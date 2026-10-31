@@ -43,12 +43,11 @@ from torchtitan.rl.examples.verifiers.rollouter import (
     RewardFromVerifiers,
     VerifiersRollouter,
 )
-from torchtitan.rl.generator.generator import (
-    SamplingConfig,
-    VLLMCudaGraphConfig,
-    VLLMGenerator,
-)
+from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
+from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.data import IterableRLDataLoader
 from torchtitan.rl.rollout.rubric import Rubric
@@ -170,7 +169,7 @@ def _qwen3_4b_verifiers_config(
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
                 max_context_length=max_total_tokens,
             ),
@@ -190,11 +189,11 @@ def _qwen3_4b_verifiers_config(
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
-            cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,

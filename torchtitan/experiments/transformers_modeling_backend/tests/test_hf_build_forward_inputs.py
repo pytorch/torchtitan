@@ -17,7 +17,7 @@ from torchtitan.experiments.transformers_modeling_backend.model import (
     HFTransformerModel,
 )
 from torchtitan.models.common.attention.cp_attention import (
-    KVAllGatherCPFlexInnerAttention,
+    AllGatherKVFlexInnerAttention,
 )
 
 
@@ -65,7 +65,7 @@ def test_hf_builds_mask_when_present(monkeypatch):
         HFTransformerModel, "get_attention_metadata", lambda self, positions: "MASK"
     )
     m = cast(HFTransformerModel, object.__new__(HFTransformerModel))
-    (inputs, labels, extra), B, S = _run(m)
+    (inputs, labels, extra, _), B, S = _run(m)
     assert extra["attention_metadata"] == "MASK"
     assert labels.numel() == B * S
     assert "input" not in extra and "labels" not in extra
@@ -76,7 +76,7 @@ def test_hf_no_mask_when_get_attention_metadata_returns_none(monkeypatch):
         HFTransformerModel, "get_attention_metadata", lambda self, positions: None
     )
     m = cast(HFTransformerModel, object.__new__(HFTransformerModel))
-    (inputs, labels, extra), B, S = _run(m)
+    (inputs, labels, extra, _), B, S = _run(m)
     assert "attention_metadata" not in extra
 
 
@@ -117,7 +117,7 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
         shard_tensors,
     )
     monkeypatch.setattr(
-        KVAllGatherCPFlexInnerAttention,
+        AllGatherKVFlexInnerAttention,
         "prepare_cp_metadata",
         staticmethod(prepare_cp_metadata),
     )
@@ -141,7 +141,7 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
         SimpleNamespace(cp_enabled=True),
     )
 
-    _, _, extra_kwargs = model.preprocess_inputs(
+    _, _, extra_kwargs, _ = model.preprocess_inputs(
         batch,
         parallelism_context=parallelism_context,
         parallelism=ParallelismConfig(

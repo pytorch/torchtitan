@@ -20,6 +20,7 @@ from torch import nn
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -112,7 +113,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        local_compile_regions: list[str],
+        local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
         dump_folder: str,
     ) -> KimiK25Model:
@@ -126,7 +127,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
             parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
-            local_compile_regions=local_compile_regions,
+            local_compile=local_compile,
             activation_remat=activation_remat,
             dump_folder=dump_folder,
         )
@@ -141,9 +142,10 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Build masks, CP-shard, SPMD-wrap, and return the batch."""
         del kwargs
+        loss_kwargs = input_dict.pop("loss_kwargs", {})
         positions = input_dict.get("positions", None)
         padding_mask = input_dict.get("padding_mask", None)
         if positions is not None:
@@ -158,6 +160,8 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
             **decoder_input_sharding(),
             **multimodal_input_sharding(),
         }
+        input_shardings.update(dict.fromkeys(loss_kwargs, input_shardings["labels"]))
+        input_dict.update(loss_kwargs)
         if parallelism_context.cp_enabled:
             input_dict = self._cp_shard(
                 input_dict,
@@ -169,10 +173,11 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
             parallelism_context, input_dict, input_shardings
         )
 
+        loss_kwargs = {name: input_dict.pop(name) for name in loss_kwargs}
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
         input_dict["aux_loss_denominators"] = global_routing_token_counts
-        return inputs, labels, input_dict
+        return inputs, labels, input_dict, loss_kwargs
 
     def _prepare_multimodal_embeds(
         self,

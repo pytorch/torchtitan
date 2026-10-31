@@ -6,17 +6,19 @@
 
 import logging
 from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 import torch.nn as nn
 
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
-from torchtitan.distributed.cuda_graph import (
-    cuda_graphs_supported,
-    NUM_CUDA_GRAPH_WARMUP_STEPS,
-    wrap_with_cuda_graph,
+from torchtitan.distributed.accelerator_graph import (
+    accelerator_graphs_supported,
+    NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
+    wrap_with_accelerator_graph,
 )
+from torchtitan.tools.utils import device_module, device_type
 
 from .ema import EMA
 from .lr_scheduler import LRSchedulersContainer
@@ -24,6 +26,38 @@ from .optimizer import OptimizersContainer
 
 
 logger = logging.getLogger(__name__)
+
+
+class GradientClipper(Configurable):
+    """Default optimizer-owned gradient clipping implementation."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        self.config = config
+
+    def clip_grad_norm_(
+        self,
+        parameters: list[nn.Parameter],
+        max_norm: float | int,
+        *,
+        parallelism_context: ParallelismContext,
+    ) -> torch.Tensor:
+        """Clip gradients with ``dist_utils.clip_grad_norm_``.
+
+        Use ``foreach=True`` and the PP mesh from ``parallelism_context``.
+        Return the pre-clip global L2 norm as a local zero-dimensional tensor
+        with an equivalent value on every rank. Preserve non-finite values and
+        do not reuse the returned norm as the clip coefficient or scratch.
+        """
+        return dist_utils.clip_grad_norm_(
+            parameters,
+            max_norm,
+            foreach=True,
+            pp_mesh=parallelism_context.get_optional_mesh("pp"),
+        )
 
 
 class Optim(Configurable):
@@ -41,8 +75,12 @@ class Optim(Configurable):
         """Optional online EMA of model weights."""
         max_norm: float | int = 1.0
         """Maximum norm used for gradient clipping."""
-        enable_cuda_graph: bool = False
-        """Capture gradient clipping and optimizer updates in one CUDA graph."""
+        gradient_clipper: GradientClipper.Config = field(
+            default_factory=GradientClipper.Config
+        )
+        """Optimizer-owned gradient clipping implementation."""
+        enable_accelerator_graph: bool = False
+        """Capture gradient clipping and optimizer updates in one accelerator graph."""
 
         def __post_init__(self) -> None:
             if self.max_norm < 0:
@@ -51,6 +89,7 @@ class Optim(Configurable):
     optimizers: OptimizersContainer
     lr_schedulers: LRSchedulersContainer
     ema: EMA | None
+    gradient_clipper: GradientClipper
 
     def __init__(
         self,
@@ -60,6 +99,7 @@ class Optim(Configurable):
         parallelism_context: ParallelismContext,
         training_steps: int,
         pp_has_last_stage: bool,
+        cuda_graph_annotation_config: dict[str, Any] | None = None,
     ) -> None:
         self.config = config
         self.parallelism_context = parallelism_context
@@ -70,19 +110,21 @@ class Optim(Configurable):
             for parameter in model_part.parameters()
         ]
         self._is_first_step_call = True
-        enable_cuda_graph = (
-            config.enable_cuda_graph
-            and cuda_graphs_supported()
-            and all(parameter.device.type == "cuda" for parameter in self.parameters)
+        enable_accelerator_graph = (
+            config.enable_accelerator_graph
+            and accelerator_graphs_supported()
+            and all(
+                parameter.device.type == device_type for parameter in self.parameters
+            )
         )
-        if config.enable_cuda_graph and not enable_cuda_graph:
+        if config.enable_accelerator_graph and not enable_accelerator_graph:
             logger.warning(
-                "Optim CUDA graph is disabled because the runtime or model "
-                "parameter device does not support CUDA graphs."
+                "Optim graph capture is disabled because the runtime or model "
+                "parameter device does not support graph capture."
             )
         self.optimizers = config.optimizer.build(
             model_parts=model_parts,
-            enable_cuda_graph=enable_cuda_graph,
+            enable_accelerator_graph=enable_accelerator_graph,
         )
         self.lr_schedulers = config.lr_scheduler.build(
             optimizers=self.optimizers,
@@ -93,12 +135,15 @@ class Optim(Configurable):
             if config.ema is not None
             else None
         )
+        self.gradient_clipper = config.gradient_clipper.build()
 
         self._run_update = self._update
-        if enable_cuda_graph:
-            self._run_update = wrap_with_cuda_graph(
+        if enable_accelerator_graph:
+            self._run_update = wrap_with_accelerator_graph(
                 self._update,
-                num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+                num_warmup_iterations=NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
+                name="optimizer",
+                annotation_config=cuda_graph_annotation_config,
             )
 
     def zero_grad(self, *, set_to_none: bool = True) -> None:
@@ -110,9 +155,15 @@ class Optim(Configurable):
         if self._is_first_step_call:
             # Finish GPU work before freeing cached memory for NCCL buffers.
             # https://github.com/pytorch/torchtitan/issues/5019
-            if torch.cuda.is_initialized():
-                torch.cuda.synchronize()
-            torch.cuda.empty_cache()
+            # The sync is skipped while a lazily initialized device (CUDA, XPU)
+            # is untouched, so a model on CPU never creates a device context.
+            # torch.mps has no is_initialized(): MPS is not lazily initialized.
+            if torch.accelerator.is_available() and (
+                not hasattr(device_module, "is_initialized")
+                or device_module.is_initialized()
+            ):
+                device_module.synchronize()
+            device_module.empty_cache()
             self._is_first_step_call = False
         grad_norm = self._run_update(loss)
         self.lr_schedulers.step()
@@ -122,11 +173,10 @@ class Optim(Configurable):
 
     def _update(self, loss: torch.Tensor) -> torch.Tensor:
         """Clip gradients, check loss and gradient norm, then update parameters."""
-        grad_norm = dist_utils.clip_grad_norm_(
+        grad_norm = self.gradient_clipper.clip_grad_norm_(
             self.parameters,
             self.config.max_norm,
-            foreach=True,
-            pp_mesh=self.parallelism_context.get_optional_mesh("pp"),
+            parallelism_context=self.parallelism_context,
         )
         loss_is_finite = torch.isfinite(loss).all().to(torch.int32)
         if not self.parallelism_context.pp_enabled or self.pp_has_last_stage:

@@ -305,6 +305,112 @@ def test_hf_resume_mid_second_epoch():
     assert [next(restored) for _ in range(16)] == expected
 
 
+@pytest.mark.parametrize("shuffle", [False, True])
+@pytest.mark.parametrize("num_consumed", [4, 16, 20])
+def test_hf_cursor_state_after_restore(shuffle, num_consumed):
+    original = _HuggingFaceCursorIterator(
+        _hf_sharded_rows(), repeat=True, shuffle=shuffle
+    )
+    restored = _HuggingFaceCursorIterator(
+        _hf_sharded_rows(), repeat=True, shuffle=shuffle
+    )
+    try:
+        for _ in range(num_consumed):
+            next(original)
+        state = original.get_state()
+        restored.set_state(state)
+
+        assert restored.get_state() == state
+        for _ in range(4):
+            assert next(restored) == next(original)
+            assert restored.get_state() == original.get_state()
+    finally:
+        original.close()
+        restored.close()
+
+
+def test_hf_cursor_keeps_restored_state_after_failed_read():
+    original = _HuggingFaceCursorIterator(
+        _hf_sharded_rows(), repeat=True, shuffle=False
+    )
+    for _ in range(4):
+        next(original)
+    state = original.get_state()
+    restored = _HuggingFaceCursorIterator(
+        _hf_sharded_rows(), repeat=True, shuffle=False
+    )
+    restored.set_state(state)
+
+    def failing_read():
+        raise OSError("transient read error")
+        yield
+
+    restored._iterator = failing_read()
+    with pytest.raises(OSError, match="transient read error"):
+        next(restored)
+
+    assert restored.get_state() == state
+
+
+@pytest.mark.parametrize("num_prefetch_microbatches", [0, 2])
+def test_hf_streaming_repeated_resume_preserves_packed_tokens(
+    tmp_path, num_prefetch_microbatches
+):
+    path = tmp_path / "rows.jsonl"
+    write_jsonl(
+        path,
+        [{"tokens": list(range(start, start + 9))} for start in (10, 20, 30, 40)],
+    )
+    config = GrainDataLoader.Config(
+        dataset=ConcatThenSplitPackingConfig(
+            dataset=SingleDatasetConfig(
+                source=HuggingFaceStreamingSource.Config(
+                    path="json",
+                    split="train",
+                    load_dataset_kwargs={"data_files": str(path)},
+                ),
+                processor=RowToTokens.Config(),
+            )
+        ),
+        max_num_documents=2,
+        shuffle=False,
+        repeat=True,
+        num_prefetch_microbatches=num_prefetch_microbatches,
+    )
+    loaders = [
+        config.build(
+            dp_world_size=1,
+            dp_rank=0,
+            tokenizer=FakeTokenizer(),
+            max_context_length=4,
+            num_tokens_per_microbatch=4,
+        )
+        for _ in range(3)
+    ]
+    original, restored, restored_again = loaders
+    try:
+        # Restore at a document boundary, then checkpoint partway through the
+        # next document. Packing saves the source state before reading it.
+        for _ in range(2):
+            next(iter(original))
+        restored.load_state_dict(original.state_dict())
+        torch.testing.assert_close(
+            next(iter(restored)).input, next(iter(original)).input
+        )
+        restored_again.load_state_dict(restored.state_dict())
+
+        for _ in range(4):
+            actual = next(iter(restored_again))
+            expected = next(iter(original))
+            torch.testing.assert_close(actual.input, expected.input)
+            torch.testing.assert_close(actual.labels, expected.labels)
+            torch.testing.assert_close(actual.positions, expected.positions)
+            torch.testing.assert_close(actual.padding_mask, expected.padding_mask)
+    finally:
+        for loader in loaders:
+            loader.close()
+
+
 def test_hf_empty_repeat_stops():
     empty = datasets.IterableDataset.from_generator(lambda: iter(()))
     iterator = _HuggingFaceCursorIterator(
@@ -1018,13 +1124,14 @@ def test_document_aware_concat_packing_restores_exactly():
     "packing_type",
     [ConcatThenSplitPackingConfig, FirstFitPackingConfig],
 )
-def test_packing_splits_positioned_long_documents(packing_type):
+@pytest.mark.parametrize("max_num_documents", [2, None])
+def test_packing_splits_positioned_long_documents(packing_type, max_num_documents):
     documents = SingleDatasetConfig(
         source=RowsSourceConfig(
             rows=(
                 {
-                    "tokens": list(range(15)),
-                    "positions": list(range(14)),
+                    "tokens": list(range(17)),
+                    "positions": list(range(16)),
                 },
             )
         ),
@@ -1034,7 +1141,7 @@ def test_packing_splits_positioned_long_documents(packing_type):
         CONTEXT,
         max_context_length=4,
         num_tokens_per_microbatch=8,
-        max_num_documents=2,
+        max_num_documents=max_num_documents,
     )
 
     packing = packing_type(dataset=documents)
@@ -1056,13 +1163,14 @@ def test_packing_splits_positioned_long_documents(packing_type):
     for row in rows:
         assert row.positions is not None
         assert row.padding_mask is not None
-        assert (
-            np.count_nonzero((row.positions == 0) & ~row.padding_mask)
-            <= context.max_num_documents
-        )
+        if context.max_num_documents is not None:
+            assert (
+                np.count_nonzero((row.positions == 0) & ~row.padding_mask)
+                <= context.max_num_documents
+            )
         assert int(row.positions.max()) < context.max_context_length
         real_input_ids.extend(row.input_ids[row.labels != IGNORE_INDEX].tolist())
-    assert real_input_ids == list(range(14))
+    assert real_input_ids == list(range(16))
 
 
 def test_first_fit_num_packing_bins_is_independent_of_token_budget(monkeypatch):

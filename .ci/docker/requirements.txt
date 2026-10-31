@@ -9,8 +9,7 @@ renderers == 0.1.12
 safetensors
 einops
 pillow
-spmd_types @ git+https://github.com/meta-pytorch/spmd_types.git@fce1acb1e9bbce66f398893ff7836346f4cf03cd
+spmd_types == 0.3.1
 attn-gym[linear,cudnn]==0.0.17
-torch_remat @ git+https://github.com/meta-pytorch/remat.git@624f19cbdb70720bd05988d6485a1225f46c074b
-# PyPI 0.1.0 predates torch_checkpointing.default_resharder.
-torch_checkpointing @ git+https://github.com/meta-pytorch/torch_checkpointing.git@dcbb3a59cfad1cbeb95994f0d6cb1802c1d91825
+torch_remat == 0.2.2
+torch_checkpointing == 0.1.1

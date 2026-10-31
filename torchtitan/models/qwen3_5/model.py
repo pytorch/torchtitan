@@ -18,7 +18,7 @@ from torch import nn
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
-from torchtitan.distributed.local_compile import local_compile
+from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -334,16 +334,18 @@ class Qwen35Model(MultimodalModel):
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         vision_encoder: Qwen35VisionEncoder.Config | None = None
-        local_compile_regions: list[str] = field(
-            default_factory=lambda: [
-                "loss",
-                "fused_binary_activation",
-                "gated_rmsnorm",
-                "offset_rmsnorm",
-                "partial_rope",
-                "shared_expert_gate",
-                "fp32_to_bf16_split",
-            ]
+        local_compile: LocalCompileConfig = field(
+            default_factory=lambda: LocalCompileConfig(
+                regions=[
+                    "loss",
+                    "fused_binary_activation",
+                    "gated_rmsnorm",
+                    "offset_rmsnorm",
+                    "partial_rope",
+                    "shared_expert_gate",
+                    "fp32_to_bf16_split",
+                ]
+            )
         )
 
         def get_nparams_and_flops(
@@ -421,7 +423,7 @@ class Qwen35Model(MultimodalModel):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        local_compile_regions: list[str],
+        local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
         dump_folder: str,
     ) -> Qwen35Model:
@@ -429,7 +431,7 @@ class Qwen35Model(MultimodalModel):
             parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
-            local_compile_regions=local_compile_regions,
+            local_compile=local_compile,
             activation_remat=activation_remat,
             dump_folder=dump_folder,
         )
@@ -444,9 +446,10 @@ class Qwen35Model(MultimodalModel):
         max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Build masks, CP-shard, SPMD-wrap (+ deltanet annotation), and return."""
         del kwargs
+        loss_kwargs = input_dict.pop("loss_kwargs", {})
         padding_mask = input_dict.get("padding_mask", None)
 
         # Attention masks are built from the 1D ``positions``.
@@ -465,8 +468,7 @@ class Qwen35Model(MultimodalModel):
             if pixel_values is not None:
                 if special_tokens is None or "image_id" not in special_tokens:
                     raise ValueError(
-                        "pixel_values require special_tokens with an 'image_id' "
-                        "entry."
+                        "pixel_values require special_tokens with an 'image_id' entry."
                     )
                 input_dict["image_vision_bank_indices_T"] = build_vision_bank_indices(
                     input_dict["input"],
@@ -519,6 +521,8 @@ class Qwen35Model(MultimodalModel):
             "'positions' or 'mrope_positions'."
         )
         input_dict["positions"] = rope_positions
+        input_shardings.update(dict.fromkeys(loss_kwargs, input_shardings["labels"]))
+        input_dict.update(loss_kwargs)
         if parallelism_context.cp_enabled:
             input_dict = self._cp_shard(
                 input_dict,
@@ -537,13 +541,14 @@ class Qwen35Model(MultimodalModel):
                 if isinstance(metadata, LinearAttentionMetadata):
                     metadata.annotate_spmd_types()
 
+        loss_kwargs = {name: input_dict.pop(name) for name in loss_kwargs}
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
         if any(
             isinstance(layer.feed_forward, MoE.Config) for layer in self.config.layers
         ):
             input_dict["aux_loss_denominators"] = global_routing_token_counts
-        return inputs, labels, input_dict
+        return inputs, labels, input_dict, loss_kwargs
 
     def _get_vision_embeds(
         self,

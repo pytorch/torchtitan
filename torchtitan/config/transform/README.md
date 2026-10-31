@@ -19,9 +19,9 @@ config = apply_transforms(
     [
         ContextParallelTransform(
             inner_attention_map={
-                FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                FlexInnerAttention: AllGatherKVFlexInnerAttention,
                 SlidingWindowFlexInnerAttention: (
-                    KVAllGatherCPSlidingWindowFlexInnerAttention
+                    AllGatherKVSlidingWindowFlexInnerAttention
                 ),
             }
         )
@@ -106,6 +106,12 @@ kernels live in `torchtitan/quantization`.
 A CP transform specializes the selected attention for distributed execution.
 It may change input sharding and preprocessing, but it preserves the selected
 attention algorithm and metadata format.
+
+Graph-safe varlen K/V all-gather supports contiguous and head-tail sharding.
+Set `context_parallel_load_balancer=None` for one varlen call per rank.
+Head-tail uses two calls to balance long causal documents. It also works for
+sliding-only models because it does not need attention metadata. PTRR is not
+supported by these varlen backends.
 
 ## Dependency direction
 

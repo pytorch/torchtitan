@@ -298,7 +298,18 @@ class _VLLMAttention(Attention, Module):
     """vLLM attention that participates in the TorchTitan Module protocol."""
 
 
-class VLLMAttentionWrapper(InnerAttention):
+def _exclude_vllm_attn_scales_from_state_dict(layer: torch.nn.Module) -> None:
+    """Re-register a vLLM attention layer's quantization scales as non-persistent.
+
+    vLLM registers them as persistent buffers, but they are not model weights, so
+    keeping them in the state dict breaks HF state dict adapters that reject
+    unmapped keys.
+    """
+    for name in VLLMInnerAttention.vllm_attn_scale_buffer_names:
+        layer.register_buffer(name, layer._buffers.pop(name), persistent=False)
+
+
+class VLLMInnerAttention(InnerAttention):
     """Adapter from TorchTitan tensor layout to ``vllm.Attention``.
 
     vLLM's ``Attention`` layer manages KV-cache and paged attention internally,
@@ -382,7 +393,7 @@ class VLLMAttentionWrapper(InnerAttention):
         )
 
         # TODO: This need to be compatible with Pipeline Parallelism
-        layer_id = next(VLLMAttentionWrapper._layer_counter)
+        layer_id = next(VLLMInnerAttention._layer_counter)
         diff_kv_kwargs: dict[str, Any] = {}
         if value_head_dim != head_dim:
             FlashAttentionDiffKVBackend.set_head_size_v(value_head_dim)
@@ -401,6 +412,7 @@ class VLLMAttentionWrapper(InnerAttention):
             prefix=f"model.layers.{layer_id}.attention.inner_attention",
             **diff_kv_kwargs,
         )
+        _exclude_vllm_attn_scales_from_state_dict(self.vllm_attn)
         # Set sharding config for the inner vLLM attention module, which has scale
         # buffers that need to be replicated on all ranks in the dense mesh
         replicated_dense = dense_param_placement(tp=spmd.R)
@@ -417,22 +429,29 @@ class VLLMAttentionWrapper(InnerAttention):
         v_THV: torch.Tensor,
         *,
         attention_metadata: None = None,
+        scale: float | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        """Run vLLM paged attention on local (non-DTensor) tensors.
+        """Run vLLM paged attention on rank-local tensors.
 
         Args:
             q_THK: ``(num_tokens, num_heads, query/key_head_dim)``
             k_THK: ``(num_tokens, num_kv_heads, query/key_head_dim)``
             v_THV: ``(num_tokens, num_kv_heads, value_head_dim)``
+            scale: Optional per-call scale; must match the scale set at construction.
 
         Returns:
             ``(num_tokens, num_heads, value_head_dim)``.
         """
         if attention_metadata is not None:
             raise ValueError(
-                "VLLMAttentionWrapper does not support attention_metadata; vLLM "
+                "VLLMInnerAttention does not support attention_metadata; vLLM "
                 "manages causal masking and the KV-cache internally."
+            )
+
+        if scale is not None and scale != self.scale:
+            raise ValueError(
+                f"Model attention scale {scale} != vLLM scale {self.scale}"
             )
 
         if self.value_head_dim != self.head_dim:

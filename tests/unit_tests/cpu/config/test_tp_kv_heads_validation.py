@@ -52,7 +52,7 @@ def _validate(config: "Llama3Model.Config", tp: int) -> None:
         parallelism=ParallelismConfig(tensor_parallel_degree=tp),
         training=TrainingConfig(
             max_context_length=config.max_context_length,
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         debug=DebugConfig(),
         activation_remat=None,
@@ -163,7 +163,7 @@ class TestTPKVHeadsValidation(unittest.TestCase):
         cfg.layers[
             0
         ].attention.inner_attention = SlidingWindowFlexInnerAttention.Config(
-            window_size=128
+            sliding_window_size=128
         )
         cfg.layers[1].attention.n_heads = 3
 

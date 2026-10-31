@@ -376,7 +376,7 @@ def compile_time_passes(
     passes.extend(
         final_inductor_compile_passes(
             config.compile,
-            use_cuda_graph=not config.training.disable_cuda_graphs,
+            use_cuda_graph=not config.training.disable_accelerator_graphs,
         )
     )
     return passes

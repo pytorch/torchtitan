@@ -24,7 +24,7 @@ This directory contains tests for the torchtitan project, including unit tests a
   - `flux.py`: Tests for the FLUX model (training, then image generation)
   - `h100.py`: Tests cases for H100 GPUs
   - `b200.py`: Test cases that require SM100 or SM103 GPUs
-  - `rl.py`: RL end-to-end suites (`rl`, `rl_kda`, `rl_b200`)
+  - `rl.py`: RL end-to-end suites (`rl`, `rl_h100`, `rl_b200`)
   - `run_tests.py`: The runner for every suite
 - `assets/`: Contains test assets and fixtures used by the tests
   - `losses/`: Golden loss and gradient norm curves for the numerics guards

@@ -50,7 +50,7 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
-from torchtitan.models.deepseek_v3.model import DeepSeekMLAAttention
+from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 
 from torchtitan.models.kimi_k2_7 import (
     build_model_config,
@@ -134,7 +134,7 @@ def kimi_k2_5_debugmodel(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
             steps=10,
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=None,
@@ -182,7 +182,7 @@ def moonlight_16b_a3b(seq_len: int | None = None) -> Trainer.Config:
             num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
             steps=10000,
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=None,
@@ -232,7 +232,7 @@ def kimi_vl_a3b(seq_len: int | None = None) -> Trainer.Config:
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
             steps=10000,
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=None,
@@ -279,7 +279,7 @@ def kimi_k2_5(seq_len: int | None = None) -> Trainer.Config:
             num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
             steps=10000,
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=None,
@@ -375,7 +375,7 @@ def _dist_muon_optimizer(
     attention_shardings = {
         **query_shardings,
         "wkv_a": kv_latent_and_rope,
-        "wkv_b": per_key_value_head,
+        "inner_attention.wkv_b": per_key_value_head,
         "wo": owned,
     }
     feed_forward_shardings = {
@@ -479,6 +479,7 @@ def _dist_muon_optimizer(
                 # shape-consistent AdamW-scale updates instead of Muon's
                 # original aspect-ratio scaling.
                 adjust_lr_fn="match_rms_adamw",
+                ns_device="accelerator",
             ),
             # The remaining parameters are embeddings, norms, biases, LM head,
             # and the vision tower.

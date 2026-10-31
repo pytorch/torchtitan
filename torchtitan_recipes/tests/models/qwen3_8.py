@@ -111,7 +111,7 @@ def qwen38_debugmodel_varlen_attn(
         attn_backend="varlen",
         parallelism=config.parallelism,
     )
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -153,7 +153,7 @@ def qwen38_debugmodel_moe(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
             steps=10,
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=None,
@@ -235,7 +235,7 @@ def qwen38_2_4t_a95b(seq_len: int | None = None) -> Trainer.Config:
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             max_context_length=model_config.max_context_length,
             steps=1000,
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=None,

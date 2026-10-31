@@ -28,12 +28,18 @@ from torchtitan.config import DebugConfig, OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
+    ContextParallelTransform,
     ModelConfigConverter,
     TokenDispatcherTransform,
 )
+from torchtitan.models.common.attention import VarlenInnerAttention
+from torchtitan.models.common.attention.cp_attention import UlyssesVarlenInnerAttention
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
+from torchtitan.models.deepseek_v3 import (
+    build_model_config as build_deepseek_v3_model_config,
+)
 from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss_model_config
 from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_model_config
 from torchtitan.models.qwen3 import build_model_config
@@ -42,12 +48,11 @@ from torchtitan.rl.controller.controller import (
     Controller,
     ValidationConfig,
 )
-from torchtitan.rl.generator.generator import (
-    SamplingConfig,
-    VLLMCudaGraphConfig,
-    VLLMGenerator,
-)
+from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
+from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.losses import GRPOLoss
@@ -127,7 +132,7 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
             ),
@@ -140,7 +145,7 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
@@ -158,7 +163,7 @@ def rl_grpo_gpt_oss_debug_varlen_no_compile(
 ) -> Controller.Config:
     config = rl_grpo_gpt_oss_debug_varlen(seq_len=seq_len)
     for model_config in (config.trainer.model, config.generator.model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     return config
 
 
@@ -196,7 +201,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
     )
     # Local compile regions do not support batch-invariant mode.
     for model_config in (trainer_model, generator_model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     return Controller.Config(
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
@@ -233,7 +238,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             # fp32 master weights; FSDP mixed precision casts to bf16 for the
             # forward (mixed_precision_param="bfloat16" is the default).
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
             ),
@@ -247,13 +252,13 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
             # TODO: use FULL CUDA graphs once a CUDA-graph-compatible
             # distributed MoE token dispatcher is enabled for GPT-OSS.
-            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
@@ -321,7 +326,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
             ),
@@ -334,12 +339,12 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             # Disable torch.compile + CUDA graph capture: the EP all-to-all
             # path issues an unpinned D2H copy of split sizes that the
             # piecewise/full graph capture rejects.
-            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -368,7 +373,7 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     config.override = OverrideConfig(
         imports=["torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"]
     )
-    config.generator.cuda_graph = VLLMCudaGraphConfig(mode="FULL")
+    config.generator.engine.cuda_graph = VLLMCudaGraphConfig(mode="FULL")
     # vLLM's per-step token budget; it sizes the generator's DeepEP buffers.
     max_num_batched_tokens = 2048
     config.generator.max_num_batched_tokens = max_num_batched_tokens
@@ -445,7 +450,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
     )
     # Local compile regions do not support batch-invariant mode.
     for model_config in (trainer_model, generator_model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     return Controller.Config(
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
@@ -479,7 +484,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
             # fp32 master weights; FSDP mixed precision casts to bf16 for the
             # forward (mixed_precision_param="bfloat16" is the default).
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
             ),
@@ -493,10 +498,10 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
-            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -556,7 +561,7 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
                 max_context_length=seq_len,
                 dtype="bfloat16",
@@ -570,13 +575,13 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             # vLLM models FULL-graph capture warmup as one sequence, so keep
             # its synthetic sequence within the GDN model's context length.
             max_num_batched_tokens=seq_len,
-            cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -614,7 +619,7 @@ def rl_grpo_qwen3_5_debug_varlen_batch_invariant(
     )
     # Local compile regions do not support batch-invariant mode.
     for model_config in (config.trainer.model, config.generator.model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     return config
 
 
@@ -639,7 +644,7 @@ def _kimi_k3_rl_model_configs(
         converters=converters,
     )
     for model_config in (trainer_model, generator_model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     return trainer_model, generator_model
 
 
@@ -690,7 +695,7 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
                 max_context_length=seq_len,
                 dtype="bfloat16",
@@ -705,10 +710,12 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
-            cuda_graph=VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY"),
+            engine=VLLMEngine.Config(
+                cuda_graph=VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY")
+            ),
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -755,6 +762,81 @@ def rl_grpo_kimi_k3_debug_varlen_batch_invariant(
     return _set_kimi_k3_batch_invariant(rl_grpo_kimi_k3_debug_varlen(seq_len=seq_len))
 
 
+def rl_grpo_deepseek_v3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
+    """Random-init DeepSeek V3 GRPO whose generator caches compressed MLA latents.
+
+    Without batch invariance, the generator uses vLLM's native MLA and captures
+    decode CUDA graphs.
+    """
+    trainer_parallelism = ParallelismConfig(data_parallel_shard_degree=2)
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=1,
+        tensor_parallel_degree=1,
+    )
+    trainer_model, generator_model = build_rl_model_configs(
+        build_deepseek_v3_model_config,
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
+    )
+    return Controller.Config(
+        hf_assets_path="tests/assets/tokenizer",
+        async_loop=AsyncLoopConfig(
+            num_training_steps=5,
+            num_prompts_per_train_step=8,
+            num_samples_per_prompt=8,
+            batcher=Batcher.Config(
+                training_sample_builder=TrainingSampleBuilder.Config(
+                    drop_zero_std_reward_groups=False,
+                ),
+            ),
+            validation=ValidationConfig(steps=20),
+        ),
+        rollouter=_alphabet_sort_rollouter_config(),
+        renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        trainer=Trainer.Config(
+            model=trainer_model,
+            optim=Optim.Config(
+                optimizer=OptimizersContainer.Config(
+                    optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+                ),
+                lr_scheduler=LRSchedulersContainer.Config(
+                    warmup_steps=2,
+                    decay_type="linear",
+                ),
+            ),
+            training=TrainingConfig(
+                disable_accelerator_graphs=True,
+                num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
+                max_context_length=seq_len,
+            ),
+            parallelism=trainer_parallelism,
+            checkpointer=None,
+            loss=ChunkedLossWrapper.Config(
+                num_chunks=8,
+                loss_fn=GRPOLoss.Config(
+                    global_vocab_size=decoder_vocab_size(trainer_model)
+                ),
+            ),
+        ),
+        generator=Generator.Config(
+            model=generator_model,
+            engine=VLLMEngine.Config(
+                cuda_graph=VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY")
+            ),
+            parallelism=generator_parallelism,
+            checkpointer=None,
+            sampling=SamplingConfig(
+                temperature=1.0,
+                max_tokens=50,
+            ),
+        ),
+    )
+
+
 def _configure_ci(
     config: Controller.Config,
     *,
@@ -799,6 +881,31 @@ def rl_grpo_fsdp2_gen_tp2_no_compile() -> Controller.Config:
     )
 
 
+def rl_grpo_cp2_fsdp2_gen_tp2() -> Controller.Config:
+    config = rl_grpo_qwen3_0_6b_varlen_no_compile(seq_len=1024)
+    config.num_generators = 2
+    config.trainer.parallelism.data_parallel_shard_degree = 2
+    config.trainer.parallelism.tensor_parallel_degree = 1
+    config.trainer.parallelism.context_parallel_degree = 2
+    config.generator.parallelism.tensor_parallel_degree = 2
+    # Only the trainer shards the sequence; generators keep plain varlen attention.
+    config.trainer = apply_transforms(
+        config.trainer,
+        [
+            ContextParallelTransform(
+                inner_attention_map={VarlenInnerAttention: UlyssesVarlenInnerAttention}
+            )
+        ],
+    )
+    return _configure_ci(
+        config,
+        steps=5,
+        num_tokens_per_microbatch=2048,
+        max_generated_tokens=256,
+        use_hf_assets_from_env=True,
+    )
+
+
 def rl_grpo_fsdp2_gen_tp2_compile() -> Controller.Config:
     config = rl_grpo_qwen3_0_6b_varlen(seq_len=1024)
     config.num_generators = 3
@@ -808,6 +915,29 @@ def rl_grpo_fsdp2_gen_tp2_compile() -> Controller.Config:
     return _configure_ci(
         config,
         steps=5,
+        num_tokens_per_microbatch=2048,
+        max_generated_tokens=256,
+        use_hf_assets_from_env=True,
+    )
+
+
+def rl_grpo_pp2_interleaved1f1b_fsdp2_gen_tp2() -> Controller.Config:
+    config = rl_grpo_qwen3_0_6b_varlen_no_compile(seq_len=1024)
+    config.num_generators = 2
+    config.trainer.parallelism.pipeline_parallel_degree = 2
+    # Two stages per rank, so each trainer rank also publishes two model parts.
+    config.trainer.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.trainer.parallelism.num_pp_microbatches = 2
+    config.trainer.parallelism.data_parallel_shard_degree = 2
+    config.trainer.parallelism.tensor_parallel_degree = 1
+    config.generator.parallelism.tensor_parallel_degree = 2
+    # Tied embeddings cannot be split across pipeline stages, and the generator
+    # must hold the same untied weights as the trainer.
+    for model_config in (config.trainer.model, config.generator.model):
+        model_config.enable_weight_tying = False  # pyrefly: ignore[missing-attribute]
+    return _configure_ci(
+        config,
+        steps=3,
         num_tokens_per_microbatch=2048,
         max_generated_tokens=256,
         use_hf_assets_from_env=True,
@@ -833,10 +963,10 @@ def rl_grpo_moe_debug_tp4_ep4() -> Controller.Config:
         generator_parallelism=config.generator.parallelism,
     )
     for model_config in (config.trainer.model, config.generator.model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     # TODO: use FULL CUDA graphs once GPT-OSS CI enables a
     # CUDA-graph-compatible distributed MoE token dispatcher.
-    config.generator.cuda_graph.mode = "NONE"
+    config.generator.engine.cuda_graph.mode = "NONE"
     return _configure_ci(
         config,
         steps=5,
@@ -931,6 +1061,20 @@ def rl_grpo_kimi_k3_debug_batch_invariant() -> Controller.Config:
     )
 
 
+def rl_grpo_deepseek_v3_debug() -> Controller.Config:
+    """Trainer FSDP=2 (2 GPUs); two generators with TP=1 (2 GPUs)."""
+    seq_len = 1024
+    config = rl_grpo_deepseek_v3_debug_varlen(seq_len=seq_len)
+    config.num_generators = 2
+    return _configure_ci(
+        config,
+        steps=3,
+        num_tokens_per_microbatch=2 * seq_len,
+        max_generated_tokens=128,
+        use_hf_assets_from_env=False,
+    )
+
+
 def rl_grpo_moe_debug_dist_moe_tp2_ep4() -> Controller.Config:
     """Dist-MoE on both RL roles, with generator CUDA graphs and uneven DP load.
 
@@ -959,7 +1103,7 @@ def rl_grpo_moe_debug_dist_moe_tp2_ep4() -> Controller.Config:
     )
     # The standard MoE dispatcher cannot be captured in a CUDA graph; Dist-MoE can,
     # prefill and decode steps alike.
-    config.generator.cuda_graph.mode = "FULL"
+    config.generator.engine.cuda_graph.mode = "FULL"
     config = _configure_ci(
         config,
         steps=3,

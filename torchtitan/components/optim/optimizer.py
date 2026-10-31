@@ -6,16 +6,18 @@
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, cast, Literal, overload
 
 import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.distributed.checkpoint.stateful import Stateful
+from torch.distributed.device_mesh import DeviceMesh
 from torch.optim import Optimizer
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
@@ -25,6 +27,7 @@ from torchtitan.distributed.flex_shard import (
     ComputeLayout,
     DistMuon as FlexShardDistMuon,
 )
+from torchtitan.distributed.utils import build_alternative_fsdp_mesh
 
 from .utils import (
     get_flat_optim_state_dict,
@@ -184,7 +187,16 @@ class AdamW(torch.optim.AdamW, BaseOptimizer):
 
 
 class DistMuon(FlexShardDistMuon, BaseOptimizer):
-    """Configurable TorchTitan wrapper around FlexShard's ``DistMuon``."""
+    """Configurable TorchTitan wrapper around FlexShard's ``DistMuon``.
+
+    Note:
+        The CTA cap is disabled by default because it is a workload-dependent
+        memory/performance tradeoff. Enabling it builds explicit redistribution
+        meshes backed by resource-independent NCCL child communicators and
+        passes them through ``BucketConfig``. Each communicator adds fixed
+        memory and may reduce throughput; the cap benefits workloads only when
+        the reduction in all-peer connection state outweighs that overhead.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseOptimizer.Config):
@@ -194,12 +206,38 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         weight_decay: float = 0.1
         momentum: float = 0.95
         nesterov: bool = True
-        ns_coefficients: tuple[float, float, float] = (3.4445, -4.7750, 2.0315)
+        ns_coefficients: (
+            tuple[float, float, float] | tuple[tuple[float, float, float], ...]
+        ) = (3.4445, -4.7750, 2.0315)
         eps: float = 1e-7
         ns_steps: int = 5
         adjust_lr_fn: Literal[
             "original", "match_rms_adamw", "spectral_unclamped"
         ] | None = None
+        ns_device: Literal["accelerator"] | None = None
+        """Where Newton-Schulz runs. ``None`` keeps the storage device, where each
+        parameter's local shard lives (the host under FSDP2 CPU offload).
+        ``"accelerator"`` copies each matrix to the current accelerator, runs
+        Newton-Schulz there and copies the result back. Momentum, parameters,
+        gradients and the exchange between ranks stay where they are, so this only
+        changes anything when the parameters live on the host."""
+        max_nccl_ctas_for_comms: int = -1  # Cap NCCL CTAs to save memory; <=0 disables.
+        """Limit NCCL CTAs for DistMuon redistribution only; ``<= 0`` disables.
+
+        All-to-all opens connection buffers for every peer and channel. A lower
+        CTA cap reduces this connection state on dedicated child communicators
+        of the ``dp_shard``/``edp_shard`` groups, while FSDP keeps its original
+        communicators. Each child adds fixed workspace memory, and fewer CTAs
+        may reduce all-to-all bandwidth.
+
+        A positive value requires NCCL on the FSDP shard axes. Other backends
+        raise ``ValueError``; fake warns and keeps the storage groups without
+        modeling the cap.
+
+        TODO: Replace this temporary all-to-all connection-memory workaround
+        with lower-memory redistribution, such as a pull-based symmetric-memory
+        implementation.
+        """
 
     def __init__(
         self,
@@ -207,10 +245,58 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         *,
         params: Iterable[dict[str, Any]] | Iterable[Tensor],
     ) -> None:
+        param_groups = tuple(cast(Iterable[dict[str, Any]], params))
+        bucket_configs = config.bucket_configs
+        if config.max_nccl_ctas_for_comms > 0:
+            if len(param_groups) != 1:
+                raise ValueError("DistMuon requires exactly one parameter group")
+            param_group = param_groups[0]
+            group_names = param_group.get("param_names")
+            if group_names is None:
+                raise ValueError("DistMuon requires param_names")
+            named_parameters = tuple(
+                zip(group_names, param_group["params"], strict=True)
+            )
+
+            resolved_bucket_configs = []
+            # OptimizersContainer builds this instance for one local model part;
+            # reuse meshes across its buckets without keeping a run-wide cache.
+            redistribution_mesh_by_storage_mesh: dict[DeviceMesh, DeviceMesh] = {}
+            for bucket_config in bucket_configs:
+                matched_parameter = next(
+                    (
+                        parameter
+                        for fqn, parameter in named_parameters
+                        if any(
+                            fnmatch.fnmatchcase(fqn, pattern)
+                            for pattern in bucket_config.patterns
+                        )
+                    ),
+                    None,
+                )
+                if matched_parameter is None:
+                    resolved_bucket_configs.append(bucket_config)
+                    continue
+                storage_mesh = cast(Any, matched_parameter).device_mesh
+                if storage_mesh not in redistribution_mesh_by_storage_mesh:
+                    redistribution_mesh_by_storage_mesh[
+                        storage_mesh
+                    ] = build_alternative_fsdp_mesh(
+                        storage_mesh,
+                        max_ctas=config.max_nccl_ctas_for_comms,
+                    )
+                resolved_bucket_configs.append(
+                    replace(
+                        bucket_config,
+                        mesh=redistribution_mesh_by_storage_mesh[storage_mesh],
+                    )
+                )
+            bucket_configs = resolved_bucket_configs
+
         super().__init__(
-            cast(Iterable[dict[str, Any]], params),
+            param_groups,
             compute_sharding_by_fqn=config.compute_sharding_by_fqn,
-            bucket_configs=config.bucket_configs,
+            bucket_configs=bucket_configs,
             lr=config.lr,
             weight_decay=config.weight_decay,
             momentum=config.momentum,
@@ -219,6 +305,7 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
             eps=config.eps,
             ns_steps=config.ns_steps,
             adjust_lr_fn=config.adjust_lr_fn,
+            ns_device=config.ns_device,
         )
 
 
@@ -240,7 +327,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
     Args:
         config (Config): Ordered optimizer configurations.
         model_parts (List[nn.Module]): List of model parts to be optimized.
-        enable_cuda_graph: Prepare every optimizer for CUDA graph capture.
+        enable_accelerator_graph: Prepare every optimizer for accelerator graph capture.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -285,7 +372,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
         config: Config,
         *,
         model_parts: list[nn.Module],
-        enable_cuda_graph: bool = False,
+        enable_accelerator_graph: bool = False,
     ) -> None:
         all_params: list[nn.Parameter] = []
         self.optimizers = []
@@ -300,13 +387,13 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
                     claimed,
                 )
                 optimizer = optimizer_config.build(params=[param_group])
-                if enable_cuda_graph:
+                if enable_accelerator_graph:
                     if any(
                         "capturable" not in group for group in optimizer.param_groups
                     ):
                         raise ValueError(
                             f"Optimizer {type(optimizer).__name__} does not support "
-                            "CUDA graph capture."
+                            "accelerator graph capture."
                         )
                     for group in optimizer.param_groups:
                         group["initial_lr"] = group["lr"]

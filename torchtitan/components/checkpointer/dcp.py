@@ -19,7 +19,7 @@ from typing import Any, cast, Literal, TYPE_CHECKING
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from torch.distributed.checkpoint import HuggingFaceStorageWriter
+from torch.distributed.checkpoint import HuggingFaceStorageWriter, Metadata
 from torch.distributed.checkpoint._consolidate_hf_safetensors import (
     consolidate_safetensors_files_on_every_rank,
 )
@@ -256,7 +256,7 @@ class CheckpointManager(BaseCheckpointManager):
         async_mode: AsyncMode,
         enable_garbage_collection: bool = False,
         to_hf: bool = False,
-    ) -> Future | AsyncSaveResponse | None:
+    ) -> Future | AsyncSaveResponse | Metadata | None:
         """Execute the DCP saving process.
 
         This method orchestrates the state_dict transformation (e.g., to HuggingFace
@@ -272,13 +272,13 @@ class CheckpointManager(BaseCheckpointManager):
                 state_dict to be compatible with safetensors and HF model definitions.
 
         Returns:
-            - None: If saved synchronously (AsyncMode.DISABLED).
+            - Metadata: If saved synchronously (AsyncMode.DISABLED).
             - Future: If AsyncMode.ASYNC is used (tracks disk I/O).
             - AsyncSaveResponse: If AsyncMode.ASYNC_WITH_PINNED_MEM is used
               (tracks both staging and disk I/O).
         """
 
-        ret: Future | AsyncSaveResponse | None = None
+        ret: Future | AsyncSaveResponse | Metadata | None = None
 
         storage_writer: HuggingFaceStorageWriter | None = None
         fqn_to_index_mapping: dict[Any, int] | None = None
@@ -339,6 +339,13 @@ class CheckpointManager(BaseCheckpointManager):
 
         # Post-Processing
         if to_hf and fqn_to_index_mapping:
+            # Each rank's to_hf output holds only its own PP stage and experts;
+            # the save's global metadata lists the tensors of every rank.
+            assert self.sd_adapter is not None and isinstance(ret, Metadata)
+            fqn_to_index_mapping = self.sd_adapter.fqn_to_index_mapping_for_save(
+                ret.state_dict_metadata
+            )
+            assert fqn_to_index_mapping is not None
             consolidate_safetensors_files_on_every_rank(
                 input_dir=os.path.join(checkpoint_id, "sharded"),
                 output_dir=checkpoint_id,
@@ -405,13 +412,6 @@ class CheckpointManager(BaseCheckpointManager):
             # manually call load_state_dict() for the model. Need to fix this.
             if MODEL in states:
                 states[MODEL].load_state_dict(state_dict)
-
-        # Reseed EMA from the just-loaded weights if it wasn't itself restored
-        # (excluded, or a model_only load). MODEL is never excludable, so its
-        # presence rules out torchft's per-replica dataloader-only load, which
-        # also calls _load_checkpoint but never includes MODEL.
-        if MODEL in states and EMA in self.states and EMA not in states:
-            self.states[EMA].load_state_dict({})
 
     def _save(self, curr_step: int, last_step: bool = False) -> bool:
         """Save the checkpoint for the current step.

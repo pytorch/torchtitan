@@ -32,7 +32,7 @@ from vllm.logger import init_logger
 from vllm.utils import torch_utils as _torch_utils
 
 # Registers the "loss" local-compile region. The generator shares the trainer's
-# model config, whose local_compile_regions may name it, but never builds a loss.
+# model config, whose local_compile.regions may name it, but never builds a loss.
 from torchtitan.components import loss as _loss  # noqa: F401
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import TrainingConfig
@@ -41,13 +41,19 @@ from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.base.module import Module
-from torchtitan.models.common.attention import Attention, LinearAttention
+from torchtitan.models.common.attention import (
+    Attention,
+    FlexInnerAttention,
+    LinearAttention,
+    MLAAttention,
+)
 from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.vllm.registry import uses_compressed_mla_cache
 
 
 logger = init_logger(__name__)
@@ -61,8 +67,9 @@ def _replace_vllm_layer_configs(model_config):
     # models do not acquire its vLLM-specific dependencies.
     from torchtitan.rl.generator.vllm.attention import (
         get_attention_dimensions,
-        VLLMAttentionWrapper,
+        VLLMInnerAttention,
     )
+    from torchtitan.rl.generator.vllm.mla import VLLMMLAAttention, VLLMMLAInnerAttention
 
     new_layers = []
     for layer_idx, layer_cfg in enumerate(model_config.layers):
@@ -78,21 +85,57 @@ def _replace_vllm_layer_configs(model_config):
                 head_dim,
                 value_head_dim,
             ) = get_attention_dimensions(attention_cfg, model_config.dim)
-            vllm_attention_cfg = VLLMAttentionWrapper.Config(
-                hidden_size=model_config.dim,
-                num_heads=num_heads,
-                num_kv_heads=num_kv_heads,
-                head_dim=head_dim,
-                value_head_dim=value_head_dim,
-                sliding_window_size=getattr(attention_cfg, "sliding_window_size", None),
-                sharding_config=attention_cfg.inner_attention.sharding_config,
+            backend_cfg = attention_cfg.inner_attention
+            is_mla = isinstance(backend_cfg, MLAAttention.Config)
+            if uses_compressed_mla_cache(backend_cfg):
+                vllm_attention_cfg = VLLMMLAAttention.Config(
+                    wkv_b=backend_cfg.wkv_b,
+                    packed_kv_head_dim=backend_cfg.packed_kv_head_dim,
+                    inner_attention=VLLMMLAInnerAttention.Config(
+                        num_heads=num_heads,
+                        kv_lora_rank=attention_cfg.kv_lora_rank,
+                        qk_nope_head_dim=attention_cfg.qk_nope_head_dim,
+                        qk_rope_head_dim=attention_cfg.qk_rope_head_dim,
+                        v_head_dim=attention_cfg.v_head_dim,
+                        scale=attention_cfg.softmax_scale,
+                        sharding_config=backend_cfg.inner_attention.sharding_config,
+                    ),
+                    sharding_config=backend_cfg.sharding_config,
+                )
+            else:
+                kernel_cfg = backend_cfg.inner_attention if is_mla else backend_cfg
+                if is_mla and isinstance(kernel_cfg, FlexInnerAttention.Config):
+                    raise ValueError(
+                        f"layers[{layer_idx}]: MLA with a materialized K/V cache "
+                        "does not support the flex attention backend in the "
+                        "TorchTitan vLLM wrapper yet; use varlen."
+                    )
+                vllm_attention_cfg = VLLMInnerAttention.Config(
+                    hidden_size=model_config.dim,
+                    num_heads=num_heads,
+                    num_kv_heads=num_kv_heads,
+                    head_dim=head_dim,
+                    value_head_dim=value_head_dim,
+                    scale=attention_cfg.softmax_scale,
+                    sliding_window_size=getattr(
+                        attention_cfg, "sliding_window_size", None
+                    ),
+                    sharding_config=kernel_cfg.sharding_config,
+                )
+                if is_mla:
+                    vllm_attention_cfg = MLAAttention.Config(
+                        wkv_b=backend_cfg.wkv_b,
+                        packed_kv_head_dim=backend_cfg.packed_kv_head_dim,
+                        inner_attention=vllm_attention_cfg,
+                        sharding_config=backend_cfg.sharding_config,
+                    )
+            attention_cfg = dataclasses.replace(
+                attention_cfg,
+                inner_attention=vllm_attention_cfg,
             )
             new_layer_cfg = dataclasses.replace(
                 new_layer_cfg,
-                attention=dataclasses.replace(
-                    attention_cfg,
-                    inner_attention=vllm_attention_cfg,
-                ),
+                attention=attention_cfg,
             )
 
         elif isinstance(attention_cfg, GDN.Config):
@@ -366,7 +409,7 @@ class VLLMModelWrapper(Module):
             parallelism_context=self.parallelism_context,
             training=TrainingConfig(),
             parallelism=training_parallelism,
-            local_compile_regions=self.config.local_compile_regions,
+            local_compile=self.config.local_compile,
             activation_remat=None,
             dump_folder="",
         )

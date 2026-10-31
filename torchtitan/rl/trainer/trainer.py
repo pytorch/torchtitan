@@ -31,7 +31,7 @@ from torchtitan.rl.controller.metrics import combine_microbatch_metrics
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.controller_state import CONTROLLER_STATE_KEY, MirroredState
 from torchtitan.rl.trainer.rdma_microbatch import (
-    MonarchRDMAMicrobatch,
+    RDMAMicrobatch,
     RDMAMicrobatchPrefetcher,
 )
 from torchtitan.tools import utils
@@ -69,15 +69,6 @@ class Trainer(Configurable):
 
         model: BaseModel.Config
         """Trainer model config, built for ``parallelism``."""
-
-        def __post_init__(self) -> None:
-            TrainingEngine.Config.__post_init__(self)
-            if self.parallelism.pipeline_parallel_degree > 1:
-                raise ValueError(
-                    "RL pipeline parallelism is temporarily disabled because "
-                    "TorchStore cannot publish a complete model state from "
-                    "stage-local state dictionaries."
-                )
 
     def __init__(
         self,
@@ -139,17 +130,13 @@ class Trainer(Configurable):
             f"{engine.model_device_mem_stats.max_reserved_gib:.2f}GiB"
             f"({engine.model_device_mem_stats.max_reserved_pct:.2f}%)"
         )
-        self.model = engine.model_parts[0]
 
         engine.load_checkpoint()
         self._staging_state_dict = self._setup_staging_model_state_dict()
-        self._staging_device_module = torch.get_device_module(engine.device)
         if engine.device.type == "cpu":
             self._staging_model_state_dict_stream = None
         else:
-            self._staging_model_state_dict_stream = self._staging_device_module.Stream(
-                device=engine.device
-            )
+            self._staging_model_state_dict_stream = torch.Stream(device=engine.device)
             self._mark_model_state_dict_ready_for_staging()
         if config.checkpointer is None:
             logger.warning(
@@ -190,7 +177,7 @@ class Trainer(Configurable):
         # for optimizer updates, but not for next-step forward/backward kernels
         # that may be queued before the concurrent push starts.
         self._staging_model_state_dict_stream.wait_stream(
-            self._staging_device_module.current_stream(self.engine.device)
+            torch.accelerator.current_stream(self.engine.device)
         )
 
     async def close(self) -> None:
@@ -245,27 +232,33 @@ class Trainer(Configurable):
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        microbatches: list[TrainingMicrobatch] | list[MonarchRDMAMicrobatch],
+        microbatch_groups: (
+            list[list[TrainingMicrobatch]] | list[list[RDMAMicrobatch]]
+        ),
         global_loss_token_counts: torch.Tensor,
         global_routing_token_counts: torch.Tensor,
-    ) -> dict[str, float]:
+    ) -> dict[str, float] | None:
         """Run one optimizer step's forward/backward microbatches.
 
         Args:
-            microbatches: This rank's column of the batcher's `[num_microbatches][dp_degree]` grid;
-                `MonarchRDMAMicrobatch`es when `rdma_min_tensor_bytes` is set, read a few ahead of training.
+            microbatch_groups: This rank's column of the batcher's
+                `[num_groups][num_microbatches_per_group][dp_degree]` grid. Under PP, each group runs
+                as one pipeline step. `RDMAMicrobatch`es when `rdma_min_tensor_bytes` is set,
+                read a few ahead of training.
             global_loss_token_counts: Per-objective loss-token counts across the
                 global batch.
             global_routing_token_counts: Per-depth non-padding routing-token
                 counts across the global batch.
 
         Returns:
-            dict[str, float]: Globally-reduced metrics.
+            dict[str, float] | None: Globally-reduced metrics, or ``None`` on
+                ranks without the last pipeline stage, which compute no loss.
 
         Example:
-            # dp_degree=2, tp=2, grid = [[mb_00, mb_01], [mb_10, mb_11]]
-            # ranks 0, 1 (DP rank 0) get microbatches = [mb_00, mb_10]
-            # ranks 2, 3 (DP rank 1) get microbatches = [mb_01, mb_11]
+            # dp_degree=2, tp=2, one microbatch per group,
+            # grid = [[[mb_00, mb_01]], [[mb_10, mb_11]]]
+            # ranks 0, 1 (DP rank 0) get microbatch_groups = [[mb_00], [mb_10]]
+            # ranks 2, 3 (DP rank 1) get microbatch_groups = [[mb_01], [mb_11]]
         """
         logger.debug(
             f"{os.getpid()=} Trainer forward_backward "
@@ -273,15 +266,15 @@ class Trainer(Configurable):
         )
         engine = self.engine
         self._step_compute_start = time.perf_counter()
+        microbatches = [
+            microbatch for group in microbatch_groups for microbatch in group
+        ]
         # The batcher pads every microbatch to the same token count.
         self._step_num_tokens_per_dp_rank = (
             len(microbatches)
             * self.config.training.num_tokens_per_microbatch_per_dp_rank
         )
-        uses_rdma = bool(microbatches) and isinstance(
-            microbatches[0], MonarchRDMAMicrobatch
-        )
-        microbatch_groups = [[microbatch] for microbatch in microbatches]
+        uses_rdma = bool(microbatches) and isinstance(microbatches[0], RDMAMicrobatch)
         if uses_rdma:
             # A wrong column, or a batch read twice or out of order, fails here instead of training.
             # Both counters start at 0 in their own process, and every registered batch trains in order.
@@ -300,28 +293,32 @@ class Trainer(Configurable):
             self._num_rdma_batches_read += 1
             # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
             # and broadcast it, to cut the trainer's reads by cp * tp. Needs a per-replica group.
+            # The controller rejects RDMA with PP, so every group holds one microbatch.
             microbatch_groups = RDMAMicrobatchPrefetcher(microbatches)
         result = engine.forward_backward(
             microbatch_groups=microbatch_groups,
             global_loss_token_counts=global_loss_token_counts,
             global_routing_token_counts=global_routing_token_counts,
         )
+        if not engine.pp_has_last_stage:
+            return None
         microbatch_metrics: list[dict[str, float]] = []
-        for loss_metrics in result.loss_metrics:
-            microbatch_metrics.append(
-                self._reduce_forward_backward_metrics(
-                    sum_reduced_metrics={
-                        key: value
-                        for key, value in loss_metrics.items()
-                        if not key.endswith("/max")
-                    },
-                    max_reduced_metrics={
-                        key: value
-                        for key, value in loss_metrics.items()
-                        if key.endswith("/max")
-                    },
+        for group_metrics in result.loss_metrics:
+            for loss_metrics in group_metrics:
+                microbatch_metrics.append(
+                    self._reduce_forward_backward_metrics(
+                        sum_reduced_metrics={
+                            key: value
+                            for key, value in loss_metrics.items()
+                            if not key.endswith("/max")
+                        },
+                        max_reduced_metrics={
+                            key: value
+                            for key, value in loss_metrics.items()
+                            if key.endswith("/max")
+                        },
+                    )
                 )
-            )
 
         metrics = combine_microbatch_metrics(microbatch_metrics)
         if uses_rdma:
@@ -420,7 +417,7 @@ class Trainer(Configurable):
           reuses the staging buffers and TorchStore key.
         """
 
-        model_state_dict = self.model.state_dict()
+        model_state_dict = self._model_state_dict()
         # Today we copy the model into reusable pinned CPU buffers before calling
         # TorchStore. Parameter destinations use the generator dtype, so copy_()
         # performs the cast; buffers keep their registered dtype.
@@ -440,11 +437,7 @@ class Trainer(Configurable):
     ) -> torch.Event | None:
         """Enqueue model-state copies into pinned CPU buffers."""
         stream = self._staging_model_state_dict_stream
-        stream_context = (
-            self._staging_device_module.stream(stream)
-            if stream is not None
-            else nullcontext()
-        )
+        stream_context = stream if stream is not None else nullcontext()
         staging_complete: torch.Event | None = None
         with stream_context:
             for name, destination in self._staging_state_dict.items():
@@ -453,7 +446,7 @@ class Trainer(Configurable):
                     get_local_tensor(source), non_blocking=stream is not None
                 )
             if stream is not None:
-                staging_complete = self._staging_device_module.Event()
+                staging_complete = torch.Event()
                 staging_complete.record(stream)
 
         return staging_complete
@@ -472,10 +465,26 @@ class Trainer(Configurable):
             )
         )
 
+    def _model_state_dict(self) -> dict[str, torch.Tensor]:
+        """Merge the state dicts of this rank's model parts.
+
+        Under PP each rank holds only its own stages, so every stage publishes
+        a partial state dict into the same TorchStore key.
+        """
+        return {
+            name: tensor
+            for model_part in self.engine.model_parts
+            for name, tensor in model_part.state_dict().items()
+        }
+
     def _setup_staging_model_state_dict(self) -> dict[str, torch.Tensor]:
         """Allocate a final-dtype pinned CPU mirror of the model state dict."""
-        buffer_names = {canonical_fqn(name) for name, _ in self.model.named_buffers()}
-        model_state_dict = self.model.state_dict()
+        buffer_names = {
+            canonical_fqn(name)
+            for model_part in self.engine.model_parts
+            for name, _ in model_part.named_buffers()
+        }
+        model_state_dict = self._model_state_dict()
         staging_state_dict = {}
         for name, tensor in model_state_dict.items():
             dtype = (

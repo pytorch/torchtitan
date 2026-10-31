@@ -235,8 +235,8 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
         dist_moe_runtime=runtime_config,
         sdc_replayer=None,
         training=SimpleNamespace(
-            cuda_graph_per_accumulation_group=False,
-            disable_cuda_graphs=True,
+            accelerator_graph_per_microbatch_group=False,
+            disable_accelerator_graphs=True,
             num_tokens_per_microbatch_per_dp_rank=8,
             mixed_precision_param="bfloat16",
             mixed_precision_reduce="float32",
@@ -638,6 +638,34 @@ def test_mxfp8_transform_is_independent_and_uses_prepared_weights() -> None:
     assert list(module.state_dict()) == ["w13.weight", "w2.weight"]
 
 
+def test_mxfp8_mega_fused_inference_builds_inference_weights() -> None:
+    """The transform flag builds both MXFP8 weight wrappers for inference."""
+    module = (
+        DistMoeTransform(
+            expert_precision="mxfp8",
+            block_scaled_config=dist_moe.BlockScaledConfig(pipeline="mega"),
+            mxfp8_mega_fused_inference=True,
+        )
+        .transform(_stock_config())
+        .build()
+    )
+
+    assert module.mega_fused_inference
+    assert module.w13.weight.mega_fused_inference
+    assert module.w2.weight.mega_fused_inference
+
+
+def test_mxfp8_mega_fused_inference_requires_mxfp8_mega() -> None:
+    """Mega fused inference needs MXFP8 experts on the Mega pipeline."""
+    with pytest.raises(ValueError, match="expert_precision='mxfp8'"):
+        DistMoeTransform(mxfp8_mega_fused_inference=True)
+    with pytest.raises(
+        ValueError,
+        match="mxfp8_mega_fused_inference requires block_scaled_config",
+    ):
+        DistMoeTransform(expert_precision="mxfp8", mxfp8_mega_fused_inference=True)
+
+
 @pytest.mark.parametrize(
     "other_transform",
     [
@@ -970,13 +998,15 @@ def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
     assert config.training.mixed_precision_reduce == "bfloat16"
     assert all(expert.inplace_wgrad_accum for _, expert, _, _ in experts)
     assert all(
-        isinstance(layer.attention.inner_attention, VarlenInnerAttention.Config)
+        isinstance(
+            layer.attention.inner_attention.inner_attention, VarlenInnerAttention.Config
+        )
         for layer in model_config.layers
     )
     assert config.dataloader.max_num_documents == max_documents
 
 
-def test_eager_dist_moe_recipe_supports_cuda_graphs_with_pipeline_parallelism():
+def test_eager_dist_moe_recipe_supports_accelerator_graphs_with_pipeline_parallelism():
     """The eager recipe accepts EP and PP while retaining CUDA graphs."""
     config = eager_test_recipes.deepseek_v3_debugmodel_dist_moe_bf16(seq_len=128)
     config.parallelism.expert_parallel_degree = 2

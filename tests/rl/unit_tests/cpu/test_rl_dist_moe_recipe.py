@@ -35,24 +35,24 @@ def test_rl_integration_recipe_runs_dist_moe_on_both_roles():
     assert isinstance(config.trainer.dist_moe_runtime, DistMoeRuntime.Config)
     assert isinstance(config.generator.dist_moe_runtime, DistMoeRuntime.Config)
     assert config.generator.dist_moe_runtime.inference
-    assert config.generator.cuda_graph.mode == "FULL"
+    assert config.generator.engine.cuda_graph.mode == "FULL"
     # Two vLLM DP replicas, so ranks of the EP group see different token counts.
     assert config.generator.parallelism.data_parallel_degree == 2
     assert config.generator.parallelism.expert_parallel_degree == 4
     assert config.trainer.parallelism.expert_parallel_degree == 4
 
 
-def test_b200_rl_suite_runs_kda_and_dist_moe():
+def test_b200_rl_suite_runs_h100_tests_and_dist_moe():
     from tests.integration_tests import get_importable_config_module
     from tests.integration_tests.rl import (
         build_b200_rl_test_list,
-        build_rl_kda_test_list,
+        build_h100_rl_test_list,
     )
 
     definitions = {d.test_name: d for d in build_b200_rl_test_list()}
 
-    for kda in build_rl_kda_test_list():
-        assert kda.test_name in definitions
+    for h100_test in build_h100_rl_test_list():
+        assert h100_test.test_name in definitions
     dist_moe_test = definitions["rl_grpo_moe_debug_dist_moe_tp2_ep4"]
     assert dist_moe_test.ngpu == 8
     (config_fn,) = dist_moe_test.configs

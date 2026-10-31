@@ -30,7 +30,6 @@ from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.renderer import from_renderers, RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.models.common.attention import (
-    Attention,
     FlexInnerAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
@@ -60,9 +59,9 @@ def _load_dataset():
     return Dataset.from_json(_DATA_PATH)
 
 
-def _runtime(max_context_length):
+def _runtime(max_context_length, *, tokenizer=None):
     return DatasetBuildContext(
-        tokenizer=_load_tokenizer(),
+        tokenizer=tokenizer or _load_tokenizer(),
         max_context_length=max_context_length,
         num_tokens_per_microbatch=max_context_length,
         read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
@@ -327,6 +326,31 @@ class TestChatDatasetPrefixValidation(unittest.TestCase):
             processor(_load_dataset()[0], np.random.default_rng(0))
 
 
+class TestHFBackendTokenizerChatLabels(unittest.TestCase):
+    """HFBackendTokenizer chat samples get one BOS and supervise only the answer."""
+
+    def test_single_bos_and_answer_only_labels(self):
+        from torchtitan.experiments.transformers_modeling_backend.tokenizer import (
+            HFBackendTokenizer,
+        )
+
+        tokenizer = HFBackendTokenizer(tokenizer_path=_TOKENIZER_PATH)
+        sample = _load_dataset()[0]
+        processor = ChatProcessor.Config(messages_fn=_process_sample).build(
+            context=_runtime(2048, tokenizer=tokenizer)
+        )
+        sequence = processor(sample, np.random.default_rng(0))
+
+        # The template renders bos_token and ChatProcessor also passes add_bos=True.
+        self.assertEqual(sequence.input_ids[0], tokenizer.bos_id)
+        self.assertEqual(sequence.input_ids.tolist().count(tokenizer.bos_id), 1)
+        answer = tokenizer.encode(sample["answer"], add_bos=False, add_eos=False)
+        self.assertEqual(
+            sequence.labels[sequence.labels != IGNORE_INDEX].tolist(),
+            answer + [tokenizer.eos_id],
+        )
+
+
 class TestMultiTurnChatProcessor(unittest.TestCase):
     def setUp(self):
         self.messages = [
@@ -549,12 +573,9 @@ class TestDocumentMaskBlocksCrossDocAttention(unittest.TestCase):
             [0, 1, 2, 0, 1, 0, 1, 2, 0, 1, 0, 1, 2, 3, 0, 1],
             dtype=torch.int32,
         )
-        attn_config = Attention.Config(
-            n_heads=1,
-            inner_attention=FlexInnerAttention.Config(block_size=4),
-        )
+        attn_config = FlexInnerAttention.Config(block_size=4)
 
-        mask = attn_config.inner_attention.build_attention_metadata(positions)
+        mask = attn_config.build_attention_metadata(positions)
 
         self.assertEqual(mask.shape, (1, 1, positions.shape[0], positions.shape[0]))
 

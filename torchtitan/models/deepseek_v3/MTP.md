@@ -10,7 +10,7 @@ DeepSeek-V3 MTP is currently enabled through the model config builder:
 
 - `build_model_config(..., num_mtp_layers=N)` controls whether MTP is enabled.
 - `_build_mtp_layers(...)` builds MTP layer configs from the last main decoder layer config.
-- `deepseek_v3_debugmodel_mtp()` is the current debug configuration example. It sets `num_mtp_layers=1` and uses `ChunkedLossWrapper` with `MTPLoss.Config(mtp_scale=0.3)` as its inner loss.
+- `deepseek_v3_debugmodel_mtp()` is the current debug configuration example. It sets `num_mtp_layers=1` and uses `ChunkedLossWrapper` with `MTPCrossEntropyLoss.Config(mtp_scale=0.3)` as its inner loss.
 
 Each MTP layer follows the normal decoder layer structure, with the following MTP-specific modules:
 
@@ -257,7 +257,7 @@ independent from MoE routing.
 
 ### 4.4 Loss Parallel
 
-When `global_vocab_size` is configured, `MTPLoss` uses the vocab size required by the loss-parallel cross entropy path. Main and auxiliary predictions share the same cross entropy helper so the loss semantics do not diverge across depths.
+When `global_vocab_size` is configured, `MTPCrossEntropyLoss` uses the vocab size required by the loss-parallel cross entropy path. Main and auxiliary predictions share the same cross entropy helper so the loss semantics do not diverge across depths.
 
 ### 4.5 Chunked Loss
 
@@ -265,7 +265,7 @@ When `global_vocab_size` is configured, `MTPLoss` uses the vocab size required b
 prediction and labels tuples. For each chunk it applies the shared LM head to
 every prediction, preserves the tensor-or-tuple structure when calling the
 inner loss, and routes one accumulated hidden-state gradient back to each model
-output. `MTPLoss` receives the aligned tuples and combines the main and weighted
+output. `MTPCrossEntropyLoss` receives the aligned tuples and combines the main and weighted
 auxiliary cross-entropy objectives.
 
 ## TODO

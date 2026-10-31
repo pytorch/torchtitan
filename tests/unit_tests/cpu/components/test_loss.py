@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -24,21 +25,24 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.components.loss import (
     _LossParallelCrossEntropy,
-    BaseLoss,
     ChunkedLossWrapper,
     compute_logprobs,
     cross_entropy_loss,
     CrossEntropyLoss,
     GradAccumulator,
     IGNORE_INDEX,
+    Loss,
 )
+from torchtitan.config import ParallelismConfig
+from torchtitan.config.transform import LoRATransform, transform_model_config_
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.deepseek_v3.mtp import (
     get_mtp_token_counts,
+    MTPCrossEntropyLoss,
     MTPDecoder,
-    MTPLoss,
     roll_mtp_sequence,
 )
+from torchtitan.models.llama3 import build_model_config
 
 
 class TestLoss(unittest.TestCase):
@@ -166,7 +170,7 @@ class TestLoss(unittest.TestCase):
             "torchtitan.models.deepseek_v3.mtp.annotate_input_spmd_types",
             side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
         ):
-            input_tokens, loss_labels, extra_kwargs = model.preprocess_inputs(
+            input_tokens, loss_labels, extra_kwargs, _ = model.preprocess_inputs(
                 {
                     "input": tokens,
                     "labels": labels,
@@ -244,16 +248,16 @@ class TestLoss(unittest.TestCase):
         torch.testing.assert_close(loss_token_counts, torch.tensor([2, 2]))
         torch.testing.assert_close(routing_token_counts, torch.tensor([4, 3]))
 
-    def test_mtp_loss_rejects_plain_tensor(self):
-        loss_fn = MTPLoss(MTPLoss.Config(global_vocab_size=16))
+    def test_mtp_cross_entropy_loss_rejects_plain_tensor(self):
+        loss_fn = MTPCrossEntropyLoss(MTPCrossEntropyLoss.Config(global_vocab_size=16))
         pred = torch.zeros(1, 4, 16)
         labels = torch.zeros(1, 4, dtype=torch.long)
 
         with self.assertRaisesRegex(ValueError, "expects prediction and labels tuples"):
             loss_fn(pred, labels)
 
-    def test_mtp_loss_uses_each_depth_target_count(self):
-        loss_fn = MTPLoss(MTPLoss.Config(mtp_scale=0.3))
+    def test_mtp_cross_entropy_loss_uses_each_depth_target_count(self):
+        loss_fn = MTPCrossEntropyLoss(MTPCrossEntropyLoss.Config(mtp_scale=0.3))
         logits = tuple(torch.zeros(4, 4, requires_grad=True) for _ in range(3))
         labels = (
             torch.zeros(4, dtype=torch.long),
@@ -270,8 +274,8 @@ class TestLoss(unittest.TestCase):
         torch.testing.assert_close(logits[1].grad[0, 0], torch.tensor(-0.15 * 0.75 / 3))
         torch.testing.assert_close(logits[2].grad[0, 0], torch.tensor(-0.15 * 0.75 / 2))
 
-    def test_mtp_loss_without_counts_returns_unnormalized_sum(self):
-        loss_fn = MTPLoss(MTPLoss.Config(mtp_scale=0.3))
+    def test_mtp_cross_entropy_loss_without_counts_returns_unnormalized_sum(self):
+        loss_fn = MTPCrossEntropyLoss(MTPCrossEntropyLoss.Config(mtp_scale=0.3))
         logits = tuple(torch.zeros(4, 4) for _ in range(2))
         labels = tuple(torch.zeros(4, dtype=torch.long) for _ in range(2))
 
@@ -759,18 +763,18 @@ class _FakeMTPDecoder(MTPDecoder):
         return {}
 
 
-class _WeightedTwoOutputLoss(BaseLoss):
+class _WeightedTwoOutputLoss(Loss[tuple[torch.Tensor, ...]]):
     """Two-output objective used to exercise generic chunked-loss plumbing."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseLoss.Config):
+    class Config(Loss.Config):
         pass
 
     auxiliary_weight = 0.25
 
     def __init__(self, config: Config):
         del config
-        self.fn = cross_entropy_loss
+        self._loss_fn = cross_entropy_loss
 
     def __call__(
         self,
@@ -782,9 +786,9 @@ class _WeightedTwoOutputLoss(BaseLoss):
         del loss_inputs
         if not isinstance(pred, tuple) or not isinstance(labels, tuple):
             raise ValueError("Expected prediction and labels tuples.")
-        loss = self.fn(pred[0], labels[0]) + self.auxiliary_weight * self.fn(
-            pred[1], labels[1]
-        )
+        loss = self._loss_fn(
+            pred[0], labels[0]
+        ) + self.auxiliary_weight * self._loss_fn(pred[1], labels[1])
         if global_loss_token_counts is not None:
             loss = loss / global_loss_token_counts
         return loss, {}
@@ -903,6 +907,167 @@ class TestChunkedLossWrapper(unittest.TestCase):
             model_chunked.output.weight.grad, model_ref.output.weight.grad
         )
 
+    def test_frozen_features_accumulate_head_gradients(self):
+        """Head-only training matches cross entropy across chunks and microbatches."""
+        for num_chunks in (1, 2, 4):
+            with self.subTest(num_chunks=num_chunks):
+                torch.manual_seed(42)
+                head = nn.Linear(5, 17)
+                reference_head = nn.Linear(5, 17)
+                reference_head.load_state_dict(head.state_dict())
+                chunked_loss = ChunkedLossWrapper(
+                    ChunkedLossWrapper.Config(num_chunks=num_chunks)
+                )
+                chunked_loss.set_lm_head(head)
+                for _ in range(2):
+                    hidden_TD = torch.randn(8, 5)
+                    labels = torch.randint(0, 17, (8,))
+                    labels[1] = IGNORE_INDEX
+                    token_count = (labels != IGNORE_INDEX).sum()
+                    reference_loss = (
+                        F.cross_entropy(
+                            reference_head(hidden_TD), labels, reduction="sum"
+                        )
+                        / token_count
+                    )
+
+                    loss, _ = chunked_loss(hidden_TD, labels, token_count)
+                    loss.backward()
+                    reference_loss.backward()
+
+                    torch.testing.assert_close(loss, reference_loss)
+                    self.assertIsNone(hidden_TD.grad)
+                    for actual, expected in zip(
+                        head.parameters(), reference_head.parameters(), strict=True
+                    ):
+                        torch.testing.assert_close(actual.grad, expected.grad)
+
+    def test_lora_head_only_matches_cross_entropy(self):
+        """The in-tree lm_head LoRA config preserves loss and adapter gradients."""
+        torch.manual_seed(42)
+        model_config = build_model_config(
+            "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
+        )
+        model_config = transform_model_config_(
+            model_config, [LoRATransform(rank=2, alpha=4.0, target_modules=["lm_head"])]
+        )
+        model = model_config.build()
+        model.init_states()
+        model._skip_lm_head = True
+        # A nonzero B matrix exercises gradients for both adapter matrices.
+        with torch.no_grad():
+            model.lm_head.lora_b.weight.normal_(std=0.02)
+        reference_head = copy.deepcopy(model.lm_head)
+        trainable_names = {
+            name for name, param in model.named_parameters() if param.requires_grad
+        }
+        self.assertEqual(
+            trainable_names, {"lm_head.lora_a.weight", "lm_head.lora_b.weight"}
+        )
+
+        for num_chunks in (1, 2, 4):
+            with self.subTest(num_chunks=num_chunks):
+                model.zero_grad(set_to_none=True)
+                reference_head.zero_grad(set_to_none=True)
+                chunked_loss = ChunkedLossWrapper(
+                    ChunkedLossWrapper.Config(num_chunks=num_chunks)
+                )
+                chunked_loss.set_lm_head(model.lm_head)
+                for _ in range(2):
+                    tokens = torch.randint(0, model_config.vocab_size, (8,))
+                    positions = torch.arange(8)
+                    hidden_TD = model(
+                        tokens,
+                        positions=positions,
+                        attention_metadata=model._get_attention_metadata(positions),
+                    )
+                    self.assertFalse(hidden_TD.requires_grad)
+                    labels = torch.randint(0, model_config.vocab_size, (8,))
+                    labels[0] = IGNORE_INDEX
+                    token_count = (labels != IGNORE_INDEX).sum()
+                    reference_loss = (
+                        F.cross_entropy(
+                            reference_head(hidden_TD), labels, reduction="sum"
+                        )
+                        / token_count
+                    )
+
+                    loss, _ = chunked_loss(hidden_TD, labels, token_count)
+                    loss.backward()
+                    reference_loss.backward()
+
+                    torch.testing.assert_close(loss, reference_loss)
+                    for name, parameter in model.named_parameters():
+                        if name in trainable_names:
+                            torch.testing.assert_close(
+                                parameter.grad,
+                                reference_head.get_parameter(
+                                    name.removeprefix("lm_head.")
+                                ).grad,
+                            )
+                        else:
+                            self.assertIsNone(parameter.grad)
+
+    def test_detached_chunk_loss_with_trainable_features_raises(self):
+        """A detached chunk must not silently shift later decoder gradients."""
+        for detached_chunk in (0, 1, 2):
+            for constant_loss in (False, True):
+                with self.subTest(
+                    detached_chunk=detached_chunk, constant_loss=constant_loss
+                ):
+                    torch.manual_seed(42)
+                    _, chunked_loss = self._make_model_and_loss(5, 17, 3)
+                    inner_loss = chunked_loss.loss_fn
+                    chunk_index = 0
+
+                    def loss_fn(*args, **kwargs):
+                        nonlocal chunk_index
+                        loss, metrics = inner_loss(*args, **kwargs)
+                        if chunk_index == detached_chunk:
+                            loss = (
+                                loss.new_zeros(()) if constant_loss else loss.detach()
+                            )
+                        chunk_index += 1
+                        return loss, metrics
+
+                    chunked_loss.loss_fn = loss_fn
+                    hidden_TD = torch.randn(6, 5, requires_grad=True)
+                    labels = torch.randint(0, 17, (6,))
+
+                    with self.assertRaisesRegex(RuntimeError, "does not require grad"):
+                        chunked_loss(hidden_TD, labels)
+                    self.assertIsNone(hidden_TD.grad)
+
+    def test_no_grad_leaves_head_and_features_unchanged(self):
+        """Validation leaves frozen decoder outputs and the head without gradients."""
+        head = nn.Linear(5, 17)
+        chunked_loss = ChunkedLossWrapper(ChunkedLossWrapper.Config(num_chunks=2))
+        chunked_loss.set_lm_head(head)
+        hidden = torch.randn(8, 5)
+        labels = torch.randint(0, 17, (8,))
+
+        with torch.no_grad():
+            loss, _ = chunked_loss(hidden, labels)
+
+        self.assertFalse(loss.requires_grad)
+        self.assertIsNone(hidden.grad)
+        for parameter in head.parameters():
+            self.assertIsNone(parameter.grad)
+
+    def test_fully_frozen_model_returns_detached_loss(self):
+        """Frozen features and head keep the forward-only loss contract."""
+        head = nn.Linear(5, 17).requires_grad_(False)
+        chunked_loss = ChunkedLossWrapper(ChunkedLossWrapper.Config(num_chunks=2))
+        chunked_loss.set_lm_head(head)
+        hidden = torch.randn(8, 5)
+        labels = torch.randint(0, 17, (8,))
+
+        loss, _ = chunked_loss(hidden, labels)
+
+        self.assertFalse(loss.requires_grad)
+        for parameter in head.parameters():
+            self.assertIsNone(parameter.grad)
+
     def test_weighted_multi_output_matches_full_objective(self):
         torch.manual_seed(42)
         T, D, V, num_chunks = 24, 5, 17, 3
@@ -985,11 +1150,11 @@ class TestChunkedLossWrapper(unittest.TestCase):
         model_ref, _ = self._make_model_and_loss(dim, vocab_size, num_chunks)
         model_chunked, _ = self._make_model_and_loss(dim, vocab_size, num_chunks)
         model_chunked.output.load_state_dict(model_ref.output.state_dict())
-        loss_config = MTPLoss.Config(
+        loss_config = MTPCrossEntropyLoss.Config(
             mtp_scale=0.3,
             global_vocab_size=vocab_size,
         )
-        full_loss = MTPLoss(loss_config)
+        full_loss = MTPCrossEntropyLoss(loss_config)
         chunked_loss = ChunkedLossWrapper(
             ChunkedLossWrapper.Config(
                 num_chunks=num_chunks,

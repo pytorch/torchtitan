@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-import unittest.mock
 
 import spmd_types as spmd
 import torch
@@ -41,7 +40,7 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
             model=model_config,
             training=TrainingConfig(
                 max_context_length=model_config.max_context_length,
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
             ),
             parallelism=parallelism,
         )
@@ -66,7 +65,7 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
                 model=model_config,
                 training=TrainingConfig(
                     max_context_length=model_config.max_context_length,
-                    disable_cuda_graphs=True,
+                    disable_accelerator_graphs=True,
                 ),
                 parallelism=ParallelismConfig(expert_parallel_degree=8),
             )
@@ -94,7 +93,7 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
             model=model_config,
             training=TrainingConfig(
                 max_context_length=model_config.max_context_length,
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
             ),
             parallelism=ParallelismConfig(tensor_parallel_degree=2),
         )
@@ -150,19 +149,11 @@ class TestPermute(unittest.TestCase):
     def _permute(self, tokens_per_expert_group, experts_per_rank, num_ranks):
         """Helper that calls _permute and returns (permuted_indices, num_tokens_per_expert)."""
         dispatcher = self._make_dispatcher()
-        mock_mesh = unittest.mock.MagicMock()
-        mock_mesh.size.return_value = num_ranks
         total = tokens_per_expert_group.sum().item()
         dummy_input = torch.zeros(total, 1)
-        with unittest.mock.patch.object(
-            AllToAllTokenDispatcher,
-            "ep_mesh",
-            new_callable=unittest.mock.PropertyMock,
-            return_value=mock_mesh,
-        ):
-            _, permuted_indices, num_tokens_per_expert = dispatcher._permute(
-                dummy_input, tokens_per_expert_group
-            )
+        _, permuted_indices, num_tokens_per_expert = dispatcher._permute(
+            dummy_input, tokens_per_expert_group, ep_size=num_ranks
+        )
         return permuted_indices, num_tokens_per_expert
 
     def test_basic_2ranks_2experts(self):

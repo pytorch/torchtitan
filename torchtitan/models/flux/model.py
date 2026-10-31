@@ -18,7 +18,7 @@ from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import context_parallel
 from torchtitan.distributed.activation_remat import ActivationRematConfig
-from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_replicated_parameters,
@@ -88,6 +88,7 @@ def _get_attention_metadata(
     return metadata._replace(
         cu_seq_k=metadata.cu_seq_k * cp_size,
         max_k=metadata.max_k * cp_size,
+        window_size=(-1, -1),
     )
 
 
@@ -103,7 +104,9 @@ class FluxModel(BaseModel):
     class Config(BaseModel.Config):
         img_in: Linear.Config
         txt_in: Linear.Config
-        local_compile_regions: list[str] = field(default_factory=lambda: ["loss"])
+        local_compile: LocalCompileConfig = field(
+            default_factory=lambda: LocalCompileConfig(regions=["loss"])
+        )
         in_channels: int = 64
         out_channels: int = 64
         vec_in_dim: int = 768
@@ -235,13 +238,13 @@ class FluxModel(BaseModel):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        local_compile_regions: list[str],
+        local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
         dump_folder: str,
     ) -> Self:
         """Apply Flux's AC-before-SPMD parallelization lifecycle."""
         # Bind local implementations early; torch.compile traces on first use.
-        apply_local_compile(local_compile_regions)
+        local_compile.apply()
         with parallelism_context.activate_spmd():
             if activation_remat is not None:
                 # Flux saves no regions under any policy: each block is
@@ -319,9 +322,11 @@ class FluxModel(BaseModel):
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
         **kwargs: Any,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Encode a raw image-text batch and prepare flow-matching inputs."""
         del max_num_documents, max_context_length
+        if input_dict.pop("loss_kwargs", None):
+            raise ValueError("Flux does not support per-microbatch loss arguments.")
         autoencoder = cast(AutoEncoder | None, kwargs["autoencoder"])
         clip_encoder = cast(FluxEmbedder, kwargs["clip_encoder"])
         t5_encoder = cast(FluxEmbedder, kwargs["t5_encoder"])
@@ -403,6 +408,7 @@ class FluxModel(BaseModel):
                 "timesteps": timesteps,
                 "loss_target": target,
             },
+            {},
         )
 
     def forward(

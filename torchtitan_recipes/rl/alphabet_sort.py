@@ -46,12 +46,11 @@ from torchtitan.rl.controller.controller import (
 from torchtitan.rl.examples.alphabet_sort.data import AlphabetSortDataset
 from torchtitan.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.rl.examples.alphabet_sort.rubric import RewardAlphabetSort
-from torchtitan.rl.generator.generator import (
-    SamplingConfig,
-    VLLMCudaGraphConfig,
-    VLLMGenerator,
-)
+from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
+from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.data import IterableRLDataLoader
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
@@ -142,7 +141,7 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
             ),
@@ -159,7 +158,7 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
@@ -175,7 +174,7 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
 def rl_grpo_qwen3_0_6b_varlen_no_compile(*, seq_len: int = 2048) -> Controller.Config:
     config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
     for model_config in (config.trainer.model, config.generator.model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     return config
 
 
@@ -221,7 +220,7 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
                 dtype="bfloat16",
@@ -239,7 +238,7 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
@@ -300,7 +299,7 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     )
     # Local compile regions do not support batch-invariant mode.
     for model_config in (config.trainer.model, config.generator.model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     inner_attention = config.trainer.model.layers[0].attention.inner_attention
     assert isinstance(inner_attention, FlexInnerAttention.Config)
     block_size = inner_attention.block_size
@@ -314,8 +313,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
     """GRPO training config for GPT-OSS-20B with varlen attention.
 
     GPT-OSS uses alternating attention: even layers apply a sliding window, odd
-    layers use full causal attention; the per-layer window is baked into each
-    ``VarlenInnerAttention.window_size``.
+    layers use full causal attention. Metadata carries the per-layer window.
     """
     num_samples_per_prompt = 8
     seq_len = 2048
@@ -360,7 +358,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
             ),
@@ -377,13 +375,13 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
             # TODO: use FULL CUDA graphs once a CUDA-graph-compatible
             # distributed MoE token dispatcher is enabled for GPT-OSS.
-            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
@@ -435,7 +433,7 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
             ),
@@ -452,7 +450,7 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
@@ -507,7 +505,7 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
                 dtype="bfloat16",
@@ -525,7 +523,7 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
@@ -589,7 +587,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
                 dtype="bfloat16",
@@ -607,10 +605,10 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
-            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -674,7 +672,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
     )
     # Local compile regions do not support batch-invariant mode.
     for model_config in (trainer_model, generator_model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     return Controller.Config(
         hf_assets_path="./assets/hf/Qwen3-0.6B",
         num_generators=3,
@@ -702,7 +700,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
             ),
@@ -720,7 +718,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
             parallelism=generator_parallelism,
@@ -800,7 +798,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
                 max_context_length=seq_len,
                 dtype="bfloat16",
@@ -818,10 +816,10 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
                 ),
             ),
         ),
-        generator=VLLMGenerator.Config(
+        generator=Generator.Config(
             model=generator_model,
             model_dtype="bfloat16",
-            cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -859,7 +857,7 @@ def rl_grpo_qwen3_5_9b_varlen_batch_invariant() -> Controller.Config:
     )
     # Local compile regions do not support batch-invariant mode.
     for model_config in (config.trainer.model, config.generator.model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     return config
 
 

@@ -8,7 +8,7 @@ description: Make a torchtitan model train faster with `local_compile` regions a
 The method: measure a model's layers against their ideal time, find the glue ops that run far slower than the bytes they move, and rewrite or regroup them so Inductor fuses them into fast kernels. Then verify numerics, graph counts and parallelism, and deliver small changes.
 
 Terms:
-- **Region:** a function decorated with `@local_compile` (`torchtitan/distributed/local_compile.py`), compiled on its own with `torch.compile(fullgraph=True)` when listed in the model's `local_compile_regions`. It traces through everything it calls (callees are inlined); `fullgraph` only forbids graph breaks.
+- **Region:** a function decorated with `@local_compile` (`torchtitan/distributed/local_compile.py`), compiled on its own with `torch.compile(fullgraph=True)` when listed in the model's `local_compile.regions`. It traces through everything it calls (callees are inlined); `fullgraph` only forbids graph breaks.
 - **Glue:** everything that isn't a GEMM or attention: norms, RoPE, residual adds, routing, permutes, casts, scores.
 - **Ideal time:** minimum bytes moved / measured HBM bandwidth (or a FLOP floor for GEMMs).
 - **Per-layer (block) compile:** `torch.compile` on each transformer block. Used here as a baseline, not a deliverable.
@@ -64,7 +64,7 @@ Before investing in an idea: negative-results.md. If compile itself fails: compi
 1. **Baselines** (harness.md):
    - 2 layers at real dims, covering each block type; packed tokens per rank from small to large (e.g. 2k, 4k, 16k, 32k+). Torchtitan has no batch dim, so long rows are normal.
    - fwd+bwd, with the recipe's activation checkpointing mode (none, full, selective).
-   - three trees: eager, upstream regions (what the model's `local_compile_regions` enables on main today), per-layer compile. Rewrites plus regions beat per-layer compile by 18-29% on Kimi K3, so it's a baseline, not a ceiling.
+   - three trees: eager, upstream regions (what the model's `local_compile.regions` enables on main today), per-layer compile. Rewrites plus regions beat per-layer compile by 18-29% on Kimi K3, so it's a baseline, not a ceiling.
    - fp32 matmul precision matching this tree's trainer.
    - check that the expected attention backend actually loaded (kernel names in the profile) and pin optional deps (requirements.txt); a missing FA4 or a stale attn-gym silently falls back to a slow path (deceiving-quirks.md).
    - record wall and kernel time, peak memory, kernel count; check attention against its FLOP floor. When attention is the largest item and far from its floor, it's a backend choice (flex, varlen, FA4, cuDNN): report it with the floor rather than trying a region.

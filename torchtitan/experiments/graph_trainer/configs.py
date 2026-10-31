@@ -9,6 +9,7 @@ from typing import Literal
 
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
@@ -352,7 +353,7 @@ def to_graph_trainer_config(
         }
     )
     # GraphTrainer compiles the whole step (config.compile), so it drops the model's local compile regions.
-    graph_model.local_compile_regions = []
+    graph_model.local_compile = LocalCompileConfig()
     disable_inplace_wgrad_accum(graph_model)
     d["model"] = graph_model
 

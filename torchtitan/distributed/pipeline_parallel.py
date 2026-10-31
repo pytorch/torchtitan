@@ -32,17 +32,17 @@ from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_remat import ActivationRematConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.base.model import BaseModel
 from torchtitan.models.base.module import ModuleDict, ModuleList
 from torchtitan.models.common.decoder import Decoder
 
-# These are the public entrypoints for model-specific PP setup. Helpers in this
-# module are implementation details and stay private.
 logger = logging.getLogger(__name__)
 
 
 __all__ = [
     "get_module_fqns_per_model_part",
+    "prepare_pipeline_schedule_for_accelerator_graph",
     "pipeline_llm",
     "pipeline_with_first_last_stage_modules",
 ]
@@ -78,7 +78,7 @@ def pipeline_llm(
     parallelism_context: ParallelismContext,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
-    local_compile_regions: list[str],
+    local_compile: LocalCompileConfig,
     activation_remat: ActivationRematConfig | None,
     dump_folder: str,
     device: torch.device,
@@ -144,7 +144,7 @@ def pipeline_llm(
             parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
-            local_compile_regions=local_compile_regions,
+            local_compile=local_compile,
             activation_remat=activation_remat,
             dump_folder=dump_folder,
         )
@@ -328,7 +328,6 @@ def _get_pipeline_metadata(
 
     # Calculate number of virtual stages
     if layers_per_stage is not None:
-
         # Calculate number of virtual stages needed (using ceiling division)
         # This allows for unequal distribution where stages can differ by at most 1 layer
         num_virtual_stages = math.ceil(
@@ -371,6 +370,34 @@ def _get_pipeline_metadata(
         stages_per_rank = 1 if is_single_stage_schedule else 2
         num_virtual_stages = parallelism_context.pp * stages_per_rank
     return num_virtual_stages, num_layers, input_weight, output_weight
+
+
+def prepare_pipeline_schedule_for_accelerator_graph(
+    schedule: _PipelineSchedule,
+    *,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    target: torch.Tensor | None,
+    loss_kwargs: dict[str, Any],
+    for_eval: bool = False,
+) -> None:
+    """Prepare training or eval pipeline metadata outside accelerator graph capture."""
+    # TODO: Use a public pipeline schedule initialization API.
+    if isinstance(schedule, PipelineScheduleSingle):
+        stages = [schedule._stage]
+        initialize = schedule._initialize_stage
+    else:
+        assert isinstance(schedule, PipelineScheduleMulti)
+        stages = schedule._stages
+        initialize = schedule._initialize_stages
+    has_backward = schedule._has_backward
+    schedule._has_backward = has_backward and not for_eval
+    try:
+        for stage in stages:
+            stage.has_backward = schedule._has_backward
+        initialize(args, kwargs, target, loss_kwargs=loss_kwargs)
+    finally:
+        schedule._has_backward = has_backward
 
 
 def _build_pipeline_schedule(
@@ -423,9 +450,19 @@ def _build_pipeline_schedule(
             "Use a concrete single-stage schedule such as GPipe or 1F1B."
         )
 
-    # Pipeline schedules expect a bare scalar loss tensor.
-    def _scalar_loss_fn(*args: object, **kwargs: object) -> torch.Tensor:
-        loss, _ = loss_fn(*args, **kwargs)
+    # Pipeline schedules expect a bare scalar loss tensor. A caller that wants
+    # the loss metrics passes a per-microbatch ``loss_metrics`` dict, which is
+    # replaced rather than accumulated into: the schedule also calls the loss on
+    # the first microbatch while inferring stage metadata.
+    def _scalar_loss_fn(
+        *args: object,
+        loss_metrics: dict[str, torch.Tensor] | None = None,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        loss, metrics = loss_fn(*args, **kwargs)
+        if loss_metrics is not None:
+            loss_metrics.clear()
+            loss_metrics.update(metrics)
         return loss
 
     if looped_schedule:

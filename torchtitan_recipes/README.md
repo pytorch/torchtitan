@@ -27,6 +27,7 @@ The package is organized by ownership:
 | `torchtitan_recipes.models.muse_glimmer` | Muse Glimmer pretraining | `torchtitan/models/muse_glimmer/README.md` |
 | `torchtitan_recipes.graph_trainer` | GraphTrainer training | `torchtitan/experiments/graph_trainer/README.md` |
 | `torchtitan_recipes.rl` | RL examples | `torchtitan/rl/examples/` |
+| `torchtitan_recipes.decision` | Typed-decision (Jev-style) fine-tuning | `torchtitan_recipes/decision/README.md` |
 | `torchtitan_recipes.torchft.llama3` | TorchFT replicated training | `torchtitan/experiments/torchft/README.md` |
 
 Select a recipe by its exact import path:

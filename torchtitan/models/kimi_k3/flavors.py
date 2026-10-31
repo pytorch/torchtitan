@@ -31,8 +31,9 @@ from torchtitan.models.common import (
     Sigmoid,
     SiTUGLU,
 )
-from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.attention import FlexInnerAttention, InnerAttention
 from torchtitan.models.common.attention.kda import InnerKDA, KDA, KDAKernel
+from torchtitan.models.common.attention.mla import MLAAttention
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
@@ -41,8 +42,9 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
-    inner_attention_local_spmd_sharding_config,
     lm_head_sharding_config,
+    mla_attention_local_spmd_sharding_config,
+    mla_kv_projection_sharding_config,
     norm_sharding_config,
     pre_lm_head_norm_sharding_config,
     replicated_input_colwise_sharding_config,
@@ -79,12 +81,8 @@ from torchtitan.models.kimi_k2_7.sharding import (
     moonvit_rotary_sharding_config,
 )
 from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
-from .model import (
-    AttentionResidual,
-    KimiK3Model,
-    KimiK3TransformerBlock,
-    KimiMLAAttention,
-)
+from .attention import KimiMLAAttention
+from .model import AttentionResidual, KimiK3Model, KimiK3TransformerBlock
 from .moe import KimiLatentMoE
 from .sharding import (
     inner_kda_sharding_config,
@@ -231,9 +229,18 @@ def _mla_config(
 ) -> KimiMLAAttention.Config:
     """Low-rank projections and norms stay replicated; up-projections and the
     gate are column-parallel; ``wo`` is row-parallel to the residual layout."""
-    inner_attention = replace(
-        get_attention_config(attn_backend),
-        sharding_config=inner_attention_local_spmd_sharding_config(),
+    wkv_b = _linear(
+        kv_lora_rank,
+        num_heads * (qk_nope_head_dim + v_head_dim),
+        sharding_config=mla_kv_projection_sharding_config(cp=spmd.S(0)),
+    )
+    qkv_attention = get_attention_config(attn_backend)
+    assert isinstance(qkv_attention, InnerAttention.Config)
+    inner_attention = MLAAttention.Config(
+        wkv_b=wkv_b,
+        packed_kv_head_dim=qk_nope_head_dim + v_head_dim,
+        inner_attention=qkv_attention,
+        sharding_config=mla_attention_local_spmd_sharding_config(),
     )
 
     q_head_dim = qk_nope_head_dim + qk_rope_head_dim
@@ -262,11 +269,6 @@ def _mla_config(
         ),
         kv_norm=_norm(
             kv_lora_rank, sharding_config=replicated_state_sharding_config("weight")
-        ),
-        wkv_b=_linear(
-            kv_lora_rank,
-            num_heads * (qk_nope_head_dim + v_head_dim),
-            sharding_config=replicated_input_colwise_sharding_config(),
         ),
         gate=_linear(
             dim,

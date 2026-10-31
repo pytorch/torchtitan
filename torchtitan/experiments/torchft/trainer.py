@@ -20,7 +20,7 @@ from torchtitan.components.data.loader import DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import apply_overrides, Configurable
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
-from torchtitan.distributed.cuda_graph import cuda_graphs_supported
+from torchtitan.distributed.accelerator_graph import accelerator_graphs_supported
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.manager import maybe_semi_sync_training
@@ -54,8 +54,8 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         output_dir: str,
         fault_tolerance: FaultTolerance,
     ) -> None:
-        if config.optim.enable_cuda_graph:
-            raise ValueError("Optim CUDA graphs are not supported with TorchFT.")
+        if config.optim.enable_accelerator_graph:
+            raise ValueError("Optim accelerator graphs are not supported with TorchFT.")
         # The base constructor invokes the distributed-runtime hook.
         self.fault_tolerance = fault_tolerance
         super().__init__(
@@ -80,6 +80,11 @@ class FaultTolerantTrainingEngine(TrainingEngine):
             global_ranks = list(range(first_rank, last_rank + 1))
 
         config = self.config
+        dist_utils.configure_nccl_for_ulysses(
+            self.model_config,
+            device_type=self.device.type,
+            comm_backend=config.comm.backend,
+        )
         topology = dist_utils.init_distributed(
             config.comm,
             enable_cpu_backend=config.training.enable_cpu_offload,
@@ -241,13 +246,13 @@ class FaultTolerantTrainer(Configurable):
         )
         if (
             config.fault_tolerance.enable
-            and cuda_graphs_supported()
-            and not config.training.disable_cuda_graphs
+            and accelerator_graphs_supported()
+            and not config.training.disable_accelerator_graphs
             and parallelism_context.fsdp_enabled
             and self.gradient_accumulation_steps > 1
         ):
             raise ValueError(
-                "TorchFT does not support CUDA-graphed FSDP gradient accumulation."
+                "TorchFT does not support accelerator-graphed FSDP gradient accumulation."
             )
 
         engine.initialize(
@@ -279,6 +284,8 @@ class FaultTolerantTrainer(Configurable):
 
         # Build validator if validation is configured
         if config.validator is not None:
+            if engine._forward_backward_accelerator_graph_enabled:
+                logger.warning("TorchFT validation runs without accelerator graphs.")
             pp_schedule, pp_has_first_stage, pp_has_last_stage = (
                 (
                     engine.pp_schedule,
@@ -290,6 +297,7 @@ class FaultTolerantTrainer(Configurable):
             )
 
             self.validator = config.validator.build(
+                accelerator_graph_enabled=False,
                 parallelism=config.parallelism,
                 job_config=config,
                 dp_world_size=dp_degree,

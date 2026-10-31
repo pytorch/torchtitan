@@ -19,14 +19,17 @@ import pytest
 import torch
 from monarch.actor import Actor, current_rank, endpoint, this_host
 from torch.utils import _pytree as pytree
-from torchtitan.rl.rollout.types import RolloutTurnID
 
-from torchtitan.rl.trainer import rdma_microbatch
+from torchtitan.rl.actors.monarch import rdma_microbatch
+from torchtitan.rl.actors.monarch.rdma_microbatch import (
+    _TensorRef,
+    MonarchRDMAMicrobatch,
+)
+from torchtitan.rl.rollout.types import RolloutTurnID
 from torchtitan.rl.trainer.batcher import Batcher, TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import (
     _NUM_MICROBATCHES_READ_AHEAD,
-    _TensorRef,
-    MonarchRDMAMicrobatch,
+    RDMAMicrobatch,
     RDMAMicrobatchPrefetcher,
 )
 from torchtitan.rl.trainer.training_sample_builder import (
@@ -115,6 +118,18 @@ def test_rdma_microbatch_round_trips_every_field_and_drops_its_buffers(
     assert tensor_refs and all(tensor_ref.buffer.dropped for tensor_ref in tensor_refs)
 
 
+def test_only_registered_microbatches_are_rdma_microbatches(monkeypatch) -> None:
+    """The trainer tells the two kinds apart with `isinstance(..., RDMAMicrobatch)`."""
+    monkeypatch.setattr(rdma_microbatch, "RDMABuffer", _FakeRDMABuffer)
+    microbatch = _microbatch(num_tokens=512)
+    registered = MonarchRDMAMicrobatch.register(
+        microbatch, min_bytes=1024, batch_index=0, dp_rank=0, microbatch_index=0
+    )
+
+    assert isinstance(registered, RDMAMicrobatch)
+    assert not isinstance(microbatch, RDMAMicrobatch)
+
+
 def _build_batcher(rdma_min_tensor_bytes: int | None) -> Batcher:
     # One group per batch, one 256-token microbatch: the int64 (2 KiB) and float32 (1 KiB) fields
     # reach 1 KiB; the bool masks and token counts stay in the message.
@@ -125,7 +140,20 @@ def _build_batcher(rdma_min_tensor_bytes: int | None) -> Batcher:
         dp_degree=1,
         pad_id=0,
         temperature=1.0,
+        register_rdma_microbatch=MonarchRDMAMicrobatch.register,
     )
+
+
+def test_batcher_rejects_rdma_without_a_registration() -> None:
+    with pytest.raises(ValueError, match="no register_rdma_microbatch"):
+        Batcher.Config(rdma_min_tensor_bytes=1024).build(
+            num_tokens_per_microbatch_per_dp_rank=256,
+            max_context_length=256,
+            num_prompts_per_train_step=1,
+            dp_degree=1,
+            pad_id=0,
+            temperature=1.0,
+        )
 
 
 def _training_sample_group(group_id: int, num_samples: int = 1) -> TrainingSampleGroup:
@@ -159,7 +187,7 @@ def test_batcher_without_rdma_min_tensor_bytes_never_registers(monkeypatch) -> N
     )
     asyncio.run(batcher.maybe_release_oldest_batch())
 
-    assert isinstance(batch.microbatches[0][0], TrainingMicrobatch)
+    assert isinstance(batch.microbatch_groups[0][0][0], TrainingMicrobatch)
 
 
 def test_batcher_registers_each_batch_and_releases_the_oldest(monkeypatch) -> None:
@@ -177,7 +205,8 @@ def test_batcher_registers_each_batch_and_releases_the_oldest(monkeypatch) -> No
     buffers = [
         [
             leaf.buffer
-            for row in batch.microbatches
+            for group in batch.microbatch_groups
+            for row in group
             for microbatch in row
             for leaf in pytree.tree_leaves(microbatch.fields)
             if isinstance(leaf, _TensorRef)
@@ -186,7 +215,10 @@ def test_batcher_registers_each_batch_and_releases_the_oldest(monkeypatch) -> No
     ]
     assert buffers[0] and all(buffer.dropped for buffer in buffers[0])
     assert buffers[1] and not any(buffer.dropped for buffer in buffers[1])
-    assert [batch.microbatches[0][0].batch_index for batch in batches] == [0, 1]
+    assert [batch.microbatch_groups[0][0][0].batch_index for batch in batches] == [
+        0,
+        1,
+    ]
 
 
 def _fake_rdma_microbatch(index: int, started: list[int]) -> SimpleNamespace:
@@ -280,7 +312,9 @@ def test_four_ranks_read_their_columns_exactly_across_released_batches(
         pad_id=0,
         temperature=1.0,
     )
-    rdma_batcher = Batcher.Config(rdma_min_tensor_bytes=256).build(**batcher_kwargs)
+    rdma_batcher = Batcher.Config(rdma_min_tensor_bytes=256).build(
+        **batcher_kwargs, register_rdma_microbatch=MonarchRDMAMicrobatch.register
+    )
     by_value_batcher = Batcher.Config().build(**batcher_kwargs)
 
     async def run() -> None:
@@ -296,15 +330,15 @@ def test_four_ranks_read_their_columns_exactly_across_released_batches(
                     training_sample_group=group
                 )
                 # All 4 ranks read at once, while the previous batch is still registered.
-                columns = list(
-                    (await ranks.read_column.call(batch.microbatches)).values()
-                )
+                rows = [row for group in batch.microbatch_groups for row in group]
+                columns = list((await ranks.read_column.call(rows)).values())
                 for dp_rank, column in enumerate(columns):
                     torch.testing.assert_close(
                         [dataclasses.asdict(microbatch) for microbatch in column],
                         [
                             dataclasses.asdict(row[dp_rank])
-                            for row in expected.microbatches
+                            for group in expected.microbatch_groups
+                            for row in group
                         ],
                         rtol=0,
                         atol=0,

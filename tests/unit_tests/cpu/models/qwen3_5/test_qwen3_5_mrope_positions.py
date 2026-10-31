@@ -110,7 +110,7 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
             "torchtitan.models.common.attention."
             "VarlenAttentionMetadata.annotate_spmd_types"
         ):
-            inputs, _labels, batch = model.preprocess_inputs(
+            inputs, _labels, batch, _ = model.preprocess_inputs(
                 input_dict,
                 parallelism_context=parallelism_context,
                 parallelism=parallelism,

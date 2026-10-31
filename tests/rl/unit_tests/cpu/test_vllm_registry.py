@@ -11,14 +11,23 @@ import pytest
 import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.attention import LinearAttention, VarlenInnerAttention
+from torchtitan.models.common.attention import (
+    LinearAttention,
+    SlidingWindowVarlenInnerAttention,
+)
 from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
+from torchtitan.models.deepseek_v3 import build_model_config as build_dsv3_config
+from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_config
 from torchtitan.models.qwen3_5 import build_model_config
-from torchtitan.rl.generator.vllm import gdn, kda
+from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.vllm import gdn, kda, registry
 from torchtitan.rl.generator.vllm.registry import model_config_to_hf_config_dict
 
 from transformers import GenerationConfig, PretrainedConfig
+from vllm.transformers_utils.model_arch_config_convertor import (
+    MODEL_ARCH_CONFIG_CONVERTORS,
+)
 
 
 def test_hf_config_adds_no_stop_token():
@@ -42,8 +51,10 @@ def test_hf_config_uses_full_attention_after_sliding_attention(monkeypatch):
     from torchtitan.rl.generator.vllm import attention
 
     config = build_llama3_config("debugmodel", parallelism=ParallelismConfig())
-    config.layers[0].attention.inner_attention = VarlenInnerAttention.Config(
-        window_size=(128, 0)
+    config.layers[
+        0
+    ].attention.inner_attention = SlidingWindowVarlenInnerAttention.Config(
+        sliding_window_size=128
     )
     get_dimensions = Mock(wraps=attention.get_attention_dimensions)
     monkeypatch.setattr(attention, "get_attention_dimensions", get_dimensions)
@@ -65,8 +76,8 @@ def test_hf_config_requires_full_attention(attention_type):
     else:
         for layer in config.layers:
             if not isinstance(layer.attention, LinearAttention.Config):
-                layer.attention.inner_attention = VarlenInnerAttention.Config(
-                    window_size=(128, 0)
+                layer.attention.inner_attention = (
+                    SlidingWindowVarlenInnerAttention.Config(sliding_window_size=128)
                 )
 
     with pytest.raises(ValueError, match="no full attention layer"):
@@ -213,3 +224,29 @@ def test_batch_invariant_kda_registers_attention_gym_replay_state(monkeypatch):
         temporal_copy,
         *(temporal_copy for _ in range(6)),
     )
+
+
+@pytest.mark.parametrize(
+    "build_config", [build_dsv3_config, build_kimi_k3_config], ids=["dsv3", "kimi_k3"]
+)
+def test_compressed_mla_configures_vllm_native_mla(monkeypatch, build_config):
+    config = build_config(
+        "debugmodel", parallelism=ParallelismConfig(), attn_backend="varlen"
+    )
+    assert registry.vllm_attention_backend(config) is None
+    hf = model_config_to_hf_config_dict(config)
+    mla_attention = config.first_full_attention
+    for name in ("kv_lora_rank", "qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim"):
+        assert hf[name] == getattr(mla_attention, name)
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "SD")
+    monkeypatch.delitem(
+        MODEL_ARCH_CONFIG_CONVERTORS, registry.TORCHTITAN_MODEL_TYPE, raising=False
+    )
+    registry.register_to_vllm(
+        config, parallelism=InferenceParallelismConfig(), checkpointer_config=None
+    )
+    hf_config = PretrainedConfig.from_dict(hf)
+    assert MODEL_ARCH_CONFIG_CONVERTORS[hf_config.model_type](
+        hf_config, hf_config
+    ).is_deepseek_mla()

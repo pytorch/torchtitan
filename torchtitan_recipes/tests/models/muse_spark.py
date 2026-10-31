@@ -45,7 +45,6 @@ from torchtitan.trainer import Trainer
 from torchtitan_recipes.models.muse_spark import (
     _muse_spark_context_parallel_transform,
     _MUSE_SPARK_FUSED_SWIGLU_OVERRIDE,
-    _MUSE_SPARK_HELION_ROPE_OVERRIDE,
     _MUSE_SPARK_HF_ASSETS_PATH,
     _muse_spark_mm_dataloader,
     _ultradata_lora_sft_optim,
@@ -135,16 +134,13 @@ def muse_spark_debugmodel(
             dtype="float32",
             mixed_precision_param="bfloat16",
             mixed_precision_reduce="float32",
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=None,
         activation_remat=DefaultActivationRematConfig(),
         override=OverrideConfig(
-            imports=[
-                _MUSE_SPARK_FUSED_SWIGLU_OVERRIDE,
-                _MUSE_SPARK_HELION_ROPE_OVERRIDE,
-            ],
+            imports=[_MUSE_SPARK_FUSED_SWIGLU_OVERRIDE],
         ),
     )
     return config
@@ -295,7 +291,7 @@ def muse_spark_debugmodel_ultradata_lora_sft() -> Trainer.Config:
         dtype="bfloat16",
         mixed_precision_param="bfloat16",
         mixed_precision_reduce="float32",
-        disable_cuda_graphs=True,
+        disable_accelerator_graphs=True,
     )
     config.parallelism = ParallelismConfig(
         data_parallel_replicate_degree=1,
@@ -309,6 +305,6 @@ def muse_spark_debugmodel_ultradata_lora_sft() -> Trainer.Config:
     )
     config.comm.train_timeout_seconds = 1800
     config.activation_remat = FullActivationRematConfig()
-    config.model.local_compile_regions = ["loss"]
+    config.model.local_compile.regions = ["loss"]
     config.debug.seed = 42
     return apply_transforms(config, [_ultradata_lora_sft_transform()])

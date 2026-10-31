@@ -18,6 +18,7 @@ import torch_remat as remat
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
+from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -221,8 +222,13 @@ class SoftCappedLinear(Linear):
         self.output_multiplier = config.output_multiplier
         self.output_soft_cap_temp = config.output_soft_cap_temp
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        logits = super().forward(input).float()
+    # TODO(ruisizhang123): the compiled bwd still computes
+    # dz * temp * (1 - tanh^2) * (1/temp) * mult (4 fp32 roundings). A custom
+    # autograd.Function bwd (recompute tanh from the saved bf16 logits) can cancel
+    # temp * (1/temp) into dz * mult * (1 - tanh^2) (2 roundings).
+    @local_compile("muse_glimmer_logit_postprocess", batch_invariant=True)
+    def postprocess_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        logits = logits.float()
         if self.output_soft_cap_temp is not None:
             logits = self.output_soft_cap_temp * torch.tanh(
                 logits * self.output_multiplier / self.output_soft_cap_temp
@@ -230,6 +236,9 @@ class SoftCappedLinear(Linear):
         else:
             logits = logits * self.output_multiplier
         return logits
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return self.postprocess_logits(super().forward(input))
 
 
 class EmbeddingWithNorm(Module):
@@ -291,8 +300,15 @@ class MuseGlimmerModel(MultimodalModel):
     class Config(Decoder.Config):
         dim: int = 6656
         vocab_size: int = 202048
-        local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "fused_binary_activation"]
+        local_compile: LocalCompileConfig = field(
+            default_factory=lambda: LocalCompileConfig(
+                regions=[
+                    "loss",
+                    "fused_binary_activation",
+                    "rope",
+                    "muse_glimmer_logit_postprocess",
+                ]
+            )
         )
         # Narrows the base Decoder.Config.tok_embeddings (Embedding.Config) to the
         # bundled embedding+norm unit whose .embedding/.norm children carry the sharding.
@@ -372,7 +388,7 @@ class MuseGlimmerModel(MultimodalModel):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        local_compile_regions: list[str],
+        local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
         dump_folder: str,
     ) -> MuseGlimmerModel:
@@ -389,7 +405,7 @@ class MuseGlimmerModel(MultimodalModel):
             parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
-            local_compile_regions=local_compile_regions,
+            local_compile=local_compile,
             activation_remat=activation_remat,
             dump_folder=dump_folder,
         )
@@ -403,11 +419,12 @@ class MuseGlimmerModel(MultimodalModel):
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
         **kwargs: Any,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Build first-stage vision-bank indices and masks, then shard the batch."""
         del kwargs
         from .sharding import vision_bank_indices_placement
 
+        loss_kwargs = input_dict.pop("loss_kwargs", {})
         pixel_values = input_dict.get("pixel_values")
         grid_thw = input_dict.get("grid_thw")
         pixel_values_videos = input_dict.get("pixel_values_videos")
@@ -460,6 +477,8 @@ class MuseGlimmerModel(MultimodalModel):
         input_shardings["vision_bank_indices_T"] = vision_bank_indices_placement(
             enable_sp=parallelism.enable_sequence_parallel
         )
+        input_shardings.update(dict.fromkeys(loss_kwargs, input_shardings["labels"]))
+        input_dict.update(loss_kwargs)
         if parallelism_context.cp_enabled:
             input_dict = self._cp_shard(
                 input_dict,
@@ -482,9 +501,10 @@ class MuseGlimmerModel(MultimodalModel):
             parallelism_context, input_dict, input_shardings
         )
 
+        loss_kwargs = {name: input_dict.pop(name) for name in loss_kwargs}
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
-        return inputs, labels, input_dict
+        return inputs, labels, input_dict, loss_kwargs
 
     def _get_vision_features(
         self,

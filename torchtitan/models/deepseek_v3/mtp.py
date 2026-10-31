@@ -14,7 +14,7 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import DataParallelMeshDims
 
-from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX
+from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX, Loss
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
@@ -259,9 +259,11 @@ class MTPDecoder(Decoder):
         torch.Tensor | tuple[torch.Tensor, ...],
         torch.Tensor | tuple[torch.Tensor, ...],
         dict[str, Any],
+        dict[str, Any],
     ]:
         """Prepare aligned pairs before applying CP sharding and annotations."""
         del kwargs
+        loss_kwargs = input_dict.pop("loss_kwargs", {})
         tokens = input_dict["input"]
         labels = input_dict["labels"]
         positions = input_dict.get("positions")
@@ -298,6 +300,8 @@ class MTPDecoder(Decoder):
             input_shardings[f"mtp_input_tokens_{depth}"] = input_shardings["input"]
             input_shardings[f"mtp_labels_{depth}"] = input_shardings["labels"]
             input_shardings[f"mtp_input_valid_mask_{depth}"] = input_shardings["input"]
+        input_shardings.update(dict.fromkeys(loss_kwargs, input_shardings["labels"]))
+        input_dict.update(loss_kwargs)
 
         if positions is not None:
             attention_metadata = self._get_attention_metadata(
@@ -319,11 +323,12 @@ class MTPDecoder(Decoder):
             parallelism_context, input_dict, input_shardings
         )
 
+        loss_kwargs = {name: input_dict.pop(name) for name in loss_kwargs}
         main_tokens = input_dict.pop("input")
         main_labels = input_dict.pop("labels")
         input_dict["aux_loss_denominators"] = global_routing_token_counts
         if self.mtp_layers is None:
-            return main_tokens, main_labels, input_dict
+            return main_tokens, main_labels, input_dict, loss_kwargs
 
         input_tokens = (
             main_tokens,
@@ -336,7 +341,7 @@ class MTPDecoder(Decoder):
         input_dict["mtp_input_valid_masks"] = tuple(
             input_dict.pop(f"mtp_input_valid_mask_{depth}") for depth in depths
         )
-        return input_tokens, loss_labels, input_dict
+        return input_tokens, loss_labels, input_dict, loss_kwargs
 
     def forward(
         self,
@@ -487,50 +492,56 @@ def apply_fsdp_to_mtp_decoder(
             del model.layers[key]
 
 
-class MTPLoss(CrossEntropyLoss):
+class MTPCrossEntropyLoss(Loss[tuple[torch.Tensor, ...]]):
     """DeepSeek-V3 weighted multi-term cross-entropy objective."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(CrossEntropyLoss.Config):
+    class Config(Loss.Config):
         mtp_scale: float = 0.3
+        global_vocab_size: int | None = None
 
     def __init__(self, config: Config):
-        super().__init__(config)
+        self.cross_entropy_loss = CrossEntropyLoss(
+            CrossEntropyLoss.Config(global_vocab_size=config.global_vocab_size)
+        )
         self.mtp_scale = config.mtp_scale
 
     def __call__(
         self,
-        pred: torch.Tensor | tuple[torch.Tensor, ...],
-        labels: torch.Tensor | tuple[torch.Tensor, ...],
+        pred: tuple[torch.Tensor, ...],
+        labels: tuple[torch.Tensor, ...],
         global_loss_token_counts: torch.Tensor | None = None,
         **loss_inputs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute the weighted objective from aligned prediction/label pairs."""
         del loss_inputs
         if not isinstance(pred, tuple) or not isinstance(labels, tuple):
-            raise ValueError("MTPLoss expects prediction and labels tuples.")
+            raise ValueError(
+                "MTPCrossEntropyLoss expects prediction and labels tuples."
+            )
         if len(pred) != len(labels):
             raise ValueError(
-                "MTPLoss requires one labels tensor per prediction, "
+                "MTPCrossEntropyLoss requires one labels tensor per prediction, "
                 f"got {len(pred)} predictions and {len(labels)} labels."
             )
         num_mtp_layers = len(pred) - 1
         if num_mtp_layers <= 0:
             raise ValueError(
-                "MTPLoss expects a main prediction and at least one auxiliary "
+                "MTPCrossEntropyLoss expects a main prediction and at least one auxiliary "
                 "prediction."
             )
         mtp_weight = self.mtp_scale / num_mtp_layers
         if global_loss_token_counts is not None and global_loss_token_counts.ndim != 1:
             raise ValueError(
-                "MTPLoss requires a per-objective global_loss_token_counts vector."
+                "MTPCrossEntropyLoss requires a per-objective "
+                "global_loss_token_counts vector."
             )
         if (
             global_loss_token_counts is not None
             and global_loss_token_counts.numel() != len(pred)
         ):
             raise ValueError(
-                "MTPLoss requires one denominator per prediction, "
+                "MTPCrossEntropyLoss requires one denominator per prediction, "
                 f"got {global_loss_token_counts.numel()} for {len(pred)} predictions."
             )
         if global_loss_token_counts is None:
@@ -540,7 +551,7 @@ class MTPLoss(CrossEntropyLoss):
                 loss_token_counts = tuple(
                     count.clamp_min(1) for count in global_loss_token_counts.unbind()
                 )
-        main_loss, _ = super().__call__(pred[0], labels[0], loss_token_counts[0])
+        main_loss, _ = self.cross_entropy_loss(pred[0], labels[0], loss_token_counts[0])
         mtp_loss = pred[0].new_zeros((), dtype=torch.float32)
         if spmd.is_type_checking():
             mtp_loss = spmd.mutate_type(
@@ -551,7 +562,7 @@ class MTPLoss(CrossEntropyLoss):
         for depth, (mtp_pred, mtp_labels) in enumerate(
             zip(pred[1:], labels[1:], strict=True), 1
         ):
-            depth_loss, _ = super().__call__(
+            depth_loss, _ = self.cross_entropy_loss(
                 mtp_pred,
                 mtp_labels,
                 loss_token_counts[depth],
