@@ -544,3 +544,55 @@ def deepseek_v4_pro(
         activation_remat=None,
         checkpointer=None,
     )
+
+
+def deepseek_v4_debugmodel_stripped(
+    seq_len: int = 512,
+    *,
+    parallelism: ParallelismConfig | None = None,
+) -> Trainer.Config:
+    """A small DeepSeek V4 configuration sized for a single accelerator."""
+    if parallelism is None:
+        parallelism = ParallelismConfig(expert_parallel_degree=1)
+    model_config = build_model_config(
+        "debugmodel", seq_len=seq_len, parallelism=parallelism
+    )
+    return Trainer.Config(
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_config),
+            ),
+        ),
+        profiler=Profiler.Config(
+            enable_profiling=False,
+            profile_freq=10,
+            profiler_active=10,
+            profiler_warmup=0,
+        ),
+        metrics=MetricsProcessor.Config(log_freq=1),
+        model=model_config,
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            max_num_documents=8,
+            document_alignment=max(model_config.compress_ratios),
+        ),
+        optim=Optim.Config(
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+            ),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=1,
+                decay_ratio=0.8,
+                decay_type="linear",
+                min_lr_factor=0.0,
+            ),
+        ),
+        training=TrainingConfig(
+            num_tokens_per_microbatch_per_dp_rank=2 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
+            steps=2,
+        ),
+        parallelism=parallelism,
+        activation_remat=None,
+        checkpointer=None,
+    )
