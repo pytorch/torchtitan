@@ -850,6 +850,8 @@ def _configure_ci(
     )
     config.generator.sampling.max_tokens = max_generated_tokens
     config.generator.gpu_memory_limit = 0.8
+    # FULL CUDA graph capture sizes must not exceed max_model_len.
+    config.generator.max_num_batched_tokens = config.generator.model.max_context_length
     config.metrics.loggers = []
     config.rollouter.worker.token_env.max_rollout_tokens = (
         config.trainer.model.max_context_length

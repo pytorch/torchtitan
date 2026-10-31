@@ -70,6 +70,7 @@ class VLLMCudaGraphConfig:
         self,
         *,
         max_num_seqs: int,
+        max_model_len: int,
         expert_sequence_parallel_size: int,
         enable_sequence_parallel: bool,
         max_num_batched_tokens: int | None = None,
@@ -85,6 +86,9 @@ class VLLMCudaGraphConfig:
         ``max_num_batched_tokens`` (the configured value, else
         ``_DEFAULT_MAX_NUM_BATCHED_TOKENS``), so the cap extends to it -- otherwise
         prefill chunks larger than the cap fall back to eager.
+
+        ``FULL`` raises ``ValueError`` when the largest capture size exceeds
+        ``max_model_len``.
 
         ``expert_sequence_parallel_size`` is the TP-axis shard count used by the
         internally sequence-sharded MoE path. A value greater than one removes
@@ -157,6 +161,18 @@ class VLLMCudaGraphConfig:
                     "No CUDA graph capture sizes are divisible by "
                     f"expert_sequence_parallel_size {expert_sequence_parallel_size}"
                 )
+
+        # TODO: remove once vLLM bounds dummy-run seq_lens by max_model_len:
+        # https://github.com/vllm-project/vllm/issues/53658
+        # vLLM's FULL capture warmup gives every dummy request a seq_len equal to the
+        # capture size, so a size above max_model_len reads past the block table.
+        if self.mode == "FULL" and sizes[-1] > max_model_len:
+            raise ValueError(
+                f"FULL CUDA graph capture size {sizes[-1]} exceeds max_model_len "
+                f"{max_model_len}. Set cuda_graph.capture_sizes to at most "
+                "max_model_len, or keep Generator.Config.max_num_batched_tokens "
+                f"and max_num_seqs ({max_num_seqs}) at most max_model_len."
+            )
 
         return CompilationConfig(
             cudagraph_mode=self.mode,
