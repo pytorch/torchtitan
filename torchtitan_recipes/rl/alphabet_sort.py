@@ -32,6 +32,7 @@ from torchtitan.config.transform import (
     MXFP8LinearConverter,
 )
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss_model_config
@@ -299,7 +300,9 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     # Local compile regions do not support batch-invariant mode.
     for model_config in (config.trainer.model, config.generator.model):
         model_config.local_compile.regions = []
-    block_size = config.trainer.model.layers[0].attention.inner_attention.block_size
+    inner_attention = config.trainer.model.layers[0].attention.inner_attention
+    assert isinstance(inner_attention, FlexInnerAttention.Config)
+    block_size = inner_attention.block_size
     config.async_loop.batcher = dataclasses.replace(
         config.async_loop.batcher, per_sample_pad_multiple=block_size
     )

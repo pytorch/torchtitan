@@ -32,6 +32,7 @@ from torchtitan.models.common.config_utils import (
     fused_qkv_param_init,
     get_attention_config,
 )
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     colwise_sharding_config,
     dense_sequence_parallel_placement,
@@ -792,7 +793,7 @@ def _muse_spark_config(
         sharding_config=perception_norm_sharding_config(enable_sp=enable_sp),
     )
 
-    layers = []
+    layers: list[TransformerBlock.Config] = []
     for layer_id, post_norm_gain_center in enumerate(post_norm_gain_centers):
         is_global_attention = layer_id in global_attention_layers
         feed_forward = _moe_config(

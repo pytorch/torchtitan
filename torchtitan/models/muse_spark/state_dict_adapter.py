@@ -227,13 +227,19 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
         }
 
     def _build_from_hf_map(self) -> dict[str, str]:
-        config = cast(Any, self.model_config)
+        from .model import MuseSparkAttention, MuseSparkModel, MuseSparkTransformerBlock
+
+        config = self.model_config
+        assert isinstance(config, MuseSparkModel.Config)
         mapping = {
             "model.language_model.embed_tokens.weight": (
                 "tok_embeddings.embedding.weight"
             ),
         }
         for layer_id, layer in enumerate(config.layers):
+            assert isinstance(layer, MuseSparkTransformerBlock.Config)
+            attention = layer.attention
+            assert isinstance(attention, MuseSparkAttention.Config)
             checkpoint = f"model.language_model.layers.{layer_id}"
             native = f"layers.{layer_id}"
             mapping.update(
@@ -267,7 +273,7 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
                     ),
                 }
             )
-            if layer.attention.output_gate is not None:
+            if attention.output_gate is not None:
                 mapping[
                     f"{checkpoint}.self_attn.gate_proj.weight"
                 ] = f"{native}.attention.output_gate.weight"
@@ -423,12 +429,15 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
         return (native_key,)
 
     def _rope_num_heads(self, native_key: str) -> int | None:
+        from .model import MuseSparkAttention
+
         config = cast("MuseSparkModel.Config", self.model_config)
         if native_key.endswith(
             ("attention.qkv_linear.wq.weight", "attention.qkv_linear.wk.weight")
         ):
             layer_id = int(native_key.split(".")[1])
             attention = config.layers[layer_id].attention
+            assert isinstance(attention, MuseSparkAttention.Config)
             return (
                 attention.n_heads
                 if native_key.endswith("wq.weight")

@@ -345,6 +345,7 @@ class MuseGlimmerModel(MultimodalModel):
             attention_op_flops = 0
             for layer in self.layers:
                 attention = layer.attention
+                assert isinstance(attention, Attention.Config)
                 head_dim = (
                     attention.head_dim
                     if attention.head_dim is not None

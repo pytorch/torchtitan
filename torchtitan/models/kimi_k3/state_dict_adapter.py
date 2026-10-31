@@ -188,6 +188,8 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
         checkpoint's layout for load planning. Ordinary HF exports leave A_log
         unpadded.
         """
+        from .model import KimiK3TransformerBlock
+
         state_dict = self._native_fused_linears_to_hf(
             state_dict,
             split_routed_experts=True,
@@ -330,8 +332,10 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
         # The released HF checkpoint includes unused layer-0 attention residual
         # weights that Titan omits. Create placeholders only on the PP stage
         # that owns layer 0, using its local feed-forward residual shapes.
+        first_layer = self.kimi_config.layers[0]
+        assert isinstance(first_layer, KimiK3TransformerBlock.Config)
         if (
-            self.kimi_config.layers[0].attention_res_norm is None
+            first_layer.attention_res_norm is None
             and "layers.0.ffn_res_norm.weight" in state_dict
         ):
             hf_state_dict[

@@ -346,8 +346,6 @@ class MuseSparkLMHead(HiMidLoLinear):
 class MuseSparkTransformerBlock(TransformerBlock):
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        # pyrefly: ignore [bad-override]
-        attention: MuseSparkAttention.Config
         post_attention_norm: MuseSparkRMSNorm.Config
         attention_residual: MuseSparkNormPreservingResidualConnection.Config
         post_ffn_norm: MuseSparkRMSNormWithInputScale.Config
@@ -455,7 +453,6 @@ class MuseSparkModel(MultimodalModel):
         )
         # pyrefly: ignore [bad-override]
         tok_embeddings: MuseSparkEmbeddingWithNorm.Config
-        layers: list[MuseSparkTransformerBlock.Config]
         residual_dtype: torch.dtype = torch.float32
         final_norm_input_dtype: torch.dtype | None = None
         dataset_modalities: tuple[Literal["vision", "audio"], ...] = ()
@@ -501,6 +498,7 @@ class MuseSparkModel(MultimodalModel):
             attention_op_flops = 0
             for layer in self.layers:
                 attention = layer.attention
+                assert isinstance(attention, MuseSparkAttention.Config)
                 head_dim = (
                     attention.head_dim
                     if attention.head_dim is not None

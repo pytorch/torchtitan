@@ -219,7 +219,6 @@ class KimiK3Model(MultimodalModel):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
-        layers: list[KimiK3TransformerBlock.Config]
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None

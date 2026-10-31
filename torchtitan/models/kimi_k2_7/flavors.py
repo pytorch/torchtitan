@@ -25,9 +25,9 @@ from torchtitan.models.common import (
     RMSNorm,
     Sigmoid,
     Softmax,
-    TransformerBlock,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     lm_head_sharding_config,
     pre_lm_head_norm_sharding_config,

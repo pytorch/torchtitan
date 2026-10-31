@@ -31,7 +31,6 @@ from torchtitan.models.common import (
     RowParallelLinear,
     Sigmoid,
     Softmax,
-    TransformerBlock,
     UnaryActivationFn,
 )
 from torchtitan.models.common.attention import InnerAttention, MLAAttention
@@ -43,6 +42,7 @@ from torchtitan.models.common.config_utils import (
     make_router_config,
     make_shared_expert_ffn_config,
 )
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     lm_head_sharding_config,
     mla_attention_local_spmd_sharding_config,
@@ -318,7 +318,7 @@ def build_mla_moe_layers(
     ``rms_norm_eps``); the MLA q/kv norms keep 1e-6.
     """
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)
-    layers = []
+    layers: list[TransformerBlock.Config] = []
     for layer_id in range(n_layers):
         attn_cfg = make_mla_attention_config(
             layer_id=layer_id,
@@ -424,7 +424,7 @@ def _build_dsv3_layers(
 
 
 def _build_mtp_layers(
-    inner_cfg: DeepSeekV3TransformerBlock.Config,
+    inner_cfg: TransformerBlock.Config,
     *,
     dim: int,
     num_mtp_layers: int,
@@ -541,7 +541,6 @@ def _debugmodel(
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
-            # pyrefly: ignore [bad-argument-type]
             layers[-1],
             dim=dim,
             num_mtp_layers=num_mtp_layers,
@@ -626,7 +625,6 @@ def _16b(
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
-            # pyrefly: ignore [bad-argument-type]
             layers[-1],
             dim=dim,
             num_mtp_layers=num_mtp_layers,
@@ -714,7 +712,6 @@ def _236b(
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
-            # pyrefly: ignore [bad-argument-type]
             layers[-1],
             dim=dim,
             num_mtp_layers=num_mtp_layers,
@@ -803,7 +800,6 @@ def _671b(
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
-            # pyrefly: ignore [bad-argument-type]
             layers[-1],
             dim=dim,
             num_mtp_layers=num_mtp_layers,

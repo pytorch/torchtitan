@@ -32,11 +32,11 @@ from torchtitan.models.deepseek_v3.mtp import (
     roll_mtp_sequence,
 )
 
+from .attention import DeepSeekV4Attention
 from .mhc import HcHead, HcPost, HcPre
 from .state_dict_adapter import DeepSeekV4StateDictAdapter
 
 if TYPE_CHECKING:
-    from .attention import DeepSeekV4Attention
     from .mtp import MTPBlock
 
 
@@ -45,7 +45,6 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        attention: "DeepSeekV4Attention.Config"  # pyrefly: ignore [bad-override]
         hc_attn_pre: HcPre.Config
         hc_ffn_pre: HcPre.Config
         hc_post: HcPost.Config
@@ -203,6 +202,7 @@ class DeepSeekV4Model(Decoder):
             for layers in (self.layers, self.mtp_layers or ()):
                 for layer in layers:
                     attention = layer.attention
+                    assert isinstance(attention, DeepSeekV4Attention.Config)
                     inner_attention = attention.inner_attention
                     attention_op_flops += quadratic_attention_flops_per_token(
                         num_heads=attention.n_heads,
@@ -248,12 +248,14 @@ class DeepSeekV4Model(Decoder):
         tp = spmd_mesh_size("tp")
         if tp > 1:
             for layer in config.layers[: config.n_layers]:
-                num_heads = layer.attention.n_heads
+                attention = layer.attention
+                assert isinstance(attention, DeepSeekV4Attention.Config)
+                num_heads = attention.n_heads
                 if num_heads % tp != 0:
                     raise ValueError(
                         f"n_heads ({num_heads}) must be divisible by tp ({tp})"
                     )
-                num_groups = layer.attention.n_groups
+                num_groups = attention.n_groups
                 if num_groups % tp != 0:
                     raise ValueError(
                         f"n_groups ({num_groups}) must be divisible by tp ({tp})"
