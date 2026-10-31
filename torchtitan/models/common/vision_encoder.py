@@ -28,7 +28,6 @@ import torch
 import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
-from torchtitan.config.function import Function
 from torchtitan.distributed.local_compile import compile
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
@@ -36,52 +35,9 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
-from torchtitan.models.common.rope import ComplexRoPE, CosSinRoPE
+from torchtitan.models.common.rope import RoPEApply
 
 compiled_create_block_mask = compile(create_block_mask)
-
-
-class VisionRoPEApply(Function[tuple[torch.Tensor, torch.Tensor]]):
-    """Applies rotary position embedding: (query, key, rope_cache) -> (query, key)."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Function.Config):
-        pass
-
-    def __init__(self, config: Config) -> None:
-        pass
-
-
-class ComplexVisionRoPEApply(VisionRoPEApply):
-    """Vision RoPE with a complex cache, via ``ComplexRoPE.apply_rotary_emb``."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(VisionRoPEApply.Config):
-        pass
-
-    def __call__(
-        self, query_THDh: torch.Tensor, key_THDh: torch.Tensor, rope_cache: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return cast(
-            tuple[torch.Tensor, torch.Tensor],
-            ComplexRoPE.apply_rotary_emb(query_THDh, key_THDh, rope_cache),
-        )
-
-
-class CosSinVisionRoPEApply(VisionRoPEApply):
-    """Vision RoPE with a cos/sin cache, via ``CosSinRoPE.apply_rotary_emb``."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(VisionRoPEApply.Config):
-        pass
-
-    def __call__(
-        self, query_THDh: torch.Tensor, key_THDh: torch.Tensor, rope_cache: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return cast(
-            tuple[torch.Tensor, torch.Tensor],
-            CosSinRoPE.apply_rotary_emb(query_THDh, key_THDh, rope_cache),
-        )
 
 
 class InvariantRowParallelLinear(Linear):
@@ -211,7 +167,7 @@ class VisionAttention(Module):
         wk: Linear.Config
         wv: Linear.Config
         proj: Linear.Config
-        rope_apply: VisionRoPEApply.Config
+        rope_apply: RoPEApply.Config
         inner_attention: Module.Config = field(
             default_factory=FlexInnerAttention.Config
         )
@@ -255,7 +211,10 @@ class VisionAttention(Module):
         q_THDh, k_THDh, v_THDh = self._qkv(x)
 
         remat.recompute_needs_tensor(q_THDh, k_THDh)
-        q_THDh, k_THDh = self.rope_apply(q_THDh, k_THDh, rope_cache)
+        q_THDh, k_THDh = cast(
+            tuple[torch.Tensor, torch.Tensor],
+            self.rope_apply(q_THDh, k_THDh, rope_cache),
+        )
 
         out_THDh = remat.region(
             self.flex_attention,

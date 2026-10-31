@@ -138,7 +138,7 @@ def _compute_2d_rope_cache(
     ``VisionRotaryEmbedding2D`` and cached by the encoder) rather than
     recomputing ``p * inv_freq`` each call. Frames repeat the spatial pattern.
 
-    Returns a complex cache consumed by ``ComplexRoPE.apply_rotary_emb``; only
+    Returns a complex cache consumed by ``ComplexRoPEApply``; only
     the cache is 2D/per-grid, which is why it is built here rather than by the
     1D ``ComplexRoPE`` cache machinery.
 
@@ -234,7 +234,7 @@ class VisionRotaryEmbedding2D(Module):
     by the row and column axes). ``forward(seqlen)`` returns the
     position-to-frequency table ``freq_table[p, k] = p * inv_freq[k]`` for
     positions up to ``seqlen``; ``_compute_2d_rope_cache`` gathers per-patch
-    row/col angles from it, and ``ComplexRoPE.apply_rotary_emb`` applies them.
+    row/col angles from it, and ``ComplexRoPEApply`` applies them.
     ``head_dim`` must be divisible by 4.
     """
 
@@ -381,7 +381,7 @@ class MoonViTEncoder(Module):
         Returns:
             learned_pos: ``(total_num_patches, dim)`` additive positions.
             rope_cache: ``(total_num_patches, 1, head_dim/2)`` complex RoPE
-                cache for ``ComplexRoPE.apply_rotary_emb``.
+                cache for ``ComplexRoPEApply``.
         """
         max_hw = max(max(h, w) for _, h, w in grids)
         if self._cached_freq_table is None or self._cached_freq_table.shape[0] < max_hw:

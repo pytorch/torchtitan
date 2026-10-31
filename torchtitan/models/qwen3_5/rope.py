@@ -15,7 +15,7 @@ class MRoPE(CosSinRoPE):
     """Multi-dimensional RoPE for Qwen3.5 temporal/height/width positions.
 
     Standard per-layer RoPE: each full-attention layer owns an ``MRoPE`` and
-    applies it through ``RoPE.forward`` -> ``_reshape_cache`` -> ``apply_rotary_emb``.
+    applies it through ``RoPE.forward`` -> ``_reshape_cache`` -> ``rope_apply``.
     The only override is ``_reshape_cache``: for 2D ``(num_tokens, 3)`` MRoPE
     positions it builds an interleaved cos/sin cache; for 1D
     ``(num_tokens,)`` text
@@ -71,7 +71,7 @@ class MRoPE(CosSinRoPE):
         Returns:
             ``(num_tokens, 1, dim * 2)`` cache, broadcastable to the
             ``(num_tokens, n_heads, rotary_dim)`` query/key in
-            ``apply_rotary_emb``.
+            ``rope_apply``.
 
         The scatter runs on plain local tensors carrying SPMD annotations.
         """

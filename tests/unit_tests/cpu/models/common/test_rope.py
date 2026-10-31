@@ -23,6 +23,8 @@ from torchtitan.models.common.rope import (
     _yarn_inv_freq,
     ComplexRoPE,
     CosSinRoPE,
+    CosSinRoPEApply,
+    IdentityRoPEApply,
     RoPE,
 )
 from torchtitan.models.qwen3_5.rope import MRoPE
@@ -43,12 +45,10 @@ class TestApplyRotaryEmbCosSin(unittest.TestCase):
         self.rope_cache = torch.randn(
             self.num_tokens, 1, self.head_dim * 2, dtype=torch.float32
         )
-        self.rope = CosSinRoPE(
-            CosSinRoPE.Config(dim=self.head_dim, max_context_length=self.num_tokens)
-        )
+        self.rope_apply = CosSinRoPEApply.Config().build()
 
     def test_output_dtype_matches_input(self):
-        xq_out, xk_out = self.rope.apply_rotary_emb(
+        xq_out, xk_out = self.rope_apply(
             self.xq,
             self.xk,
             self.rope_cache,
@@ -57,7 +57,7 @@ class TestApplyRotaryEmbCosSin(unittest.TestCase):
         self.assertEqual(xk_out.dtype, self.xk.dtype)
 
     def test_output_shape_matches_input(self):
-        xq_out, xk_out = self.rope.apply_rotary_emb(
+        xq_out, xk_out = self.rope_apply(
             self.xq,
             self.xk,
             self.rope_cache,
@@ -71,7 +71,7 @@ class TestApplyRotaryEmbCosSin(unittest.TestCase):
         Ensures inductor cannot fuse away the fp32 upcast when compiling
         adjacent ops (e.g. q_norm/k_norm) with the RoPE computation.
         """
-        xq_out, xk_out = self.rope.apply_rotary_emb(
+        xq_out, xk_out = self.rope_apply(
             self.xq,
             self.xk,
             self.rope_cache,
@@ -132,6 +132,20 @@ class TestRoPEPositionBoundsComplex(unittest.TestCase):
         xk = torch.randn(num_tokens, 4, self.head_dim)
         positions = torch.arange(num_tokens) % 8
         self.rope(xq, xk, positions)
+        config = dataclasses.replace(
+            self.rope.config, rope_apply=IdentityRoPEApply.Config()
+        )
+        torch.testing.assert_close(
+            config.build()(xq, xk, positions), (xq, xk), rtol=0, atol=0
+        )
+
+        class LegacyRoPE(ComplexRoPE):
+            @staticmethod
+            def apply_rotary_emb(query, key, rope_cache, *, inverse=False):
+                return query if key is None else (query, key)
+
+        with self.assertRaisesRegex(ValueError, "Config.rope_apply"):
+            LegacyRoPE(self.rope.config)
 
     def test_out_of_range_positions_raises(self):
         num_tokens = 4
