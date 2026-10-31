@@ -14,11 +14,9 @@ import pytest
 import torch
 
 from torchtitan.models.deepseek_v4.attention import (
-    CompressedSparseAttention,
-    HeavilyCompressedAttention,
-    SlidingWindowAttention,
+    DeepSeekV4InnerAttention,
 )
-from torchtitan.models.deepseek_v4.compressor import Indexer
+from torchtitan.models.deepseek_v4.compressor import InnerIndexer
 
 SEQLEN, N_HEADS, HEAD_DIM, WINDOW, SCALE, TOPK = 32, 4, 8, 6, 0.1234, 5
 
@@ -47,15 +45,7 @@ def causal_cmp_allowed(ratio):
 
 # HCA runs at ratio 8 instead of 128 so SEQLEN 32 has compressed blocks; the
 # all-causal-blocks pattern is the same.
-@pytest.mark.parametrize(
-    "cls, ratio",
-    [
-        (SlidingWindowAttention, 1),
-        (HeavilyCompressedAttention, 8),
-        (CompressedSparseAttention, 4),
-    ],
-    ids=["swa", "hca", "csa"],
-)
+@pytest.mark.parametrize("ratio", [1, 8, 4], ids=["swa", "hca", "csa"])
 @pytest.mark.parametrize(
     "device, dtype, tol",
     [
@@ -71,16 +61,21 @@ def causal_cmp_allowed(ratio):
         ),
     ],
 )
-def test_matches_dense_masked_attention(cls, ratio, device, dtype, tol):
+def test_matches_dense_masked_attention(ratio, device, dtype, tol):
     torch.manual_seed(0)
+    cls = DeepSeekV4InnerAttention
     module = cls(
         cls.Config(
             window_size=WINDOW,
             compress_ratio=ratio,
             softmax_scale=SCALE,
-            index_topk=TOPK,
         )
     )
+    metadata = cls.Config(
+        window_size=WINDOW,
+        compress_ratio=ratio,
+        softmax_scale=SCALE,
+    ).build_attention_metadata(torch.arange(SEQLEN))
     n_cmp = 0 if ratio == 1 else SEQLEN // ratio
     # fp64 CPU copies feed the oracle; the module runs on `device` in `dtype`.
     ref_inputs = [
@@ -99,34 +94,35 @@ def test_matches_dense_masked_attention(cls, ratio, device, dtype, tol):
     ]
     q, swa_k, cmp_k, attn_sink = inputs
 
-    match module:
-        case SlidingWindowAttention():
-            out = module(q, swa_k, attn_sink)
-            cmp_allowed = torch.zeros(SEQLEN, 0, dtype=torch.bool)
-        case HeavilyCompressedAttention():
-            out = module(q, swa_k, cmp_k, attn_sink)
-            cmp_allowed = causal_cmp_allowed(ratio)
-        case CompressedSparseAttention():
-            idx_q, idx_k, idx_w = (
-                torch.randn(*shape)
-                for shape in ((SEQLEN, 3, 6), (n_cmp, 6), (SEQLEN, 3))
-            )
-            idx = [t.to(device) for t in (idx_q, idx_k, idx_w)]
-            out = module(q, swa_k, cmp_k, *idx, attn_sink)
-            cmp_topk, _ = Indexer.select(
-                idx_q,
-                idx_k,
-                idx_w,
-                max_seqlen=SEQLEN,
-                ratio=ratio,
-                topk=TOPK,
-                return_scores=False,
-            )
-            cmp_topk = cmp_topk.long()
-            cmp_allowed = torch.zeros(SEQLEN, n_cmp, dtype=torch.bool)
-            rows = torch.arange(SEQLEN).unsqueeze(1).expand_as(cmp_topk)
-            cmp_allowed[rows[cmp_topk >= 0], cmp_topk[cmp_topk >= 0]] = True
-            cmp_allowed &= causal_cmp_allowed(ratio)
+    if ratio == 1:
+        out = module(q, swa_k, attn_sink, attention_metadata=metadata)
+        cmp_allowed = torch.zeros(SEQLEN, 0, dtype=torch.bool)
+    elif ratio == 8:
+        out = module(q, swa_k, attn_sink, cmp_k=cmp_k, attention_metadata=metadata)
+        cmp_allowed = causal_cmp_allowed(ratio)
+    else:
+        idx_q, idx_k, idx_w = (
+            torch.randn(*shape) for shape in ((SEQLEN, 3, 6), (n_cmp, 6), (SEQLEN, 3))
+        )
+        inner_indexer = InnerIndexer(
+            InnerIndexer.Config(topk=TOPK, compress_ratio=ratio)
+        )
+        cmp_topk, _ = inner_indexer(
+            idx_q, idx_k, idx_w, attention_metadata=metadata, return_scores=False
+        )
+        out = module(
+            q,
+            swa_k,
+            attn_sink,
+            cmp_k=cmp_k,
+            topk_indices=cmp_topk,
+            attention_metadata=metadata,
+        )
+        cmp_topk = cmp_topk.long()
+        cmp_allowed = torch.zeros(SEQLEN, n_cmp, dtype=torch.bool)
+        rows = torch.arange(SEQLEN).unsqueeze(1).expand_as(cmp_topk)
+        cmp_allowed[rows[cmp_topk >= 0], cmp_topk[cmp_topk >= 0]] = True
+        cmp_allowed &= causal_cmp_allowed(ratio)
 
     ref = dense_attention(*ref_inputs[:3], cmp_allowed, ref_inputs[3])
     diff_inputs = [t for t in inputs if t.requires_grad]

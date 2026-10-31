@@ -323,6 +323,9 @@ def deepseek_v4_debugmodel(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             # Fixed document capacity keeps the packed offsets sync-free.
             max_num_documents=64,
+            # Keep documents aligned to the compression ratio so the
+            # compressor can regroup the whole packed stream.
+            document_alignment=max(model_config.compress_ratios),
         ),
         optim=Optim.Config(
             optimizer=_dist_muon_optimizer(
@@ -396,6 +399,9 @@ def deepseek_v4_mtp_debugmodel(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             # Fixed document capacity keeps the packed offsets sync-free.
             max_num_documents=64,
+            # Keep documents aligned to the compression ratio so the
+            # compressor can regroup the whole packed stream.
+            document_alignment=max(model_config.compress_ratios),
             num_mtp_layers=num_mtp_layers,
         ),
         optim=Optim.Config(
@@ -452,6 +458,9 @@ def deepseek_v4_flash(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             # Fixed document capacity keeps the packed offsets sync-free.
             max_num_documents=64,
+            # Keep documents aligned to the compression ratio so the
+            # compressor can regroup the whole packed stream.
+            document_alignment=max(model_config.compress_ratios),
         ),
         optim=Optim.Config(
             optimizer=_dist_muon_optimizer(
@@ -507,6 +516,9 @@ def deepseek_v4_pro(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             # Fixed document capacity keeps the packed offsets sync-free.
             max_num_documents=64,
+            # Keep documents aligned to the compression ratio so the
+            # compressor can regroup the whole packed stream.
+            document_alignment=max(model_config.compress_ratios),
         ),
         optim=Optim.Config(
             optimizer=_dist_muon_optimizer(

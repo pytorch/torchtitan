@@ -59,12 +59,12 @@ from torchtitan.models.common.moe.sharding import (
 from torchtitan.models.common.param_init import depth_scaled_std
 
 from .attention import (
-    CompressedSparseAttention,
     DeepSeekV4Attention,
-    HeavilyCompressedAttention,
-    SlidingWindowAttention,
+    DeepSeekV4CompressedSparseAttention,
+    DeepSeekV4HeavilyCompressedAttention,
+    DeepSeekV4SlidingWindowAttention,
 )
-from .compressor import Compressor, Indexer, SparseIndexerLoss
+from .compressor import Compressor, Indexer, InnerIndexer, SparseIndexerLoss
 from .mhc import HcHead, HcPost, HcPre
 from .model import DeepSeekV4Model, DeepSeekV4TransformerBlock
 from .moe import DeepSeekV4Router
@@ -79,6 +79,7 @@ from .sharding import (
     hc_post_sharding_config,
     hc_pre_sharding_config,
     indexer_sharding_config,
+    inner_indexer_sharding_config,
     mtp_block_sharding_config,
     mtp_hc_head_sharding_config,
     wo_a_sharding_config,
@@ -182,6 +183,7 @@ def _make_indexer_config(
     compress_ratio: int,
     norm_eps: float,
     rope: RoPE.Config,
+    index_topk: int,
 ) -> "Indexer.Config":
     coff = 2  # overlap always True for indexer
     return Indexer.Config(
@@ -212,6 +214,11 @@ def _make_indexer_config(
             coff=coff,
             rope=rope,
         ),
+        inner_indexer=InnerIndexer.Config(
+            topk=index_topk,
+            compress_ratio=compress_ratio,
+            sharding_config=inner_indexer_sharding_config(),
+        ),
         sharding_config=indexer_sharding_config(),
     )
 
@@ -240,7 +247,7 @@ def _make_v4_attn_config(
     per_group_in = (n_heads * hd) // n_groups
     per_group_out = n_groups * o_lora_rank
     softmax_scale = head_dim**-0.5
-    # One compressor covers every compressed ratio; the overlap history is
+    # One compressor covers every compressed ratio: the overlap history is
     # selected by ``compress_ratio``. The indexer exists only for CSA layers.
     compressor_cfg = None
     indexer_cfg = None
@@ -264,13 +271,8 @@ def _make_v4_attn_config(
             compress_ratio=compress_ratio,
             norm_eps=norm_eps,
             rope=rope,
+            index_topk=index_topk,
         )
-    if compress_ratio == 4:
-        inner_attention_cls = CompressedSparseAttention
-    elif compress_ratio > 1:
-        inner_attention_cls = HeavilyCompressedAttention
-    else:
-        inner_attention_cls = SlidingWindowAttention
     aux_loss_cfg = (
         SparseIndexerLoss.Config(
             coeff=0.01,
@@ -282,14 +284,17 @@ def _make_v4_attn_config(
         if compress_ratio == 4
         else None
     )
+    if compress_ratio == 4:
+        inner_attention_cls = DeepSeekV4CompressedSparseAttention
+    elif compress_ratio > 1:
+        inner_attention_cls = DeepSeekV4HeavilyCompressedAttention
+    else:
+        inner_attention_cls = DeepSeekV4SlidingWindowAttention
     inner_attention_cfg = inner_attention_cls.Config(
         window_size=window_size,
         compress_ratio=compress_ratio,
         softmax_scale=softmax_scale,
-        index_topk=index_topk,
-        sharding_config=dsa_inner_attention_sharding_config(
-            compress_ratio=compress_ratio
-        ),
+        sharding_config=dsa_inner_attention_sharding_config(),
         aux_loss=aux_loss_cfg,
     )
     replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
@@ -514,6 +519,7 @@ def _build_v4_layers(
     for layer_id in range(n_layers):
         actual_layer_id = layer_offset + layer_id
         cr = compress_ratios[layer_id] if layer_id < len(compress_ratios) else 1
+        cr = max(cr, 1)
 
         attn_cfg = _make_v4_attn_config(
             layer_id=actual_layer_id,
@@ -616,12 +622,11 @@ def _make_mtp_inner_block(
     attn_cfg.rope = dataclasses.replace(
         rope, sharding_config=rope_cache_sharding_config()
     )
-    attn_cfg.inner_attention = SlidingWindowAttention.Config(
+    attn_cfg.inner_attention = DeepSeekV4SlidingWindowAttention.Config(
         window_size=inner_attn_cfg.window_size,
         compress_ratio=1,
         softmax_scale=inner_attn_cfg.softmax_scale,
-        index_topk=inner_attn_cfg.index_topk,
-        sharding_config=dsa_inner_attention_sharding_config(compress_ratio=1),
+        sharding_config=dsa_inner_attention_sharding_config(),
         aux_loss=None,
     )
     return block_cfg
@@ -734,7 +739,7 @@ def _debugmodel(
     q_lora_rank = 128
     o_lora_rank = 128
     n_groups = 2
-    compress_ratios = (0, 0, 4, 128)
+    compress_ratios = (1, 1, 4, 128)
     window_size = 16
     norm_eps = 1e-6
     index_n_heads = 8

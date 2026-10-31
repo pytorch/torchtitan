@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import bisect
+import copy
 import unittest
 from unittest.mock import patch
 
@@ -12,12 +13,17 @@ import torch
 from attn_gym.sparse.gather_attn import AuxRequest, gather_attn
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.common.attention import VarlenAttentionMetadata
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.deepseek_v4 import build_model_config
-from torchtitan.models.deepseek_v4.attention import CompressedSparseAttention
+from torchtitan.models.deepseek_v4.attention import (
+    DeepSeekV4CompressedSparseAttention,
+    DeepSeekV4InnerAttention,
+)
 from torchtitan.models.deepseek_v4.compressor import (
     compressed_cu_seqlens,
-    Indexer,
+    document_cmp_base,
+    InnerIndexer,
     SparseIndexerLoss,
 )
 
@@ -92,6 +98,10 @@ class TestSparseIndexerLoss(unittest.TestCase):
             **kwargs,
         ).build()
 
+    def cmp_base(self, cu):
+        """Pool base per token, as the attention metadata provides it."""
+        return document_cmp_base(cu, 4, self.q.size(0), self.q.device)
+
     def test_teacher_matches_independent_dense_attention_and_kernel(self):
         for packed in (False, True):
             with self.subTest(packed=packed):
@@ -110,7 +120,7 @@ class TestSparseIndexerLoss(unittest.TestCase):
                 torch.testing.assert_close(out, expected_out)
                 torch.testing.assert_close(lse, expected_lse)
                 teacher = self.loss()._teacher(
-                    self.q, self.compressed, indices, lse, cu
+                    self.q, self.compressed, indices, lse, self.cmp_base(cu)
                 )
                 torch.testing.assert_close(teacher, expected_teacher)
 
@@ -139,7 +149,7 @@ class TestSparseIndexerLoss(unittest.TestCase):
                     indices,
                     scores.masked_fill(indices < 0, -torch.inf),
                     lse,
-                    cu,
+                    self.cmp_base(cu),
                     carrier=carrier,
                     denominator=torch.tensor(10.0),
                     padding_mask_T=~valid_tokens,
@@ -168,9 +178,9 @@ class TestSparseIndexerLoss(unittest.TestCase):
         indices, cu = self.case(True)
         _, lse = self.kernel(indices, cu)
         loss = self.loss()
-        small = loss._teacher(self.q, self.compressed, indices, lse, cu)
+        small = loss._teacher(self.q, self.compressed, indices, lse, self.cmp_base(cu))
         loss.chunk_size = 128
-        large = loss._teacher(self.q, self.compressed, indices, lse, cu)
+        large = loss._teacher(self.q, self.compressed, indices, lse, self.cmp_base(cu))
         torch.testing.assert_close(small, large)
 
     def test_bfloat16_teacher_dot_products_accumulate_in_float32(self):
@@ -188,7 +198,7 @@ class TestSparseIndexerLoss(unittest.TestCase):
             cu,
         )
         with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
-            actual = self.loss()._teacher(q, compressed, indices, lse, cu)
+            actual = self.loss()._teacher(q, compressed, indices, lse, self.cmp_base(cu))
         torch.testing.assert_close(actual, expected, atol=1e-7, rtol=1e-6)
 
     def test_configuration_defaults_to_unweighted_kl(self):
@@ -237,17 +247,25 @@ class TestIndexerSelect(unittest.TestCase):
         k = torch.randn(3, 8, requires_grad=True)
         w = torch.randn(12, 3, requires_grad=True)
         for cu in (None, torch.tensor([0, 4, 12], dtype=torch.int32)):
-            indices, scores = Indexer.select(
-                q, k, w, max_seqlen=12, ratio=4, topk=2, cu_seqlens=cu
+            inner_indexer = InnerIndexer(
+                InnerIndexer.Config(topk=2, compress_ratio=4)
             )
-            index_only, no_scores = Indexer.select(
+            positions = (
+                torch.arange(12)
+                if cu is None
+                else torch.cat([torch.arange(n) for n in (4, 8)])
+            )
+            metadata = DeepSeekV4CompressedSparseAttention.Config(
+                window_size=1, compress_ratio=4, softmax_scale=1.0
+            ).build_attention_metadata(positions)
+            indices, scores = inner_indexer(
+                q, k, w, attention_metadata=metadata, return_scores=True
+            )
+            index_only, no_scores = inner_indexer(
                 q,
                 k,
                 w,
-                max_seqlen=12,
-                ratio=4,
-                topk=2,
-                cu_seqlens=cu,
+                attention_metadata=metadata,
                 return_scores=False,
             )
             torch.testing.assert_close(indices, index_only)
@@ -257,29 +275,48 @@ class TestIndexerSelect(unittest.TestCase):
                 self.assertTrue(torch.isfinite(tensor.grad).all())
 
     def test_eval_and_disabled_loss_do_not_rescore(self):
-        q, kv = torch.randn(8, 4, 8), torch.randn(8, 8)
-        iq, ik, iw = torch.randn(8, 2, 8), torch.randn(2, 8), torch.randn(8, 2)
         for training, enabled in ((False, True), (True, False)):
-            cfg = CompressedSparseAttention.Config(
-                window_size=3,
-                compress_ratio=4,
-                softmax_scale=8**-0.5,
-                index_topk=2,
-                aux_loss=SparseIndexerLoss.Config(
-                    coeff=0.01, softmax_scale=8**-0.5, num_heads=4
+            layer_cfg = next(
+                layer.attention
+                for layer in build_model_config(
+                    "debugmodel",
+                    seq_len=64,
+                    parallelism=ParallelismConfig(expert_parallel_degree=1),
+                ).layers
+                if layer.attention.compress_ratio == 4
+            )
+            attn_cfg = copy.deepcopy(layer_cfg)
+            attn_cfg.inner_attention.aux_loss = (
+                SparseIndexerLoss.Config(
+                    coeff=0.01,
+                    softmax_scale=attn_cfg.inner_attention.softmax_scale,
+                    num_heads=attn_cfg.n_heads,
                 )
                 if enabled
-                else None,
+                else None
             )
-            module = cfg.build().train(training)
+            module = attn_cfg.build().train(training)
+            x = torch.randn(64, attn_cfg.dim)
+            positions = torch.arange(64)
             with (
-                patch.object(Indexer, "select", wraps=Indexer.select) as select,
+                patch.object(
+                    InnerIndexer,
+                    "forward",
+                    autospec=True,
+                    wraps=InnerIndexer.forward,
+                ) as select,
                 patch(
                     "torchtitan.models.deepseek_v4.attention.gather_attn",
                     wraps=gather_attn,
                 ) as attention,
             ):
-                module(q, kv, kv[:2], iq, ik, iw, torch.zeros(4))
+                module(
+                    x,
+                    attention_metadata=attn_cfg.inner_attention.build_attention_metadata(
+                        positions
+                    ),
+                    positions=positions,
+                )
                 self.assertFalse(select.call_args.kwargs["return_scores"])
                 self.assertFalse(attention.call_args.kwargs["return_aux"].lse)
 
