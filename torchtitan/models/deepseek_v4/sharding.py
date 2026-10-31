@@ -15,6 +15,7 @@ from spmd_types import SpmdType
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.decoder_sharding import (
+    attention_activation_placement,
     dense_activation_placement,
     dense_param_placement,
     residual_activation_placement,
@@ -73,35 +74,27 @@ def _hc_state_shardings() -> dict[str, SpmdType]:
     }
 
 
-def dsa_inner_attention_sharding_config(*, compress_ratio: int) -> ShardingConfig:
-    """Local-SPMD sparse attention kernel with queries sharded on heads."""
-    query_states = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
+def dsa_inner_attention_sharding_config() -> ShardingConfig:
+    """Local-SPMD sparse attention kernel with queries sharded on heads.
+
+    Only the positional inputs (``q``, ``swa_k``, ``attn_sink``) are inside the
+    local region's type contract. Variant tensors are keyword-only, so a layer
+    without a compressed pool passes ``None`` without breaking that contract;
+    when present they are asserted and redistributed at the module boundary.
+    """
+    # ``q`` is ``(tokens, heads, dim)``: it needs the 3-D attention layout, not
+    # the 2-D dense one, or the PartitionSpec length does not match the tensor.
+    query_states = attention_activation_placement(cp=spmd.S(0))
     replicated_activation = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     input_shardings = {
         "q": query_states,
         "swa_k": replicated_activation,
+        "attn_sink": _attn_sink_placement,
+        "cmp_k": replicated_activation,
+        "topk_indices": replicated_activation,
+        "topk_scores": replicated_activation,
+        "padding_mask_T": token_id_placement(),
     }
-    if compress_ratio == 4:
-        input_shardings.update(
-            {
-                "cmp_k": replicated_activation,
-                "idx_q": replicated_activation,
-                "idx_k": replicated_activation,
-                "idx_w": replicated_activation,
-                "attn_sink": _attn_sink_placement,
-                "padding_mask_T": token_id_placement(),
-            }
-        )
-    elif compress_ratio > 1:
-        input_shardings.update(
-            {
-                "cmp_k": replicated_activation,
-                "attn_sink": _attn_sink_placement,
-            }
-        )
-    else:
-        input_shardings["attn_sink"] = _attn_sink_placement
-
     return ShardingConfig(
         in_src_shardings=input_shardings,
         in_dst_shardings=dict(input_shardings),
@@ -154,6 +147,40 @@ def indexer_sharding_config() -> ShardingConfig:
         in_dst_shardings={
             "x": replicated_activation,
             "qr": replicated_activation,
+        },
+    )
+
+
+def _replicated_attention_placement() -> SpmdType:
+    """3-D ``(tokens, heads, dim)`` activation replicated on TP.
+
+    The indexer runs fully replicated across TP, so its query tensor is
+    token-sharded only: a head-sharded layout would claim a TP split it does
+    not have.
+    """
+    return SpmdType(
+        {
+            DP: spmd.V,
+            CP: spmd.V,
+            TP: spmd.R,
+        },
+        partition_spec=spmd.PartitionSpec((DP, CP), None, None),
+    )
+
+
+def inner_indexer_sharding_config() -> ShardingConfig:
+    """Top-k selection core of the indexer.
+
+    The selection is a module boundary so a context-parallel variant can
+    declare ``idx_k``'s all-gather here instead of re-running the indexer
+    projections on gathered inputs.
+    """
+    replicated_activation = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    return ShardingConfig(
+        in_src_shardings={
+            "idx_q_TKD": _replicated_attention_placement(),
+            "idx_k_SD": replicated_activation,
+            "idx_w_TK": replicated_activation,
         },
     )
 

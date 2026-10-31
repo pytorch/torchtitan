@@ -16,10 +16,12 @@ shipped for them.
 ## Components
 
 - `model.py`: decoder model and transformer block definitions.
-- `attention.py`: DeepSeek V4 sparse attention variants, including sliding
-  window attention, heavily compressed attention, and compressed sparse
-  attention.
-- `compressor.py`: KV compression and sparse-index selection helpers.
+- `attention.py`: DeepSeek V4 sparse attention. One inner-attention backend
+  (`DeepSeekV4InnerAttention`) serves every layer; its
+  `compress_ratio` selects sliding-window-only, heavily compressed, or
+  top-k compressed (CSA) behavior.
+- `compressor.py`: KV compression, plus the indexer and its pluggable
+  selection core (`InnerIndexer`).
 - `mhc.py`: multi-token/head-coupled branch mixing modules.
 - `moe.py`: DeepSeek V4 MoE router and expert wrapper.
 - `sharding.py`: declarative sharding config for TP, SP, EP, FSDP, DTensor, and

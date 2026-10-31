@@ -83,21 +83,20 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
         self.compress_ratios = model_config.compress_ratios
         for layer_id in range(model_config.n_layers):
             cr = self.compress_ratios[layer_id]
-            if cr != 1:
-                comp = "compressor" if cr == 4 else "compressor_128"
+            if cr > 1:
                 self.from_hf_map.update(
                     {
                         f"layers.{layer_id}.attn.compressor.ape": (
-                            f"layers.{layer_id}.attention.{comp}.ape"
+                            f"layers.{layer_id}.attention.compressor.ape"
                         ),
                         f"layers.{layer_id}.attn.compressor.norm.weight": (
-                            f"layers.{layer_id}.attention.{comp}.norm.weight"
+                            f"layers.{layer_id}.attention.compressor.norm.weight"
                         ),
                         f"layers.{layer_id}.attn.compressor.wgate.weight": (
-                            f"layers.{layer_id}.attention.{comp}.wgate.weight"
+                            f"layers.{layer_id}.attention.compressor.wgate.weight"
                         ),
                         f"layers.{layer_id}.attn.compressor.wkv.weight": (
-                            f"layers.{layer_id}.attention.{comp}.wkv.weight"
+                            f"layers.{layer_id}.attention.compressor.wkv.weight"
                         ),
                     }
                 )

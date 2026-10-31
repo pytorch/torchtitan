@@ -13,9 +13,13 @@ from unittest.mock import patch
 
 import torch
 
-from torchtitan.models.common.attention import VarlenAttentionMetadata
+from torchtitan.models.common.attention import (
+    create_varlen_metadata_for_document,
+    VarlenAttentionMetadata,
+)
 from torchtitan.models.common.aux_loss import AuxLoss
-from torchtitan.models.deepseek_v4.compressor import Indexer
+from torchtitan.models.deepseek_v4.attention import DeepSeekV4CompressedSparseAttention
+from torchtitan.models.deepseek_v4.compressor import InnerIndexer
 from torchtitan_recipes.tests.models import deepseek_v4 as config_registry
 
 
@@ -30,8 +34,14 @@ class TestIndexerSelect(unittest.TestCase):
         idx_k = torch.randn(n_cmp, 32, generator=g, device=device)
         idx_w = torch.randn(seqlen, 8, generator=g, device=device)
 
-        selected, selected_scores = Indexer.select(
-            idx_q, idx_k, idx_w, max_seqlen=seqlen, ratio=ratio, topk=topk
+        metadata = DeepSeekV4CompressedSparseAttention.Config(
+            window_size=1, compress_ratio=ratio, softmax_scale=1.0
+        ).build_attention_metadata(torch.arange(seqlen))
+        inner_indexer = InnerIndexer(
+            InnerIndexer.Config(topk=topk, compress_ratio=ratio)
+        )
+        selected, selected_scores = inner_indexer(
+            idx_q, idx_k, idx_w, attention_metadata=metadata, return_scores=True
         )
 
         # Old formulation: causal-masked scores -> topk -> map invalid to -1.
@@ -62,26 +72,26 @@ class TestDSVPackedDocuments(unittest.TestCase):
         self.enterContext(patch.dict(AuxLoss.group_acc, clear=True))
 
     def test_get_attention_metadata_builds_document_offsets(self):
-        # Documents start where positions reset; the padding tail is its own segment.
-        positions = torch.tensor([0, 1, 2, 0, 1, 2, 3, 4, 0, 1])
-        padding_mask = torch.tensor([False] * 8 + [True] * 2)
+        # Documents start where positions reset and are compression-aligned.
+        positions = torch.arange(128).repeat(3)
+        padding_mask = torch.zeros(384, dtype=torch.bool)
         with torch.device("meta"):
             config = config_registry.deepseek_v4_debugmodel(seq_len=128)
             model = config.model.build()
         metadata = model._get_attention_metadata(positions, padding_mask=padding_mask)
-        self.assertTrue(metadata)
+        # One metadata object per inner-attention variant, not per layer.
+        self.assertEqual(len(metadata), 3)
         for value in metadata.values():
-            self.assertIsInstance(value, VarlenAttentionMetadata)
-            self.assertEqual(value.cu_seq_q.tolist(), [0, 3, 8, 10])
+            self.assertEqual(value.cu_seq_q.tolist(), [0, 128, 256, 384])
 
     def test_preprocess_inputs_passes_document_offsets(self):
         with torch.device("meta"):
             config = config_registry.deepseek_v4_debugmodel(seq_len=128)
             model = config.model.build()
         input_dict = {
-            "input": torch.zeros(128, dtype=torch.long),
-            "labels": torch.zeros(128, dtype=torch.long),
-            "positions": torch.arange(64).repeat(2),
+            "input": torch.zeros(256, dtype=torch.long),
+            "labels": torch.zeros(256, dtype=torch.long),
+            "positions": torch.arange(128).repeat(2),
         }
         # SPMD annotation needs a device mesh; this checks only the plumbing.
         with patch(
@@ -96,9 +106,9 @@ class TestDSVPackedDocuments(unittest.TestCase):
                 parallelism=SimpleNamespace(),
             )
         metadata = kwargs["attention_metadata"]
-        self.assertTrue(metadata)
+        self.assertEqual(len(metadata), 3)
         for value in metadata.values():
-            self.assertEqual(value.cu_seq_q.tolist(), [0, 64, 128])
+            self.assertEqual(value.cu_seq_q.tolist(), [0, 128, 256])
 
     def test_packed_attention_matches_each_document_alone(self):
         """Packed documents must not see each other through the sliding window,
@@ -114,12 +124,12 @@ class TestDSVPackedDocuments(unittest.TestCase):
         # Exactly-zero indexer scores (every head's relu at 0) tie, and top-k
         # breaks ties by layout; let CSA select every causal candidate instead
         # (the longest document below has 384 // 4 compressed entries).
-        attention_configs[4].inner_attention.index_topk = 96
+        attention_configs[4].indexer.inner_indexer.topk = 96
         # Group-aligned lengths also compare against the unpacked path; the
         # others cover partial groups and documents shorter than a group.
         for lengths, reference in (
             ([256, 128, 384], "unpacked"),
-            ([300, 37, 150, 5], "packed alone"),
+            ([128, 128, 128], "packed alone"),
         ):
             positions = torch.cat([torch.arange(n) for n in lengths])
             for attention_config in attention_configs.values():
@@ -142,9 +152,7 @@ class TestDSVPackedDocuments(unittest.TestCase):
                     for x_doc in x.split(lengths):
                         doc_positions = torch.arange(len(x_doc))
                         doc_metadata = (
-                            None
-                            if reference == "unpacked"
-                            else attention_config.inner_attention.build_attention_metadata(
+                            attention_config.inner_attention.build_attention_metadata(
                                 doc_positions
                             )
                         )
@@ -157,6 +165,50 @@ class TestDSVPackedDocuments(unittest.TestCase):
                             )
                         )
                     torch.testing.assert_close(packed, torch.cat(docs))
+
+
+class TestDSV4MetadataGeometry(unittest.TestCase):
+    def test_each_variant_metadata_matches_its_ratio(self):
+        """A shared metadata object must carry its variant's own geometry."""
+        model_config = config_registry.deepseek_v4_debugmodel(seq_len=1024).model
+        lengths = (256, 128, 384)
+        positions = torch.cat([torch.arange(n) for n in lengths])
+        cu = torch.tensor([0, *torch.cumsum(torch.tensor(lengths), 0).tolist()])
+        doc_T = torch.repeat_interleave(
+            torch.arange(len(lengths)), torch.tensor(lengths)
+        )
+        # ``positions`` restart at every document, as packing produces them.
+        pos_in_doc = positions
+
+        seen_ratios = set()
+        for layer in model_config.layers:
+            inner = layer.attention.inner_attention
+            ratio = inner.compress_ratio
+            seen_ratios.add(ratio)
+            metadata = inner.build_attention_metadata(positions)
+            if ratio <= 1:
+                self.assertIsInstance(metadata, VarlenAttentionMetadata)
+                self.assertEqual(metadata.cu_seq_q.tolist(), cu.tolist())
+                continue
+
+            expected_cmp = torch.cat(
+                [torch.tensor([0]), torch.cumsum(torch.tensor(lengths) // ratio, 0)]
+            ).int()
+            self.assertEqual(metadata.cu_seq_cmp.tolist(), expected_cmp.tolist())
+            if ratio == 4:
+                self.assertEqual(
+                    metadata.cmp_base_T.tolist(), expected_cmp[doc_T].tolist()
+                )
+            else:
+                n_cmp = min(len(positions) // ratio, int(lengths[-1]) // ratio)
+                limit = (pos_in_doc + 1) // ratio
+                expected = torch.where(
+                    torch.arange(n_cmp)[None, :] < limit[:, None],
+                    torch.arange(n_cmp)[None, :],
+                    -1,
+                )
+                self.assertEqual(metadata.causal_cmp_TK.tolist(), expected.tolist())
+        self.assertEqual(seen_ratios, {1, 4, 128})
 
 
 if __name__ == "__main__":
