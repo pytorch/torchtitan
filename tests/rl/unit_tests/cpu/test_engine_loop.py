@@ -1265,3 +1265,59 @@ def test_drain_task_resolves_peer_results_on_the_engine_thread(
         await asyncio.wait_for(engine_loop.close(), _TIMEOUT_S)
 
     asyncio.run(run())
+
+
+def test_drain_task_failure_fails_engine_loop_and_outstanding_generation(
+    engine_thread, monkeypatch
+) -> None:
+    peer_results: asyncio.Queue = asyncio.Queue()
+
+    class ResultReceiver:
+        async def recv(self):
+            return await peer_results.get()
+
+    async def run() -> None:
+        dispatcher = _dispatcher(
+            dp_size=2, open_result_channel=lambda: ("port", ResultReceiver())
+        )
+        # Route the request to the peer DP rank.
+        dispatcher._rank0_dp_router.reserve("busy", routing_session_id="busy")
+        engine_loop = engine_thread(_FakeEngine(), request_dispatcher=dispatcher)
+        peer_requests: list[str] = []
+
+        def broadcast_object_list(container, **kwargs):
+            if peer_requests:
+                peer_requests.clear()
+                engine_loop._event_loop.call_soon_threadsafe(
+                    peer_results.put_nowait,
+                    _FinishedRequests(
+                        requests=[_finished("unknown")], policy_version=0
+                    ),
+                )
+            decision = container[0]
+            if (
+                isinstance(decision, LoopDecision)
+                and decision.action is LoopAction.STEP
+            ):
+                peer_requests.extend(
+                    request.request_id for request in decision.requests_per_dp_rank[1]
+                )
+
+        monkeypatch.setattr(
+            engine_loop_module.dist, "broadcast_object_list", broadcast_object_list
+        )
+        engine_loop.start()
+
+        generation = _generate(engine_loop, "r0")
+        with pytest.raises(KeyError, match="unknown"):
+            await asyncio.wait_for(generation, _TIMEOUT_S)
+        with pytest.raises(KeyError, match="unknown"):
+            await asyncio.wait_for(engine_loop.wait(), _TIMEOUT_S)
+        with pytest.raises(
+            RuntimeError, match="generator is closed; cannot call generate"
+        ):
+            await engine_loop.generate(_request("r1"), metrics_prefix="generator")
+
+        await engine_loop.close()
+
+    asyncio.run(run())

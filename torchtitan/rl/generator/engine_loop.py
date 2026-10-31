@@ -288,7 +288,7 @@ class EngineLoop:
         pending_load_messages: list[ModelStateDictLoadMessage] = []
         try:
             # One-time dispatcher setup before the loop starts.
-            self._request_dispatcher.setup()
+            self._request_dispatcher.setup(self._rank0_dispatcher_failed)
             while True:
                 # Rank 0 decides next decision; followers pass None and learn from the broadcast.
                 decision = (
@@ -391,10 +391,20 @@ class EngineLoop:
         await asyncio.sleep(0)
         while not self._queue.empty():
             message = self._queue.get_nowait()
-            if isinstance(message, (CloseMessage, SessionReleaseMessage)):
+            if isinstance(
+                message,
+                (CloseMessage, ResultDrainFailureMessage, SessionReleaseMessage),
+            ):
                 continue
             if message.reply.set_running_or_notify_cancel():
                 message.reply.set_exception(exc)
+
+    def _rank0_dispatcher_failed(self, exc: Exception) -> None:
+        """Wake the engine loop and make it fail with a background dispatcher error."""
+        assert self._rank == 0
+        self._queue.close(
+            ResultDrainFailureMessage(exc=exc), reason="result drain failed"
+        )
 
     async def _decide_next_action(
         self,
@@ -430,6 +440,8 @@ class EngineLoop:
         released_session_ids: list[str] = []
         released_group_ids: list[int] = []
         for message in messages:
+            if isinstance(message, ResultDrainFailureMessage):
+                raise message.exc
             if isinstance(message, CloseMessage):
                 # Drops nothing: the queue rejects puts once closed, so the `CloseMessage` is the last message.
                 return LoopDecision(action=LoopAction.CLOSE, requests_per_dp_rank=[])
@@ -559,8 +571,19 @@ class SessionReleaseMessage:
     group_ids: list[int] = field(default_factory=list)
 
 
+@dataclass(kw_only=True, slots=True)
+class ResultDrainFailureMessage:
+    """A failure from the rank-0 peer-result drain task."""
+
+    exc: Exception
+
+
 EngineLoopMessage = (
-    GenerationMessage | ModelStateDictLoadMessage | CloseMessage | SessionReleaseMessage
+    GenerationMessage
+    | ModelStateDictLoadMessage
+    | CloseMessage
+    | SessionReleaseMessage
+    | ResultDrainFailureMessage
 )
 
 
