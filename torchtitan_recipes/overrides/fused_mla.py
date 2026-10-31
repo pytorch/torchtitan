@@ -1022,6 +1022,8 @@ class FusedMLAAttention(DeepSeekMLAAttention):
                 "FusedMLAAttention currently requires ComplexRoPE, got "
                 f"{type(self.rope).__name__}."
             )
+        if self.rope.cache is None:
+            raise ValueError("FusedMLAAttention requires an internal RoPE cache.")
 
     def forward(
         self,

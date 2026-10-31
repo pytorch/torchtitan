@@ -131,7 +131,21 @@ class TestRoPEPositionBoundsComplex(unittest.TestCase):
         xq = torch.randn(num_tokens, 4, self.head_dim)
         xk = torch.randn(num_tokens, 4, self.head_dim)
         positions = torch.arange(num_tokens) % 8
-        self.rope(xq, xk, positions)
+        expected = self.rope(xq, xk, positions)
+        external = ComplexRoPE.Config(dim=self.head_dim).build()
+        self.assertIsNone(external.cache)
+        cache = self.rope._reshape_cache(xq, positions)
+        torch.testing.assert_close(
+            external(xq, xk, rope_cache=cache), expected, rtol=0, atol=0
+        )
+        with self.assertRaisesRegex(ValueError, "no internal cache"):
+            external(xq, xk)
+        with self.assertRaisesRegex(ValueError, "cannot be supplied together"):
+            external(xq, xk, positions, rope_cache=cache)
+        with self.assertRaisesRegex(ValueError, "head widths"):
+            external(xq[..., :2], xk, rope_cache=cache)
+        with self.assertRaisesRegex(ValueError, "cache generation"):
+            ComplexRoPE.Config(dim=self.head_dim, theta=500000)
 
     def test_out_of_range_positions_raises(self):
         num_tokens = 4
@@ -162,7 +176,14 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
         xq = torch.randn(num_tokens, 4, self.head_dim)
         xk = torch.randn(num_tokens, 4, self.head_dim)
         positions = torch.arange(num_tokens) % 8
-        self.rope(xq, xk, positions)
+        expected = self.rope(xq, xk, positions)
+        external = CosSinRoPE.Config(dim=self.head_dim).build()
+        torch.testing.assert_close(
+            external(xq, xk, rope_cache=self.rope._reshape_cache(xq, positions)),
+            expected,
+            rtol=0,
+            atol=0,
+        )
 
     def test_out_of_range_positions_raises(self):
         num_tokens = 4

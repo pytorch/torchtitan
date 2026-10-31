@@ -156,7 +156,7 @@ class DeepSeekMLAAttention(Attention):
 
     # Cat options: _RotateTail concatenates q's untouched int32 words with the rotated ones;
     # Inductor's default pointwise cat makes that masked loads, slower than a plain cat.
-    # No pointwise autotuning, as in ComplexRoPE.forward: RoPE is inlined here, so this region's options apply.
+    # Match ComplexRoPE's cached compile options; RoPE is inlined in this region.
     @local_compile(
         "mla_qk",
         batch_invariant=True,
@@ -187,6 +187,7 @@ class DeepSeekMLAAttention(Attention):
         if (
             torch.compiler.is_compiling()
             and type(self.rope) is ComplexRoPE
+            and self.rope.cache is not None
             and q.dtype == torch.bfloat16
             and q.is_contiguous()
         ):

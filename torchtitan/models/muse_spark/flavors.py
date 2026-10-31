@@ -584,6 +584,7 @@ def _muse_spark_navit_attention_config(
             bias=True,
             sharding_config=vision_rowwise_sharding_config(),
         ),
+        rope=ComplexRoPE.Config(dim=latent_dim // num_heads),
         sharding_config=vision_attention_sharding_config(rope_cache_dp=spmd.V),
     )
 

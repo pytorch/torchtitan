@@ -359,10 +359,18 @@ class TestComplexRoPELocalCompile(unittest.TestCase):
             for _ in range(2)
         )
         cache = rope.cache[torch.randperm(128, device="cuda")[:64]].unsqueeze(1)
-        compiled = torch.compile(ComplexRoPE.apply_rotary_emb, fullgraph=True)
+        external = ComplexRoPE.Config(dim=64).build().cuda()
+        expected = ComplexRoPE.apply_rotary_emb(query, key, cache)
+        # Enabling the text rope region must not compile the external-cache path.
+        LocalCompileConfig(regions=["rope"]).apply()
         for out, ref in zip(
-            compiled(query, key, cache),
-            ComplexRoPE.apply_rotary_emb(query, key, cache),
+            external(query, key, rope_cache=cache), expected, strict=True
+        ):
+            torch.testing.assert_close(out, ref, rtol=0, atol=0)
+        compiled = torch.compile(external, fullgraph=True)
+        for out, ref in zip(
+            compiled(query, key, rope_cache=cache),
+            expected,
             strict=True,
         ):
             torch.testing.assert_close(out, ref)

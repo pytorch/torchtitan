@@ -12,7 +12,7 @@ import unittest
 import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.rope import RoPE
+from torchtitan.models.common.rope import ComplexRoPE, RoPE
 from torchtitan.models.deepseek_v4 import build_model_config as build_dsv4_config
 from torchtitan.models.llama3 import MODEL_FLAVORS
 from torchtitan.models.llama3.model import Llama3Model
@@ -51,10 +51,13 @@ class TestRoPECacheTying(unittest.TestCase):
         """Mirror the trainer: build on meta, ``to_empty()``, then ``init_states()``."""
         with torch.device("meta"):
             model = Llama3Model(_make_config())
+            model.external_rope = ComplexRoPE.Config(dim=64).build()
         model.to_empty(device="cpu")
         model.init_states()
+        self.assertIsNone(model.external_rope.cache)
+        self.assertFalse(model.external_rope.state_dict())
 
-        ropes = _ropes(model)
+        ropes = [rope for rope in _ropes(model) if rope.cache is not None]
         expected = ropes[0]._precompute_cache()
         for rope in ropes:
             self.assertIs(rope.cache, ropes[0].cache)

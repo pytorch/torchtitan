@@ -95,6 +95,9 @@ class TestFusedMLAOverrideConfig(unittest.TestCase):
     def test_non_cp_backend_still_builds(self):
         config = fused_mla(self._attention_config())
         self.assertIsInstance(config.build(), FusedMLAAttention)
+        config.rope = ComplexRoPE.Config(dim=16)
+        with self.assertRaisesRegex(ValueError, "requires an internal RoPE cache"):
+            config.build()
 
     def test_all_kernels_are_autotuned_over_head_geometry(self):
         """Launch configuration is tuned per shape, not hard-coded."""
