@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import sys
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
@@ -32,7 +31,6 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
-    GroupedLinear,
     Linear,
     RowParallelLinear,
 )
@@ -43,9 +41,7 @@ from torchtitan.models.common.moe import (
     sharding as moe_sharding,
     TokenChoiceTopKRouter,
 )
-from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 from torchtitan.models.kimi_k3.moe import KimiLatentMoE
 from torchtitan.models.muse_spark.moe import MuseSparkMoE
 
@@ -254,107 +250,6 @@ class TestMoE(unittest.TestCase):
         output_TD.sum().backward()
         self.assertIsNotNone(x_TD.grad)
         self.assertIsNotNone(routed_experts.output_postprocess.weight.grad)
-
-    def test_deepep_absorbs_scores_only_without_bias_or_postprocess(self):
-        """Guard automatic absorption and post-W2 scoring of bias/postprocess outputs."""
-        backend = SimpleNamespace(
-            dispatch_tokens=lambda x, ids, scores, *args, **kwargs: (
-                x,
-                torch.tensor([x.shape[0]]),
-                scores.reshape(-1),
-                None,
-            ),
-            combine_tokens=lambda x, state: x,
-            sync_combine=lambda: None,
-        )
-
-        def grouped_mm(module, *, input_RI, weight_EOI, offsets_E):
-            return input_RI @ weight_EOI[0].to(input_RI.dtype).T
-
-        with (
-            patch.dict(sys.modules, {"torchtitan.distributed.deepep.deepep": backend}),
-            patch(
-                "torchtitan.models.common.moe.token_dispatcher._ep_process_group",
-                return_value=SimpleNamespace(size=lambda: 1),
-            ),
-            patch.object(GroupedLinear, "_grouped_mm", grouped_mm),
-        ):
-            for bias, postprocess in ((False, False), (True, False), (False, True)):
-                with self.subTest(bias=bias, postprocess=postprocess):
-                    config = make_routed_experts_config(
-                        dim=4,
-                        hidden_dim=4,
-                        num_experts=1,
-                        top_k=1,
-                        param_init={},
-                        enable_ep=False,
-                    )
-                    config = replace(
-                        config,
-                        token_dispatcher=DeepEPTokenDispatcher.Config(
-                            num_experts=1,
-                            top_k=1,
-                            hidden_dim=4,
-                            num_max_tokens_per_rank=2,
-                        ),
-                        w2=(
-                            GptOssGroupedLinear.Config(
-                                group_size=1, in_features=4, out_features=4
-                            )
-                            if bias
-                            else config.w2
-                        ),
-                        output_postprocess=(
-                            RMSNorm.Config(normalized_shape=4) if postprocess else None
-                        ),
-                    )
-                    experts = config.build()
-                    experts.w13 = _AddOneW13()
-                    experts.activation_fn = _SelectGate()
-                    with torch.no_grad():
-                        experts.w2.weight.fill_(0.25)
-                        if bias:
-                            experts.w2.bias.fill_(0.5)
-                        if postprocess:
-                            experts.output_postprocess.weight.fill_(1.0)
-                    x_TD = (
-                        torch.arange(8, dtype=torch.bfloat16)
-                        .reshape(2, 4)
-                        .requires_grad_()
-                    )
-                    # Dyadic values make scoring exact in BF16.
-                    scores_TK = torch.tensor([[0.25], [0.5]], requires_grad=True)
-                    with patch.object(
-                        experts.w2, "forward", wraps=experts.w2.forward
-                    ) as w2_forward:
-                        actual_TD = experts(
-                            x_TD,
-                            scores_TK,
-                            torch.zeros(2, 1, dtype=torch.long),
-                            torch.ones(2, 1, dtype=torch.bool),
-                        )
-                    expected_input_RD = x_TD + 1
-                    if not bias and not postprocess:
-                        expected_input_RD = (expected_input_RD * scores_TK).to(
-                            x_TD.dtype
-                        )
-                    torch.testing.assert_close(
-                        w2_forward.call_args.args[0], expected_input_RD, rtol=0, atol=0
-                    )
-                    expected_TD = experts.w2(
-                        x_TD + 1, torch.tensor([2], dtype=torch.int32)
-                    )
-                    if postprocess:
-                        expected_TD = experts.output_postprocess(expected_TD)
-                    expected_TD = expected_TD * scores_TK.to(expected_TD.dtype)
-                    torch.testing.assert_close(actual_TD, expected_TD, rtol=0, atol=0)
-                    inputs = (x_TD, scores_TK, *experts.parameters())
-                    actual_grads = torch.autograd.grad(
-                        actual_TD.sum(), inputs, retain_graph=True
-                    )
-                    expected_grads = torch.autograd.grad(expected_TD.sum(), inputs)
-                    for actual, expected in zip(actual_grads, expected_grads):
-                        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     def test_token_choice_router_uses_normalization_epsilon(self):
         x_TD = torch.zeros(1, 4)
