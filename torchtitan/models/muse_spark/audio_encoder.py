@@ -12,6 +12,7 @@ import torch
 import torch.nn.functional as F
 import torch_remat as remat
 
+from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 
 from torchtitan.models.common import Linear
@@ -127,6 +128,39 @@ class MuseSparkAudioEncoder(Module):
         norm: RMSNorm.Config
         o_proj: Linear.Config
         dual_norm: RMSNorm.Config
+
+        def build_flops_estimator(
+            self, encoder, *, output_modules: tuple[Module | None, ...] = ()
+        ) -> FlopsEstimator:
+            from torchtitan.models.common.flops import active_parameter_flops_per_unit
+
+            stage_flops = tuple(
+                (stage.patchifier.patch_size, active_parameter_flops_per_unit(module))
+                for stage, module in zip(self.layers, encoder.layers.values())
+            )
+            output_flops = sum(
+                active_parameter_flops_per_unit(module)
+                for module in (
+                    *output_modules,
+                    encoder.norm,
+                    encoder.o_proj,
+                    encoder.dual_norm,
+                )
+                if module is not None
+            )
+
+            def estimate(input_dict):
+                waveforms = input_dict.get("waveforms")
+                if waveforms is None:
+                    return 0
+                num_tokens = waveforms.shape[0]
+                flops = 0
+                for patch_size, flops_per_token in stage_flops:
+                    num_tokens //= patch_size
+                    flops += num_tokens * flops_per_token
+                return flops + num_tokens * output_flops
+
+            return estimate
 
     def __init__(self, config: Config) -> None:
         super().__init__()

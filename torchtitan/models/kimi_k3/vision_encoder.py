@@ -16,10 +16,13 @@ from dataclasses import dataclass, field
 
 import torch
 
+from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module
-
 from torchtitan.models.common import Linear
+
+from torchtitan.models.common.flops import active_parameter_flops_per_unit
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
+from torchtitan.models.common.vision_encoder import get_packed_vision_grids
 from torchtitan.models.kimi_k2_7.vision_encoder import MoonViTEncoder
 
 
@@ -55,3 +58,42 @@ class KimiK3VisionEncoder(MoonViTEncoder):
 
         final_norm: RMSNorm.Config  # pyrefly: ignore [bad-override]
         projector: KimiK3VisionProjector.Config  # pyrefly: ignore [bad-override]
+
+        def build_flops_estimator(
+            self,
+            encoder: "KimiK3VisionEncoder",
+        ) -> FlopsEstimator:
+            input_patch_flops = sum(
+                active_parameter_flops_per_unit(module)
+                for module in (
+                    encoder.patch_embed,
+                    encoder.layers,
+                    encoder.final_norm,
+                )
+            )
+            output_token_flops = sum(
+                active_parameter_flops_per_unit(module)
+                for module in (
+                    encoder.projector.linear_1,
+                    encoder.projector.linear_2,
+                    encoder.projector.post_norm,
+                )
+            )
+            attention_pair_flops = (
+                self.num_layers * self.block.attn.flops_per_query_key_pair()
+            )
+            merge_h, merge_w = self.merge_kernel_size
+
+            def estimate(input_dict) -> int:
+                total_flops = 0
+                for temporal, grid_h, grid_w in get_packed_vision_grids(input_dict):
+                    num_input_patches = temporal * grid_h * grid_w
+                    num_output_tokens = (grid_h // merge_h) * (grid_w // merge_w)
+                    total_flops += (
+                        num_input_patches * input_patch_flops
+                        + num_output_tokens * output_token_flops
+                        + num_input_patches**2 * attention_pair_flops
+                    )
+                return total_flops
+
+            return estimate

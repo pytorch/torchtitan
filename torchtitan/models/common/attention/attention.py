@@ -117,6 +117,10 @@ class Attention(Module):
         def __post_init__(self):
             assert self.n_heads > 0, "n_heads must be > 0"
 
+        def flops_per_token(self, seq_len: int) -> int:
+            """Training attention contractions, excluding parameter-based work."""
+            raise NotImplementedError(type(self).__qualname__)
+
 
 class QKVLinear(Module):
     """Single fused linear projection, split along R dimension.
@@ -224,6 +228,30 @@ class GQAttention(Attention):
                     f"n_heads ({self.n_heads}) must be divisible by "
                     f"n_kv_heads ({n_kv_heads})"
                 )
+
+        def flops_per_token(self, seq_len: int) -> int:
+            from torchtitan.models.common.flops import (
+                quadratic_attention_flops_per_token,
+            )
+
+            head_dim = self.head_dim or self.dim // self.n_heads
+            return quadratic_attention_flops_per_token(
+                num_heads=self.n_heads,
+                qk_head_dim=head_dim,
+                v_head_dim=head_dim,
+                seq_len=seq_len,
+                sliding_window_size=(
+                    self.inner_attention.sliding_window_size
+                    if isinstance(
+                        self.inner_attention,
+                        (
+                            SlidingWindowFlexInnerAttention.Config,
+                            SlidingWindowVarlenInnerAttention.Config,
+                        ),
+                    )
+                    else None
+                ),
+            )
 
     def __init__(self, config: Config):
         super().__init__()
