@@ -12,7 +12,7 @@ from typing import Any, cast, Self
 import spmd_types as spmd
 import torch
 import torch_remat as remat
-from torch import nn, Tensor
+from torch import Tensor
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -134,9 +134,7 @@ class FluxModel(BaseModel):
         double_blocks: list[DoubleStreamBlock.Config]
         single_blocks: list[SingleStreamBlock.Config]
 
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
+        def build_flops_estimator(self, model: Module, *, seq_len: int):
             nparams = sum(p.numel() for p in model.parameters())
 
             # Base: 6 FLOPs per parameter per token (fwd + bwd for linear
@@ -201,7 +199,11 @@ class FluxModel(BaseModel):
                 * self.depth
             )
 
-            return nparams, num_flops_per_token
+            return (
+                lambda input_dict: num_flops_per_token
+                * seq_len
+                * input_dict["labels"].shape[0]
+            )
 
     def __init__(self, config: Config):
         super().__init__()

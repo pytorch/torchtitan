@@ -12,7 +12,8 @@ The folder should be organized as follows
   - NOTE: We prioritize readability over flexibility. The preferred style is to not share modules among different models, except for the most common and complicated ones.
   - Define a Model class inheriting from a base model (e.g. `Decoder` from `torchtitan/models/common/decoder.py`).
   - The model class should contain a nested `Config` dataclass (inheriting from the base model's `Config`) that holds all architecture hyperparameters.
-    - `get_nparams_and_flops()` will be used to understand model size and compute throughput.
+    - `get_parameter_counts()` reports total and active model size, and
+      `build_flops_estimator()` estimates work for each raw CPU microbatch.
   - `__init__()` consumes the `Config` to build the model.
   - Parameter initialization is handled by the `param_init` system on each module's `Config`. Set `param_init` (a `dict[str, Callable]` mapping parameter names to init functions) on every sub-config in the model flavor builder. `init_states()` auto-recurses into all submodules, so manual recursive calls are not needed. Override `_init_self_buffers()` for device-aware buffer initialization (e.g., RoPE, MoE).
   - Add additional files to reduce the complexity of `model.py` if it grows too large or complex, e.g. moe.py to host the `MoE`, router, grouped-linear, and expert-activation modules.
@@ -69,3 +70,42 @@ The folder should be organized as follows
   - Including unit tests and integration tests, see [examples](/tests/).
   - If the model folder is under the experiments folder, put the tests under the model folder. Otherwise, put the tests under the `/tests` folder.
   - Add necessary GitHub [workflows](/.github/workflows/).
+
+### FLOPs estimation
+
+`Config.build_flops_estimator(model, seq_len=...)` builds a callable from a raw CPU
+microbatch dictionary to logical training FLOPs, before partitioning or sharding.
+The engine invokes it before device transfer and CP sharding, including streamed
+microbatches. Logging averages this work over DP replicas and divides by elapsed
+time and the model-parallel device count. CP replicas must not be summed again.
+Per-microbatch estimation reads CPU metadata and tensor shapes, without launching
+tensor computation or copying device values to the host. DP-enabled reporting adds
+one float64 scalar reduction at each logging interval (each optimizer step in RL).
+Its host readback is combined with grad norm; single-DP runs keep FLOPs on the CPU.
+TorchFT also reduces across its active replica group when configured.
+
+Native decoders share parameter-based work and sum
+`Attention.Config.flops_per_token(seq_len)` over their attention configurations.
+Attention families own their quadratic, windowed, recurrent, or compressed formula.
+MTP adds attention and repeated output-head uses. Multimodal models add encoder
+estimates from image/video grids or padded waveform lengths. Encoders own their
+internal token counts; adapters run per output token, and audio stages use their
+progressively downsampled lengths.
+
+Every encoder uses `build_flops_estimator()` to return a callable accepting a raw
+microbatch. Each multimodal config's `build_flops_estimator()` explicitly excludes
+encoder-owned modules from the inherited decoder estimate and adds its encoder
+estimates. Muse includes its vision adapter, projection, and perception norm;
+Spark also counts the norm's audio use. The resulting callable retains only the
+estimators, not the model modules. Kimi's inherited decoder estimate includes MTP.
+
+`Config.get_parameter_counts(model)` reports total and active parameters. Total
+parameters count unique tensors, including tied weights once. Active parameters
+weight routed experts by their active expert ratio and include embeddings and
+encoders. FLOPs separately exclude lookup embeddings unless they share the output
+projection's weight.
+
+These are architectural estimates. Decoder attention uses the configured sequence
+length rather than individual packed document lengths. Causal sparsity,
+recomputation, and elementwise operations are omitted. Flux and the Transformers
+modeling backend retain their specialized formulas.

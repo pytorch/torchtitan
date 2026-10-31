@@ -376,11 +376,27 @@ class Trainer(Configurable):
 
         # TODO: Move performance, LR, and auxiliary-loss reporting into a shared
         # trainer metrics interface while preserving controller-side aggregation.
+        mean_num_flops = engine.step_num_flops
+        if engine.parallelism_context.dp_enabled:
+            total_flops = dist_utils.dist_sum_tensor(
+                torch.tensor(mean_num_flops, dtype=torch.float64, device=engine.device),
+                mesh=engine.parallelism_context.get_optional_mesh("dp"),
+            )
+            grad_norm_value, mean_num_flops = torch.stack(
+                (grad_norm, total_flops)
+            ).tolist()
+            mean_num_flops /= (
+                engine.parallelism_context.dp_replicate
+                * engine.parallelism_context.dp_shard
+            )
+        else:
+            grad_norm_value = float(grad_norm.item())
+
         performance = compute_training_performance_metrics(
             num_tokens=self._step_num_tokens_per_dp_rank,
             elapsed_time=time.perf_counter() - self._step_compute_start,
             non_data_parallel_size=engine.parallelism_context.non_data_parallel_size,
-            num_flops_per_token=engine.num_flops_per_token,
+            num_flops=mean_num_flops,
             gpu_peak_flops=self.gpu_peak_flops,
             has_quantization=engine.has_quantization,
         )
@@ -398,7 +414,7 @@ class Trainer(Configurable):
         return OptimizerStepOutput(
             policy_version=self.policy_version,
             metrics={
-                "trainer/grad_norm/mean": float(grad_norm.item()),
+                "trainer/grad_norm/mean": grad_norm_value,
                 **{f"trainer/{key}": value for key, value in lr_metrics.items()},
                 "trainer/policy_version": float(self.policy_version),
                 "trainer/tokens_per_second": performance["tokens_per_second"],

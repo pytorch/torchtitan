@@ -23,6 +23,7 @@ from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     spmd_local_context,
 )
+from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
     AttentionMetadataMap,
@@ -34,10 +35,6 @@ from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
-from torchtitan.models.common.flops import (
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
-)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import MoE
@@ -403,6 +400,7 @@ class MuseSparkTransformerBlock(TransformerBlock):
 class MuseSparkModel(MultimodalModel):
     state_dict_adapter_cls = MuseSparkStateDictAdapter
     multimodal_encoder_fqns = ("vision_encoder", "audio_encoder")
+
     pipeline_first_stage_module_fqns = (
         "vision_encoder",
         "vision_adapter",
@@ -480,40 +478,46 @@ class MuseSparkModel(MultimodalModel):
                         f"dataset_modalities requires a configured {modality}_encoder"
                     )
 
-        def get_nparams_and_flops(
+        def build_flops_estimator(
             self,
-            model: nn.Module,
+            model: Module,
+            *,
             seq_len: int,
-        ) -> tuple[int, int]:
-            # Perception modules run per image or audio clip rather than per
-            # text token, so this remains a decoder-only MFU estimate.
-            muse_model = cast("MuseSparkModel", model)
-            nparams, active_nparams = get_nparams_and_active_nparams(
+            excluded_modules: tuple[Module | None, ...] = (),
+        ) -> FlopsEstimator:
+            model = cast(MuseSparkModel, model)
+            vision_outputs = (
+                model.vision_adapter,
+                model.vision_projection,
+                model.perception_emb_norm,
+            )
+            decoder_estimate = super(MuseSparkModel.Config, self).build_flops_estimator(
                 model,
-                modules_excluded_from_active_params=(
-                    muse_model.vision_encoder,
-                    muse_model.vision_adapter,
-                    muse_model.vision_projection,
-                    muse_model.perception_emb_norm,
-                    muse_model.audio_encoder,
+                seq_len=seq_len,
+                excluded_modules=(
+                    model.vision_encoder,
+                    *vision_outputs,
+                    model.audio_encoder,
+                    *excluded_modules,
                 ),
             )
-            attention_op_flops = 0
-            for layer in self.layers:
-                attention = layer.attention
-                head_dim = (
-                    attention.head_dim
-                    if attention.head_dim is not None
-                    else attention.dim // attention.n_heads
+            estimates = [decoder_estimate]
+            if self.vision_encoder is not None:
+                estimates.append(
+                    self.vision_encoder.build_flops_estimator(
+                        model.vision_encoder, output_modules=vision_outputs
+                    )
                 )
-                attention_op_flops += quadratic_attention_flops_per_token(
-                    num_heads=attention.n_heads,
-                    qk_head_dim=head_dim,
-                    v_head_dim=head_dim,
-                    seq_len=seq_len,
-                    sliding_window_size=attention.window_size,
+            if self.audio_encoder is not None:
+                estimates.append(
+                    self.audio_encoder.build_flops_estimator(
+                        model.audio_encoder,
+                        output_modules=(model.perception_emb_norm,),
+                    )
                 )
-            return nparams, 6 * active_nparams + attention_op_flops
+            return lambda input_dict: sum(
+                estimate(input_dict) for estimate in estimates
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)

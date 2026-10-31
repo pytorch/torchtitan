@@ -40,6 +40,7 @@ from torchtitan.distributed.pipeline_parallel import (
     prepare_pipeline_schedule_for_accelerator_graph,
 )
 from torchtitan.models.base import BaseModel
+from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import (
     build_device_memory_monitor,
@@ -246,7 +247,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     ntokens_seen: int
     sdc_replayer: SDCReplayer | None
     model_param_count: int
-    num_flops_per_token: int
+    model_active_param_count: int
+    step_num_flops: int
+    flops_estimator: FlopsEstimator
     has_quantization: bool
     loss: torch.Tensor
     loss_metrics: dict[str, torch.Tensor]
@@ -381,10 +384,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         )
         (
             self.model_param_count,
-            self.num_flops_per_token,
-        ) = self.model_config.get_nparams_and_flops(
-            model, self.config.training.max_context_length
+            self.model_active_param_count,
+        ) = self.model_config.get_parameter_counts(model)
+        self.flops_estimator = self.model_config.build_flops_estimator(
+            model, seq_len=self.config.training.max_context_length
         )
+        self.step_num_flops = 0
         config = self.config
         if self.parallelism_context.pp_enabled:
             (
@@ -444,7 +449,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
         logger.info(
             f"Model {type(self.model_config).__qualname__} size: "
-            f"{self.model_param_count:,} total parameters"
+            f"{self.model_param_count:,} total parameters, "
+            f"{self.model_active_param_count:,} active parameters"
         )
 
     def _parallelize_compile_kwargs(self) -> dict[str, Any]:
@@ -633,6 +639,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         """Run all microbatch groups for one optimizer update."""
         if not microbatch_groups:
             raise ValueError("microbatch_groups must not be empty.")
+        self.step_num_flops = 0
         self.num_accumulation_steps = len(microbatch_groups)
         self.garbage_collector.run(self.num_completed_steps + 1)
         self.optim.zero_grad(
@@ -696,6 +703,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         ``(arg_mbs, kwarg_mbs, target_mbs, loss_kwarg_mbs)``."""
         prepared_microbatches: list[tuple[Any, ...]] = []
         for microbatch in microbatch_group:
+            self.step_num_flops += self.flops_estimator(microbatch.as_input_dict())
             with (
                 sl.log_trace_span("preprocess_inputs"),
                 self.parallelism_context.activate_spmd(),
@@ -746,6 +754,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
         accumulated_loss: torch.Tensor | None = None
         loss_metrics: list[list[dict[str, torch.Tensor]]] = []
+        if preprocess_microbatch_groups_lazily:
+            self.step_num_flops = 0
         num_accumulation_steps = len(microbatch_groups)
         for accumulation_index, microbatch_group in enumerate(microbatch_groups):
             is_last_accumulation_step = accumulation_index == num_accumulation_steps - 1

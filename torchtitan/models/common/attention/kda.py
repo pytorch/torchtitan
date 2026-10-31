@@ -343,6 +343,15 @@ class KDA(LinearAttention):
                     f"conv_kernel_size must be positive, got {self.conv_kernel_size}"
                 )
 
+        def flops_per_token(self, seq_len: int) -> int:
+            from torchtitan.models.common.flops import delta_rule_flops_per_token
+
+            return delta_rule_flops_per_token(
+                num_heads=self.n_heads,
+                key_head_dim=self.head_dim,
+                v_head_dim=self.head_dim,
+            )
+
     def __init__(self, config: Config):
         super().__init__()
         self.n_heads = config.n_heads

@@ -118,21 +118,20 @@ def compute_training_performance_metrics(
     num_tokens: int,
     elapsed_time: float,
     non_data_parallel_size: int,
-    num_flops_per_token: int,
+    num_flops: float,
     gpu_peak_flops: float,
     has_quantization: bool,
 ) -> dict[str, float]:
     """Compute per-device throughput, TFLOPS, and optional MFU."""
     tokens_per_second = num_tokens / (elapsed_time * non_data_parallel_size)
-    tflops = num_flops_per_token * tokens_per_second / 1e12
+    device_flops_per_second = num_flops / (elapsed_time * non_data_parallel_size)
+    tflops = device_flops_per_second / 1e12
     metrics = {
         "tokens_per_second": tokens_per_second,
         "tflops": tflops,
     }
     if not has_quantization:
-        metrics["mfu_percent"] = (
-            100 * num_flops_per_token * tokens_per_second / gpu_peak_flops
-        )
+        metrics["mfu_percent"] = 100 * device_flops_per_second / gpu_peak_flops
     return metrics
 
 
@@ -406,7 +405,6 @@ class MetricsProcessor(Configurable):
     time_last_log: float
     step_last_log: int | None
 
-    num_flops_per_token: int
     has_quantization: bool
     optimizers: OptimizersContainer | None
     model_parts: list[torch.nn.Module] | None
@@ -455,7 +453,6 @@ class MetricsProcessor(Configurable):
         self.has_quantization = has_quantization
 
         # These variables have to be set later as they depend on other components or model.
-        self.num_flops_per_token = -1
         self.optimizers = None
         self.model_parts = None
 
@@ -579,6 +576,8 @@ class MetricsProcessor(Configurable):
         global_max_loss: float,
         grad_norm: float,
         extra_metrics: dict[str, Any] | None = None,
+        *,
+        num_flops: float,
     ):
         """
         Log training metrics including loss, throughput, and memory statistics.
@@ -591,9 +590,9 @@ class MetricsProcessor(Configurable):
                 Defined as max(local_loss_sum / local_valid_tokens)
             grad_norm: Gradient norm after clipping
             extra_metrics: Optional additional metrics to log
+            num_flops: Mean model-wide logical FLOPs per DP replica in this interval
 
         """
-        assert self.num_flops_per_token > 0, "num_flops_per_token must be set"
 
         time_delta = time.perf_counter() - self.time_last_log
 
@@ -601,7 +600,7 @@ class MetricsProcessor(Configurable):
             num_tokens=self.ntokens_since_last_log,
             elapsed_time=time_delta,
             non_data_parallel_size=self.parallelism_context.non_data_parallel_size,
-            num_flops_per_token=self.num_flops_per_token,
+            num_flops=num_flops,
             gpu_peak_flops=self.gpu_peak_flops,
             has_quantization=self.has_quantization,
         )

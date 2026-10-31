@@ -16,7 +16,7 @@ from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
-from torchtitan.models.base.model import BaseModel
+from torchtitan.models.base.model import BaseModel, FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.attention import (
     Attention,
@@ -149,6 +149,25 @@ class Decoder(BaseModel):
                 (config for _, config, _, _ in self.traverse(MoE.Config)),
                 None,
             )
+
+        def build_flops_estimator(
+            self,
+            model: Module,
+            *,
+            seq_len: int,
+            excluded_modules: tuple[Module | None, ...] = (),
+        ) -> FlopsEstimator:
+            from torchtitan.models.common.flops import active_parameter_flops_per_unit
+
+            parameter_flops = active_parameter_flops_per_unit(
+                model, excluded_modules=excluded_modules
+            )
+            attention_flops = sum(
+                attention.flops_per_token(seq_len)
+                for _, attention, _, _ in self.traverse(Attention.Config)
+            )
+            flops_per_token = parameter_flops + attention_flops
+            return lambda input_dict: flops_per_token * input_dict["input"].numel()
 
     # Set by the trainer when ChunkedLossWrapper is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().

@@ -15,7 +15,6 @@ from typing import Any, cast
 
 import spmd_types as spmd
 import torch
-from torch import nn
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -27,6 +26,8 @@ from torchtitan.distributed.spmd_types import (
     spmd_local_context,
     spmd_mesh_size,
 )
+from torchtitan.models.base.model import FlopsEstimator
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import AttentionMetadataMap
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
@@ -37,10 +38,7 @@ from torchtitan.models.common.multimodal import (
     scatter_vision_embeds,
 )
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
-from torchtitan.models.deepseek_v3.model import (
-    DeepSeekV3Model,
-    get_deepseek_v3_nparams_and_flops as get_kimi_k2_7_nparams_and_flops,
-)
+from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder
 
 from .state_dict_adapter import KimiK25StateDictAdapter
@@ -80,15 +78,27 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
     class Config(DeepSeekV3Model.Config):
         vision_encoder: KimiK25VisionEncoder.Config | None = None
 
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
-            kimi_model = cast("KimiK25Model", model)
-            return get_kimi_k2_7_nparams_and_flops(
-                self,
+        def build_flops_estimator(
+            self,
+            model: Module,
+            *,
+            seq_len: int,
+            excluded_modules: tuple[Module | None, ...] = (),
+        ) -> FlopsEstimator:
+            model = cast(KimiK25Model, model)
+            decoder_estimate = super(KimiK25Model.Config, self).build_flops_estimator(
                 model,
-                seq_len,
-                modules_excluded_from_active_params=(kimi_model.vision_encoder,),
+                seq_len=seq_len,
+                excluded_modules=(model.vision_encoder, *excluded_modules),
+            )
+            if self.vision_encoder is None:
+                return decoder_estimate
+            assert model.vision_encoder is not None
+            vision_estimate = self.vision_encoder.build_flops_estimator(
+                model.vision_encoder
+            )
+            return lambda input_dict: decoder_estimate(input_dict) + vision_estimate(
+                input_dict
             )
 
     def __init__(self, config: Config):

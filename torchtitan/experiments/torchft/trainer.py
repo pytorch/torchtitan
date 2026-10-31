@@ -228,6 +228,7 @@ class FaultTolerantTrainer(Configurable):
             ft_replica_id=config.fault_tolerance.replica_id,
             config_dict=config.to_dict(),
         )
+        self._local_num_flops_since_last_log = 0
         color = self.metrics_processor.color
 
         self.num_pp_microbatches = num_pp_microbatches
@@ -271,7 +272,6 @@ class FaultTolerantTrainer(Configurable):
                 pp_schedule=config.parallelism.pipeline_parallel_schedule,
                 color=color,
             )
-        self.metrics_processor.num_flops_per_token = engine.num_flops_per_token
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = engine.device_memory_monitor
@@ -358,6 +358,7 @@ class FaultTolerantTrainer(Configurable):
         # step_last_log on the first step, so keep this check after it.
         if self.metrics_processor.step_last_log == engine.num_completed_steps:
             self.metrics_processor.reset()
+            self._local_num_flops_since_last_log = 0
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
@@ -420,6 +421,7 @@ class FaultTolerantTrainer(Configurable):
         )
 
         grad_norm = engine.optim_step()
+        self._local_num_flops_since_last_log += engine.step_num_flops
 
         # log metrics
         if not should_log:
@@ -467,6 +469,26 @@ class FaultTolerantTrainer(Configurable):
             global_avg_loss = global_max_loss = accumulated_loss.item()
             global_ntokens_seen = engine.ntokens_seen
 
+        mean_num_flops = self._local_num_flops_since_last_log
+        ft_pg = engine.ft_manager.loss_sync_pg
+        if parallelism_context.dp_enabled or ft_pg is not None:
+            total_flops = dist_utils.dist_sum_tensor(
+                torch.tensor(mean_num_flops, dtype=torch.float64, device=engine.device),
+                mesh=parallelism_context.get_optional_mesh("dp"),
+                extra_pg=ft_pg,
+            )
+            # Read both reporting scalars with the existing grad-norm synchronization.
+            grad_norm_value, mean_num_flops = torch.stack(
+                (grad_norm, total_flops)
+            ).tolist()
+            mean_num_flops /= (
+                parallelism_context.dp_replicate * parallelism_context.dp_shard
+            )
+            if ft_pg is not None:
+                mean_num_flops /= ft_pg.size()
+        else:
+            grad_norm_value = float(grad_norm.item())
+
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             "lr": lr,
@@ -476,8 +498,9 @@ class FaultTolerantTrainer(Configurable):
             engine.num_completed_steps,
             global_avg_loss,
             global_max_loss,
-            grad_norm.item(),
+            grad_norm_value,
             extra_metrics=extra_metrics,
+            num_flops=mean_num_flops,
         )
 
     @record

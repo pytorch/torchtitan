@@ -258,6 +258,7 @@ class GraphTrainingEngine(TrainingEngine):
             kwarg_mbs: list[dict[str, Any]] = []
             target_mbs: list[torch.Tensor | tuple[torch.Tensor, ...]] = []
             for microbatch in microbatch_group:
+                self.step_num_flops += self.flops_estimator(microbatch.as_input_dict())
                 input_dict = microbatch.to_input_dict(self.device, non_blocking=True)
                 with (
                     sl.log_trace_span("preprocess_inputs"),

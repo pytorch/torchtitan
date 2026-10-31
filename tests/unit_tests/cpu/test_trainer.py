@@ -130,6 +130,7 @@ def _training_loop(trainer: TrainingEngine) -> SimpleNamespace:
         gradient_accumulation_steps=trainer.gradient_accumulation_steps,
         num_pp_microbatches=trainer.num_pp_microbatches,
         metrics_processor=trainer.metrics_processor,
+        _local_num_flops_since_last_log=0,
     )
 
 
@@ -300,6 +301,8 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs(
                 ),
             ),
             ntokens_seen=0,
+            step_num_flops=0,
+            flops_estimator=lambda inputs: 100,
             device=torch.device("cpu"),
         ),
     )
@@ -448,6 +451,8 @@ def test_forward_backward_runs_whole_accumulation(
         ),
     )
     engine.preprocess_inputs_kwargs = {"processor": "VALUE"}
+    engine.step_num_flops = 0
+    engine.flops_estimator = lambda inputs: 100
     engine.ntokens_seen = 100
     engine.num_completed_steps = 0
     engine.device = torch.device("cpu")
@@ -1001,6 +1006,8 @@ def test_trainer_accumulates_reused_accelerator_graph_losses(
             ),
             parallelism_context=SimpleNamespace(
                 dp_enabled=False,
+                dp_replicate=1,
+                dp_shard=1,
                 pp_enabled=False,
                 dp_cp_enabled=False,
                 ep_enabled=False,
@@ -1018,6 +1025,7 @@ def test_trainer_accumulates_reused_accelerator_graph_losses(
             checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
             metrics_processor=metrics_processor,
             num_completed_steps=0,
+            step_num_flops=600,
             ntokens_seen=3,
         ),
     )
@@ -1033,6 +1041,7 @@ def test_trainer_accumulates_reused_accelerator_graph_losses(
         6.0,
         4.0,
         extra_metrics={"n_tokens_seen": 3},
+        num_flops=600.0,
     )
     # The first step after loading starts a new metrics window.
     metrics_processor.reset.assert_called_once()
@@ -1269,7 +1278,7 @@ def test_compute_training_performance_metrics():
         num_tokens=20,
         elapsed_time=2.0,
         non_data_parallel_size=2,
-        num_flops_per_token=200,
+        num_flops=4000,
         gpu_peak_flops=1000,
         has_quantization=False,
     )

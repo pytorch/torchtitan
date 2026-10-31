@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Self, TYPE_CHECKING
 
@@ -24,6 +25,9 @@ if TYPE_CHECKING:
     from torchtitan.distributed.activation_remat import ActivationRematConfig
 
     from .state_dict_adapter import BaseStateDictAdapter
+
+
+FlopsEstimator = Callable[[Mapping[str, Any]], int]
 
 
 class BaseModel(Module, ABC):
@@ -102,9 +106,17 @@ class BaseModel(Module, ABC):
         An empty ``regions`` list runs named regions eagerly.
         """
 
+        def get_parameter_counts(self, model: Module) -> tuple[int, int]:
+            from torchtitan.models.common.flops import get_parameter_counts
+
+            return get_parameter_counts(model)
+
         @abstractmethod
-        def get_nparams_and_flops(self, model: Module, seq_len: int) -> tuple[int, int]:
-            pass
+        def build_flops_estimator(
+            self, model: Module, *, seq_len: int
+        ) -> FlopsEstimator:
+            """Build a CPU estimator for one raw training microbatch."""
+            raise NotImplementedError
 
     state_dict_adapter_cls: ClassVar[type[BaseStateDictAdapter] | None] = None
     pipeline_first_stage_module_fqns: ClassVar[tuple[str, ...]] = ()
