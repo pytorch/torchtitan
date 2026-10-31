@@ -20,7 +20,7 @@ from torchtitan.models.common.attn_gym import lightning_indexer
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.common.rope import CachedRoPE
+from torchtitan.models.common.rope import RoPE
 from torchtitan.tools.utils import has_cuda_capability
 
 # Shape suffixes: T = tokens, H = heads, D = head width, K = selected slots,
@@ -73,7 +73,7 @@ class Compressor(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        rope: CachedRoPE.Config
+        rope: RoPE.Config
         wkv: Linear.Config
         wgate: Linear.Config
         norm: RMSNorm.Config
@@ -200,7 +200,7 @@ class Indexer(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        rope: CachedRoPE.Config
+        rope: RoPE.Config
         wq_b: Linear.Config
         weights_proj: Linear.Config
         compressor: "Compressor.Config"

@@ -35,7 +35,7 @@ from torchtitan.models.common.flops import (
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.common.rope import CachedRoPE
+from torchtitan.models.common.rope import RoPE
 
 from .state_dict_adapter import GptOssStateDictAdapter
 
@@ -67,7 +67,7 @@ class GptOssAttention(Attention):
         )
         sliding_window_size: int | None = None
         """Per-layer causal sliding-window size"""
-        rope: CachedRoPE.Config
+        rope: RoPE.Config
 
         @property
         def softmax_scale(self) -> float:

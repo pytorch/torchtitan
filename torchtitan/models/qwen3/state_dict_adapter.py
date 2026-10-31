@@ -23,7 +23,7 @@ from torch.distributed.tensor import DTensor
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe.state_dict_adapter import MoEStateDictAdapter
 
-from torchtitan.models.common.rope import CachedCosSinRoPE
+from torchtitan.models.common.rope import CosSinRoPE
 
 if TYPE_CHECKING:
     from .model import Qwen3Model
@@ -155,7 +155,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                 f"{type(self).__name__} does not support loading quantized "
                 "HF checkpoints."
             )
-        self._validate_hf_rope_config(CachedCosSinRoPE.Config)
+        self._validate_hf_rope_config(CosSinRoPE.Config)
 
         state_dict = {}
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}

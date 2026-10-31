@@ -66,7 +66,7 @@ from torchtitan.models.common.moe.sharding import (
 )
 from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.common.rope import CachedRoPE
+from torchtitan.models.common.rope import RoPE
 
 
 DEFAULT_DEBUG_MODEL_SEQ_LEN = 2048
@@ -231,7 +231,7 @@ def make_gqa_config(
     wqkv_param_init: dict[str, Callable],
     wo_param_init: dict[str, Callable],
     inner_attention: InnerAttention.Config,
-    rope: CachedRoPE.Config | None,
+    rope: RoPE.Config | None,
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
     qk_norm: RMSNorm.Config | None = None,

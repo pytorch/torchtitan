@@ -20,8 +20,7 @@ from torchtitan.config.transform import (
     validate_converter_compatibility,
 )
 from torchtitan.models.common import (
-    CachedComplexRoPE,
-    CachedRoPE,
+    ComplexRoPE,
     DenseFeedForward,
     Embedding,
     FeedForward,
@@ -30,6 +29,7 @@ from torchtitan.models.common import (
     Linear,
     MoE,
     RMSNorm,
+    RoPE,
     RowParallelLinear,
     SqrtSoftplus,
 )
@@ -134,7 +134,7 @@ def _make_compressor_config(
     compress_ratio: int,
     norm_eps: float,
     coff: int,
-    rope: CachedRoPE.Config,
+    rope: RoPE.Config,
 ) -> "Compressor.Config":
     return Compressor.Config(
         rope=dataclasses.replace(rope, sharding_config=rope_cache_sharding_config()),
@@ -181,7 +181,7 @@ def _make_indexer_config(
     q_lora_rank: int,
     compress_ratio: int,
     norm_eps: float,
-    rope: CachedRoPE.Config,
+    rope: RoPE.Config,
 ) -> "Indexer.Config":
     coff = 2  # overlap always True for indexer
     return Indexer.Config(
@@ -233,7 +233,7 @@ def _make_v4_attn_config(
     index_head_dim: int,
     index_topk: int,
     n_layers: int,
-    rope: CachedRoPE.Config,
+    rope: RoPE.Config,
     enable_sp: bool,
 ) -> DeepSeekV4Attention.Config:
     hd = head_dim
@@ -505,8 +505,8 @@ def _build_v4_layers(
     route_norm: bool,
     route_scale: float,
     load_balance_coeff: float,
-    rope: CachedRoPE.Config,
-    rope_compress: CachedRoPE.Config,
+    rope: RoPE.Config,
+    rope_compress: RoPE.Config,
     hc_mult: int = 4,
     sinkhorn_iters: int = 20,
     hc_eps: float = 1e-6,
@@ -618,7 +618,7 @@ def _build_v4_layers(
 
 def _make_mtp_inner_block(
     inner_cfg: DeepSeekV4TransformerBlock.Config,
-    rope: CachedRoPE.Config,
+    rope: RoPE.Config,
 ) -> DeepSeekV4TransformerBlock.Config:
     block_cfg = copy.deepcopy(inner_cfg)
     attn_cfg = block_cfg.attention
@@ -650,7 +650,7 @@ def _build_mtp_layers(
     hc_mult: int = 4,
     norm_eps: float = 1e-6,
     hc_eps: float = 1e-6,
-    rope: CachedRoPE.Config,
+    rope: RoPE.Config,
 ) -> list[MTPBlock.Config]:
     mtp_layers = []
     for depth in range(num_mtp_layers):
@@ -769,13 +769,13 @@ def _debugmodel(
     compress_rope_theta = 40000.0
     original_seq_len = 65536
 
-    rope = CachedComplexRoPE.Config(
+    rope = ComplexRoPE.Config(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=10000.0,
         scaling="none",
     )
-    rope_compress = CachedComplexRoPE.Config(
+    rope_compress = ComplexRoPE.Config(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=compress_rope_theta,
@@ -916,13 +916,13 @@ def _deepseek_v4_flash(
     compress_rope_theta = 160000.0
     original_seq_len = 65536
 
-    rope = CachedComplexRoPE.Config(
+    rope = ComplexRoPE.Config(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=10000.0,
         scaling="none",
     )
-    rope_compress = CachedComplexRoPE.Config(
+    rope_compress = ComplexRoPE.Config(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=compress_rope_theta,
@@ -1064,13 +1064,13 @@ def _deepseek_v4_pro(
     compress_rope_theta = 160000.0
     original_seq_len = 65536
 
-    rope = CachedComplexRoPE.Config(
+    rope = ComplexRoPE.Config(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=10000.0,
         scaling="none",
     )
-    rope_compress = CachedComplexRoPE.Config(
+    rope_compress = ComplexRoPE.Config(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=compress_rope_theta,

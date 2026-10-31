@@ -38,7 +38,7 @@ class TestVisionAttention(unittest.TestCase):
             wk=Linear.Config(in_features=dim, out_features=dim),
             wv=Linear.Config(in_features=dim, out_features=dim),
             proj=Linear.Config(in_features=dim, out_features=dim),
-            rope_apply=ComplexRoPE.Config(),
+            rope=ComplexRoPE.Config(dim=dim // num_heads),
         )
 
         class OffsetRoPE(ComplexRoPE):
@@ -53,7 +53,7 @@ class TestVisionAttention(unittest.TestCase):
 
         with patch.dict("torchtitan.config.override._REGISTRY"):
 
-            @override(target=ComplexRoPE.Config, fqns=["rope_apply"], exact=True)
+            @override(target=ComplexRoPE.Config, fqns=["rope"], exact=True)
             def replace_vision_rope(cfg):
                 return derive(cfg, OffsetRoPE.Config)
 
@@ -63,6 +63,7 @@ class TestVisionAttention(unittest.TestCase):
             self.assertEqual(len(replacements), 1)
 
         attention = config.build()
+        self.assertIsNone(attention.rope.cache)
         identity_attention = _IdentityAttention()
         attention.flex_attention = identity_attention
 

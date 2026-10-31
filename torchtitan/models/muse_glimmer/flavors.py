@@ -20,12 +20,7 @@ from torchtitan.config.transform import (
 )
 
 from torchtitan.models.base.sharding import ShardingConfig
-from torchtitan.models.common import (
-    CachedComplexRoPE,
-    Embedding,
-    Linear,
-    RowParallelLinear,
-)
+from torchtitan.models.common import ComplexRoPE, Embedding, Linear, RowParallelLinear
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     QKVLinear,
@@ -226,7 +221,7 @@ def _build_muse_glimmer_attention(
             head_dim, _NORM_EPS, sharding_config=scaleless_head_norm_sharding_config()
         ),
         inner_attention=inner_attention,
-        rope=CachedComplexRoPE.Config(
+        rope=ComplexRoPE.Config(
             dim=head_dim,
             max_context_length=max_context_length,
             theta=_ROPE_THETA,

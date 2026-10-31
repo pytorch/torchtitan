@@ -11,7 +11,7 @@ block-diagonal FlexInnerAttention mask helper and the pre-norm transformer block
 RoPE differs per model, so each encoder passes ``rope_cache`` through the block
 to the attention as a per-forward arg (a tensor, so config-based sharding can
 annotate it before it meets the head-sharded q/k), and the attention applies it
-with its configured ``rope_apply``.
+with its configured ``rope``.
 
 Shape suffixes:
 - T = packed visual tokens
@@ -20,7 +20,6 @@ Shape suffixes:
 - Dh = head dim
 """
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import spmd_types as spmd
@@ -38,11 +37,6 @@ from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.models.common.rope import RoPE
 
 compiled_create_block_mask = compile(create_block_mask)
-
-# Applies rotary position embedding: (query, key, rope_cache) -> (query, key).
-RopeApply = Callable[
-    [torch.Tensor, torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]
-]
 
 
 class InvariantRowParallelLinear(Linear):
@@ -160,7 +154,7 @@ class VisionAttention(Module):
     """Multi-head self-attention with FlexInnerAttention over visual patches.
 
     Separate q/k/v projections (clean per-head ColwiseParallel under TP). RoPE is
-    applied via the configured ``rope_apply`` so this class is reused
+    applied via the configured ``rope`` so this class is reused
     across models with different rotary formulations.
     """
 
@@ -172,7 +166,7 @@ class VisionAttention(Module):
         wk: Linear.Config
         wv: Linear.Config
         proj: Linear.Config
-        rope_apply: RoPE.Config
+        rope: RoPE.Config
         inner_attention: Module.Config = field(
             default_factory=FlexInnerAttention.Config
         )
@@ -190,7 +184,7 @@ class VisionAttention(Module):
         self.wk = config.wk.build()
         self.wv = config.wv.build()
         self.proj = config.proj.build()
-        self.rope_apply: RopeApply = config.rope_apply.build()
+        self.rope = config.rope.build()
         self.flex_attention = config.inner_attention.build()
 
     def _qkv(
@@ -218,7 +212,7 @@ class VisionAttention(Module):
 
         remat.recompute_needs_tensor(q_THDh, k_THDh)
         if use_rope:
-            q_THDh, k_THDh = self.rope_apply(q_THDh, k_THDh, rope_cache)
+            q_THDh, k_THDh = self.rope(q_THDh, k_THDh, rope_cache=rope_cache)
 
         out_THDh = remat.region(
             self.flex_attention,

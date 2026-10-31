@@ -64,7 +64,7 @@ from typing import Any, TYPE_CHECKING
 
 from torchtitan.models.base.state_dict_adapter import dtensor_safe, StateDictAdapter
 
-from torchtitan.models.common.rope import CachedComplexRoPE
+from torchtitan.models.common.rope import ComplexRoPE
 
 if TYPE_CHECKING:
     from .model import MuseGlimmerModel
@@ -263,7 +263,7 @@ class MuseGlimmerStateDictAdapter(StateDictAdapter):
                 f"{type(self).__name__} does not support loading quantized "
                 "HF checkpoints."
             )
-        self._validate_hf_rope_config(CachedComplexRoPE.Config)
+        self._validate_hf_rope_config(ComplexRoPE.Config)
 
         n_heads, n_kv_heads, dim, head_dim = self._attn_geometry()
         v_heads = self._vision_num_heads()

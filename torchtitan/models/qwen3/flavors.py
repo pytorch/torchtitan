@@ -19,10 +19,10 @@ from torchtitan.config.transform import (
 )
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
-    CachedCosSinRoPE,
-    CachedRoPE,
+    CosSinRoPE,
     Embedding,
     Linear,
+    RoPE,
     Softmax,
     TransformerBlock,
 )
@@ -111,7 +111,7 @@ def _build_qwen3_layers(
     head_dim: int,
     hidden_dim: int,
     attn_backend: str,
-    rope: CachedRoPE.Config,
+    rope: RoPE.Config,
     enable_sp: bool,
 ) -> list[TransformerBlock.Config]:
     """Build sharded per-layer configs for dense Qwen3 models."""
@@ -158,7 +158,7 @@ def _build_qwen3_moe_layers(
     num_experts: int,
     top_k: int,
     attn_backend: str,
-    rope: CachedRoPE.Config,
+    rope: RoPE.Config,
     enable_sp: bool,
     enable_ep: bool,
 ) -> list[TransformerBlock.Config]:
@@ -252,7 +252,7 @@ def _debugmodel(
             head_dim=head_dim,
             hidden_dim=3072,
             attn_backend=attn_backend,
-            rope=CachedCosSinRoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_context_length=seq_len,
                 theta=1000000.0,
@@ -302,7 +302,7 @@ def _0_6b(
             head_dim=head_dim,
             hidden_dim=3072,
             attn_backend=attn_backend,
-            rope=CachedCosSinRoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_context_length=seq_len,
                 theta=1000000.0,
@@ -352,7 +352,7 @@ def _1_7b(
             head_dim=head_dim,
             hidden_dim=6144,
             attn_backend=attn_backend,
-            rope=CachedCosSinRoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_context_length=seq_len,
                 theta=1000000.0,
@@ -402,7 +402,7 @@ def _4b(
             head_dim=head_dim,
             hidden_dim=9728,
             attn_backend=attn_backend,
-            rope=CachedCosSinRoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_context_length=seq_len,
                 theta=1000000.0,
@@ -451,7 +451,7 @@ def _8b(
             head_dim=head_dim,
             hidden_dim=12288,
             attn_backend=attn_backend,
-            rope=CachedCosSinRoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_context_length=seq_len,
                 theta=1000000.0,
@@ -500,7 +500,7 @@ def _14b(
             head_dim=head_dim,
             hidden_dim=17408,
             attn_backend=attn_backend,
-            rope=CachedCosSinRoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_context_length=seq_len,
                 theta=1000000.0,
@@ -549,7 +549,7 @@ def _32b(
             head_dim=head_dim,
             hidden_dim=25600,
             attn_backend=attn_backend,
-            rope=CachedCosSinRoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_context_length=seq_len,
                 theta=1000000.0,
@@ -606,7 +606,7 @@ def _debugmodel_moe(
             num_experts=64,
             top_k=8,
             attn_backend=attn_backend,
-            rope=CachedCosSinRoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_context_length=seq_len,
                 theta=1000000.0,
@@ -661,7 +661,7 @@ def _30b_a3b(
             num_experts=128,
             top_k=8,
             attn_backend=attn_backend,
-            rope=CachedCosSinRoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_context_length=seq_len,
                 theta=1000000.0,
@@ -716,7 +716,7 @@ def _235b_a22b(
             num_experts=128,
             top_k=8,
             attn_backend=attn_backend,
-            rope=CachedCosSinRoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_context_length=seq_len,
                 theta=1000000.0,

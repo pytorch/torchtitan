@@ -324,7 +324,7 @@ class _CountingVisionAttention(VisionAttention):
         self.wk = _CountingLinear(_linear_config(4, 4))
         self.wv = _CountingLinear(_linear_config(4, 4))
         self.proj = _CountingLinear(_linear_config(4, 4))
-        self.rope_apply = _vision_identity_rope
+        self.rope = _vision_identity_rope
         self.flex_attention = _CountingOp(_vision_inner_attention)
 
 

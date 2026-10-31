@@ -27,7 +27,7 @@ from torchtitan.models.common.attention.cp_mla import (
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.common.rope import CachedComplexRoPE, CosSinRoPE
+from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 from torchtitan_recipes.overrides.fused_mla import (
@@ -59,7 +59,7 @@ class TestFusedMLAOverrideConfig(unittest.TestCase):
             wo=Linear.Config(in_features=64, out_features=64),
             q_norm=RMSNorm.Config(normalized_shape=1),
             kv_norm=RMSNorm.Config(normalized_shape=32),
-            rope=CachedComplexRoPE.Config(dim=16, max_context_length=128),
+            rope=ComplexRoPE.Config(dim=16, max_context_length=128),
             inner_attention=MLAAttention.Config(
                 wkv_b=Linear.Config(in_features=32, out_features=128),
                 packed_kv_head_dim=32,
@@ -95,8 +95,8 @@ class TestFusedMLAOverrideConfig(unittest.TestCase):
     def test_non_cp_backend_still_builds(self):
         config = fused_mla(self._attention_config())
         self.assertIsInstance(config.build(), FusedMLAAttention)
-        config.rope.rope_apply = CosSinRoPE.Config()
-        with self.assertRaisesRegex(ValueError, "cannot use a custom rope_apply"):
+        config.rope = ComplexRoPE.Config(dim=16)
+        with self.assertRaisesRegex(ValueError, "requires an internal RoPE cache"):
             config.build()
 
     def test_all_kernels_are_autotuned_over_head_geometry(self):
@@ -201,7 +201,7 @@ class TestFusedMLANumerics(unittest.TestCase):
         FlexInnerAttention.inductor_configs["max_autotune"] = False
         FlexInnerAttention.inductor_configs["coordinate_descent_tuning"] = False
         cuda = torch.device("cuda")
-        self.rope = CachedComplexRoPE.Config(
+        self.rope = ComplexRoPE.Config(
             dim=self.rope_dim,
             max_context_length=128,
             scaling="yarn",
@@ -276,7 +276,7 @@ class TestFusedMLANumerics(unittest.TestCase):
             dim=-1,
         )
         cache = self.rope.cache[self.positions].unsqueeze(0).unsqueeze(2)
-        q_pos, _ = self.rope.rope_apply(
+        q_pos, _ = self.rope.apply_rotary_emb(
             q_pos,
             q_pos[:, :, :1],
             cache,
@@ -368,7 +368,7 @@ class TestFusedMLANumerics(unittest.TestCase):
             dim=-1,
         )
         cache = self.rope.cache[self.positions].unsqueeze(0).unsqueeze(2)
-        q_pos, _ = self.rope.rope_apply(
+        q_pos, _ = self.rope.apply_rotary_emb(
             q_pos,
             q_pos[:, :, :1],
             cache,
@@ -422,7 +422,7 @@ class TestFusedMLANumerics(unittest.TestCase):
         )
         k_pos_view = reference_k_pos.unsqueeze(2)
         cache = self.rope.cache[self.positions].unsqueeze(0).unsqueeze(2)
-        _, rotated_k_pos = self.rope.rope_apply(
+        _, rotated_k_pos = self.rope.apply_rotary_emb(
             k_pos_view,
             k_pos_view,
             cache,

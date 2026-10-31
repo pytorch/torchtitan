@@ -22,12 +22,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.common.rope import (
-    _RotatePairs,
-    CachedComplexRoPE,
-    CachedRoPE,
-    ComplexRoPE,
-)
+from torchtitan.models.common.rope import _RotatePairs, ComplexRoPE, RoPE
 
 __all__ = ["DeepSeekMLAAttention"]
 
@@ -50,7 +45,7 @@ class DeepSeekMLAAttention(Attention):
         qk_nope_head_dim: int = 128
         qk_rope_head_dim: int = 64
         v_head_dim: int = 128
-        rope: CachedRoPE.Config
+        rope: RoPE.Config
         inner_attention: MLAAttention.Config  # pyrefly: ignore[bad-override]
         mscale: float = 1.0
 
@@ -161,7 +156,7 @@ class DeepSeekMLAAttention(Attention):
 
     # Cat options: _RotateTail concatenates q's untouched int32 words with the rotated ones;
     # Inductor's default pointwise cat makes that masked loads, slower than a plain cat.
-    # No pointwise autotuning, as in CachedComplexRoPE.forward: RoPE is inlined here, so this region's options apply.
+    # Match ComplexRoPE's cached compile options; RoPE is inlined in this region.
     @local_compile(
         "mla_qk",
         batch_invariant=True,
@@ -191,15 +186,14 @@ class DeepSeekMLAAttention(Attention):
         k_pe = k_pe.unsqueeze(1)
         if (
             torch.compiler.is_compiling()
-            and type(self.rope) is CachedComplexRoPE
-            and type(self.rope.rope_apply) is ComplexRoPE
+            and type(self.rope) is ComplexRoPE
+            and self.rope.cache is not None
             and q.dtype == torch.bfloat16
             and q.is_contiguous()
         ):
-            # Under compile, CachedComplexRoPE's cache holds adjacent (cos, sin) pairs, so a contiguous
-            # bf16 q can rotate inside its row viewed as int32 pairs (_RotateTail).
-            # Eager execution and custom cache modules or rotary operations use
-            # split -> rope -> cat below.
+            # Under compile, ComplexRoPE's cache holds adjacent (cos, sin) pairs, so a contiguous
+            # bf16 q can rotate inside its row viewed as int32 pairs (_RotateTail). Eager and
+            # ComplexRoPE subclasses, which may replace forward, keep split -> rope -> cat below.
             cache = self.rope._reshape_cache(q, positions).unflatten(-1, (-1, 2))
             cos, sin = cache[..., 0], cache[..., 1]
             return _RotateTail.apply(q, cos, sin), _RotatePairs.apply(k_pe, cos, sin)

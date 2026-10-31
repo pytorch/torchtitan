@@ -12,7 +12,7 @@ import unittest
 import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.rope import CachedRoPE, ComplexRoPE
+from torchtitan.models.common.rope import ComplexRoPE, RoPE
 from torchtitan.models.deepseek_v4 import build_model_config as build_dsv4_config
 from torchtitan.models.llama3 import MODEL_FLAVORS
 from torchtitan.models.llama3.model import Llama3Model
@@ -36,20 +36,13 @@ def _with_layer_theta(
     return dataclasses.replace(config, layers=layers)
 
 
-def _ropes(model: torch.nn.Module) -> list[CachedRoPE]:
-    return [m for m in model.modules() if isinstance(m, CachedRoPE)]
+def _ropes(model: torch.nn.Module) -> list[RoPE]:
+    return [m for m in model.modules() if isinstance(m, RoPE)]
 
 
 class TestRoPECacheTying(unittest.TestCase):
     def test_caches_are_shared_after_build(self):
-        class AlternateRoPE(ComplexRoPE):
-            @dataclasses.dataclass(kw_only=True, slots=True)
-            class Config(ComplexRoPE.Config):
-                pass
-
-        config = _make_config()
-        config.layers[1].attention.rope.rope_apply = AlternateRoPE.Config()
-        ropes = _ropes(Llama3Model(config))
+        ropes = _ropes(Llama3Model(_make_config()))
         self.assertGreater(len(ropes), 1)
         for rope in ropes[1:]:
             self.assertIs(rope.cache, ropes[0].cache)
@@ -58,10 +51,13 @@ class TestRoPECacheTying(unittest.TestCase):
         """Mirror the trainer: build on meta, ``to_empty()``, then ``init_states()``."""
         with torch.device("meta"):
             model = Llama3Model(_make_config())
+            model.external_rope = ComplexRoPE.Config(dim=64).build()
         model.to_empty(device="cpu")
         model.init_states()
+        self.assertIsNone(model.external_rope.cache)
+        self.assertFalse(model.external_rope.state_dict())
 
-        ropes = _ropes(model)
+        ropes = [rope for rope in _ropes(model) if rope.cache is not None]
         expected = ropes[0]._precompute_cache()
         for rope in ropes:
             self.assertIs(rope.cache, ropes[0].cache)
@@ -98,7 +94,7 @@ class TestDeepSeekV4RoPECacheTying(unittest.TestCase):
 
         caches = {}
         for name, module in model.named_modules():
-            if isinstance(module, CachedRoPE):
+            if isinstance(module, RoPE):
                 caches.setdefault(id(module.cache), []).append((name, module))
         self.assertEqual(len(caches), 2)
 

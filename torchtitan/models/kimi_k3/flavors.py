@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """Kimi K3 model flavors."""
+
 from collections.abc import Callable
 from dataclasses import replace
 from functools import partial
@@ -477,7 +478,7 @@ def _vision_encoder_config(
                 sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
             ),
             proj=_vision_row_parallel_linear(qkv_dim, dim),
-            rope_apply=ComplexRoPE.Config(),
+            rope=ComplexRoPE.Config(dim=head_dim),
             inner_attention=FlexInnerAttention.Config(
                 sharding_config=vision_inner_attention_sharding_config()
             ),

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """Kimi K2.5 model flavors."""
+
 from collections.abc import Callable
 from functools import partial
 
@@ -18,7 +19,7 @@ from torchtitan.config.transform import (
 )
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
-    CachedComplexRoPE,
+    ComplexRoPE,
     Embedding,
     Linear,
     RMSNorm,
@@ -34,7 +35,6 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
     InvariantRowParallelLinear,
     VisionAttention,
@@ -207,7 +207,7 @@ def _vision_encoder_config(
                 sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
             ),
             proj=_vision_row_parallel_linear(dim, dim),
-            rope_apply=ComplexRoPE.Config(),
+            rope=ComplexRoPE.Config(dim=head_dim),
             inner_attention=FlexInnerAttention.Config(
                 sharding_config=vision_inner_attention_sharding_config()
             ),
@@ -315,7 +315,7 @@ def _debugmodel(
         router_top_k=3,
         router_score_func=Softmax.Config(),
         attn_backend=attn_backend,
-        rope=CachedComplexRoPE.Config(
+        rope=ComplexRoPE.Config(
             dim=rope_dim,
             max_context_length=seq_len,
             theta=10000.0,
@@ -407,7 +407,7 @@ def _moonlight_16b_a3b_config(
         router_route_scale=2.446,
         router_route_norm=True,
         attn_backend=attn_backend,
-        rope=CachedComplexRoPE.Config(
+        rope=ComplexRoPE.Config(
             dim=64,
             max_context_length=max_context_length,
             theta=rope_theta,
@@ -540,7 +540,7 @@ def _kimi_k2_5(
         router_route_scale=2.827,
         router_route_norm=True,
         attn_backend=attn_backend,
-        rope=CachedComplexRoPE.Config(
+        rope=ComplexRoPE.Config(
             dim=rope_dim,
             max_context_length=seq_len,
             theta=50000.0,

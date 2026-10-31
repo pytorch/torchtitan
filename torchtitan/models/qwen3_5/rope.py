@@ -8,22 +8,22 @@ from dataclasses import dataclass, field
 
 import torch
 
-from torchtitan.models.common.rope import _maybe_check_max_pos, CachedCosSinRoPE
+from torchtitan.models.common.rope import _maybe_check_max_pos, CosSinRoPE
 
 
-class MRoPE(CachedCosSinRoPE):
+class MRoPE(CosSinRoPE):
     """Multi-dimensional RoPE for Qwen3.5 temporal/height/width positions.
 
     Standard per-layer RoPE: each full-attention layer owns an ``MRoPE`` and
-    applies it through ``CachedRoPE.forward`` -> ``_reshape_cache`` -> ``rope_apply``.
+    applies it through ``RoPE.forward`` -> ``_reshape_cache`` -> ``apply_rotary_emb``.
     The only override is ``_reshape_cache``: for 2D ``(num_tokens, 3)`` MRoPE
     positions it builds an interleaved cos/sin cache; for 1D
     ``(num_tokens,)`` text
-    positions it falls back to the plain ``CachedCosSinRoPE`` per-token lookup.
+    positions it falls back to the plain ``CosSinRoPE`` per-token lookup.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(CachedCosSinRoPE.Config):
+    class Config(CosSinRoPE.Config):
         mrope_section: list[int] = field(default_factory=lambda: [24, 20, 20])
 
     def __init__(self, config: Config):
@@ -51,7 +51,7 @@ class MRoPE(CachedCosSinRoPE):
 
         Dispatches on position rank: 2D ``(num_tokens, 3)`` MRoPE positions
         take the interleaved scatter; everything else (1D text positions or
-        ``None``) falls back to the plain ``CachedCosSinRoPE`` lookup.
+        ``None``) falls back to the plain ``CosSinRoPE`` lookup.
         """
         if positions is not None and positions.ndim == 2:
             if positions.shape[-1] != 3:
@@ -71,7 +71,7 @@ class MRoPE(CachedCosSinRoPE):
         Returns:
             ``(num_tokens, 1, dim * 2)`` cache, broadcastable to the
             ``(num_tokens, n_heads, rotary_dim)`` query/key in
-            ``rope_apply``.
+            ``apply_rotary_emb``.
 
         The scatter runs on plain local tensors carrying SPMD annotations.
         """

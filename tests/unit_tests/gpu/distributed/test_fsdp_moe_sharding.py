@@ -38,7 +38,7 @@ def _qwen3_moe_config(
     num_experts: int = 8, *, enable_sp: bool = False, enable_ep: bool = False
 ) -> Qwen3Model.Config:
     """Build a tiny, sharded Qwen3 MoE config with a configurable number of experts."""
-    from torchtitan.models.common import CachedCosSinRoPE, Embedding, Linear, RMSNorm
+    from torchtitan.models.common import CosSinRoPE, Embedding, Linear, RMSNorm
     from torchtitan.models.common.decoder_sharding import (
         lm_head_sharding_config,
         pre_lm_head_norm_sharding_config,
@@ -85,7 +85,7 @@ def _qwen3_moe_config(
             # Most tests only inspect expert-parameter sharding. The postprocess
             # test also runs forward and backward with the default flex backend.
             attn_backend="flex",
-            rope=CachedCosSinRoPE.Config(
+            rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_context_length=4096,
                 theta=1000000.0,
