@@ -40,7 +40,6 @@ __all__ = ["Decoder", "TransformerBlock"]
 
 logger = logging.getLogger(__name__)
 
-
 # TODO: we can unify the TransformerBlock impl across all models when
 # there is no special logic for each model.
 class TransformerBlock(Module):
@@ -62,7 +61,7 @@ class TransformerBlock(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        attention: Attention.Config  # required, no default
+        attention: Attention.Config
         feed_forward: FeedForward.Config
         attention_norm: Module.Config
         ffn_norm: Module.Config
@@ -85,10 +84,7 @@ class Decoder(BaseModel):
         lm_head: Linear.Config
         tok_embeddings: Embedding.Config
         norm: RMSNorm.Config
-        # TODO(fegin): revisit
-        # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3033849265
-        # and fix the typing here
-        layers: list  # list[TransformerBlock.Config] or subclass configs
+        layers: list[TransformerBlock.Config]
         # Tie ``tok_embeddings`` and ``lm_head`` to share one weight. Models
         # that support it set this True in their config factories; the tying
         # itself is handled by ``Decoder.__init__`` / ``Decoder.init_states``.

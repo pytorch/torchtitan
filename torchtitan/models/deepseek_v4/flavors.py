@@ -40,6 +40,7 @@ from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_shared_expert_ffn_config,
 )
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     colwise_sharding_config,
     dense_activation_placement,
@@ -515,7 +516,7 @@ def _build_v4_layers(
     swiglu_limit: float | None = None,
     enable_sp: bool,
     enable_ep: bool,
-) -> list[DeepSeekV4TransformerBlock.Config]:
+) -> list[TransformerBlock.Config]:
     if dense_layers is None:
         dense_layers = set()
     if dense_hidden_dim is None:
@@ -523,7 +524,7 @@ def _build_v4_layers(
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)
     hc_pre_sharding = hc_pre_sharding_config(enable_sp=enable_sp)
 
-    layers = []
+    layers: list[TransformerBlock.Config] = []
     for layer_id in range(n_layers):
         actual_layer_id = layer_offset + layer_id
         cr = compress_ratios[layer_id] if layer_id < len(compress_ratios) else 1
@@ -622,6 +623,7 @@ def _make_mtp_inner_block(
 ) -> DeepSeekV4TransformerBlock.Config:
     block_cfg = copy.deepcopy(inner_cfg)
     attn_cfg = block_cfg.attention
+    assert isinstance(attn_cfg, DeepSeekV4Attention.Config)
     inner_attn_cfg = attn_cfg.inner_attention
     attn_cfg.compress_ratio = 1
     attn_cfg.compressor = None
@@ -642,7 +644,7 @@ def _make_mtp_inner_block(
 
 
 def _build_mtp_layers(
-    inner_cfg: DeepSeekV4TransformerBlock.Config,
+    inner_cfg: TransformerBlock.Config,
     *,
     dim: int,
     n_main_layers: int,
@@ -652,6 +654,7 @@ def _build_mtp_layers(
     hc_eps: float = 1e-6,
     rope: RoPE.Config,
 ) -> list[MTPBlock.Config]:
+    assert isinstance(inner_cfg, DeepSeekV4TransformerBlock.Config)
     mtp_layers = []
     for depth in range(num_mtp_layers):
         layer_id = n_main_layers + depth
@@ -1215,7 +1218,9 @@ def build_model_config(
             "Indexer loss coefficient must be nonnegative and chunk size positive."
         )
     for layer in config.layers:
-        inner_attention = layer.attention.inner_attention
+        attention = layer.attention
+        assert isinstance(attention, DeepSeekV4Attention.Config)
+        inner_attention = attention.inner_attention
         if inner_attention.aux_loss is not None:
             inner_attention.aux_loss = (
                 dataclasses.replace(

@@ -15,6 +15,7 @@ from torch import nn
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.attention import (
     FlexAttentionMetadata,
+    GQAttention,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -98,6 +99,7 @@ class Llama3Model(Decoder):
             attention_op_flops = 0
             for layer in self.layers:
                 attention = layer.attention
+                assert isinstance(attention, GQAttention.Config)
                 head_dim = (
                     attention.head_dim
                     if attention.head_dim is not None

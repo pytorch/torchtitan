@@ -41,6 +41,7 @@ from torchtitan.models.common.config_utils import (
     make_router_config,
     make_shared_expert_down_proj_config,
 )
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     head_norm_sharding_config,
     inner_attention_local_spmd_sharding_config,
@@ -471,9 +472,9 @@ def _build_qwen35_layers(
     attn_backend: str,
     enable_sp: bool,
     has_vision_encoder: bool,
-) -> list[Qwen35TransformerBlock.Config]:
+) -> list[TransformerBlock.Config]:
     """Build sharded per-layer configs for dense Qwen3.5 models."""
-    layers = []
+    layers: list[TransformerBlock.Config] = []
     for layer_id in range(n_layers):
         is_full = (layer_id + 1) % full_attention_interval == 0
 
@@ -549,9 +550,9 @@ def _build_qwen35_moe_layers(
     enable_sp: bool,
     enable_ep: bool,
     has_vision_encoder: bool,
-) -> list[Qwen35TransformerBlock.Config]:
+) -> list[TransformerBlock.Config]:
     """Build sharded per-layer configs for MoE Qwen3.5 models with shared expert."""
-    layers = []
+    layers: list[TransformerBlock.Config] = []
     for layer_id in range(n_layers):
         is_full = (layer_id + 1) % full_attention_interval == 0
 

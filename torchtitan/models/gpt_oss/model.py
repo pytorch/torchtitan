@@ -237,6 +237,7 @@ class GptOssModel(Decoder):
             attention_op_flops = 0
             for layer in self.layers:
                 attention = layer.attention
+                assert isinstance(attention, GptOssAttention.Config)
                 attention_op_flops += quadratic_attention_flops_per_token(
                     num_heads=attention.n_heads,
                     qk_head_dim=attention.head_dim,

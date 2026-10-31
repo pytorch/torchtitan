@@ -42,6 +42,8 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         model_config: DeepSeekV3Model.Config,
         hf_assets_path: str | None,
     ):
+        from .attention import DeepSeekMLAAttention
+
         super().__init__(model_config, hf_assets_path)
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
@@ -76,20 +78,23 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         }
 
         # Adjustments for from_hf_map based on model architecture
-        if model_config.layers[0].attention.q_lora_rank != 0:
-            self.from_hf_map.update(
-                {
-                    "model.layers.{}.self_attn.q_a_proj.weight": "layers.{}.attention.wq_a.weight",
-                    "model.layers.{}.self_attn.q_a_layernorm.weight": "layers.{}.attention.q_norm.weight",
-                    "model.layers.{}.self_attn.q_b_proj.weight": "layers.{}.attention.wq_b.weight",
-                }
-            )
-        else:
-            self.from_hf_map.update(
-                {
-                    "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
-                }
-            )
+        attention = model_config.layers[0].attention
+        # V4 reuses this initializer but supplies its own attention mapping.
+        if isinstance(attention, DeepSeekMLAAttention.Config):
+            if attention.q_lora_rank != 0:
+                self.from_hf_map.update(
+                    {
+                        "model.layers.{}.self_attn.q_a_proj.weight": "layers.{}.attention.wq_a.weight",
+                        "model.layers.{}.self_attn.q_a_layernorm.weight": "layers.{}.attention.q_norm.weight",
+                        "model.layers.{}.self_attn.q_b_proj.weight": "layers.{}.attention.wq_b.weight",
+                    }
+                )
+            else:
+                self.from_hf_map.update(
+                    {
+                        "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
+                    }
+                )
 
     def _map_from_hf_layer_key(
         self,

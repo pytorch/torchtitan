@@ -71,7 +71,7 @@ from torchtitan.models.common.moe import (
 )
 
 from torchtitan.models.muse_spark import build_model_config
-from torchtitan.models.muse_spark.model import MuseSparkModel
+from torchtitan.models.muse_spark.model import MuseSparkAttention, MuseSparkModel
 from torchtitan.models.muse_spark.renderer import MuseSparkRendererConfig
 from torchtitan.models.muse_spark.tokenizer import MuseSparkTokenizer
 from torchtitan.observability.metrics import MetricsProcessor
@@ -201,6 +201,7 @@ def _use_flex_flash_attention(model_config: MuseSparkModel.Config) -> None:
     """Select FA4 and layer-appropriate block-mask geometry under CP."""
     for layer in model_config.layers:
         attention = layer.attention
+        assert isinstance(attention, MuseSparkAttention.Config)
         inner_attention = attention.inner_attention
         if not isinstance(
             inner_attention,

@@ -18,14 +18,7 @@ from torchtitan.config.transform import (
     validate_converter_compatibility,
 )
 from torchtitan.models.base.sharding import ShardingConfig
-from torchtitan.models.common import (
-    CosSinRoPE,
-    Embedding,
-    Linear,
-    RoPE,
-    Softmax,
-    TransformerBlock,
-)
+from torchtitan.models.common import CosSinRoPE, Embedding, Linear, RoPE, Softmax
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
@@ -34,6 +27,7 @@ from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_router_config,
 )
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     lm_head_sharding_config,
     norm_sharding_config,
@@ -117,7 +111,7 @@ def _build_qwen3_layers(
     """Build sharded per-layer configs for dense Qwen3 models."""
     inner_attention = get_attention_config(attn_backend)
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)
-    layers = []
+    layers: list[TransformerBlock.Config] = []
     for _ in range(n_layers):
         layers.append(
             Qwen3TransformerBlock.Config(
@@ -167,7 +161,7 @@ def _build_qwen3_moe_layers(
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)
     output_init = _residual_output_init(n_layers)
     experts_init = _moe_experts_init(n_layers)
-    layers = []
+    layers: list[TransformerBlock.Config] = []
     for _ in range(n_layers):
         layers.append(
             Qwen3TransformerBlock.Config(

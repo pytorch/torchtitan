@@ -33,6 +33,7 @@ from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
 )
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     inner_attention_local_spmd_sharding_config,
     lm_head_sharding_config,
@@ -252,11 +253,11 @@ def _build_muse_glimmer_layers(
     window_pattern: list[int],
     attn_backend: str,
     enable_sp: bool,
-) -> list[MuseGlimmerTransformerBlock.Config]:
+) -> list[TransformerBlock.Config]:
     hidden_dim = int(_FFN_DIM_MULTIPLIER * dim)
     # All four norms operate on the residual activation.
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)
-    layers = []
+    layers: list[TransformerBlock.Config] = []
     for layer_id in range(n_layers):
         layers.append(
             MuseGlimmerTransformerBlock.Config(

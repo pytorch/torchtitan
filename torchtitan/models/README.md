@@ -12,6 +12,10 @@ The folder should be organized as follows
   - NOTE: We prioritize readability over flexibility. The preferred style is to not share modules among different models, except for the most common and complicated ones.
   - Define a Model class inheriting from a base model (e.g. `Decoder` from `torchtitan/models/common/decoder.py`).
   - The model class should contain a nested `Config` dataclass (inheriting from the base model's `Config`) that holds all architecture hyperparameters.
+    - `TransformerBlock.Config` and `Decoder.Config` use their base component
+      config types and are not generic. Keep concrete fields on the model's
+      nested `Config`, and narrow a base-typed layer or attention config with
+      `isinstance` only where model-specific fields are consumed.
     - `get_nparams_and_flops()` will be used to understand model size and compute throughput.
   - `__init__()` consumes the `Config` to build the model.
   - Parameter initialization is handled by the `param_init` system on each module's `Config`. Set `param_init` (a `dict[str, Callable]` mapping parameter names to init functions) on every sub-config in the model flavor builder. `init_states()` auto-recurses into all submodules, so manual recursive calls are not needed. Override `_init_self_buffers()` for device-aware buffer initialization (e.g., RoPE, MoE).

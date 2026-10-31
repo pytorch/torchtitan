@@ -24,6 +24,7 @@ from torchtitan.models.common.flops import (
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder
 
+from .attention import DeepSeekMLAAttention
 from .state_dict_adapter import DeepSeekV3StateDictAdapter
 
 
@@ -89,6 +90,7 @@ def get_deepseek_v3_nparams_and_flops(
     for layers in (model_config.layers, model_config.mtp_layers):
         for layer in layers:
             attention = layer.attention
+            assert isinstance(attention, DeepSeekMLAAttention.Config)
             attention_op_flops += quadratic_attention_flops_per_token(
                 num_heads=attention.n_heads,
                 qk_head_dim=(attention.qk_nope_head_dim + attention.qk_rope_head_dim),
