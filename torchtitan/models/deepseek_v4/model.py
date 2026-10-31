@@ -10,22 +10,18 @@ from typing import cast, TYPE_CHECKING
 import spmd_types as spmd
 import torch
 import torch_remat as remat
-from torch import nn
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.models.base.module import ModuleList
+from torchtitan.models.base.model import FlopsEstimator
+from torchtitan.models.base.module import Module, ModuleList
 from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.common.flops import (
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
-)
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.deepseek_v3.mtp import (
     apply_fsdp_to_mtp_decoder,
@@ -192,55 +188,33 @@ class DeepSeekV4Model(Decoder):
         hc_head: HcHead.Config
         mtp_layers: list["MTPBlock.Config"] | None = None
 
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
-            """Estimate DeepSeek V4 training FLOPs from the final model config."""
-            deepseek_v4_model = cast(DeepSeekV4Model, model)
-            nparams, active_nparams = get_nparams_and_active_nparams(deepseek_v4_model)
-
-            attention_op_flops = 0
-            for layers in (self.layers, self.mtp_layers or ()):
-                for layer in layers:
-                    attention = layer.attention
-                    inner_attention = attention.inner_attention
-                    attention_op_flops += quadratic_attention_flops_per_token(
-                        num_heads=attention.n_heads,
-                        qk_head_dim=attention.head_dim,
-                        v_head_dim=attention.head_dim,
-                        seq_len=seq_len,
-                        sliding_window_size=inner_attention.window_size,
-                    )
-
-                    if attention.compress_ratio > 1:
-                        compressed_seq_len = seq_len // attention.compress_ratio
-                        if attention.compress_ratio == 4:
-                            attention_op_flops += (
-                                6
-                                * attention.index_n_heads
-                                * attention.index_head_dim
-                                * compressed_seq_len
-                            )
-                            compressed_seq_len = min(
-                                compressed_seq_len, inner_attention.index_topk
-                            )
-                        attention_op_flops += quadratic_attention_flops_per_token(
-                            num_heads=attention.n_heads,
-                            qk_head_dim=attention.head_dim,
-                            v_head_dim=attention.head_dim,
-                            seq_len=compressed_seq_len,
-                        )
-
-            active_nparams += len(deepseek_v4_model.mtp_layers) * sum(
-                param.numel() for param in deepseek_v4_model.lm_head.parameters()
+        def build_flops_estimator(
+            self,
+            model: Module,
+            *,
+            seq_len: int,
+            excluded_modules: tuple[Module | None, ...] = (),
+        ) -> FlopsEstimator:
+            decoder_estimate = super(
+                DeepSeekV4Model.Config, self
+            ).build_flops_estimator(
+                model, seq_len=seq_len, excluded_modules=excluded_modules
             )
-            active_nparams += (self.hc_mult - 1) * sum(
-                param.numel()
-                for mtp_layer in deepseek_v4_model.mtp_layers
-                for param in cast("MTPBlock", mtp_layer).h_proj.parameters()
+            model = cast(DeepSeekV4Model, model)
+            repeated_mtp_flops_per_token = 6 * (
+                len(model.mtp_layers)
+                * sum(p.numel() for p in model.lm_head.parameters())
+                + (self.hc_mult - 1)
+                * sum(
+                    p.numel()
+                    for layer in model.mtp_layers
+                    for p in layer.h_proj.parameters()
+                )
             )
-
-            return nparams, 6 * active_nparams + attention_op_flops
+            return lambda input_dict: (
+                decoder_estimate(input_dict)
+                + repeated_mtp_flops_per_token * input_dict["input"].numel()
+            )
 
     def __init__(self, config: Config):
         from torchtitan.distributed.spmd_types import spmd_mesh_size

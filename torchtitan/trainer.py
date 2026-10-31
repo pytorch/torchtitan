@@ -180,6 +180,7 @@ class Trainer(Configurable):
             config_dict=config.to_dict(),
             has_quantization=engine.has_quantization,
         )
+        self._local_num_flops_since_last_log = 0
         color = self.metrics_processor.color
 
         self.num_pp_microbatches = (
@@ -235,7 +236,6 @@ class Trainer(Configurable):
                 pp_schedule=config.parallelism.pipeline_parallel_schedule,
                 color=color,
             )
-        self.metrics_processor.num_flops_per_token = engine.num_flops_per_token
         self.metrics_processor.optimizers = engine.optim.optimizers
         self.metrics_processor.model_parts = engine.model_parts
 
@@ -328,6 +328,7 @@ class Trainer(Configurable):
         # step_last_log on the first step, so keep this check after it.
         if self.metrics_processor.step_last_log == engine.num_completed_steps:
             self.metrics_processor.reset()
+            self._local_num_flops_since_last_log = 0
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
@@ -394,6 +395,7 @@ class Trainer(Configurable):
         # scheduler advances in engine.optim_step().
         lr_metrics = engine.optim.lr_schedulers.get_metrics() if should_log else {}
         grad_norm = engine.optim_step()
+        self._local_num_flops_since_last_log += engine.step_num_flops
 
         # log metrics
         if not should_log:
@@ -439,6 +441,22 @@ class Trainer(Configurable):
                 global_avg_loss = global_max_loss = float(accumulated_loss.item())
                 global_ntokens_seen = engine.ntokens_seen
 
+        mean_num_flops = self._local_num_flops_since_last_log
+        if parallelism_context.dp_enabled:
+            total_flops = dist_utils.dist_sum_tensor(
+                torch.tensor(mean_num_flops, dtype=torch.float64, device=engine.device),
+                mesh=parallelism_context.get_optional_mesh("dp"),
+            )
+            # Read both reporting scalars with the existing grad-norm synchronization.
+            grad_norm_value, mean_num_flops = torch.stack(
+                (grad_norm, total_flops)
+            ).tolist()
+            mean_num_flops /= (
+                parallelism_context.dp_replicate * parallelism_context.dp_shard
+            )
+        else:
+            grad_norm_value = float(grad_norm.item())
+
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
@@ -448,8 +466,9 @@ class Trainer(Configurable):
             engine.num_completed_steps,
             global_avg_loss,
             global_max_loss,
-            float(grad_norm.item()),
+            grad_norm_value,
             extra_metrics=extra_metrics,
+            num_flops=mean_num_flops,
         )
 
     @record

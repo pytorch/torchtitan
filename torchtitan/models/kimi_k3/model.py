@@ -12,7 +12,6 @@ from typing import Any, cast
 import spmd_types as spmd
 import torch
 import torch_remat as remat
-from torch import nn
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.function import Function
@@ -25,22 +24,18 @@ from torchtitan.distributed.spmd_types import (
     annotate_replicated_parameters,
     spmd_local_context,
 )
+from torchtitan.models.base.model import FlopsEstimator
+from torchtitan.models.base.module import Module
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
     AttentionMetadata,
     AttentionMetadataMap,
     LinearAttentionMetadata,
 )
-from torchtitan.models.common.attention.kda import KDA
-from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
     token_id_placement,
-)
-from torchtitan.models.common.flops import (
-    delta_rule_flops_per_token,
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
 )
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
@@ -54,7 +49,6 @@ from torchtitan.models.common.multimodal import (
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 
-from .attention import KimiMLAAttention
 from .moe import KimiLatentMoE
 from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import KimiK3VisionEncoder
@@ -218,7 +212,7 @@ class KimiK3Model(MultimodalModel):
         return pipeline_kimi_k3(self, **kwargs)
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
+    class Config(MultimodalModel.Config):
         layers: list[KimiK3TransformerBlock.Config]
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
@@ -238,34 +232,28 @@ class KimiK3Model(MultimodalModel):
             )
         )
 
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
-            kimi_model = cast("KimiK3Model", model)
-            nparams, active_nparams = get_nparams_and_active_nparams(
+        def build_flops_estimator(
+            self,
+            model: Module,
+            *,
+            seq_len: int,
+            excluded_modules: tuple[Module | None, ...] = (),
+        ) -> FlopsEstimator:
+            model = cast(KimiK3Model, model)
+            decoder_estimate = super(KimiK3Model.Config, self).build_flops_estimator(
                 model,
-                modules_excluded_from_active_params=(kimi_model.vision_encoder,),
+                seq_len=seq_len,
+                excluded_modules=(model.vision_encoder, *excluded_modules),
             )
-            attention_op_flops = 0
-            for layer in self.layers:
-                if isinstance(layer.attention, KimiMLAAttention.Config):
-                    attention = layer.attention
-                    attention_op_flops += quadratic_attention_flops_per_token(
-                        num_heads=attention.n_heads,
-                        qk_head_dim=(
-                            attention.qk_nope_head_dim + attention.qk_rope_head_dim
-                        ),
-                        v_head_dim=attention.v_head_dim,
-                        seq_len=seq_len,
-                    )
-                elif isinstance(layer.attention, KDA.Config):
-                    delta_attention = layer.attention
-                    attention_op_flops += delta_rule_flops_per_token(
-                        num_heads=delta_attention.n_heads,
-                        key_head_dim=delta_attention.head_dim,
-                        v_head_dim=delta_attention.head_dim,
-                    )
-            return nparams, 6 * active_nparams + attention_op_flops
+            if self.vision_encoder is None:
+                return decoder_estimate
+            assert model.vision_encoder is not None
+            vision_estimate = self.vision_encoder.build_flops_estimator(
+                model.vision_encoder
+            )
+            return lambda input_dict: decoder_estimate(input_dict) + vision_estimate(
+                input_dict
+            )
 
     def __init__(self, config: Config):
         from torchtitan.distributed.spmd_types import spmd_mesh_size
