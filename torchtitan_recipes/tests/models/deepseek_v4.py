@@ -131,20 +131,22 @@ def _dist_muon_optimizer(
                 hc_mult, hc_mult, hc_mult * hc_mult
             )
         if attention.compressor is not None:
-            shardings[f"{prefix}.attention.compressor.wkv.weight"] = blocks(
-                nope_dim,
-                attention.rope_head_dim,
-                nope_dim,
-                attention.rope_head_dim,
-            )
-            shardings[f"{prefix}.attention.compressor.wgate.weight"] = blocks(
-                attention.head_dim
-            )
-        if attention.compressor_128 is not None:
-            shardings[f"{prefix}.attention.compressor_128.wkv.weight"] = blocks(
-                nope_dim, attention.rope_head_dim
-            )
-            shardings[f"{prefix}.attention.compressor_128.wgate.weight"] = owned
+            if attention.compress_ratio == 4:
+                # CSA keeps the previous group as a second candidate half.
+                shardings[f"{prefix}.attention.compressor.wkv.weight"] = blocks(
+                    nope_dim,
+                    attention.rope_head_dim,
+                    nope_dim,
+                    attention.rope_head_dim,
+                )
+                shardings[f"{prefix}.attention.compressor.wgate.weight"] = blocks(
+                    attention.head_dim
+                )
+            else:
+                shardings[f"{prefix}.attention.compressor.wkv.weight"] = blocks(
+                    nope_dim, attention.rope_head_dim
+                )
+                shardings[f"{prefix}.attention.compressor.wgate.weight"] = owned
         if attention.indexer is not None:
             indexer = attention.indexer
             indexer_nope_dim = indexer.index_head_dim - indexer.rope_head_dim

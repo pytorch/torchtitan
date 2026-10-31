@@ -17,7 +17,7 @@ def _compressor(ratio: int):
     for layer in deepseek_v4_debugmodel(seq_len=1024).model.layers:
         attn = layer.attention
         if attn.compress_ratio == ratio:
-            cfg = attn.compressor if ratio == 4 else attn.compressor_128
+            cfg = attn.compressor
             torch.manual_seed(0)
             with torch.device("cpu"):
                 compressor = cfg.build()

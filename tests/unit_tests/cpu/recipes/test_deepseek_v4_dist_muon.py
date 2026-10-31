@@ -99,13 +99,13 @@ def test_deepseek_v4_uses_dist_muon_with_complete_compute_layouts() -> None:
     )
     hca = config.model.layers[3].attention
     assert compute_shardings[
-        "layers.3.attention.compressor_128.wkv.weight"
+        "layers.3.attention.compressor.wkv.weight"
     ].shardings_by_mesh_axis["dp_shard"] == BlockShard(
         dim=0, block_sizes=(hca.head_dim - hca.rope_head_dim, hca.rope_head_dim)
     )
     assert isinstance(
         compute_shardings[
-            "layers.3.attention.compressor_128.wgate.weight"
+            "layers.3.attention.compressor.wgate.weight"
         ].shardings_by_mesh_axis["dp_shard"],
         Owned,
     )

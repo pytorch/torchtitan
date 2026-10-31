@@ -240,22 +240,21 @@ def _make_v4_attn_config(
     per_group_in = (n_heads * hd) // n_groups
     per_group_out = n_groups * o_lora_rank
     softmax_scale = head_dim**-0.5
-    # Conditionally build compressor/indexer configs.
+    # One compressor covers every compressed ratio; the overlap history is
+    # selected by ``compress_ratio``. The indexer exists only for CSA layers.
     compressor_cfg = None
     indexer_cfg = None
-    compressor_128_cfg = None
-
-    if compress_ratio == 4:
-        coff = 2  # 1 + overlap (overlap=True when compress_ratio==4)
+    if compress_ratio > 1:
         compressor_cfg = _make_compressor_config(
             dim=dim,
             head_dim=hd,
             rope_head_dim=rope_head_dim,
             compress_ratio=compress_ratio,
             norm_eps=norm_eps,
-            coff=coff,
+            coff=2 if compress_ratio == 4 else 1,
             rope=rope,
         )
+    if compress_ratio == 4:
         indexer_cfg = _make_indexer_config(
             dim=dim,
             num_index_heads=index_n_heads,
@@ -264,17 +263,6 @@ def _make_v4_attn_config(
             q_lora_rank=q_lora_rank,
             compress_ratio=compress_ratio,
             norm_eps=norm_eps,
-            rope=rope,
-        )
-    elif compress_ratio > 1:
-        coff = 1  # no overlap
-        compressor_128_cfg = _make_compressor_config(
-            dim=dim,
-            head_dim=hd,
-            rope_head_dim=rope_head_dim,
-            compress_ratio=compress_ratio,
-            norm_eps=norm_eps,
-            coff=coff,
             rope=rope,
         )
     if compress_ratio == 4:
@@ -384,7 +372,6 @@ def _make_v4_attn_config(
             sharding_config=attn_sink_sharding_config(),
         ),
         compressor=compressor_cfg,
-        compressor_128=compressor_128_cfg,
         indexer=indexer_cfg,
         sharding_config=attention_sharding_config(enable_sp=enable_sp),
     )
@@ -625,7 +612,6 @@ def _make_mtp_inner_block(
     inner_attn_cfg = attn_cfg.inner_attention
     attn_cfg.compress_ratio = 1
     attn_cfg.compressor = None
-    attn_cfg.compressor_128 = None
     attn_cfg.indexer = None
     attn_cfg.rope = dataclasses.replace(
         rope, sharding_config=rope_cache_sharding_config()

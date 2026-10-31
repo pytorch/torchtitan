@@ -300,7 +300,6 @@ class DeepSeekV4Attention(Attention):
 
         # Compressor/indexer are conditional, so keep them here too.
         compressor: Compressor.Config | None = None
-        compressor_128: Compressor.Config | None = None
         indexer: Indexer.Config | None = None
 
     def __init__(self, config: Config):
@@ -329,12 +328,11 @@ class DeepSeekV4Attention(Attention):
         self.wo_b = cfg.wo_b.build()
         self.attn_sink = cfg.attn_sink.build()
 
-        if cfg.compressor is not None:
-            self.compressor = cfg.compressor.build()
+        self.compressor = (
+            cfg.compressor.build() if cfg.compressor is not None else None
+        )
         if cfg.indexer is not None:
             self.indexer = cfg.indexer.build()
-        if cfg.compressor_128 is not None:
-            self.compressor_128 = cfg.compressor_128.build()
 
         self.inner_attention = cfg.inner_attention.build()
 
@@ -391,10 +389,11 @@ class DeepSeekV4Attention(Attention):
             idx_q, idx_k, idx_w = self.indexer(
                 x.detach(), qr.detach(), positions=positions, cu_seqlens=cu_seqlens
             )
-        if self.compress_ratio == 4:
-            cmp_k = self.compressor(x, positions=positions, cu_seqlens=cu_seqlens)
-        elif self.compress_ratio > 1:
-            cmp_k = self.compressor_128(x, positions=positions, cu_seqlens=cu_seqlens)
+        cmp_k = None
+        if self.compressor is not None:
+            cmp_k = self.compressor(
+                x, positions=positions, cu_seqlens=cu_seqlens
+            )
 
         attn_sink_param = self.attn_sink.weight.squeeze(-1)
         if self.compress_ratio == 4:
