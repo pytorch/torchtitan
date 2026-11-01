@@ -16,7 +16,7 @@ import torchtitan.models.kimi_k2_7.flavors as kimi_k2_7_flavors
 import torchtitan.models.llama3.flavors as llama3_flavors
 import torchtitan.models.qwen3_5.flavors as qwen3_5_flavors
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.activation import SiTUGLU
+from torchtitan.models.common.activation import LimitedSwiGLU, SiTUGLU
 from torchtitan.models.common.config_utils import (
     fused_gate_up_param_init,
     make_ffn_config,
@@ -217,3 +217,14 @@ def test_feed_forward_uses_configured_activation():
     gate_up_T2F = feed_forward.w13(x_TD)
     expected_TD = feed_forward.w2(activation_fn.build()(gate_up_T2F))
     torch.testing.assert_close(feed_forward(x_TD), expected_TD)
+
+
+def test_limited_swiglu_clamps_gate_above_and_up_on_both_sides():
+    gate_up_T2F = torch.tensor([[[-20.0, 3.0, 25.0], [30.0, -40.0, 2.0]]])
+    expected_TF = F.silu(torch.tensor([[-20.0, 3.0, 10.0]])) * torch.tensor(
+        [[10.0, -10.0, 2.0]]
+    )
+
+    actual_TF = LimitedSwiGLU.Config(swiglu_limit=10.0).build()(gate_up_T2F)
+
+    torch.testing.assert_close(actual_TF, expected_TF)

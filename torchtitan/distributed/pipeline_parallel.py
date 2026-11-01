@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "get_module_fqns_per_model_part",
-    "prepare_pipeline_schedule_for_cuda_graph",
+    "prepare_pipeline_schedule_for_accelerator_graph",
     "pipeline_llm",
     "pipeline_with_first_last_stage_modules",
 ]
@@ -373,7 +373,7 @@ def _get_pipeline_metadata(
     return num_virtual_stages, num_layers, input_weight, output_weight
 
 
-def prepare_pipeline_schedule_for_cuda_graph(
+def prepare_pipeline_schedule_for_accelerator_graph(
     schedule: _PipelineSchedule,
     *,
     args: tuple[Any, ...],
@@ -382,7 +382,7 @@ def prepare_pipeline_schedule_for_cuda_graph(
     loss_kwargs: dict[str, Any],
     for_eval: bool = False,
 ) -> None:
-    """Prepare training or eval pipeline metadata outside CUDA graph capture."""
+    """Prepare training or eval pipeline metadata outside accelerator graph capture."""
     # TODO: Use a public pipeline schedule initialization API.
     if isinstance(schedule, PipelineScheduleSingle):
         stages = [schedule._stage]

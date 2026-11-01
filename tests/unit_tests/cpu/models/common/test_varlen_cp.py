@@ -19,7 +19,7 @@ from torch.distributed.tensor.experimental._attention import _HeadTailLoadBalanc
 from torch.testing._internal.common_utils import run_tests, TestCase
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
-from torchtitan.distributed.cuda_graph import CUDAGraphInputSpec
+from torchtitan.distributed.accelerator_graph import AcceleratorGraphInputSpec
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.attention import (
     cp_attention,
@@ -133,7 +133,7 @@ class TestVarlenMetadataCudaGraphInputs(TestCase):
                     varlen_metadata=_metadata([0, 4]),
                     inverse_permutation=inverse_permutation,
                 )
-                spec = CUDAGraphInputSpec({"metadata": captured_metadata})
+                spec = AcceleratorGraphInputSpec({"metadata": captured_metadata})
                 captured = spec.flatten({"metadata": captured_metadata})
                 rebuilt = spec.flatten({"metadata": rebuilt_metadata})
                 self.assertEqual(

@@ -88,6 +88,8 @@ class UlyssesMLAAttention(Ulysses, MLAAttention):
         q_THK: torch.Tensor,
         kv_c_normed_TL: torch.Tensor,
         k_shared_TR: torch.Tensor,
+        *,
+        materialize_kv=materialize_mla_kv,
         **kwargs,
     ) -> torch.Tensor:
         cp_group = spmd_mesh_group(MeshAxisName.CP)
@@ -133,7 +135,7 @@ class UlyssesMLAAttention(Ulysses, MLAAttention):
         )
         # Materialization reads saved communication outputs outside a region.
         remat.recompute_needs_tensor(kv_THP, k_shared_TR)
-        k_THK, v_THV = materialize_mla_kv(q_THK, kv_THP, k_shared_TR)
+        k_THK, v_THV = materialize_kv(q_THK, kv_THP, k_shared_TR)
         out_THV = remat.region(
             self.inner_attention,
             self.remat_region_name("inner_attention"),

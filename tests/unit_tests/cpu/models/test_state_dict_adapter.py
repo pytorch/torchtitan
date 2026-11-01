@@ -344,8 +344,8 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
             )
             mtp_layer = f"model.layers.{len(config.layers)}"
             weight_map = {
-                "model.layers.0.self_attn.q_a_proj.weight": "model-00001-of-00002.safetensors",
-                "model.layers.0.self_attn.q_a_proj.weight_scale_inv": (
+                "model.layers.0.self_attn.q_proj.weight": "model-00001-of-00002.safetensors",
+                "model.layers.0.self_attn.q_proj.weight_scale_inv": (
                     "model-00001-of-00002.safetensors"
                 ),
                 f"{mtp_layer}.eh_proj.weight": "model-00002-of-00002.safetensors",
@@ -357,15 +357,19 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
                 adapter = DeepSeekV3StateDictAdapter(
                     config, hf_assets_path=hf_assets_path
                 )
+            with torch.device("meta"):
+                hf_state_dict = adapter.to_hf(config.build().state_dict())
 
             expected = {
-                "model.layers.0.self_attn.q_a_proj.weight": 1,
+                "model.layers.0.self_attn.q_proj.weight": 1,
                 "model.norm.weight": 2,
             }
             if num_mtp_layers:
                 expected[f"{mtp_layer}.eh_proj.weight"] = 2
             with self.subTest(num_mtp_layers=num_mtp_layers):
-                self.assertEqual(adapter.fqn_to_index_mapping, expected)
+                self.assertEqual(
+                    adapter.fqn_to_index_mapping_for_save(hf_state_dict), expected
+                )
 
     def test_mtp_layers_save_independent_embedding_and_head_copies(self) -> None:
         build_config, max_context_length = DEEPSEEK_V3_MODEL_FLAVORS["debugmodel"]
@@ -616,15 +620,16 @@ class KimiK3StateDictAdapterTest(unittest.TestCase):
             "vision_tower.patch_embed.proj.weight": "model-00001-of-00002.safetensors",
             "mm_projector.proj.0.weight": "model-00002-of-00002.safetensors",
         }
+        config = _small_kimi_k3_config()
         with tempfile.TemporaryDirectory() as hf_assets_path:
             with open(f"{hf_assets_path}/model.safetensors.index.json", "w") as f:
                 json.dump({"weight_map": weight_map}, f)
-            adapter = KimiK3StateDictAdapter(
-                _small_kimi_k3_config(), hf_assets_path=hf_assets_path
-            )
+            adapter = KimiK3StateDictAdapter(config, hf_assets_path=hf_assets_path)
+        with torch.device("meta"):
+            hf_state_dict = adapter.to_hf(config.build().state_dict())
 
         self.assertEqual(
-            adapter.fqn_to_index_mapping,
+            adapter.fqn_to_index_mapping_for_save(hf_state_dict),
             {
                 f"{experts}.w1.weight": 1,
                 "language_model.model.norm.weight": 2,
@@ -659,14 +664,15 @@ class KimiK3StateDictAdapterTest(unittest.TestCase):
                     enable_consolidation=False,
                 ),
             )
+            fqn_to_index_mapping = adapter.fqn_to_index_mapping_for_save(exported)
             consolidate_safetensors_files_on_every_rank(
                 input_dir=sharded_dir,
                 output_dir=checkpoint_dir,
-                fqn_to_index_mapping=adapter.fqn_to_index_mapping,
+                fqn_to_index_mapping=fqn_to_index_mapping,
             )
             restored = {hf_key: torch.empty_like(exported[hf_key])}
             dcp.load(restored, storage_reader=HuggingFaceStorageReader(checkpoint_dir))
-        self.assertEqual(adapter.fqn_to_index_mapping, {hf_key: 1})
+        self.assertEqual(fqn_to_index_mapping, {hf_key: 1})
         torch.testing.assert_close(restored[hf_key], exported[hf_key], rtol=0, atol=0)
 
 
@@ -965,9 +971,11 @@ class GptOssStateDictAdapterTest(unittest.TestCase):
             with open(f"{hf_assets_path}/model.safetensors.index.json", "w") as f:
                 json.dump({"weight_map": weight_map}, f)
             adapter = GptOssStateDictAdapter(config, hf_assets_path=hf_assets_path)
+        with torch.device("meta"):
+            hf_state_dict = adapter.to_hf(config.build().state_dict())
 
         self.assertEqual(
-            adapter.fqn_to_index_mapping,
+            adapter.fqn_to_index_mapping_for_save(hf_state_dict),
             {
                 f"{experts}.gate_up_proj": 1,
                 f"{experts}.gate_up_proj_bias": 1,

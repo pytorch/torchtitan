@@ -235,8 +235,8 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
         dist_moe_runtime=runtime_config,
         sdc_replayer=None,
         training=SimpleNamespace(
-            cuda_graph_per_microbatch_group=False,
-            disable_cuda_graphs=True,
+            accelerator_graph_per_microbatch_group=False,
+            disable_accelerator_graphs=True,
             num_tokens_per_microbatch_per_dp_rank=8,
             mixed_precision_param="bfloat16",
             mixed_precision_reduce="float32",
@@ -1006,7 +1006,7 @@ def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
     assert config.dataloader.max_num_documents == max_documents
 
 
-def test_eager_dist_moe_recipe_supports_cuda_graphs_with_pipeline_parallelism():
+def test_eager_dist_moe_recipe_supports_accelerator_graphs_with_pipeline_parallelism():
     """The eager recipe accepts EP and PP while retaining CUDA graphs."""
     config = eager_test_recipes.deepseek_v3_debugmodel_dist_moe_bf16(seq_len=128)
     config.parallelism.expert_parallel_degree = 2
