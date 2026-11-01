@@ -247,7 +247,13 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
         config=Mock(training=Mock(disable_accelerator_graphs=True)),
         device=torch.device("cpu"),
         parallelism_context=Mock(
-            dp_enabled=False, dp_cp_enabled=True, pp_enabled=False, ep_enabled=False
+            dp_enabled=False,
+            dp_cp_enabled=True,
+            pp_enabled=False,
+            ep_enabled=False,
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
         ),
         ft_manager=Mock(loss_sync_pg=Mock(size=lambda: 2), group_size=4),
         optim=Mock(lr_schedulers=Mock(schedulers=[Mock(get_last_lr=lambda: [0.1])])),
@@ -255,7 +261,7 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
         ntokens_seen=4,
         model_config=SimpleNamespace(mtp_layers=None),
         forward_backward=Mock(
-            return_value=ForwardBackwardResult(torch.tensor(2.0), [])
+            return_value=ForwardBackwardResult(torch.tensor(2.0), [], 400)
         ),
         optim_step=Mock(return_value=torch.tensor(0.0)),
     )
@@ -267,11 +273,12 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
             dataloader=Mock(num_mtp_layers=0),
             model=Mock(traverse=lambda _: iter((("aux_loss", Mock(), None, None),))),
         ),
+        _local_num_flops_since_last_log=0,
         gradient_accumulation_steps=1,
         num_pp_microbatches=1,
     )
     # Two active replicas contribute a loss sum of 4.0, despite group_size=4.
-    monkeypatch.setattr(ft.dist_utils, "dist_sum", Mock(side_effect=[4.0, 8]))
+    monkeypatch.setattr(ft.dist_utils, "dist_sum", Mock(side_effect=[4.0, 8, 800.0]))
     monkeypatch.setattr(ft.dist_utils, "dist_max", Mock(return_value=2.0))
     monkeypatch.setattr(ft, "collect_aux_loss_metrics", Mock(return_value={}))
 
@@ -298,6 +305,8 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
     trainer.metrics_processor.log.assert_called_once()
     _, logged_loss, *_ = trainer.metrics_processor.log.call_args.args
     assert logged_loss == 2.0
+    assert trainer.metrics_processor.log.call_args.kwargs["num_flops"] == 400
+    assert ft.dist_utils.dist_sum.call_count == 3
 
 
 def test_ft_engine_installs_all_reduce_hook_after_model_initialization() -> None:

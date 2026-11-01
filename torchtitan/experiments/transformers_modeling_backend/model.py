@@ -568,8 +568,8 @@ class HFTransformerModel(BaseModel):
 
             return self
 
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
+        def _parameter_counts(
+            self, model: nn.Module, *, include_embeddings: bool
         ) -> tuple[int, int]:
             assert isinstance(model, HFTransformerModel)
             named_parameters = list(model.named_parameters())
@@ -578,17 +578,18 @@ class HFTransformerModel(BaseModel):
                 id(param): Fraction(1) for _, param in named_parameters
             }
 
-            lm_head = getattr(model, "lm_head", None)
-            lm_head_parameter_ids = (
-                {id(param) for param in lm_head.parameters()}
-                if isinstance(lm_head, nn.Module)
-                else set()
-            )
-            for module in model.modules():
-                if isinstance(module, nn.Embedding):
-                    for param in module.parameters(recurse=False):
-                        if id(param) not in lm_head_parameter_ids:
-                            parameter_weights[id(param)] = Fraction(0)
+            if not include_embeddings:
+                lm_head = getattr(model, "lm_head", None)
+                lm_head_parameter_ids = (
+                    {id(param) for param in lm_head.parameters()}
+                    if isinstance(lm_head, nn.Module)
+                    else set()
+                )
+                for module in model.modules():
+                    if isinstance(module, nn.Embedding):
+                        for param in module.parameters(recurse=False):
+                            if id(param) not in lm_head_parameter_ids:
+                                parameter_weights[id(param)] = Fraction(0)
 
             for layer in model.layers.values():
                 moe_params = getattr(layer, "_native_moe_params", None)
@@ -616,7 +617,13 @@ class HFTransformerModel(BaseModel):
                 for _, param in named_parameters
             )
             assert nparams_for_matmul.denominator == 1
-            active_nparams = nparams_for_matmul.numerator
+            return nparams, nparams_for_matmul.numerator
+
+        def get_parameter_counts(self, model: nn.Module) -> tuple[int, int]:
+            return self._parameter_counts(model, include_embeddings=True)
+
+        def build_flops_estimator(self, model: nn.Module, *, seq_len: int):
+            _, active_nparams = self._parameter_counts(model, include_embeddings=False)
 
             if all(
                 hasattr(self, name)
@@ -692,11 +699,7 @@ class HFTransformerModel(BaseModel):
                 )
 
             num_flops_per_token = 6 * active_nparams + attention_op_flops
-            logger.info(
-                f"Total parameter count: {nparams:,}, "
-                f"active parameters: {active_nparams:,}"
-            )
-            return nparams, num_flops_per_token
+            return lambda input_dict: num_flops_per_token * input_dict["input"].numel()
 
     def __init__(self, config: Config):
         super().__init__()

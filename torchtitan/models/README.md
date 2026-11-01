@@ -12,7 +12,8 @@ The folder should be organized as follows
   - NOTE: We prioritize readability over flexibility. The preferred style is to not share modules among different models, except for the most common and complicated ones.
   - Define a Model class inheriting from a base model (e.g. `Decoder` from `torchtitan/models/common/decoder.py`).
   - The model class should contain a nested `Config` dataclass (inheriting from the base model's `Config`) that holds all architecture hyperparameters.
-    - `get_nparams_and_flops()` will be used to understand model size and compute throughput.
+    - `get_parameter_counts()` reports total and active model size, and
+      `build_flops_estimator()` estimates work for each raw CPU microbatch.
   - `__init__()` consumes the `Config` to build the model.
   - Parameter initialization is handled by the `param_init` system on each module's `Config`. Set `param_init` (a `dict[str, Callable]` mapping parameter names to init functions) on every sub-config in the model flavor builder. `init_states()` auto-recurses into all submodules, so manual recursive calls are not needed. Override `_init_self_buffers()` for device-aware buffer initialization (e.g., RoPE, MoE).
   - Add additional files to reduce the complexity of `model.py` if it grows too large or complex, e.g. moe.py to host the `MoE`, router, grouped-linear, and expert-activation modules.
@@ -69,3 +70,20 @@ The folder should be organized as follows
   - Including unit tests and integration tests, see [examples](/tests/).
   - If the model folder is under the experiments folder, put the tests under the model folder. Otherwise, put the tests under the `/tests` folder.
   - Add necessary GitHub [workflows](/.github/workflows/).
+
+### FLOPs estimation
+
+`Config.build_flops_estimator(model, seq_len=...)` returns a callable from a raw
+CPU microbatch dictionary to model-wide logical training FLOPs before sharding.
+Build it from the full model; runtime estimation should use CPU metadata and tensor
+shapes without device-to-host synchronization or retaining model modules.
+Native decoders use `Attention.Config.flops_per_token(seq_len)`. Multimodal models
+share encoder composition through `multimodal_encoder_fqns`. Muse overrides the
+estimator to add output-module work using encoder-owned output-token counts.
+`ForwardBackwardResult.num_flops` reports work for the optimizer update.
+
+`Config.get_parameter_counts(model)` reports unique total and architecturally
+active parameters, including embeddings and encoders and weighting routed experts
+by their active ratio. FLOPs exclude lookup-only embeddings separately.
+Decoder attention uses configured sequence length rather than packed document
+lengths. Causal sparsity, recomputation, and elementwise operations are omitted.

@@ -491,6 +491,15 @@ class GDN(LinearAttention):
         norm: GatedRMSNorm.Config
         out_proj: Linear.Config
 
+        def flops_per_token(self, seq_len: int) -> int:
+            from torchtitan.models.common.flops import delta_rule_flops_per_token
+
+            return delta_rule_flops_per_token(
+                num_heads=self.n_heads,
+                key_head_dim=self.key_head_dim,
+                v_head_dim=self.value_head_dim,
+            )
+
     def __init__(self, config: Config):
         super().__init__()
         self.key_head_dim = config.key_head_dim

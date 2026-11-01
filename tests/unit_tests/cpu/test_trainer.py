@@ -130,6 +130,7 @@ def _training_loop(trainer: TrainingEngine) -> SimpleNamespace:
         gradient_accumulation_steps=trainer.gradient_accumulation_steps,
         num_pp_microbatches=trainer.num_pp_microbatches,
         metrics_processor=trainer.metrics_processor,
+        _local_num_flops_since_last_log=0,
     )
 
 
@@ -300,6 +301,7 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs(
                 ),
             ),
             ntokens_seen=0,
+            flops_estimator=lambda inputs: 100,
             device=torch.device("cpu"),
         ),
     )
@@ -448,6 +450,7 @@ def test_forward_backward_runs_whole_accumulation(
         ),
     )
     engine.preprocess_inputs_kwargs = {"processor": "VALUE"}
+    engine.flops_estimator = lambda inputs: 100
     engine.ntokens_seen = 100
     engine.num_completed_steps = 0
     engine.device = torch.device("cpu")
@@ -975,7 +978,7 @@ def test_trainer_accumulates_reused_accelerator_graph_losses(
             global_routing_token_counts, routing_token_counts * 3
         )
         graph_loss.fill_(sum(next(loss_values) for _ in microbatch_groups))
-        return ForwardBackwardResult(graph_loss, [])
+        return ForwardBackwardResult(graph_loss, [], 600)
 
     metrics_processor = SimpleNamespace(
         should_log=MagicMock(return_value=True),
@@ -1001,6 +1004,8 @@ def test_trainer_accumulates_reused_accelerator_graph_losses(
             ),
             parallelism_context=SimpleNamespace(
                 dp_enabled=False,
+                dp_replicate=1,
+                dp_shard=1,
                 pp_enabled=False,
                 dp_cp_enabled=False,
                 ep_enabled=False,
@@ -1033,6 +1038,7 @@ def test_trainer_accumulates_reused_accelerator_graph_losses(
         6.0,
         4.0,
         extra_metrics={"n_tokens_seen": 3},
+        num_flops=600.0,
     )
     # The first step after loading starts a new metrics window.
     metrics_processor.reset.assert_called_once()
@@ -1115,9 +1121,12 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     run_forward_backward = MagicMock(
         return_value=ForwardBackwardResult(torch.tensor(1.0), [])
     )
-    replayer = SimpleNamespace(
-        run_fwd_bwd=MagicMock(side_effect=lambda fn, **kwargs: fn()),
-    )
+
+    def replay(fn, **kwargs):
+        fn()
+        return fn()
+
+    replayer = SimpleNamespace(run_fwd_bwd=MagicMock(side_effect=replay))
     engine = object.__new__(TrainingEngine)
     engine.config = SimpleNamespace(
         training=SimpleNamespace(
@@ -1136,6 +1145,7 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     engine._accelerator_graph_per_microbatch_group_enabled = False
     engine.sdc_replayer = replayer
     engine.num_completed_steps = 0
+    engine.flops_estimator = MagicMock(return_value=100)
     engine._preprocess_microbatch_groups = MagicMock(
         side_effect=lambda groups, global_routing_token_counts: [
             ("input", group[0].labels, {}, {}) for group in groups
@@ -1143,7 +1153,7 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     )
     engine._run_forward_backward = run_forward_backward
 
-    TrainingEngine.forward_backward(
+    result = TrainingEngine.forward_backward(
         engine,
         microbatch_groups=[[_batch()], [_batch()]],
         global_loss_token_counts=2,
@@ -1153,7 +1163,9 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     replayer.run_fwd_bwd.assert_called_once()
     assert replayer.run_fwd_bwd.call_args.kwargs["step"] == 1
     assert callable(replayer.run_fwd_bwd.call_args.kwargs["get_loss"])
-    run_forward_backward.assert_called_once()
+    assert run_forward_backward.call_count == 2
+    assert engine.flops_estimator.call_count == 2
+    assert result.num_flops == 200
 
 
 def test_replay_failure_propagates_from_engine():
@@ -1182,6 +1194,7 @@ def test_replay_failure_propagates_from_engine():
     engine._accelerator_graph_per_microbatch_group_enabled = False
     engine.sdc_replayer = SimpleNamespace(run_fwd_bwd=MagicMock(side_effect=mismatch))
     engine.num_completed_steps = 0
+    engine.flops_estimator = MagicMock(return_value=100)
     engine._preprocess_microbatch_groups = MagicMock(
         return_value=[("input", "labels", {}, {})]
     )
@@ -1269,7 +1282,7 @@ def test_compute_training_performance_metrics():
         num_tokens=20,
         elapsed_time=2.0,
         non_data_parallel_size=2,
-        num_flops_per_token=200,
+        num_flops=4000,
         gpu_peak_flops=1000,
         has_quantization=False,
     )

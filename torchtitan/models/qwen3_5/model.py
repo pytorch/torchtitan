@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any
 
 import spmd_types as spmd
 import torch
@@ -36,15 +36,10 @@ from torchtitan.models.common.attention import (
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.attention.gdn import GDN
-from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
     token_id_placement,
-)
-from torchtitan.models.common.flops import (
-    delta_rule_flops_per_token,
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
 )
 from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.moe import MoE
@@ -122,6 +117,20 @@ class Qwen35Attention(Attention):
         wo: Linear.Config
         q_norm: OffsetRMSNorm.Config
         k_norm: OffsetRMSNorm.Config
+
+        def flops_per_token(self, seq_len: int) -> int:
+            from torchtitan.models.common.flops import (
+                quadratic_attention_flops_per_token,
+            )
+
+            head_dim = self.head_dim
+            return quadratic_attention_flops_per_token(
+                num_heads=self.n_heads,
+                qk_head_dim=head_dim,
+                v_head_dim=head_dim,
+                seq_len=seq_len,
+                sliding_window_size=None,
+            )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -332,7 +341,7 @@ class Qwen35Model(MultimodalModel):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
+    class Config(MultimodalModel.Config):
         vision_encoder: Qwen35VisionEncoder.Config | None = None
         local_compile: LocalCompileConfig = field(
             default_factory=lambda: LocalCompileConfig(
@@ -347,38 +356,6 @@ class Qwen35Model(MultimodalModel):
                 ]
             )
         )
-
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
-            # The vision encoder cost scales with patches rather than text
-            # sequence length, so this remains a decoder-only MFU estimate.
-            qwen_model = cast("Qwen35Model", model)
-            nparams, active_nparams = get_nparams_and_active_nparams(
-                model,
-                modules_excluded_from_active_params=(qwen_model.vision_encoder,),
-            )
-            attention_op_flops = 0
-            for layer in self.layers:
-                if isinstance(layer.attention, Qwen35Attention.Config):
-                    attention = layer.attention
-                    attention_op_flops += quadratic_attention_flops_per_token(
-                        num_heads=attention.n_heads,
-                        qk_head_dim=attention.head_dim,
-                        v_head_dim=attention.head_dim,
-                        seq_len=seq_len,
-                    )
-                elif isinstance(layer.attention, GDN.Config):
-                    delta_net = layer.attention
-                    num_value_heads = (
-                        delta_net.in_proj_v.out_features // delta_net.value_head_dim
-                    )
-                    attention_op_flops += delta_rule_flops_per_token(
-                        num_heads=num_value_heads,
-                        key_head_dim=delta_net.key_head_dim,
-                        v_head_dim=delta_net.value_head_dim,
-                    )
-            return nparams, 6 * active_nparams + attention_op_flops
 
     def __init__(self, config: Config):
         from torchtitan.distributed.spmd_types import spmd_mesh_size

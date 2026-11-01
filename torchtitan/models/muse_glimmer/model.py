@@ -11,7 +11,6 @@ from typing import Any, cast
 
 import spmd_types as spmd
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch_remat as remat
 
@@ -24,6 +23,7 @@ from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     spmd_local_context,
 )
+from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
     AttentionMetadataMap,
@@ -31,14 +31,10 @@ from torchtitan.models.common.attention import (
     GQAttention,
     VarlenAttentionMetadata,
 )
-from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import DenseFeedForward
-from torchtitan.models.common.flops import (
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
-)
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
@@ -283,6 +279,7 @@ class EmbeddingWithNorm(Module):
 class MuseGlimmerModel(MultimodalModel):
     state_dict_adapter_cls = MuseGlimmerStateDictAdapter
     multimodal_encoder_fqns = ("vision_encoder",)
+
     pipeline_first_stage_module_fqns = (
         "vision_encoder",
         "vision_adapter",
@@ -297,7 +294,7 @@ class MuseGlimmerModel(MultimodalModel):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
+    class Config(MultimodalModel.Config):
         dim: int = 6656
         vocab_size: int = 202048
         local_compile: LocalCompileConfig = field(
@@ -328,36 +325,43 @@ class MuseGlimmerModel(MultimodalModel):
         vision_encoder: NaViTEncoder.Config | None = None
         vision_adapter: MuseSparkNaViTAdapter.Config | None = None
 
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
-            # Vision modules run per image rather than per text token.
-            muse_model = cast("MuseGlimmerModel", model)
-            nparams, active_nparams = get_nparams_and_active_nparams(
-                model,
-                modules_excluded_from_active_params=(
-                    muse_model.vision_encoder,
-                    muse_model.vision_adapter,
-                    muse_model.vision_projection,
-                    muse_model.perception_emb_norm,
-                ),
+        def build_flops_estimator(
+            self,
+            model: Module,
+            *,
+            seq_len: int,
+            excluded_modules: tuple[Module | None, ...] = (),
+        ) -> FlopsEstimator:
+            from torchtitan.models.common.flops import active_parameter_flops_per_unit
+
+            model = cast(MuseGlimmerModel, model)
+            vision_outputs = (
+                model.vision_adapter,
+                model.vision_projection,
+                model.perception_emb_norm,
             )
-            attention_op_flops = 0
-            for layer in self.layers:
-                attention = layer.attention
-                head_dim = (
-                    attention.head_dim
-                    if attention.head_dim is not None
-                    else attention.dim // attention.n_heads
-                )
-                attention_op_flops += quadratic_attention_flops_per_token(
-                    num_heads=attention.n_heads,
-                    qk_head_dim=head_dim,
-                    v_head_dim=head_dim,
-                    seq_len=seq_len,
-                    sliding_window_size=attention.window_size,
-                )
-            return nparams, 6 * active_nparams + attention_op_flops
+            base_estimate = super(MuseGlimmerModel.Config, self).build_flops_estimator(
+                model,
+                seq_len=seq_len,
+                excluded_modules=(*vision_outputs, *excluded_modules),
+            )
+            vision_output_flops = sum(
+                active_parameter_flops_per_unit(module)
+                for module in vision_outputs
+                if module is not None
+            )
+            vision_config = self.vision_encoder
+
+            def estimate(input_dict) -> int:
+                flops = base_estimate(input_dict)
+                if vision_config is not None:
+                    flops += (
+                        vision_config.get_num_output_tokens(input_dict)
+                        * vision_output_flops
+                    )
+                return flops
+
+            return estimate
 
     def __init__(self, config: "MuseGlimmerModel.Config") -> None:
         super().__init__(config)

@@ -9,7 +9,6 @@
 from dataclasses import dataclass, field
 
 import torch
-import torch.nn as nn
 import torch_remat as remat
 
 from torchtitan.distributed.local_compile import LocalCompileConfig
@@ -18,10 +17,6 @@ from torchtitan.models.common.attention import (
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.common.flops import (
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
-)
 from torchtitan.models.common.moe import MoE
 from .state_dict_adapter import Qwen3StateDictAdapter
 
@@ -114,26 +109,6 @@ class Qwen3Model(Decoder):
                 ]
             )
         )
-
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
-            nparams, active_nparams = get_nparams_and_active_nparams(model)
-            attention_op_flops = 0
-            for layer in self.layers:
-                attention = layer.attention
-                head_dim = (
-                    attention.head_dim
-                    if attention.head_dim is not None
-                    else attention.dim // attention.n_heads
-                )
-                attention_op_flops += quadratic_attention_flops_per_token(
-                    num_heads=attention.n_heads,
-                    qk_head_dim=head_dim,
-                    v_head_dim=head_dim,
-                    seq_len=seq_len,
-                )
-            return nparams, 6 * active_nparams + attention_op_flops
 
     def __init__(self, config: Config):
         super().__init__(config)

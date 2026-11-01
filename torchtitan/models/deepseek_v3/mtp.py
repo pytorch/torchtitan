@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import spmd_types as spmd
 import torch
@@ -24,7 +24,8 @@ from torchtitan.distributed.spmd_types import (
     spmd_dense_sp_enabled,
     spmd_mesh_group,
 )
-from torchtitan.models.base.module import ModuleList
+from torchtitan.models.base.model import FlopsEstimator
+from torchtitan.models.base.module import Module, ModuleList
 from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     FlexAttentionMetadata,
@@ -200,6 +201,27 @@ class MTPDecoder(Decoder):
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         mtp_layers: list = field(default_factory=list)
+
+        def build_flops_estimator(
+            self,
+            model: Module,
+            *,
+            seq_len: int,
+            excluded_modules: tuple[Module | None, ...] = (),
+        ) -> FlopsEstimator:
+            decoder_estimate = super(MTPDecoder.Config, self).build_flops_estimator(
+                model, seq_len=seq_len, excluded_modules=excluded_modules
+            )
+            model = cast(MTPDecoder, model)
+            repeated_head_flops_per_token = (
+                6
+                * len(self.mtp_layers)
+                * sum(param.numel() for param in model.lm_head.parameters())
+            )
+            return lambda input_dict: (
+                decoder_estimate(input_dict)
+                + repeated_head_flops_per_token * input_dict["input"].numel()
+            )
 
     def __init__(self, config: Config):
         super().__init__(config)

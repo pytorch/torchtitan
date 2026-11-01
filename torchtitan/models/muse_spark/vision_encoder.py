@@ -28,12 +28,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 
 from torchtitan.models.common import ComplexRoPE, Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
+    get_packed_vision_grids,
     RopeApply,
     VisionTransformerBlock,
 )
@@ -152,6 +154,54 @@ class NaViTEncoder(Module):
         use_rope: bool = True
         grid_sample_mode: str = "bilinear"
         pos_emb_grid_order: str = "raster"
+
+        def get_num_output_tokens(self, input_dict) -> int:
+            factor = self.downsample_factor
+            return sum(
+                temporal * (height // factor) * (width // factor)
+                for temporal, height, width in get_packed_vision_grids(input_dict)
+            )
+
+        def build_flops_estimator(self, encoder) -> FlopsEstimator:
+            from torchtitan.models.common.flops import active_parameter_flops_per_unit
+
+            input_patch_flops = sum(
+                active_parameter_flops_per_unit(module)
+                for module in (
+                    encoder.conv1_linear,
+                    encoder.ln_pre,
+                    encoder.layers,
+                    encoder.ln_post,
+                )
+            )
+            pair_flops = self.block.attn.flops_per_query_key_pair()
+            num_global_layers = sum(
+                index == self.num_layers - 1
+                or (index + 1) % self.sparse_attention_factor == 0
+                for index in range(self.num_layers)
+            )
+            num_window_layers = self.num_layers - num_global_layers
+
+            def estimate(input_dict):
+                flops = 0
+                for temporal, height, width in get_packed_vision_grids(input_dict):
+                    num_patches = height * width
+                    full_h, rem_h = divmod(height, self.pos_emb_grid_h)
+                    full_w, rem_w = divmod(width, self.pos_emb_grid_w)
+                    window_pairs = (full_h * self.pos_emb_grid_h**2 + rem_h**2) * (
+                        full_w * self.pos_emb_grid_w**2 + rem_w**2
+                    )
+                    flops += temporal * (
+                        input_patch_flops * num_patches
+                        + pair_flops
+                        * (
+                            num_global_layers * num_patches**2
+                            + num_window_layers * window_pairs
+                        )
+                    )
+                return flops
+
+            return estimate
 
     def __init__(self, config: Config) -> None:
         super().__init__()
