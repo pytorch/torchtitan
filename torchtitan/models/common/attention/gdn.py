@@ -205,20 +205,20 @@ _recurrent_gdn_fwd.register_autograd(
 
 
 @spmd.local_map(
+    in_types=(spmd.PartitionSpec(("dp", "cp"), "tp"), None, None),
     out_types=(
-        # Each rank's own [q | k | v] columns, not a shard of one global tensor.
+        # Nominal tp S(1): each rank holds its own [q | k | v]; never redistribute or gather it.
         spmd.PartitionSpec(("dp", "cp"), "tp"),  # mixed_qkv_TC
         spmd.PartitionSpec(("dp", "cp"), "tp"),  # a_TH
         spmd.PartitionSpec(("dp", "cp"), "tp"),  # b_TH
         spmd.PartitionSpec(("dp", "cp"), "tp", None),  # gate_THV
-    )
+    ),
 )
 @local_compile("gdn_split_in_proj", batch_invariant=True)
 def _split_in_proj(
     projected_TC: torch.Tensor,
-    key_head_dim: int,
+    split_sizes: list[int],
     value_head_dim: int,
-    heads_per_key: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Split ``GDN.in_proj``'s output into ``(mixed_qkv_TC, a_TH, b_TH, gate_THV)``.
 
@@ -228,18 +228,10 @@ def _split_in_proj(
 
         projected_TC [T, 4 * 1030]   per key head [q 128 | k 128 | v 384 | z 384 | a 3 | b 3]
         mixed_qkv_TC [T, 2560]       [q 512 | k 512 | v 1536]
-        a_TH, b_TH   [T, 12],        gate_THV [T, 12, 128]
+        a_TH, b_TH   [T, 12]
+        gate_THV     [T, 12, 128]
     """
     num_tokens = projected_TC.shape[0]
-    value_dim = heads_per_key * value_head_dim
-    split_sizes = [
-        key_head_dim,
-        key_head_dim,
-        value_dim,
-        value_dim,
-        heads_per_key,
-        heads_per_key,
-    ]
     grouped_TGC = projected_TC.unflatten(-1, (-1, sum(split_sizes)))
     query, key, value, gate, a, b = grouped_TGC.split(split_sizes, dim=-1)
     mixed_qkv_TC = torch.cat(
@@ -540,6 +532,20 @@ class GDN(LinearAttention):
         norm: GatedRMSNorm.Config
         out_proj: Linear.Config
 
+        @property
+        def in_proj_split_sizes(self) -> list[int]:
+            """Rows of q, k, v, z, a, b per key head; 27B: [128, 128, 384, 384, 3, 3]."""
+            heads_per_key = self.n_heads // self.n_key_heads
+            value_dim = heads_per_key * self.value_head_dim
+            return [
+                self.key_head_dim,
+                self.key_head_dim,
+                value_dim,
+                value_dim,
+                heads_per_key,
+                heads_per_key,
+            ]
+
     def __init__(self, config: Config):
         super().__init__()
         self.key_head_dim = config.key_head_dim
@@ -549,7 +555,7 @@ class GDN(LinearAttention):
                 f"n_heads ({config.n_heads}) must be divisible by "
                 f"n_key_heads ({config.n_key_heads})"
             )
-        self.heads_per_key = config.n_heads // config.n_key_heads
+        self.in_proj_split_sizes = config.in_proj_split_sizes
 
         self.in_proj = config.in_proj.build()
 
@@ -576,7 +582,7 @@ class GDN(LinearAttention):
         # The split copies the in_proj output with bare ops.
         remat.recompute_needs_tensor(projected_TC)
         mixed_qkv_TC, a_TH, b_TH, gate_THV = _split_in_proj(
-            projected_TC, self.key_head_dim, self.value_head_dim, self.heads_per_key
+            projected_TC, self.in_proj_split_sizes, self.value_head_dim
         )
 
         output_THV = remat.region(

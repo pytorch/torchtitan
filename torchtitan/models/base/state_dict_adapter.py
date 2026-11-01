@@ -17,7 +17,7 @@ from typing import Any
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import DTensor, Replicate
+from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import Placement
 
 from .model import BaseModel
@@ -355,14 +355,15 @@ class StateDictAdapter(BaseStateDictAdapter):
         if fused_key not in state_dict:
             return
         tensor = state_dict.pop(fused_key)
-        # As in _split_qkv_linear: a dim-0 shard may split a key-head group.
+        # A dim-0 shard may split a key-head group, so shard the columns instead (a full
+        # copy per rank would be 15 GiB fp32 at 27B).
         if isinstance(tensor, DTensor):
             self._qkv_linear_sharding[fused_key] = (
                 tensor.device_mesh,
                 tensor.placements,
             )
             tensor = tensor.redistribute(
-                tensor.device_mesh, [Replicate()] * tensor.device_mesh.ndim
+                tensor.device_mesh, [Shard(tensor.ndim - 1)] * tensor.device_mesh.ndim
             )
         grouped = tensor.reshape(-1, sum(split_sizes), tensor.shape[-1])
         for name, projection in zip(
@@ -384,13 +385,13 @@ class StateDictAdapter(BaseStateDictAdapter):
         if not all(key in state_dict for key in logical_keys):
             return
         projections = [state_dict.pop(key) for key in logical_keys]
-        # As in _merge_qkv_linear: rebuild from replicated inputs, then restore the
-        # native placement captured before HF loading.
+        # Rebuild from column shards (see _split_gdn_in_proj), then restore the native
+        # placement captured before HF loading.
         if isinstance(projections[0], DTensor):
             projections = [
                 tensor.redistribute(
                     tensor.device_mesh,
-                    [Replicate()] * tensor.device_mesh.ndim,
+                    [Shard(tensor.ndim - 1)] * tensor.device_mesh.ndim,
                 )
                 for tensor in projections
             ]
@@ -400,8 +401,7 @@ class StateDictAdapter(BaseStateDictAdapter):
             [projection.reshape(n_key_heads, -1, dim) for projection in projections],
             dim=1,
         ).reshape(-1, dim)
-        if fused_key in self._qkv_linear_sharding:
-            assert isinstance(fused, DTensor)
+        if isinstance(fused, DTensor) and fused_key in self._qkv_linear_sharding:
             mesh, placements = self._qkv_linear_sharding[fused_key]
             fused = fused.redistribute(mesh, placements)
         state_dict[fused_key] = fused
@@ -454,19 +454,10 @@ class StateDictAdapter(BaseStateDictAdapter):
             )
 
         for fqn, config, _parent, _ in self.model_config.traverse(GDN.Config):
-            heads_per_key = config.n_heads // config.n_key_heads
-            value_dim = heads_per_key * config.value_head_dim
             self._split_gdn_in_proj(
                 result,
                 prefix=f"{fqn}." if fqn else "",
-                split_sizes=[
-                    config.key_head_dim,
-                    config.key_head_dim,
-                    value_dim,
-                    value_dim,
-                    heads_per_key,
-                    heads_per_key,
-                ],
+                split_sizes=config.in_proj_split_sizes,
             )
 
         if split_routed_experts:
