@@ -205,6 +205,8 @@ _recurrent_gdn_fwd.register_autograd(
 
 
 @spmd.local_map(
+    # split_sizes is a list of six ints.
+    in_types=(spmd.PartitionSpec(("dp", "cp"), "tp"), [None] * 6, None),
     out_types=(
         # Nominal tp S(1): each rank holds its own [q | k | v]; never redistribute or gather it.
         spmd.PartitionSpec(("dp", "cp"), "tp"),  # mixed_qkv_TC
@@ -552,15 +554,24 @@ class GDN(LinearAttention):
                 heads_per_key,
             ]
 
+        def __post_init__(self):
+            LinearAttention.Config.__post_init__(self)
+            if self.n_heads % self.n_key_heads != 0:
+                raise ValueError(
+                    f"n_heads ({self.n_heads}) must be divisible by "
+                    f"n_key_heads ({self.n_key_heads})"
+                )
+            in_proj_rows = self.n_key_heads * sum(self.in_proj_split_sizes)
+            if self.in_proj.out_features != in_proj_rows:
+                raise ValueError(
+                    f"in_proj.out_features ({self.in_proj.out_features}) must be "
+                    f"n_key_heads * sum(in_proj_split_sizes) ({in_proj_rows})"
+                )
+
     def __init__(self, config: Config):
         super().__init__()
         self.key_head_dim = config.key_head_dim
         self.value_head_dim = config.value_head_dim
-        if config.n_heads % config.n_key_heads != 0:
-            raise ValueError(
-                f"n_heads ({config.n_heads}) must be divisible by "
-                f"n_key_heads ({config.n_key_heads})"
-            )
         self.in_proj_split_sizes = config.in_proj_split_sizes
 
         self.in_proj = config.in_proj.build()
