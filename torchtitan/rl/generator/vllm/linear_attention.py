@@ -42,6 +42,9 @@ class TorchTitanLinearAttentionMetadata(GDNAttentionMetadata):
     # Block-table column of each request's running state, ``[num_reqs, 1]``; the same
     # in every group, so ``update_block_table`` reuses it.
     state_block_column: torch.Tensor
+    # Read by packed steps only: the decode requests' slots for the decode kernel;
+    # the chunk kernel reads the inherited prefill_* fields (see `_stage_decode_split`).
+    decode_state_indices: torch.Tensor | None = None
 
 
 class TorchTitanLinearAttentionBackend(AttentionBackend):
@@ -121,12 +124,17 @@ class TorchTitanLinearAttentionMetadataBuilder(
         self.decode_query_start_loc = torch.arange(
             self.num_reqs_capacity + 1, device=device, dtype=torch.int32
         )
+        self.decode_state_indices = torch.zeros_like(self.state_indices)
+        self.prefill_state_indices = torch.zeros_like(self.state_indices)
+        self.prefill_query_start_loc = torch.zeros_like(self.query_start_loc)
 
     def build(
         self,
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        *,
+        stage_packed: bool = False,
     ) -> TorchTitanLinearAttentionMetadata:
         m = common_attn_metadata
         capacity = min(self.num_reqs_capacity, m.num_actual_tokens)
@@ -177,6 +185,12 @@ class TorchTitanLinearAttentionMetadataBuilder(
         single_token = (
             m.max_query_len == 1 and m.num_actual_tokens <= self.num_reqs_capacity
         )
+        # A FULL dummy run can replay the mixed-batch graph too (stage_packed).
+        decode_split = (
+            self._stage_decode_split(num_decodes, capacity)
+            if stage_packed or not single_token
+            else {}
+        )
         return TorchTitanLinearAttentionMetadata(
             execution_path=(
                 LinearAttentionExecutionPath.SINGLE_TOKEN
@@ -207,6 +221,43 @@ class TorchTitanLinearAttentionMetadataBuilder(
                 else self.has_initial_state[: capacity + 1]
             ),
             state_block_column=state_block_column,
+            **decode_split,
+        )
+
+    def _stage_decode_split(
+        self, num_decodes: int, capacity: int
+    ) -> dict[str, torch.Tensor]:
+        """Stage the slots and offsets that send decode requests to the decode kernel.
+
+        vLLM puts decode requests (one token each) first. The chunk kernel sees their
+        tokens as one sequence with the null slot. Example, 2 decode requests then a
+        3-token prefill, slots 5, 7, 9, capacity 4:
+
+            decode_state_indices     [5, 7, 0, 0]        null past the decode requests
+            prefill_query_start_loc  [0, 2, 2, 5, 5, 5]  decode tokens as one sequence
+            prefill_state_indices    [0, 0, 9, 0, 0]     ... with the null slot
+
+        - FULL graphs need fixed extents, so prefill_* keep every row (vLLM's builder
+          slices them to the prefill requests).
+        - prefill_has_initial_state stays None: the chunk kernel reads the shared
+          ``has_initial_state`` (null slots ignore it).
+        - Restaged only by builds that can replay a packed graph (see ``build``).
+        """
+        prefill_query_start_loc = self.prefill_query_start_loc[: capacity + 2]
+        torch.clamp(
+            self.query_start_loc[: capacity + 2],
+            min=num_decodes,
+            out=prefill_query_start_loc,
+        )
+        prefill_query_start_loc[0] = 0
+        self.decode_state_indices.copy_(self.state_indices)
+        self.decode_state_indices[num_decodes:].zero_()
+        self.prefill_state_indices.copy_(self.state_indices)
+        self.prefill_state_indices[:num_decodes].zero_()
+        return dict(
+            decode_state_indices=self.decode_state_indices[:capacity],
+            prefill_query_start_loc=prefill_query_start_loc,
+            prefill_state_indices=self.prefill_state_indices[: capacity + 1],
         )
 
     def update_block_table(
@@ -228,14 +279,19 @@ class TorchTitanLinearAttentionMetadataBuilder(
         # Single-token metadata runs eager or replays decode graphs, both reading the
         # static decode offsets, so only the packed path copies the query offsets.
         query_start_loc = self.decode_query_start_loc[: extent + 1]
+        decode_split = {}
         if metadata.execution_path is LinearAttentionExecutionPath.PACKED:
             query_start_loc = self.query_start_loc[: extent + 1]
             query_start_loc.copy_(metadata.non_spec_query_start_loc)
+            decode_split = self._stage_decode_split(
+                metadata.num_decodes, metadata.decode_state_indices.shape[0]
+            )
         return replace(
             metadata,
             non_spec_query_start_loc=query_start_loc,
             non_spec_state_indices_tensor=self.state_indices[:extent],
             has_initial_state=self.has_initial_state[:extent],
+            **decode_split,
         )
 
     def _stage_state_indices(
@@ -254,8 +310,12 @@ class TorchTitanLinearAttentionMetadataBuilder(
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> TorchTitanLinearAttentionMetadata:
-        metadata = self.build(0, common_attn_metadata)
+        # vLLM's FULL dummy runs build here too. At DP>1 a one-token dummy can replay
+        # the mixed-batch graph at any padded size, so stage the packed buffers.
+        metadata = self.build(0, common_attn_metadata, stage_packed=True)
         self.state_indices.zero_()
+        self.decode_state_indices.zero_()
+        self.prefill_state_indices.zero_()
         self.has_initial_state.zero_()
         return metadata
 
