@@ -20,7 +20,7 @@ from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
-from torchtitan.rl.rollout.data import RLDataLoader, RLDataset
+from torchtitan.rl.rollout.data import RLDataset, RolloutDataLoader
 from torchtitan.rl.rollout.message_env import MessageEnv
 from torchtitan.rl.rollout.rubric import Rubric, RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv
@@ -69,7 +69,7 @@ class Rollouter(Configurable):
 
     Example:
         rollouter = Rollouter.Config(
-            training_dataloader=IterableRLDataLoader.Config(
+            training_dataloader=IterableRolloutDataLoader.Config(
                 dataset=MyDataset.Config()
             ),
             validation_dataset=MyDataset.Config(),
@@ -94,7 +94,7 @@ class Rollouter(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        training_dataloader: RLDataLoader.Config
+        training_dataloader: RolloutDataLoader.Config
         """Builds a checkpointable iterator of identified training inputs."""
 
         validation_dataset: RLDataset.Config
@@ -126,8 +126,8 @@ class Rollouter(Configurable):
     def __init__(self, config: Config) -> None:
         self._config = config
         training_dataloader = config.training_dataloader.build()
-        if not isinstance(training_dataloader, RLDataLoader):
-            raise ValueError("training_dataloader must build an RLDataLoader")
+        if not isinstance(training_dataloader, RolloutDataLoader):
+            raise ValueError("training_dataloader must build a RolloutDataLoader")
         self._training_dataloader = iter(training_dataloader)
 
         # The worker pool's actor handle and the actor system that spawned it.
@@ -138,9 +138,9 @@ class Rollouter(Configurable):
         """Return the next globally identified input from the training loader."""
         return next(self._training_dataloader)
 
-    def acknowledge_training_sample_ids(self, sample_ids: Iterable[int]) -> None:
+    def commit_training_sample_ids(self, sample_ids: Iterable[int]) -> None:
         """Mark training samples as safe to omit from the next checkpoint."""
-        self._training_dataloader.acknowledge(sample_ids)
+        self._training_dataloader.commit(sample_ids)
 
     def get_validation_samples(self, steps: int) -> list[object]:
         """Materialize one fresh validation pass, optionally bounded by steps."""
@@ -237,7 +237,7 @@ class Rollouter(Configurable):
         return self._training_dataloader.state_dict()
 
     def load_state_dict(self, state_dict: dict[str, object]) -> None:
-        """Restore the training iterator, including unacknowledged inputs."""
+        """Restore the training iterator, including uncommitted inputs."""
         self._training_dataloader.load_state_dict(state_dict)
 
 

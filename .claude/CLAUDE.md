@@ -212,7 +212,11 @@ this for the comments and docstrings you are adding or rewriting.
 2. **Write a description a human can verify.** Follow the `pr-description`
    skill: the concrete problem with a simple example, what changed, user-facing
    changes as a before/after table, numerics, and testing. Say which parts are
-   mechanical so reviewers can skip them.
+   mechanical so reviewers can skip them. The "Summary (human-written)" section
+   is written by the author. Agents never fill it in; they leave the template
+   placeholder (see "AI-assisted contributions" in `CONTRIBUTING.md`).
+   Agents don't open, edit, or comment on GitHub issues and PRs unless the user
+   approved the exact content.
 3. **Show numerical proof.** Include loss comparison for any non-trivial change
    (see "Validating Numerics" above).
 4. **Tests must earn their CI cost.** Add a test when it guards a real,

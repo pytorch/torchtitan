@@ -3,7 +3,7 @@ We support automatically collecting metrics such as
 2. Memory metrics to measure max VRAM consumption and the number of OOMs
 3. Timing metrics to measure data loading bottlenecks
 
-Those metrics can then be visualized in either a TensorBoard or WandDB dashboard
+Those metrics can then be visualized in a TensorBoard, W&B, or MLflow dashboard.
 
 ## TensorBoard
 
@@ -31,4 +31,12 @@ So all you need to do is make sure that `metrics.enable_wandb` is enabled
 
 For an example you can inspect the Llama 3 [recipe](../../torchtitan_recipes/models/llama3.py)
 
-If both W&B and TensorBoard are enabled, both loggers run.
+## MLflow
+
+Install the optional tracking client with `pip install mlflow-skinny`
+(or the full `mlflow` package).
+
+Enable `metrics.enable_mlflow` in your recipe and set `MLFLOW_TRACKING_URI`
+and `MLFLOW_EXPERIMENT_NAME` to select the tracking server and experiment.
+
+Any combination of the three loggers can be enabled together.
