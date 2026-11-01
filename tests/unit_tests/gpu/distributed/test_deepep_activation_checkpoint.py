@@ -124,6 +124,72 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
         return 2
 
     @with_comms
+    def test_absorbed_router_scores_match_post_combine(self):
+        mesh = init_device_mesh(
+            self.device_type, (self.world_size,), mesh_dim_names=("ep",)
+        )
+        set_spmd_meshes(dense_mesh=mesh, sparse_mesh=mesh, dense_sp_enabled=False)
+        with (
+            set_current_spmd_mesh(mesh),
+            torch.autograd.set_multithreading_enabled(False),
+        ):
+            dispatcher = DeepEPTokenDispatcher.Config(
+                num_experts=8,
+                top_k=_TOP_K,
+                hidden_dim=_MODEL_DIM,
+                num_max_tokens_per_rank=_NUM_TOKENS,
+            ).build()
+            dispatcher.init_buffer()
+            # Dyadic values keep score multiplication exact in BF16, isolating
+            # communication alignment from rounding differences around W2.
+            x_TD = (
+                (torch.arange(_NUM_TOKENS, device=self.device_type) % 3 + 1)
+                .to(torch.bfloat16)[:, None]
+                .expand(-1, _MODEL_DIM)
+                .clone()
+                .requires_grad_()
+            )
+            expert_ids_TK = (
+                torch.arange(_NUM_TOKENS, device=self.device_type)[:, None]
+                + torch.arange(_TOP_K, device=self.device_type)
+                + self.rank
+            ) % 8
+            score_exponents_TK = (
+                torch.arange(_NUM_TOKENS, device=self.device_type)[:, None] // 8
+                + torch.arange(_TOP_K, device=self.device_type)
+                + self.rank
+            ) % 3 + 1
+            scores_TK = (2.0**-score_exponents_TK).requires_grad_()
+            routing_map_TE = torch.nn.functional.one_hot(expert_ids_TK, 8).any(dim=1)
+            results = []
+            for absorb in (False, True):
+                routed_RD, _, metadata = dispatcher.dispatch(
+                    x_TD,
+                    scores_TK,
+                    expert_ids_TK,
+                    routing_map_TE,
+                )
+                remat.recompute_needs_tensor(routed_RD)
+                if absorb:
+                    remat.recompute_needs_tensor(metadata.routed_scores_R)
+                    routed_RD = (
+                        routed_RD.float() * metadata.routed_scores_R[:, None]
+                    ).bfloat16()
+                out_TD = dispatcher.combine(
+                    routed_RD,
+                    metadata,
+                    x_TD,
+                    routed_scores_R=None if absorb else metadata.routed_scores_R,
+                )
+                remat.recompute_needs_tensor(out_TD)
+                grads = torch.autograd.grad(
+                    out_TD.float().square().sum(), (x_TD, scores_TK)
+                )
+                results.append((out_TD.detach(), *grads))
+            for actual, expected in zip(results[1], results[0]):
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    @with_comms
     def test_dispatch_and_combine_are_saved_not_replayed(self):
         # DeepEP fills receive slots with atomics, so a replayed dispatch can
         # receive rows in another order than the forward's handle records.
@@ -230,7 +296,7 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                 self.assertEqual(baseline_calls, {"dispatch": 2, "combine": 2})
                 self.assertEqual(
                     num_calls,
-                    {"dispatch": 2 + num_replays, "combine": 2 + num_replays},
+                    {"dispatch": 2 + num_replays, "combine": 2},
                     msg=f"unexpected DeepEP replays: {num_calls}",
                 )
                 if num_replays:
