@@ -495,8 +495,9 @@ class EngineLoop:
         wait for every rank to finish, and bump the policy version.
 
         Rank 0 replies to the load right after this returns, and the trainer may then
-        overwrite the StorageVolume snapshot the other ranks read from. A rank that fails
-        stops every rank here instead of leaving the others in the next decision broadcast.
+        overwrite the StorageVolume snapshot the other ranks read from. A fetch that fails on
+        one rank stops every rank here instead of leaving the others in the next decision
+        broadcast; a failure in an FSDP reshard or unshard relies on collective timeouts.
         """
         error: Exception | None = None
         try:

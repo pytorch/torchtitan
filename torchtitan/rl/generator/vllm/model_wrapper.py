@@ -596,8 +596,8 @@ class VLLMModelWrapper(Module):
             _unshard_and_free_sharded_params(module)
         if error is not None:
             raise error
-        # Buffers the trainer does not publish (e.g. vLLM attention scales) keep
-        # their values.
+        # Buffers load after every FSDP collective, so a failure here cannot hang
+        # peers. A fetch that skips unpublished keys (gpu_fetch) leaves them as is.
         if self._buffer_keys:
             fetch({key: self.model.get_buffer(key) for key in self._buffer_keys})
 

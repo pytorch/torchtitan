@@ -1075,7 +1075,7 @@ class Controller(Configurable):
             Controller: await pull N-1     (push N must not overwrite the TorchStore key mid-pull)
             Controller: start push N -> pull N -> release groups, in the background
                           |-> Trainer: stage policy N, TorchStore put_state_dict
-                          |-> Generators: prefetch policy N into pinned CPU memory, then load it
+                          |-> Generators: load policy N (cpu_prefetch: prefetch it into pinned CPU memory first)
                           |-> Group buffer: admit the next rollout groups
             Trainer:    forward/backward N+1 (does not mutate persistent model state)
 
