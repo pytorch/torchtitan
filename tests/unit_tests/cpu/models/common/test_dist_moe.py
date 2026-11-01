@@ -326,8 +326,8 @@ def test_transform_propagates_clamped_swiglu_to_annex_config(
     source = replace(
         _stock_config(dim=64),
         activation_fn=ClampedSwiGLU.Config(
-            swiglu_alpha=1.75,
-            swiglu_limit=8.0,
+            alpha=1.75,
+            limit=8.0,
         ),
     )
     transformed = DistMoeTransform(expert_precision=expert_precision).transform(source)
