@@ -238,7 +238,14 @@ def _split_in_proj(
         [query.flatten(1), key.flatten(1), value.flatten(1)], dim=-1
     )
     gate_THV = gate.reshape(num_tokens, -1, value_head_dim)
-    return mixed_qkv_TC, a.flatten(1), b.flatten(1), gate_THV
+    # The GDN kernels need contiguous heads. With one value head per key head (0.8B, 2B),
+    # flatten and reshape return strided views instead of copies.
+    return (
+        mixed_qkv_TC,
+        a.flatten(1).contiguous(),
+        b.flatten(1).contiguous(),
+        gate_THV.contiguous(),
+    )
 
 
 class GDNKernel(Module):
