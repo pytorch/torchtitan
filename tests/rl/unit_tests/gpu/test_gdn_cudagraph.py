@@ -42,6 +42,65 @@ MODEL_ENV = "TORCHTITAN_QWEN3_5_0_8B_HF_PATH"
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
 
+def test_batch_invariant_query_normalization_matches_prefill(monkeypatch):
+    monkeypatch.setattr(gdn, "is_in_batch_invariant_mode", lambda: True)
+    # Captured BF16 query with different rounding under decode's reduction layout.
+    raw = bytes.fromhex(
+        "903cfe3df13d74bbd6bd4b3d5ebdafbc87bc8b3d873d203decbd51bdb43d553e"
+        "aebd163ee13da53da6bb28bcd73d693ddbbcb6bdf5bd2d3caebbc4bafe3d073e"
+        "6dba76bbc2bcf93d773c333b443d073ec33d91bda43eefbc013ea43d0cbe5b3d"
+        "8ebdc3bc57bdbb3e443d10bd36bdc13d103edabc733d87bdf1bdc6bcabbc8bbd"
+        "6ebdda3da13c83bd38be27befdbadc3d013d12bd1cbd6ebb223e223c573e9abd"
+        "1cbdf43cc43d90bcc7bd97bd0cbea5bce93ccebc853d51bdb1bca93c973d163e"
+        "703d8c3ba7bdb5bde53d46bde73da3bc823c08bea2bdacbd4abdc8bd96bd3a3d"
+        "ab3d0ebc42bda03d40bc85bd813ec7bd603d0a3d1dbd1ebea3bc04be0b3d493c"
+    )
+    query = torch.frombuffer(bytearray(raw), dtype=torch.bfloat16).cuda()
+    layer = object.__new__(gdn.VLLMInnerGDN)
+    torch.nn.Module.__init__(layer)
+    layer.local_num_k_heads = 1
+    layer.local_num_v_heads = 2
+    layer.local_key_dim = layer.head_k_dim = layer.head_v_dim = 128
+    normalized = []
+    original = gdn.recurrent_gdn
+
+    def observe(query, *args, **kwargs):
+        normalized.append(query.detach().clone())
+        return original(query, *args, **kwargs)
+
+    monkeypatch.setattr(gdn, "recurrent_gdn", observe)
+
+    def run(num_tokens, position, offsets):
+        layer.kv_cache = (
+            torch.empty(0, device="cuda"),
+            torch.zeros(4, 2, 128, 128, device="cuda"),
+        )
+        mixed = torch.zeros(num_tokens, 512, device="cuda", dtype=torch.bfloat16)
+        mixed[position, :128] = query
+        mixed[:, 128:] = 1
+        gates = torch.zeros(num_tokens, 2, device="cuda", dtype=torch.bfloat16)
+        parameters = torch.zeros(2, device="cuda", dtype=torch.bfloat16)
+        output = torch.zeros(num_tokens, 2, 128, device="cuda", dtype=torch.bfloat16)
+        layer._forward_gdn(
+            mixed,
+            gates,
+            gates,
+            parameters,
+            parameters,
+            output,
+            torch.tensor(offsets, device="cuda", dtype=torch.int32),
+            torch.tensor([1, 2, 3], device="cuda", dtype=torch.int32),
+            torch.zeros(3, device="cuda", dtype=torch.bool),
+        )
+        assert torch.isfinite(output).all()
+        return normalized[-1][0, position]
+
+    with torch.no_grad():
+        decode = run(3, 0, [0, 1, 2, 3])
+        prefill = run(313, 128, [0, 143, 247, 313])
+    assert torch.equal(decode, prefill)
+
+
 @pytest.mark.parametrize(
     "batch_invariant", [False, True], ids=["regular", "batch-invariant"]
 )
