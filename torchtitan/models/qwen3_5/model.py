@@ -340,6 +340,7 @@ class Qwen35Model(MultimodalModel):
                     "loss",
                     "fused_binary_activation",
                     "gated_rmsnorm",
+                    "gdn_split_in_proj",
                     "offset_rmsnorm",
                     "partial_rope",
                     "shared_expert_gate",
@@ -370,11 +371,8 @@ class Qwen35Model(MultimodalModel):
                     )
                 elif isinstance(layer.attention, GDN.Config):
                     delta_net = layer.attention
-                    num_value_heads = (
-                        delta_net.in_proj_v.out_features // delta_net.value_head_dim
-                    )
                     attention_op_flops += delta_rule_flops_per_token(
-                        num_heads=num_value_heads,
+                        num_heads=delta_net.n_heads,
                         key_head_dim=delta_net.key_head_dim,
                         v_head_dim=delta_net.value_head_dim,
                     )
@@ -394,12 +392,8 @@ class Qwen35Model(MultimodalModel):
                 None,
             )
             if delta_net is not None:
-                num_key_heads = (
-                    delta_net.in_proj_q.out_features // delta_net.key_head_dim
-                )
-                num_value_heads = (
-                    delta_net.in_proj_v.out_features // delta_net.value_head_dim
-                )
+                num_key_heads = delta_net.n_key_heads
+                num_value_heads = delta_net.n_heads
                 if num_key_heads % tp != 0 or num_value_heads % tp != 0:
                     raise ValueError(
                         f"tensor parallel degree ({tp}) must divide "

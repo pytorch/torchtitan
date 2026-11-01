@@ -109,9 +109,9 @@ def inner_gated_delta_net_sharding_config() -> ShardingConfig:
     head_placement = attention_activation_placement()
     parameter_placement = dense_param_placement(tp=spmd.S(0))
     input_shardings = {
-        "query_TC": projected_placement,
-        "key_TC": projected_placement,
-        "value_TC": projected_placement,
+        # Each rank's own [q | k | v] columns, not a shard of one global tensor:
+        # S(1) is nominal, so never redistribute or gather it.
+        "mixed_qkv_TC": projected_placement,
         "a_TH": projected_placement,
         "b_TH": projected_placement,
         "conv_q_weight_C1W": parameter_placement,

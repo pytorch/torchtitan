@@ -377,12 +377,14 @@ def _qwen35_deltanet_config(
 ) -> GDN.Config:
     """Build a fully-specified, head-sharded GDN.Config.
 
-    Input projections are colwise-sharded (head-sharded output) and out_proj is
+    The input projection is colwise-sharded (head-sharded output) and out_proj is
     row-parallel. Conv weights and per-head A_log/dt_bias are Shard(0). The
     recurrence runs on rank-local heads via a single local SPMD boundary.
     """
     key_dim = n_key_heads * key_head_dim
     value_dim = n_value_heads * value_head_dim
+    # in_proj rows per key head: q, k, then v, z, a, b of its value heads (GDN.Config).
+    in_proj_dim = 2 * key_dim + 2 * value_dim + 2 * n_value_heads
 
     def _proj(in_f: int, out_f: int, init: dict) -> Linear.Config:
         return Linear.Config(
@@ -411,13 +413,9 @@ def _qwen35_deltanet_config(
         n_heads=n_value_heads,
         key_head_dim=key_head_dim,
         value_head_dim=value_head_dim,
+        n_key_heads=n_key_heads,
         conv_kernel_size=conv_kernel_size,
-        in_proj_q=_proj(dim, key_dim, _LINEAR_INIT),
-        in_proj_k=_proj(dim, key_dim, _LINEAR_INIT),
-        in_proj_v=_proj(dim, value_dim, _LINEAR_INIT),
-        in_proj_z=_proj(dim, value_dim, _LINEAR_INIT),
-        in_proj_a=_proj(dim, n_value_heads, _LINEAR_INIT),
-        in_proj_b=_proj(dim, n_value_heads, _LINEAR_INIT),
+        in_proj=_proj(dim, in_proj_dim, _LINEAR_INIT),
         conv_q=_conv(key_dim),
         conv_k=_conv(key_dim),
         conv_v=_conv(value_dim),

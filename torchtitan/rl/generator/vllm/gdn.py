@@ -6,8 +6,8 @@
 
 """vLLM paged-cache adapter for TorchTitan's Gated DeltaNet.
 
-The enclosing ``VLLMGDN`` owns all parameters. This adapter runs the input
-projections and Attention Gym's paging-aware convolution and GDN kernels.
+The enclosing Qwen3.5 module owns all parameters. This adapter runs Attention
+Gym's paging-aware convolution and GDN kernels.
 
 Batch-invariant execution has two additional requirements:
 
@@ -21,9 +21,7 @@ Decode and prefill update the paged convolution and SSM state pools directly.
 
 from dataclasses import dataclass
 
-import spmd_types as spmd
 import torch
-import torch.nn.functional as F
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -37,7 +35,6 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
-from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.attention import InnerAttention, LinearAttentionMetadata
 from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.linear_attention import chunk_kernel_options
@@ -51,12 +48,6 @@ from torchtitan.models.common.attn_gym import (
     recurrent_gdn_decode,
 )
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.decoder_sharding import (
-    attention_activation_placement,
-    dense_param_placement,
-    replicated_activation_placement,
-)
-from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.rl.generator.vllm.linear_attention import (
     configure_hybrid_state,
     LinearAttentionExecutionPath,
@@ -69,9 +60,8 @@ from torchtitan.rl.generator.vllm.linear_attention import (
 class VLLMInnerGDN(InnerAttention, MambaBase):
     """Paged-cache inner GDN implementation.
 
-    The enclosing ``VLLMGDN`` owns all parameters and passes fused copies of
-    the projection and conv weights. This module owns only vLLM cache plumbing
-    and kernel dispatch.
+    The enclosing ``common.attention.gdn.GDN`` owns all parameters. This
+    module owns only vLLM cache plumbing and kernel dispatch.
 
     The enclosing module and vLLM cache are both head-sharded under tensor
     parallelism. Speculative decoding is not supported.
@@ -419,139 +409,38 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
 
     def forward(
         self,
-        x_TD: torch.Tensor,
-        input_weight_CD: torch.Tensor,
-        conv_weight_CW: torch.Tensor,
+        mixed_qkv_TC: torch.Tensor,
+        a_TH: torch.Tensor,
+        b_TH: torch.Tensor,
+        conv_q_weight_C1W: torch.Tensor,
+        conv_k_weight_C1W: torch.Tensor,
+        conv_v_weight_C1W: torch.Tensor,
         A_log_H: torch.Tensor,
         dt_bias_H: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run the six input projections as one GEMM, then the paged conv and recurrence.
-
-        Returns the recurrence output and the ``in_proj_z`` gate, both ``[T, H, V]``.
-
-        Example, 27B at TP1 (16 key heads, 48 value heads, head dims 128):
-
-            F.linear(x_TD, input_weight_CD)  # [T, 16480] = [q|k|v 10240 | z 6144 | a 48 | b 48]
-            # q|k|v, z, a and b are column views; the conv reads q|k|v in place.
-        """
-        value_dim = self.local_num_v_heads * self.head_v_dim
-        split_sizes = [
-            2 * self.local_key_dim + value_dim,
-            value_dim,
-            self.local_num_v_heads,
-            self.local_num_v_heads,
-        ]
-        mixed_qkv_TC, gate_TC, a_TH, b_TH = F.linear(x_TD, input_weight_CD).split(
-            split_sizes, dim=-1
-        )
-        output_THV = self._forward(
-            mixed_qkv_TC, a_TH, b_TH, conv_weight_CW, None, A_log_H, dt_bias_H
-        )
-        return output_THV, gate_TC.unflatten(-1, (-1, self.head_v_dim))
-
-
-def vllm_inner_gdn_sharding_config() -> ShardingConfig:
-    """``VLLMInnerGDN``'s local boundary: gathered input in, head-sharded output and gate out."""
-    head_placement = attention_activation_placement()
-    parameter_placement = dense_param_placement(tp=spmd.S(0))
-    input_shardings = {
-        "x_TD": replicated_activation_placement(),
-        # Each rank's own [q|k|v|z|a|b] (and [q|k|v]) rows, not a shard of one global
-        # weight: S(0) is nominal, so never redistribute or gather the fused weights.
-        "input_weight_CD": parameter_placement,
-        "conv_weight_CW": parameter_placement,
-        "A_log_H": parameter_placement,
-        "dt_bias_H": parameter_placement,
-    }
-    return ShardingConfig(
-        in_src_shardings=input_shardings,
-        in_dst_shardings=dict(input_shardings),
-        out_src_shardings=(head_placement, head_placement),
-        local_spmd=True,
-    )
-
-
-class VLLMGDN(GDN):
-    """GDN for the vLLM generator: one GEMM for the six input projections.
-
-    Parameters and state-dict keys are ``GDN``'s, so weight loads and syncs are
-    unchanged. After each load of its FSDP group, ``refresh_fused_weights`` copies
-    each rank's local shards into two fused tensors that every step reads:
-
-        input_weight_CD = [in_proj_q | in_proj_k | in_proj_v | in_proj_z | in_proj_a | in_proj_b]
-        conv_weight_CW  = [conv_q | conv_k | conv_v]
-
-    Why copies: FSDP owns each parameter's storage, and the generator's model is
-    FSDP-wrapped, so the parameters can't be views of one buffer. To hold one copy,
-    the refresh frees the six projections' unsharded storages; the next load's
-    FSDP unshard re-allocates them, one layer at a time. Between loads the six
-    parameters have no storage, so nothing may read them.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(GDN.Config):
-        pass
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        # The fused GEMM bypasses the projection modules' forward, which quantized
-        # or LoRA projections override, and has no bias.
-        projections = self._input_projections()
-        if any(
-            type(projection) is not Linear or projection.bias is not None
-            for projection in projections
-        ):
-            raise ValueError(
-                "VLLMGDN fuses plain Linear input projections without bias, got "
-                f"{[(type(p).__name__, p.bias is not None) for p in projections]}"
-            )
-        self.input_weight_CD: torch.Tensor | None = None
-        self.conv_weight_CW: torch.Tensor | None = None
-
-    def _input_projections(self) -> tuple[Linear, ...]:
-        return (
-            self.in_proj_q,
-            self.in_proj_k,
-            self.in_proj_v,
-            self.in_proj_z,
-            self.in_proj_a,
-            self.in_proj_b,
-        )
-
-    @torch.no_grad()
-    def refresh_fused_weights(self) -> None:
-        """Copy the local shards into the fused tensors, in place after the first call (CUDA
-        graphs captured the addresses), then free the six projections."""
-        from torch.distributed.fsdp._fully_shard._fsdp_param import free_storage
-
-        input_weight_CD = torch.cat(
-            [projection.weight for projection in self._input_projections()]
-        )
-        conv_weight_CW = torch.cat(
-            [self.conv_q.weight, self.conv_k.weight, self.conv_v.weight]
-        ).squeeze(1)
-        if self.input_weight_CD is None or self.conv_weight_CW is None:
-            self.input_weight_CD = input_weight_CD
-            self.conv_weight_CW = conv_weight_CW
-        else:
-            self.input_weight_CD.copy_(input_weight_CD)
-            self.conv_weight_CW.copy_(conv_weight_CW)
-        for projection in self._input_projections():
-            free_storage(projection.weight)
-
-    def forward(
-        self,
-        x_TD: torch.Tensor,
-        attention_metadata: LinearAttentionMetadata | None = None,
+        *,
+        key_head_dim: int,
+        value_head_dim: int,
+        attention_metadata: LinearAttentionMetadata | None,
     ) -> torch.Tensor:
-        # VLLMInnerGDN reads vLLM's per-step metadata from the forward context.
+        """Run the flattened vLLM cache operation on rank-local tensors."""
         del attention_metadata
-        x_TD = maybe_gather_tp_input(self, x_TD)
-        output_THV, gate_THV = self.inner_attention(
-            x_TD, self.input_weight_CD, self.conv_weight_CW, self.A_log, self.dt_bias
+        assert key_head_dim == self.head_k_dim
+        assert value_head_dim == self.head_v_dim
+        conv_weight_CW = torch.cat(
+            [conv_q_weight_C1W, conv_k_weight_C1W, conv_v_weight_C1W],
+            dim=0,
+        ).squeeze(1)
+        assert conv_weight_CW.shape[-1] == self.conv_kernel_size
+
+        return self._forward(
+            mixed_qkv_TC,
+            a_TH,
+            b_TH,
+            conv_weight_CW,
+            None,
+            A_log_H,
+            dt_bias_H,
         )
-        output_THV = self.norm(output_THV, gate_THV)
-        return self.out_proj(output_THV.reshape(x_TD.shape[0], -1))
 
 
 def maybe_configure_gdn_hybrid_model(
@@ -566,8 +455,8 @@ def maybe_configure_gdn_hybrid_model(
         "GDN",
         (
             (
-                gdn_config.in_proj_q.out_features // gdn_config.key_head_dim,
-                gdn_config.in_proj_v.out_features // gdn_config.value_head_dim,
+                gdn_config.n_key_heads,
+                gdn_config.n_heads,
                 gdn_config.key_head_dim,
                 gdn_config.value_head_dim,
                 gdn_config.conv_kernel_size,
