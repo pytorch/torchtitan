@@ -316,7 +316,19 @@ class Controller(Configurable):
 
         override: OverrideConfig = field(default_factory=OverrideConfig)
         """Registered overrides applied to this whole config tree, including the
-        trainer and generator models, when the controller is constructed."""
+        trainer and generator models, by ``resolve_overrides``: when the
+        controller is constructed, and by the launcher's submit command before
+        it plans the job."""
+
+        def resolve_overrides(self) -> None:
+            """Apply ``override`` to this config in place. Call it once, before
+            reading the config, wherever the run is planned or built."""
+            # Copy each model so overrides never write through a model config the
+            # recipe shares between the trainer and generator.
+            self.trainer.model = copy.deepcopy(self.trainer.model)
+            self.generator.model = copy.deepcopy(self.generator.model)
+            if self.override.imports:
+                apply_overrides(self.override, self)
 
         def maybe_log(self) -> None:
             debug = self.trainer.debug
@@ -430,12 +442,7 @@ class Controller(Configurable):
 
     def __init__(self, config: Config):
         self.config = config
-        # Copy each model so overrides never write through a model config the
-        # recipe shares between the trainer and generator.
-        config.trainer.model = copy.deepcopy(config.trainer.model)
-        config.generator.model = copy.deepcopy(config.generator.model)
-        if config.override.imports:
-            apply_overrides(config.override, config)
+        config.resolve_overrides()
         config.maybe_log()
         self.actor_system: ActorSystem | None = None
         self.trainer: TrainerHandle | None = None

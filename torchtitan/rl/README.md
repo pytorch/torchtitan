@@ -249,6 +249,10 @@ python -m torchtitan.rl.train \
 `config.metrics.enable_wandb = False` in your recipe. Set
 `config.metrics.enable_tensorboard = True` to write TensorBoard metrics.
 
+## Run on SLURM
+
+See [Launchers](./actors/monarch/README.md#launchers).
+
 ## Trainer/generator consistency
 
 Install the batch-invariant kernels shown in [Prerequisites](#prerequisites), then follow the [bitwise parity guide](./BITWISE_PARITY.md) for configuration, supported layouts, verification, and limitations.
