@@ -164,6 +164,8 @@ class EngineLoop:
         # `_run` running on the engine loop thread's event loop, as a future any thread can await;
         # None until `start` starts it.
         self._future: concurrent.futures.Future[None] | None = None
+        # RANK 0: raised after broadcasting CLOSE so peers leave their collective first.
+        self._rank0_result_drain_failure: Exception | None = None
 
     def start(self) -> None:
         """Start the loop on the engine loop thread (one-time, idempotent)."""
@@ -288,7 +290,7 @@ class EngineLoop:
         pending_load_messages: list[ModelStateDictLoadMessage] = []
         try:
             # One-time dispatcher setup before the loop starts.
-            self._request_dispatcher.setup()
+            self._request_dispatcher.setup(self._rank0_result_drain_failed)
             while True:
                 # Rank 0 decides next decision; followers pass None and learn from the broadcast.
                 decision = (
@@ -320,6 +322,8 @@ class EngineLoop:
 
                 if decision.action is LoopAction.CLOSE:
                     if self._rank == 0:
+                        if self._rank0_result_drain_failure is not None:
+                            raise self._rank0_result_drain_failure
                         _fail_loads(
                             pending_load_messages,
                             RuntimeError(
@@ -391,10 +395,20 @@ class EngineLoop:
         await asyncio.sleep(0)
         while not self._queue.empty():
             message = self._queue.get_nowait()
-            if isinstance(message, (CloseMessage, SessionReleaseMessage)):
+            if isinstance(
+                message,
+                (CloseMessage, ResultDrainFailureMessage, SessionReleaseMessage),
+            ):
                 continue
             if message.reply.set_running_or_notify_cancel():
                 message.reply.set_exception(exc)
+
+    def _rank0_result_drain_failed(self, exc: Exception) -> None:
+        """Wake the engine loop and make it fail with a result-drain error."""
+        assert self._rank == 0
+        self._queue.close(
+            ResultDrainFailureMessage(exc=exc), reason="result drain failed"
+        )
 
     async def _decide_next_action(
         self,
@@ -430,6 +444,11 @@ class EngineLoop:
         released_session_ids: list[str] = []
         released_group_ids: list[int] = []
         for message in messages:
+            if isinstance(message, ResultDrainFailureMessage):
+                # Peers are already waiting in the decision broadcast. Send them
+                # CLOSE before rank 0 raises, or they remain blocked forever.
+                self._rank0_result_drain_failure = message.exc
+                return LoopDecision(action=LoopAction.CLOSE, requests_per_dp_rank=[])
             if isinstance(message, CloseMessage):
                 # Drops nothing: the queue rejects puts once closed, so the `CloseMessage` is the last message.
                 return LoopDecision(action=LoopAction.CLOSE, requests_per_dp_rank=[])
@@ -559,8 +578,19 @@ class SessionReleaseMessage:
     group_ids: list[int] = field(default_factory=list)
 
 
+@dataclass(kw_only=True, slots=True)
+class ResultDrainFailureMessage:
+    """A failure from the rank-0 peer-result drain task."""
+
+    exc: Exception
+
+
 EngineLoopMessage = (
-    GenerationMessage | ModelStateDictLoadMessage | CloseMessage | SessionReleaseMessage
+    GenerationMessage
+    | ModelStateDictLoadMessage
+    | CloseMessage
+    | SessionReleaseMessage
+    | ResultDrainFailureMessage
 )
 
 
