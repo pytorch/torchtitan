@@ -9,7 +9,11 @@
 import asyncio
 from types import SimpleNamespace
 
-from torchtitan.rl.actors.monarch import provisioning
+from torchtitan.observability import structured_logger as sl
+from torchtitan.rl.actors.monarch import (
+    provisioning,
+    rollout_worker as rollout_worker_module,
+)
 from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 from torchtitan.rl.actors.monarch.system import MonarchActorSystem
 
@@ -43,9 +47,32 @@ def test_rollout_worker_actor_builds_configured_worker() -> None:
             actor,
             worker_config=worker_config,
             num_threads=1,
+            structured_logger_init_fn=None,
         )
 
         assert actor._worker is worker
+
+    asyncio.run(run())
+
+
+def test_rollout_worker_actor_inits_structured_logger_with_its_rank(
+    monkeypatch,
+) -> None:
+    async def run() -> None:
+        init_calls = []
+        monkeypatch.setattr(
+            rollout_worker_module, "current_rank", lambda: SimpleNamespace(rank=2)
+        )
+        actor = object.__new__(RolloutWorkerActor)
+
+        RolloutWorkerActor.__init__(
+            actor,
+            worker_config=SimpleNamespace(build=lambda: None),
+            num_threads=1,
+            structured_logger_init_fn=lambda **kwargs: init_calls.append(kwargs),
+        )
+
+        assert init_calls == [{"source": "rl_rollout_worker", "rank": 2}]
 
     asyncio.run(run())
 
@@ -131,6 +158,12 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
         worker_mesh = _WorkerMesh(_WorkerActorMesh())
         host = _ControllerHost(worker_mesh)
         monkeypatch.setattr(provisioning, "this_host", lambda: host)
+        structured_logger_init_fn = object()
+        monkeypatch.setattr(
+            sl,
+            "get_structured_logger_subprocess_init_fn",
+            lambda: structured_logger_init_fn,
+        )
         rollouter = _rollouter_without_datasets()
 
         await rollouter.setup_async(
@@ -148,6 +181,7 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
         assert kwargs == {
             "worker_config": rollouter._config.worker,
             "num_threads": 2,
+            "structured_logger_init_fn": structured_logger_init_fn,
         }
         assert worker_mesh.actor_mesh.setup_async.calls == [
             {
