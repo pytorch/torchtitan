@@ -146,30 +146,29 @@ class MuseGlimmerStateDictAdapter(StateDictAdapter):
     # along that axis, so they are wrapped to redistribute DTensors to Replicate
     # first (see dtensor_safe).
     @dtensor_safe
-    def _permute(self, w, n_heads_arg, dim1=None, dim2=None):
-        """native (interleaved) -> HF (split-half) row order for q/k."""
-        if dim1 is None:
-            dim1 = w.shape[0]
-        if dim2 is None:
-            dim2 = w.shape[1]
+    def _permute(self, w, n_heads_arg):
+        """native (interleaved) -> HF (split-half) row order for q/k.
+
+        Only the rows are reordered, so the tensor's own shape sizes the view: a
+        LoRA factor with the projection's rows but a rank-wide second dim goes
+        through the same permute as the weight.
+        """
+        rows, cols = w.shape
         return (
-            w.view(n_heads_arg, dim1 // n_heads_arg // 2, 2, dim2)
+            w.view(n_heads_arg, rows // n_heads_arg // 2, 2, cols)
             .transpose(1, 2)
-            .reshape(dim1, dim2)
+            .reshape(rows, cols)
             .clone()
         )
 
     @dtensor_safe
-    def _reverse_permute(self, w, n_heads_arg, dim1=None, dim2=None):
+    def _reverse_permute(self, w, n_heads_arg):
         """HF (split-half) -> native (interleaved) row order for q/k."""
-        if dim1 is None:
-            dim1 = w.shape[0]
-        if dim2 is None:
-            dim2 = w.shape[1]
+        rows, cols = w.shape
         return (
-            w.view(n_heads_arg, 2, dim1 // n_heads_arg // 2, dim2)
+            w.view(n_heads_arg, 2, rows // n_heads_arg // 2, cols)
             .transpose(1, 2)
-            .reshape(dim1, dim2)
+            .reshape(rows, cols)
             .clone()
         )
 
@@ -195,15 +194,12 @@ class MuseGlimmerStateDictAdapter(StateDictAdapter):
             .clone()
         )
 
-    def _attn_geometry(self):
+    def _attn_heads(self):
         # pyrefly: ignore [missing-attribute]
         attn = self.model_config.layers[0].attention
         n_heads = attn.n_heads
         n_kv_heads = attn.n_kv_heads if attn.n_kv_heads is not None else n_heads
-        # pyrefly: ignore [missing-attribute]
-        dim = self.model_config.dim
-        head_dim = attn.head_dim or dim // n_heads
-        return n_heads, n_kv_heads, dim, head_dim
+        return n_heads, n_kv_heads
 
     def _vision_num_heads(self):
         # pyrefly: ignore [missing-attribute]
@@ -219,7 +215,7 @@ class MuseGlimmerStateDictAdapter(StateDictAdapter):
                 "HF checkpoints."
             )
         state_dict = self._native_fused_linears_to_hf(state_dict)
-        n_heads, n_kv_heads, dim, head_dim = self._attn_geometry()
+        n_heads, n_kv_heads = self._attn_heads()
         v_heads = self._vision_num_heads()
         to_hf_map = {val: k for k, val in self.from_hf_map.items() if val is not None}
         hf_state_dict: dict[str, Any] = {}
@@ -236,7 +232,7 @@ class MuseGlimmerStateDictAdapter(StateDictAdapter):
                 if abstract_key == "layers.{}.attention.qkv_linear.wq.weight":
                     value = self._permute(value, n_heads)
                 elif abstract_key == "layers.{}.attention.qkv_linear.wk.weight":
-                    value = self._permute(value, n_kv_heads, head_dim * n_kv_heads, dim)
+                    value = self._permute(value, n_kv_heads)
                 # Vision: same permute for q/k weight+bias
                 elif abstract_key == "vision_encoder.layers.{}.attn.wq.weight":
                     value = self._permute(value, v_heads)
@@ -265,7 +261,7 @@ class MuseGlimmerStateDictAdapter(StateDictAdapter):
             )
         self._validate_hf_rope_config(ComplexRoPE.Config)
 
-        n_heads, n_kv_heads, dim, head_dim = self._attn_geometry()
+        n_heads, n_kv_heads = self._attn_heads()
         v_heads = self._vision_num_heads()
         state_dict: dict[str, Any] = {}
         for key, value in hf_state_dict.items():
@@ -286,9 +282,7 @@ class MuseGlimmerStateDictAdapter(StateDictAdapter):
                     abstract_key
                     == f"{_HF_TEXT_PREFIX}layers.{{}}.self_attn.k_proj.weight"
                 ):
-                    value = self._reverse_permute(
-                        value, n_kv_heads, head_dim * n_kv_heads, dim
-                    )
+                    value = self._reverse_permute(value, n_kv_heads)
                 # Vision: reverse permute for q/k weight+bias
                 elif (
                     abstract_key == f"{_HF_VISION_PREFIX}layers.{{}}.attn.q_proj.weight"
