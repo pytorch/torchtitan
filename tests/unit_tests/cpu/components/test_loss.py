@@ -415,19 +415,20 @@ class TestGradAccumulator(unittest.TestCase):
         """Verify GradAccumulator produces the same result as torch.cat."""
         torch.manual_seed(42)
         T, D = 16, 16
+        num_chunks = 4
         reference = torch.randn(T, D)
-        # Equal chunks, and the unequal ones ChunkedLossWrapper uses for loss_mask tokens.
-        for chunks in (torch.chunk(reference, 4), torch.tensor_split(reference, 3)):
-            acc = GradAccumulator(
-                reference,
-                num_chunks=len(chunks),
-                dtype=reference.dtype,
-            )
-            for chunk in chunks:
-                acc.add(chunk)
+        chunks = torch.chunk(reference, num_chunks, dim=0)
 
-            result = acc.buffer
-            torch.testing.assert_close(result, reference)
+        acc = GradAccumulator(
+            reference,
+            num_chunks=num_chunks,
+            dtype=reference.dtype,
+        )
+        for chunk in chunks:
+            acc.add(chunk)
+
+        result = acc.buffer
+        torch.testing.assert_close(result, reference)
 
     def test_accumulate_with_dtype_conversion(self):
         """Verify fp32 accumulation from bf16 chunks."""
@@ -1081,6 +1082,67 @@ class TestChunkedLossWrapper(unittest.TestCase):
         torch.testing.assert_close(
             model_chunked.output.weight.grad, model_ref.output.weight.grad
         )
+
+    def test_skip_non_loss_tokens_matches_every_token(self):
+        """SFT: the lm_head runs only on labels != IGNORE_INDEX, with the same loss and grads."""
+        T, D, V, num_chunks = 256, 8, 32, 8
+        # 0.15 runs 2 chunks, 0.004 keeps fewer tokens than chunks, 0.0 runs one non-loss row.
+        for loss_token_frac in (0.15, 0.004, 0.0, 1.0):
+            with self.subTest(loss_token_frac=loss_token_frac):
+                torch.manual_seed(42)
+                hidden = torch.randn(T, D)
+                labels = torch.randint(0, V, (T,))
+                labels[torch.rand(T) >= loss_token_frac] = IGNORE_INDEX
+                num_kept = max(1, int((labels != IGNORE_INDEX).sum()))
+                lm_head = nn.Linear(D, V, bias=False)
+                results, lm_head_rows = [], []
+                for skip in (False, True):
+                    head = copy.deepcopy(lm_head)
+                    if skip:
+                        head.register_forward_hook(
+                            lambda module, args, output: lm_head_rows.append(
+                                args[0].shape[0]
+                            )
+                        )
+                    chunked_loss = ChunkedLossWrapper(
+                        ChunkedLossWrapper.Config(
+                            num_chunks=num_chunks, skip_non_loss_tokens=skip
+                        )
+                    )
+                    chunked_loss.set_lm_head(head)
+                    hidden_input = hidden.clone().requires_grad_()
+                    loss, _ = chunked_loss(
+                        hidden_input, labels, torch.tensor(float(num_kept))
+                    )
+                    loss.backward()
+                    results.append((loss, hidden_input.grad, head.weight.grad))
+
+                # Every loss token, padded with fewer than len(lm_head_rows) non-loss rows.
+                self.assertTrue(
+                    num_kept <= sum(lm_head_rows) < num_kept + len(lm_head_rows)
+                )
+                self.assertLessEqual(max(lm_head_rows), T // num_chunks)
+                self.assertTrue((results[1][1][labels == IGNORE_INDEX] == 0).all())
+                for skipped, full in zip(results[1], results[0], strict=True):
+                    if loss_token_frac == 1.0:
+                        self.assertTrue(torch.equal(skipped, full))
+                    else:
+                        torch.testing.assert_close(skipped, full)
+
+    def test_skip_non_loss_tokens_rejects_indivisible_length(self):
+        """Raises at every loss-token count, so no rank fails while its peers wait."""
+        chunked_loss = ChunkedLossWrapper(
+            ChunkedLossWrapper.Config(num_chunks=4, skip_non_loss_tokens=True)
+        )
+        chunked_loss.set_lm_head(nn.Linear(4, 8, bias=False))
+        for num_loss_tokens in (0, 3, 10):
+            labels = torch.full((10,), IGNORE_INDEX)
+            labels[:num_loss_tokens] = 1
+            with (
+                self.subTest(num_loss_tokens=num_loss_tokens),
+                self.assertRaisesRegex(RuntimeError, "divisible by num_chunks"),
+            ):
+                chunked_loss(torch.randn(10, 4, requires_grad=True), labels)
 
     def test_frozen_features_accumulate_head_gradients(self):
         """Head-only training matches cross entropy across chunks and microbatches."""

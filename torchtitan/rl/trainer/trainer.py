@@ -20,7 +20,6 @@ from torch.distributed.tensor import DTensor
 from torchstore import RankRole
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
-from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import maybe_apply_numa_binding, utils as dist_utils
@@ -91,20 +90,6 @@ class Trainer(Configurable):
 
         model: BaseModel.Config
         """Trainer model config, built for ``parallelism``."""
-
-        def __post_init__(self) -> None:
-            TrainingEngine.Config.__post_init__(self)
-            if (
-                isinstance(self.loss, ChunkedLossWrapper.Config)
-                and self.loss.skip_non_loss_tokens
-                and not self.training.disable_accelerator_graphs
-            ):
-                raise ValueError(
-                    "ChunkedLossWrapper.skip_non_loss_tokens changes the lm_head's token "
-                    "count per microbatch and syncs with the host, which accelerator graphs "
-                    "can't capture: set training.disable_accelerator_graphs=True or "
-                    "loss.skip_non_loss_tokens=False."
-                )
 
     def __init__(
         self,

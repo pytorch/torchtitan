@@ -193,6 +193,7 @@ def _qwen3_4b_dapo_math_config(
             ),
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
+                skip_non_loss_tokens=True,
                 loss_fn=DAPOLoss.Config(
                     ratio_clip_low=0.2,
                     ratio_clip_high=0.28,
@@ -357,6 +358,7 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
             activation_remat=ActivationRematConfig(save_regions=[]),
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
+                skip_non_loss_tokens=True,
                 loss_fn=DAPOLoss.Config(
                     ratio_clip_low=0.2,
                     ratio_clip_high=0.28,
@@ -498,6 +500,7 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
             ),
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
+                skip_non_loss_tokens=True,
                 loss_fn=DAPOLoss.Config(
                     ratio_clip_low=0.2,
                     ratio_clip_high=0.28,

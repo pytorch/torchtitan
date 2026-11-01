@@ -85,7 +85,7 @@ def test_chunked_loss_runs_lm_head_on_loss_mask_tokens(
     loss_config, loss_token_frac
 ) -> None:
     # Same loss, metrics and gradients as the unchunked loss. 0.15 runs 3 chunks, 0.004
-    # keeps fewer tokens than chunks, 0.0 runs one masked row, 1.0 runs every token.
+    # keeps fewer tokens than chunks, 0.0 runs one non-loss row, 1.0 runs every token.
     torch.manual_seed(42)
     num_tokens, dim, vocab, num_chunks = 1024, 16, 64, 16
     labels, global_loss_token_counts, loss_kwargs = _rl_loss_inputs(
@@ -94,7 +94,7 @@ def test_chunked_loss_runs_lm_head_on_loss_mask_tokens(
     hidden = torch.randn(num_tokens, dim)
     lm_head = nn.Linear(dim, vocab, bias=False)
     chunked_loss = ChunkedLossWrapper.Config(
-        num_chunks=num_chunks, loss_fn=loss_config
+        num_chunks=num_chunks, loss_fn=loss_config, skip_non_loss_tokens=True
     ).build()
     chunked_loss.set_lm_head(lm_head)
 
@@ -115,8 +115,9 @@ def test_chunked_loss_runs_lm_head_on_loss_mask_tokens(
     )
     loss.backward()
 
-    num_kept = int(loss_kwargs["loss_mask"].sum())
-    assert sum(lm_head_rows) == max(num_kept, 1)
+    # Every loss token, padded with fewer than len(lm_head_rows) non-loss rows.
+    num_kept = max(1, int(loss_kwargs["loss_mask"].sum()))
+    assert num_kept <= sum(lm_head_rows) < num_kept + len(lm_head_rows)
     assert max(lm_head_rows) <= num_tokens // num_chunks
     assert (hidden_input.grad[~loss_kwargs["loss_mask"]] == 0).all()
     torch.testing.assert_close(loss, loss_ref)
@@ -147,7 +148,7 @@ class TestChunkedLossFSDPLossMask(DTensorTestBase):
             num_tokens, vocab, (0.0, 0.6)[self.rank]
         )
         chunked_loss = ChunkedLossWrapper.Config(
-            num_chunks=8, loss_fn=DAPOLoss.Config()
+            num_chunks=8, loss_fn=DAPOLoss.Config(), skip_non_loss_tokens=True
         ).build()
 
         results = []

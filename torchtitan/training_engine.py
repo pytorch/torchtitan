@@ -197,6 +197,17 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                         "replay: replay reruns a checked step, which would preprocess its "
                         "microbatches again."
                     )
+            if (
+                isinstance(self.loss, ChunkedLossWrapper.Config)
+                and self.loss.skip_non_loss_tokens
+                and not self.training.disable_accelerator_graphs
+                and accelerator_graphs_supported()
+            ):
+                raise ValueError(
+                    "loss.skip_non_loss_tokens changes the lm_head's row count every "
+                    "microbatch, which accelerator graphs can't replay: set "
+                    "training.disable_accelerator_graphs=True."
+                )
             num_tokens = self.training.num_tokens_per_microbatch_per_dp_rank
             sequence_parallel_degree = (
                 self.parallelism.tensor_parallel_degree
