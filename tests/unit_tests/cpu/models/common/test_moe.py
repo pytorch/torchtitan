@@ -41,9 +41,14 @@ from torchtitan.models.common.moe import (
     sharding as moe_sharding,
     TokenChoiceTopKRouter,
 )
+from torchtitan.models.common.moe.token_dispatcher import (
+    LocalDispatchMetadata,
+    LocalTokenDispatcher,
+)
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.kimi_k3.moe import KimiLatentMoE
 from torchtitan.models.muse_spark.moe import MuseSparkMoE
+from torchtitan.ops.scatter_add import deterministic_scatter_add, score_and_scatter_add
 
 
 class _PassthroughRoutedExperts(nn.Module):
@@ -729,6 +734,108 @@ class TestMoE(unittest.TestCase):
                 grouped_linear.sharding_config.state_shardings["weight"],
                 dense_param_placement(tp=spmd.R),
             )
+
+
+def _inline_combine(routed_ND, scores_N, token_indices_N, num_tokens):
+    # The token dispatcher combine before torchtitan::score_and_scatter_add.
+    x_TD = torch.empty(num_tokens, routed_ND.shape[-1], dtype=routed_ND.dtype)
+    routed_ND = (routed_ND * scores_N.reshape(-1, 1).to(torch.float32)).to(
+        routed_ND.dtype
+    )
+    return deterministic_scatter_add(
+        torch.zeros_like(x_TD),
+        token_indices_N.reshape(-1, 1).expand(-1, x_TD.shape[-1]),
+        routed_ND,
+    )
+
+
+def _combine_fwd_bwd(combine_fn, num_tokens, top_k, dim, dtype, num_padded_tokens=0):
+    # N = num_tokens * top_k routed rows; the last num_padded_tokens output
+    # rows receive no routed row and must stay zero.
+    g = torch.Generator().manual_seed(0)
+    num_out = num_tokens + num_padded_tokens
+    routed_ND = torch.randn(num_tokens * top_k, dim, generator=g).to(dtype)
+    scores_N = torch.rand(num_tokens * top_k, generator=g)
+    token_indices_N = torch.randperm(num_tokens * top_k, generator=g) // top_k
+    grad_TD = torch.randn(num_out, dim, generator=g).to(dtype)
+    routed_ND.requires_grad_(True)
+    scores_N.requires_grad_(True)
+    out_TD = combine_fn(routed_ND, scores_N, token_indices_N, num_out)
+    out_TD.backward(grad_TD)
+    return out_TD.detach(), routed_ND.grad, scores_N.grad
+
+
+class TestScoreAndScatterAdd(unittest.TestCase):
+    def _assert_bitwise(self, actual, expected):
+        for a, e in zip(actual, expected, strict=True):
+            self.assertEqual(a.dtype, e.dtype)
+            self.assertTrue(torch.equal(a, e))
+
+    def test_matches_inline_combine(self):
+        for dtype in (torch.bfloat16, torch.float32):
+            for shape in ((64, 2, 32, 0), (37, 6, 48, 11)):
+                num_tokens, top_k, dim, num_padded_tokens = shape
+                args = (num_tokens, top_k, dim, dtype, num_padded_tokens)
+                with self.subTest(dtype=dtype, shape=shape):
+                    self._assert_bitwise(
+                        _combine_fwd_bwd(score_and_scatter_add, *args),
+                        _combine_fwd_bwd(_inline_combine, *args),
+                    )
+
+    def test_dispatcher_combine_runs_backend_override(self):
+        # AutogradCPU stands in for an out-of-tree backend's dispatch key.
+        op = torch.ops.torchtitan.score_and_scatter_add.default
+        num_calls = 0
+
+        def backend_kernel(routed, scores, token_indices, num_tokens):
+            nonlocal num_calls
+            num_calls += 1
+            return op.decompose(routed, scores, token_indices, num_tokens)
+
+        dispatcher = LocalTokenDispatcher(
+            LocalTokenDispatcher.Config(num_experts=4, top_k=2)
+        )
+
+        def dispatcher_combine(routed_ND, scores_N, token_indices_N, num_tokens):
+            metadata = LocalDispatchMetadata(
+                token_indices_experts_sorted_N=token_indices_N,
+                topk_scores_experts_sorted_N=scores_N,
+            )
+            x_TD = torch.empty(num_tokens, routed_ND.shape[-1], dtype=routed_ND.dtype)
+            return dispatcher.combine(routed_ND, metadata, x_TD)
+
+        lib = torch.library.Library("torchtitan", "IMPL")
+        try:
+            lib.impl("score_and_scatter_add", backend_kernel, "AutogradCPU")
+            overridden = _combine_fwd_bwd(dispatcher_combine, 32, 2, 16, torch.bfloat16)
+        finally:
+            lib._destroy()
+        self.assertEqual(num_calls, 1)
+        self._assert_bitwise(
+            overridden, _combine_fwd_bwd(_inline_combine, 32, 2, 16, torch.bfloat16)
+        )
+        _combine_fwd_bwd(dispatcher_combine, 32, 2, 16, torch.bfloat16)
+        self.assertEqual(num_calls, 1)
+
+    def test_compile_traces_reference_ops(self):
+        dynamo_targets = []
+
+        def backend(gm, example_inputs):
+            dynamo_targets.extend(n.target for n in gm.graph.nodes)
+            return torch._dynamo.backends.debugging.aot_eager(gm, example_inputs)
+
+        torch._dynamo.reset()
+        compiled = torch.compile(score_and_scatter_add, backend=backend, fullgraph=True)
+        self._assert_bitwise(
+            _combine_fwd_bwd(compiled, 32, 2, 16, torch.float32),
+            _combine_fwd_bwd(_inline_combine, 32, 2, 16, torch.float32),
+        )
+        self.assertIn(
+            torch.ops.torchtitan.deterministic_scatter_add.default, dynamo_targets
+        )
+        self.assertNotIn(
+            torch.ops.torchtitan.score_and_scatter_add.default, dynamo_targets
+        )
 
 
 if __name__ == "__main__":
