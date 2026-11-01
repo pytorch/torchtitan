@@ -123,12 +123,6 @@ class RoutedExperts(Module):
         # TODO(acisseJZhong): skip padding rows' dispatch, expert compute and
         # combine in the stock token dispatchers too, as Dist-MoE does.
         del padding_mask_T
-        dispatch_kwargs = {}
-        if isinstance(self.token_dispatcher, DeepEPTokenDispatcher):
-            dispatch_kwargs["absorb_router_scores"] = (
-                self.output_postprocess is None
-                and getattr(self.w2, "bias", None) is None
-            )
         (
             routed_input_RD,
             num_global_tokens_per_local_expert_e,
@@ -138,7 +132,6 @@ class RoutedExperts(Module):
             topk_scores_TK,
             topk_expert_ids_TK,
             routing_map_TE,
-            **dispatch_kwargs,
         )
         offsets_E = torch.cumsum(
             num_global_tokens_per_local_expert_e,
@@ -147,6 +140,16 @@ class RoutedExperts(Module):
         )
 
         routed_scores_R = getattr(metadata, "routed_scores_R", None)
+        combine_kwargs = {}
+        if isinstance(self.token_dispatcher, DeepEPTokenDispatcher):
+            if (
+                self.output_postprocess is not None
+                or getattr(self.w2, "bias", None) is not None
+            ):
+                combine_kwargs["routed_scores_R"] = routed_scores_R
+                routed_scores_R = None
+            else:
+                combine_kwargs["routed_scores_R"] = None
         with maybe_set_sparse_mesh():
             # w13 and w2 declare their own remat regions (<fqn>.grouped_mm).
             # The bf16 cast reads the dispatched tokens with bare ops.
@@ -179,6 +182,7 @@ class RoutedExperts(Module):
             routed_output_RD,
             metadata,
             x_TD,
+            **combine_kwargs,
         )
         return out_TD
 

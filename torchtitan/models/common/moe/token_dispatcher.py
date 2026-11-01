@@ -808,13 +808,6 @@ class EPDispatchMetadata:
     """Metadata for DeepEP and HybridEP token dispatch."""
 
     state: object  # Backend-specific dispatch state.
-
-
-@dataclass(frozen=True, kw_only=True)
-class DeepEPDispatchMetadata(EPDispatchMetadata):
-    """DeepEP scores applied either before W2 or in combine."""
-
-    combine_scores_R: torch.Tensor | None  # noqa: N815
     routed_scores_R: torch.Tensor | None = None  # noqa: N815
 
 
@@ -901,9 +894,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
         routing_map_TE: torch.Tensor,
-        *,
-        absorb_router_scores: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
+    ) -> tuple[torch.Tensor, torch.Tensor, EPDispatchMetadata]:
         """Dispatch through the preallocated ElasticBuffer."""
         # Ignore input routing_map_TE. DeepEP returns the number
         # of global routed tokens for every local expert using other inputs.
@@ -934,19 +925,17 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             cuda_graph_compatible=self.cuda_graph_compatible,
         )
 
-        metadata = DeepEPDispatchMetadata(
-            state=state,
-            routed_scores_R=routed_scores_R if absorb_router_scores else None,
-            combine_scores_R=None if absorb_router_scores else routed_scores_R,
-        )
+        metadata = EPDispatchMetadata(state=state, routed_scores_R=routed_scores_R)
         return hidden_states_RD, num_global_tokens_per_local_expert_e, metadata
 
     # pyrefly: ignore [bad-override]
     def combine(
         self,
         routed_output_RD: torch.Tensor,
-        metadata: DeepEPDispatchMetadata,
+        metadata: EPDispatchMetadata,
         x_TD: torch.Tensor,
+        *,
+        routed_scores_R: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Combine tokens via DeepEP and wait for completion."""
         del x_TD
@@ -954,11 +943,11 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
 
         def score_and_combine(
             routed_output_RD: torch.Tensor,
-            combine_scores_R: torch.Tensor | None,
+            routed_scores_R: torch.Tensor | None,
         ) -> torch.Tensor:
             """Apply unabsorbed scores, then run the pure-reduction combine."""
-            if combine_scores_R is not None:
-                routed_output_RD = routed_output_RD * combine_scores_R.to(
+            if routed_scores_R is not None:
+                routed_output_RD = routed_output_RD * routed_scores_R.to(
                     routed_output_RD.dtype
                 ).reshape(-1, 1)
             return combine_tokens(
@@ -966,15 +955,16 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
                 metadata.state,  # pyrefly: ignore [bad-argument-type]
             )
 
-        absorbed = metadata.combine_scores_R is None
         combined_TD = remat.region(
             score_and_combine,
             self.remat_region_name("ep_communication.combine"),
             # An absorbed combine reads the w2 output only in this body and is a
             # pure reduction, so never replay it; unabsorbed combines follow the policy.
-            recompute=False if absorbed else self._replays_communication(),
-        )(routed_output_RD, metadata.combine_scores_R)
-        if not absorbed:
+            recompute=(
+                self._replays_communication() if routed_scores_R is not None else False
+            ),
+        )(routed_output_RD, routed_scores_R)
+        if routed_scores_R is not None:
             # The caller consumes this output outside another remat region.
             remat.recompute_needs_tensor(combined_TD)
         sync_combine()

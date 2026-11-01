@@ -168,7 +168,6 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                     scores_TK,
                     expert_ids_TK,
                     routing_map_TE,
-                    absorb_router_scores=absorb,
                 )
                 remat.recompute_needs_tensor(routed_RD)
                 if absorb:
@@ -176,7 +175,12 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                     routed_RD = (
                         routed_RD.float() * metadata.routed_scores_R[:, None]
                     ).bfloat16()
-                out_TD = dispatcher.combine(routed_RD, metadata, x_TD)
+                out_TD = dispatcher.combine(
+                    routed_RD,
+                    metadata,
+                    x_TD,
+                    routed_scores_R=None if absorb else metadata.routed_scores_R,
+                )
                 remat.recompute_needs_tensor(out_TD)
                 grads = torch.autograd.grad(
                     out_TD.float().square().sum(), (x_TD, scores_TK)
