@@ -297,17 +297,19 @@ def ensure_pp_loss_visible(
     if _is_v_schedule(pp_schedule):
         return
 
+    # This hint is about run_train.sh, which exports LOG_RANK and passes it to
+    # torchrun as --local-ranks-filter. Launchers that leave LOG_RANK unset, such
+    # as scripts/multinode_trainer.slurm, do not filter console output.
+    env_log_rank = os.environ.get("LOG_RANK", "")
+    if not env_log_rank:
+        return
+
     # Calculate the rank where loss is visible (first rank of the last pipeline stage)
     world_size = parallelism_context.world_size
     pp_size = parallelism_context.pp
     loss_visible_rank = (world_size // pp_size) * (pp_size - 1)
 
-    # Check if the loss-visible rank is included in LOG_RANK environment variable
-    env_logged_ranks = os.environ.get("LOG_RANK", "").split(",")
-    if env_logged_ranks == [""]:
-        env_logged_ranks = []
-
-    if str(loss_visible_rank) not in env_logged_ranks:
+    if str(loss_visible_rank) not in env_log_rank.split(","):
         logger.warning(
             f"{color.red}Pipeline Parallel loss is not visible. "
             f"Please add {color.yellow}rank {loss_visible_rank}{color.red} "
