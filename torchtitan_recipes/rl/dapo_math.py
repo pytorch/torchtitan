@@ -65,7 +65,7 @@ from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
-from torchtitan.rl.rollout.data import IterableRLDataLoader
+from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.rollout.token_env import TokenEnv
@@ -88,7 +88,7 @@ def _dapo_math_rollouter_config(
     token_env: TokenEnv.Config,
 ) -> Rollouter.Config:
     return Rollouter.Config(
-        training_dataloader=IterableRLDataLoader.Config(
+        training_dataloader=IterableRolloutDataLoader.Config(
             dataset=DapoMathDataset.Config()
         ),
         validation_dataset=validation_dataset,

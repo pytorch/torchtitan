@@ -54,7 +54,7 @@ from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
-from torchtitan.rl.rollout.data import IterableRLDataLoader
+from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.rollout.token_env import TokenEnv
@@ -69,7 +69,7 @@ from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
 def _search_r1_rollouter_config() -> Rollouter.Config:
     return Rollouter.Config(
-        training_dataloader=IterableRLDataLoader.Config(
+        training_dataloader=IterableRolloutDataLoader.Config(
             dataset=SearchR1Dataset.Config(filename="train.parquet", seed=42)
         ),
         validation_dataset=SearchR1Dataset.Config(

@@ -111,7 +111,7 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
 
     controller._rollouter = SimpleNamespace(
         sync_log_step=sync_log_step,
-        acknowledge_training_sample_ids=lambda group_ids: None,
+        commit_training_sample_ids=lambda group_ids: None,
         state_dict=lambda: {},
     )
     controller._group_buffer = SimpleNamespace(
