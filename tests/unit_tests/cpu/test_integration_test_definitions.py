@@ -26,7 +26,7 @@ from tests.integration_tests.features import (
     build_features_test_list,
     llama3_debugmodel_default,
     llama3_debugmodel_hf_checkpoint_load,
-    muse_glimmer_debugmodel_fsdp2_per_group_cuda_graph,
+    muse_glimmer_debugmodel_fsdp2_per_group_accelerator_graph,
 )
 from tests.integration_tests.flux import build_flux_test_list
 from tests.integration_tests.h100 import build_h100_tests_list
@@ -131,14 +131,14 @@ def test_llama3_pp_numerics_has_one_microbatch_per_stage() -> None:
     )
 
 
-def test_split_backward_pp_cases_exercise_varlen_cuda_graphs() -> None:
+def test_split_backward_pp_cases_exercise_varlen_accelerator_graphs() -> None:
     tests_by_name = {test.test_name: test for test in build_features_test_list()}
 
     for test_name in ("pp_looped_zero_bubble", "pp_zbv", "pp_custom_csv"):
         test = tests_by_name[test_name]
         config = test.configs[0]()
         assert not test.disabled
-        assert not config.training.disable_cuda_graphs
+        assert not config.training.disable_accelerator_graphs
         assert isinstance(
             config.model.layers[0].attention.inner_attention,
             VarlenInnerAttention.Config,
@@ -162,7 +162,7 @@ def test_varlen_cp_combinations_require_real_collectives(
     assert config.parallelism.context_parallel_degree == 2
     assert config.parallelism.tensor_parallel_degree == tp_degree
     assert config.parallelism.context_parallel_load_balancer is None
-    assert not config.training.disable_cuda_graphs
+    assert not config.training.disable_accelerator_graphs
     assert config.dataloader.max_num_documents is not None
     assert all(
         isinstance(layer.attention.inner_attention, UlyssesVarlenInnerAttention.Config)
@@ -171,16 +171,16 @@ def test_varlen_cp_combinations_require_real_collectives(
     config.__post_init__()
 
 
-def test_per_group_cuda_graph_integration_supports_fake_pg() -> None:
+def test_per_group_accelerator_graph_integration_supports_fake_pg() -> None:
     tests_by_name = {test.test_name: test for test in build_features_test_list()}
-    test = tests_by_name["fsdp_per_group_cuda_graph"]
+    test = tests_by_name["fsdp_per_group_accelerator_graph"]
     config = test.configs[0]()
 
-    assert test.configs == [muse_glimmer_debugmodel_fsdp2_per_group_cuda_graph]
+    assert test.configs == [muse_glimmer_debugmodel_fsdp2_per_group_accelerator_graph]
     assert not test.use_real_pg
     assert test.ngpu == 2
     assert config.parallelism.data_parallel_shard_degree == 2
-    assert config.training.cuda_graph_per_microbatch_group
+    assert config.training.accelerator_graph_per_microbatch_group
     assert config.training.steps == 10
     assert config.training.num_tokens_per_train_step == (
         3 * test.ngpu * config.training.num_tokens_per_microbatch_per_dp_rank
@@ -225,8 +225,8 @@ def test_b200_tests_are_registered_in_separate_suite() -> None:
         "kimi_k3_fsdp2_tp2_ep2_pp2_vpp4",
         "kimi_k3_mm",
         "kimi_k3_mm_muon",
-        "dist_moe_eager_fsdp_ep_cudagraph",
-        "dist_moe_eager_fsdp_ep_pp_cudagraph",
+        "dist_moe_eager_fsdp_ep_accelerator_graph",
+        "dist_moe_eager_fsdp_ep_pp_accelerator_graph",
         "mxfp8_linear_fsdp",
         "nvfp4_linear_fsdp",
     }

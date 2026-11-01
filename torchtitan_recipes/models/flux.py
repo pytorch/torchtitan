@@ -79,7 +79,7 @@ def _flux_recipe(flavor: str, *, max_t5_encoding_len: int) -> FluxTrainer.Config
             ),
             max_context_length=_flux_seq_len(img_size, max_t5_encoding_len),
             steps=30000,
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         dataloader=GrainDataLoader.Config(
             dataset=_flux_dataset("cc12m-wds", img_size=img_size),

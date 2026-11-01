@@ -15,18 +15,22 @@ from torch.distributed.elastic.utils.distributed import get_free_port
 from torch.distributed.fsdp import fully_shard
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
-from torchtitan.distributed.cuda_graph import cuda_graph_teardown, wrap_with_cuda_graph
+from torchtitan.distributed.accelerator_graph import (
+    accelerator_graph_teardown,
+    wrap_with_accelerator_graph,
+)
+from torchtitan.tools.utils import device_type
 
 
 def test_group_graph_replay_accumulates_existing_gradients() -> None:
-    parameter = torch.nn.Parameter(torch.randn(1024, device="cuda"))
+    parameter = torch.nn.Parameter(torch.randn(1024, device=device_type))
 
     def forward_backward(group: torch.Tensor) -> torch.Tensor:
         loss = (parameter * group).sum()
         loss.backward()
         return loss.detach()
 
-    run_group = wrap_with_cuda_graph(
+    run_group = wrap_with_accelerator_graph(
         forward_backward,
         num_warmup_iterations=2,
     )
@@ -37,7 +41,7 @@ def test_group_graph_replay_accumulates_existing_gradients() -> None:
             values = [step + group_index + 1 for group_index in range(count)]
             groups = [torch.full_like(parameter, value) for value in values]
             losses = [run_group(group).clone() for group in groups]
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
 
             torch.testing.assert_close(
                 parameter.grad,
@@ -52,15 +56,15 @@ def test_group_graph_replay_accumulates_existing_gradients() -> None:
             torch.testing.assert_close(torch.stack(losses), expected_losses)
 
         with pytest.raises(ValueError, match="same shape"):
-            run_group(torch.ones(1, device="cuda"))
+            run_group(torch.ones(1, device=device_type))
     finally:
-        cuda_graph_teardown()
+        accelerator_graph_teardown()
 
 
 def test_group_graph_replay_accumulates_reduced_fsdp_gradients() -> None:
     dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=1)
-    mesh = init_device_mesh("cuda", (1,), mesh_dim_names=("dp_shard",))
-    model = torch.nn.Linear(8, 8, bias=False, device="cuda")
+    mesh = init_device_mesh(device_type, (1,), mesh_dim_names=("dp_shard",))
+    model = torch.nn.Linear(8, 8, bias=False, device=device_type)
     fully_shard(model, mesh=mesh)
     parameter = next(model.parameters())
 
@@ -69,7 +73,7 @@ def test_group_graph_replay_accumulates_reduced_fsdp_gradients() -> None:
         loss.backward()
         return loss.detach()
 
-    run_group = wrap_with_cuda_graph(
+    run_group = wrap_with_accelerator_graph(
         forward_backward,
         num_warmup_iterations=2,
     )
@@ -78,9 +82,9 @@ def test_group_graph_replay_accumulates_reduced_fsdp_gradients() -> None:
             model.zero_grad(set_to_none=False)
             values = [step + group_index + 1 for group_index in range(count)]
             for value in values:
-                group = torch.full((4, 8), float(value), device="cuda")
+                group = torch.full((4, 8), float(value), device=device_type)
                 run_group(group)
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
 
             assert parameter.grad is not None
             gradient = parameter.grad.to_local()
@@ -89,7 +93,7 @@ def test_group_graph_replay_accumulates_reduced_fsdp_gradients() -> None:
                 torch.full_like(gradient, 4 * sum(values)),
             )
     finally:
-        cuda_graph_teardown()
+        accelerator_graph_teardown()
         dist.destroy_process_group()
 
 
@@ -100,16 +104,20 @@ def _run_real_fsdp_group_graph_numerics(
 ) -> None:
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(port)
-    torch.cuda.set_device(rank)
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    torch.accelerator.set_device_index(rank)
+    dist.init_process_group(
+        dist.get_default_backend_for_device(device_type),
+        rank=rank,
+        world_size=world_size,
+    )
     try:
         mesh = init_device_mesh(
-            "cuda",
+            device_type,
             (world_size,),
             mesh_dim_names=("dp_shard",),
         )
-        graph_model = torch.nn.Linear(8, 8, bias=False, device="cuda")
-        eager_model = torch.nn.Linear(8, 8, bias=False, device="cuda")
+        graph_model = torch.nn.Linear(8, 8, bias=False, device=device_type)
+        eager_model = torch.nn.Linear(8, 8, bias=False, device=device_type)
         eager_model.load_state_dict(graph_model.state_dict())
         fully_shard(graph_model, mesh=mesh)
         fully_shard(eager_model, mesh=mesh)
@@ -123,7 +131,7 @@ def _run_real_fsdp_group_graph_numerics(
             loss.backward()
             return loss.detach()
 
-        run_graph_group = wrap_with_cuda_graph(
+        run_graph_group = wrap_with_accelerator_graph(
             graph_forward_backward,
             num_warmup_iterations=2,
         )
@@ -134,7 +142,7 @@ def _run_real_fsdp_group_graph_numerics(
                 torch.full(
                     (4, 8),
                     float(step + group_index + rank + 1),
-                    device="cuda",
+                    device=device_type,
                 )
                 for group_index in range(count)
             ]
@@ -144,7 +152,7 @@ def _run_real_fsdp_group_graph_numerics(
             for group in eager_groups:
                 eager_loss = eager_model(group).sum()
                 eager_loss.backward()
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
 
             assert graph_parameter.grad is not None
             assert eager_parameter.grad is not None
@@ -177,12 +185,12 @@ def _run_real_fsdp_group_graph_numerics(
                 atol=0,
             )
     finally:
-        cuda_graph_teardown()
+        accelerator_graph_teardown()
         dist.destroy_process_group()
 
 
 @pytest.mark.multi_gpu
-@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two GPUs")
+@pytest.mark.skipif(torch.accelerator.device_count() < 2, reason="requires two GPUs")
 def test_group_graph_replay_matches_real_fsdp_numerics() -> None:
     mp.spawn(
         _run_real_fsdp_group_graph_numerics,

@@ -64,7 +64,7 @@ from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
-from torchtitan.rl.rollout.data import IterableRLDataLoader
+from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.recorder import (
     KeepExtremeRewardsFilter,
     RolloutSampleRecorder,
@@ -108,7 +108,7 @@ def _terminal_bench_rollouter_config(
 
     taskset_id = register_local_taskset_alias(TerminalTasksetConfig.__module__)
     return VerifiersRollouter.Config(
-        training_dataloader=IterableRLDataLoader.Config(
+        training_dataloader=IterableRolloutDataLoader.Config(
             dataset=VerifiersTaskDataset.Config(
                 verifiers_taskset=TerminalTasksetConfig(
                     id=taskset_id, dataset=train_dataset
@@ -242,7 +242,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_context_length,
                 max_context_length=max_context_length,
                 dtype="float32",
@@ -387,7 +387,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_context_length,
                 max_context_length=max_context_length,
                 dtype="float32",
@@ -509,7 +509,7 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_context_length,
                 max_context_length=max_context_length,
             ),

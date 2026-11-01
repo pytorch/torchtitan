@@ -109,7 +109,7 @@ def build_minimal_trainer(
     engine.ntokens_seen = 0
     engine.num_completed_steps = 0
     engine.sdc_replayer = None
-    engine._cuda_graph_per_microbatch_group_enabled = False
+    engine._accelerator_graph_per_microbatch_group_enabled = False
     engine.garbage_collector = SimpleNamespace(run=lambda _step: False)
     engine.optim = SimpleNamespace(zero_grad=model.zero_grad)
     engine.loss_metrics = {}
@@ -136,7 +136,7 @@ def build_minimal_trainer(
             activation_remat=activation_remat,
             dataloader=SimpleNamespace(max_num_documents=max_num_documents),
             debug=DebugConfig(),
-            training=TrainingConfig(disable_cuda_graphs=True),
+            training=TrainingConfig(disable_accelerator_graphs=True),
             parallelism=SimpleNamespace(
                 enable_sequence_parallel=False,
                 pipeline_parallel_degree=1,
@@ -233,7 +233,7 @@ def build_minimal_trainer(
         trainer.config = SimpleNamespace(
             dataloader=SimpleNamespace(max_num_documents=max_num_documents),
             debug=DebugConfig(),
-            training=TrainingConfig(disable_cuda_graphs=True),
+            training=TrainingConfig(disable_accelerator_graphs=True),
             parallelism=SimpleNamespace(
                 enable_sequence_parallel=False,
                 fsdp_defer_gradient_reduction=False,

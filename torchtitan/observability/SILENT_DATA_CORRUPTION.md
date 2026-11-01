@@ -49,10 +49,10 @@ Gradient values are never snapshotted. The checked forward/backward must
 begin with no pending gradients (`None` or zeros, the post-`zero_grad`
 state), and restore rebuilds that entry state directly: parameters that
 entered without a gradient return to `None`, and entry gradient tensors are
-zeroed in place, preserving their storage addresses for CUDA graphs, with no
+zeroed in place, preserving their storage addresses for accelerator graphs, with no
 gradient-sized clone or copy kernels on checked steps.
 
-Eager execution, `torch.compile`, CUDA graphs, symmetric-memory FSDP,
+Eager execution, `torch.compile`, accelerator graphs, symmetric-memory FSDP,
 distributed GEMM, async TP, DeepEP v2, and HybridEP can
 participate in replay. GraphTrainer uses the same replay boundary. Execution
 backends do not need their internal scratch state restored as long as one
@@ -62,7 +62,7 @@ snapshotted nor included in the replay signature.
 
 ## Limitations
 
-CUDA graphs currently require `sdc_replayer.num_replays=1`. Additional replays
+Accelerator graphs currently require `sdc_replayer.num_replays=1`. Additional replays
 would require restoring graph-owned gradient and optional-buffer storage
 without changing its captured addresses.
 

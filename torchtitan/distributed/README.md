@@ -2,7 +2,7 @@
 
 This package holds the PyTorch-native parallelisms and the training techniques
 that have to compose with them. Not every module issues collectives: activation
-checkpointing, CUDA graphs and local compile run per device, but they live here
+checkpointing, accelerator graphs and local compile run per device, but they live here
 because each one interacts with sharding, pipeline schedules or SPMD regions and
 is applied during model parallelization.
 
@@ -24,7 +24,7 @@ is applied during model parallelization.
 | Module | Purpose |
 | --- | --- |
 | `activation_remat.py` | Activation remat (activation checkpointing) configs on `torch_remat`. See [REMAT.md](REMAT.md). |
-| `cuda_graph.py` | CUDA graph capture and replay of the training step. |
+| `accelerator_graph.py` | Accelerator graph capture and replay of the training step. |
 | `local_compile.py` | `torch.compile` of named model regions. |
 | `batch_invariant.py` | Batch-invariant (bitwise-reproducible) kernels. |
 | `offloading.py` | NUMA binding of each rank to the CPU node local to its GPU. |
@@ -34,7 +34,7 @@ is applied during model parallelization.
 `Optim.step()` releases unused CUDA cache on its first call, before gradient
 clipping. Each new `Optim` instance tracks its own first call, so a restored
 step number does not skip the release. It waits for GPU work to finish before
-releasing cache. Both calls run outside optimizer CUDA graph capture.
+releasing cache. Both calls run outside optimizer accelerator graph capture.
 
 NCCL allocates its internal communication buffers outside PyTorch's caching
 allocator. Unused PyTorch cache can block those allocations even when the live
@@ -47,7 +47,7 @@ This workaround requires:
 - Enough unused CUDA cache that can be released for the NCCL buffers.
 - The affected NCCL allocation to happen during the first optimizer call.
 
-The release keeps live tensors and active CUDA graph pools. It does not reduce
+The release keeps live tensors and active accelerator graph pools. It does not reduce
 NCCL buffer sizes or prevent allocation failures during forward or backward,
 or later in the run. It does not release NCCL host shared memory.
 
