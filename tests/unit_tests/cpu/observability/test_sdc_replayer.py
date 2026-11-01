@@ -160,30 +160,63 @@ def test_replay_mismatch_is_fatal():
     ),
 )
 def test_replay_detects_semantic_state_mismatch(corruption, expected):
-    module = _BufferModule()
-    replayer = SDCReplayer(
-        SDCReplayer.Config(),
-        modules=[module],
-        device=torch.device("cpu"),
-    )
-    calls = 0
+    with torch.random.fork_rng(devices=[]):
+        # Start from an RNG position where one extra torch.rand(1) leaves
+        # torch.hash_tensor of the CPU RNG state unchanged: the draw's two
+        # counter updates cancel under XOR.
+        torch.manual_seed(0)
+        torch.rand(2)
+        module = _BufferModule()
+        replayer = SDCReplayer(
+            SDCReplayer.Config(),
+            modules=[module],
+            device=torch.device("cpu"),
+        )
+        calls = 0
 
-    def execute():
-        nonlocal calls
-        calls += 1
+        def execute():
+            nonlocal calls
+            calls += 1
+            loss = module.weight.square().sum()
+            loss.backward()
+            if calls == 2:
+                if corruption == "buffer":
+                    module.counter.add_(1)
+                elif corruption == "cpu_rng":
+                    torch.rand(1)
+                elif corruption == "python_rng":
+                    random.random()
+            return loss
+
+        with pytest.raises(SDCReplayMismatch, match=expected):
+            replayer.run_fwd_bwd(execute, step=9, get_loss=lambda loss: loss)
+
+
+def test_signature_detects_accelerator_rng_advancement():
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        torch.rand(2)
+        before = torch.get_rng_state()
+        torch.rand(1)
+        after = torch.get_rng_state()
+        module = _BufferModule()
+        replayer = SDCReplayer(
+            SDCReplayer.Config(), modules=[module], device=torch.device("cpu")
+        )
         loss = module.weight.square().sum()
-        loss.backward()
-        if calls == 2:
-            if corruption == "buffer":
-                module.counter.add_(1)
-            elif corruption == "cpu_rng":
-                torch.rand(1)
-            elif corruption == "python_rng":
-                random.random()
-        return loss
+        with patch(
+            "torchtitan.observability.sdc_replayer._accelerator_rng_states",
+            return_value=[before],
+        ):
+            reference = replayer._signature(loss)
+        with patch(
+            "torchtitan.observability.sdc_replayer._accelerator_rng_states",
+            return_value=[after],
+        ):
+            candidate = replayer._signature(loss)
 
-    with pytest.raises(SDCReplayMismatch, match=expected):
-        replayer.run_fwd_bwd(execute, step=9, get_loss=lambda loss: loss)
+        assert _compare_signature(reference, candidate).item()
+        assert _find_signature_mismatch(reference, candidate) == "rng:accelerator:0"
 
 
 @pytest.mark.parametrize(
