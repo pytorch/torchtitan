@@ -808,7 +808,13 @@ class EPDispatchMetadata:
     """Metadata for DeepEP and HybridEP token dispatch."""
 
     state: object  # Backend-specific dispatch state.
-    routed_scores_R: torch.Tensor | None = None  # noqa: N815
+
+
+@dataclass(frozen=True, kw_only=True)
+class DeepEPDispatchMetadata(EPDispatchMetadata):
+    """DeepEP dispatch state and per-row router scores."""
+
+    routed_scores_R: torch.Tensor  # noqa: N815
 
 
 class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
@@ -894,7 +900,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
         routing_map_TE: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, EPDispatchMetadata]:
+    ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
         """Dispatch through the preallocated ElasticBuffer."""
         # Ignore input routing_map_TE. DeepEP returns the number
         # of global routed tokens for every local expert using other inputs.
@@ -925,14 +931,14 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             cuda_graph_compatible=self.cuda_graph_compatible,
         )
 
-        metadata = EPDispatchMetadata(state=state, routed_scores_R=routed_scores_R)
+        metadata = DeepEPDispatchMetadata(state=state, routed_scores_R=routed_scores_R)
         return hidden_states_RD, num_global_tokens_per_local_expert_e, metadata
 
     # pyrefly: ignore [bad-override]
     def combine(
         self,
         routed_output_RD: torch.Tensor,
-        metadata: EPDispatchMetadata,
+        metadata: DeepEPDispatchMetadata,
         x_TD: torch.Tensor,
         *,
         routed_scores_R: torch.Tensor | None = None,
