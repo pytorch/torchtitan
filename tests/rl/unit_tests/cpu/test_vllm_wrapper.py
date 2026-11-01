@@ -24,7 +24,6 @@ from torchtitan.models.qwen3 import build_model_config as build_qwen3_config
 from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.rl.generator.vllm import model_wrapper, registry
 from torchtitan.rl.generator.vllm.attention import VLLMInnerAttention
-from torchtitan.rl.generator.vllm.gdn import VLLMGDN
 
 from torchtitan.rl.generator.vllm.mla import (
     _VLLMKVBProj,
@@ -112,7 +111,9 @@ def test_vllm_attention_classifies_sliding_window(sliding_window_size) -> None:
     assert config.is_full_attention is (sliding_window_size is None)
 
 
-@pytest.mark.parametrize("build_config", [build_kimi_k3_config], ids=["kda"])
+@pytest.mark.parametrize(
+    "build_config", [build_model_config, build_kimi_k3_config], ids=["gdn", "kda"]
+)
 def test_vllm_replacement_preserves_attention_sharding(build_config) -> None:
     """Pass the trainer attention's sharding config through unchanged."""
     model_config = build_config(
@@ -231,74 +232,6 @@ def test_load_state_dict_allocates_one_fsdp_group_at_a_time(
         )
         for name, param in model.named_parameters(remove_duplicate=False):
             assert param.equal(new_state_dict[name].to_local()), name
-    finally:
-        dist.destroy_process_group()
-
-
-@pytest.mark.parametrize(
-    "one_group", [False, True], ids=["group_per_layer", "one_group_for_both_layers"]
-)
-def test_load_state_dict_refreshes_fused_gdn_weights_in_place(
-    tmp_path, one_group
-) -> None:
-    """Every weight load refreshes each GDN layer's fused weights in place (CUDA graphs
-    capture their addresses), then frees its six projections."""
-    dist.init_process_group(
-        "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
-    )
-    try:
-        # Under a root group: one FSDP group per layer (the generator's layout), or
-        # one group holding both layers.
-        model = nn.Module()
-        model.layers = nn.ModuleList()
-        for _ in range(2):
-            gdn = VLLMGDN.__new__(VLLMGDN)
-            nn.Module.__init__(gdn)
-            for name, rows in zip("qkvzab", (8, 8, 16, 16, 2, 2)):
-                projection = nn.Module()
-                projection.weight = nn.Parameter(torch.randn(rows, 4))
-                setattr(gdn, f"in_proj_{name}", projection)
-            for name, rows in zip("qkv", (8, 8, 16)):
-                conv = nn.Module()
-                conv.weight = nn.Parameter(torch.randn(rows, 1, 4))
-                setattr(gdn, f"conv_{name}", conv)
-            gdn.A_log = nn.Parameter(torch.randn(2))
-            gdn.input_weight_CD = gdn.conv_weight_CW = None
-            model.layers.append(gdn)
-        model.norm = nn.LayerNorm(4)
-        mesh = init_device_mesh("cpu", (1,))
-        for group in [list(model.layers)] if one_group else model.layers:
-            fully_shard(group, mesh=mesh)
-        fully_shard(model, mesh=mesh)
-        model.set_keep_unsharded_storage(True)
-        pushed = {k: v.detach() + 1.0 for k, v in model.state_dict().items()}
-        for module in model.modules():  # as after the initial load
-            if isinstance(module, FSDPModule):
-                model_wrapper._unshard_and_free_sharded_params(module)
-        data_ptrs = [
-            (gdn.input_weight_CD.data_ptr(), gdn.conv_weight_CW.data_ptr())
-            for gdn in model.layers
-        ]
-
-        _Wrapper(model).load_state_dict(pushed)
-
-        for i, gdn in enumerate(model.layers):
-            assert (
-                gdn.input_weight_CD.data_ptr(),
-                gdn.conv_weight_CW.data_ptr(),
-            ) == data_ptrs[i]
-            projections = [
-                pushed[f"layers.{i}.in_proj_{name}.weight"].to_local()
-                for name in "qkvzab"
-            ]
-            assert torch.equal(gdn.input_weight_CD, torch.cat(projections))
-            convs = [
-                pushed[f"layers.{i}.conv_{name}.weight"].to_local() for name in "qkv"
-            ]
-            assert torch.equal(gdn.conv_weight_CW, torch.cat(convs).squeeze(1))
-            for name in "qkvzab":
-                weight = getattr(gdn, f"in_proj_{name}").weight
-                assert weight.untyped_storage().size() == 0, name
     finally:
         dist.destroy_process_group()
 

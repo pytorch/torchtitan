@@ -22,6 +22,7 @@ Other notable conversions:
 - Vision block naming: HF `blocks` <-> TT `layers`
 - Vision QKV: HF fused qkv <-> TT separate wq/wk/wv
 - GatedDeltaNet QKV: HF fused in_proj_qkv <-> TT separate in_proj_q/k/v
+  (the base adapter packs these six logical projections into TT's one in_proj)
 - GatedDeltaNet Conv1d: HF fused conv1d <-> TT separate conv_q/k/v
 """
 
@@ -313,8 +314,8 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                 ):
                     # pyrefly: ignore [missing-attribute]
                     dn = self.model_config.layers[int(idx)].attention
-                    kd = dn.in_proj_q.out_features
-                    vd = dn.in_proj_v.out_features
+                    kd = dn.n_key_heads * dn.key_head_dim
+                    vd = dn.n_heads * dn.value_head_dim
                     q, k, v = value.split([kd, kd, vd], dim=0)
                     tt_state_dict[f"layers.{idx}.attention.in_proj_q.weight"] = q
                     tt_state_dict[f"layers.{idx}.attention.in_proj_k.weight"] = k
@@ -328,8 +329,8 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                 ):
                     # pyrefly: ignore [missing-attribute]
                     dn = self.model_config.layers[int(idx)].attention
-                    kd = dn.in_proj_q.out_features
-                    vd = dn.in_proj_v.out_features
+                    kd = dn.n_key_heads * dn.key_head_dim
+                    vd = dn.n_heads * dn.value_head_dim
                     cq, ck, cv = value.split([kd, kd, vd], dim=0)
                     tt_state_dict[f"layers.{idx}.attention.conv_q.weight"] = cq
                     tt_state_dict[f"layers.{idx}.attention.conv_k.weight"] = ck
