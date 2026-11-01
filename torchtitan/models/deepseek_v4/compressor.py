@@ -7,6 +7,7 @@
 from dataclasses import dataclass
 from functools import cache
 
+import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 import torch_remat as remat
@@ -47,18 +48,31 @@ def compressed_cu_seqlens(cu_seqlens: torch.Tensor, ratio: int) -> torch.Tensor:
     return F.pad(counts.cumsum(0, dtype=torch.int32), (1, 0))
 
 
-def compressed_gather_indices(topk_indices_TK, cu_seqlens, ratio):
-    """Translate document-local selections into safe compressed-pool indices."""
-    gather_TK = topk_indices_TK.clamp_min(0).long()
-    if cu_seqlens is not None:
-        doc_T = torch.searchsorted(
-            cu_seqlens[1:],
-            torch.arange(topk_indices_TK.size(0), device=topk_indices_TK.device),
-            right=True,
-            out_int32=True,
-        )
-        gather_TK = gather_TK + compressed_cu_seqlens(cu_seqlens, ratio)[doc_T, None]
-    # Empty documents can start at the end of the pool; invalid slots read zero.
+def document_cmp_base(
+    cu_seqlens: torch.Tensor | None,
+    ratio: int,
+    seqlen: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Compressed-pool row where each query token's document starts."""
+    if cu_seqlens is None:
+        return torch.zeros(seqlen, dtype=torch.int32, device=device)
+    cu_seq_cmp = compressed_cu_seqlens(cu_seqlens, ratio)
+    counts = torch.diff(cu_seqlens)
+    doc_T = torch.repeat_interleave(
+        torch.arange(counts.numel(), dtype=torch.int32, device=cu_seqlens.device),
+        counts,
+        output_size=seqlen,
+    )
+    return cu_seq_cmp[doc_T]
+
+
+def pool_rows(
+    topk_indices_TK: torch.Tensor, cmp_base_T: torch.Tensor
+) -> torch.Tensor:
+    """Translate document-local selections into packed-pool rows."""
+    gather_TK = topk_indices_TK.clamp_min(0).long() + cmp_base_T[:, None]
+    # Invalid slots read row 0; they are masked out downstream.
     return gather_TK.masked_fill(topk_indices_TK < 0, 0)
 
 
@@ -120,27 +134,33 @@ class Compressor(Module):
         curr = tensor[:, :, d:]
         return torch.cat([prev, curr], dim=1)
 
-    def forward(self, x, positions, cu_seqlens=None):
+    def forward(self, x, positions):
         """Compress hidden states into compressed KV states.
+
+        Documents are packed ratio-aligned (padded to a multiple of the largest
+        compression ratio before packing), so regrouping the whole stream is
+        exactly per-document grouping: a group never straddles a document
+        boundary, and a group starts a document exactly when its first token
+        has position 0.
 
         Args:
             x: Hidden states of shape ``[L, D_model]``.
-            positions: Position IDs of shape ``[L]``.
-            cu_seqlens: Optional packed document offsets ``[N + 1]``. Groups then
-                restart at each document start, a document's trailing partial
-                group forms no entry, and the overlap candidate never crosses a
-                document boundary.
+            positions: Position IDs of shape ``[L]``, reset to 0 at each
+                document start.
 
         Returns:
-            Compressed KV tensor of shape ``[L // compress_ratio, head_dim]``. With
-            ``cu_seqlens``, entries are packed by document at
-            ``compressed_cu_seqlens(cu_seqlens, compress_ratio)`` and later slots
-            are unused.
+            Compressed KV tensor of shape ``[L // compress_ratio, head_dim]``.
         """
         seqlen = x.size(0)
         rd = self.rope_head_dim
         ratio = self.compress_ratio
         dtype = x.dtype
+        if seqlen % ratio != 0:
+            raise ValueError(
+                f"seqlen ({seqlen}) must be divisible by compress_ratio "
+                f"({ratio}); packed documents must be aligned to the "
+                "compression ratio."
+            )
         with torch.autocast(device_type=x.device.type, dtype=torch.float32):
             kv = self.wkv(x)
             score = self.wgate(x)
@@ -150,41 +170,16 @@ class Compressor(Module):
         # Compressed entry j summarizes tokens [j * ratio, (j + 1) * ratio) of its
         # document and takes the position of its first token, as in the
         # DeepSeek-V4 reference.
-        first_G = None
-        if cu_seqlens is None:
-            if seqlen % ratio != 0:
-                raise ValueError(
-                    f"seqlen ({seqlen}) must be divisible by compress_ratio ({ratio})"
-                )
-            comp_positions = (
-                positions[::ratio]
-                if positions is not None
-                else torch.arange(0, seqlen, ratio, device=x.device)
-            )
-            kv = kv.unflatten(0, (-1, ratio))
-            score = score.unflatten(0, (-1, ratio))
-        else:
-            if seqlen < ratio:
-                # Shorter than one group: no document has a compressed entry.
-                return x.new_zeros(0, self.head_dim)
-            # Entries are packed by document at compressed_cu_seqlens offsets in
-            # a fixed pool of seqlen // ratio slots, so no host sync is needed.
-            # Slots past the last complete group are unused and read token 0.
-            cmp_cu = compressed_cu_seqlens(cu_seqlens, ratio)
-            slot_G = torch.arange(seqlen // ratio, dtype=torch.int32, device=x.device)
-            doc_G = torch.searchsorted(cmp_cu[1:], slot_G, right=True, out_int32=True)
-            group_G = slot_G - cmp_cu[doc_G]
-            start_G = torch.where(
-                slot_G < cmp_cu[-1], cu_seqlens[doc_G] + group_G * ratio, 0
-            )
-            token_GR = start_G.unsqueeze(1) + torch.arange(ratio, device=x.device)
-            kv, score = kv[token_GR], score[token_GR]
-            comp_positions = (
-                positions[start_G] if positions is not None else group_G * ratio
-            )
-            first_G = group_G == 0
+        kv = kv.unflatten(0, (-1, ratio))
+        score = score.unflatten(0, (-1, ratio))
+        comp_positions = (
+            positions[::ratio]
+            if positions is not None
+            else torch.arange(0, seqlen, ratio, device=x.device)
+        )
         score = score + self.ape
         if self.overlap:
+            first_G = None if positions is None else comp_positions == 0
             kv = self._overlap_transform(kv, 0, first_G)
             score = self._overlap_transform(score, float("-inf"), first_G)
         kv = (kv * score.softmax(dim=1)).sum(dim=1)
@@ -193,6 +188,97 @@ class Compressor(Module):
         kv_rope = self.rope(kv_rope.unsqueeze(1), positions=comp_positions)
         kv = torch.cat([kv_nope, kv_rope.squeeze(1)], dim=-1)
         return kv
+
+
+class InnerIndexer(Module):
+    """Select the compressed blocks that sparse attention reads.
+
+    This is the pluggable core of :class:`Indexer`, mirroring
+    ``Attention``/``inner_attention``: the projections stay in ``Indexer``, the
+    selection algorithm lives here, and the module boundary is where a
+    context-parallel variant can declare an all-gather of ``idx_k`` without
+    re-running those projections.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        topk: int
+        compress_ratio: int = 4
+
+        def __post_init__(self) -> None:
+            if self.topk <= 0 or self.compress_ratio <= 0:
+                raise ValueError(
+                    "inner indexer topk and compress_ratio must be positive."
+                )
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.topk = config.topk
+        self.compress_ratio = config.compress_ratio
+
+    def forward(
+        self,
+        idx_q_TKD,
+        idx_k_SD,
+        idx_w_TK,
+        *,
+        attention_metadata,
+        return_scores: bool,
+    ):
+        """Select top-k compressed positions per folded query token.
+
+        Uses Attention Gym's ``lightning_indexer`` for discrete selection, then
+        recomputes the selected logits inside autograd for the distillation loss.
+        With packed ``cu_seqlens``, returned indices are local to the query's
+        document in the packed compressed-KV pool.
+
+        Returns:
+            ``(indices, scores)``. ``indices`` is int32
+            ``[T, min(topk, max_seqlen // ratio)]`` with ``-1`` in unusable
+            slots. ``scores`` holds live indexer logits for those selected
+            entries and ``-inf`` in unusable slots, or None when return_scores
+            is False (evaluation and disabled auxiliary loss).
+        """
+        # The fused kernels need fp16/bf16 on NVIDIA SM90 or newer and do not
+        # fall back; CPU, fp32, ROCm, and older GPUs use the reference
+        # implementation.
+        fused = (
+            idx_q_TKD.is_cuda
+            and idx_q_TKD.dtype in (torch.float16, torch.bfloat16)
+            and has_cuda_capability(9, 0)
+        )
+        cu_seqlens = attention_metadata.cu_seq_q
+        max_seqlen = attention_metadata.max_k
+        cmp_offset_T = attention_metadata.cmp_base_T
+        topk = self.topk
+        ratio = self.compress_ratio
+        k = min(topk, max_seqlen // ratio)
+        cu_seqlens_k = (
+            None if cu_seqlens is None else compressed_cu_seqlens(cu_seqlens, ratio)
+        )
+        with torch.no_grad():
+            topk_indices = lightning_indexer(
+                idx_q_TKD.unsqueeze(0),
+                idx_k_SD.unsqueeze(0),
+                idx_w_TK.unsqueeze(0),
+                k,
+                causal=True,
+                compress_ratio=ratio,
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_k=cu_seqlens_k,
+                impl="fused" if fused else "reference",
+            ).squeeze(0)
+
+        if not return_scores:
+            return topk_indices, None
+        valid_TK = topk_indices >= 0
+        gather_indices_TK = pool_rows(topk_indices, cmp_offset_T)
+
+        selected_TKD = idx_k_SD[gather_indices_TK]
+        logits_THK = torch.einsum("thd,tkd->thk", idx_q_TKD, selected_TKD)
+        topk_scores = (logits_THK.relu() * idx_w_TK.unsqueeze(-1)).sum(dim=1)
+        topk_scores = topk_scores.masked_fill(~valid_TK, -torch.inf)
+        return topk_indices, topk_scores
 
 
 class Indexer(Module):
@@ -204,6 +290,7 @@ class Indexer(Module):
         wq_b: Linear.Config
         weights_proj: Linear.Config
         compressor: "Compressor.Config"
+        inner_indexer: "InnerIndexer.Config"
         num_index_heads: int = 64
         index_head_dim: int = 128
         rope_head_dim: int = 64
@@ -220,6 +307,7 @@ class Indexer(Module):
         self.wq_b = cfg.wq_b.build()
         self.weights_proj = cfg.weights_proj.build()
         self.compressor = cfg.compressor.build()
+        self.inner_indexer = cfg.inner_indexer.build()
 
     @staticmethod
     def _rotate_activation(x):
@@ -240,9 +328,15 @@ class Indexer(Module):
         qr,
         *,
         positions,
-        cu_seqlens=None,
+        attention_metadata,
+        return_scores: bool,
     ):
-        """Project raw indexer queries, keys, and per-head weights."""
+        """Project indexer features and select the top-k compressed blocks.
+
+        Returns:
+            ``(topk_indices, topk_scores)``, both document-local; ``scores`` is
+            None when ``return_scores`` is false.
+        """
         seqlen = x.size(0)
         rd = self.rope_head_dim
         q = self.wq_b(qr)
@@ -253,76 +347,19 @@ class Indexer(Module):
         q_rope = self.rope(q_rope, positions=positions)
         q = torch.cat([q_nope, q_rope], dim=-1)
         q = self._rotate_activation(q)
-        k = self.compressor(x, positions=positions, cu_seqlens=cu_seqlens)
+        k = self.compressor(x, positions=positions)
         k = self._rotate_activation(k)
         weights = self.weights_proj(x)
         # The scale reads the weights_proj output with bare ops.
         remat.recompute_needs_tensor(weights)
         weights = weights * (self.softmax_scale * self.num_index_heads**-0.5)
-        return q, k, weights
-
-    @staticmethod
-    def select(
-        idx_q,
-        idx_k,
-        idx_w,
-        *,
-        max_seqlen: int,
-        ratio: int,
-        topk: int,
-        cu_seqlens: torch.Tensor | None = None,
-        return_scores: bool = True,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Select top-k compressed positions per folded query token.
-
-        Uses Attention Gym's ``lightning_indexer`` for discrete selection, then
-        recomputes the selected logits inside autograd for the distillation loss.
-        With packed ``cu_seqlens``, returned indices are local to the query's
-        document in the packed compressed-KV pool.
-
-        Returns:
-            ``(indices, scores)``. ``indices`` is int32
-            ``[T, min(topk, max_seqlen // ratio)]`` with ``-1`` in unusable
-            slots. ``scores`` holds live indexer logits for those selected
-            entries and ``-inf`` in unusable slots, or None when return_scores
-            is False (evaluation and disabled auxiliary loss).
-        """
-        # The fused kernels need fp16/bf16 on NVIDIA SM90 or newer and do not
-        # fall back; CPU, fp32, ROCm, and older GPUs use the reference
-        # implementation.
-        fused = (
-            idx_q.is_cuda
-            and idx_q.dtype in (torch.float16, torch.bfloat16)
-            and has_cuda_capability(9, 0)
+        return self.inner_indexer(
+            q,
+            k,
+            weights,
+            attention_metadata=attention_metadata,
+            return_scores=return_scores,
         )
-        k = min(topk, max_seqlen // ratio)
-        cu_seqlens_k = (
-            None if cu_seqlens is None else compressed_cu_seqlens(cu_seqlens, ratio)
-        )
-        with torch.no_grad():
-            topk_indices = lightning_indexer(
-                idx_q.unsqueeze(0),
-                idx_k.unsqueeze(0),
-                idx_w.unsqueeze(0),
-                k,
-                causal=True,
-                compress_ratio=ratio,
-                cu_seqlens=cu_seqlens,
-                cu_seqlens_k=cu_seqlens_k,
-                impl="fused" if fused else "reference",
-            ).squeeze(0)
-
-        if not return_scores:
-            return topk_indices, None
-        valid_TK = topk_indices >= 0
-        gather_indices_TK = compressed_gather_indices(topk_indices, cu_seqlens, ratio)
-
-        selected_TKD = idx_k[gather_indices_TK]
-        logits_THK = torch.einsum("thd,tkd->thk", idx_q, selected_TKD)
-        topk_scores = (logits_THK.relu() * idx_w.unsqueeze(-1)).sum(dim=1)
-        topk_scores = topk_scores.masked_fill(~valid_TK, -torch.inf)
-        return topk_indices, topk_scores
-
 
 class SparseIndexerLoss(AuxLoss):
     """Distill selected compressed attention using the main kernel's LSE.
@@ -367,15 +404,13 @@ class SparseIndexerLoss(AuxLoss):
         cmp_k_SD: torch.Tensor,
         topk_indices_TK: torch.Tensor,
         attn_lse_TH: torch.Tensor,
-        cu_seqlens: torch.Tensor | None,
+        cmp_base_T: torch.Tensor,
         padding_mask_T: torch.Tensor | None = None,
     ) -> torch.Tensor:
         tp_size = spmd_mesh_size("tp")
         if q_THD.size(1) * tp_size != self.num_heads:
             raise ValueError("Teacher head count does not match the TP-sharded query.")
-        gather_TK = compressed_gather_indices(
-            topk_indices_TK, cu_seqlens, self.compress_ratio
-        )
+        gather_TK = pool_rows(topk_indices_TK, cmp_base_T)
         targets = []
         # Bound gathered keys and fp32 logits by chunk_size, not context length.
         with torch.autocast(device_type=q_THD.device.type, enabled=False):
@@ -424,7 +459,7 @@ class SparseIndexerLoss(AuxLoss):
         topk_indices_TK: torch.Tensor,
         topk_scores_TK: torch.Tensor,
         attn_lse_TH: torch.Tensor,
-        cu_seqlens: torch.Tensor | None,
+        cmp_base_T: torch.Tensor,
         *,
         carrier: torch.Tensor,
         denominator: torch.Tensor,
@@ -439,7 +474,7 @@ class SparseIndexerLoss(AuxLoss):
             cmp_k_SD,
             topk_indices_TK,
             attn_lse_TH,
-            cu_seqlens,
+            cmp_base_T,
             padding_mask_T,
         )
         tiny = torch.finfo(torch.float32).tiny

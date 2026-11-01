@@ -87,6 +87,76 @@ class TestTextDatasetPacking(unittest.TestCase):
         self.assertGreater(interior_doc_starts, 0)
 
 
+class TestDocumentAlignment(unittest.TestCase):
+    """Aligned packing keeps every document segment a multiple of the alignment."""
+
+    def _dataloader(self, alignment: int, max_context_length: int = 512):
+        return GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            max_num_documents=8,
+            document_alignment=alignment,
+            shuffle=False,
+            num_prefetch_microbatches=0,
+        ).build(
+            dp_world_size=1,
+            dp_rank=0,
+            tokenizer=HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH),
+            max_context_length=max_context_length,
+            num_tokens_per_microbatch=2 * max_context_length,
+        )
+
+    def test_segments_are_aligned_and_padding_is_flagged(self):
+        alignment = 128
+        dataloader = self._dataloader(alignment)
+        real_segments = 0
+        try:
+            iterator = iter(dataloader)
+            for _ in range(10):
+                batch = next(iterator)
+                positions = batch.positions
+                padding_mask = batch.padding_mask
+                starts = (positions == 0).nonzero().flatten().tolist()
+                ends = starts[1:] + [len(positions)]
+                for start, end in zip(starts, ends):
+                    if bool(padding_mask[start:end].all()):
+                        # The row-tail padding segment is not a document.
+                        continue
+                    real_segments += 1
+                    self.assertEqual((end - start) % alignment, 0)
+                    self.assertFalse(bool(padding_mask[start]))
+                    # Padding the segment does not renumber it: positions keep
+                    # counting through the padded tail.
+                    self.assertTrue(
+                        bool(
+                            torch.all(
+                                positions[start:end]
+                                == torch.arange(end - start, dtype=positions.dtype)
+                            )
+                        )
+                    )
+        finally:
+            dataloader.close()
+        self.assertGreater(real_segments, 0)
+
+    def test_alignment_requires_a_divisible_row_size(self):
+        with self.assertRaisesRegex(ValueError, "must divide max_context_length"):
+            self._dataloader(100)
+
+    def test_alignment_requires_document_capacity(self):
+        with self.assertRaisesRegex(ValueError, "requires max_num_documents"):
+            GrainDataLoader.Config(
+                dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+                document_alignment=128,
+                num_prefetch_microbatches=0,
+            ).build(
+                dp_world_size=1,
+                dp_rank=0,
+                tokenizer=HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH),
+                max_context_length=512,
+                num_tokens_per_microbatch=1024,
+            )
+
+
 class TestTextDatasetBufferCheckpointing(unittest.TestCase):
     def test_packing_state_round_trips(self):
         dataloader = _build_dataloader(256)

@@ -93,6 +93,7 @@ class DatasetBuildContext:
     num_tokens_per_microbatch: int
     read_options: grain.ReadOptions
     max_num_documents: int | None = None
+    document_alignment: int | None = None
     num_mtp_layers: int = 0
 
 

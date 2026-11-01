@@ -131,20 +131,22 @@ def _dist_muon_optimizer(
                 hc_mult, hc_mult, hc_mult * hc_mult
             )
         if attention.compressor is not None:
-            shardings[f"{prefix}.attention.compressor.wkv.weight"] = blocks(
-                nope_dim,
-                attention.rope_head_dim,
-                nope_dim,
-                attention.rope_head_dim,
-            )
-            shardings[f"{prefix}.attention.compressor.wgate.weight"] = blocks(
-                attention.head_dim
-            )
-        if attention.compressor_128 is not None:
-            shardings[f"{prefix}.attention.compressor_128.wkv.weight"] = blocks(
-                nope_dim, attention.rope_head_dim
-            )
-            shardings[f"{prefix}.attention.compressor_128.wgate.weight"] = owned
+            if attention.compress_ratio == 4:
+                # CSA keeps the previous group as a second candidate half.
+                shardings[f"{prefix}.attention.compressor.wkv.weight"] = blocks(
+                    nope_dim,
+                    attention.rope_head_dim,
+                    nope_dim,
+                    attention.rope_head_dim,
+                )
+                shardings[f"{prefix}.attention.compressor.wgate.weight"] = blocks(
+                    attention.head_dim
+                )
+            else:
+                shardings[f"{prefix}.attention.compressor.wkv.weight"] = blocks(
+                    nope_dim, attention.rope_head_dim
+                )
+                shardings[f"{prefix}.attention.compressor.wgate.weight"] = owned
         if attention.indexer is not None:
             indexer = attention.indexer
             indexer_nope_dim = indexer.index_head_dim - indexer.rope_head_dim
@@ -321,6 +323,9 @@ def deepseek_v4_debugmodel(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             # Fixed document capacity keeps the packed offsets sync-free.
             max_num_documents=64,
+            # Keep documents aligned to the compression ratio so the
+            # compressor can regroup the whole packed stream.
+            document_alignment=max(model_config.compress_ratios),
         ),
         optim=Optim.Config(
             optimizer=_dist_muon_optimizer(
@@ -394,6 +399,9 @@ def deepseek_v4_mtp_debugmodel(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             # Fixed document capacity keeps the packed offsets sync-free.
             max_num_documents=64,
+            # Keep documents aligned to the compression ratio so the
+            # compressor can regroup the whole packed stream.
+            document_alignment=max(model_config.compress_ratios),
             num_mtp_layers=num_mtp_layers,
         ),
         optim=Optim.Config(
@@ -450,6 +458,9 @@ def deepseek_v4_flash(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             # Fixed document capacity keeps the packed offsets sync-free.
             max_num_documents=64,
+            # Keep documents aligned to the compression ratio so the
+            # compressor can regroup the whole packed stream.
+            document_alignment=max(model_config.compress_ratios),
         ),
         optim=Optim.Config(
             optimizer=_dist_muon_optimizer(
@@ -505,6 +516,9 @@ def deepseek_v4_pro(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             # Fixed document capacity keeps the packed offsets sync-free.
             max_num_documents=64,
+            # Keep documents aligned to the compression ratio so the
+            # compressor can regroup the whole packed stream.
+            document_alignment=max(model_config.compress_ratios),
         ),
         optim=Optim.Config(
             optimizer=_dist_muon_optimizer(
@@ -525,6 +539,58 @@ def deepseek_v4_pro(
             num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
             max_context_length=model_config.max_context_length,
             steps=10,
+        ),
+        parallelism=parallelism,
+        activation_remat=None,
+        checkpointer=None,
+    )
+
+
+def deepseek_v4_debugmodel_stripped(
+    seq_len: int = 512,
+    *,
+    parallelism: ParallelismConfig | None = None,
+) -> Trainer.Config:
+    """A small DeepSeek V4 configuration sized for a single accelerator."""
+    if parallelism is None:
+        parallelism = ParallelismConfig(expert_parallel_degree=1)
+    model_config = build_model_config(
+        "debugmodel", seq_len=seq_len, parallelism=parallelism
+    )
+    return Trainer.Config(
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_config),
+            ),
+        ),
+        profiler=Profiler.Config(
+            enable_profiling=False,
+            profile_freq=10,
+            profiler_active=10,
+            profiler_warmup=0,
+        ),
+        metrics=MetricsProcessor.Config(log_freq=1),
+        model=model_config,
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            max_num_documents=8,
+            document_alignment=max(model_config.compress_ratios),
+        ),
+        optim=Optim.Config(
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+            ),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=1,
+                decay_ratio=0.8,
+                decay_type="linear",
+                min_lr_factor=0.0,
+            ),
+        ),
+        training=TrainingConfig(
+            num_tokens_per_microbatch_per_dp_rank=2 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
+            steps=2,
         ),
         parallelism=parallelism,
         activation_remat=None,

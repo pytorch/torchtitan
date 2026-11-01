@@ -192,6 +192,22 @@ class DeepSeekV4Model(Decoder):
         hc_head: HcHead.Config
         mtp_layers: list["MTPBlock.Config"] | None = None
 
+        def __post_init__(self) -> None:
+            # Attention metadata is keyed by inner-attention class, so every
+            # layer of one variant shares it: their geometry must agree.
+            geometry: dict[type, tuple[int, int]] = {}
+            for layer_config in list(self.layers) + list(self.mtp_layers or ()):
+                inner = layer_config.attention.inner_attention
+                variant = type(inner)
+                shape = (inner.compress_ratio, inner.window_size)
+                seen = geometry.setdefault(variant, shape)
+                if seen != shape:
+                    raise ValueError(
+                        f"{variant.__qualname__} layers must share one geometry "
+                        f"because they share attention metadata; got {seen} and "
+                        f"{shape}."
+                    )
+
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
@@ -221,8 +237,11 @@ class DeepSeekV4Model(Decoder):
                                 * attention.index_head_dim
                                 * compressed_seq_len
                             )
+                            index_topk = 0
+                            if attention.indexer is not None:
+                                index_topk = attention.indexer.inner_indexer.topk
                             compressed_seq_len = min(
-                                compressed_seq_len, inner_attention.index_topk
+                                compressed_seq_len, index_topk
                             )
                         attention_op_flops += quadratic_attention_flops_per_token(
                             num_heads=attention.n_heads,
@@ -286,6 +305,10 @@ class DeepSeekV4Model(Decoder):
         aux_loss_denominators: torch.Tensor | None = None,
     ):
         """Run the DeepSeek V4 decoder."""
+        if attention_metadata is None:
+            raise ValueError(
+                "DeepSeek V4 requires attention metadata built from positions."
+            )
         if len(self.mtp_layers) > 0 and self.tok_embeddings is None:
             raise ValueError("DeepSeek V4 MTP forward requires token embeddings.")
         if len(self.mtp_layers) > 0 and self._skip_lm_head:
@@ -304,11 +327,9 @@ class DeepSeekV4Model(Decoder):
             )
         for i in range(self.n_main_layers):
             layer = self.layers[str(i)]
-            layer_attention_metadata = (
-                None
-                if attention_metadata is None
-                else attention_metadata.get(type(layer.attention.inner_attention))
-            )
+            layer_attention_metadata = attention_metadata[
+                type(layer.attention.inner_attention)
+            ]
             h = layer(
                 h,
                 input_ids_T,
@@ -343,12 +364,16 @@ class DeepSeekV4Model(Decoder):
         self,
         prev_hc_hidden: torch.Tensor,
         tokens: torch.Tensor,
-        attention_metadata: AttentionMetadataMap | None = None,
+        attention_metadata: AttentionMetadataMap | None,
         positions: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominators: torch.Tensor | None = None,
     ) -> list[torch.Tensor]:
         """Run auxiliary MTP depths and return prediction hidden states."""
+        if attention_metadata is None:
+            raise ValueError(
+                "DeepSeek V4 MTP requires attention metadata built from positions."
+            )
         mtp_outputs = []
         for depth, mtp_block in enumerate(self.mtp_layers, 1):
             mtp_tokens, valid_mask = roll_mtp_sequence(
@@ -359,11 +384,9 @@ class DeepSeekV4Model(Decoder):
                 padding_mask=padding_mask,
                 return_valid_mask=True,
             )
-            layer_attention_metadata = (
-                None
-                if attention_metadata is None
-                else attention_metadata.get(type(mtp_block.attention.inner_attention))
-            )
+            layer_attention_metadata = attention_metadata[
+                type(mtp_block.attention.inner_attention)
+            ]
             with spmd.no_typecheck():
                 aux_loss_denominator = (
                     None
