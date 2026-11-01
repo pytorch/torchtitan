@@ -393,7 +393,10 @@ def apply_fsdp_to_decoder(
         #   shard their output features when FSDP degree > num_experts
         # Dense blocks use the default mesh with only stacked-parameter
         # placement overrides.
-        if isinstance(moe := transformer_block.feed_forward, MoE):
+        moe = next(
+            (m for m in transformer_block.children() if isinstance(m, MoE)), None
+        )
+        if moe is not None:
             routed_experts = moe.routed_experts
             num_experts = moe.num_experts
 

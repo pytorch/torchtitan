@@ -70,6 +70,36 @@ def test_apply_fsdp_to_decoder_forwards_param_dtype_override_fn() -> None:
     assert mp_policy.param_dtype_override_fn is param_dtype_override_fn
 
 
+def test_apply_fsdp_to_decoder_shards_an_moe_held_as_mlp() -> None:
+    model = nn.Module()
+    model.enable_weight_tying = False
+    model.tok_embeddings = None
+    model.norm = None
+    model.lm_head = None
+    moe = MoE.__new__(MoE)
+    nn.Module.__init__(moe)
+    moe.num_experts = 2
+    moe.routed_experts = nn.Linear(4, 2, bias=False)
+    block = nn.Module()
+    block.mlp = moe
+    model.layers = nn.ModuleDict({"0": block})
+    dp_mesh = mock.MagicMock(mesh_dim_names=("dp_shard",))
+    dp_mesh["dp_shard"].size.return_value = 2
+
+    with mock.patch("torchtitan.distributed.fsdp.fully_shard") as fully_shard:
+        apply_fsdp_to_decoder(
+            model,
+            dp_mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            pp_enabled=False,
+        )
+
+    block_call = next(c for c in fully_shard.call_args_list if c.args[0] is block)
+    shard_placement_fn = block_call.kwargs["shard_placement_fn"]
+    assert shard_placement_fn(moe.routed_experts.weight) == Shard(0)
+
+
 def test_stacked_linear_shard_placements_use_num_linears() -> None:
     module = nn.Module()
     stacked = Linear.Config(
