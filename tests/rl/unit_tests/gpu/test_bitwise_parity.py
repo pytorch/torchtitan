@@ -38,6 +38,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from typing import Literal
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -270,11 +271,11 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     return LLMEngine.from_engine_args(EngineArgs(**engine_kwargs))
 
 
-def _sync_trainer_weights_to_vllm(trainer_model, engine, *, direct: bool) -> None:
+def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
     """Copy the trainer model's weights into the vLLM model in-process.
 
-    With ``direct``, load through ``load_state_dict_direct`` with a fetch that copies
-    in place of the torchstore RDMA read.
+    As the generator's model state dict load does: with cpu_prefetch, fill the pinned
+    CPU copy and load from it; with gpu_fetch, copy in place of the TorchStore read.
     """
 
     wrapper = engine.model_executor.driver_worker.get_model()
@@ -299,7 +300,8 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine, *, direct: bool) -> Non
                     vparam.copy_(full)
         return copied
 
-    if direct:
+    prefetched = wrapper._prefetched_model_state_dict
+    if prefetched is None:
 
         def fetch(state_dict: dict[str, torch.Tensor]) -> list[str]:
             copied = copy_trainer_weights(state_dict)
@@ -307,12 +309,16 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine, *, direct: bool) -> Non
             torch.accelerator.current_stream().synchronize()
             return copied
 
-        wrapper.load_state_dict_direct(fetch)
     else:
-        # As a model state dict load: fill the pinned CPU copy, then load it with load_state_dict.
-        vllm_sd = wrapper._prefetched_model_state_dict
-        copy_trainer_weights(vllm_sd)
-        wrapper.load_state_dict(vllm_sd)
+        copy_trainer_weights(prefetched)
+
+        def fetch(state_dict: dict[str, torch.Tensor]) -> list[str]:
+            with torch.no_grad():
+                for key, tensor in state_dict.items():
+                    tensor.copy_(prefetched[key])
+            return list(state_dict)
+
+    wrapper.load_model_state_dict(fetch)
 
     if dist.get_rank() == 0 and missing:
         logger.warning("vLLM params not present in trainer state_dict: %s", missing)
@@ -607,9 +613,9 @@ class BitwiseParityTestBase(unittest.TestCase):
     # When True, vLLM skips its own checkpoint load and the trainer model's
     # weights (including attention sinks) are copied into the engine in-process.
     sync_weights_from_trainer: bool = False
-    # With sync_weights_from_trainer, copy into the generator's sharded parameters one
-    # FSDP group at a time (fetch_model_state_dict_to_gpu) instead of a pinned CPU copy.
-    fetch_model_state_dict_to_gpu: bool = False
+    # How the generator loads model state dicts; with sync_weights_from_trainer,
+    # gpu_fetch copies into its parameters without the pinned CPU copy.
+    model_state_dict_load_mode: Literal["cpu_prefetch", "gpu_fetch"] = "cpu_prefetch"
 
     # Shared across all tests in the class (built once in setUpClass)
     model: torch.nn.Module
@@ -673,7 +679,7 @@ class BitwiseParityTestBase(unittest.TestCase):
             config.generator.model,
             parallelism=config.generator.parallelism,
             checkpointer_config=generator_checkpointer,
-            fetch_model_state_dict_to_gpu=cls.fetch_model_state_dict_to_gpu,
+            model_state_dict_load_mode=cls.model_state_dict_load_mode,
         )
 
         # Test runs trainer and generator in the same process, so limit
@@ -695,9 +701,7 @@ class BitwiseParityTestBase(unittest.TestCase):
 
         cls.engine = build_inference_engine(config)
         if cls.sync_weights_from_trainer:
-            _sync_trainer_weights_to_vllm(
-                cls.model, cls.engine, direct=cls.fetch_model_state_dict_to_gpu
-            )
+            _sync_trainer_weights_to_vllm(cls.model, cls.engine)
 
         tokenizer = cls.engine.get_tokenizer()
         cls.prompt_ids = _make_prompt_tokens(
@@ -929,10 +933,10 @@ class TestBitwiseParityQwen35DebugVarlen(BitwiseParityTestBase):
         self._check_vllm_prefill_and_decode_batch_invariance()
 
 
-class TestBitwiseParityQwen35DebugVarlenDirect(TestBitwiseParityQwen35DebugVarlen):
-    """Qwen3.5 parity with weights loaded via fetch_model_state_dict_to_gpu."""
+class TestBitwiseParityQwen35DebugVarlenGPUFetch(TestBitwiseParityQwen35DebugVarlen):
+    """Qwen3.5 parity with weights loaded with model_state_dict_load_mode="gpu_fetch"."""
 
-    fetch_model_state_dict_to_gpu = True
+    model_state_dict_load_mode = "gpu_fetch"
 
     @unittest.skip("does not depend on how weights are loaded")
     def test_batch_invariance(self):
@@ -951,7 +955,7 @@ class TestBitwiseParityQwen35DebugVarlenDirect(TestBitwiseParityQwen35DebugVarle
         engine = self.engine
 
         def reload() -> None:
-            _sync_trainer_weights_to_vllm(self.model, engine, direct=True)
+            _sync_trainer_weights_to_vllm(self.model, engine)
             # As the generator does after a load: drop KV computed with the old weights.
             engine.reset_prefix_cache(reset_running_requests=True)
 

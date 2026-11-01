@@ -308,7 +308,7 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
         checkpointer_config=CheckpointManager.Config(
             initial_load_in_hf=True, initial_load_path=model
         ),
-        fetch_model_state_dict_to_gpu=False,
+        model_state_dict_load_mode="cpu_prefetch",
     )
     engine = LLMEngine.from_engine_args(
         EngineArgs(

@@ -13,9 +13,8 @@ TorchTitan models for vLLM.
 
 import copy
 import dataclasses
-from collections import defaultdict
-from collections.abc import Callable, Iterable, Iterator, Mapping
-from typing import Any, cast
+from collections.abc import Callable, Iterable, Iterator
+from typing import Any, cast, Literal
 
 import spmd_types as spmd
 
@@ -350,7 +349,7 @@ def _unshard_and_free_sharded_params(module: FSDPModule) -> None:
             free_storage(sharded_data)
 
 
-def _direct_load_groups(
+def _fsdp_load_groups(
     model: nn.Module,
 ) -> tuple[list[tuple[FSDPModule, list[tuple[str, Any]]]], list[str]]:
     """Group ``model.state_dict()`` keys by the FSDP group whose sharded parameters hold them.
@@ -359,13 +358,9 @@ def _direct_load_groups(
     parameters. Tied parameters list each of their keys under the same group.
 
     Returns:
-        ``(groups, other_keys)``: one ``(module, [(key, fsdp_param), ...])`` per FSDP
+        ``(groups, buffer_keys)``: one ``(module, [(key, fsdp_param), ...])`` per FSDP
         group in module order, where ``module`` is the group's first module; and the
-        keys outside any group (buffers).
-
-    Raises:
-        ValueError: If a parameter is quantized; direct loads fetch into the
-            sharded parameter itself, not its high-precision ``_tensor``.
+        keys of the buffers.
     """
     sharded_param_to_group: dict[int, tuple[FSDPModule, Any]] = {}
     group_modules: dict[Any, FSDPModule] = {}
@@ -378,12 +373,6 @@ def _direct_load_groups(
         group_modules[state] = module
         for param_group in state._fsdp_param_groups:
             for fsdp_param in param_group.fsdp_params:
-                if isinstance(fsdp_param._sharded_param_data, _ShardedFSDPTensor):
-                    raise ValueError(
-                        "fetch_model_state_dict_to_gpu does not support quantized "
-                        f"parameters ({fsdp_param._module_info.param_name} in "
-                        f"{type(module).__name__})"
-                    )
                 sharded_param_to_group[id(fsdp_param.sharded_param)] = (
                     module,
                     fsdp_param,
@@ -393,18 +382,18 @@ def _direct_load_groups(
         module: [] for module in group_modules.values()
     }
     buffers = {id(buffer) for buffer in model.buffers()}
-    other_keys = []
+    buffer_keys = []
     for key, value in model.state_dict(keep_vars=True).items():
         group = sharded_param_to_group.get(id(value))
         if group is None:
             # A parameter here would be loaded outside the reshard/unshard sequence.
             assert id(value) in buffers, f"{key} is neither FSDP-sharded nor a buffer"
-            other_keys.append(key)
+            buffer_keys.append(key)
             continue
         module, fsdp_param = group
         keys_by_module[module].append((key, fsdp_param))
     groups = [(module, keyed) for module, keyed in keys_by_module.items() if keyed]
-    return groups, other_keys
+    return groups, buffer_keys
 
 
 @support_torch_compile(
@@ -441,7 +430,7 @@ class VLLMModelWrapper(Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         dist_moe_runtime: DistMoeRuntime.Config | None = None,
-        fetch_model_state_dict_to_gpu: bool,
+        model_state_dict_load_mode: Literal["cpu_prefetch", "gpu_fetch"],
     ):
         super().__init__()
 
@@ -523,18 +512,24 @@ class VLLMModelWrapper(Module):
         if self.parallelism_context.tp_enabled and not is_in_batch_invariant_mode():
             _patch_vllm_all_reduce()
 
-        # Without direct loads, build pinned CPU receive buffers for model state
-        # dict loads while the model is still sharded. Bind first so first-touch
-        # places them on the NUMA node local to this rank's GPU.
+        self._fsdp_load_groups, self._buffer_keys = _fsdp_load_groups(self.model)
+        if model_state_dict_load_mode == "gpu_fetch":
+            # gpu_fetch writes into the sharded parameter itself, not a quantized
+            # parameter's high-precision _tensor.
+            for _, keyed_params in self._fsdp_load_groups:
+                for key, fsdp_param in keyed_params:
+                    if isinstance(fsdp_param._sharded_param_data, _ShardedFSDPTensor):
+                        raise ValueError(
+                            "model_state_dict_load_mode='gpu_fetch' does not support "
+                            f"quantized parameters ({key})"
+                        )
+
+        # With cpu_prefetch, build pinned CPU receive buffers for model state dict
+        # loads while the model is still sharded. Bind first so first-touch places
+        # them on the NUMA node local to this rank's GPU.
         maybe_apply_numa_binding(torch.cuda.current_device(), "cuda")
         self._prefetched_model_state_dict: dict[str, torch.Tensor] | None = None
-        if fetch_model_state_dict_to_gpu:
-            # Direct loads fetch into the sharded parameters instead.
-            (
-                self._direct_load_groups,
-                self._direct_load_other_keys,
-            ) = _direct_load_groups(self.model)
-        else:
+        if model_state_dict_load_mode == "cpu_prefetch":
             with torch.device("cpu"):
                 self._prefetched_model_state_dict = _create_cpu_state_dict(
                     self.model.state_dict(), pin_memory=True
@@ -546,75 +541,36 @@ class VLLMModelWrapper(Module):
             if isinstance(module, FSDPModule):
                 _unshard_and_free_sharded_params(module)
 
-    def load_state_dict(self, state_dict: Mapping[str, Any]):
-        """Copy new weights into `self.model`, allocating about one FSDP group's sharded buffers at a time.
+    def load_model_state_dict(
+        self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
+    ) -> None:
+        """Fetch new weights into `self.model`, allocating one FSDP group's sharded buffers at a time.
 
-        Each group is allocated right before its first module loads and freed right after its last:
+        Each group is allocated, filled by `fetch`, then unsharded and freed:
 
-            load order:     tok_embeddings | layers.0 | ... | layers.N | norm     lm_head
-            FSDP group:     [emb]          | [l0]     |     | [lN]     | [norm,   lm_head]
-            allocate:       emb            | l0       |     | lN       | norm
-            unshard, free:  emb            | l0       |     | lN       |          lm_head
+            FSDP group:     [emb] | [l0] | ... | [lN] | [norm, lm_head] | buffers
+            allocate:       emb   | l0   |     | lN   | norm, lm_head   |
+            fetch:          emb   | l0   |     | lN   | norm, lm_head   | buffers
+            unshard, free:  emb   | l0   |     | lN   | norm, lm_head   |
 
-        With tied embeddings the group is [tok_embeddings, norm, lm_head], so it stays
-        allocated for the whole load.
+        With tied embeddings the group is [tok_embeddings, norm, lm_head].
 
         Why this shape:
           - Memory: allocating every sharded buffer first adds a second copy of the weights at
             FSDP degree 1: 64.6 GiB extra for bf16 Qwen3.5-35B-A3B at TP1, vs 1.6 GiB here.
           - Per group: modules from one `fully_shard` call share one FSDP state, so unsharding
             after `norm` would all-gather `lm_head` before it loads.
-          - Hooks: a `load_state_dict` per module would also load its nested FSDP modules
-            (the root holds every block), whose sharded buffers are still freed.
-
-        Args:
-            state_dict: Keyed like `self.model.state_dict()`, not `self.state_dict()`
-                (no `model.` prefix), e.g. the generator's pinned CPU copy.
-        """
-        # One entry per FSDP group: fully_shard([norm, lm_head]) gives both modules one
-        # state, and its sharded buffers are allocated and freed together.
-        modules_by_fsdp_state = defaultdict(list)
-        for module in self.model.modules():
-            if isinstance(module, FSDPModule):
-                modules_by_fsdp_state[module._get_fsdp_state()].append(module)
-        # Hooks run inside the one load_state_dict call, just before and after each group
-        # loads; a call per module would also load its nested modules while they are freed.
-        handles = []
-        for modules in modules_by_fsdp_state.values():
-            handles.append(
-                modules[0].register_load_state_dict_pre_hook(
-                    lambda module, *args: _restore_sharded_params(module)
-                )
-            )
-            handles.append(
-                modules[-1].register_load_state_dict_post_hook(
-                    lambda module, *args: _unshard_and_free_sharded_params(module)
-                )
-            )
-        incompatible_keys = self.model.load_state_dict(state_dict, strict=True)
-        for handle in handles:
-            handle.remove()
-        return incompatible_keys
-
-    def load_state_dict_direct(
-        self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
-    ) -> None:
-        """Fetch new weights straight into `self.model`, one FSDP group at a time.
-
-        Follows the same allocate -> copy -> unshard and free sequence per group as
-        `load_state_dict`, but `fetch` writes the group's sharded parameters in place
-        (e.g. over RDMA), so no full CPU copy of the weights is needed. Requires
-        `fetch_model_state_dict_to_gpu=True` at construction.
 
         Args:
             fetch: Fills each tensor of the given subset of `self.model.state_dict()`
-                in place with the new weights and returns the keys it filled. Each
+                in place with the new weights and returns the keys it filled, e.g. a
+                copy from the generator's pinned CPU buffers or a TorchStore read. Each
                 group's sharded storage is reallocated just before its fetch, so a
                 fetch writing outside the current stream (e.g. RDMA) must first wait
                 for queued device work, and must finish writing before it returns.
         """
         error = None
-        for module, keyed_params in self._direct_load_groups:
+        for module, keyed_params in self._fsdp_load_groups:
             # unshard() is a no-op while the group is unsharded. Resharding registers
             # the sharded parameters and keeps the unsharded storage CUDA graphs read.
             _reshard(module)
@@ -642,13 +598,8 @@ class VLLMModelWrapper(Module):
             raise error
         # Buffers the trainer does not publish (e.g. vLLM attention scales) keep
         # their values.
-        if self._direct_load_other_keys:
-            fetch(
-                {
-                    key: self.model.get_buffer(key)
-                    for key in self._direct_load_other_keys
-                }
-            )
+        if self._buffer_keys:
+            fetch({key: self.model.get_buffer(key) for key in self._buffer_keys})
 
     def set_num_valid_tokens(self, num_valid_tokens: int) -> None:
         """Publish how many of this step's tokens are real, for the padding mask.

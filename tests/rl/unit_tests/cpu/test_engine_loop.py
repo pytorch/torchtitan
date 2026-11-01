@@ -19,7 +19,7 @@ import contextvars
 import gc
 import threading
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
@@ -101,7 +101,7 @@ def _bare_loop(
     dp_size: int = 1,
     dp_routing_strategy: RoutingStrategy.Config | None = None,
     reset_kv_cache_on_model_state_dict_load: bool = False,
-    fetch_model_state_dict: Callable[[dict], Any] | None = None,
+    fetch_model_state_dict: Callable[[dict], Any] = lambda weights: weights.keys(),
 ) -> EngineLoop:
     # _decide_next_action delegates the in-flight check and routing to the
     # dispatcher, so wire up a bare one (no engine / GPU needed here).
@@ -601,8 +601,8 @@ class _FakeEngine:
         finished, self.running = self.running, []
         return [_finished(request_id) for request_id in finished]
 
-    def load_prefetched_model_state_dict(self) -> None:
-        pass
+    def load_model_state_dict(self, fetch) -> None:
+        fetch({})
 
     def shutdown(self) -> None:
         self.shutdowns.append(threading.current_thread())
@@ -891,9 +891,12 @@ def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
     async def run() -> None:
         # The generator's endpoints around the engine loop, without building vLLM.
         generator = object.__new__(Generator)
-        generator.config = SimpleNamespace(fetch_model_state_dict_to_gpu=False)
-        generator._engine_loop = engine_thread(engine)
+        generator.config = SimpleNamespace(model_state_dict_load_mode="cpu_prefetch")
         generator._prefetched_model_state_dict = {}
+        generator._engine_loop = engine_thread(
+            engine,
+            fetch_model_state_dict=generator._copy_prefetched_model_state_dict,
+        )
         await generator.start_engine_loop()
         first = _generate(generator._engine_loop, "r0")
         assert await asyncio.to_thread(gate.entered.wait, _TIMEOUT_S)
@@ -914,7 +917,7 @@ def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
     asyncio.run(run())
 
 
-def test_direct_load_reads_torchstore_on_the_actor_loop_during_the_load(
+def test_gpu_fetch_reads_torchstore_on_the_actor_loop_during_the_load(
     engine_thread, monkeypatch
 ) -> None:
     reads: list[tuple] = []
@@ -932,19 +935,17 @@ def test_direct_load_reads_torchstore_on_the_actor_loop_during_the_load(
     monkeypatch.setattr(torch.accelerator, "current_stream", current_stream)
     weights = {"weight": object()}
 
-    class _DirectEngine(_FakeEngine):
-        def load_model_state_dict_direct(self, fetch) -> None:
+    class _GPUFetchEngine(_FakeEngine):
+        def load_model_state_dict(self, fetch) -> None:
             fetch(weights)
-
-        def load_prefetched_model_state_dict(self) -> None:
-            raise AssertionError("direct loads must not read prefetched buffers")
 
     async def run() -> None:
         generator = object.__new__(Generator)
-        generator.config = SimpleNamespace(fetch_model_state_dict_to_gpu=True)
+        generator.config = SimpleNamespace(model_state_dict_load_mode="gpu_fetch")
         generator._torchstore_loop = asyncio.get_running_loop()
         generator._engine_loop = engine_thread(
-            _DirectEngine(), fetch_model_state_dict=generator._fetch_model_state_dict
+            _GPUFetchEngine(),
+            fetch_model_state_dict=generator._fetch_model_state_dict_from_storage_volume,
         )
         await generator.start_engine_loop()
 
@@ -967,18 +968,7 @@ def test_direct_load_reads_torchstore_on_the_actor_loop_during_the_load(
     asyncio.run(run())
 
 
-class _DirectLoadEngine(_FakeEngine):
-    """Loads by fetching straight into its (empty) weights."""
-
-    def load_model_state_dict_direct(self, fetch) -> None:
-        fetch({})
-
-
-def _fetch_nothing(weights: dict) -> dict:
-    return weights
-
-
-def test_direct_load_replies_only_after_every_rank_finished_reading(
+def test_load_replies_only_after_every_rank_finished_fetching(
     engine_thread, monkeypatch
 ) -> None:
     reducing, released = threading.Event(), threading.Event()
@@ -992,14 +982,12 @@ def test_direct_load_replies_only_after_every_rank_finished_reading(
     monkeypatch.setattr(engine_loop_module.dist, "all_reduce", all_reduce)
 
     async def run() -> None:
-        engine_loop = engine_thread(
-            _DirectLoadEngine(), fetch_model_state_dict=_fetch_nothing
-        )
+        engine_loop = engine_thread(_FakeEngine())
         engine_loop.start()
         load = asyncio.create_task(engine_loop.load_model_state_dict(3))
         assert await asyncio.to_thread(reducing.wait, _TIMEOUT_S)
 
-        # Other ranks may still be reading the StorageVolume, so the load must not resolve.
+        # Other ranks may still be fetching, so the load must not resolve.
         await _on_engine_loop(engine_loop, lambda: None)
         assert not load.done()
         released.set()
@@ -1013,7 +1001,7 @@ def test_direct_load_replies_only_after_every_rank_finished_reading(
 
 
 @pytest.mark.parametrize("failing_rank", ["this", "another"])
-def test_direct_load_fails_on_every_rank_when_any_rank_fails(
+def test_load_fails_on_every_rank_when_any_rank_fails(
     engine_thread, monkeypatch, failing_rank: str
 ) -> None:
     reduced: list[int] = []
@@ -1022,14 +1010,15 @@ def test_direct_load_fails_on_every_rank_when_any_rank_fails(
         reduced.append(int(tensor.item()))
         tensor.fill_(1)
 
-    def fetch(weights: dict) -> None:
+    def fetch(weights: dict) -> Iterable[str]:
         if failing_rank == "this":
             raise RuntimeError("TorchStore is down")
+        return weights.keys()
 
     monkeypatch.setattr(engine_loop_module.dist, "all_reduce", all_reduce)
 
     async def run() -> None:
-        engine_loop = engine_thread(_DirectLoadEngine(), fetch_model_state_dict=fetch)
+        engine_loop = engine_thread(_FakeEngine(), fetch_model_state_dict=fetch)
         engine_loop.start()
         error = (
             "TorchStore is down"

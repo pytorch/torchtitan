@@ -247,7 +247,7 @@ def test_compressed_mla_configures_vllm_native_mla(monkeypatch, build_config):
         config,
         parallelism=InferenceParallelismConfig(),
         checkpointer_config=None,
-        fetch_model_state_dict_to_gpu=False,
+        model_state_dict_load_mode="cpu_prefetch",
     )
     hf_config = PretrainedConfig.from_dict(hf)
     assert MODEL_ARCH_CONFIG_CONVERTORS[hf_config.model_type](

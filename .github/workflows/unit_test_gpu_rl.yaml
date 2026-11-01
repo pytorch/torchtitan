@@ -113,6 +113,6 @@ jobs:
           tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityQwen35DebugVarlen -v
         RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
           torchrun --nproc-per-node=2 -m pytest \
-          tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityQwen35DebugVarlenDirect -v
+          tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityQwen35DebugVarlenGPUFetch -v
         torchrun --nproc-per-node=4 -m pytest \
           tests/rl/unit_tests/gpu/test_generator_uneven_decode.py -v

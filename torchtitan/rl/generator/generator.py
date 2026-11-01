@@ -14,7 +14,7 @@ import os
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import torch
 import torch.distributed as dist
@@ -67,8 +67,8 @@ class Generator(Configurable):
     `prefetch_model_state_dict` runs on the caller's event loop and writes the staging buffers the
     engine loop reads on a load: the router awaits it before `load_model_state_dict`, and the
     controller awaits that load before the trainer's next push, so the two never overlap.
-    With `fetch_model_state_dict_to_gpu`, the prefetch is a no-op and the load reads the
-    StorageVolume snapshot directly into the engine's weights; it resolves only after every
+    With ``model_state_dict_load_mode="gpu_fetch"``, the prefetch is a no-op and the load reads
+    the StorageVolume snapshot directly into the engine's weights; it resolves only after every
     rank finishes reading, so the trainer's next push cannot overwrite it mid-read.
 
     Args:
@@ -158,20 +158,22 @@ class Generator(Configurable):
         Enable this to clear prefix-cache entries and preempt running requests; the engine
         then recomputes their KV under the new weights when they resume."""
 
-        # TODO: unify with the pinned CPU prefetch into one load path (e.g.
-        # direct fetch overlapped with generation) and drop this flag.
-        fetch_model_state_dict_to_gpu: bool = False
-        """Read the StorageVolume snapshot directly into the engine's GPU
-        weights, one FSDP group at a time, instead of first prefetching a full
-        pinned CPU copy on the generator host.
+        model_state_dict_load_mode: Literal[
+            "cpu_prefetch", "gpu_fetch"
+        ] = "cpu_prefetch"
+        """How a model state dict load moves the StorageVolume snapshot into the engine's weights.
 
-        Saves generator host memory (one full copy of the weights) on hosts with
-        little CPU memory, e.g. GB300. The transfer then happens inside the
-        model state dict load, while the engine is paused, instead of
-        overlapping generation: with hot_swap, in-flight requests stall for the
-        whole transfer; without it, the generator is drained for it. A failed
-        transfer leaves the weights partially loaded, so it stops the engine
-        loop on every generator rank."""
+        - ``"cpu_prefetch"``: `prefetch_model_state_dict` reads the snapshot into pinned CPU
+          buffers while generation continues, and the load copies them to the GPU. Costs one
+          full copy of the weights in generator host memory.
+        - ``"gpu_fetch"``: the load reads the snapshot directly into the GPU weights, one FSDP
+          group at a time, with no CPU copy. For hosts with little CPU memory, e.g. GB300. The
+          transfer happens while the engine is paused: with hot_swap, in-flight requests stall
+          for it; without it, the generator stays drained for it. Quantized parameters are not
+          supported.
+
+        A failed load leaves the weights partially loaded, so it stops the engine loop on every
+        generator rank."""
 
         def __post_init__(self):
             # The generator runs full expert parallelism: the engine forms the EP
@@ -254,7 +256,7 @@ class Generator(Configurable):
                     reset_kv_cache_on_model_state_dict_load=(
                         config.reset_kv_cache_on_model_state_dict_load
                     ),
-                    fetch_model_state_dict_to_gpu=config.fetch_model_state_dict_to_gpu,
+                    model_state_dict_load_mode=config.model_state_dict_load_mode,
                     rank=self._rank,
                     generator_name=generator_name,
                     output_dir=output_dir,
@@ -316,9 +318,9 @@ class Generator(Configurable):
             max_engine_steps_between_decisions=config.max_engine_steps_between_decisions,
             reset_kv_cache_on_model_state_dict_load=config.reset_kv_cache_on_model_state_dict_load,
             fetch_model_state_dict=(
-                self._fetch_model_state_dict
-                if config.fetch_model_state_dict_to_gpu
-                else None
+                self._copy_prefetched_model_state_dict
+                if config.model_state_dict_load_mode == "cpu_prefetch"
+                else self._fetch_model_state_dict_from_storage_volume
             ),
         )
 
@@ -456,9 +458,9 @@ class Generator(Configurable):
         """Queues a model state dict load for `version` and blocks until the engine loop has finished loading.
         Loads queued together are applied once, at the highest version.
 
-        Without `fetch_model_state_dict_to_gpu`, the network transfer has already
-        completed and this load applies the prefetched weights to the GPU. With
-        it, this load also reads the weights from the StorageVolume.
+        With ``model_state_dict_load_mode="cpu_prefetch"``, the network transfer has already
+        completed and this load copies the prefetched weights to the GPU. With
+        ``"gpu_fetch"``, this load reads the weights from the StorageVolume.
 
         NOTE: In-flight requests are NOT drained here — the endpoint never drains; a caller that wants
         an idle engine holds off new `generate` calls until the queue drains, then calls this.
@@ -472,9 +474,9 @@ class Generator(Configurable):
     async def prefetch_model_state_dict(self) -> None:
         """Fetch weights into pinned CPU memory without interrupting generation.
 
-        A no-op with `fetch_model_state_dict_to_gpu`: the load reads the weights.
+        A no-op with ``model_state_dict_load_mode="gpu_fetch"``: the load reads the weights.
         """
-        if self.config.fetch_model_state_dict_to_gpu:
+        if self.config.model_state_dict_load_mode == "gpu_fetch":
             return
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
@@ -485,7 +487,19 @@ class Generator(Configurable):
             direct_rdma=False,
         )
 
-    def _fetch_model_state_dict(
+    def _copy_prefetched_model_state_dict(
+        self, state_dict: dict[str, torch.Tensor]
+    ) -> Iterable[str]:
+        """Copy `state_dict`'s weights in place from the prefetched pinned CPU buffers.
+
+        Called on the engine loop thread during a load.
+        """
+        with torch.no_grad():
+            for key, tensor in state_dict.items():
+                tensor.copy_(self._prefetched_model_state_dict[key])
+        return state_dict.keys()
+
+    def _fetch_model_state_dict_from_storage_volume(
         self, state_dict: dict[str, torch.Tensor]
     ) -> Iterable[str]:
         """Read `state_dict`'s weights in place from the StorageVolume snapshot.

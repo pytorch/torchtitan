@@ -112,9 +112,9 @@ class EngineLoop:
     `LoopDecision(LoopAction.LOAD_MODEL_STATE_DICT)` applied between step bursts. The engine does
     NOT drain in-flight requests first ("hotswap"). This behavior can be changed in the
     inter-generator router, by blocking new requests until the engine is drained. The network
-    transfer into the engine's pinned CPU buffers happens before this loop action, which then
-    performs the local CPU-to-GPU copy. With `fetch_model_state_dict`, the loop action performs
-    the transfer itself, straight into the engine's weights.
+    load fills the engine's weights through `fetch_model_state_dict`: with
+    ``model_state_dict_load_mode="cpu_prefetch"`` a local copy from the pinned CPU buffers the
+    network transfer already filled, with ``"gpu_fetch"`` the network transfer itself.
 
     Args:
         engine: The inference engine, built on the engine loop thread. The loop releases it on exit.
@@ -125,8 +125,7 @@ class EngineLoop:
         max_engine_steps_between_decisions: ``Generator.Config``'s field.
         reset_kv_cache_on_model_state_dict_load: ``Generator.Config``'s field.
         fetch_model_state_dict: Fills the given model state dict tensors in place with the new
-            weights. When set, loads fetch through it instead of loading the engine's prefetched
-            model state dict.
+            weights and returns the keys it filled.
     """
 
     def __init__(
@@ -139,8 +138,7 @@ class EngineLoop:
         broadcast_group: dist.ProcessGroup,
         max_engine_steps_between_decisions: int,
         reset_kv_cache_on_model_state_dict_load: bool,
-        fetch_model_state_dict: Callable[[dict[str, torch.Tensor]], Iterable[str]]
-        | None,
+        fetch_model_state_dict: Callable[[dict[str, torch.Tensor]], Iterable[str]],
     ):
         self._engine: GenerationEngine | None = engine
         self._fetch_model_state_dict = fetch_model_state_dict
@@ -493,34 +491,19 @@ class EngineLoop:
 
     @sl.log_trace_span("load_model_state_dict_copy")
     async def _load_model_state_dict(self, version: int) -> None:
-        """ALL RANKS: collectively load the model state dict and bump the policy version.
-
-        By default the model state dict was already prefetched into the engine's pinned CPU
-        buffers and this performs the local CPU-to-GPU copy. With `fetch_model_state_dict`,
-        this fetches the model state dict straight into the engine's weights instead.
-        """
-        if self._fetch_model_state_dict is None:
-            self._engine.load_prefetched_model_state_dict()
-        else:
-            await self._load_model_state_dict_direct(self._fetch_model_state_dict)
-        self.policy_version = version
-        gc.collect()
-
-    async def _load_model_state_dict_direct(
-        self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
-    ) -> None:
-        """ALL RANKS: fetch the model state dict into the engine's weights, then wait for
-        every rank to finish reading.
+        """ALL RANKS: collectively load the model state dict through `fetch_model_state_dict`,
+        wait for every rank to finish, and bump the policy version.
 
         Rank 0 replies to the load right after this returns, and the trainer may then
-        overwrite the StorageVolume snapshot the other ranks read from.
+        overwrite the StorageVolume snapshot the other ranks read from. A rank that fails
+        stops every rank here instead of leaving the others in the next decision broadcast.
         """
         error: Exception | None = None
         try:
-            self._engine.load_model_state_dict_direct(fetch)
+            self._engine.load_model_state_dict(self._fetch_model_state_dict)
         except Exception as e:
             # Log now: peers may be stuck in a collective until it times out.
-            logger.exception("Direct model state dict load failed")
+            logger.exception("Model state dict load failed")
             error = e
         failed = torch.tensor([int(error is not None)])
         await asyncio.to_thread(dist.all_reduce, failed, group=self._broadcast_group)
@@ -528,6 +511,8 @@ class EngineLoop:
             raise error
         if failed.item():
             raise RuntimeError("model state dict load failed on another generator rank")
+        self.policy_version = version
+        gc.collect()
 
     async def _release_resources(self) -> None:
         """Stop the dispatcher, fail the replies it left unresolved, and drop the engine. No-op

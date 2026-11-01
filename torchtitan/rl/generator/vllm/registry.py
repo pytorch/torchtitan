@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
@@ -196,7 +196,7 @@ def register_to_vllm(
     parallelism: InferenceParallelismConfig,
     checkpointer_config: CheckpointManager.Config | None,
     dist_moe_runtime: DistMoeRuntime.Config | None = None,
-    fetch_model_state_dict_to_gpu: bool,
+    model_state_dict_load_mode: Literal["cpu_prefetch", "gpu_fetch"],
 ) -> None:
     """Register the TorchTitan model class and the TorchTitan config parser with vLLM.
 
@@ -234,9 +234,8 @@ def register_to_vllm(
             weights arrive from TorchStore.
         dist_moe_runtime: ``DistMoeRuntime.Config(inference=True)`` for models
             with Dist-MoE routed experts; ``None`` otherwise.
-        fetch_model_state_dict_to_gpu: Load model state dicts directly into the
-            model's GPU weights instead of allocating a pinned CPU copy. See
-            ``Generator.Config.fetch_model_state_dict_to_gpu``.
+        model_state_dict_load_mode: ``Generator.Config``'s field; ``"cpu_prefetch"``
+            allocates the pinned CPU copy model state dicts are prefetched into.
     """
     has_gdn = any(
         isinstance(layer.attention, GDN.Config) for layer in model_config.layers
@@ -275,7 +274,7 @@ def register_to_vllm(
                 vllm_config=vllm_config,
                 prefix=prefix,
                 dist_moe_runtime=dist_moe_runtime,
-                fetch_model_state_dict_to_gpu=fetch_model_state_dict_to_gpu,
+                model_state_dict_load_mode=model_state_dict_load_mode,
             )
 
     VLLMModelFromSpec.__name__ = VLLM_MODEL_NAME

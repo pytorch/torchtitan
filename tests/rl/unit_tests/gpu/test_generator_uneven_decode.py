@@ -61,7 +61,7 @@ def test_vllm_uneven_decode_tp_padding():
         config.generator.model,
         parallelism=config.generator.parallelism,
         checkpointer_config=None,
-        fetch_model_state_dict_to_gpu=False,
+        model_state_dict_load_mode="cpu_prefetch",
     )
 
     engine = build_inference_engine(config)
