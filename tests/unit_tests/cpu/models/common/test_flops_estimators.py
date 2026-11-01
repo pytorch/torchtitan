@@ -177,7 +177,7 @@ def test_engine_returns_current_flops_before_preprocessing():
         garbage_collector=SimpleNamespace(run=lambda step: None),
         optim=SimpleNamespace(zero_grad=lambda **kwargs: None),
         num_completed_steps=0,
-        _cuda_graph_per_microbatch_group_enabled=False,
+        _accelerator_graph_per_microbatch_group_enabled=False,
         device=torch.device("cpu"),
         config=SimpleNamespace(
             training=SimpleNamespace(preprocess_microbatch_groups_lazily=False)
