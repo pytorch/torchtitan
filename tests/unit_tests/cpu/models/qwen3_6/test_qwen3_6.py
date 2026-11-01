@@ -12,7 +12,7 @@ import torch
 pytest.importorskip("attn_gym")
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.attention.gdn import GDN
+from torchtitan.models.common.attention.gdn import _split_in_proj, GDN
 from torchtitan.models.qwen3_5 import Qwen35Model
 from torchtitan.models.qwen3_5.state_dict_adapter import Qwen35StateDictAdapter
 from torchtitan.models.qwen3_6 import build_model_config, MODEL_FLAVORS
@@ -79,6 +79,23 @@ def test_qwen36_35b_a3b_matches_hugging_face_config() -> None:
     assert full_attention_layer.attention is not None
     assert full_attention_layer.attention.n_heads == 16
     assert full_attention_layer.attention.n_kv_heads == 2
+
+
+@pytest.mark.parametrize("heads_per_key", [1, 3])
+def test_gdn_split_in_proj_returns_contiguous_heads(heads_per_key: int) -> None:
+    # The GDN kernels need contiguous heads; with one value head per key head the
+    # split's views would be strided.
+    split_sizes = [
+        4,
+        4,
+        2 * heads_per_key,
+        2 * heads_per_key,
+        heads_per_key,
+        heads_per_key,
+    ]
+    projected_TC = torch.randn(5, 2 * sum(split_sizes))
+    outputs = _split_in_proj(projected_TC, split_sizes, 2)
+    assert all(output.is_contiguous() for output in outputs)
 
 
 def test_adapter_packs_deltanet_projections_into_one_in_proj() -> None:
