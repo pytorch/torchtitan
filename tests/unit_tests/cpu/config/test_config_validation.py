@@ -9,6 +9,7 @@ from unittest import mock
 
 import pytest
 
+from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.validator import Validator
 from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
@@ -95,6 +96,16 @@ def test_lazy_preprocessing_config_restrictions() -> None:
             preprocess_microbatch_groups_lazily=True, disable_accelerator_graphs=True
         )
     )
+
+
+def test_skip_non_loss_tokens_requires_disabled_accelerator_graphs() -> None:
+    loss = ChunkedLossWrapper.Config(skip_non_loss_tokens=True)
+    with _accelerator_graphs_supported(True):
+        with pytest.raises(ValueError, match="skip_non_loss_tokens"):
+            TrainingEngine.Config(loss=loss)
+        TrainingEngine.Config(
+            loss=loss, training=TrainingConfig(disable_accelerator_graphs=True)
+        )
 
 
 def test_graph_trainer_rejects_per_group_accelerator_graphs() -> None:

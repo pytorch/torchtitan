@@ -1122,7 +1122,8 @@ class TestChunkedLossWrapper(unittest.TestCase):
                     num_kept <= sum(lm_head_rows) < num_kept + len(lm_head_rows)
                 )
                 self.assertLessEqual(max(lm_head_rows), T // num_chunks)
-                self.assertTrue((results[1][1][labels == IGNORE_INDEX] == 0).all())
+                grad_skipped = results[1][1]
+                self.assertTrue((grad_skipped[labels == IGNORE_INDEX] == 0).all())
                 for skipped, full in zip(results[1], results[0], strict=True):
                     if loss_token_frac == 1.0:
                         self.assertTrue(torch.equal(skipped, full))
@@ -1691,6 +1692,7 @@ class TestChunkedLossWrapperSPMD(DTensorTestBase):
         lm_head: nn.Module,
         *,
         num_chunks=4,
+        skip_non_loss_tokens=False,
     ):
         """Create the ChunkedLossWrapper variant under SPMD typecheck."""
         chunked_loss = ChunkedLossWrapper(
@@ -1699,6 +1701,7 @@ class TestChunkedLossWrapperSPMD(DTensorTestBase):
                 loss_fn=CrossEntropyLoss.Config(
                     global_vocab_size=lm_head.out_features,
                 ),
+                skip_non_loss_tokens=skip_non_loss_tokens,
             )
         )
         chunked_loss.set_lm_head(lm_head)
@@ -1756,7 +1759,6 @@ class TestChunkedLossWrapperSPMD(DTensorTestBase):
         lm_head_spmd = self._make_vocab_parallel_lm_head(D, V, tp_group).to(
             self.device_type
         )
-        loss_spmd_fn = self._make_loss(lm_head_spmd, num_chunks=num_chunks)
 
         # copy over vocab shard
         chunk_size = (V + tp_degree - 1) // tp_degree
@@ -1770,23 +1772,29 @@ class TestChunkedLossWrapperSPMD(DTensorTestBase):
         loss_ref.backward()
         h_grad_ref = h_ref.grad.clone()
 
-        # run SPMD path, typecheck
-        h_spmd = hidden_states.clone().detach().requires_grad_(True)
-        with set_current_spmd_mesh(mesh):
-            spmd.assert_type(h_spmd, {tp_group: spmd.R})
-            spmd.assert_type(labels, {tp_group: spmd.I})
-            spmd.assert_type(lm_head_spmd.weight, {tp_group: spmd.S(0)})
-            with typecheck(strict_mode="strict", local=False):
-                loss_spmd, _ = loss_spmd_fn(h_spmd, labels)
-            # ChunkedLossWrapper returns through an autograd bridge under
-            # no_typecheck, so the returned scalar is intentionally untyped.
+        for skip_non_loss_tokens in (False, True):
+            loss_spmd_fn = self._make_loss(
+                lm_head_spmd,
+                num_chunks=num_chunks,
+                skip_non_loss_tokens=skip_non_loss_tokens,
+            )
+            # run SPMD path, typecheck
+            h_spmd = hidden_states.clone().detach().requires_grad_(True)
+            with set_current_spmd_mesh(mesh):
+                spmd.assert_type(h_spmd, {tp_group: spmd.R})
+                spmd.assert_type(labels, {tp_group: spmd.I})
+                spmd.assert_type(lm_head_spmd.weight, {tp_group: spmd.S(0)})
+                with typecheck(strict_mode="strict", local=False):
+                    loss_spmd, _ = loss_spmd_fn(h_spmd, labels)
+                # ChunkedLossWrapper returns through an autograd bridge under
+                # no_typecheck, so the returned scalar is intentionally untyped.
 
-        # numerics check
-        loss_spmd.backward()
-        torch.testing.assert_close(loss_spmd, loss_ref)
-        h_grad_spmd = h_spmd.grad.clone()
-        dist.all_reduce(h_grad_spmd, group=tp_group)
-        torch.testing.assert_close(h_grad_spmd, h_grad_ref)
+            # numerics check
+            loss_spmd.backward()
+            torch.testing.assert_close(loss_spmd, loss_ref)
+            h_grad_spmd = h_spmd.grad.clone()
+            dist.all_reduce(h_grad_spmd, group=tp_group)
+            torch.testing.assert_close(h_grad_spmd, h_grad_ref)
 
 
 if __name__ == "__main__":

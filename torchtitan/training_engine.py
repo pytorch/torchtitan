@@ -204,9 +204,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 and accelerator_graphs_supported()
             ):
                 raise ValueError(
-                    "loss.skip_non_loss_tokens changes the lm_head's row count every "
-                    "microbatch, which accelerator graphs can't replay: set "
-                    "training.disable_accelerator_graphs=True."
+                    "loss.skip_non_loss_tokens requires training.disable_accelerator_graphs=True: "
+                    "the lm_head's row count changes every microbatch."
                 )
             num_tokens = self.training.num_tokens_per_microbatch_per_dp_rank
             sequence_parallel_degree = (

@@ -16,12 +16,10 @@ from torchstore import RankRole
 from torchtitan.components.data.types import (
     TrainingMicrobatch as CoreTrainingMicrobatch,
 )
-from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import Configurable, DebugConfig, TrainingConfig
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.rl.actors.monarch.trainer import TrainerActor
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
-from torchtitan.rl.trainer.losses import DAPOLoss
 from torchtitan.rl.trainer.rdma_microbatch import (
     RDMAMicrobatch,
     RDMAMicrobatchPrefetcher,
@@ -55,22 +53,6 @@ def test_mirrored_state_uses_a_fixed_opaque_template() -> None:
 
 def test_rl_trainer_uses_training_engine_config_defaults() -> None:
     assert not Trainer.Config(model=MagicMock()).training.disable_accelerator_graphs
-
-
-def test_rl_trainer_rejects_loss_token_skip_with_accelerator_graphs() -> None:
-    loss = ChunkedLossWrapper.Config(
-        loss_fn=DAPOLoss.Config(), skip_non_loss_tokens=True
-    )
-    with patch(
-        "torchtitan.training_engine.accelerator_graphs_supported", return_value=True
-    ):
-        with pytest.raises(ValueError, match="skip_non_loss_tokens"):
-            Trainer.Config(model=MagicMock(), loss=loss)
-        Trainer.Config(
-            model=MagicMock(),
-            loss=loss,
-            training=TrainingConfig(disable_accelerator_graphs=True),
-        )
 
 
 def test_initialize_torchstore_client_uses_publisher_role() -> None:

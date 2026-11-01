@@ -619,6 +619,7 @@ class ChunkedLossWrapper(Loss[LossInput]):
     The flow:
     1. Model forward with _skip_lm_head=True to get one or more hidden states [T, D]
     2. Split each hidden state and its labels into N chunks along seq dim
+       (``skip_non_loss_tokens``: only the loss tokens, in fewer chunks)
     3. Detach each hidden-state chunk at the lm_head boundary
     4. Disable FSDP reshard on lm_head across all outputs and chunks
     5. For each chunk: lm_head on each output -> loss_fn(logits, labels, gvt) -> backward()
@@ -655,10 +656,10 @@ class ChunkedLossWrapper(Loss[LossInput]):
         """Loss applied to each chunk's logits."""
 
         skip_non_loss_tokens: bool = False
-        """Run the lm_head only on loss tokens: RL's ``loss_mask``, else SFT's labels that
-        aren't ``IGNORE_INDEX``. The rest get zero grad, so ``loss_fn`` must read only loss
-        tokens (not entropy or KL over all tokens). The row count changes every microbatch,
-        so accelerator graphs must be off. No effect with multiple outputs (MTP)."""
+        """Run the lm_head only on loss tokens: ``loss_mask`` if passed (RL), else labels
+        != ``IGNORE_INDEX`` (SFT). The rest get zero grad, so ``loss_fn`` must read only loss
+        tokens (no entropy or KL over all tokens). Needs accelerator graphs off. No effect
+        with multiple outputs (MTP)."""
 
     def __init__(self, config: Config):
         self.num_chunks = config.num_chunks
@@ -731,38 +732,34 @@ class ChunkedLossWrapper(Loss[LossInput]):
         # GradAccumulator's sequential slice
         # writes, which use one chunk length for each write offset.
         def _chunk_local(t):
-            seq_len = t.shape[0]
-            torch._check(
-                seq_len % num_chunks == 0,
-                lambda: "ChunkedLossWrapper sequence length must be divisible by num_chunks",
-            )
-            chunk_len = seq_len // num_chunks
+            chunk_len = t.shape[0] // num_chunks
             return tuple(
                 c.contiguous() for c in torch.split(t, [chunk_len] * num_chunks, dim=0)
             )
 
         with spmd.local():
+            # Before the skip shrinks pred, so every microbatch checks the same length.
+            torch._check(
+                pred[0].shape[0] % num_chunks == 0,
+                lambda: "ChunkedLossWrapper sequence length must be divisible by num_chunks",
+            )
             if self.skip_non_loss_tokens and not is_multi_output:
-                # Swap in the loss tokens; the code below runs unchanged on them, with fewer
-                # chunks. Loss tokens go first, in order; the next non-loss tokens pad the last
-                # chunk (their loss and grad are 0). No chunk is longer than without the skip:
-                #   T=8, num_chunks=4, is_loss_token=[F T T F F F T F]
-                #   -> 3 loss tokens -> 2 chunks of 2 rows: rows=[1 2 | 6 0]
+                # Keep only the loss tokens: the code below runs unchanged on fewer chunks, and
+                # the backward of pred[0][rows] gives the other tokens zero grad. A stable sort
+                # puts loss tokens first, in order; the first non-loss tokens pad the last chunk
+                # (zero loss and grad). Chunks are never longer than without the skip:
+                #   T=8, num_chunks=4 (chunks of 2), is_loss_token=[F T T F F F T F]
+                #   -> rows=[1 2 | 6 0]: 3 loss tokens + 1 pad, 2 chunks of 2
                 is_loss_token = loss_inputs.get("loss_mask", labels[0] != IGNORE_INDEX)
                 num_tokens = is_loss_token.shape[0]
-                # Check the full length here: below, only microbatches with many loss tokens
-                # would fail _chunk_local's check, and a rank failing alone stalls FSDP peers.
-                torch._check(
-                    num_tokens % num_chunks == 0,
-                    lambda: "ChunkedLossWrapper sequence length must be divisible by num_chunks",
-                )
                 # At least one row: FSDP reduce-scatters the lm_head grad in the last chunk.
                 num_loss_tokens = max(1, int(is_loss_token.sum()))  # host sync
                 num_chunks = math.ceil(num_loss_tokens * num_chunks / num_tokens)
                 chunk_len = math.ceil(num_loss_tokens / num_chunks)
                 rows = torch.argsort(is_loss_token, descending=True, stable=True)
                 rows = rows[: num_chunks * chunk_len]
-                pred, labels = (pred[0][rows],), (labels[0][rows],)
+                pred = (pred[0][rows],)
+                labels = (labels[0][rows],)
                 loss_inputs = {
                     key: value[rows] if isinstance(value, torch.Tensor) else value
                     for key, value in loss_inputs.items()

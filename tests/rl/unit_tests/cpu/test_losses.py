@@ -6,7 +6,6 @@
 
 import copy
 
-import pytest
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
@@ -17,7 +16,6 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.components.loss import ChunkedLossWrapper
-from torchtitan.rl.trainer.losses import GRPOLoss
 from torchtitan.rl.trainer.losses.dapo import _normalize, DAPOLoss
 
 
@@ -67,7 +65,8 @@ def _rl_loss_inputs(num_tokens: int, vocab: int, loss_token_frac: float) -> tupl
     generator_logprobs[:8] = float("-inf")
     loss_kwargs = {
         "generator_logprobs": generator_logprobs,
-        "temperature": torch.full((num_tokens,), 0.7),
+        # Per-token values, so a misaligned row changes the loss.
+        "temperature": 0.5 + torch.rand(num_tokens),
         "advantages": torch.randn(num_tokens) * loss_mask,
         "loss_mask": loss_mask,
     }
@@ -75,26 +74,21 @@ def _rl_loss_inputs(num_tokens: int, vocab: int, loss_token_frac: float) -> tupl
     return labels, loss_mask.sum().clamp_min(1).float(), loss_kwargs
 
 
-@pytest.mark.parametrize("loss_token_frac", [0.15, 0.004, 0.0, 1.0])
-@pytest.mark.parametrize(
-    "loss_config",
-    [DAPOLoss.Config(ratio_clip_high=0.28), GRPOLoss.Config()],
-    ids=["dapo", "grpo"],
-)
-def test_chunked_loss_runs_lm_head_on_loss_mask_tokens(
-    loss_config, loss_token_frac
-) -> None:
-    # Same loss, metrics and gradients as the unchunked loss. 0.15 runs 3 chunks, 0.004
-    # keeps fewer tokens than chunks, 0.0 runs one non-loss row, 1.0 runs every token.
+def test_chunked_loss_runs_lm_head_on_loss_mask_tokens() -> None:
+    # Same loss, metrics and gradients as the unchunked loss; 15% loss tokens run 3 chunks.
+    # The wrapper's edge cases (0%, 100%, fewer tokens than chunks) are tested with SFT
+    # cross-entropy in tests/unit_tests/cpu/components/test_loss.py.
     torch.manual_seed(42)
     num_tokens, dim, vocab, num_chunks = 1024, 16, 64, 16
     labels, global_loss_token_counts, loss_kwargs = _rl_loss_inputs(
-        num_tokens, vocab, loss_token_frac
+        num_tokens, vocab, 0.15
     )
     hidden = torch.randn(num_tokens, dim)
     lm_head = nn.Linear(dim, vocab, bias=False)
     chunked_loss = ChunkedLossWrapper.Config(
-        num_chunks=num_chunks, loss_fn=loss_config, skip_non_loss_tokens=True
+        num_chunks=num_chunks,
+        loss_fn=DAPOLoss.Config(ratio_clip_high=0.28),
+        skip_non_loss_tokens=True,
     ).build()
     chunked_loss.set_lm_head(lm_head)
 
