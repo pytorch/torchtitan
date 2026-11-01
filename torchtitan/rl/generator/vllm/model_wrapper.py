@@ -14,7 +14,7 @@ TorchTitan models for vLLM.
 import copy
 import dataclasses
 from collections.abc import Callable, Iterable, Iterator
-from typing import Any, cast, Literal
+from typing import Any, cast
 
 import spmd_types as spmd
 
@@ -52,6 +52,7 @@ from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
+from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.vllm.registry import uses_compressed_mla_cache
 
@@ -430,7 +431,7 @@ class VLLMModelWrapper(Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         dist_moe_runtime: DistMoeRuntime.Config | None = None,
-        model_state_dict_load_mode: Literal["cpu_prefetch", "gpu_fetch"],
+        model_state_dict_load_mode: ModelStateDictLoadMode,
     ):
         super().__init__()
 

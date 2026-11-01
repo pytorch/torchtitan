@@ -11,11 +11,15 @@ from __future__ import annotations
 import abc
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 
 from torchtitan.config import Configurable
 from torchtitan.rl.generator.types import EngineRequest, FinishedRequest
+
+
+ModelStateDictLoadMode = Literal["cpu_prefetch", "gpu_fetch"]
 
 
 class GenerationEngine(Configurable, abc.ABC):

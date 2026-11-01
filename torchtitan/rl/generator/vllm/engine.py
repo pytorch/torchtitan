@@ -12,7 +12,7 @@ import logging
 import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
 import torch
 from vllm import EngineArgs, LLMEngine, SamplingParams
@@ -25,7 +25,7 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import DebugConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
-from torchtitan.rl.generator.engine import GenerationEngine
+from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import (
     EngineRequest,
@@ -128,7 +128,7 @@ class VLLMEngine(GenerationEngine):
         dist_moe_runtime: DistMoeRuntime.Config | None,
         debug: DebugConfig,
         reset_kv_cache_on_model_state_dict_load: bool,
-        model_state_dict_load_mode: Literal["cpu_prefetch", "gpu_fetch"],
+        model_state_dict_load_mode: ModelStateDictLoadMode,
         rank: int,
         generator_name: str,
         output_dir: str,
@@ -195,7 +195,7 @@ class VLLMEngine(GenerationEngine):
         checkpointer: CheckpointManager.Config | None,
         dist_moe_runtime: DistMoeRuntime.Config | None,
         batch_invariant: bool,
-        model_state_dict_load_mode: Literal["cpu_prefetch", "gpu_fetch"],
+        model_state_dict_load_mode: ModelStateDictLoadMode,
     ) -> None:
         """Process-wide vLLM setup before the engine build: register the TorchTitan model
         and config parser with vLLM, and select vLLM's model runner."""
