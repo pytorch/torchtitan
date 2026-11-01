@@ -332,32 +332,36 @@ class MuseGlimmerModel(MultimodalModel):
             seq_len: int,
             excluded_modules: tuple[Module | None, ...] = (),
         ) -> FlopsEstimator:
+            from torchtitan.models.common.flops import active_parameter_flops_per_unit
+
             model = cast(MuseGlimmerModel, model)
             vision_outputs = (
                 model.vision_adapter,
                 model.vision_projection,
                 model.perception_emb_norm,
             )
-            decoder_estimate = super(
-                MuseGlimmerModel.Config, self
-            ).build_flops_estimator(
+            base_estimate = super(MuseGlimmerModel.Config, self).build_flops_estimator(
                 model,
                 seq_len=seq_len,
-                excluded_modules=(
-                    model.vision_encoder,
-                    *vision_outputs,
-                    *excluded_modules,
-                ),
+                excluded_modules=(*vision_outputs, *excluded_modules),
             )
-            if self.vision_encoder is None:
-                return decoder_estimate
-            assert model.vision_encoder is not None
-            vision_estimate = self.vision_encoder.build_flops_estimator(
-                model.vision_encoder, output_modules=vision_outputs
+            vision_output_flops = sum(
+                active_parameter_flops_per_unit(module)
+                for module in vision_outputs
+                if module is not None
             )
-            return lambda input_dict: decoder_estimate(input_dict) + vision_estimate(
-                input_dict
-            )
+            vision_config = self.vision_encoder
+
+            def estimate(input_dict) -> int:
+                flops = base_estimate(input_dict)
+                if vision_config is not None:
+                    flops += (
+                        vision_config.get_num_output_tokens(input_dict)
+                        * vision_output_flops
+                    )
+                return flops
+
+            return estimate
 
     def __init__(self, config: "MuseGlimmerModel.Config") -> None:
         super().__init__(config)

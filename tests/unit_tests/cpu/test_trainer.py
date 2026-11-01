@@ -300,7 +300,6 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs(
                 ),
             ),
             ntokens_seen=0,
-            step_num_flops=0,
             flops_estimator=lambda inputs: 100,
             device=torch.device("cpu"),
         ),
@@ -449,7 +448,6 @@ def test_forward_backward_runs_whole_accumulation(
         ),
     )
     engine.preprocess_inputs_kwargs = {"processor": "VALUE"}
-    engine.step_num_flops = 0
     engine.flops_estimator = lambda inputs: 100
     engine.ntokens_seen = 100
     engine.num_completed_steps = 0
@@ -979,7 +977,7 @@ def test_trainer_accumulates_reused_accelerator_graph_losses(
             global_routing_token_counts, routing_token_counts * 3
         )
         graph_loss.fill_(sum(next(loss_values) for _ in microbatch_groups))
-        return ForwardBackwardResult(graph_loss, [])
+        return ForwardBackwardResult(graph_loss, [], 600)
 
     metrics_processor = SimpleNamespace(
         should_log=MagicMock(return_value=True),
@@ -1024,7 +1022,6 @@ def test_trainer_accumulates_reused_accelerator_graph_losses(
             checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
             metrics_processor=metrics_processor,
             num_completed_steps=0,
-            step_num_flops=600,
             ntokens_seen=3,
         ),
     )
@@ -1123,9 +1120,12 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     run_forward_backward = MagicMock(
         return_value=ForwardBackwardResult(torch.tensor(1.0), [])
     )
-    replayer = SimpleNamespace(
-        run_fwd_bwd=MagicMock(side_effect=lambda fn, **kwargs: fn()),
-    )
+
+    def replay(fn, **kwargs):
+        fn()
+        return fn()
+
+    replayer = SimpleNamespace(run_fwd_bwd=MagicMock(side_effect=replay))
     engine = object.__new__(TrainingEngine)
     engine.config = SimpleNamespace(
         training=SimpleNamespace(
@@ -1144,6 +1144,7 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     engine._accelerator_graph_per_microbatch_group_enabled = False
     engine.sdc_replayer = replayer
     engine.num_completed_steps = 0
+    engine.flops_estimator = MagicMock(return_value=100)
     engine._preprocess_microbatch_groups = MagicMock(
         side_effect=lambda groups, global_routing_token_counts: [
             ("input", group[0].labels, {}, {}) for group in groups
@@ -1151,7 +1152,7 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     )
     engine._run_forward_backward = run_forward_backward
 
-    TrainingEngine.forward_backward(
+    result = TrainingEngine.forward_backward(
         engine,
         microbatch_groups=[[_batch()], [_batch()]],
         global_loss_token_counts=2,
@@ -1161,7 +1162,9 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     replayer.run_fwd_bwd.assert_called_once()
     assert replayer.run_fwd_bwd.call_args.kwargs["step"] == 1
     assert callable(replayer.run_fwd_bwd.call_args.kwargs["get_loss"])
-    run_forward_backward.assert_called_once()
+    assert run_forward_backward.call_count == 2
+    assert engine.flops_estimator.call_count == 2
+    assert result.num_flops == 200
 
 
 def test_replay_failure_propagates_from_engine():
@@ -1190,6 +1193,7 @@ def test_replay_failure_propagates_from_engine():
     engine._accelerator_graph_per_microbatch_group_enabled = False
     engine.sdc_replayer = SimpleNamespace(run_fwd_bwd=MagicMock(side_effect=mismatch))
     engine.num_completed_steps = 0
+    engine.flops_estimator = MagicMock(return_value=100)
     engine._preprocess_microbatch_groups = MagicMock(
         return_value=[("input", "labels", {}, {})]
     )

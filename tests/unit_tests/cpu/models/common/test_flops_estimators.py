@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import contextlib
 import importlib
 from types import SimpleNamespace
 
@@ -165,41 +164,74 @@ def test_spark_audio_uses_each_stage_token_count():
     )
 
 
-def test_engine_estimates_before_transfer_and_preprocessing():
+def test_engine_returns_current_flops_before_preprocessing():
+    from torchtitan.training_engine import ForwardBackwardResult
+
     calls = []
     raw = {"input": torch.ones(4, dtype=torch.long)}
-    microbatch = SimpleNamespace(
-        as_input_dict=lambda: raw,
-        to_input_dict=lambda *args, **kwargs: calls.append("transfer") or dict(raw),
-    )
-    model = SimpleNamespace(
-        preprocess_inputs=lambda *args, **kwargs: calls.append("preprocess")
-        or (1, 2, {}, {}),
-    )
+    microbatch = SimpleNamespace(as_input_dict=lambda: raw)
+    cached_result = ForwardBackwardResult(torch.tensor(1.0), [])
     engine = SimpleNamespace(
-        step_num_flops=0,
-        flops_estimator=lambda inputs: calls.append("estimate") or 123,
-        parallelism_context=SimpleNamespace(
-            activate_spmd=contextlib.nullcontext, cp=2, pp_enabled=False
-        ),
-        model_parts=[model],
+        flops_estimator=lambda inputs: calls.append("estimate")
+        or inputs["input"].numel(),
+        garbage_collector=SimpleNamespace(run=lambda step: None),
+        optim=SimpleNamespace(zero_grad=lambda **kwargs: None),
+        num_completed_steps=0,
+        _cuda_graph_per_microbatch_group_enabled=False,
         device=torch.device("cpu"),
         config=SimpleNamespace(
-            parallelism=None,
-            training=SimpleNamespace(
-                max_context_length=4, num_tokens_per_microbatch_per_dp_rank=4
-            ),
+            training=SimpleNamespace(preprocess_microbatch_groups_lazily=False)
         ),
-        max_num_documents=None,
-        preprocess_inputs_kwargs={},
-        ntokens_seen=0,
+        sdc_replayer=None,
+        _preprocess_microbatch_groups=lambda groups, **kwargs: calls.append(
+            "preprocess"
+        )
+        or groups,
+        _run_forward_backward=lambda *args: cached_result,
     )
-    TrainingEngine._preprocess_microbatch_group(
-        engine, [microbatch], global_routing_token_counts=torch.tensor([4])
+    for num_tokens in (4, 8):
+        raw["input"] = torch.ones(num_tokens, dtype=torch.long)
+        result = TrainingEngine.forward_backward(
+            engine,
+            microbatch_groups=[[microbatch]],
+            global_loss_token_counts=torch.tensor(4),
+            global_routing_token_counts=torch.tensor([4]),
+        )
+        assert result.num_flops == num_tokens
+    assert calls == ["estimate", "preprocess", "estimate", "preprocess"]
+    assert cached_result.num_flops == 0
+
+
+def test_lazy_forward_backward_returns_flops_for_streamed_groups():
+    class StreamedGroups:
+        def __len__(self):
+            return 2
+
+        def __iter__(self):
+            for num_tokens in (4, 8):
+                yield [
+                    SimpleNamespace(
+                        as_input_dict=lambda: {"input": torch.empty(num_tokens)}
+                    )
+                ]
+
+    engine = SimpleNamespace(
+        flops_estimator=lambda inputs: inputs["input"].numel(),
+        parallelism_context=SimpleNamespace(
+            dp_replicate_enabled=False, pp_enabled=False
+        ),
+        _global_routing_token_counts=torch.tensor([12]),
+        _preprocess_microbatch_group=lambda group, **kwargs: (None, None, {}, {}),
+        _non_pp_forward_backward_microbatch=lambda **kwargs: torch.tensor(1.0),
     )
-    assert calls == ["estimate", "transfer", "preprocess"]
-    assert engine.step_num_flops == 123
-    assert engine.ntokens_seen == 2
+    result = TrainingEngine._forward_backward_body(
+        engine,
+        StreamedGroups(),
+        torch.tensor(12),
+        defer_fsdp_gradient_reduction=False,
+        preprocess_microbatch_groups_lazily=True,
+    )
+    assert result.num_flops == 12
 
 
 def test_performance_uses_work_independently_of_text_token_count():
@@ -240,33 +272,6 @@ def test_linear_attention_configs_own_sequence_independent_work(family):
             expected = 18 * attention.n_heads * attention.head_dim**2
         assert attention.flops_per_token(16) == expected
         assert attention.flops_per_token(128) == expected
-
-
-def test_lazy_replay_does_not_count_work_twice():
-    engine = SimpleNamespace(
-        step_num_flops=0,
-        parallelism_context=SimpleNamespace(
-            dp_replicate_enabled=False, pp_enabled=False
-        ),
-        _global_routing_token_counts=torch.tensor([4]),
-        _non_pp_forward_backward_microbatch=lambda **kwargs: torch.tensor(1.0),
-        loss_metrics={},
-    )
-
-    def preprocess(group, **kwargs):
-        engine.step_num_flops += 123
-        return (torch.ones(4), torch.ones(4), {}, {})
-
-    engine._preprocess_microbatch_group = preprocess
-    for _ in range(2):
-        TrainingEngine._forward_backward_body(
-            engine,
-            [[object()], [object()]],
-            torch.tensor(8),
-            defer_fsdp_gradient_reduction=False,
-            preprocess_microbatch_groups_lazily=True,
-        )
-        assert engine.step_num_flops == 246
 
 
 @pytest.mark.parametrize("family", ["muse_glimmer", "muse_spark"])
@@ -331,18 +336,24 @@ def test_vision_estimators_accept_raw_microbatches(family):
     assert estimate(two_images) == 2 * estimate(image)
 
 
-def test_built_estimator_does_not_retain_encoder_modules():
+@pytest.mark.parametrize(
+    "family,flavor",
+    [
+        ("kimi_k2_7", "debugmodel"),
+        ("muse_glimmer", "debugmodel_mm"),
+        ("muse_spark", "debugmodel_mm"),
+    ],
+)
+def test_built_estimator_does_not_retain_encoder_modules(family, flavor):
     import gc
     import weakref
 
-    config, model = _build("muse_spark", "debugmodel_mm")
-    encoder_ref = weakref.ref(model.vision_encoder)
-    projection_ref = weakref.ref(model.vision_projection)
+    config, model = _build(family, flavor)
+    module_refs = [weakref.ref(module) for module in model.modules()]
     estimate = config.build_flops_estimator(model, seq_len=128)
     del model
     gc.collect()
-    assert encoder_ref() is None
-    assert projection_ref() is None
+    assert all(module_ref() is None for module_ref in module_refs)
     assert estimate({"input": torch.empty(128, dtype=torch.long)}) > 0
 
 
@@ -367,7 +378,7 @@ def test_muse_inherits_gqa_window_accounting(family):
 @pytest.mark.parametrize(
     "dp,cp,should_log", [(1, 1, True), (1, 2, True), (2, 2, True), (1, 1, False)]
 )
-def test_flops_logging_reduces_only_across_dp(dp, cp, should_log):
+def test_flops_logging_normalizes_replicated_cp_inputs(dp, cp, should_log):
     from unittest.mock import MagicMock, patch
 
     from torchtitan.components.data.types import TokenizedTrainingMicrobatch
@@ -385,12 +396,13 @@ def test_flops_logging_reduces_only_across_dp(dp, cp, should_log):
     )
     engine = SimpleNamespace(
         num_completed_steps=0,
-        step_num_flops=200,
         device=torch.device("cpu"),
         parallelism_context=context,
         optim=SimpleNamespace(lr_schedulers=SimpleNamespace(get_metrics=lambda: {})),
         optim_step=lambda: torch.tensor(3.0),
-        forward_backward=lambda **kwargs: ForwardBackwardResult(torch.tensor(2.0), []),
+        forward_backward=lambda **kwargs: ForwardBackwardResult(
+            torch.tensor(2.0), [], 200
+        ),
         ntokens_seen=4,
     )
     metrics = SimpleNamespace(
@@ -413,41 +425,31 @@ def test_flops_logging_reduces_only_across_dp(dp, cp, should_log):
         loss_token_counts=torch.tensor(4),
         routing_token_counts=torch.tensor([4]),
     )
-    tensor_reductions = []
+    flops_meshes = []
 
-    def sum_tensor(value, mesh):
-        tensor_reductions.append((value.clone(), mesh))
-        return value * dp
+    def sum_value(value, mesh):
+        if value.dtype == torch.float64:
+            flops_meshes.append(mesh)
+            # A second DP replica contributes 600 FLOPs instead of 200.
+            return (800 if dp > 1 else 200) * cp
+        return float(value) * dp * cp
 
     with (
-        patch("torchtitan.trainer.dist_utils.dist_sum_tensor", side_effect=sum_tensor),
         patch(
-            "torchtitan.trainer.dist_utils.dist_sum",
-            side_effect=lambda value, mesh: float(value) * dp * cp,
+            "torchtitan.trainer.dist_utils.dist_sum_tensor",
+            side_effect=lambda value, mesh: value * dp,
         ),
+        patch("torchtitan.trainer.dist_utils.dist_sum", side_effect=sum_value),
         patch(
             "torchtitan.trainer.dist_utils.dist_max",
             side_effect=lambda value, mesh: float(value),
         ),
         patch("torchtitan.trainer.collect_aux_loss_metrics", return_value={}),
-        patch("torchtitan.trainer.torch.stack", wraps=torch.stack) as stack,
     ):
         Trainer.train_step(trainer, iter([batch]))
-    flops_reductions = [
-        (value, mesh)
-        for value, mesh in tensor_reductions
-        if value.dtype == torch.float64
-    ]
-    assert len(flops_reductions) == int(dp > 1 and should_log)
-    if flops_reductions:
-        value, mesh = flops_reductions[0]
-        assert value.numel() == 1 and mesh == "dp"
-        # FLOPs and grad norm share one host readback.
-        stack.assert_called_once()
-    else:
-        stack.assert_not_called()
+    assert flops_meshes == (["loss"] if dp * cp > 1 and should_log else [])
     if should_log:
-        assert metrics.log.call_args.kwargs["num_flops"] == 200
+        assert metrics.log.call_args.kwargs["num_flops"] == (400 if dp > 1 else 200)
         assert metrics.log.call_args.args[3] == 3.0
     else:
         metrics.log.assert_not_called()

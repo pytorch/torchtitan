@@ -12,7 +12,8 @@ fusion over a full token sequence. ``build_vision_bank_indices`` and
 packed-bank row for every placeholder token.
 """
 
-from typing import Self
+from dataclasses import dataclass
+from typing import cast, Self
 
 import spmd_types as spmd
 import torch
@@ -23,6 +24,9 @@ from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 
+from torchtitan.models.base.model import FlopsEstimator
+from torchtitan.models.base.module import Module
+
 from .decoder import Decoder
 
 
@@ -30,6 +34,40 @@ class MultimodalModel(Decoder):
     """Language model with modality-specific encoders."""
 
     multimodal_encoder_fqns: tuple[str, ...] = ()
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Decoder.Config):
+        def build_flops_estimator(
+            self,
+            model: Module,
+            *,
+            seq_len: int,
+            excluded_modules: tuple[Module | None, ...] = (),
+        ) -> FlopsEstimator:
+            model = cast(MultimodalModel, model)
+            encoder_modules = []
+            encoder_estimates = []
+            for encoder_fqn in model.multimodal_encoder_fqns:
+                encoder = getattr(model, encoder_fqn)
+                encoder_modules.append(encoder)
+                if encoder is None:
+                    continue
+                encoder_config = getattr(self, encoder_fqn)
+                estimate = encoder_config.build_flops_estimator(encoder)
+                encoder_estimates.append(estimate)
+            decoder_estimate = super(
+                MultimodalModel.Config, self
+            ).build_flops_estimator(
+                model,
+                seq_len=seq_len,
+                excluded_modules=(
+                    *encoder_modules,
+                    *excluded_modules,
+                ),
+            )
+            return lambda input_dict: decoder_estimate(input_dict) + sum(
+                estimate(input_dict) for estimate in encoder_estimates
+            )
 
     def parallelize(
         self,

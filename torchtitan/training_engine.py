@@ -71,6 +71,8 @@ class ForwardBackwardResult(NamedTuple):
     loss_metrics: list[list[dict[str, torch.Tensor]]]
     """Loss metrics, one list per microbatch group with one dict per
     microbatch. Under PP, they are empty on ranks without the last stage."""
+    num_flops: int = 0
+    """Logical model-wide FLOPs for the raw microbatches in this invocation."""
 
 
 _ForwardBackwardFn: TypeAlias = Callable[
@@ -249,7 +251,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     sdc_replayer: SDCReplayer | None
     model_param_count: int
     model_active_param_count: int
-    step_num_flops: int
     flops_estimator: FlopsEstimator
     has_quantization: bool
     loss: torch.Tensor
@@ -389,10 +390,14 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self.model_param_count,
             self.model_active_param_count,
         ) = self.model_config.get_parameter_counts(model)
+        logger.info(
+            f"Model {type(self.model_config).__qualname__} size: "
+            f"{self.model_param_count:,} total parameters, "
+            f"{self.model_active_param_count:,} architecturally active parameters"
+        )
         self.flops_estimator = self.model_config.build_flops_estimator(
             model, seq_len=self.model_config.max_context_length
         )
-        self.step_num_flops = 0
         config = self.config
         if self.parallelism_context.pp_enabled:
             (
@@ -450,12 +455,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             assert lm_head is not None, error_message
             self.loss_fn.set_lm_head(lm_head)
             model_with_lm_head._skip_lm_head = True
-
-        logger.info(
-            f"Model {type(self.model_config).__qualname__} size: "
-            f"{self.model_param_count:,} total parameters, "
-            f"{self.model_active_param_count:,} active parameters"
-        )
 
     def _parallelize_kwargs(self) -> dict[str, Any]:
         """Return the engine-specific kwargs ``model.parallelize``/``model.pipeline`` expect.
@@ -643,7 +642,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         """Run all microbatch groups for one optimizer update."""
         if not microbatch_groups:
             raise ValueError("microbatch_groups must not be empty.")
-        self.step_num_flops = 0
         self.num_accumulation_steps = len(microbatch_groups)
         self.garbage_collector.run(self.num_completed_steps + 1)
         self.optim.zero_grad(
@@ -653,11 +651,18 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             global_loss_token_counts, device=self.device
         )
         global_routing_token_counts = global_routing_token_counts.to(self.device)
+        num_flops = 0
         if self.config.training.preprocess_microbatch_groups_lazily:
             # _forward_backward_body preprocesses each group just before its forward/backward.
             self._global_routing_token_counts = global_routing_token_counts
             step_inputs: list[Any] = microbatch_groups
         else:
+            microbatch_groups = list(microbatch_groups)
+            num_flops = sum(
+                self.flops_estimator(microbatch.as_input_dict())
+                for group in microbatch_groups
+                for microbatch in group
+            )
             step_inputs = self._preprocess_microbatch_groups(
                 microbatch_groups,
                 global_routing_token_counts=global_routing_token_counts,
@@ -679,6 +684,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 global_loss_token_counts,
             )
 
+        if not self.config.training.preprocess_microbatch_groups_lazily:
+            result = result._replace(num_flops=num_flops)
         self.loss = result.loss
         return result
 
@@ -707,7 +714,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         ``(arg_mbs, kwarg_mbs, target_mbs, loss_kwarg_mbs)``."""
         prepared_microbatches: list[tuple[Any, ...]] = []
         for microbatch in microbatch_group:
-            self.step_num_flops += self.flops_estimator(microbatch.as_input_dict())
             with (
                 sl.log_trace_span("preprocess_inputs"),
                 self.parallelism_context.activate_spmd(),
@@ -757,13 +763,16 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
         accumulated_loss: torch.Tensor | None = None
         loss_metrics: list[list[dict[str, torch.Tensor]]] = []
-        if preprocess_microbatch_groups_lazily:
-            self.step_num_flops = 0
+        num_flops = 0
         num_accumulation_steps = len(microbatch_groups)
         for accumulation_index, microbatch_group in enumerate(microbatch_groups):
             is_last_accumulation_step = accumulation_index == num_accumulation_steps - 1
             prepared_inputs = microbatch_group
             if preprocess_microbatch_groups_lazily:
+                num_flops += sum(
+                    self.flops_estimator(microbatch.as_input_dict())
+                    for microbatch in microbatch_group
+                )
                 # TODO: this waits ~4 ms per microbatch on pageable inputs and varlen's host sync
                 # (+0.77% at 16K tokens, Qwen3-0.6B, H100). Pinned inputs + max_num_documents fix it.
                 prepared_inputs = self._preprocess_microbatch_group(
@@ -827,7 +836,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             )
 
         assert accumulated_loss is not None
-        return ForwardBackwardResult(accumulated_loss, loss_metrics)
+        return ForwardBackwardResult(accumulated_loss, loss_metrics, num_flops)
 
     def _non_pp_forward_backward_microbatch(
         self,
