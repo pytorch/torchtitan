@@ -47,7 +47,7 @@ def build_rl_test_list() -> list[IntegrationTestDefinition]:
     return [
         _rl_test(
             configs=[rl_grpo_fsdp2_gen_tp2_no_compile],
-            test_descr="RL GRPO trainer FSDP=2 + gen TP=2 no compile",
+            test_descr="RL GRPO trainer FSDP=2 + gen TP=2 no compile, streamed microbatches",
             test_name="rl_grpo_fsdp2_gen_tp2_no_compile",
             ngpu=8,
         ),

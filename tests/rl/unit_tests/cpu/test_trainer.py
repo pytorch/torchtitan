@@ -373,6 +373,8 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
         trainer.config = Trainer.Config(model=MagicMock())
         trainer.dp_rank = 1
         trainer._num_rdma_batches_read = 0
+        trainer._step_forward_backward_s = 0.0
+        trainer._step_num_tokens_per_dp_rank = 0
         trainer._reduce_forward_backward_metrics = MagicMock(
             side_effect=lambda *, sum_reduced_metrics, max_reduced_metrics: {
                 key: float(value.item())
@@ -422,6 +424,7 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
             microbatch_groups=ANY,
             global_loss_token_counts=torch.tensor([3]),
             global_routing_token_counts=torch.tensor([2]),
+            ends_step=True,
         )
         # RDMAMicrobatches are read through the prefetcher; by value, the column is passed as is.
         groups = engine.forward_backward.call_args.kwargs["microbatch_groups"]
@@ -440,6 +443,53 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
     asyncio.run(run())
 
 
+def test_streamed_forward_backward_calls_add_up_the_step_tokens() -> None:
+    async def run() -> None:
+        trainer = object.__new__(Trainer)
+        trainer.engine = SimpleNamespace(
+            num_completed_steps=0,
+            device=torch.device("cpu"),
+            pp_has_last_stage=True,
+            forward_backward=MagicMock(
+                return_value=ForwardBackwardResult(
+                    loss=torch.tensor(0.5),
+                    loss_metrics=[[{"loss/mean": torch.tensor(1.0)}]],
+                )
+            ),
+        )
+        trainer.config = Trainer.Config(model=MagicMock())
+        trainer.dp_rank = 0
+        trainer._num_rdma_batches_read = 0
+        trainer._step_forward_backward_s = 0.0
+        trainer._step_num_tokens_per_dp_rank = 0
+        trainer._reduce_forward_backward_metrics = MagicMock(
+            side_effect=lambda *, sum_reduced_metrics, max_reduced_metrics: {
+                key: float(value.item())
+                for key, value in {
+                    **sum_reduced_metrics,
+                    **max_reduced_metrics,
+                }.items()
+            }
+        )
+
+        for ends_step in (False, True):
+            await Trainer.forward_backward(
+                trainer, [[object()]], None, None, ends_step=ends_step
+            )
+
+        # optim_step reports the step's tokens and busy time over both calls.
+        assert trainer._step_num_tokens_per_dp_rank == (
+            2 * trainer.config.training.num_tokens_per_microbatch_per_dp_rank
+        )
+        assert trainer._step_forward_backward_s > 0.0
+        assert [
+            call.kwargs["ends_step"]
+            for call in trainer.engine.forward_backward.call_args_list
+        ] == [False, True]
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     ("batch_index", "dp_rank", "microbatch_index"),
     [(1, 1, 0), (0, 0, 0), (0, 1, 1)],
@@ -453,6 +503,7 @@ def test_forward_backward_rejects_a_misplaced_rdma_microbatch(
     trainer.config = Trainer.Config(model=MagicMock())
     trainer.dp_rank = 1
     trainer._num_rdma_batches_read = 0
+    trainer._step_num_tokens_per_dp_rank = 0
     wrong = MagicMock(
         spec=RDMAMicrobatch,
         batch_index=batch_index,
@@ -495,7 +546,10 @@ def test_forward_backward_without_last_pipeline_stage_returns_no_metrics() -> No
         )
         trainer.engine = engine
         trainer.config = Trainer.Config(model=MagicMock())
+        engine.device = torch.device("cpu")
         trainer.dp_rank = 1
+        trainer._step_forward_backward_s = 0.0
+        trainer._step_num_tokens_per_dp_rank = 0
         trainer._reduce_forward_backward_metrics = MagicMock()
         # This rank's column: two pipeline steps of two microbatches each.
         microbatch_groups = [
@@ -503,14 +557,21 @@ def test_forward_backward_without_last_pipeline_stage_returns_no_metrics() -> No
             for group in range(2)
         ]
 
-        result = await Trainer.forward_backward(
-            trainer, microbatch_groups, torch.tensor([3]), torch.tensor([2])
-        )
+        with patch(
+            "torchtitan.rl.trainer.trainer.torch.accelerator.current_stream"
+        ) as current_stream:
+            result = await Trainer.forward_backward(
+                trainer, microbatch_groups, torch.tensor([3]), torch.tensor([2])
+            )
 
+        # Its busy time waits for the GPU, like the ranks that reduce the loss metrics.
+        current_stream.assert_called_once_with(engine.device)
+        current_stream.return_value.synchronize.assert_called_once_with()
         engine.forward_backward.assert_called_once_with(
             microbatch_groups=microbatch_groups,
             global_loss_token_counts=torch.tensor([3]),
             global_routing_token_counts=torch.tensor([2]),
+            ends_step=True,
         )
         assert trainer._step_num_tokens_per_dp_rank == (
             4 * trainer.config.training.num_tokens_per_microbatch_per_dp_rank
@@ -555,14 +616,15 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
             save_checkpoint=MagicMock(),
             step_profiler=MagicMock(),
         )
-        engine.optim_step.side_effect = lambda: (
+        engine.optim_step.side_effect = lambda *, global_loss_token_counts: (
             setattr(engine, "num_completed_steps", engine.num_completed_steps + 1),
             torch.tensor(2.0),
         )[1]
         trainer.engine = engine
         trainer._resume_state = MirroredState()
         trainer.gpu_peak_flops = 1000
-        trainer._step_compute_start = 0.0
+        # forward_backward's busy time; the patched clock makes the update itself take 0 s.
+        trainer._step_forward_backward_s = 2.0
         trainer._step_num_tokens_per_dp_rank = 10
         trainer._staging_model_state_dict_stream = MagicMock()
         compute_stream = MagicMock()
@@ -611,7 +673,7 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
             "trainer/mfu_percent": 50.0,
             "aux_loss/mean": 0.5,
         }
-        engine.optim_step.assert_called_once_with()
+        engine.optim_step.assert_called_once_with(global_loss_token_counts=None)
         assert trainer._resume_state.value == {"next_index": 3}
         engine.save_checkpoint.assert_called_once_with(last_step=False)
         engine.step_profiler.assert_called_once_with()
@@ -623,6 +685,9 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
             gpu_peak_flops=1000,
             has_quantization=False,
         )
+        # The next step starts counting from zero.
+        assert trainer._step_forward_backward_s == 0.0
+        assert trainer._step_num_tokens_per_dp_rank == 0
         device_memory_monitor.get_peak_stats.assert_called_once_with()
         device_memory_monitor.reset_peak_stats.assert_called_once_with()
 

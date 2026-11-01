@@ -15,6 +15,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from torchtitan.rl.actors.system import TrainerHandle
 from torchtitan.rl.controller.controller import Controller
@@ -50,18 +51,32 @@ class _Endpoint:
         return await self.call(*args, **kwargs)
 
 
-def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
+def _controller(
+    events: list[str],
+    *,
+    on_push=None,
+    on_pull=None,
+    stream_microbatches: bool = False,
+) -> Controller:
     """A controller with only the state `_trainer_loop` reads; each actor call appends to `events`."""
     version = 0
 
-    async def forward_backward(*args):
+    async def forward_backward(
+        microbatch_groups,
+        global_loss_token_counts,
+        global_routing_token_counts,
+        *,
+        ends_step,
+    ):
         events.append(f"fwd_bwd {version + 1}")
+        controller.forward_backward_calls.append((global_loss_token_counts, ends_step))
         return _RankValues({"loss/mean": 1.0})
 
-    async def optim_step(**kwargs):
+    async def optim_step(*, global_loss_token_counts, **kwargs):
         nonlocal version
         version += 1
         events.append(f"optim {version}")
+        controller.optim_step_counts.append(global_loss_token_counts)
         return _RankValues(SimpleNamespace(policy_version=version, metrics={}))
 
     async def push():
@@ -84,8 +99,11 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
             target_offpolicy_steps=1,
             max_offpolicy_steps=None,
             num_prompts_per_train_step=5,
+            batcher=SimpleNamespace(stream_microbatches=stream_microbatches),
         )
     )
+    controller.forward_backward_calls = []
+    controller.optim_step_counts = []
     controller.start_step = 0
     controller._trainer_policy_version = 0
     trainer = SimpleNamespace(
@@ -126,19 +144,22 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
     return controller
 
 
+def _batch(*, num_loss_tokens: int = 1, ends_step: bool = True) -> SimpleNamespace:
+    return SimpleNamespace(
+        microbatch_groups=[],
+        global_loss_token_counts=torch.tensor([num_loss_tokens]),
+        global_routing_token_counts=None,
+        group_ids=[],
+        min_policy_versions=[0],
+        metrics=[],
+        ends_step=ends_step,
+    )
+
+
 def _batch_queue(num_batches: int) -> asyncio.Queue:
     queue: asyncio.Queue = asyncio.Queue()
     for _ in range(num_batches):
-        queue.put_nowait(
-            SimpleNamespace(
-                microbatch_groups=[],
-                global_loss_token_counts=[1],
-                global_routing_token_counts=None,
-                group_ids=[],
-                min_policy_versions=[0],
-                metrics=[],
-            )
-        )
+        queue.put_nowait(_batch())
     return queue
 
 
@@ -226,3 +247,170 @@ def test_push_failure_fails_the_loop() -> None:
     controller = _controller([], on_push=failing_push)
     with pytest.raises(RuntimeError, match="push failed"):
         _run(controller, num_training_steps=2)
+
+
+def test_streamed_step_trains_each_batch_then_divides_by_the_step_count() -> None:
+    events: list[str] = []
+    controller = _controller(events, stream_microbatches=True)
+    queue: asyncio.Queue = asyncio.Queue()
+    for batch in (
+        _batch(num_loss_tokens=3, ends_step=False),
+        _batch(num_loss_tokens=4, ends_step=False),
+        _batch(num_loss_tokens=5),
+    ):
+        queue.put_nowait(batch)
+
+    asyncio.run(controller._trainer_loop(queue, num_training_steps=1))
+
+    # Each batch's losses are sums; the optimizer step gets the step's 3 + 4 + 5 loss tokens.
+    assert events[:4] == ["fwd_bwd 1", "fwd_bwd 1", "fwd_bwd 1", "optim 1"]
+    assert controller.forward_backward_calls == [
+        (None, False),
+        (None, False),
+        (None, True),
+    ]
+    assert controller.optim_step_counts[0].tolist() == [12]
+    # Each fake batch returns a summed loss of 1.0: 3.0 over 12 loss tokens.
+    assert controller.logged_metrics[0]["loss/mean"].value.value == 0.25
+
+
+def test_one_batch_step_passes_counts_to_forward_backward() -> None:
+    events: list[str] = []
+    controller = _controller(events)
+    _run(controller, num_training_steps=1)
+
+    assert controller.forward_backward_calls[0][1] is True
+    assert controller.forward_backward_calls[0][0].tolist() == [1]
+    assert controller.optim_step_counts == [None]
+
+
+def test_stream_closing_mid_step_skips_the_optimizer_step() -> None:
+    events: list[str] = []
+    controller = _controller(events, stream_microbatches=True)
+    queue: asyncio.Queue = asyncio.Queue()
+    queue.put_nowait(_batch(ends_step=False))
+    queue.put_nowait(None)
+
+    asyncio.run(controller._trainer_loop(queue, num_training_steps=1))
+
+    assert events == ["fwd_bwd 1"]
+
+
+def test_nan_loss_mid_step_skips_the_optimizer_step() -> None:
+    events: list[str] = []
+    controller = _controller(events, stream_microbatches=True)
+    losses = iter([float("nan"), 1.0])
+
+    async def forward_backward(*args, **kwargs):
+        events.append("fwd_bwd")
+        return _RankValues({"loss/mean": next(losses)})
+
+    controller.trainer.all_ranks.forward_backward = _Endpoint(forward_backward)
+    queue: asyncio.Queue = asyncio.Queue()
+    queue.put_nowait(_batch(ends_step=False))
+    queue.put_nowait(_batch())
+
+    asyncio.run(controller._trainer_loop(queue, num_training_steps=1))
+
+    assert events == ["fwd_bwd", "fwd_bwd"]
+
+
+def test_batches_are_sent_before_earlier_calls_return() -> None:
+    events: list[str] = []
+    controller = _controller(events, stream_microbatches=True)
+    calls: list[asyncio.Task] = []
+    num_finished = 0
+    num_in_flight_at_send: list[int] = []
+
+    def forward_backward_call(*args, ends_step):
+        # Like the trainer actor: the call is sent at once, and calls run one after another.
+        async def run(previous: asyncio.Task | None):
+            nonlocal num_finished
+            if previous is not None:
+                await previous
+            for _ in range(3):
+                await asyncio.sleep(0)
+            num_finished += 1
+            events.append(f"finish {index}")
+            return _RankValues({"loss/mean": 1.0})
+
+        index = len(calls)
+        num_in_flight_at_send.append(index + 1 - num_finished)
+        events.append(f"send {index}")
+        calls.append(asyncio.ensure_future(run(calls[-1] if calls else None)))
+        return calls[-1]
+
+    controller.trainer.by_dp_rank[0].forward_backward = SimpleNamespace(
+        call=forward_backward_call
+    )
+    controller.batcher.maybe_release_oldest_batch = SimpleNamespace(
+        broadcast=lambda: events.append("release")
+    )
+    queue: asyncio.Queue = asyncio.Queue()
+    for ends_step in (False, False, False, False, True):
+        queue.put_nowait(_batch(ends_step=ends_step))
+
+    asyncio.run(controller._trainer_loop(queue, num_training_steps=1))
+
+    # The second batch is sent while the first call runs; the third waits for the first call.
+    assert events[:5] == ["send 0", "send 1", "finish 0", "release", "send 2"]
+    assert num_in_flight_at_send[:3] == [1, 2, 2]
+    assert max(num_in_flight_at_send) == 2
+    # A batch's RDMA buffers are released only after its call returned.
+    releases = [i for i, event in enumerate(events) if event == "release"]
+    assert len(releases) == 5
+    for index, release in enumerate(releases):
+        assert events.index(f"finish {index}") < release
+    assert events.index("finish 4") < events.index("optim 1")
+
+
+def test_step_times_are_the_trainers_wait_and_forward_backward() -> None:
+    controller = _controller([], stream_microbatches=True)
+
+    async def forward_backward(*args, **kwargs):
+        await asyncio.sleep(0.05)
+        return _RankValues({"loss/mean": 1.0})
+
+    controller.trainer.by_dp_rank[0].forward_backward = _Endpoint(forward_backward)
+
+    async def run() -> None:
+        queue: asyncio.Queue = asyncio.Queue()
+        queue.put_nowait(_batch(ends_step=False))
+        loop = asyncio.create_task(
+            controller._trainer_loop(queue, num_training_steps=1)
+        )
+        # The trainer computes 0.05 s, then waits ~0.45 s for the step's last batch.
+        await asyncio.sleep(0.5)
+        queue.put_nowait(_batch())
+        await loop
+
+    asyncio.run(run())
+
+    [metrics] = controller.logged_metrics
+    wait_s = metrics["timing/step/wait_for_training_batch"].value.value
+    forward_backward_s = metrics["timing/step/forward_backward"].value.value
+    assert 0.09 <= forward_backward_s < 0.3
+    assert wait_s >= 0.4
+
+
+def test_forward_backward_failure_stops_the_step_at_once() -> None:
+    async def failing_forward_backward(*args, **kwargs):
+        raise RuntimeError("forward_backward failed")
+
+    events: list[str] = []
+    controller = _controller(events, stream_microbatches=True)
+    controller.trainer.by_dp_rank[0].forward_backward = _Endpoint(
+        failing_forward_backward
+    )
+    queue: asyncio.Queue = asyncio.Queue()
+    # The step's other batches are still generating: the loop must not wait for them.
+    queue.put_nowait(_batch(ends_step=False))
+
+    with pytest.raises(ExceptionGroup) as raised:
+        asyncio.run(
+            asyncio.wait_for(
+                controller._trainer_loop(queue, num_training_steps=1), timeout=5
+            )
+        )
+    assert "forward_backward failed" in str(raised.value.exceptions[0])
+    assert "optim 1" not in events

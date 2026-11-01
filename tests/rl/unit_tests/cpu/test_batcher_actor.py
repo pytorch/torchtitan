@@ -156,3 +156,60 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
             torch.testing.assert_close(
                 comparable(batch), comparable(expected_batch), rtol=0, atol=0
             )
+
+
+def test_streaming_batcher_actor_returns_the_in_process_batches(tmp_path) -> None:
+    """With streaming, `add_group` returns a streamed batch per filled bin: the same batches as in
+    process."""
+    # Each sample packs 4 tokens, so a group's 4 samples fill one 16-token bin.
+    kwargs = dict(
+        num_tokens_per_microbatch_per_dp_rank=16,
+        max_context_length=16,
+        num_prompts_per_train_step=3,
+        dp_degree=1,
+        pad_id=0,
+        temperature=1.0,
+    )
+    config = Batcher.Config(stream_microbatches=True)
+    groups = [_group(group_id, [0.0, 1.0, 0.0, 1.0]) for group_id in range(3)]
+
+    batcher = config.build(**kwargs)
+    expected = [batcher.add_group(rollout_group=group) for group in groups]
+
+    async def run() -> list:
+        mesh = this_host().spawn_procs(per_host={"cpus": 1})
+        try:
+            actor = mesh.spawn(
+                "batcher",
+                BatcherActor,
+                config,
+                **kwargs,
+                output_dir=str(tmp_path),
+                enable_structured_logging=False,
+            )
+            return [
+                await actor.add_group.call_one(rollout_group=group) for group in groups
+            ]
+        finally:
+            await mesh.stop()
+
+    results = asyncio.run(run())
+
+    assert [None if batch is None else batch.ends_step for batch, _ in expected] == [
+        False,
+        False,
+        True,
+    ]
+
+    def comparable(batch) -> dict:
+        return dataclasses.asdict(dataclasses.replace(batch, metrics=[]))
+
+    for (batch, trainable), (expected_batch, expected_trainable) in zip(
+        results, expected, strict=True
+    ):
+        assert trainable == expected_trainable
+        assert (batch is None) == (expected_batch is None)
+        if expected_batch is not None:
+            torch.testing.assert_close(
+                comparable(batch), comparable(expected_batch), rtol=0, atol=0
+            )

@@ -91,7 +91,8 @@ class DAPOLoss(Loss[torch.Tensor]):
             loss_mask: [T] bool mask; True for response tokens.
             advantages: [T] per-token advantages (0.0 for prompt/padding).
             global_loss_token_counts: total response tokens with finite generator logprobs
-                across all microbatches and DP ranks; the loss denominator.
+                across all microbatches and DP ranks; the loss denominator. None: the loss and
+                the mean/frac metrics are sums, and the trainer divides the gradients later.
 
         Returns:
             (loss, metrics) where loss is a scalar tensor and metrics is a dict of

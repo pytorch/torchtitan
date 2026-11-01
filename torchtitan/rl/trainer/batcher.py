@@ -72,7 +72,7 @@ class TrainingMicrobatch(TokenizedTrainingMicrobatch):
 
 @dataclass(frozen=True, slots=True)
 class TrainerStepBatch:
-    """Packed microbatches for one optimizer step.
+    """Packed microbatches for one optimizer step, or for part of one with `stream_microbatches`.
 
     Example:
         # 5 training samples, effective length 5 each; 2 rows/rank, dp_degree=1
@@ -91,16 +91,24 @@ class TrainerStepBatch:
     microbatch_groups: (
         list[list[list[TrainingMicrobatch]]] | list[list[list[RDMAMicrobatch]]]
     )
+    # Counts over this batch's microbatches.
     global_loss_token_counts: torch.Tensor
     global_routing_token_counts: torch.Tensor
+    # The step's metrics, group ids and policy versions; empty on a streamed step's earlier batches.
     metrics: list[m.Metric]
     group_ids: list[int]
     """Every consumed rollout group, including metric-only groups."""
-    # one per packed training_sample; trainer computes policy_age at consume time
+    # one per training_sample of the step; trainer computes policy_age at consume time
     min_policy_versions: list[int]
+    ends_step: bool = True
+    """False on a streamed step's earlier batches; True on the step's last batch."""
 
 
 _MAX_CONSECUTIVE_UNTRAINABLE_BATCHES = 10
+
+# Streaming sends a microbatch group once each of its bins holds at least this fraction of its token
+# capacity (or its document limit), so streamed bins carry little padding.
+_STREAMED_MIN_BIN_FILL = 0.98
 
 # Per-field pad values + dtypes for a packed row.
 _PAD_VALUES: dict[str, int | float | bool] = {
@@ -189,6 +197,17 @@ class Batcher(Configurable):
         # pending is None; batch.microbatch_groups: [num_groups][1][2 ranks];
         # each TrainingMicrobatch.input: [256 tokens]
 
+    With `stream_microbatches`, a group before the step's last also returns the microbatch groups
+    that the step's unsent samples fill:
+
+        batcher = Batcher.Config(stream_microbatches=True).build(..., num_prompts_per_train_step=3)
+        batcher.add_training_samples(training_sample_group=group0)
+        # -> (TrainerStepBatch(ends_step=False), True): group0's samples fill a microbatch group
+        batcher.add_training_samples(training_sample_group=group1)
+        # -> (None, True): the unsent samples can't fill one yet
+        batcher.add_training_samples(training_sample_group=group2)
+        # -> (TrainerStepBatch(ends_step=True), True): the step's last batch packs every unsent sample
+
     With `rdma_min_tensor_bytes` set, it returns `RDMAMicrobatch`es registered with
     `register_rdma_microbatch`, the actor system's RDMA registration (e.g.
     `MonarchRDMAMicrobatch.register`), which is then required.
@@ -216,6 +235,17 @@ class Batcher(Configurable):
         The Monarch actor system uses ibverbs where the host has it, else TCP; a host that lists unusable
         ibverbs devices fails instead. MONARCH_RDMA_DISABLE_IBVERBS=1 forces TCP in every process, weight sync
         included."""
+        stream_microbatches: bool = False
+        """When the trainer gets the step's microbatches:
+            False: once, after all `num_prompts_per_train_step` groups are packed. Each loss divides by the
+                step's loss-token count.
+            True: while the step's groups arrive, every microbatch group the unsent samples fill; the
+                step's last batch has the rest. Each loss returns a sum, and the trainer divides the
+                gradients by the step's count before clipping. Samples are packed in arrival order, so
+                the microbatches depend on which groups finish first.
+                Needs: accelerator graphs off, no SDC replay, no deferred FSDP reduction, no MoE auxiliary
+                loss, no MTP, no RDMA.
+        """
         training_sample_builder: TrainingSampleBuilder.Config = field(
             default_factory=TrainingSampleBuilder.Config
         )
@@ -278,6 +308,10 @@ class Batcher(Configurable):
         self._num_pp_microbatches = num_pp_microbatches
         self._groups_for_next_batch: list[TrainingSampleGroup] = []
         self._num_consecutive_zero_output_groups = 0
+        self._stream_microbatches = config.stream_microbatches
+        # Streaming: this step's samples that no batch has sent yet, and the microbatches sent so far.
+        self._unsent_training_samples: list[TrainingSample] = []
+        self._num_microbatches_sent = 0
         self._rdma_min_tensor_bytes = config.rdma_min_tensor_bytes
         self._register_rdma_microbatch = register_rdma_microbatch
         # Batches that trainer ranks may still read, oldest first; each buffer keeps its tensor alive until drop().
@@ -387,12 +421,19 @@ class Batcher(Configurable):
         # leave its dataloader entry pending forever.
         self._groups_for_next_batch.append(training_sample_group)
         self._record_untrainable_groups(group_is_trainable=group_is_trainable)
+        if self._stream_microbatches:
+            self._unsent_training_samples.extend(training_sample_group.training_samples)
         num_trainable_groups = sum(
             bool(group.training_samples) for group in self._groups_for_next_batch
         )
-        if num_trainable_groups < self._num_prompts_per_train_step:
-            return None, group_is_trainable  # accumulate until one full batch is ready
-        batch = self._pack_one_training_batch()
+        if num_trainable_groups >= self._num_prompts_per_train_step:
+            batch = self._pack_one_training_batch()
+        elif self._stream_microbatches:
+            batch = self._pack_ready_microbatches()
+        else:
+            batch = None  # accumulate until one full batch is ready
+        if batch is None:
+            return None, group_is_trainable
         if self._rdma_min_tensor_bytes is None:
             return batch, group_is_trainable
         assert self._register_rdma_microbatch is not None
@@ -440,18 +481,150 @@ class Batcher(Configurable):
             )
         )
 
-    def _pack_one_training_batch(self) -> TrainerStepBatch:
-        """Pack the oldest accumulated groups (up to `num_prompts_per_train_step` trainable groups) into one batch."""
-        (
-            training_samples,
-            metrics,
-            num_rollout_groups,
-            num_metric_only_groups,
-            group_ids,
-        ) = self._take_groups()
-        assignments = self._assign_training_samples_to_microbatches(
-            training_samples, num_pp_microbatches=self._num_pp_microbatches
+    def _pack_ready_microbatches(self) -> TrainerStepBatch | None:
+        """Streaming: pack the microbatch groups that the step's unsent samples fill, each of
+        `num_pp_microbatches * dp_degree` bins, and keep the other samples unsent.
+
+        The DP ranks run a microbatch at the same time, so each waits for the rank with the most
+        attention work. `_pack_streamed_bins` packs k groups' bins at once from every unsent sample.
+        Try k from the most groups that could be full down to 1; send the first k where
+          (a) every bin holds `_STREAMED_MIN_BIN_FILL` of its tokens (or its document limit), or
+          (b) k < the groups the unsent tokens fill: long samples with no short ones never reach 98%,
+              and waiting would idle the trainer until the step's last batch.
+        The step's last batch packs whatever is left.
+
+        Cases with dp_degree=2, no PP and 10 tokens per bin, by unsent sample lengths:
+            [6, 6, 4, 4]           -> bins [6+4] [6+4]                     -> send them
+            [6, 5, 4, 3]           -> bins [6+3] [5+4]                     -> send nothing: later samples fill them
+            [9, 9, 9, 1, 1]        -> bins [9+1] [9+1], one 9 stays unsent  -> send them
+            [9, 9, 9, 9, 9, 9, 3]  -> no bin reaches 98%, but 57 tokens hold 2 groups of 20 -> send
+                                      57 // 20 - 1 = 1 group: [9] [9]
+            [10, 10, 6, 6, 6, 6, 6, 6, 6, 6] -> [10] [10] are full, but 68 tokens hold 3 groups of 20
+                                      -> send 68 // 20 - 1 = 2 groups: [10] [10] [6] [6]
+
+        Why not repack the bins with `_assign_training_samples_to_microbatches`: repacking full bins into
+        exactly as many bins rarely fits, and its fallback keeps first-fit-decreasing's unbalanced bins
+        (one with 3 long samples next to one with 30 short ones).
+        """
+        num_bins_per_microbatch_group = self._num_pp_microbatches * self._dp_degree
+        num_tokens_per_bin = self._num_rows_per_microbatch * self.seq_len
+        min_bin_num_tokens = _STREAMED_MIN_BIN_FILL * num_tokens_per_bin
+        num_unsent_tokens = sum(
+            map(self.num_tokens_to_pack, self._unsent_training_samples)
         )
+        num_unsent_microbatch_groups = num_unsent_tokens // (
+            num_bins_per_microbatch_group * num_tokens_per_bin
+        )
+
+        def bin_is_full(bin_: list[TrainingSample]) -> bool:
+            return sum(map(self.num_tokens_to_pack, bin_)) >= min_bin_num_tokens or (
+                self._max_num_documents is not None
+                and len(bin_) >= self._max_num_documents
+            )
+
+        # A full bin is full by tokens or by documents, which bounds how many bins can be full.
+        # TODO: with many short samples, the document term makes the bound loose: one 2000-sample group
+        # with max_num_documents=16 tries 16 packings (1.5 s); bound it with the shortest samples. Not
+        # done now because 16-sample groups take about 20 ms or less (20.5 ms at 64 DP ranks).
+        max_num_full_bins = num_unsent_tokens / min_bin_num_tokens
+        if self._max_num_documents is not None:
+            max_num_full_bins += (
+                len(self._unsent_training_samples) / self._max_num_documents
+            )
+        # Send the most groups whose bins are all full. Once the unsent tokens fill g >= 2 groups,
+        # g - 1 groups go even if some bins aren't full.
+        for num_groups in range(
+            int(max_num_full_bins // num_bins_per_microbatch_group), 0, -1
+        ):
+            bins, unplaced_training_samples = self._pack_streamed_bins(
+                self._unsent_training_samples,
+                num_bins=num_groups * num_bins_per_microbatch_group,
+            )
+            if num_groups < num_unsent_microbatch_groups or all(map(bin_is_full, bins)):
+                self._unsent_training_samples = unplaced_training_samples
+                return self._pack_one_training_batch(streamed_bins=bins)
+        return None
+
+    def _pack_streamed_bins(
+        self, training_samples: list[TrainingSample], *, num_bins: int
+    ) -> tuple[list[list[TrainingSample]], list[TrainingSample]]:
+        """Put each sample, longest first, in the bin with room whose documents have the least
+        attention work (sum of squared lengths; ties: fewer tokens). Return the bins and the samples
+        that fit no bin.
+
+        Unlike `_pack_with_lpt`, which fills a fixed bin count with slack and must place every sample,
+        this ranks bins by their documents only, without padding. On 64K agentic lengths, rows average
+        1.11-1.12x max/mean attention work this way and 1.17-1.21x with `_pack_with_lpt`'s key.
+
+        Example (10 tokens per bin):
+            _pack_streamed_bins(lengths [9, 6, 5, 4, 3], num_bins=2)
+            # 9 -> bin 0; 6 -> bin 1; 5 fits no bin; 4 -> bin 1; 3 fits no bin
+            # -> ([[9], [6, 4]], [5, 3])
+        """
+        num_tokens_per_bin = self._num_rows_per_microbatch * self.seq_len
+        bins: list[list[TrainingSample]] = [[] for _ in range(num_bins)]
+        bin_num_tokens = [0] * num_bins
+        bin_document_workloads = [0] * num_bins
+        unplaced_training_samples: list[TrainingSample] = []
+        for sample in sorted(
+            training_samples, key=self.num_tokens_to_pack, reverse=True
+        ):
+            num_tokens = self.num_tokens_to_pack(sample)
+            destination = min(
+                (
+                    index
+                    for index, bin_ in enumerate(bins)
+                    if bin_num_tokens[index] + num_tokens <= num_tokens_per_bin
+                    and (
+                        self._max_num_documents is None
+                        or len(bin_) < self._max_num_documents
+                    )
+                ),
+                key=lambda index: (
+                    bin_document_workloads[index],
+                    bin_num_tokens[index],
+                ),
+                default=None,
+            )
+            if destination is None:
+                unplaced_training_samples.append(sample)
+                continue
+            bins[destination].append(sample)
+            bin_num_tokens[destination] += num_tokens
+            bin_document_workloads[destination] += num_tokens**2
+        return bins, unplaced_training_samples
+
+    def _pack_one_training_batch(
+        self, *, streamed_bins: list[list[TrainingSample]] | None = None
+    ) -> TrainerStepBatch:
+        """Pack one training batch:
+        streamed_bins=None: the step's last batch. Takes the oldest accumulated groups (up to
+            `num_prompts_per_train_step` trainable groups), packs every sample no earlier batch sent, and
+            carries the step's metrics, group ids and policy versions.
+        streamed_bins=[...]: a streamed step's earlier batch: `num_groups * num_pp_microbatches * dp_degree`
+            bins of samples, already packed (see `_pack_ready_microbatches`).
+        """
+        if streamed_bins is None:
+            (
+                training_samples,
+                metrics,
+                num_rollout_groups,
+                num_metric_only_groups,
+                group_ids,
+            ) = self._take_groups()
+            # With streaming, the step's earlier batches sent the other samples.
+            samples_to_pack = (
+                self._unsent_training_samples
+                if self._stream_microbatches
+                else training_samples
+            )
+            assignments = self._assign_training_samples_to_microbatches(
+                samples_to_pack, num_pp_microbatches=self._num_pp_microbatches
+            )
+        else:
+            assignments = self._assign_bins_to_dp_ranks(
+                streamed_bins, num_pp_microbatches=self._num_pp_microbatches
+            )
         microbatches = [
             [self._pack_training_samples(samples) for samples in rank_assignments]
             for rank_assignments in assignments
@@ -472,18 +645,40 @@ class Batcher(Configurable):
                 global_routing_token_counts.add_(microbatch.routing_token_counts)
         assert global_loss_token_counts is not None
         assert global_routing_token_counts is not None
-        num_global_loss_tokens = int(global_loss_token_counts.reshape(-1)[0].item())
-        num_response_tokens = sum(
-            int(microbatch.loss_mask.sum().item())
-            for rank_microbatches in microbatches
-            for microbatch in rank_microbatches
-        )
         num_pp_microbatches = self._num_pp_microbatches
+        microbatch_groups = [
+            microbatches[start : start + num_pp_microbatches]
+            for start in range(0, len(microbatches), num_pp_microbatches)
+        ]
+        if streamed_bins is not None:
+            self._num_microbatches_sent += len(assignments)
+            return TrainerStepBatch(
+                microbatch_groups=microbatch_groups,
+                global_loss_token_counts=global_loss_token_counts,
+                global_routing_token_counts=global_routing_token_counts,
+                metrics=[],
+                group_ids=[],
+                min_policy_versions=[],
+                ends_step=False,
+            )
+
+        num_microbatches = self._num_microbatches_sent + len(assignments)
+        self._unsent_training_samples = []
+        self._num_microbatches_sent = 0
+        # Response tokens, and those with a finite generator logprob (the loss tokens), over the step.
+        num_response_tokens = sum(
+            int(np.count_nonzero(sample.loss_mask[1:])) for sample in training_samples
+        )
+        num_global_loss_tokens = sum(
+            int(
+                np.count_nonzero(
+                    sample.loss_mask[1:] & np.isfinite(sample.logprobs[1:])
+                )
+            )
+            for sample in training_samples
+        )
         return TrainerStepBatch(
-            microbatch_groups=[
-                microbatches[start : start + num_pp_microbatches]
-                for start in range(0, len(microbatches), num_pp_microbatches)
-            ],
+            microbatch_groups=microbatch_groups,
             global_loss_token_counts=global_loss_token_counts,
             global_routing_token_counts=global_routing_token_counts,
             metrics=[
@@ -498,7 +693,7 @@ class Batcher(Configurable):
                     ),
                 ),
                 *self._packing_metrics(
-                    assignments,
+                    num_microbatches,
                     training_samples,
                     num_rollout_groups,
                     num_metric_only_groups,
@@ -624,6 +819,16 @@ class Batcher(Configurable):
             bins = ffd_bins
             self._expand_bins_by_splitting(bins, target_num_bins=target_num_bins)
 
+        # Steps 4-6: sort the bins by attention work and balance their rank totals.
+        return self._assign_bins_to_dp_ranks(
+            bins, num_pp_microbatches=num_pp_microbatches
+        )
+
+    def _assign_bins_to_dp_ranks(
+        self, bins: list[list[TrainingSample]], *, num_pp_microbatches: int
+    ) -> list[list[list[TrainingSample]]]:
+        """Sort `[G * M * D]` bins by padding-aware attention work and assign them as `[G * M][D]`
+        with `assign_sorted_bins_to_dp_ranks`."""
         # Step 4: estimate attention work, including tail padding.
         workloads = [self._attention_workload(bin_) for bin_ in bins]
         sorted_bin_indices = sorted(
@@ -921,14 +1126,14 @@ class Batcher(Configurable):
 
     def _packing_metrics(
         self,
-        assignments: list[list[list[TrainingSample]]],
+        num_microbatches: int,
         training_samples: list[TrainingSample],
         num_rollout_groups: int,
         num_metric_only_groups: int,
     ) -> list[m.Metric]:
         """Per-training-batch packing + count metrics. (policy age is logged at trainer consume time.)"""
         padding_frac = self._padding_fraction(
-            num_microbatches=len(assignments),
+            num_microbatches=num_microbatches,
             training_samples=training_samples,
         )
         return [
@@ -938,7 +1143,7 @@ class Batcher(Configurable):
             ),
             m.Metric(
                 "train_batch/num_microbatches",
-                m.NoReduce(float(len(assignments))),
+                m.NoReduce(float(num_microbatches)),
             ),
             m.Metric(
                 "train_batch/num_rollout_groups", m.NoReduce(float(num_rollout_groups))

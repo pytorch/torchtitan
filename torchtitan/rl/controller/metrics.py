@@ -56,12 +56,42 @@ class MetricsTimer:
         ]
 
 
+def forward_backward_wait_and_busy_seconds(
+    step_start_s: float, calls: list[tuple[float, float]]
+) -> tuple[float, float]:
+    """The trainer's total wait for batches and its total forward/backward time in one step, from each
+    forward_backward call's (sent, finished) times. The trainer runs its calls in order, so a call sent
+    while the previous one runs starts when that one finishes.
+
+    Example:
+        # Each call takes 3 s. Batch 2 is sent at t=1, while call 1 runs; batch 3 at t=10.
+        forward_backward_wait_and_busy_seconds(0.0, [(0.0, 3.0), (1.0, 6.0), (10.0, 13.0)])
+        # -> (4.0, 9.0): waits 0 + 0 + 4, forward/backward 3 + 3 + 3
+    """
+    wait_s = busy_s = 0.0
+    previous_end_s = step_start_s
+    for sent_s, finished_s in calls:
+        start_s = max(sent_s, previous_end_s)
+        wait_s += start_s - previous_end_s
+        busy_s += finished_s - start_s
+        previous_end_s = finished_s
+    return wait_s, busy_s
+
+
+_SUMMED_METRIC_SUFFIXES = ("/mean", "_mean", "/frac", "_frac")
+
+
 def combine_microbatch_metrics(
     microbatch_metrics: list[dict[str, float]],
+    *,
+    num_global_loss_tokens: int | None = None,
 ) -> dict[str, float]:
     """Combine per-microbatch loss metrics over the grad-accumulation: mean/frac keys are pre-normalized
     by num_global_valid_tokens so summing them reconstructs the global value. For keys ending in "max",
     the max value is taken.
+
+    Streamed microbatches return unnormalized sums; `num_global_loss_tokens` then divides the summed
+    mean/frac keys.
 
     Example:
         # already normalized by num_global_valid_tokens
@@ -69,6 +99,11 @@ def combine_microbatch_metrics(
                                     {"loss/ratio_clipped_frac": 0.2, "x/max": 5.0}])
         # output
         # -> {"loss/ratio_clipped_frac": 0.3, "x/max": 5.0}
+
+        # streamed: token sums over a step with 10 loss tokens
+        combine_microbatch_metrics([{"loss/ratio_clipped_frac": 1.0}, {"loss/ratio_clipped_frac": 2.0}],
+                                   num_global_loss_tokens=10)
+        # -> {"loss/ratio_clipped_frac": 0.3}
     """
     combined: dict[str, float] = {}
     for microbatch in microbatch_metrics:
@@ -77,8 +112,13 @@ def combine_microbatch_metrics(
                 combined[key] = value
             elif key.endswith("/max"):
                 combined[key] = max(combined[key], value)
-            elif key.endswith(("/mean", "_mean", "/frac", "_frac")):
+            elif key.endswith(_SUMMED_METRIC_SUFFIXES):
                 combined[key] += value
+    if num_global_loss_tokens is not None:
+        for key in combined:
+            if key.endswith(_SUMMED_METRIC_SUFFIXES):
+                # A step with no loss tokens has all-zero sums; dividing by 1 keeps them zero.
+                combined[key] /= max(num_global_loss_tokens, 1)
     return combined
 
 

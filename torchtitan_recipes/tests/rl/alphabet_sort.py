@@ -872,10 +872,12 @@ def rl_grpo_fsdp2_gen_tp2_no_compile() -> Controller.Config:
     config.trainer.parallelism.data_parallel_shard_degree = 2
     config.trainer.parallelism.tensor_parallel_degree = 1
     config.generator.parallelism.tensor_parallel_degree = 2
+    # 1024-token microbatches, so a step streams several batches.
+    config.async_loop.batcher.stream_microbatches = True
     return _configure_ci(
         config,
         steps=5,
-        num_tokens_per_microbatch=2048,
+        num_tokens_per_microbatch=1024,
         max_generated_tokens=256,
         use_hf_assets_from_env=True,
     )
