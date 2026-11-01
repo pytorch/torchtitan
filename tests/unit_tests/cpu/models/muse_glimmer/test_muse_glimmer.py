@@ -153,3 +153,34 @@ class TestMuseGlimmerConditionalVision(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMuseGlimmerStateDictAdapterRowPermute(unittest.TestCase):
+    def test_a_rank_wide_factor_permutes_like_its_projection(self):
+        """The q/k RoPE permute reorders rows only, so a LoRA factor with the projection's rows
+        and a rank-wide second dim must follow the weight's row order; sizing the k permute from
+        the model config instead of the tensor used to fail on such a factor."""
+        config = build_model_config("debugmodel", parallelism=ParallelismConfig(), seq_len=64)
+        adapter = type(config)._owner.state_dict_adapter_cls(config, None)
+        attention = config.layers[0].attention
+        rows = (attention.n_heads + 2 * attention.n_kv_heads) * attention.head_dim
+        rank = 4
+        factor = torch.arange(rows, dtype=torch.float32)[:, None].expand(rows, rank).contiguous()
+        weight = torch.arange(rows, dtype=torch.float32)[:, None].expand(rows, config.dim).contiguous()
+
+        exported = adapter.to_hf({"layers.0.attention.qkv_linear.wqkv.weight": factor})
+        reference = adapter.to_hf({"layers.0.attention.qkv_linear.wqkv.weight": weight})
+
+        self.assertEqual(
+            {name: tuple(tensor.shape) for name, tensor in exported.items()},
+            {
+                f"model.language_model.layers.0.self_attn.{proj}.weight": (out, rank)
+                for proj, out in (
+                    ("q_proj", attention.n_heads * attention.head_dim),
+                    ("k_proj", attention.n_kv_heads * attention.head_dim),
+                    ("v_proj", attention.n_kv_heads * attention.head_dim),
+                )
+            },
+        )
+        for name, tensor in exported.items():
+            torch.testing.assert_close(tensor[:, 0], reference[name][:, 0])
