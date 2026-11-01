@@ -8,6 +8,9 @@
 
 vLLM's MLA layer caches the compressed latent ``[kv_c_normed, k_pe]`` and
 decodes in latent space by folding ``wkv_b`` into the query and output.
+vLLM owns the cache, its metadata, and the decode/prefill split; TorchTitan
+supplies the kernels: Attention Gym's paged latent decode, and torch's varlen
+attention over expanded K/V for prefill.
 Batch-invariant mode does not use this module; it keeps materialized K/V
 through ``VLLMInnerAttention`` for bitwise parity with the trainer.
 """
@@ -17,15 +20,28 @@ from dataclasses import dataclass
 import spmd_types as spmd
 
 import torch
+from torch.nn.attention.varlen import AuxRequest, varlen_attn
 from vllm.model_executor.layers.attention import MLAAttention as VLLMNativeMLAAttention
+from vllm.model_executor.layers.attention.mla_attention import (
+    MLACommonImpl,
+    MLACommonPrefillMetadata,
+)
+from vllm.v1.attention.backend import AttentionLayer
+from vllm.v1.attention.backends.mla.flashattn_mla import (
+    FlashAttnMLABackend,
+    FlashAttnMLAMetadata,
+)
+from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
 
 from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.attention import InnerAttention, MLAAttention
+from torchtitan.models.common.attn_gym import paged_mla_decode, require_attn_gym
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.linear import Linear
 from torchtitan.rl.generator.vllm.attention import (
     _exclude_vllm_attn_scales_from_state_dict,
+    activate_cuda_flash_attention_impl,
     VLLMInnerAttention,
 )
 
@@ -35,8 +51,119 @@ from torchtitan.rl.generator.vllm.attention import (
 # K = full per-head query dimension (qk_nope_head_dim + qk_rope_head_dim)
 # L = latent KV dimension (kv_lora_rank)
 # R = head-shared key dimension (qk_rope_head_dim)
+# V = per-head value dimension (v_head_dim)
 
-# TODO: replace vLLM's MLA kernel with attn-gym latent-space decode kernel
+
+class TorchTitanMLABackend(FlashAttnMLABackend):
+    """vLLM MLA backend whose decode runs Attention Gym's paged latent kernel.
+
+    Inheriting from ``FlashAttnMLABackend`` reuses its decode metadata, which
+    carries the packed query offsets the latent kernel takes.
+    """
+
+    @staticmethod
+    def get_name() -> str:
+        return "CUSTOM"
+
+    @staticmethod
+    def get_impl_cls() -> type["TorchTitanMLAImpl"]:
+        return TorchTitanMLAImpl
+
+
+class TorchTitanMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
+    """Decode over vLLM's ``[kv_c_normed, k_pe]`` cache with ``paged_mla_decode``."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        require_attn_gym(paged_mla_decode)
+        if self.dcp_world_size != 1:
+            raise ValueError(
+                "TorchTitan's MLA decode does not support decode context parallelism."
+            )
+        if self.kv_cache_dtype.startswith("fp8"):
+            raise ValueError(
+                "TorchTitan's MLA decode does not support an FP8 KV cache."
+            )
+
+    def forward_mqa(
+        self,
+        q: tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: FlashAttnMLAMetadata,
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, None]:
+        """Attend the absorbed queries ``(q_latent_THL, q_rope_THR)`` to the cache."""
+        q_latent_THL, q_rope_THR = q
+        decode = attn_metadata.decode
+        out_THL = paged_mla_decode(
+            q_latent_THL,
+            q_rope_THR,
+            kv_c_and_k_pe_cache[..., : self.kv_lora_rank],
+            kv_c_and_k_pe_cache[..., self.kv_lora_rank :],
+            decode.block_table,
+            decode.query_start_loc,
+            decode.seq_lens,
+            max_seqlen_q=max(decode.max_query_len, 1),
+            scale=self.scale,
+        )
+        return out_THL, None
+
+
+class TorchTitanMLAPrefillBackend(MLAPrefillBackend):
+    """vLLM MLA prefill over expanded K/V with torch's varlen attention."""
+
+    @staticmethod
+    def get_name() -> str:
+        return "CUSTOM"
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        activate_cuda_flash_attention_impl()
+
+    def run_prefill_new_tokens(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        return_softmax_lse: bool,
+        out: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Causal attention among the new tokens; LSE is ``(H, T)``."""
+        metadata: MLACommonPrefillMetadata = self._prefill_metadata
+        return varlen_attn(
+            q,
+            k,
+            v,
+            metadata.query_start_loc,
+            metadata.query_start_loc,
+            metadata.max_query_len,
+            metadata.max_query_len,
+            scale=self.scale,
+            window_size=(-1, 0),
+            return_aux=AuxRequest(lse=True) if return_softmax_lse else None,
+        )
+
+    def run_prefill_context_chunk(
+        self,
+        chunk: MLACommonPrefillMetadata.ContextChunk,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        out: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Unmasked attention from the new tokens to one chunk of cached context."""
+        return varlen_attn(
+            q,
+            k,
+            v,
+            chunk.query_start_loc,
+            chunk.cu_seq_lens,
+            chunk.max_query_len,
+            chunk.max_seq_len,
+            scale=self.scale,
+            return_aux=AuxRequest(lse=True),
+        )
 
 
 class _VLLMKVBProj:
@@ -127,6 +254,8 @@ class VLLMMLAInnerAttention(InnerAttention):
             kv_b_proj=_VLLMKVBProj(kv_b_proj),
             cache_config=vllm_config.cache_config,
             quant_config=None,
+            attn_backend=TorchTitanMLABackend,
+            prefill_backend_cls=TorchTitanMLAPrefillBackend,
             prefix=(
                 f"model.layers.{next(VLLMInnerAttention._layer_counter)}"
                 ".attention.inner_attention"
