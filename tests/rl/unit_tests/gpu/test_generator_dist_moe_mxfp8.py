@@ -253,6 +253,7 @@ def test_vllm_generator_enables_mxfp8_mega_inference_weights():
             parallelism=config.generator.parallelism,
             checkpointer_config=None,
             dist_moe_runtime=config.generator.dist_moe_runtime,
+            model_state_dict_load_mode="cpu_prefetch",
         )
         engine = build_inference_engine(config)
         _check_inference_operands(engine)

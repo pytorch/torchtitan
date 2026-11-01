@@ -14,6 +14,10 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FSDPModule, fully_shard
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import InnerAttention, MLAAttention
@@ -154,42 +158,111 @@ def test_vllm_replacement_preserves_attention_sharding(build_config) -> None:
 
 
 class _Wrapper:
-    """Stand-in `self` for VLLMModelWrapper's real model state dict load methods (no vLLM)."""
+    """Stand-in `self` for VLLMModelWrapper's real model state dict load (no vLLM).
 
-    load_state_dict = VLLMModelWrapper.load_state_dict
+    Build it while `model` is sharded, as VLLMModelWrapper does.
+    """
+
+    load_model_state_dict = VLLMModelWrapper.load_model_state_dict
 
     def __init__(self, model: nn.Module):
         self.model = model
+        self._fsdp_load_groups, self._buffer_keys = model_wrapper._fsdp_load_groups(
+            model
+        )
 
 
-def test_load_state_dict_allocates_one_fsdp_group_at_a_time(
-    tmp_path, monkeypatch
-) -> None:
-    """Load new weights with at most two FSDP groups' sharded buffers allocated at once.
+def _copy_from(new_state_dict: dict[str, torch.Tensor]):
+    """A fetch that copies from `new_state_dict`, as the generator's cpu_prefetch fetch does."""
 
-    Guards that each group's sharded buffers are allocated before its copy, even when
-    FSDP's own load pre-hook already resharded the group (tok_embeddings here).
-    """
+    def fetch(state_dict: dict[str, torch.Tensor]) -> list[str]:
+        with torch.no_grad():
+            for key, tensor in state_dict.items():
+                tensor.copy_(new_state_dict[key])
+        return list(state_dict)
+
+    return fetch
+
+
+def test_load_model_state_dict_requires_every_param(tmp_path) -> None:
+    """Raise when fetch skips a parameter, whose storage was just reallocated; an
+    unfilled buffer (e.g. a vLLM attention scale the trainer does not publish) keeps
+    its value."""
     dist.init_process_group(
         "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
     )
     try:
-        # The generator's layout: a tied [tok_embeddings, norm, lm_head] group, one per block.
         model = nn.Module()
-        model.tok_embeddings = nn.Embedding(32, 16)
-        model.layers = nn.ModuleList(
-            nn.Sequential(nn.Linear(16, 16), nn.Linear(16, 16)) for _ in range(3)
-        )
-        model.norm = nn.LayerNorm(16)
-        model.lm_head = nn.Linear(16, 32, bias=False)
-        model.lm_head.weight = model.tok_embeddings.weight
+        model.layers = nn.ModuleList(nn.Linear(4, 4) for _ in range(2))
+        model.register_buffer("scale", torch.ones(4))
         mesh = init_device_mesh("cpu", (1,))
-        fully_shard([model.tok_embeddings, model.norm, model.lm_head], mesh=mesh)
         for block in model.layers:
-            fully_shard(block, mesh=mesh)
-        fully_shard(model, mesh=mesh)
+            fully_shard(block, mesh=mesh, reshard_after_forward=False)
+        fully_shard(model, mesh=mesh, reshard_after_forward=False)
         model.set_keep_unsharded_storage(True)
-        new_state_dict = {k: v.detach() + 1.0 for k, v in model.state_dict().items()}
+        wrapper = _Wrapper(model)
+        for module in model.modules():  # as after the initial load
+            if isinstance(module, FSDPModule):
+                model_wrapper._unshard_and_free_sharded_params(module)
+
+        def fetch_published(published: set[str]):
+            def fetch(state_dict: dict[str, torch.Tensor]) -> list[str]:
+                return [key for key in state_dict if key in published]
+
+            return fetch
+
+        params = {name for name, _ in model.named_parameters()}
+        wrapper.load_model_state_dict(fetch_published(params))
+        assert model.scale.equal(torch.ones(4))
+
+        with pytest.raises(RuntimeError, match="did not fill 1 weights.*layers.1.bias"):
+            wrapper.load_model_state_dict(fetch_published(params - {"layers.1.bias"}))
+    finally:
+        dist.destroy_process_group()
+
+
+class TestLoadModelStateDictTwoRanks(DTensorTestBase):
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    @property
+    def backend(self) -> str:
+        return "gloo"
+
+    @property
+    def device_type(self) -> str:
+        return "cpu"
+
+    @with_comms
+    def test_fetches_shards_into_the_unsharded_params(self) -> None:
+        """Load twice; each rank fetches its own (uneven) shards, one FSDP group
+        allocated at a time, and every rank ends with the full new weights.
+
+        Guards that each group's sharded buffers are allocated before its fetch and
+        freed after, and that a group left mid-forward (the tied group after a
+        standalone lm_head call) still receives the new weights.
+        """
+        model = nn.Module()
+        model.tok_embeddings = nn.Embedding(15, 16)
+        model.layers = nn.ModuleList(nn.Linear(16, 15) for _ in range(2))
+        model.lm_head = nn.Linear(16, 15, bias=False)
+        model.lm_head.weight = model.tok_embeddings.weight
+        model.register_buffer("scale", torch.zeros(4))
+        mesh = init_device_mesh("cpu", (self.world_size,))
+        fully_shard(
+            [model.tok_embeddings, model.lm_head],
+            mesh=mesh,
+            reshard_after_forward=False,
+        )
+        for block in model.layers:
+            fully_shard(block, mesh=mesh, reshard_after_forward=False)
+        fully_shard(model, mesh=mesh, reshard_after_forward=False)
+        model.set_keep_unsharded_storage(True)
+        initial_state_dict = {
+            k: v.detach().clone() for k, v in model.state_dict().items()
+        }
+        wrapper = _Wrapper(model)
         groups = [
             group
             for module in (model.tok_embeddings, *model.layers)
@@ -202,38 +275,87 @@ def test_load_state_dict_allocates_one_fsdp_group_at_a_time(
                 for p in group.fsdp_params
             )
 
-        wrapper = _Wrapper(model)
-        max_allocated_groups = 0
-
-        restore_sharded_params = model_wrapper._restore_sharded_params
-
-        def checked_restore_sharded_params(module) -> None:
-            nonlocal max_allocated_groups
-            restore_sharded_params(module)
-            # The load copies into these buffers next, so freed ones would be overrun.
-            assert all(map(is_allocated, module._get_fsdp_state()._fsdp_param_groups))
-            max_allocated_groups = max(
-                max_allocated_groups, sum(map(is_allocated, groups))
-            )
-
-        monkeypatch.setattr(
-            model_wrapper, "_restore_sharded_params", checked_restore_sharded_params
-        )
         for module in model.modules():  # as after the initial load
             if isinstance(module, FSDPModule):
                 model_wrapper._unshard_and_free_sharded_params(module)
-        wrapper.load_state_dict(new_state_dict)
+        # As in compute_logits: calling lm_head alone leaves the tied group's forward
+        # incomplete, so module.reshard() would skip it.
+        model._get_fsdp_state()._lazy_init()  # the root's forward would do this
+        with torch.no_grad():
+            model.lm_head(torch.zeros(1, 16))
 
-        assert max_allocated_groups <= 2
-        assert all(
-            p._sharded_param_data.untyped_storage().size() == 0
-            for group in groups
-            for p in group.fsdp_params
+        for version in (1, 2):
+            new_state_dict = {k: v + version for k, v in initial_state_dict.items()}
+            fetched_keys = []
+
+            copy = _copy_from(new_state_dict)
+
+            def fetch(state_dict: dict[str, torch.Tensor]) -> list[str]:
+                fetched_keys.append(sorted(state_dict))
+                # Exactly the fetched group holds sharded buffers; none for buffers.
+                self.assertEqual(
+                    sum(map(is_allocated, groups)), int("scale" not in state_dict)
+                )
+                return copy(state_dict)
+
+            wrapper.load_model_state_dict(fetch)
+
+            self.assertEqual(
+                fetched_keys,
+                [
+                    ["lm_head.weight", "tok_embeddings.weight"],
+                    ["layers.0.bias", "layers.0.weight"],
+                    ["layers.1.bias", "layers.1.weight"],
+                    ["scale"],
+                ],
+            )
+            self.assertFalse(any(map(is_allocated, groups)))
+            for name, param in model.named_parameters(remove_duplicate=False):
+                self.assertEqual(param, new_state_dict[name].full_tensor(), msg=name)
+            self.assertEqual(model.scale, new_state_dict["scale"])
+
+    @with_comms
+    def test_unshards_every_group_after_fetch_error(self) -> None:
+        """Unshard every group after a failed fetch on one rank, then raise.
+
+        unshard() all-gathers across the FSDP group, so if rank 1 stopped after
+        its fetch failed, rank 0 would hang in the next group's all-gather.
+        """
+        model = nn.Module()
+        model.layers = nn.ModuleList(nn.Linear(16, 16) for _ in range(3))
+        model.register_buffer("scale", torch.zeros(4))
+        mesh = init_device_mesh("cpu", (self.world_size,))
+        for block in model.layers:
+            fully_shard(block, mesh=mesh, reshard_after_forward=False)
+        fully_shard(model, mesh=mesh, reshard_after_forward=False)
+        model.set_keep_unsharded_storage(True)
+        wrapper = _Wrapper(model)
+        for module in model.modules():  # as after the initial load
+            if isinstance(module, FSDPModule):
+                model_wrapper._unshard_and_free_sharded_params(module)
+        fetched_keys = []
+
+        def fetch(state_dict: dict[str, torch.Tensor]) -> list[str]:
+            fetched_keys.append(sorted(state_dict))
+            if self.rank == 1:
+                raise RuntimeError("fetch failed")
+            return list(state_dict)
+
+        if self.rank == 1:
+            with self.assertRaisesRegex(RuntimeError, "fetch failed"):
+                wrapper.load_model_state_dict(fetch)
+            self.assertEqual(fetched_keys, [["layers.0.bias", "layers.0.weight"]])
+        else:
+            wrapper.load_model_state_dict(fetch)
+            self.assertEqual(len(fetched_keys), 4)
+        self.assertTrue(
+            all(
+                p._sharded_param_data.untyped_storage().size() == 0
+                for block in model.layers
+                for group in block._get_fsdp_state()._fsdp_param_groups
+                for p in group.fsdp_params
+            )
         )
-        for name, param in model.named_parameters(remove_duplicate=False):
-            assert param.equal(new_state_dict[name].to_local()), name
-    finally:
-        dist.destroy_process_group()
 
 
 @pytest.mark.parametrize(
@@ -325,8 +447,7 @@ def test_vllm_mla_inner_attention_matches_vllm_mla_shapes():
     assert torch.equal(out_THV, vllm_mla.return_value.view(8, 4, 3))
 
 
-@pytest.mark.parametrize("fsdp", [False, True], ids=["plain", "fully_shard"])
-def test_vllm_native_mla_decode_weights_follow_weight_sync(tmp_path, fsdp) -> None:
+def test_vllm_native_mla_decode_weights_follow_weight_sync(tmp_path) -> None:
     """vLLM's decode weights are views of wkv_b, so weight sync updates them."""
     dist.init_process_group(
         "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
@@ -339,12 +460,12 @@ def test_vllm_native_mla_decode_weights_follow_weight_sync(tmp_path, fsdp) -> No
         torch.nn.init.normal_(block.wkv_b.weight)
         model = nn.Module()
         model.layers = nn.ModuleList([block])
-        if fsdp:
-            mesh = init_device_mesh("cpu", (1,))
-            fully_shard(block, mesh=mesh)
-            fully_shard(model, mesh=mesh)
-            model.set_keep_unsharded_storage(True)
+        mesh = init_device_mesh("cpu", (1,))
+        fully_shard(block, mesh=mesh)
+        fully_shard(model, mesh=mesh)
+        model.set_keep_unsharded_storage(True)
         new_state_dict = {k: 3.0 * v.detach() for k, v in model.state_dict().items()}
+        wrapper = _Wrapper(model)
         for module in model.modules():  # as after the initial load
             if isinstance(module, FSDPModule):
                 model_wrapper._unshard_and_free_sharded_params(module)
@@ -370,11 +491,9 @@ def test_vllm_native_mla_decode_weights_follow_weight_sync(tmp_path, fsdp) -> No
 
         assert not attention.state_dict()
         assert {"W_UK_T", "W_UV"} <= {name for name, _ in attention.named_buffers()}
-        _Wrapper(model).load_state_dict(new_state_dict)
+        wrapper.load_model_state_dict(_copy_from(new_state_dict))
 
-        new_weight = new_state_dict["layers.0.wkv_b.weight"]
-        if fsdp:
-            new_weight = new_weight.to_local()
+        new_weight = new_state_dict["layers.0.wkv_b.weight"].to_local()
         w_uk, w_uv = new_weight.T.view(5, 2, 7).split([3, 4], dim=-1)
         assert torch.equal(attention.W_UK_T, w_uk.permute(1, 2, 0))
         assert torch.equal(attention.W_UV, w_uv.transpose(0, 1))

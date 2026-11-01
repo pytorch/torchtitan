@@ -20,11 +20,13 @@ import gc
 import logging
 import threading
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
+import torch
 
 import torchtitan.rl.generator.engine_loop as engine_loop_module
 import torchtitan.rl.generator.generator as generator_module
@@ -100,6 +102,7 @@ def _bare_loop(
     dp_size: int = 1,
     dp_routing_strategy: RoutingStrategy.Config | None = None,
     reset_kv_cache_on_model_state_dict_load: bool = False,
+    fetch_model_state_dict: Callable[[dict], Any] = lambda weights: weights.keys(),
 ) -> EngineLoop:
     # _decide_next_action delegates the in-flight check and routing to the
     # dispatcher, so wire up a bare one (no engine / GPU needed here).
@@ -112,6 +115,7 @@ def _bare_loop(
         broadcast_group=None,
         max_engine_steps_between_decisions=16,
         reset_kv_cache_on_model_state_dict_load=reset_kv_cache_on_model_state_dict_load,
+        fetch_model_state_dict=fetch_model_state_dict,
     )
     # An outstanding generation models in-flight work (possibly in a peer DP rank).
     if inflight:
@@ -598,8 +602,8 @@ class _FakeEngine:
         finished, self.running = self.running, []
         return [_finished(request_id) for request_id in finished]
 
-    def load_prefetched_model_state_dict(self) -> None:
-        pass
+    def load_model_state_dict(self, fetch) -> None:
+        fetch({})
 
     def shutdown(self) -> None:
         self.shutdowns.append(threading.current_thread())
@@ -665,10 +669,11 @@ def _stop_engine_thread(engine_thread: EngineLoopThread) -> None:
 def engine_thread(monkeypatch):
     """Returns a function that builds an engine loop around `engine`, with its engine loop thread
     running; stops those threads afterwards."""
-    # Rank 0 is the only rank, so the decision broadcast is a no-op.
+    # Rank 0 is the only rank, so the decision broadcast and the load's all-reduce are no-ops.
     monkeypatch.setattr(
         engine_loop_module.dist, "broadcast_object_list", lambda *a, **k: None
     )
+    monkeypatch.setattr(engine_loop_module.dist, "all_reduce", lambda *a, **k: None)
     engine_threads: list[EngineLoopThread] = []
 
     def start(engine: _FakeEngine, **kwargs: Any) -> EngineLoop:
@@ -887,8 +892,12 @@ def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
     async def run() -> None:
         # The generator's endpoints around the engine loop, without building vLLM.
         generator = object.__new__(Generator)
-        generator._engine_loop = engine_thread(engine)
+        generator.config = SimpleNamespace(model_state_dict_load_mode="cpu_prefetch")
         generator._prefetched_model_state_dict = {}
+        generator._engine_loop = engine_thread(
+            engine,
+            fetch_model_state_dict=generator._copy_prefetched_model_state_dict,
+        )
         await generator.start_engine_loop()
         first = _generate(generator._engine_loop, "r0")
         assert await asyncio.to_thread(gate.entered.wait, _TIMEOUT_S)
@@ -905,6 +914,125 @@ def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
         assert generator.policy_version == 4
 
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
+
+    asyncio.run(run())
+
+
+def test_gpu_fetch_reads_torchstore_on_the_actor_loop_during_the_load(
+    engine_thread, monkeypatch
+) -> None:
+    reads: list[tuple] = []
+    current_stream = Mock()
+
+    async def get_state_dict(*args, **kwargs):
+        # Queued GPU work on the weights must finish before the read writes them.
+        current_stream.return_value.synchronize.assert_called_once_with()
+        reads.append(
+            (threading.current_thread(), asyncio.get_running_loop(), args, kwargs)
+        )
+        return kwargs["user_state_dict"]
+
+    monkeypatch.setattr(generator_module.ts, "get_state_dict", get_state_dict)
+    monkeypatch.setattr(torch.accelerator, "current_stream", current_stream)
+    weights = {"weight": object()}
+
+    class _GPUFetchEngine(_FakeEngine):
+        def load_model_state_dict(self, fetch) -> None:
+            fetch(weights)
+
+    async def run() -> None:
+        generator = object.__new__(Generator)
+        generator.config = SimpleNamespace(model_state_dict_load_mode="gpu_fetch")
+        generator._torchstore_loop = asyncio.get_running_loop()
+        generator._engine_loop = engine_thread(
+            _GPUFetchEngine(),
+            fetch_model_state_dict=generator._fetch_model_state_dict_from_storage_volume,
+        )
+        await generator.start_engine_loop()
+
+        await asyncio.wait_for(generator.prefetch_model_state_dict(), _TIMEOUT_S)
+        assert reads == []
+
+        await asyncio.wait_for(generator.load_model_state_dict(4), _TIMEOUT_S)
+        assert reads == [
+            (
+                threading.current_thread(),
+                asyncio.get_running_loop(),
+                ("model_state_dict",),
+                {"user_state_dict": weights, "strict": False, "direct_rdma": False},
+            )
+        ]
+        assert generator.policy_version == 4
+
+        await asyncio.wait_for(generator.close(), _TIMEOUT_S)
+
+    asyncio.run(run())
+
+
+def test_load_replies_only_after_every_rank_finished_fetching(
+    engine_thread, monkeypatch
+) -> None:
+    reducing, released = threading.Event(), threading.Event()
+    reduced: list[int] = []
+
+    def all_reduce(tensor, group) -> None:
+        reduced.append(int(tensor.item()))
+        reducing.set()
+        assert released.wait(timeout=_TIMEOUT_S)
+
+    monkeypatch.setattr(engine_loop_module.dist, "all_reduce", all_reduce)
+
+    async def run() -> None:
+        engine_loop = engine_thread(_FakeEngine())
+        engine_loop.start()
+        load = asyncio.create_task(engine_loop.load_model_state_dict(3))
+        assert await asyncio.to_thread(reducing.wait, _TIMEOUT_S)
+
+        # Other ranks may still be fetching, so the load must not resolve.
+        await _on_engine_loop(engine_loop, lambda: None)
+        assert not load.done()
+        released.set()
+        await asyncio.wait_for(load, _TIMEOUT_S)
+        assert reduced == [0]
+        assert engine_loop.policy_version == 3
+
+        await asyncio.wait_for(engine_loop.close(), _TIMEOUT_S)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failing_rank", ["this", "another"])
+def test_load_fails_on_every_rank_when_any_rank_fails(
+    engine_thread, monkeypatch, failing_rank: str
+) -> None:
+    reduced: list[int] = []
+
+    def all_reduce(tensor, group) -> None:
+        reduced.append(int(tensor.item()))
+        tensor.fill_(1)
+
+    def fetch(weights: dict) -> Iterable[str]:
+        if failing_rank == "this":
+            raise RuntimeError("TorchStore is down")
+        return weights.keys()
+
+    monkeypatch.setattr(engine_loop_module.dist, "all_reduce", all_reduce)
+
+    async def run() -> None:
+        engine_loop = engine_thread(_FakeEngine(), fetch_model_state_dict=fetch)
+        engine_loop.start()
+        error = (
+            "TorchStore is down"
+            if failing_rank == "this"
+            else "failed on another generator rank"
+        )
+        with pytest.raises(RuntimeError, match=error):
+            await asyncio.wait_for(engine_loop.load_model_state_dict(3), _TIMEOUT_S)
+        # A failing rank still joins the all-reduce, so the other ranks don't hang.
+        assert reduced == [int(failing_rank == "this")]
+        assert engine_loop.policy_version == 0
+
+        await asyncio.wait_for(engine_loop.close(), _TIMEOUT_S)
 
     asyncio.run(run())
 

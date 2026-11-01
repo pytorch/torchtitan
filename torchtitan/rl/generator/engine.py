@@ -9,12 +9,17 @@
 from __future__ import annotations
 
 import abc
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 
 from torchtitan.config import Configurable
 from torchtitan.rl.generator.types import EngineRequest, FinishedRequest
+
+
+ModelStateDictLoadMode = Literal["cpu_prefetch", "gpu_fetch"]
 
 
 class GenerationEngine(Configurable, abc.ABC):
@@ -45,6 +50,8 @@ class GenerationEngine(Configurable, abc.ABC):
         reset_kv_cache_on_model_state_dict_load: Whether each model state dict load resets
             all KV. When False, a request may reuse only KV computed under its
             ``min_policy_version``.
+        model_state_dict_load_mode: ``"cpu_prefetch"`` allocates the pinned CPU buffers of
+            ``prefetched_model_state_dict``; ``"gpu_fetch"`` does not.
         rank: Global rank of this process.
         generator_name: Name of the generator, for engine metrics.
         output_dir: Output directory, for engine metrics.
@@ -66,9 +73,10 @@ class GenerationEngine(Configurable, abc.ABC):
 
     @property
     @abc.abstractmethod
-    def prefetched_model_state_dict(self) -> dict[str, torch.Tensor]:
+    def prefetched_model_state_dict(self) -> dict[str, torch.Tensor] | None:
         """The pinned CPU buffers a model state dict is prefetched into, and loaded from by
-        ``load_prefetched_model_state_dict``. Safe to fill from any thread while no load runs."""
+        a model state dict load. Safe to fill from any thread while no load runs. None with
+        ``model_state_dict_load_mode="gpu_fetch"``."""
 
     @abc.abstractmethod
     def add_requests(
@@ -86,9 +94,16 @@ class GenerationEngine(Configurable, abc.ABC):
         """Run one engine step and return the requests it finished."""
 
     @abc.abstractmethod
-    def load_prefetched_model_state_dict(self) -> None:
-        """Load the prefetched model state dict into the model, and reset the KV cache when
-        configured."""
+    def load_model_state_dict(
+        self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
+    ) -> None:
+        """Load a model state dict by having ``fetch`` fill the model's weights in place, and
+        reset the KV cache when configured.
+
+        Args:
+            fetch: Fills each tensor of the given subset of the model state dict in place
+                with the new weights and returns the keys it filled.
+        """
 
     @property
     def holds_session_kv(self) -> bool:

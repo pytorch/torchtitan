@@ -275,7 +275,7 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
 
     wrapper = engine.model_executor.driver_worker.get_model()
     trainer_sd = trainer_model.state_dict()
-    # As a model state dict load: fill the pinned CPU copy, then load it with load_state_dict.
+    # As a model state dict load: fill the pinned CPU copy, then load from it.
     vllm_sd = wrapper._prefetched_model_state_dict
 
     missing = []
@@ -293,7 +293,13 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
             else:
                 vparam.copy_(full)
 
-    wrapper.load_state_dict(vllm_sd)
+    def fetch(state_dict: dict[str, torch.Tensor]) -> list[str]:
+        with torch.no_grad():
+            for key, tensor in state_dict.items():
+                tensor.copy_(vllm_sd[key])
+        return list(state_dict)
+
+    wrapper.load_model_state_dict(fetch)
 
     if dist.get_rank() == 0 and missing:
         logger.warning("vLLM params not present in trainer state_dict: %s", missing)
@@ -651,6 +657,7 @@ class BitwiseParityTestBase(unittest.TestCase):
             config.generator.model,
             parallelism=config.generator.parallelism,
             checkpointer_config=generator_checkpointer,
+            model_state_dict_load_mode="cpu_prefetch",
         )
 
         # Test runs trainer and generator in the same process, so limit
@@ -902,6 +909,62 @@ class TestBitwiseParityQwen35DebugVarlen(BitwiseParityTestBase):
     def test_vllm_prefill_and_decode_batch_invariance(self):
         """vLLM prefill and decode must not depend on batch composition."""
         self._check_vllm_prefill_and_decode_batch_invariance()
+
+    def test_reload_after_generate(self):
+        """Reload changed weights after generation has replayed the captured graphs."""
+        engine = self.engine
+
+        def reload() -> None:
+            _sync_trainer_weights_to_vllm(self.model, engine)
+            # As the generator does after a load: drop KV computed with the old weights.
+            engine.reset_prefix_cache(reset_running_requests=True)
+
+        vllm_generate(engine, self.prompt_ids, self.MAX_GEN_TOKENS)
+        before_lps = vllm_prefill(engine, self.prompt_ids)
+        params = list(self.model.parameters())
+        originals = [p.detach().clone() for p in params]
+        # Every rank runs every collective before rank 0 asserts, so a mismatch
+        # fails instead of hanging the other rank.
+        try:
+            with torch.no_grad():
+                for p in params:
+                    p.mul_(0.5)
+            reload()
+            with type(self).parallelism_context.activate_spmd(), torch.no_grad():
+                trainer_lps = compute_trainer_prefill_logprobs(
+                    self.model,
+                    self.prompt_ids,
+                    self.device,
+                    attn_backend=self.attn_backend,
+                )
+            vllm_lps = vllm_prefill(engine, self.prompt_ids)
+            gen_ids, decode_lps = vllm_generate(
+                engine, self.prompt_ids, self.MAX_GEN_TOKENS
+            )
+            prefill_2nd_lps = vllm_2nd_pass_prefill(engine, self.prompt_ids, gen_ids)
+        finally:
+            with torch.no_grad():
+                for p, original in zip(params, originals):
+                    p.copy_(original)
+            reload()
+
+        if dist.get_rank() == 0:
+            self.assertNotEqual(before_lps[0], vllm_lps[0])
+            for i in range(len(self.prompt_ids)):
+                self._assert_logprobs_equal(
+                    f"seq {i}: Trainer prefill vs vLLM prefill after reload",
+                    trainer_lps[i],
+                    vllm_lps[i],
+                    "Trainer",
+                    "vLLM",
+                )
+                self._assert_logprobs_equal(
+                    f"seq {i}: vLLM decode vs 2nd-pass prefill after reload",
+                    decode_lps[i],
+                    prefill_2nd_lps[i],
+                    "Decode",
+                    "2ndPrefill",
+                )
 
 
 @unittest.skipUnless(
