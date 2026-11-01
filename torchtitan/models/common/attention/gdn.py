@@ -205,7 +205,6 @@ _recurrent_gdn_fwd.register_autograd(
 
 
 @spmd.local_map(
-    in_types=(spmd.PartitionSpec(("dp", "cp"), "tp"), None, None),
     out_types=(
         # Nominal tp S(1): each rank holds its own [q | k | v]; never redistribute or gather it.
         spmd.PartitionSpec(("dp", "cp"), "tp"),  # mixed_qkv_TC
