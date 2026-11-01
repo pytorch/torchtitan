@@ -310,7 +310,7 @@ def test_empty_completion_on_first_turn_is_skipped() -> None:
     assert rollout_to_training_samples(rollout) == []
 
 
-def test_group_filters_preserve_group_id_for_acknowledgement() -> None:
+def test_group_filters_preserve_group_id_for_commit() -> None:
     builder = TrainingSampleBuilder.Config().build()
 
     failed = builder.build_from_group(

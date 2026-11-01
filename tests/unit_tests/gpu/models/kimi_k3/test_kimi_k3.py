@@ -206,6 +206,7 @@ class TestKimiK3(unittest.TestCase):
         self.assertRegex(
             "layers.1.feed_forward.routed_experts.w2.weight", muon_config.pattern
         )
+        self.assertEqual(muon_config.max_nccl_ctas_for_comms, 8)
 
     def test_flex_attention_mask(self):
         config = _small_model_config()

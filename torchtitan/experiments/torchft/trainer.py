@@ -105,6 +105,10 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         self.parallelism_context = ParallelismContext.from_config(
             config.parallelism, topology, dump_folder=self.output_dir
         )
+        dist_utils.set_pg_timeouts(
+            timeout=timedelta(seconds=config.comm.init_timeout_seconds),
+            parallelism_context=self.parallelism_context,
+        )
         self.garbage_collector = config.garbage_collector.build()
         dist_utils.set_determinism(
             self.parallelism_context,
