@@ -33,6 +33,7 @@ from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
     PagedStashManager,
     PagedStashRunner,
 )
+from torchtitan.experiments.graph_trainer.traced_optimizer import TracedOptimizerUpdate
 from torchtitan.models.base import BaseModel
 from torchtitan.models.common.linear import Linear
 from torchtitan.observability import structured_logger as sl
@@ -54,6 +55,7 @@ class GraphTrainingEngine(TrainingEngine):
     # enabled. Class-level, so engines without it -- including those a test
     # harness builds without running initialization -- see it as disabled.
     _paged_stash_runner: PagedStashRunner | None = None
+    _optimizer_update: TracedOptimizerUpdate | None = None
 
     def __init__(
         self,
@@ -63,8 +65,6 @@ class GraphTrainingEngine(TrainingEngine):
         max_num_documents: int | None,
         output_dir: str,
     ) -> None:
-        if config.optim.enable_accelerator_graph:
-            raise ValueError("Optim CUDA graphs are not supported with GraphTrainer.")
         if model_config.local_compile.regions:
             raise ValueError(
                 "GraphTrainer traces the whole step into one graph; set "
@@ -145,6 +145,17 @@ class GraphTrainingEngine(TrainingEngine):
                 num_microbatches = (
                     num_tokens_per_train_step // num_tokens_per_microbatch
                 )
+            optimizer_update = None
+            if self.config.optim.enable_accelerator_graph and all(
+                group.get("capturable", False)
+                for optimizer in self.optim.optimizers
+                for group in optimizer.param_groups
+            ):
+                optimizer_update = TracedOptimizerUpdate(
+                    self.optim,
+                    parallelism_context=self.parallelism_context,
+                )
+                self._optimizer_update = optimizer_update
             graph_runtime = make_spmd_graph_runtime(
                 self.model_parts[0],
                 gradient_accumulation_steps=num_microbatches,
@@ -152,6 +163,7 @@ class GraphTrainingEngine(TrainingEngine):
                 device=self.device,
                 loss_fn=self.loss_fn,
                 trainer_config=self.config,
+                optimizer_update=optimizer_update,
             )
             # The inherited PP execution path calls `pp_schedule.step`
             # GraphRuntime implements that interface and owns the underlying schedule
@@ -219,6 +231,33 @@ class GraphTrainingEngine(TrainingEngine):
             self._pinned_pool_ctx.__enter__()
         else:
             self._pinned_pool_ctx = None
+
+    def forward_backward(
+        self,
+        *,
+        microbatch_groups: list[list[TrainingMicrobatch]],
+        global_loss_token_counts: int | torch.Tensor,
+        global_routing_token_counts: torch.Tensor,
+    ) -> ForwardBackwardResult:
+        if self._optimizer_update is not None and hasattr(self, "checkpointer"):
+            self.checkpointer.maybe_wait_for_staging()
+        return super().forward_backward(
+            microbatch_groups=microbatch_groups,
+            global_loss_token_counts=global_loss_token_counts,
+            global_routing_token_counts=global_routing_token_counts,
+        )
+
+    @sl.log_trace_span("optim_step")
+    def optim_step(self) -> torch.Tensor:
+        if self._optimizer_update is None:
+            return super().optim_step()
+        current_step = self.num_completed_steps + 1
+        grad_norm = self._optimizer_update.recorded_grad_norm()
+        self.optim.lr_schedulers.step()
+        if self.optim.ema is not None:
+            self.optim.ema.step(current_step)
+        self.num_completed_steps = current_step
+        return grad_norm
 
     def _preprocess_microbatch_groups(
         self,
@@ -427,6 +466,25 @@ class GraphTrainer(Trainer):
                     "training.preprocess_microbatch_groups_lazily is not supported "
                     "with GraphTrainer."
                 )
+            if self.optim.enable_accelerator_graph:
+                if self.parallelism.pipeline_parallel_degree > 1:
+                    raise ValueError(
+                        "optim.enable_accelerator_graph is not supported with pipeline "
+                        "parallelism in GraphTrainer."
+                    )
+                if self.sdc_replayer is not None:
+                    raise ValueError(
+                        "optim.enable_accelerator_graph does not support SDC replay in "
+                        "GraphTrainer: replay reruns a step whose graph already "
+                        "applied the optimizer update."
+                    )
+                if self.compile.memory_policy == "sac_and_paged_stash":
+                    raise ValueError(
+                        "optim.enable_accelerator_graph does not support "
+                        "memory_policy='sac_and_paged_stash' in GraphTrainer: an "
+                        "overflowed step cannot be skipped after its graph applied "
+                        "the optimizer update."
+                    )
             # to_graph_trainer_config and the flavor builders turn these off;
             # this catches a transform applied afterwards that builds them with
             # the eager default.

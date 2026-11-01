@@ -6,7 +6,7 @@
 
 import contextlib
 import copy
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -226,24 +226,63 @@ def extract_module_state(mod: nn.Module) -> dict[str, torch.Tensor]:
     }
 
 
+OptimizerArg = torch.optim.Optimizer | Sequence[torch.optim.Optimizer] | None
+
+
+def _as_optimizer_list(optimizer: OptimizerArg) -> list[torch.optim.Optimizer]:
+    if optimizer is None:
+        return []
+    if isinstance(optimizer, torch.optim.Optimizer):
+        return [optimizer]
+    return list(optimizer)
+
+
+def extract_optimizer_state(optimizer: torch.optim.Optimizer) -> dict[str, Any]:
+    """Return the live optimizer state in ``optimizer.state_dict()`` layout.
+
+    Unlike ``state_dict()``, this does not run state-dict hooks. Hooks may
+    rewrite live tensors for checkpointing (e.g. a device ``lr`` tensor saved
+    as a host float), which would bake that value into the traced graph as a
+    constant instead of threading the live tensor as a graph input.
+    """
+    param_ids: dict[int, int] = {}
+    param_groups = []
+    for group in optimizer.param_groups:
+        packed_group = {k: v for k, v in group.items() if k != "params"}
+        packed_group["params"] = [
+            param_ids.setdefault(id(p), len(param_ids)) for p in group["params"]
+        ]
+        param_groups.append(packed_group)
+    state = {
+        param_ids[id(param)]: param_state
+        for param, param_state in optimizer.state.items()
+    }
+    return {"state": state, "param_groups": param_groups}
+
+
 def extract_train_state(
     module: nn.Module | None = None,
-    optimizer: "torch.optim.Optimizer | None" = None,
-) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
+    optimizer: OptimizerArg = None,
+) -> tuple[dict[str, torch.Tensor], dict[str, Any] | list[dict[str, Any]]]:
     """Return ``(model_state, optim_state)`` for ``minimal_fx_tracer``.
 
-    Both are dicts (empty when the corresponding object is ``None``) and are
-    sampled from the live module/optimizer, so callers can reuse this helper
-    to refresh state at runtime.
+    ``model_state`` is a dict and ``optim_state`` holds one
+    :func:`extract_optimizer_state` entry per optimizer (empty when the
+    corresponding object is ``None``). Both are sampled from the live
+    module/optimizers, so callers can reuse this helper to refresh state at
+    runtime.
     """
     model_state = extract_module_state(module) if module is not None else {}
-    optim_state = optimizer.state_dict() if optimizer is not None else {}
+    optimizers = _as_optimizer_list(optimizer)
+    optim_state = (
+        [extract_optimizer_state(opt) for opt in optimizers] if optimizers else {}
+    )
     return model_state, optim_state
 
 
 def _check_optimizer_has_module(
     module: nn.Module | None,
-    optimizer: "torch.optim.Optimizer | None",
+    optimizer: OptimizerArg,
 ) -> None:
     """Optimizer parameters align with module.named_parameters() by order, so
     requiring a module guarantees that alignment."""
@@ -257,13 +296,14 @@ def _check_optimizer_has_module(
 @contextlib.contextmanager
 def _reparametrize_train_state(
     module: nn.Module | None,
-    optimizer: "torch.optim.Optimizer | None",
+    optimizer: OptimizerArg,
     model_state: dict[str, torch.Tensor],
-    optim_state: dict[str, Any],
+    optim_state: dict[str, Any] | list[dict[str, Any]],
 ):
-    """Reparametrize module and optimizer with explicit tensor state for tracing."""
+    """Reparametrize module and optimizers with explicit tensor state for tracing."""
+    optimizers = _as_optimizer_list(optimizer)
     with contextlib.ExitStack() as stack:
-        if optimizer is not None:
+        if optimizers:
             # swap_in pairs values positionally in optimizer.param_groups flat
             # order, which differs from named_parameters() order for bucketed
             # param_groups. Walk param_groups and resolve names by id() against
@@ -271,14 +311,15 @@ def _reparametrize_train_state(
             id_to_name = {
                 id(p): n for n, p in module.named_parameters(remove_duplicate=False)
             }
+        for opt, opt_state in zip(optimizers, optim_state, strict=True):
             params_for_optim = {
                 id_to_name[id(p)]: model_state[id_to_name[id(p)]]
-                for group in optimizer.param_groups
+                for group in opt.param_groups
                 for p in group["params"]
             }
             stack.enter_context(
                 torch.optim.swap_in_optimizer_params_and_state(
-                    optimizer, params_for_optim, optim_state
+                    opt, params_for_optim, opt_state
                 )
             )
         if module is not None:
@@ -368,16 +409,18 @@ class TracedResult:
     def num_static_inputs(self) -> int:
         """Number of leading graph inputs with stable tensor addresses.
 
-        Parameters and buffers (the state entries) have fixed addresses across
-        training steps. Each may expand to multiple plain tensors after
-        subclass unwrapping (e.g. DTensor -> inner tensors).
-
-        TODO: graph_trainer does not trace optimizers yet, so optimizer state
-        tensors are not counted here. When optimizer tracing is enabled, they
-        should be included since their addresses are also stable across steps,
-        avoiding CUDA graph re-copying them every step.
+        Parameters, buffers, graph state, and optimizer state have fixed
+        addresses across training steps, so graph capture does not need to
+        copy them on every replay. Each may expand to multiple plain tensors
+        after subclass unwrapping (e.g. DTensor -> inner tensors). Non-tensor
+        optimizer leaves (hyperparameters) are counted too; graph capture skips
+        non-tensor inputs.
         """
-        num_state = len(self.state_fqns) + len(self.graph_state.mappings)
+        num_state = (
+            len(self.state_fqns)
+            + len(self.graph_state.mappings)
+            + self.num_optimizer_state_inputs
+        )
         return sum(
             self.input_subclass_layouts[i].num_tensors
             if i in self.input_subclass_layouts
@@ -404,7 +447,7 @@ def _flat_tensor_ranges(
 def minimal_fx_tracer(
     fn: Callable,
     module: nn.Module | None = None,
-    optimizer: "torch.optim.Optimizer | None" = None,
+    optimizer: OptimizerArg = None,
     *,
     precompile_meshes: list[DeviceMesh] | None = None,
     graph_state: dict[str, torch.Tensor] | None = None,
@@ -636,7 +679,7 @@ def run_traced(
     traced_result: TracedResult,
     *,
     module: nn.Module | None = None,
-    optimizer: "torch.optim.Optimizer | None" = None,
+    optimizer: OptimizerArg = None,
     precompile_meshes: list[DeviceMesh] | None = None,
     graph_state: dict[str, torch.Tensor] | None = None,
     _validate_runtime: bool = False,
@@ -651,8 +694,8 @@ def run_traced(
 
     Mirrors :func:`minimal_fx_tracer`'s state extraction: parameters/buffers
     are sampled from ``module``, ``graph_state`` supplies separately owned
-    persistent tensors, and optimizer state is sampled from
-    ``optimizer.state_dict()``. Runs under ``torch.no_grad()`` because the graph
+    persistent tensors, and optimizer state is sampled with
+    :func:`extract_optimizer_state`. Runs under ``torch.no_grad()`` because the graph
     already contains explicit backward ops (from ``torch.autograd.grad`` traced
     by make_fx). Without this, PyTorch would build a redundant autograd graph on
     top, keeping all forward intermediates alive via ``grad_fn`` references.
