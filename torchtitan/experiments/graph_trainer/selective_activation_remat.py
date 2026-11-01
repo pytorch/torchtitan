@@ -204,7 +204,11 @@ def selective_activation_remat_pass(
         if fwd_wait is None:
             continue
         reload_op = next(
-            (u for u in fwd_wait.users if u.target is torch.ops.ao.reload.default),
+            (
+                u
+                for u in node.users | fwd_wait.users
+                if u.target is torch.ops.ao.reload.default
+            ),
             None,
         )
         if reload_op is None:
