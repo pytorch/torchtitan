@@ -12,6 +12,10 @@ torchtitan but not your context.
 
 ## Rules
 
+- Never write the "Summary (human-written)" section. Leave its placeholder for
+  the author, and tell the user to fill it in before review. Don't draft text
+  for them to paste. With ghstack the PR body is the commit message, so keep the
+  placeholder there too.
 - Lead with the problem, in concrete terms. If you can't state a concrete input
   that misbehaves on `main` (or a concrete thing that is hard to do today), stop
   and reconsider whether the PR should exist.
@@ -34,6 +38,10 @@ torchtitan but not your context.
 ## Template
 
 ```markdown
+## Summary (human-written)
+<!-- Write this yourself, not with an AI tool. 2-5 sentences: the problem, why
+     this approach, and what you checked yourself. -->
+
 ## Why
 <The concrete problem: what fails or is hard today, for whom. 2-5 sentences.>
 
