@@ -193,18 +193,12 @@ def disable_fsdp_gradient_division(model: nn.Module) -> None:
 
 def enable_fsdp_symm_mem(model: nn.Module, scope: FSDPSymmMemScope) -> None:
     """Enable symmetric-memory communication for the FSDP modules ``scope`` selects."""
-    from torchtitan.models.common.decoder import TransformerBlock
-
     if scope is None:
         return
     for module in model.modules():
         if not isinstance(module, FSDPModule):
             continue
-        if (
-            scope == "dense"
-            and isinstance(module, TransformerBlock)
-            and isinstance(module.feed_forward, MoE)
-        ):
+        if scope == "dense" and any(isinstance(m, MoE) for m in module.children()):
             continue
         module.set_force_sum_reduction_for_comms(True)
         module.set_symm_mem_for_comm()
@@ -399,7 +393,10 @@ def apply_fsdp_to_decoder(
         #   shard their output features when FSDP degree > num_experts
         # Dense blocks use the default mesh with only stacked-parameter
         # placement overrides.
-        if isinstance(moe := transformer_block.feed_forward, MoE):
+        moe = next(
+            (m for m in transformer_block.children() if isinstance(m, MoE)), None
+        )
+        if moe is not None:
             routed_experts = moe.routed_experts
             num_experts = moe.num_experts
 
