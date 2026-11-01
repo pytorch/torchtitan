@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any
 
 import spmd_types as spmd
 import torch
@@ -24,7 +24,6 @@ from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     spmd_local_context,
 )
-from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
@@ -357,29 +356,6 @@ class Qwen35Model(MultimodalModel):
                 ]
             )
         )
-
-        def build_flops_estimator(
-            self,
-            model: Module,
-            *,
-            seq_len: int,
-            excluded_modules: tuple[Module | None, ...] = (),
-        ) -> FlopsEstimator:
-            model = cast(Qwen35Model, model)
-            decoder_estimate = super(Qwen35Model.Config, self).build_flops_estimator(
-                model,
-                seq_len=seq_len,
-                excluded_modules=(model.vision_encoder, *excluded_modules),
-            )
-            if self.vision_encoder is None:
-                return decoder_estimate
-            assert model.vision_encoder is not None
-            vision_estimate = self.vision_encoder.build_flops_estimator(
-                model.vision_encoder
-            )
-            return lambda input_dict: decoder_estimate(input_dict) + vision_estimate(
-                input_dict
-            )
 
     def __init__(self, config: Config):
         from torchtitan.distributed.spmd_types import spmd_mesh_size

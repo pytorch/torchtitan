@@ -485,39 +485,47 @@ class MuseSparkModel(MultimodalModel):
             seq_len: int,
             excluded_modules: tuple[Module | None, ...] = (),
         ) -> FlopsEstimator:
+            from torchtitan.models.common.flops import active_parameter_flops_per_unit
+
             model = cast(MuseSparkModel, model)
             vision_outputs = (
                 model.vision_adapter,
                 model.vision_projection,
                 model.perception_emb_norm,
             )
-            decoder_estimate = super(MuseSparkModel.Config, self).build_flops_estimator(
+            base_estimate = super(MuseSparkModel.Config, self).build_flops_estimator(
                 model,
                 seq_len=seq_len,
-                excluded_modules=(
-                    model.vision_encoder,
-                    *vision_outputs,
-                    model.audio_encoder,
-                    *excluded_modules,
-                ),
+                excluded_modules=(*vision_outputs, *excluded_modules),
             )
-            estimates = [decoder_estimate]
-            if self.vision_encoder is not None:
-                estimates.append(
-                    self.vision_encoder.build_flops_estimator(
-                        model.vision_encoder, output_modules=vision_outputs
-                    )
-                )
-            if self.audio_encoder is not None:
-                estimates.append(
-                    self.audio_encoder.build_flops_estimator(
-                        model.audio_encoder,
-                        output_modules=(model.perception_emb_norm,),
-                    )
-                )
-            return lambda input_dict: sum(
-                estimate(input_dict) for estimate in estimates
+            vision_output_flops = sum(
+                active_parameter_flops_per_unit(module)
+                for module in vision_outputs
+                if module is not None
             )
+            vision_config = self.vision_encoder
+            audio_config = self.audio_encoder
+            audio_output_flops = (
+                active_parameter_flops_per_unit(model.perception_emb_norm)
+                if model.perception_emb_norm is not None
+                else 0
+            )
+
+            def estimate(input_dict) -> int:
+                flops = base_estimate(input_dict)
+                if vision_config is not None:
+                    flops += (
+                        vision_config.get_num_output_tokens(input_dict)
+                        * vision_output_flops
+                    )
+                if audio_config is not None:
+                    flops += (
+                        audio_config.get_num_output_tokens(input_dict)
+                        * audio_output_flops
+                    )
+                return flops
+
+            return estimate
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)

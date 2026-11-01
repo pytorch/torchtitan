@@ -546,13 +546,13 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
             parallelism_context=SimpleNamespace(
                 non_data_parallel_size=1,
                 dp_enabled=False,
+                dp_cp_enabled=False,
                 dp_replicate=1,
                 dp_shard=1,
                 get_optional_mesh=lambda _: None,
             ),
             num_completed_steps=4,
             ntokens_seen=12,
-            step_num_flops=2000,
             has_quantization=False,
             device=torch.device("cpu"),
             device_memory_monitor=device_memory_monitor,
@@ -569,6 +569,7 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
         trainer.gpu_peak_flops = 1000
         trainer._step_compute_start = 0.0
         trainer._step_num_tokens_per_dp_rank = 10
+        trainer._num_flops = 2000
         trainer._staging_model_state_dict_stream = MagicMock()
         compute_stream = MagicMock()
 

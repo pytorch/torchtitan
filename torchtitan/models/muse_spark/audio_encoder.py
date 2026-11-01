@@ -129,9 +129,16 @@ class MuseSparkAudioEncoder(Module):
         o_proj: Linear.Config
         dual_norm: RMSNorm.Config
 
-        def build_flops_estimator(
-            self, encoder, *, output_modules: tuple[Module | None, ...] = ()
-        ) -> FlopsEstimator:
+        def get_num_output_tokens(self, input_dict) -> int:
+            waveforms = input_dict.get("waveforms")
+            if waveforms is None:
+                return 0
+            num_tokens = waveforms.shape[0]
+            for stage in self.layers:
+                num_tokens //= stage.patchifier.patch_size
+            return num_tokens
+
+        def build_flops_estimator(self, encoder) -> FlopsEstimator:
             from torchtitan.models.common.flops import active_parameter_flops_per_unit
 
             stage_flops = tuple(
@@ -141,7 +148,6 @@ class MuseSparkAudioEncoder(Module):
             output_flops = sum(
                 active_parameter_flops_per_unit(module)
                 for module in (
-                    *output_modules,
                     encoder.norm,
                     encoder.o_proj,
                     encoder.dual_norm,
@@ -158,7 +164,7 @@ class MuseSparkAudioEncoder(Module):
                 for patch_size, flops_per_token in stage_flops:
                     num_tokens //= patch_size
                     flops += num_tokens * flops_per_token
-                return flops + num_tokens * output_flops
+                return flops + self.get_num_output_tokens(input_dict) * output_flops
 
             return estimate
 

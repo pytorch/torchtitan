@@ -421,7 +421,7 @@ class FaultTolerantTrainer(Configurable):
         )
 
         grad_norm = engine.optim_step()
-        self._local_num_flops_since_last_log += engine.step_num_flops
+        self._local_num_flops_since_last_log += forward_backward_result.num_flops
 
         # log metrics
         if not should_log:
@@ -471,23 +471,18 @@ class FaultTolerantTrainer(Configurable):
 
         mean_num_flops = self._local_num_flops_since_last_log
         ft_pg = engine.ft_manager.loss_sync_pg
-        if parallelism_context.dp_enabled or ft_pg is not None:
-            total_flops = dist_utils.dist_sum_tensor(
+        if parallelism_context.dp_cp_enabled or ft_pg is not None:
+            mean_num_flops = dist_utils.dist_sum(
                 torch.tensor(mean_num_flops, dtype=torch.float64, device=engine.device),
-                mesh=parallelism_context.get_optional_mesh("dp"),
-                extra_pg=ft_pg,
-            )
-            # Read both reporting scalars with the existing grad-norm synchronization.
-            grad_norm_value, mean_num_flops = torch.stack(
-                (grad_norm, total_flops)
-            ).tolist()
-            mean_num_flops /= (
-                parallelism_context.dp_replicate * parallelism_context.dp_shard
+                parallelism_context.get_optional_mesh("loss"),
+                ft_pg,
+            ) / (
+                parallelism_context.dp_replicate
+                * parallelism_context.dp_shard
+                * parallelism_context.cp
             )
             if ft_pg is not None:
                 mean_num_flops /= ft_pg.size()
-        else:
-            grad_norm_value = float(grad_norm.item())
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
@@ -498,7 +493,7 @@ class FaultTolerantTrainer(Configurable):
             engine.num_completed_steps,
             global_avg_loss,
             global_max_loss,
-            grad_norm_value,
+            float(grad_norm.item()),
             extra_metrics=extra_metrics,
             num_flops=mean_num_flops,
         )

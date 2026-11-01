@@ -253,15 +253,15 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
             ep_enabled=False,
             dp_replicate=1,
             dp_shard=1,
+            cp=1,
         ),
         ft_manager=Mock(loss_sync_pg=Mock(size=lambda: 2), group_size=4),
         optim=Mock(lr_schedulers=Mock(schedulers=[Mock(get_last_lr=lambda: [0.1])])),
         num_completed_steps=1,
         ntokens_seen=4,
-        step_num_flops=400,
         model_config=SimpleNamespace(mtp_layers=None),
         forward_backward=Mock(
-            return_value=ForwardBackwardResult(torch.tensor(2.0), [])
+            return_value=ForwardBackwardResult(torch.tensor(2.0), [], 400)
         ),
         optim_step=Mock(return_value=torch.tensor(0.0)),
     )
@@ -278,10 +278,8 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
         num_pp_microbatches=1,
     )
     # Two active replicas contribute a loss sum of 4.0, despite group_size=4.
-    monkeypatch.setattr(ft.dist_utils, "dist_sum", Mock(side_effect=[4.0, 8]))
+    monkeypatch.setattr(ft.dist_utils, "dist_sum", Mock(side_effect=[4.0, 8, 800.0]))
     monkeypatch.setattr(ft.dist_utils, "dist_max", Mock(return_value=2.0))
-    flops_reduce = Mock(return_value=torch.tensor(800.0, dtype=torch.float64))
-    monkeypatch.setattr(ft.dist_utils, "dist_sum_tensor", flops_reduce)
     monkeypatch.setattr(ft, "collect_aux_loss_metrics", Mock(return_value={}))
 
     microbatch = SimpleNamespace(
@@ -308,7 +306,7 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
     _, logged_loss, *_ = trainer.metrics_processor.log.call_args.args
     assert logged_loss == 2.0
     assert trainer.metrics_processor.log.call_args.kwargs["num_flops"] == 400
-    flops_reduce.assert_called_once()
+    assert ft.dist_utils.dist_sum.call_count == 3
 
 
 def test_ft_engine_installs_all_reduce_hook_after_model_initialization() -> None:

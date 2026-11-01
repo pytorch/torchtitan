@@ -155,16 +155,15 @@ class NaViTEncoder(Module):
         grid_sample_mode: str = "bilinear"
         pos_emb_grid_order: str = "raster"
 
-        def build_flops_estimator(
-            self, encoder, *, output_modules: tuple[Module | None, ...] = ()
-        ) -> FlopsEstimator:
-            from torchtitan.models.common.flops import active_parameter_flops_per_unit
-
-            output_token_flops = sum(
-                active_parameter_flops_per_unit(module)
-                for module in output_modules
-                if module is not None
+        def get_num_output_tokens(self, input_dict) -> int:
+            factor = self.downsample_factor
+            return sum(
+                temporal * (height // factor) * (width // factor)
+                for temporal, height, width in get_packed_vision_grids(input_dict)
             )
+
+        def build_flops_estimator(self, encoder) -> FlopsEstimator:
+            from torchtitan.models.common.flops import active_parameter_flops_per_unit
 
             input_patch_flops = sum(
                 active_parameter_flops_per_unit(module)
@@ -192,12 +191,8 @@ class NaViTEncoder(Module):
                     window_pairs = (full_h * self.pos_emb_grid_h**2 + rem_h**2) * (
                         full_w * self.pos_emb_grid_w**2 + rem_w**2
                     )
-                    num_output_tokens = (height // self.downsample_factor) * (
-                        width // self.downsample_factor
-                    )
                     flops += temporal * (
                         input_patch_flops * num_patches
-                        + output_token_flops * num_output_tokens
                         + pair_flops
                         * (
                             num_global_layers * num_patches**2

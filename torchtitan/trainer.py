@@ -395,13 +395,14 @@ class Trainer(Configurable):
         # scheduler advances in engine.optim_step().
         lr_metrics = engine.optim.lr_schedulers.get_metrics() if should_log else {}
         grad_norm = engine.optim_step()
-        self._local_num_flops_since_last_log += engine.step_num_flops
+        self._local_num_flops_since_last_log += forward_backward_result.num_flops
 
         # log metrics
         if not should_log:
             return
 
         accumulated_loss = forward_backward_result.loss
+        mean_num_flops = self._local_num_flops_since_last_log
 
         with sl.log_trace_span("collect_dist_metrics"):
             sl.log_trace_scalar(
@@ -437,25 +438,20 @@ class Trainer(Configurable):
                         loss_mesh,
                     ),
                 )
+                mean_num_flops = dist_utils.dist_sum(
+                    torch.tensor(
+                        mean_num_flops, dtype=torch.float64, device=engine.device
+                    ),
+                    parallelism_context.get_optional_mesh("loss"),
+                ) / (
+                    parallelism_context.dp_replicate
+                    * parallelism_context.dp_shard
+                    * parallelism_context.cp
+                )
+
             else:
                 global_avg_loss = global_max_loss = float(accumulated_loss.item())
                 global_ntokens_seen = engine.ntokens_seen
-
-        mean_num_flops = self._local_num_flops_since_last_log
-        if parallelism_context.dp_enabled:
-            total_flops = dist_utils.dist_sum_tensor(
-                torch.tensor(mean_num_flops, dtype=torch.float64, device=engine.device),
-                mesh=parallelism_context.get_optional_mesh("dp"),
-            )
-            # Read both reporting scalars with the existing grad-norm synchronization.
-            grad_norm_value, mean_num_flops = torch.stack(
-                (grad_norm, total_flops)
-            ).tolist()
-            mean_num_flops /= (
-                parallelism_context.dp_replicate * parallelism_context.dp_shard
-            )
-        else:
-            grad_norm_value = float(grad_norm.item())
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
@@ -466,7 +462,7 @@ class Trainer(Configurable):
             engine.num_completed_steps,
             global_avg_loss,
             global_max_loss,
-            grad_norm_value,
+            float(grad_norm.item()),
             extra_metrics=extra_metrics,
             num_flops=mean_num_flops,
         )

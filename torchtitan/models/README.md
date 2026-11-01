@@ -73,39 +73,17 @@ The folder should be organized as follows
 
 ### FLOPs estimation
 
-`Config.build_flops_estimator(model, seq_len=...)` builds a callable from a raw CPU
-microbatch dictionary to logical training FLOPs, before partitioning or sharding.
-The engine invokes it before device transfer and CP sharding, including streamed
-microbatches. Logging averages this work over DP replicas and divides by elapsed
-time and the model-parallel device count. CP replicas must not be summed again.
-Per-microbatch estimation reads CPU metadata and tensor shapes, without launching
-tensor computation or copying device values to the host. DP-enabled reporting adds
-one float64 scalar reduction at each logging interval (each optimizer step in RL).
-Its host readback is combined with grad norm; single-DP runs keep FLOPs on the CPU.
-TorchFT also reduces across its active replica group when configured.
+`Config.build_flops_estimator(model, seq_len=...)` returns a callable from a raw
+CPU microbatch dictionary to model-wide logical training FLOPs before sharding.
+Build it from the full model; runtime estimation should use CPU metadata and tensor
+shapes without device-to-host synchronization or retaining model modules.
+Native decoders use `Attention.Config.flops_per_token(seq_len)`. Multimodal models
+share encoder composition through `multimodal_encoder_fqns`. Muse overrides the
+estimator to add output-module work using encoder-owned output-token counts.
+`ForwardBackwardResult.num_flops` reports work for the optimizer update.
 
-Native decoders share parameter-based work and sum
-`Attention.Config.flops_per_token(seq_len)` over their attention configurations.
-Attention families own their quadratic, windowed, recurrent, or compressed formula.
-MTP adds attention and repeated output-head uses. Multimodal models add encoder
-estimates from image/video grids or padded waveform lengths. Encoders own their
-internal token counts; adapters run per output token, and audio stages use their
-progressively downsampled lengths.
-
-Every encoder uses `build_flops_estimator()` to return a callable accepting a raw
-microbatch. Each multimodal config's `build_flops_estimator()` explicitly excludes
-encoder-owned modules from the inherited decoder estimate and adds its encoder
-estimates. Muse includes its vision adapter, projection, and perception norm;
-Spark also counts the norm's audio use. The resulting callable retains only the
-estimators, not the model modules. Kimi's inherited decoder estimate includes MTP.
-
-`Config.get_parameter_counts(model)` reports total and active parameters. Total
-parameters count unique tensors, including tied weights once. Active parameters
-weight routed experts by their active expert ratio and include embeddings and
-encoders. FLOPs separately exclude lookup embeddings unless they share the output
-projection's weight.
-
-These are architectural estimates. Decoder attention uses the configured sequence
-length rather than individual packed document lengths. Causal sparsity,
-recomputation, and elementwise operations are omitted. Flux and the Transformers
-modeling backend retain their specialized formulas.
+`Config.get_parameter_counts(model)` reports unique total and architecturally
+active parameters, including embeddings and encoders and weighting routed experts
+by their active ratio. FLOPs exclude lookup-only embeddings separately.
+Decoder attention uses configured sequence length rather than packed document
+lengths. Causal sparsity, recomputation, and elementwise operations are omitted.

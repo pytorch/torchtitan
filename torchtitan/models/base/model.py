@@ -106,10 +106,11 @@ class BaseModel(Module, ABC):
         An empty ``regions`` list runs named regions eagerly.
         """
 
-        def get_parameter_counts(self, model: Module) -> tuple[int, int]:
-            from torchtitan.models.common.flops import get_parameter_counts
-
-            return get_parameter_counts(model)
+        @staticmethod
+        def get_parameter_counts(model: Module) -> tuple[int, int]:
+            """Return unique total and active parameters for a dense model."""
+            num_parameters = sum(param.numel() for param in model.parameters())
+            return num_parameters, num_parameters
 
         @abstractmethod
         def build_flops_estimator(

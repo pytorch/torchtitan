@@ -150,6 +150,13 @@ class Decoder(BaseModel):
                 None,
             )
 
+        @staticmethod
+        def get_parameter_counts(model: Module) -> tuple[int, int]:
+            """Return total and architecturally active native decoder parameters."""
+            from torchtitan.models.common.flops import get_parameter_counts
+
+            return get_parameter_counts(model)
+
         def build_flops_estimator(
             self,
             model: Module,
