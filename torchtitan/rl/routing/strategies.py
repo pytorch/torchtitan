@@ -41,6 +41,9 @@ class RoutingStrategy(Configurable, ABC):
     ``InterGeneratorRouter.Config(strategy=MyRoutingStrategy.Config())``.
     """
 
+    num_repins: int = 0
+    """Sessions moved off their pinned candidate so far (sticky routing)."""
+
     def __init__(self, config: Configurable.Config):
         # Stateless by default; stateful strategies override __init__.
         del config
@@ -209,6 +212,8 @@ class StickySessionRoutingStrategy(RoutingStrategy):
 
         # New session, or the pinned candidate is gone or overloaded: (re)pin to the fallback's choice.
         chosen = self._fallback_strategy.choose(routing_ctx, candidates)
+        if sticky_candidate is not None and chosen is not sticky_candidate:
+            self.num_repins += 1
         self._sessions[routing_ctx.session_id] = chosen
         # End of the dict means it's the most-recently-used session.
         self._sessions.move_to_end(routing_ctx.session_id)

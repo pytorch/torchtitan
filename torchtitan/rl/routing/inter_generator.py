@@ -16,6 +16,7 @@ from typing import Any
 from torchtitan.config import Configurable
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.system import ServiceHandle
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.routing.strategies import (
     RoutingStrategy,
     StickySessionRoutingStrategy,
@@ -113,6 +114,8 @@ class InterGeneratorRouter(Configurable):
             h.serving.set()
 
         self._strategy = config.strategy.build()
+        # `_strategy.num_repins` at the last `get_session_kv_metrics`.
+        self._num_repins_logged = 0
         self._serving = asyncio.Event()
         self._refresh_serving_status()
 
@@ -313,6 +316,22 @@ class InterGeneratorRouter(Configurable):
     async def release_groups(self, group_ids: list[int]) -> None:
         """Tell every generator that these rollout groups are finished."""
         await self._fanout("release_groups", group_ids)
+
+    async def get_session_kv_metrics(self) -> list[m.Metric]:
+        """Every generator's session-KV metrics (from its rank 0) and the sessions re-pinned to
+        another generator, since the last call."""
+        per_generator = await asyncio.gather(
+            *(h.rank0_actor.get_session_kv_metrics.call_one() for h in self._generators)
+        )
+        num_repins = self._strategy.num_repins
+        repinned_sessions = num_repins - self._num_repins_logged
+        self._num_repins_logged = num_repins
+        return [
+            *(metric for metrics in per_generator for metric in metrics),
+            m.Metric(
+                "generator/session_kv/repinned_sessions", m.Sum(repinned_sessions)
+            ),
+        ]
 
     async def close_generators(self) -> list[Any | BaseException]:
         """Close every generator, returning each one's result or exception."""

@@ -244,6 +244,7 @@ def test_evict_until_free_releases_the_session_idle_longest_first(manager):
     holder.after_step()
     # Only "old" was released: releasing "new" now frees the rest.
     assert holder.num_sessions == 1 and holder.num_evicted == 1
+    assert holder.num_stall_evicted == 0
     holder.release(session_ids=["new"])
     assert holder.num_sessions == 0
 
@@ -314,6 +315,66 @@ def test_next_turn_moves_the_hold_and_release_frees_everything(manager):
 
     holder.release(session_ids=["s"])
     assert manager.block_pool.get_num_free_blocks() == free_before
+
+
+@pytest.mark.parametrize(
+    "cpu_hit_tokens, expected",
+    [(0, (48, 0, 16)), (16, (48, 16, 0))],
+)
+def test_a_later_turn_counts_its_prefix_as_gpu_hit_cpu_hit_or_recomputed(
+    manager, cpu_hit_tokens, expected
+):
+    """Turn 1 computed 64 tokens in full blocks; the hold keeps its prompt end (48)."""
+    requests = {}
+    holder = _holder(manager, requests)
+    turn1 = _request("t1", list(range(50)))
+    requests["t1"] = turn1
+    holder.track("t1", session_id="s", group_id=0)
+    _prefill(manager, turn1)
+    holder.after_step()
+    for t in range(20):
+        _schedule(manager, turn1, 1, sample=100 + t)
+    manager.free(turn1)
+    del requests["t1"]
+    holder.after_step()
+    # A session's first turn has nothing to reuse.
+    assert holder.gpu_hit_prefix_tokens == holder.recomputed_prefix_tokens == 0
+
+    turn2 = _request("t2", list(turn1.all_token_ids) + [5, 6, 7])
+    requests["t2"] = turn2
+    holder.track("t2", session_id="s", group_id=0)
+    gpu_hit_tokens = _prefill(manager, turn2)
+    # vLLM fills these at the first schedule (`_prefill` stands in for it); a CPU load extends
+    # the GPU hit.
+    turn2.prefill_stats.set(
+        num_prompt_tokens=turn2.num_prompt_tokens,
+        num_local_cached_tokens=gpu_hit_tokens,
+        num_external_cached_tokens=cpu_hit_tokens,
+    )
+    holder.after_step()
+
+    assert gpu_hit_tokens == 48
+    assert (
+        holder.gpu_hit_prefix_tokens,
+        holder.cpu_hit_prefix_tokens,
+        holder.recomputed_prefix_tokens,
+    ) == expected
+
+
+def test_held_blocks_count_a_block_two_siblings_hold_once(manager):
+    requests = {}
+    holder = _holder(manager, requests)
+    _finished_turn(manager, holder, requests, "a", list(range(50)))
+    held_by_a = holder.num_held_blocks
+    # The same prompt: "b" hits and holds the blocks "a" holds.
+    _finished_turn(manager, holder, requests, "b", list(range(50)))
+
+    assert held_by_a > 0
+    assert holder.num_sessions == 2 and holder.num_held_blocks == held_by_a
+    holder.release(session_ids=["a"])
+    assert holder.num_held_blocks == held_by_a
+    holder.release(session_ids=["b"])
+    assert holder.num_held_blocks == 0
 
 
 # --- CPU offload: ended sessions' chunks are evicted first ---
@@ -459,6 +520,17 @@ def test_offload_without_hold_holds_nothing_and_evicts_a_finished_group_first(
     assert _eviction_order(cpu_tier)[-1] == _CHURN
 
 
+def test_cpu_used_fraction_counts_stored_chunks(monkeypatch, manager):
+    """vLLM's usage gauge counts only chunks a transfer pins, so a full tier reads 0 there."""
+    cpu_tier = _cpu_tier()
+    holder = _offload_holder(monkeypatch, manager, {}, cpu_tier, hold_gpu_blocks=False)
+    _store(cpu_tier, [OffloadKey(bytes([i])) for i in range(250)])
+
+    assert holder.cpu_kv_offload.used_fraction() == 0.25
+    vllm_gauges = cpu_tier.get_stats().reduce()
+    assert vllm_gauges["vllm:kv_offload_cpu_cache_usage_perc"] == 0.0
+
+
 def test_free_floor_release_keeps_the_cpu_chunks_of_a_live_session(
     monkeypatch, manager
 ):
@@ -530,6 +602,7 @@ def test_a_waiting_turn_gets_room_when_held_sessions_fill_the_pool(manager, queu
         holder.after_step()
     else:
         pytest.fail("held sessions stalled the engine: the waiting turn never fit")
+    assert holder.num_stall_evicted == holder.num_evicted > 0
 
 
 def test_a_turn_loading_kv_from_cpu_releases_nothing(manager):

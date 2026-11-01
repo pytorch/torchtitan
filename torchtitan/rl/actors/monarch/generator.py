@@ -13,6 +13,7 @@ from monarch.actor import Actor, Channel, concurrent_endpoint, context, current_
 from torchtitan.rl.generator.generator import Generator
 
 from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.types import Completion
 
 
@@ -78,6 +79,10 @@ class _GeneratorActorEndpoints:
     @concurrent_endpoint
     async def release_sessions(self, session_ids: list[str]) -> None:
         await super().release_sessions(session_ids)
+
+    @concurrent_endpoint
+    async def get_session_kv_metrics(self) -> list[m.Metric]:
+        return await super().get_session_kv_metrics()
 
     @concurrent_endpoint
     async def load_model_state_dict(self, version: int) -> None:

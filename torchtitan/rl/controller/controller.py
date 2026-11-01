@@ -1247,6 +1247,9 @@ class Controller(Configurable):
             # rollout related metrics here, or move all of them to the rollouter.
             time_metrics = step_timer.flush()
             with sl.log_trace_span("metrics_log"):
+                session_kv_metrics = (
+                    await self.generator_router.get_session_kv_metrics.call_one()
+                )
                 self.metrics_processor.log(
                     step=step,
                     is_validation=False,
@@ -1261,6 +1264,7 @@ class Controller(Configurable):
                             for key, value in optimizer_result.metrics.items()
                         ],
                         *self._group_buffer.metrics(),
+                        *session_kv_metrics,
                         *time_metrics,
                         *policy_age_panel,
                         # Background push/pull work time; the trainer's wait for it is timing/step/blocking_*.

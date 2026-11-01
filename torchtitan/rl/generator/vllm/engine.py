@@ -47,6 +47,7 @@ from torchtitan.rl.generator.vllm.stat_logger import (
     StatLoggerContext,
     VllmOtelStatLogger,
 )
+from torchtitan.rl.observability import metrics as m
 from torchtitan.tools.utils import has_cuda_capability
 
 logger = logging.getLogger(__name__)
@@ -191,12 +192,21 @@ class VLLMEngine(GenerationEngine):
                     output_dir=output_dir,
                 )
             )
+        # Rank 0 adds up its engine's CPU KV store bytes for `session_kv_metrics`.
+        holder = self._session_kv_holder
+        if holder is not None and holder.cpu_kv_offload is not None and rank == 0:
+            stat_loggers = [
+                *(stat_loggers or []),
+                holder.cpu_kv_offload.stat_logger,
+            ]
         logger.info("Initializing LLMEngine from EngineArgs...")
         self._engine = LLMEngine.from_engine_args(
             engine_args, stat_loggers=stat_loggers
         )
         if self._session_kv_holder is not None:
             self._session_kv_holder.attach(self._engine)
+        # Running totals (holder, CPU offload) at the last `session_kv_metrics`.
+        self._session_kv_totals: dict[str, int] = {}
 
     @staticmethod
     def _setup(
@@ -420,6 +430,45 @@ class VLLMEngine(GenerationEngine):
                 self._session_kv_holder.num_sessions,
                 self._session_kv_holder.num_evicted,
             )
+
+    def session_kv_metrics(self) -> list[m.Metric]:
+        """This rank's session-KV metrics: levels now, counts since the last call.
+
+        Example:
+
+            call 1: holder.num_evicted 3, num_sessions 80  ->  evicted_sessions 3, held_sessions 80
+            call 2: holder.num_evicted 5, num_sessions 78  ->  evicted_sessions 2, held_sessions 78
+        """
+        holder = self._session_kv_holder
+        if holder is None:
+            return []
+        # TODO: with DP > 1 this is DP rank 0's engine only; gather every DP rank's holder.
+        scheduler = self._engine.engine_core.engine_core.scheduler
+        levels = {"gpu_used_fraction": scheduler.kv_cache_manager.usage}
+        totals = {
+            "gpu_hit_prefix_tokens": holder.gpu_hit_prefix_tokens,
+            "cpu_hit_prefix_tokens": holder.cpu_hit_prefix_tokens,
+            "recomputed_prefix_tokens": holder.recomputed_prefix_tokens,
+        }
+        if self.config.session_kv_holder.hold_gpu_blocks:
+            levels["held_sessions"] = holder.num_sessions
+            levels["held_blocks"] = holder.num_held_blocks
+            totals["evicted_sessions"] = holder.num_evicted
+            totals["stall_evicted_sessions"] = holder.num_stall_evicted
+        offload = holder.cpu_kv_offload
+        if offload is not None:
+            levels["cpu_used_fraction"] = offload.used_fraction()
+            totals["cpu_store_bytes"] = offload.store_bytes
+        counts = {
+            key: total - self._session_kv_totals.get(key, 0)
+            for key, total in totals.items()
+        }
+        self._session_kv_totals = totals
+        return [
+            m.Metric(f"generator/session_kv/{key}", metric_type(value))
+            for key, value in (levels | counts).items()
+            for metric_type in (m.Mean, m.Max)
+        ]
 
     def load_prefetched_model_state_dict(self) -> None:
         """Copy the prefetched model state dict from pinned CPU memory into the model, and
