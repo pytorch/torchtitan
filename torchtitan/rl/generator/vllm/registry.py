@@ -137,7 +137,7 @@ def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
 
     n_heads, n_kv_heads, head_dim, _ = get_attention_dimensions(attn, cfg.dim)
     rope = getattr(attn, "rope", None)
-    rope_theta = None if rope is None else rope.theta
+    rope_theta = None if rope is None or rope.cache is None else rope.cache.theta
 
     hf: dict[str, Any] = {
         # Value used

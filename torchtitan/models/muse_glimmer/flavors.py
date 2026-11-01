@@ -222,9 +222,9 @@ def _build_muse_glimmer_attention(
         ),
         inner_attention=inner_attention,
         rope=ComplexRoPE.Config(
-            dim=head_dim,
-            max_context_length=max_context_length,
-            theta=_ROPE_THETA,
+            cache=ComplexRoPE.CacheConfig(
+                dim=head_dim, max_context_length=max_context_length, theta=_ROPE_THETA
+            ),
             sharding_config=rope_cache_sharding_config(),
         )
         if _layer_use_rope(layer_id, n_layers)

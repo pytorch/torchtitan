@@ -38,7 +38,7 @@ class TestVisionAttention(unittest.TestCase):
             wk=Linear.Config(in_features=dim, out_features=dim),
             wv=Linear.Config(in_features=dim, out_features=dim),
             proj=Linear.Config(in_features=dim, out_features=dim),
-            rope=ComplexRoPE.Config(dim=dim // num_heads),
+            rope=ComplexRoPE.Config(),
         )
 
         class OffsetRoPE(ComplexRoPE):
@@ -46,8 +46,15 @@ class TestVisionAttention(unittest.TestCase):
             class Config(ComplexRoPE.Config):
                 pass
 
-            @staticmethod
-            def apply_rotary_emb(query_THDh, key_THDh, rope_cache, *, inverse=False):
+            def forward(
+                self,
+                query_THDh,
+                key_THDh=None,
+                positions=None,
+                *,
+                rope_cache=None,
+                inverse=False,
+            ):
                 query_THDh = query_THDh + 1
                 return query_THDh if key_THDh is None else (query_THDh, key_THDh)
 

@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from typing import Literal
 
 import spmd_types as spmd
@@ -86,15 +86,16 @@ class RoPE(Module):
     complex exponential caches and ``CosSinRoPE.Config`` for concatenated
     cosine/sine caches.
 
-    With max_context_length, the module owns a cache and accepts positions.
-    Without it, callers supply an already prepared rope_cache to forward.
+    With a cache config, the module owns a cache and accepts positions.
+    Otherwise, callers supply an already prepared rope_cache to forward.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class CacheConfig:
+        """Parameters for the module's optional internal cache."""
+
         dim: int
-        max_context_length: int | None = None
-        """Omit to use an external cache without allocating an internal one."""
+        max_context_length: int
         theta: float = 10000.0
         scaling: Literal["none", "llama", "yarn"] = "none"
         # llama scaling params
@@ -109,28 +110,15 @@ class RoPE(Module):
         original_seq_len: int = 4096
         truncate: bool = True
 
-        def __post_init__(self) -> None:
-            if self.max_context_length is not None:
-                return
-            # The remaining base RoPE fields configure internal cache generation.
-            unused = [
-                f.name
-                for f in fields(RoPE.Config)
-                if f.name
-                not in {"dim", "max_context_length", "param_init", "sharding_config"}
-                and getattr(self, f.name) != f.default
-            ]
-            if unused:
-                raise ValueError(
-                    f"RoPE cache generation options {unused} require "
-                    "max_context_length. Configure the provider of an external "
-                    "rope_cache instead."
-                )
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        cache: "RoPE.CacheConfig | None" = None
+        """Omit when forward receives an already prepared rope_cache."""
 
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
-        cache = None if config.max_context_length is None else self._precompute_cache()
+        cache = None if config.cache is None else self._precompute_cache()
         self.register_buffer("cache", cache, persistent=False)
 
     def _precompute_cache(self) -> torch.Tensor:
@@ -196,18 +184,12 @@ class RoPE(Module):
                 raise ValueError(
                     "positions and rope_cache cannot be supplied together."
                 )
-            if query.shape[-1] != self.config.dim or (
-                key is not None and key.shape[-1] != self.config.dim
-            ):
-                raise ValueError(
-                    "query and key head widths must match RoPE config.dim."
-                )
             # Vision previously called the static operation outside local_compile.
             return self.apply_rotary_emb(query, key, rope_cache, inverse=inverse)
         if self.cache is None:
             raise ValueError(
                 "RoPE has no internal cache. Supply rope_cache or configure "
-                "max_context_length."
+                "a cache in RoPE.Config."
             )
         return self._forward_cached(query, key, positions, inverse=inverse)
 
@@ -274,10 +256,10 @@ class ComplexRoPE(RoPE):
         Returns:
             Cache of shape ``(max_context_length, dim / 2)``.
         """
-        cfg = self.config
+        cfg = self.config.cache
+        assert cfg is not None
         dim = cfg.dim
         end = cfg.max_context_length
-        assert end is not None
         theta = cfg.theta
 
         freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
@@ -459,10 +441,10 @@ class CosSinRoPE(RoPE):
         Returns:
             Cache of shape ``(max_context_length, dim * 2)``.
         """
-        cfg = self.config
+        cfg = self.config.cache
+        assert cfg is not None
         dim = cfg.dim
         max_context_length = cfg.max_context_length
-        assert max_context_length is not None
         base = cfg.theta
 
         if cfg.scaling == "llama":

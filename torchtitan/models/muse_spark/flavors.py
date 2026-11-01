@@ -422,9 +422,11 @@ def _attention_config(
         inner_attention=inner_attention,
         rope=(
             ComplexRoPE.Config(
-                dim=head_dim,
-                max_context_length=max_context_length,
-                theta=_ROPE_THETA,
+                cache=ComplexRoPE.CacheConfig(
+                    dim=head_dim,
+                    max_context_length=max_context_length,
+                    theta=_ROPE_THETA,
+                ),
                 sharding_config=rope_cache_sharding_config(),
             )
             if use_rope
@@ -584,7 +586,7 @@ def _muse_spark_navit_attention_config(
             bias=True,
             sharding_config=vision_rowwise_sharding_config(),
         ),
-        rope=ComplexRoPE.Config(dim=latent_dim // num_heads),
+        rope=ComplexRoPE.Config(),
         sharding_config=vision_attention_sharding_config(rope_cache_dp=spmd.V),
     )
 

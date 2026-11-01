@@ -59,7 +59,9 @@ class TestFusedMLAOverrideConfig(unittest.TestCase):
             wo=Linear.Config(in_features=64, out_features=64),
             q_norm=RMSNorm.Config(normalized_shape=1),
             kv_norm=RMSNorm.Config(normalized_shape=32),
-            rope=ComplexRoPE.Config(dim=16, max_context_length=128),
+            rope=ComplexRoPE.Config(
+                cache=ComplexRoPE.CacheConfig(dim=16, max_context_length=128)
+            ),
             inner_attention=MLAAttention.Config(
                 wkv_b=Linear.Config(in_features=32, out_features=128),
                 packed_kv_head_dim=32,
@@ -95,7 +97,7 @@ class TestFusedMLAOverrideConfig(unittest.TestCase):
     def test_non_cp_backend_still_builds(self):
         config = fused_mla(self._attention_config())
         self.assertIsInstance(config.build(), FusedMLAAttention)
-        config.rope = ComplexRoPE.Config(dim=16)
+        config.rope = ComplexRoPE.Config()
         with self.assertRaisesRegex(ValueError, "requires an internal RoPE cache"):
             config.build()
 
@@ -202,13 +204,15 @@ class TestFusedMLANumerics(unittest.TestCase):
         FlexInnerAttention.inductor_configs["coordinate_descent_tuning"] = False
         cuda = torch.device("cuda")
         self.rope = ComplexRoPE.Config(
-            dim=self.rope_dim,
-            max_context_length=128,
-            scaling="yarn",
-            rope_factor=40.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=4096,
+            cache=ComplexRoPE.CacheConfig(
+                dim=self.rope_dim,
+                max_context_length=128,
+                scaling="yarn",
+                rope_factor=40.0,
+                beta_fast=32.0,
+                beta_slow=1.0,
+                original_seq_len=4096,
+            ),
         ).build()
         self.rope = self.rope.to(cuda)
         self.positions = torch.arange(self.num_tokens, device=cuda)

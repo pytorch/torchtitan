@@ -30,7 +30,10 @@ def _with_layer_theta(
 ) -> Llama3Model.Config:
     layers = list(config.layers)
     block = layers[layer]
-    rope = dataclasses.replace(block.attention.rope, theta=theta)
+    rope = ComplexRoPE.Config(
+        cache=dataclasses.replace(block.attention.rope.cache, theta=theta),
+        sharding_config=block.attention.rope.sharding_config,
+    )
     attention = dataclasses.replace(block.attention, rope=rope)
     layers[layer] = dataclasses.replace(block, attention=attention)
     return dataclasses.replace(config, layers=layers)
@@ -51,7 +54,7 @@ class TestRoPECacheTying(unittest.TestCase):
         """Mirror the trainer: build on meta, ``to_empty()``, then ``init_states()``."""
         with torch.device("meta"):
             model = Llama3Model(_make_config())
-            model.external_rope = ComplexRoPE.Config(dim=64).build()
+            model.external_rope = ComplexRoPE.Config().build()
         model.to_empty(device="cpu")
         model.init_states()
         self.assertIsNone(model.external_rope.cache)

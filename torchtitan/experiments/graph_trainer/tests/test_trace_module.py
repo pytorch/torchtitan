@@ -1912,9 +1912,9 @@ class TestTraceModels(unittest.TestCase):
                     qk_rope_head_dim=rope_dim,
                     v_head_dim=v_head_dim,
                     rope=ComplexRoPE.Config(
-                        dim=rope_dim,
-                        max_context_length=seq_len,
-                        scaling="none",
+                        cache=ComplexRoPE.CacheConfig(
+                            dim=rope_dim, max_context_length=seq_len, scaling="none"
+                        ),
                     ),
                     q_norm=RMSNorm.Config(normalized_shape=1),
                     kv_norm=RMSNorm.Config(normalized_shape=kv_lora_rank),

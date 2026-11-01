@@ -53,8 +53,13 @@ class DeepSeekMLAAttention(Attention):
         def softmax_scale(self) -> float:
             qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
             scale = qk_head_dim**-0.5
-            if self.rope.scaling == "yarn" and self.rope.rope_factor > 1.0:
-                mscale = 0.1 * self.mscale * math.log(self.rope.rope_factor) + 1.0
+            cache = self.rope.cache
+            if (
+                cache is not None
+                and cache.scaling == "yarn"
+                and cache.rope_factor > 1.0
+            ):
+                mscale = 0.1 * self.mscale * math.log(cache.rope_factor) + 1.0
                 scale = scale * mscale * mscale
             return scale
 
