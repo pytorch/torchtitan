@@ -84,10 +84,9 @@ def test_hybrid_layers_have_one_attention_config(model):
         assert layer.attention.n_heads > 0
         if isinstance(layer.attention, GDN.Config):
             assert isinstance(layer.attention, LinearAttention.Config)
-            heads_per_key = layer.attention.n_heads // layer.attention.n_key_heads
-            assert layer.attention.in_proj.out_features == layer.attention.n_key_heads * (
-                2 * layer.attention.key_head_dim
-                + heads_per_key * (2 * layer.attention.value_head_dim + 2)
+            rows_per_key_head = sum(layer.attention.in_proj_split_sizes)
+            assert layer.attention.in_proj.out_features == (
+                layer.attention.n_key_heads * rows_per_key_head
             )
         elif isinstance(layer.attention, KDA.Config):
             assert isinstance(layer.attention, LinearAttention.Config)

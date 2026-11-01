@@ -355,15 +355,15 @@ class StateDictAdapter(BaseStateDictAdapter):
         if fused_key not in state_dict:
             return
         tensor = state_dict.pop(fused_key)
-        # A dim-0 shard may split a key-head group, so shard the columns instead (a full
-        # copy per rank would be 15 GiB fp32 at 27B).
+        # A dim-0 shard may split a key-head group, so shard the columns instead
+        # (replicating every layer's in_proj would cost 15 GiB per rank at 27B, fp32).
         if isinstance(tensor, DTensor):
             self._qkv_linear_sharding[fused_key] = (
                 tensor.device_mesh,
                 tensor.placements,
             )
             tensor = tensor.redistribute(
-                tensor.device_mesh, [Shard(tensor.ndim - 1)] * tensor.device_mesh.ndim
+                tensor.device_mesh, [Shard(1)] * tensor.device_mesh.ndim
             )
         grouped = tensor.reshape(-1, sum(split_sizes), tensor.shape[-1])
         for name, projection in zip(
@@ -391,7 +391,7 @@ class StateDictAdapter(BaseStateDictAdapter):
             projections = [
                 tensor.redistribute(
                     tensor.device_mesh,
-                    [Shard(tensor.ndim - 1)] * tensor.device_mesh.ndim,
+                    [Shard(1)] * tensor.device_mesh.ndim,
                 )
                 for tensor in projections
             ]

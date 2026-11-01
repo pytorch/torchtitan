@@ -82,19 +82,20 @@ def test_qwen36_35b_a3b_matches_hugging_face_config() -> None:
 
 
 @pytest.mark.parametrize("heads_per_key", [1, 3])
-def test_gdn_split_in_proj_returns_contiguous_heads(heads_per_key: int) -> None:
-    # The GDN kernels need contiguous heads; with one value head per key head the
-    # split's views would be strided.
-    split_sizes = [
-        4,
-        4,
-        2 * heads_per_key,
-        2 * heads_per_key,
-        heads_per_key,
-        heads_per_key,
-    ]
-    projected_TC = torch.randn(5, 2 * sum(split_sizes))
-    outputs = _split_in_proj(projected_TC, split_sizes, 2)
+def test_gdn_split_in_proj(heads_per_key: int) -> None:
+    # 5 tokens, 2 key heads; at one value head per key head (0.8B, 2B) a, b and gate
+    # would be strided views without the split's copies.
+    r, T, G = heads_per_key, 5, 2
+    q, k = torch.randn(T, G, 4), torch.randn(T, G, 4)
+    v, z = torch.randn(T, G, 2 * r), torch.randn(T, G, 2 * r)
+    a, b = torch.randn(T, G, r), torch.randn(T, G, r)
+    projected_TC = torch.cat([q, k, v, z, a, b], dim=-1).flatten(1)
+    outputs = _split_in_proj(projected_TC, [4, 4, 2 * r, 2 * r, r, r], 2)
+    mixed_qkv_TC, a_TH, b_TH, gate_THV = outputs
+    qkv = torch.cat([q.flatten(1), k.flatten(1), v.flatten(1)], dim=-1)
+    assert torch.equal(mixed_qkv_TC, qkv)
+    assert torch.equal(a_TH, a.flatten(1)) and torch.equal(b_TH, b.flatten(1))
+    assert torch.equal(gate_THV, z.reshape(T, G * r, 2))
     assert all(output.is_contiguous() for output in outputs)
 
 
