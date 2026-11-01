@@ -171,6 +171,7 @@ def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -
         non_spec_query_start_loc=torch.arange(5, device=device, dtype=torch.int32),
         non_spec_state_indices_tensor=state_indices,
         has_initial_state=has_initial_state,
+        state_block_column=torch.zeros(4, 1, device=device, dtype=torch.long),
     )
     context = ForwardContext(
         no_compile_layers={}, attn_metadata={"gdn": metadata}, slot_mapping={}
