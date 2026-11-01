@@ -207,6 +207,7 @@ def _vision_encoder_config(
                 sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
             ),
             proj=_vision_row_parallel_linear(dim, dim),
+            rope=ComplexRoPE.Config(),
             inner_attention=FlexInnerAttention.Config(
                 sharding_config=vision_inner_attention_sharding_config()
             ),
@@ -315,14 +316,16 @@ def _debugmodel(
         router_score_func=Softmax.Config(),
         attn_backend=attn_backend,
         rope=ComplexRoPE.Config(
-            dim=rope_dim,
-            max_context_length=seq_len,
-            theta=10000.0,
-            scaling="yarn",
-            rope_factor=40.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=4096,
+            cache=ComplexRoPE.CacheConfig(
+                dim=rope_dim,
+                max_context_length=seq_len,
+                theta=10000.0,
+                scaling="yarn",
+                rope_factor=40.0,
+                beta_fast=32.0,
+                beta_slow=1.0,
+                original_seq_len=4096,
+            ),
         ),
         first_layer_sharding_config=_first_layer_sharding(
             enable_sp=enable_sp, multimodal=True
@@ -407,9 +410,9 @@ def _moonlight_16b_a3b_config(
         router_route_norm=True,
         attn_backend=attn_backend,
         rope=ComplexRoPE.Config(
-            dim=64,
-            max_context_length=max_context_length,
-            theta=rope_theta,
+            cache=ComplexRoPE.CacheConfig(
+                dim=64, max_context_length=max_context_length, theta=rope_theta
+            ),
         ),
         first_layer_sharding_config=_first_layer_sharding(
             enable_sp=enable_sp, multimodal=multimodal
@@ -540,14 +543,16 @@ def _kimi_k2_5(
         router_route_norm=True,
         attn_backend=attn_backend,
         rope=ComplexRoPE.Config(
-            dim=rope_dim,
-            max_context_length=seq_len,
-            theta=50000.0,
-            scaling="yarn",
-            rope_factor=64.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=4096,
+            cache=ComplexRoPE.CacheConfig(
+                dim=rope_dim,
+                max_context_length=seq_len,
+                theta=50000.0,
+                scaling="yarn",
+                rope_factor=64.0,
+                beta_fast=32.0,
+                beta_slow=1.0,
+                original_seq_len=4096,
+            ),
         ),
         first_layer_sharding_config=_first_layer_sharding(
             enable_sp=enable_sp, multimodal=True

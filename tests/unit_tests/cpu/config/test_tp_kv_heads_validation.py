@@ -84,10 +84,12 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
                     wo_param_init=_LINEAR_INIT,
                     inner_attention=FlexInnerAttention.Config(),
                     rope=ComplexRoPE.Config(
-                        dim=_DIM // n_heads,
-                        max_context_length=4096,
-                        theta=500000,
-                        scaling="llama",
+                        cache=ComplexRoPE.CacheConfig(
+                            dim=_DIM // n_heads,
+                            max_context_length=4096,
+                            theta=500000,
+                            scaling="llama",
+                        ),
                     ),
                     enable_sp=True,
                 ),

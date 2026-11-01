@@ -27,6 +27,10 @@ class MRoPE(CosSinRoPE):
         mrope_section: list[int] = field(default_factory=lambda: [24, 20, 20])
 
     def __init__(self, config: Config):
+        if config.cache is None:
+            raise ValueError(
+                "MRoPE requires an internal cache for multi-axis positions."
+            )
         if len(config.mrope_section) != 3:
             raise ValueError(
                 f"mrope_section must have 3 entries, got {config.mrope_section}."
@@ -35,9 +39,9 @@ class MRoPE(CosSinRoPE):
             raise ValueError(
                 f"mrope_section entries must be non-negative, got {config.mrope_section}."
             )
-        if sum(config.mrope_section) != config.dim // 2:
+        if sum(config.mrope_section) != config.cache.dim // 2:
             raise ValueError(
-                f"mrope_section must sum to dim // 2 ({config.dim // 2}), "
+                f"mrope_section must sum to dim // 2 ({config.cache.dim // 2}), "
                 f"got {config.mrope_section}."
             )
         super().__init__(config)

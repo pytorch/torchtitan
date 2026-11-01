@@ -86,9 +86,9 @@ def _qwen3_moe_config(
             # test also runs forward and backward with the default flex backend.
             attn_backend="flex",
             rope=CosSinRoPE.Config(
-                dim=head_dim,
-                max_context_length=4096,
-                theta=1000000.0,
+                cache=CosSinRoPE.CacheConfig(
+                    dim=head_dim, max_context_length=4096, theta=1000000.0
+                ),
             ),
             enable_sp=enable_sp,
             enable_ep=enable_ep,

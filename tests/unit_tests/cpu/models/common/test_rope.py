@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import dataclasses
 import math
 import unittest
 from unittest.mock import patch
@@ -44,7 +43,11 @@ class TestApplyRotaryEmbCosSin(unittest.TestCase):
             self.num_tokens, 1, self.head_dim * 2, dtype=torch.float32
         )
         self.rope = CosSinRoPE(
-            CosSinRoPE.Config(dim=self.head_dim, max_context_length=self.num_tokens)
+            CosSinRoPE.Config(
+                cache=CosSinRoPE.CacheConfig(
+                    dim=self.head_dim, max_context_length=self.num_tokens
+                )
+            )
         )
 
     def test_output_dtype_matches_input(self):
@@ -121,7 +124,9 @@ class TestRoPEPositionBoundsComplex(unittest.TestCase):
         self.head_dim = 64
         self.max_context_length = 32
         rope_cfg = ComplexRoPE.Config(
-            dim=self.head_dim, max_context_length=self.max_context_length
+            cache=ComplexRoPE.CacheConfig(
+                dim=self.head_dim, max_context_length=self.max_context_length
+            )
         )
         self.rope = rope_cfg.build()
         self.assertIsInstance(self.rope, ComplexRoPE)
@@ -131,7 +136,17 @@ class TestRoPEPositionBoundsComplex(unittest.TestCase):
         xq = torch.randn(num_tokens, 4, self.head_dim)
         xk = torch.randn(num_tokens, 4, self.head_dim)
         positions = torch.arange(num_tokens) % 8
-        self.rope(xq, xk, positions)
+        expected = self.rope(xq, xk, positions)
+        external = ComplexRoPE.Config().build()
+        self.assertIsNone(external.cache)
+        cache = self.rope._reshape_cache(xq, positions)
+        torch.testing.assert_close(
+            external(xq, xk, rope_cache=cache), expected, rtol=0, atol=0
+        )
+        with self.assertRaisesRegex(ValueError, "no internal cache"):
+            external(xq, xk)
+        with self.assertRaisesRegex(ValueError, "cannot be supplied together"):
+            external(xq, xk, positions, rope_cache=cache)
 
     def test_out_of_range_positions_raises(self):
         num_tokens = 4
@@ -152,7 +167,9 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
         self.head_dim = 64
         self.max_context_length = 32
         rope_cfg = CosSinRoPE.Config(
-            dim=self.head_dim, max_context_length=self.max_context_length
+            cache=CosSinRoPE.CacheConfig(
+                dim=self.head_dim, max_context_length=self.max_context_length
+            )
         )
         self.rope = rope_cfg.build()
         self.assertIsInstance(self.rope, CosSinRoPE)
@@ -162,7 +179,14 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
         xq = torch.randn(num_tokens, 4, self.head_dim)
         xk = torch.randn(num_tokens, 4, self.head_dim)
         positions = torch.arange(num_tokens) % 8
-        self.rope(xq, xk, positions)
+        expected = self.rope(xq, xk, positions)
+        external = CosSinRoPE.Config().build()
+        torch.testing.assert_close(
+            external(xq, xk, rope_cache=self.rope._reshape_cache(xq, positions)),
+            expected,
+            rtol=0,
+            atol=0,
+        )
 
     def test_out_of_range_positions_raises(self):
         num_tokens = 4
@@ -177,6 +201,8 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
 
 class TestMRoPECache(unittest.TestCase):
     def test_rejects_invalid_sections(self):
+        with self.assertRaisesRegex(ValueError, "internal cache"):
+            MRoPE.Config().build()
         for sections, error in (
             ([2, 1], "must have 3 entries"),
             ([4, 3, -1], "must be non-negative"),
@@ -185,16 +211,14 @@ class TestMRoPECache(unittest.TestCase):
             with self.subTest(sections=sections):
                 with self.assertRaisesRegex(ValueError, error):
                     MRoPE.Config(
-                        dim=12,
-                        max_context_length=8,
+                        cache=MRoPE.CacheConfig(dim=12, max_context_length=8),
                         mrope_section=sections,
                     ).build()
 
     def test_rejects_invalid_position_width(self):
         num_tokens, head_dim = 2, 12
         rope = MRoPE.Config(
-            dim=head_dim,
-            max_context_length=8,
+            cache=MRoPE.CacheConfig(dim=head_dim, max_context_length=8),
             mrope_section=[2, 2, 2],
         ).build()
         x = torch.randn(num_tokens, 1, head_dim)
@@ -209,8 +233,7 @@ class TestMRoPECache(unittest.TestCase):
         num_tokens, n_heads = 6, 4
         head_dim = 12
         rope = MRoPE.Config(
-            dim=head_dim,
-            max_context_length=8,
+            cache=MRoPE.CacheConfig(dim=head_dim, max_context_length=8),
             mrope_section=[2, 2, 2],
         ).build()
         # (tokens, 3): per-token [temporal, height, width] positions.
@@ -263,38 +286,39 @@ class TestYaRNScaling(unittest.TestCase):
 
     def test_complex_rope_applies_below_original_sequence_length(self):
         yarn = ComplexRoPE.Config(
-            dim=64,
-            max_context_length=2048,
-            scaling="yarn",
-            rope_factor=40.0,
-            original_seq_len=4096,
+            cache=ComplexRoPE.CacheConfig(
+                dim=64,
+                max_context_length=2048,
+                scaling="yarn",
+                rope_factor=40.0,
+                original_seq_len=4096,
+            ),
         ).build()
-        unscaled = ComplexRoPE.Config(dim=64, max_context_length=2048).build()
+        unscaled = ComplexRoPE.Config(
+            cache=ComplexRoPE.CacheConfig(dim=64, max_context_length=2048)
+        ).build()
 
         self.assertFalse(torch.equal(yarn.cache[1], unscaled.cache[1]))
 
     def test_deepseek_mscale_applies_below_original_sequence_length(self):
-        from torchtitan.models.deepseek_v3 import build_model_config, MODEL_FLAVORS
+        from torchtitan.models.deepseek_v3 import build_model_config
         from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 
-        _, max_context_length = MODEL_FLAVORS["debugmodel"]
         model_config = build_model_config(
             "debugmodel",
             attn_backend="flex",
-            seq_len=max_context_length,
+            seq_len=2048,
             parallelism=ParallelismConfig(),
         )
         attention_config = model_config.layers[0].attention
         assert isinstance(attention_config, DeepSeekMLAAttention.Config)
-        attention_config.rope = dataclasses.replace(
-            attention_config.rope,
-            max_context_length=attention_config.rope.original_seq_len // 2,
-        )
+        cache = attention_config.rope.cache
+        assert cache is not None
+        self.assertLess(cache.max_context_length, cache.original_seq_len)
         attention = attention_config.build()
 
         expected_mscale = (
-            0.1 * attention_config.mscale * math.log(attention_config.rope.rope_factor)
-            + 1.0
+            0.1 * attention_config.mscale * math.log(cache.rope_factor) + 1.0
         )
         expected_softmax_scale = attention.qk_head_dim**-0.5 * expected_mscale**2
         self.assertAlmostEqual(attention.softmax_scale, expected_softmax_scale)
@@ -318,7 +342,9 @@ class TestPerLayerRoPECache(unittest.TestCase):
             ),
             wo=Linear.Config(in_features=dim, out_features=dim),
             inner_attention=VarlenInnerAttention.Config(),
-            rope=ComplexRoPE.Config(dim=head_dim, max_context_length=16),
+            rope=ComplexRoPE.Config(
+                cache=ComplexRoPE.CacheConfig(dim=head_dim, max_context_length=16)
+            ),
         ).build()
         attention.bfloat16()
 

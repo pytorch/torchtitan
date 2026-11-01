@@ -79,9 +79,9 @@ def _qwen3_8_2_4t_a95b(
         ),
         layers=_build_qwen35_moe_layers(
             rope=MRoPE.Config(
-                dim=rotary_dim,
-                max_context_length=seq_len,
-                theta=10_000_000.0,
+                cache=MRoPE.CacheConfig(
+                    dim=rotary_dim, max_context_length=seq_len, theta=10_000_000.0
+                ),
                 mrope_section=[11, 11, 10],
             ),
             attn_backend=attn_backend,

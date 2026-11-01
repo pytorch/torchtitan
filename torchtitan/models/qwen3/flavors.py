@@ -253,9 +253,9 @@ def _debugmodel(
             hidden_dim=3072,
             attn_backend=attn_backend,
             rope=CosSinRoPE.Config(
-                dim=head_dim,
-                max_context_length=seq_len,
-                theta=1000000.0,
+                cache=CosSinRoPE.CacheConfig(
+                    dim=head_dim, max_context_length=seq_len, theta=1000000.0
+                ),
             ),
             enable_sp=parallelism.enable_sequence_parallel,
         ),
@@ -303,9 +303,9 @@ def _0_6b(
             hidden_dim=3072,
             attn_backend=attn_backend,
             rope=CosSinRoPE.Config(
-                dim=head_dim,
-                max_context_length=seq_len,
-                theta=1000000.0,
+                cache=CosSinRoPE.CacheConfig(
+                    dim=head_dim, max_context_length=seq_len, theta=1000000.0
+                ),
             ),
             enable_sp=parallelism.enable_sequence_parallel,
         ),
@@ -353,9 +353,9 @@ def _1_7b(
             hidden_dim=6144,
             attn_backend=attn_backend,
             rope=CosSinRoPE.Config(
-                dim=head_dim,
-                max_context_length=seq_len,
-                theta=1000000.0,
+                cache=CosSinRoPE.CacheConfig(
+                    dim=head_dim, max_context_length=seq_len, theta=1000000.0
+                ),
             ),
             enable_sp=parallelism.enable_sequence_parallel,
         ),
@@ -403,9 +403,9 @@ def _4b(
             hidden_dim=9728,
             attn_backend=attn_backend,
             rope=CosSinRoPE.Config(
-                dim=head_dim,
-                max_context_length=seq_len,
-                theta=1000000.0,
+                cache=CosSinRoPE.CacheConfig(
+                    dim=head_dim, max_context_length=seq_len, theta=1000000.0
+                ),
             ),
             enable_sp=parallelism.enable_sequence_parallel,
         ),
@@ -452,9 +452,9 @@ def _8b(
             hidden_dim=12288,
             attn_backend=attn_backend,
             rope=CosSinRoPE.Config(
-                dim=head_dim,
-                max_context_length=seq_len,
-                theta=1000000.0,
+                cache=CosSinRoPE.CacheConfig(
+                    dim=head_dim, max_context_length=seq_len, theta=1000000.0
+                ),
             ),
             enable_sp=parallelism.enable_sequence_parallel,
         ),
@@ -501,9 +501,9 @@ def _14b(
             hidden_dim=17408,
             attn_backend=attn_backend,
             rope=CosSinRoPE.Config(
-                dim=head_dim,
-                max_context_length=seq_len,
-                theta=1000000.0,
+                cache=CosSinRoPE.CacheConfig(
+                    dim=head_dim, max_context_length=seq_len, theta=1000000.0
+                ),
             ),
             enable_sp=parallelism.enable_sequence_parallel,
         ),
@@ -550,9 +550,9 @@ def _32b(
             hidden_dim=25600,
             attn_backend=attn_backend,
             rope=CosSinRoPE.Config(
-                dim=head_dim,
-                max_context_length=seq_len,
-                theta=1000000.0,
+                cache=CosSinRoPE.CacheConfig(
+                    dim=head_dim, max_context_length=seq_len, theta=1000000.0
+                ),
             ),
             enable_sp=parallelism.enable_sequence_parallel,
         ),
@@ -607,9 +607,9 @@ def _debugmodel_moe(
             top_k=8,
             attn_backend=attn_backend,
             rope=CosSinRoPE.Config(
-                dim=head_dim,
-                max_context_length=seq_len,
-                theta=1000000.0,
+                cache=CosSinRoPE.CacheConfig(
+                    dim=head_dim, max_context_length=seq_len, theta=1000000.0
+                ),
             ),
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,
@@ -662,9 +662,9 @@ def _30b_a3b(
             top_k=8,
             attn_backend=attn_backend,
             rope=CosSinRoPE.Config(
-                dim=head_dim,
-                max_context_length=seq_len,
-                theta=1000000.0,
+                cache=CosSinRoPE.CacheConfig(
+                    dim=head_dim, max_context_length=seq_len, theta=1000000.0
+                ),
             ),
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,
@@ -717,9 +717,9 @@ def _235b_a22b(
             top_k=8,
             attn_backend=attn_backend,
             rope=CosSinRoPE.Config(
-                dim=head_dim,
-                max_context_length=seq_len,
-                theta=1000000.0,
+                cache=CosSinRoPE.CacheConfig(
+                    dim=head_dim, max_context_length=seq_len, theta=1000000.0
+                ),
             ),
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,

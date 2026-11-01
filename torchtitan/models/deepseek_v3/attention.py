@@ -53,8 +53,13 @@ class DeepSeekMLAAttention(Attention):
         def softmax_scale(self) -> float:
             qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
             scale = qk_head_dim**-0.5
-            if self.rope.scaling == "yarn" and self.rope.rope_factor > 1.0:
-                mscale = 0.1 * self.mscale * math.log(self.rope.rope_factor) + 1.0
+            cache = self.rope.cache
+            if (
+                cache is not None
+                and cache.scaling == "yarn"
+                and cache.rope_factor > 1.0
+            ):
+                mscale = 0.1 * self.mscale * math.log(cache.rope_factor) + 1.0
                 scale = scale * mscale * mscale
             return scale
 
@@ -156,7 +161,7 @@ class DeepSeekMLAAttention(Attention):
 
     # Cat options: _RotateTail concatenates q's untouched int32 words with the rotated ones;
     # Inductor's default pointwise cat makes that masked loads, slower than a plain cat.
-    # No pointwise autotuning, as in ComplexRoPE.forward: RoPE is inlined here, so this region's options apply.
+    # Match ComplexRoPE's cached compile options; RoPE is inlined in this region.
     @local_compile(
         "mla_qk",
         batch_invariant=True,
@@ -187,6 +192,7 @@ class DeepSeekMLAAttention(Attention):
         if (
             torch.compiler.is_compiling()
             and type(self.rope) is ComplexRoPE
+            and self.rope.cache is not None
             and q.dtype == torch.bfloat16
             and q.is_contiguous()
         ):

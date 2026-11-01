@@ -85,10 +85,15 @@ class RoPE(Module):
     Common base for concrete RoPE formats. Use ``ComplexRoPE.Config`` for
     complex exponential caches and ``CosSinRoPE.Config`` for concatenated
     cosine/sine caches.
+
+    With a cache config, the module owns a cache and accepts positions.
+    Otherwise, callers supply an already prepared rope_cache to forward.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class CacheConfig:
+        """Parameters for the module's optional internal cache."""
+
         dim: int
         max_context_length: int
         theta: float = 10000.0
@@ -105,10 +110,16 @@ class RoPE(Module):
         original_seq_len: int = 4096
         truncate: bool = True
 
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        cache: "RoPE.CacheConfig | None" = None
+        """Omit when forward receives an already prepared rope_cache."""
+
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
-        self.register_buffer("cache", self._precompute_cache(), persistent=False)
+        cache = None if config.cache is None else self._precompute_cache()
+        self.register_buffer("cache", cache, persistent=False)
 
     def _precompute_cache(self) -> torch.Tensor:
         """Build the reusable cache for all positions up to ``max_context_length``.
@@ -164,13 +175,38 @@ class RoPE(Module):
         key: torch.Tensor | None = None,
         positions: torch.Tensor | None = None,
         *,
+        rope_cache: torch.Tensor | None = None,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Apply rotary embeddings to query and optional key tensors."""
+        """Rotate using either positions in the internal cache or a prepared cache."""
+        if rope_cache is not None:
+            if positions is not None:
+                raise ValueError(
+                    "positions and rope_cache cannot be supplied together."
+                )
+            # Vision previously called the static operation outside local_compile.
+            return self.apply_rotary_emb(query, key, rope_cache, inverse=inverse)
+        if self.cache is None:
+            raise ValueError(
+                "RoPE has no internal cache. Supply rope_cache or configure "
+                "a cache in RoPE.Config."
+            )
+        return self._forward_cached(query, key, positions, inverse=inverse)
+
+    def _forward_cached(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         reshaped_cache = self._reshape_cache(query, positions)
         return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        if self.cache is None:
+            return
         # TODO: In long-term we need to have buffer abstraction in `Module`` class to infer the buffer_device
         if buffer_device is None:
             # After ``to_empty()``, the existing cache records the target device.
@@ -204,7 +240,7 @@ class ComplexRoPE(RoPE):
             "triton.autotune_pointwise": False,
         },
     )
-    def forward(
+    def _forward_cached(
         self,
         query: torch.Tensor,
         key: torch.Tensor | None = None,
@@ -212,7 +248,7 @@ class ComplexRoPE(RoPE):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return super().forward(query, key, positions, inverse=inverse)
+        return super()._forward_cached(query, key, positions, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
         """Precompute complex cis values.
@@ -220,7 +256,8 @@ class ComplexRoPE(RoPE):
         Returns:
             Cache of shape ``(max_context_length, dim / 2)``.
         """
-        cfg = self.config
+        cfg = self.config.cache
+        assert cfg is not None
         dim = cfg.dim
         end = cfg.max_context_length
         theta = cfg.theta
@@ -388,7 +425,7 @@ class CosSinRoPE(RoPE):
         pass
 
     @local_compile("rope", batch_invariant=True)
-    def forward(
+    def _forward_cached(
         self,
         query: torch.Tensor,
         key: torch.Tensor | None = None,
@@ -396,7 +433,7 @@ class CosSinRoPE(RoPE):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return super().forward(query, key, positions, inverse=inverse)
+        return super()._forward_cached(query, key, positions, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
         """Precompute cos/sin values.
@@ -404,7 +441,8 @@ class CosSinRoPE(RoPE):
         Returns:
             Cache of shape ``(max_context_length, dim * 2)``.
         """
-        cfg = self.config
+        cfg = self.config.cache
+        assert cfg is not None
         dim = cfg.dim
         max_context_length = cfg.max_context_length
         base = cfg.theta

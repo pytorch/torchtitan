@@ -55,6 +55,7 @@ from torchtitan.models.common.decoder_sharding import (
 from torchtitan.models.common.moe.sharding import shared_experts_sharding_config
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
+from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.models.common.vision_encoder import (
     InvariantRowParallelLinear,
     VisionAttention,
@@ -268,6 +269,7 @@ def _qwen35_vision_encoder_config(
                     sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
                 ),
                 proj=_vision_row_parallel_linear(dim, dim),
+                rope=CosSinRoPE.Config(),
                 inner_attention=FlexInnerAttention.Config(
                     sharding_config=vision_inner_attention_sharding_config()
                 ),
@@ -662,9 +664,9 @@ def _debugmodel(
         ),
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
-                dim=rotary_dim,
-                max_context_length=seq_len,
-                theta=10_000_000.0,
+                cache=MRoPE.CacheConfig(
+                    dim=rotary_dim, max_context_length=seq_len, theta=10_000_000.0
+                ),
                 mrope_section=[3, 3, 2],
             ),
             attn_backend=attn_backend,
@@ -734,9 +736,9 @@ def _debugmodel_moe(
         ),
         layers=_build_qwen35_moe_layers(
             rope=MRoPE.Config(
-                dim=rotary_dim,
-                max_context_length=seq_len,
-                theta=10_000_000.0,
+                cache=MRoPE.CacheConfig(
+                    dim=rotary_dim, max_context_length=seq_len, theta=10_000_000.0
+                ),
                 mrope_section=[3, 3, 2],
             ),
             attn_backend=attn_backend,
@@ -811,9 +813,9 @@ def _0_8b(
         ),
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
-                dim=rotary_dim,
-                max_context_length=seq_len,
-                theta=10_000_000.0,
+                cache=MRoPE.CacheConfig(
+                    dim=rotary_dim, max_context_length=seq_len, theta=10_000_000.0
+                ),
                 mrope_section=[11, 11, 10],
             ),
             attn_backend=attn_backend,
@@ -884,9 +886,9 @@ def _2b(
         ),
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
-                dim=rotary_dim,
-                max_context_length=seq_len,
-                theta=10_000_000.0,
+                cache=MRoPE.CacheConfig(
+                    dim=rotary_dim, max_context_length=seq_len, theta=10_000_000.0
+                ),
                 mrope_section=[11, 11, 10],
             ),
             attn_backend=attn_backend,
@@ -957,9 +959,9 @@ def _4b(
         ),
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
-                dim=rotary_dim,
-                max_context_length=seq_len,
-                theta=10_000_000.0,
+                cache=MRoPE.CacheConfig(
+                    dim=rotary_dim, max_context_length=seq_len, theta=10_000_000.0
+                ),
                 mrope_section=[11, 11, 10],
             ),
             attn_backend=attn_backend,
@@ -1025,9 +1027,9 @@ def _9b(
         ),
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
-                dim=rotary_dim,
-                max_context_length=seq_len,
-                theta=10_000_000.0,
+                cache=MRoPE.CacheConfig(
+                    dim=rotary_dim, max_context_length=seq_len, theta=10_000_000.0
+                ),
                 mrope_section=[11, 11, 10],
             ),
             attn_backend=attn_backend,
@@ -1093,9 +1095,9 @@ def _27b(
         ),
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
-                dim=rotary_dim,
-                max_context_length=seq_len,
-                theta=10_000_000.0,
+                cache=MRoPE.CacheConfig(
+                    dim=rotary_dim, max_context_length=seq_len, theta=10_000_000.0
+                ),
                 mrope_section=[11, 11, 10],
             ),
             attn_backend=attn_backend,
@@ -1164,9 +1166,9 @@ def _35b_a3b(
         ),
         layers=_build_qwen35_moe_layers(
             rope=MRoPE.Config(
-                dim=rotary_dim,
-                max_context_length=seq_len,
-                theta=10_000_000.0,
+                cache=MRoPE.CacheConfig(
+                    dim=rotary_dim, max_context_length=seq_len, theta=10_000_000.0
+                ),
                 mrope_section=[11, 11, 10],
             ),
             attn_backend=attn_backend,
@@ -1239,9 +1241,9 @@ def _122b_a10b(
         ),
         layers=_build_qwen35_moe_layers(
             rope=MRoPE.Config(
-                dim=rotary_dim,
-                max_context_length=seq_len,
-                theta=10_000_000.0,
+                cache=MRoPE.CacheConfig(
+                    dim=rotary_dim, max_context_length=seq_len, theta=10_000_000.0
+                ),
                 mrope_section=[11, 11, 10],
             ),
             attn_backend=attn_backend,
@@ -1314,9 +1316,9 @@ def _397b_a17b(
         ),
         layers=_build_qwen35_moe_layers(
             rope=MRoPE.Config(
-                dim=rotary_dim,
-                max_context_length=seq_len,
-                theta=10_000_000.0,
+                cache=MRoPE.CacheConfig(
+                    dim=rotary_dim, max_context_length=seq_len, theta=10_000_000.0
+                ),
                 mrope_section=[11, 11, 10],
             ),
             attn_backend=attn_backend,

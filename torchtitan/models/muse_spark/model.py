@@ -148,7 +148,7 @@ class MuseSparkAttention(GQAttention):
         return output_TD
 
     # Limit 16: RoPE and no-RoPE layers share this region and use 8 graphs, exactly the default limit.
-    # No pointwise autotuning, as in ComplexRoPE.forward: RoPE is inlined here, so this region's options apply.
+    # Match ComplexRoPE's cached compile options; RoPE is inlined in this region.
     @local_compile(
         "muse_spark_attention_qk",
         batch_invariant=False,

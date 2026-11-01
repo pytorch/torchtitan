@@ -276,7 +276,7 @@ class Decoder(BaseModel):
         # config during the same ``init_states`` pass.
         representatives: list[RoPE] = []
         for module in self.modules():
-            if not isinstance(module, RoPE):
+            if not isinstance(module, RoPE) or module.cache is None:
                 continue
             rep = next(
                 (
