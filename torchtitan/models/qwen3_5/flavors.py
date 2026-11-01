@@ -383,7 +383,7 @@ def _qwen35_deltanet_config(
     """
     key_dim = n_key_heads * key_head_dim
     value_dim = n_value_heads * value_head_dim
-    # in_proj rows per key head: q, k, then v, z, a, b of its value heads (GDN.Config).
+    # All six projections' rows; GDN.Config shows their order, grouped by key head.
     in_proj_dim = 2 * key_dim + 2 * value_dim + 2 * n_value_heads
 
     def _proj(in_f: int, out_f: int, init: dict) -> Linear.Config:

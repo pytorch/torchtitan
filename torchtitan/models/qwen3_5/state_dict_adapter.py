@@ -21,8 +21,8 @@ Other notable conversions:
 - Conv3d patch embedding (HF) <-> Linear (TT) via weight reshape
 - Vision block naming: HF `blocks` <-> TT `layers`
 - Vision QKV: HF fused qkv <-> TT separate wq/wk/wv
-- GatedDeltaNet QKV: HF fused in_proj_qkv <-> TT separate in_proj_q/k/v
-  (the base adapter packs these six logical projections into TT's one in_proj)
+- GatedDeltaNet QKV: HF fused in_proj_qkv <-> TT logical in_proj_q/k/v; the base
+  adapter then packs in_proj_q/k/v/z/a/b into TT's one in_proj
 - GatedDeltaNet Conv1d: HF fused conv1d <-> TT separate conv_q/k/v
 """
 

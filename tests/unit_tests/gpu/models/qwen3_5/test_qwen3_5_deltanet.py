@@ -469,7 +469,9 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             )
 
         # The six projections' weights, taken from in_proj's rows (grouped by key head).
-        heads_per_key = model.heads_per_key
+        heads_per_key = model.A_log.shape[0] // (
+            model.conv_q.weight.shape[0] // model.key_head_dim
+        )
         value_dim = heads_per_key * model.value_head_dim
         split_sizes = [
             model.key_head_dim,
