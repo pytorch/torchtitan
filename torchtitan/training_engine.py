@@ -68,7 +68,7 @@ class ForwardBackwardResult(NamedTuple):
 
 
 _ForwardBackwardFn: TypeAlias = Callable[
-    [list[Any], torch.Tensor], ForwardBackwardResult
+    [list[Any], torch.Tensor | None], ForwardBackwardResult
 ]
 
 
@@ -255,7 +255,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     _run_forward_backward: _ForwardBackwardFn
     _forward_backward_accelerator_graph_enabled: bool
     _accelerator_graph_per_microbatch_group_enabled: bool
-    _global_routing_token_counts: torch.Tensor
+    _global_routing_token_counts: torch.Tensor | None
+    _step_is_open: bool
+    _losses_are_sums: bool
     _dist_moe_runtime: "DistMoeRuntime | None"
 
     def __init__(
@@ -275,6 +277,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.has_quantization = has_quantization(model_config)
         self.num_accumulation_steps = 1
         self.num_completed_steps = 0
+        # True between a forward_backward call with ends_step=False and the call that ends the step.
+        self._step_is_open = False
+        # Whether this step's losses are sums; then optim_step divides the gradients by the loss-token count.
+        self._losses_are_sums = False
         self.ntokens_seen = 0
         self.sdc_replayer = None
         self._forward_backward_accelerator_graph_enabled = False
@@ -579,7 +585,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             # without duplicating the gradient accumulation logic.
             def run_forward_backward_groups(
                 microbatch_groups: list[tuple[Any, ...]],
-                global_loss_token_counts: torch.Tensor,
+                global_loss_token_counts: torch.Tensor | None,
             ) -> ForwardBackwardResult:
                 accumulated_loss: torch.Tensor | None = None
                 loss_metrics: list[list[dict[str, torch.Tensor]]] = []
@@ -627,21 +633,78 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self,
         *,
         microbatch_groups: list[list[TrainingMicrobatch]],
-        global_loss_token_counts: int | torch.Tensor,
-        global_routing_token_counts: torch.Tensor,
+        global_loss_token_counts: int | torch.Tensor | None,
+        global_routing_token_counts: torch.Tensor | None,
+        ends_step: bool = True,
     ) -> ForwardBackwardResult:
-        """Run all microbatch groups for one optimizer update."""
+        """Run microbatch groups and add their gradients to this optimizer step's gradients.
+
+        One optimizer step takes one call, or several when the caller streams microbatch groups:
+
+            # One call: each loss is divided by the step's loss-token count N.
+            forward_backward(microbatch_groups=[g0, g1], global_loss_token_counts=N, ...)
+            optim_step()
+
+            # Streamed: each loss is a sum, and optim_step divides the gradients by N.
+            forward_backward(microbatch_groups=[g0, g1], global_loss_token_counts=None, ..., ends_step=False)
+            forward_backward(microbatch_groups=[g2], global_loss_token_counts=None, ...)
+            optim_step(global_loss_token_counts=N)
+
+        The first call after a call with `ends_step=True` zeroes the gradients. A step over
+        several calls has summed losses in every call.
+
+        Args:
+            microbatch_groups: One list of microbatches per group; see the class docstring.
+            global_loss_token_counts: Each loss is divided by these counts. None: each loss returns
+                its sum, and the caller passes the counts to `optim_step` instead.
+            global_routing_token_counts: MoE auxiliary-loss denominators; None for a model without
+                an auxiliary loss. Summed losses need None: `optim_step` would divide the auxiliary
+                gradient by the loss-token count on top of these denominators.
+            ends_step: False when later calls add to this step's gradients. HSDP all-reduces the
+                gradients only after the step's last group.
+        """
         if not microbatch_groups:
             raise ValueError("microbatch_groups must not be empty.")
         self.num_accumulation_steps = len(microbatch_groups)
-        self.garbage_collector.run(self.num_completed_steps + 1)
-        self.optim.zero_grad(
-            set_to_none=not self._accelerator_graph_per_microbatch_group_enabled
-        )
-        global_loss_token_counts = torch.as_tensor(
-            global_loss_token_counts, device=self.device
-        )
-        global_routing_token_counts = global_routing_token_counts.to(self.device)
+        losses_are_sums = global_loss_token_counts is None
+        if not losses_are_sums and (self._step_is_open or not ends_step):
+            raise ValueError(
+                "A step over several forward_backward calls needs summed losses "
+                "(global_loss_token_counts=None) in every call."
+            )
+        if losses_are_sums and global_routing_token_counts is not None:
+            raise ValueError(
+                "Summed losses (global_loss_token_counts=None) need "
+                "global_routing_token_counts=None: optim_step would divide the auxiliary-loss "
+                "gradient by the loss-token count again."
+            )
+        # TODO: per-group accelerator graphs could replay each call; deferred reduction would need its
+        # parameters resharded between calls.
+        if losses_are_sums and (
+            self._forward_backward_accelerator_graph_enabled
+            or self.sdc_replayer is not None
+            or self.config.parallelism.fsdp_defer_gradient_reduction
+        ):
+            raise ValueError(
+                "Summed losses (global_loss_token_counts=None) need eager forward/backward "
+                "without SDC replay or deferred FSDP gradient reduction: accelerator graphs and "
+                "SDC replay capture one whole step, and deferred reduction keeps the parameters "
+                "unsharded between calls."
+            )
+        starts_step = not self._step_is_open
+        if starts_step:
+            self._losses_are_sums = losses_are_sums
+            self.garbage_collector.run(self.num_completed_steps + 1)
+            self.optim.zero_grad(
+                set_to_none=not self._accelerator_graph_per_microbatch_group_enabled
+            )
+        self._step_is_open = not ends_step
+        if global_loss_token_counts is not None:
+            global_loss_token_counts = torch.as_tensor(
+                global_loss_token_counts, device=self.device
+            )
+        if global_routing_token_counts is not None:
+            global_routing_token_counts = global_routing_token_counts.to(self.device)
         if self.config.training.preprocess_microbatch_groups_lazily:
             # _forward_backward_body preprocesses each group just before its forward/backward.
             self._global_routing_token_counts = global_routing_token_counts
@@ -663,19 +726,22 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 get_loss=lambda result: result.loss,
             )
         else:
-            result = self._run_forward_backward(
-                step_inputs,
-                global_loss_token_counts,
+            # The check above leaves only the eager body when ends_step is False.
+            run_forward_backward = (
+                self._run_forward_backward
+                if ends_step
+                else partial(self._run_forward_backward, ends_step=False)
             )
+            result = run_forward_backward(step_inputs, global_loss_token_counts)
 
-        self.loss = result.loss
+        self.loss = result.loss if starts_step else self.loss + result.loss
         return result
 
     def _preprocess_microbatch_groups(
         self,
         microbatch_groups: list[list[TrainingMicrobatch]],
         *,
-        global_routing_token_counts: torch.Tensor,
+        global_routing_token_counts: torch.Tensor | None,
     ) -> list[tuple[Any, ...]]:
         """Preprocess all microbatch groups outside CUDA capture."""
         return [
@@ -690,7 +756,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self,
         microbatch_group: list[TrainingMicrobatch],
         *,
-        global_routing_token_counts: torch.Tensor,
+        global_routing_token_counts: torch.Tensor | None,
     ) -> tuple[Any, ...]:
         """Preprocess one group: ``(inputs, labels, model_kwargs, loss_kwargs)``, or with PP
         ``(arg_mbs, kwarg_mbs, target_mbs, loss_kwarg_mbs)``."""
@@ -737,18 +803,22 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     def _forward_backward_body(
         self,
         microbatch_groups: list[Any],
-        global_loss_token_counts: torch.Tensor,
+        global_loss_token_counts: torch.Tensor | None,
         *,
         defer_fsdp_gradient_reduction: bool,
         preprocess_microbatch_groups_lazily: bool = False,
+        ends_step: bool = True,
     ) -> ForwardBackwardResult:
-        """Run all microbatch groups in one graphable call."""
+        """Run all microbatch groups in one graphable call. With `ends_step=False`, the last
+        group is not the optimizer step's last, so HSDP skips its all-reduce."""
 
         accumulated_loss: torch.Tensor | None = None
         loss_metrics: list[list[dict[str, torch.Tensor]]] = []
         num_accumulation_steps = len(microbatch_groups)
         for accumulation_index, microbatch_group in enumerate(microbatch_groups):
-            is_last_accumulation_step = accumulation_index == num_accumulation_steps - 1
+            is_last_accumulation_step = (
+                ends_step and accumulation_index == num_accumulation_steps - 1
+            )
             prepared_inputs = microbatch_group
             if preprocess_microbatch_groups_lazily:
                 # TODO: this waits ~4 ms per microbatch on pageable inputs and varlen's host sync
@@ -884,11 +954,45 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         return self._pp_loss_sentinel_on_non_last_stage, loss_metrics
 
     @sl.log_trace_span("optim_step")
-    def optim_step(self) -> torch.Tensor:
-        """Run one optimization update and advance its eager state."""
+    def optim_step(
+        self, *, global_loss_token_counts: int | torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Run one optimization update and advance its eager state.
+
+        Args:
+            global_loss_token_counts: The step's loss-token count when this step's
+                `forward_backward` calls got None and their losses were sums. Every gradient
+                is divided by it before clipping.
+        """
+        if self._step_is_open:
+            raise ValueError(
+                "The last forward_backward call had ends_step=False; the step is not finished."
+            )
+        if (global_loss_token_counts is not None) != self._losses_are_sums:
+            raise ValueError(
+                "Pass global_loss_token_counts to forward_backward or to optim_step, once per "
+                f"step: forward_backward got {'None' if self._losses_are_sums else 'counts'}, "
+                f"optim_step got {global_loss_token_counts}."
+            )
         current_step = self.num_completed_steps + 1
         if hasattr(self, "checkpointer"):
             self.checkpointer.maybe_wait_for_staging()
+        if global_loss_token_counts is not None:
+            counts = torch.as_tensor(global_loss_token_counts).reshape(-1)
+            if counts.numel() != 1:
+                raise ValueError(
+                    "Summed losses support one loss objective; MTP needs one count per depth "
+                    f"before forward/backward. Got {counts.tolist()}."
+                )
+            grads = [
+                dist_utils.get_local_tensor(parameter.grad)
+                for parameter in self.optim.parameters
+                if parameter.grad is not None
+            ]
+            # A rank can hold no gradients, e.g. when all its parameters are frozen.
+            if grads:
+                # A step with no loss tokens has all-zero gradients; dividing by 1 keeps them zero.
+                torch._foreach_div_(grads, float(max(int(counts[0]), 1)))
         grad_norm = self.optim.step(
             self.loss,
             current_step=current_step,

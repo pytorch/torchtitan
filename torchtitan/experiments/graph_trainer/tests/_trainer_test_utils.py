@@ -108,6 +108,7 @@ def build_minimal_trainer(
     engine.max_num_documents = max_num_documents
     engine.ntokens_seen = 0
     engine.num_completed_steps = 0
+    engine._step_is_open = False
     engine.sdc_replayer = None
     engine._accelerator_graph_per_microbatch_group_enabled = False
     engine.garbage_collector = SimpleNamespace(run=lambda _step: False)

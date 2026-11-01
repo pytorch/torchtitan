@@ -450,6 +450,7 @@ def test_forward_backward_runs_whole_accumulation(
     engine.preprocess_inputs_kwargs = {"processor": "VALUE"}
     engine.ntokens_seen = 100
     engine.num_completed_steps = 0
+    engine._step_is_open = False
     engine.device = torch.device("cpu")
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
@@ -922,6 +923,8 @@ def test_optim_step_waits_for_checkpoint() -> None:
         TrainingEngine,
         SimpleNamespace(
             num_completed_steps=2,
+            _step_is_open=False,
+            _losses_are_sums=False,
             loss=loss,
             checkpointer=SimpleNamespace(
                 maybe_wait_for_staging=lambda: events.append("checkpoint")
@@ -1018,6 +1021,8 @@ def test_trainer_accumulates_reused_accelerator_graph_losses(
             checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
             metrics_processor=metrics_processor,
             num_completed_steps=0,
+            _step_is_open=False,
+            _losses_are_sums=False,
             ntokens_seen=3,
         ),
     )
@@ -1136,6 +1141,7 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     engine._accelerator_graph_per_microbatch_group_enabled = False
     engine.sdc_replayer = replayer
     engine.num_completed_steps = 0
+    engine._step_is_open = False
     engine._preprocess_microbatch_groups = MagicMock(
         side_effect=lambda groups, global_routing_token_counts: [
             ("input", group[0].labels, {}, {}) for group in groups
@@ -1182,6 +1188,7 @@ def test_replay_failure_propagates_from_engine():
     engine._accelerator_graph_per_microbatch_group_enabled = False
     engine.sdc_replayer = SimpleNamespace(run_fwd_bwd=MagicMock(side_effect=mismatch))
     engine.num_completed_steps = 0
+    engine._step_is_open = False
     engine._preprocess_microbatch_groups = MagicMock(
         return_value=[("input", "labels", {}, {})]
     )
@@ -1479,6 +1486,181 @@ def test_hsdp_keeps_all_reduce_on_single_accum_group() -> None:
         gradient_accumulation_steps=1,
     )
     assert flags == [True]
+
+
+def _streaming_engine() -> tuple[
+    TrainingEngine, _RecordingFSDPPart, torch.nn.Parameter
+]:
+    """An eager HSDP engine whose microbatch losses are 1.0 each."""
+    part = _RecordingFSDPPart()
+    parameter = torch.nn.Parameter(torch.zeros(2))
+    engine = object.__new__(TrainingEngine)
+    engine.config = SimpleNamespace(
+        training=SimpleNamespace(
+            disable_accelerator_graphs=True, preprocess_microbatch_groups_lazily=False
+        ),
+        parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
+    )
+    engine.parallelism_context = SimpleNamespace(
+        pp_enabled=False, dp_replicate_enabled=True
+    )
+    engine.model_parts = [part]
+    engine.device = torch.device("cpu")
+    engine.garbage_collector = SimpleNamespace(run=MagicMock())
+    engine.optim = SimpleNamespace(
+        zero_grad=MagicMock(),
+        parameters=[parameter],
+        step=MagicMock(return_value=torch.tensor(0.5)),
+    )
+    engine._accelerator_graph_per_microbatch_group_enabled = False
+    engine._forward_backward_accelerator_graph_enabled = False
+    engine.sdc_replayer = None
+    engine.num_completed_steps = 0
+    engine._step_is_open = False
+    engine._losses_are_sums = False
+    engine._preprocess_microbatch_groups = MagicMock(
+        side_effect=lambda groups, global_routing_token_counts: [
+            ("input", "labels", {}, {}) for _ in groups
+        ]
+    )
+    engine._non_pp_forward_backward_microbatch = MagicMock(
+        return_value=torch.tensor(1.0)
+    )
+    engine._run_forward_backward = partial(
+        TrainingEngine._forward_backward_body,
+        engine,
+        defer_fsdp_gradient_reduction=False,
+    )
+    return engine, part, parameter
+
+
+def test_streamed_calls_add_up_to_one_step() -> None:
+    engine, part, parameter = _streaming_engine()
+
+    # Two calls of two groups each: one optimizer step of four groups.
+    TrainingEngine.forward_backward(
+        engine,
+        microbatch_groups=[[object()], [object()]],
+        global_loss_token_counts=None,
+        global_routing_token_counts=None,
+        ends_step=False,
+    )
+    TrainingEngine.forward_backward(
+        engine,
+        microbatch_groups=[[object()], [object()]],
+        global_loss_token_counts=None,
+        global_routing_token_counts=None,
+    )
+
+    # HSDP all-reduces once, after the step's last group; gradients are zeroed once.
+    assert part.requires_all_reduce_calls == [False, False, False, True]
+    engine.optim.zero_grad.assert_called_once()
+    engine.garbage_collector.run.assert_called_once_with(1)
+    torch.testing.assert_close(engine.loss, torch.tensor(4.0))
+    # Losses are sums: no microbatch got a denominator.
+    for call in engine._non_pp_forward_backward_microbatch.call_args_list:
+        assert call.kwargs["loss_kwargs"]["global_loss_token_counts"] is None
+
+    # The optimizer step divides the summed gradients by the step's loss-token count.
+    parameter.grad = torch.tensor([8.0, 4.0])
+    TrainingEngine.optim_step(engine, global_loss_token_counts=torch.tensor([4]))
+    torch.testing.assert_close(parameter.grad, torch.tensor([2.0, 1.0]))
+    engine.optim.step.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("step_is_open", "counts", "routing_counts", "ends_step", "error"),
+    [
+        # The call that ends a streamed step passes counts.
+        (True, torch.tensor([4]), None, True, "needs summed losses"),
+        # A step left open with divided losses.
+        (False, torch.tensor([4]), None, False, "needs summed losses"),
+        # Summed losses with MoE auxiliary-loss denominators.
+        (False, None, torch.tensor([4]), True, "global_routing_token_counts=None"),
+    ],
+)
+def test_forward_backward_rejects_a_wrong_call(
+    step_is_open: bool,
+    counts: torch.Tensor | None,
+    routing_counts: torch.Tensor | None,
+    ends_step: bool,
+    error: str,
+) -> None:
+    engine, _, _ = _streaming_engine()
+    engine._step_is_open = step_is_open
+
+    with pytest.raises(ValueError, match=error):
+        TrainingEngine.forward_backward(
+            engine,
+            microbatch_groups=[[object()]],
+            global_loss_token_counts=counts,
+            global_routing_token_counts=routing_counts,
+            ends_step=ends_step,
+        )
+
+
+@pytest.mark.parametrize(
+    ("forward_backward_counts", "ends_step", "optim_step_counts", "error"),
+    [
+        (None, True, None, "once per step"),
+        (torch.tensor([4]), True, torch.tensor([4]), "once per step"),
+        (None, False, None, "not finished"),
+    ],
+)
+def test_optim_step_rejects_a_wrong_call_sequence(
+    forward_backward_counts: torch.Tensor | None,
+    ends_step: bool,
+    optim_step_counts: torch.Tensor | None,
+    error: str,
+) -> None:
+    engine, _, _ = _streaming_engine()
+    TrainingEngine.forward_backward(
+        engine,
+        microbatch_groups=[[object()]],
+        global_loss_token_counts=forward_backward_counts,
+        global_routing_token_counts=None,
+        ends_step=ends_step,
+    )
+
+    with pytest.raises(ValueError, match=error):
+        TrainingEngine.optim_step(engine, global_loss_token_counts=optim_step_counts)
+
+
+def test_one_call_steps_zero_gradients_on_every_call() -> None:
+    engine, part, _ = _streaming_engine()
+
+    for _ in range(2):
+        TrainingEngine.forward_backward(
+            engine,
+            microbatch_groups=[[object()], [object()]],
+            global_loss_token_counts=torch.tensor([4]),
+            global_routing_token_counts=None,
+        )
+
+    assert part.requires_all_reduce_calls == [False, True, False, True]
+    assert engine.optim.zero_grad.call_count == 2
+    assert engine.garbage_collector.run.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "setting", ["accelerator_graphs", "sdc_replay", "deferred_reduction"]
+)
+def test_streamed_calls_need_eager_forward_backward(setting: str) -> None:
+    engine, _, _ = _streaming_engine()
+    if setting == "accelerator_graphs":
+        engine._forward_backward_accelerator_graph_enabled = True
+    elif setting == "sdc_replay":
+        engine.sdc_replayer = MagicMock()
+    else:
+        engine.config.parallelism.fsdp_defer_gradient_reduction = True
+
+    with pytest.raises(ValueError, match="eager forward/backward"):
+        TrainingEngine.forward_backward(
+            engine,
+            microbatch_groups=[[object()]],
+            global_loss_token_counts=None,
+            global_routing_token_counts=None,
+        )
 
 
 @pytest.mark.parametrize("defer_fsdp_gradient_reduction", [False, True])

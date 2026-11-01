@@ -277,6 +277,7 @@ def test_forward_backward_uses_global_token_count() -> None:
             return_value=ForwardBackwardResult(torch.tensor(1.0), [])
         ),
         _accelerator_graph_per_microbatch_group_enabled=False,
+        _step_is_open=False,
         sdc_replayer=None,
     )
     microbatch_groups = [[object()], [object()], [object()]]

@@ -176,6 +176,19 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         ):
             engine._initialize_forward_backward()
 
+    def test_rejects_streamed_forward_backward_calls(self):
+        from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
+
+        engine = object.__new__(GraphTrainingEngine)
+        for counts, ends_step in ((None, True), (torch.tensor([4]), False)):
+            with self.assertRaisesRegex(ValueError, "one optimizer step per"):
+                engine.forward_backward(
+                    microbatch_groups=[[object()]],
+                    global_loss_token_counts=counts,
+                    global_routing_token_counts=None,
+                    ends_step=ends_step,
+                )
+
     def test_initializes_one_stage_pipeline_runtime(self):
         from types import SimpleNamespace
         from unittest.mock import MagicMock, patch

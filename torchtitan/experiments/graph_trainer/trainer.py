@@ -285,6 +285,26 @@ class GraphTrainingEngine(TrainingEngine):
 
         return preprocessed_microbatch_groups
 
+    def forward_backward(
+        self,
+        *,
+        microbatch_groups: list[list[TrainingMicrobatch]],
+        global_loss_token_counts: int | torch.Tensor | None,
+        global_routing_token_counts: torch.Tensor | None,
+        ends_step: bool = True,
+    ) -> ForwardBackwardResult:
+        """Run one whole optimizer step: GraphRuntime takes the step's loss-token counts."""
+        if global_loss_token_counts is None or not ends_step:
+            raise ValueError(
+                "GraphTrainingEngine runs one optimizer step per forward_backward call: "
+                "pass global_loss_token_counts and keep ends_step=True."
+            )
+        return super().forward_backward(
+            microbatch_groups=microbatch_groups,
+            global_loss_token_counts=global_loss_token_counts,
+            global_routing_token_counts=global_routing_token_counts,
+        )
+
     def _forward_backward_body(
         self,
         microbatch_groups: list[tuple[Any, ...]],
