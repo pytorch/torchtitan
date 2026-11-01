@@ -317,7 +317,8 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
             A_log.float(),
             dt_bias.float(),
             kind="softplus",
-            impl="reference",
+            fastmath=False,
+            impl="fused",
         )
         update_gate = torch.sigmoid(b).unsqueeze(0)
         query = l2norm(query, cu_seqlens=cu_seqlens)
