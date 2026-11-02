@@ -127,6 +127,13 @@ class TorchTitanLinearAttentionMetadataBuilder(
         self.decode_state_indices = torch.zeros_like(self.state_indices)
         self.prefill_state_indices = torch.zeros_like(self.state_indices)
         self.prefill_query_start_loc = torch.zeros_like(self.query_start_loc)
+        # "none" mode's state column (always 0), built once instead of in every build().
+        self.zero_state_block_column = torch.zeros(
+            self.num_reqs_capacity, 1, device=device, dtype=torch.long
+        )
+        # TorchTitanGPUModelRunner sets this before each build: True when the step
+        # replays a FULL graph captured for packed batches.
+        self.replays_packed_graph = False
 
     def build(
         self,
@@ -161,7 +168,7 @@ class TorchTitanLinearAttentionMetadataBuilder(
             # 0-length requests in CUDA graph capture read column 0.
             state_block_column = state_block_column.clamp_(min=0).long().unsqueeze(1)
         else:
-            state_block_column = seq_lens.new_zeros(m.num_reqs, 1, dtype=torch.long)
+            state_block_column = self.zero_state_block_column[: m.num_reqs]
         self._stage_state_indices(m.block_table_tensor, state_block_column)
         self.query_start_loc[: m.num_reqs + 1].copy_(
             m.query_start_loc[: m.num_reqs + 1]
@@ -179,12 +186,10 @@ class TorchTitanLinearAttentionMetadataBuilder(
             else (0, 0, 0, 0)
         )
         # If every request is processing one token, use the single-token
-        # (decode-style) path. Past max_num_seqs tokens there is no decode graph, so
-        # a one-token step padded that far replays the mixed-batch graph: build it as
-        # the packed step, so update_block_table restages its offsets too.
-        single_token = (
-            m.max_query_len == 1 and m.num_actual_tokens <= self.num_reqs_capacity
-        )
+        # (decode-style) path, unless the runner picked a packed FULL graph for the
+        # step. Building it as the packed step makes update_block_table restage its
+        # offsets too.
+        single_token = m.max_query_len == 1 and not self.replays_packed_graph
         # A FULL dummy run can replay the mixed-batch graph too (stage_packed).
         decode_split = (
             self._stage_decode_split(num_decodes, capacity)
