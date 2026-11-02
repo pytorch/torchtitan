@@ -362,8 +362,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             and not self.config.training.disable_accelerator_graphs
             and accelerator_graphs_supported()
         ):
+            # Same check as _initialize_forward_backward's graph flag; that runs later.
             # TODO: keep the skip under graphs (graph the decoder only, or a fixed row budget).
-            logger.warning(
+            logger.info(
                 "loss.skip_non_loss_tokens is off: accelerator graphs need a fixed lm_head row count."
             )
             self.loss_fn.skip_non_loss_tokens = False

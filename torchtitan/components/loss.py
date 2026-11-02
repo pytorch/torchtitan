@@ -744,6 +744,7 @@ class ChunkedLossWrapper(Loss[LossInput]):
                 pred[0].shape[0] % num_chunks == 0,
                 lambda: "ChunkedLossWrapper sequence length must be divisible by num_chunks",
             )
+            rows = None
             if self.skip_non_loss_tokens:
                 # Keep only the loss tokens, in fewer chunks. A stable sort puts them first, in
                 # order; the first non-loss tokens pad the last chunk (zero loss and grad). Chunks
@@ -757,20 +758,18 @@ class ChunkedLossWrapper(Loss[LossInput]):
                 num_tokens = is_loss_token.shape[0]
                 # At least one row: FSDP reduce-scatters the lm_head grad in the last chunk.
                 num_loss_tokens = max(1, int(is_loss_token.sum()))  # host sync
-                num_chunks = math.ceil(num_loss_tokens * num_chunks / num_tokens)
-                chunk_len = math.ceil(num_loss_tokens / num_chunks)
-                rows = torch.argsort(is_loss_token, descending=True, stable=True)
-                rows = rows[: num_chunks * chunk_len]
-                labels = tuple(label[rows] for label in labels)
-                loss_inputs = {
-                    key: value[rows] if isinstance(value, torch.Tensor) else value
-                    for key, value in loss_inputs.items()
-                }
-                # The loop gathers pred's rows one chunk at a time, so no [K, D] copy of pred is
-                # held. Their grads fill a [K, D] buffer, scattered into [T, D] after the loop.
-                hidden_state_chunks_per_output = ()
-            else:
-                rows = None
+                # With every token a loss token, the code below runs as without the skip.
+                if num_loss_tokens < num_tokens:
+                    num_chunks = math.ceil(num_loss_tokens * num_chunks / num_tokens)
+                    chunk_len = math.ceil(num_loss_tokens / num_chunks)
+                    rows = torch.argsort(is_loss_token, descending=True, stable=True)
+                    rows = rows[: num_chunks * chunk_len]
+                    labels = tuple(label[rows] for label in labels)
+                    loss_inputs = {
+                        key: value[rows] if isinstance(value, torch.Tensor) else value
+                        for key, value in loss_inputs.items()
+                    }
+            if rows is None:
                 # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
                 # accumulates ``.grad`` for ``GradAccumulator``.
                 hidden_state_chunks_per_output = tuple(
@@ -780,6 +779,10 @@ class ChunkedLossWrapper(Loss[LossInput]):
                     )
                     for hidden_state in pred
                 )
+            else:
+                # The loop gathers pred's rows one chunk at a time, so no [K, D] copy of pred is
+                # held. Their grads fill a [K, D] buffer, scattered into [T, D] after the loop.
+                hidden_state_chunks_per_output = ()
             label_chunks_per_output = tuple(_chunk_local(label) for label in labels)
             input_chunks = {
                 key: _chunk_local(value) if isinstance(value, torch.Tensor) else value
