@@ -899,7 +899,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self.device, non_blocking=True
         )
         self.global_loss_token_count = self._sum_loss_token_count(local_count)
-        # A step with no loss tokens has all-zero gradients; dividing by 1 keeps them zero.
+        # A step with no loss tokens has all-zero gradients; dividing by 1 keeps them zero. The
+        # update still runs, so AdamW's momentum and weight decay still move the weights.
         divisor = self.global_loss_token_count.clamp_min(1).to(torch.float32)
         gradients_by_device: dict[torch.device, list[torch.Tensor]] = {}
         for parameter in self.optim.parameters:

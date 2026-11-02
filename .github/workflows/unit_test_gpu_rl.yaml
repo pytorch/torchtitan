@@ -114,4 +114,4 @@ jobs:
         torchrun --nproc-per-node=4 -m pytest \
           tests/rl/unit_tests/gpu/test_generator_uneven_decode.py -v
         # Spawns its own 2-GPU process groups.
-        pytest tests/rl/unit_tests/gpu/test_stream_microbatches.py -m multi_gpu -v
+        pytest tests/rl/unit_tests/gpu/test_gradient_accumulation.py -m multi_gpu -v

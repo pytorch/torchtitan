@@ -4,18 +4,19 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Streamed forward_backward calls give the optimizer the same gradients as one call.
+"""optim_step divides the summed gradients once by the step's loss-token count N.
 
-Losses are sums and optim_step divides the summed gradients by the step's loss-token count N
-(509 here, not a power of two). One call and two calls then run the same operations, so the
-gradients are bitwise equal on 1 GPU and with PP. HSDP all-reduces the replicas once per call
-instead of once per step, which reassociates the sum (allclose).
+Losses are sums. N is 509 here, not a power of two, so dividing by a wrong count changes the
+gradients. FSDP 2 with the batcher's uneven per-rank loss tokens matches 1 GPU running both
+ranks' microbatches: optim_step sums the count over the DP ranks.
 
-A second test runs FSDP 2 with the batcher's uneven per-rank loss tokens against 1 GPU running
-both ranks' microbatches: optim_step sums the count over the DP ranks.
+Streamed forward_backward calls give the optimizer the same gradients as one call. One call and
+two calls run the same operations, so the gradients are bitwise equal on 1 GPU and with PP. HSDP
+all-reduces the replicas once per call instead of once per step, which reassociates the sum
+(allclose).
 
-    pytest tests/rl/unit_tests/gpu/test_stream_microbatches.py                 # 1 GPU
-    pytest tests/rl/unit_tests/gpu/test_stream_microbatches.py -m multi_gpu    # 2 GPUs
+    pytest tests/rl/unit_tests/gpu/test_gradient_accumulation.py                 # 1 GPU
+    pytest tests/rl/unit_tests/gpu/test_gradient_accumulation.py -m multi_gpu    # 2 GPUs
 """
 
 import dataclasses
