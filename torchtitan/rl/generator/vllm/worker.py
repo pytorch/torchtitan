@@ -110,6 +110,8 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
         result = super()._determine_batch_execution_and_padding(
             num_tokens, *args, **kwargs
         )
+        # TODO: drop once vLLM passes the dispatched (cudagraph_mode, batch_descriptor)
+        # to AttentionMetadataBuilder.build.
         cudagraph_mode, batch_descriptor = result[:2]
         replays_packed_graph = (
             cudagraph_mode == CUDAGraphMode.FULL and not batch_descriptor.uniform
