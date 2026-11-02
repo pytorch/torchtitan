@@ -716,16 +716,12 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             test_descr="DeepSeek V3 fused MLA+SwiGLU FSDP+EP",
             test_name="deepseek_v3_fused_mla_swiglu_fsdp+ep",
             ngpu=4,
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[deepseek_v4_debugmodel_fsdp2_tp2_ep2],
             test_descr="DeepSeek V4 AdamW FSDP+TP+EP",
             test_name="deepseek_v4_fsdp+tp+ep",
             ngpu=4,
-            # Sparse attention / indexer kernels are CUDA-only and unvalidated
-            # on ROCm.
-            skip_rocm_test=True,
             # Runs on a real PG. Under Fake PG this config's sequence-parallel
             # collectives return activations that alias their inputs, which
             # corrupts a saved-for-backward tensor and blows up grad_norm at
@@ -739,9 +735,6 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             test_descr="DeepSeek V4 DistMuon FSDP+EP",
             test_name="deepseek_v4_dist_muon_fsdp+ep",
             ngpu=4,
-            # Sparse attention / indexer kernels are CUDA-only and unvalidated
-            # on ROCm.
-            skip_rocm_test=True,
             # DistMuon optimizer-state redistribution requires real collectives.
             use_real_pg=True,
         ),
@@ -772,8 +765,6 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             test_name="qwen3_5_moe_fsdp+tp+ep+pp",
             ngpu=8,
             use_real_pg=True,
-            # short_conv's CuTe/CUTLASS kernel (attn_gym) is CUDA-only.
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[qwen35_debugmodel_moe_fsdp4_tp2_ep4],
@@ -782,15 +773,12 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             ngpu=8,
             # NOTE: This topology is not bitwise deterministic with Real PG on
             # A10G, so this case provides end-to-end coverage without a golden.
-            # short_conv's CuTe/CUTLASS kernel (attn_gym) is CUDA-only.
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac],
             test_descr="Qwen3.5 FSDP+TP+VARLEN_ATTN + selective AC",
             test_name="qwen3_5_fsdp+tp+varlen_attn+per_op_sac",
             ngpu=4,
-            skip_rocm_test=True,
             use_real_pg=True,
         ),
         # Integration Test Cases for gpt-oss
