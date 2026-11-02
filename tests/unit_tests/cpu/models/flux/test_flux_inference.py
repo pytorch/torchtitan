@@ -51,7 +51,7 @@ def test_inference_runs_model_in_engine_context(monkeypatch, tmp_path):
     engine = SimpleNamespace(
         device=torch.device("cpu"),
         model_parts=[object()],
-        load_checkpoint=lambda: None,
+        load_checkpoint=lambda: True,
         parallelism_context=SimpleNamespace(
             activate_spmd=lambda **kwargs: spmd_context()
         ),
