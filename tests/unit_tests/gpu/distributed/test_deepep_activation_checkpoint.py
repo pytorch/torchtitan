@@ -207,6 +207,69 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                 self.assertLess((error / expected_tensor.float().norm()).item(), 1e-2)
 
     @with_comms
+    def test_saved_dispatch_keeps_one_row_per_token(self):
+        # A saved dispatch keeps recv_x for the replayed expert GEMM. Token t picks experts
+        # t to t + 3 of 8, so of every 8 tokens each rank receives 7, as 16 rows: 16384
+        # rows from 7168 tokens. Remat keeps one row per token, and replay rebuilds the
+        # 16384 rows bitwise.
+        from torchtitan.distributed.deepep import deepep
+
+        num_tokens, num_experts, top_k = 4096, 4 * self.world_size, 4
+        deepep.get_buffer(
+            torch.distributed.group.WORLD,
+            hidden=_MODEL_DIM,
+            num_max_tokens_per_rank=num_tokens,
+            num_topk=top_k,
+        )
+        token_ids_T1 = torch.arange(num_tokens, device=self.device_type).unsqueeze(-1)
+        offsets_1K = torch.arange(top_k, device=self.device_type).unsqueeze(0)
+        expert_ids_TK = (token_ids_T1 + offsets_1K) % num_experts
+        scores_TK = torch.full((num_tokens, top_k), 0.5, device=self.device_type)
+        expert_inputs = []
+
+        def experts(rows_RD: torch.Tensor) -> torch.Tensor:
+            expert_inputs.append(rows_RD.detach().cpu())
+            return rows_RD.square()
+
+        def block(x_TD: torch.Tensor) -> torch.Tensor:
+            rows_RD, _, _ = deepep.dispatch_tokens(
+                x_TD,
+                expert_ids_TK,
+                scores_TK,
+                num_experts // self.world_size,
+                num_experts,
+                num_tokens_per_rank=num_tokens,
+                remat_region_name="dispatch",
+                recompute=False,
+            )
+            # A replayed consumer: remat keeps its input from the forward.
+            return remat.region(experts, "experts", recompute=True)(rows_RD).sum()
+
+        checkpointed = remat.checkpoint(region_name="block")(block)
+        torch.manual_seed(self.rank)
+        x_TD = torch.randn(
+            num_tokens,
+            _MODEL_DIM,
+            device=self.device_type,
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        allocated_before = torch.cuda.memory_allocated()
+        loss = checkpointed(x_TD)
+        kept_bytes = torch.cuda.memory_allocated() - allocated_before
+        loss.backward()
+
+        num_rows, num_received_tokens = 16384, 7168
+        rows_RD, replayed_rows_RD = expert_inputs
+        self.assertEqual(rows_RD.shape[0], num_rows)
+        self.assertTrue(torch.equal(rows_RD, replayed_rows_RD))
+        # Kept: one row per received token (3.5 MiB; all 16384 rows without the hooks,
+        # 8 MiB), plus under 1 MiB of per-row token ids, scores and DeepEP's routing
+        # handle. The bound sits halfway between the two row counts.
+        row_bytes = _MODEL_DIM * rows_RD.element_size()
+        self.assertLess(kept_bytes, (num_rows + num_received_tokens) * row_bytes // 2)
+
+    @with_comms
     def test_region_ac_replay_is_exact(self):
         # The full policy and policies without ep_communication saved replay dispatch and
         # combine. DeepEP then uses a deterministic buffer, which receives rows in

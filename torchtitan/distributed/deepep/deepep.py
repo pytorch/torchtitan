@@ -379,6 +379,68 @@ def get_buffer(
     return _buffer
 
 
+class _OneRowPerTokenHooks:
+    """Saved-tensor hooks that keep ``recv_x`` with one row per received token.
+
+    In the expand layout, a token that picked several of this rank's experts arrives as
+    several identical rows. When activation remat keeps ``recv_x`` for backward, ``pack``
+    keeps each received token once plus the token of every row, and ``unpack`` rebuilds
+    ``recv_x`` with a gather, bitwise.
+
+    Example, as in ``_dispatch_op_impl``:
+
+        recv_x = [A, C, A, B]  ->  kept: recv_x_UD = [A, B, C], row_to_token_R = [0, 2, 0, 1]
+    """
+
+    def __init__(self) -> None:
+        # Set when dispatch returns. Remat packs recv_x later, when a consumer needs it.
+        self.handle_id: torch.Tensor | None = None
+
+    def pack(
+        self, tensor: torch.Tensor
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # recv_x is the only 2D dispatch output; the scores, counts and handle id stay.
+        if tensor.dim() != 2:
+            return tensor
+        if self.handle_id is None:
+            raise RuntimeError("DeepEP recv_x was packed before dispatch returned")
+        handle = _handle_cache[self.handle_id.item()]
+        if handle.expert_alignment != 1:
+            raise ValueError(
+                f"DeepEP expert_alignment={handle.expert_alignment} adds padding rows "
+                "that no received token owns, so remat can't rebuild recv_x from one "
+                "row per token; it must be 1."
+            )
+        # [received tokens, top_k]: the rows of each token, -1 for picks on other ranks.
+        row_ids_UK = handle.recv_src_metadata[:, 2:].long()
+        num_rows = tensor.shape[0]
+        token_ids_UK = torch.arange(
+            row_ids_UK.shape[0], dtype=torch.int32, device=tensor.device
+        )
+        token_ids_UK = token_ids_UK.unsqueeze(1).expand_as(row_ids_UK)
+        # Picks on other ranks write to one extra slot, dropped below.
+        row_to_token_R = torch.empty(
+            num_rows + 1, dtype=torch.int32, device=tensor.device
+        )
+        row_to_token_R.scatter_(
+            0,
+            row_ids_UK.masked_fill(row_ids_UK < 0, num_rows).flatten(),
+            token_ids_UK.flatten(),
+        )
+        # Every received token has a row on this rank, so the max is one of its rows.
+        recv_x_UD = tensor.index_select(0, row_ids_UK.amax(dim=1))
+        return recv_x_UD, row_to_token_R[:num_rows]
+
+    @staticmethod
+    def unpack(
+        packed: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+    ) -> torch.Tensor:
+        if isinstance(packed, torch.Tensor):
+            return packed
+        recv_x_UD, row_to_token_R = packed
+        return recv_x_UD.index_select(0, row_to_token_R)
+
+
 @dataclass
 class DispatchState:
     """State from dispatch needed for combine."""
@@ -467,14 +529,21 @@ def dispatch_tokens(
         remat_region_name,
         recompute=recompute,
     )
-    recv_x, recv_scores, num_recv_per_expert, handle_id = dispatch_region(
-        hidden_states,
-        selected_experts_indices,
-        top_scores,
-        num_experts=num_experts,
-        num_tokens_per_rank=num_tokens_per_rank,
-        cuda_graph_compatible=cuda_graph_compatible,
-    )
+    # When remat saves this region, it keeps recv_x for the replayed grouped GEMM. These hooks
+    # store it as one row per received token and rebuild recv_x in replay; without remat
+    # they never run.
+    one_row_per_token = _OneRowPerTokenHooks()
+    with remat.saved_tensors_hooks(one_row_per_token.pack, one_row_per_token.unpack):
+        recv_x, recv_scores, num_recv_per_expert, handle_id = dispatch_region(
+            hidden_states,
+            selected_experts_indices,
+            top_scores,
+            num_experts=num_experts,
+            num_tokens_per_rank=num_tokens_per_rank,
+            cuda_graph_compatible=cuda_graph_compatible,
+        )
+    # Remat packs recv_x at recompute_needs_tensor below; pack reads the routing handle.
+    one_row_per_token.handle_id = handle_id
     # The saved region is skipped during replay, while the caller (grouped GEMM, score
     # multiply in combine_tokens) still runs and needs its original outputs.
     remat.recompute_needs_tensor(recv_x, recv_scores, num_recv_per_expert, handle_id)
