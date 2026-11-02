@@ -54,7 +54,8 @@ def _validate_head_sharding(weight: DTensor) -> None:
         if type(placement) is Replicate:
             continue
         # ``_StridedShard`` subclasses ``Shard``, so an exact type check rejects
-        # it: its non-default shard order would pair heads with the wrong rows.
+        # it. TP produces it, and QK clipping supports only FSDP layouts: under
+        # TP, each rank records maxima for its local heads only.
         if type(placement) is not Shard or placement.dim != 0:
             raise ValueError(
                 "QK clipping requires MLA weights sharded only on tensor "
@@ -86,13 +87,13 @@ def _scale_mla_heads(
     rows_per_head: int,
     nope_rows_per_head: int,
     nope_scale_exponent: float,
-    remaining_scale_exponent: float | None,
+    remaining_scale_exponent: float,
 ) -> None:
     """Scale the NoPE and remaining rows of every MLA head in place.
 
     Rows ``[h * rows_per_head, (h + 1) * rows_per_head)`` of ``weight`` belong to
-    head ``h``, and ``scales_H`` contains one scale per head. The remaining rows
-    are unchanged when ``remaining_scale_exponent`` is ``None``.
+    head ``h``, and ``scales_H`` contains one scale per head. A zero
+    ``remaining_scale_exponent`` leaves the remaining rows unchanged.
     """
     num_heads = scales_H.numel()
     if weight.ndim != 2 or weight.shape[0] != num_heads * rows_per_head:
@@ -102,15 +103,12 @@ def _scale_mla_heads(
     # Scale rows, not a [num_heads, rows_per_head, in_features] view: Shard(0)
     # can split a head across ranks when num_heads is not a multiple of the
     # shard count, and DTensor cannot view such a tensor.
-    remaining_scales_H = (
-        torch.ones_like(scales_H)
-        if remaining_scale_exponent is None
-        else scales_H.pow(remaining_scale_exponent)
-    )
     row_scales_R1 = torch.cat(
         [
             scales_H.pow(nope_scale_exponent)[:, None].expand(-1, nope_rows_per_head),
-            remaining_scales_H[:, None].expand(-1, rows_per_head - nope_rows_per_head),
+            scales_H.pow(remaining_scale_exponent)[:, None].expand(
+                -1, rows_per_head - nope_rows_per_head
+            ),
         ],
         dim=1,
     ).view(-1, 1)
@@ -142,7 +140,7 @@ def _clip_mla_weights(
         rows_per_head=attention.qk_nope_head_dim + attention.v_head_dim,
         nope_rows_per_head=attention.qk_nope_head_dim,
         nope_scale_exponent=1.0 - alpha,
-        remaining_scale_exponent=None,
+        remaining_scale_exponent=0.0,
     )
 
 

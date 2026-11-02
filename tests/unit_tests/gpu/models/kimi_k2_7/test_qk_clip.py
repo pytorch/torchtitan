@@ -331,8 +331,10 @@ class QKClipDistributedTest(DTensorTestBase):
             attention.inner_attention.wkv_b = weight_module(
                 num_heads * (qk_nope_head_dim + v_head_dim)
             )
+            # Head h has max logit 400 * 4**h, so a head given another head's
+            # scale fails the value check below.
             attention.inner_attention.inner_attention.max_attention_logits_H.append(
-                torch.full((num_heads,), 400.0, device=device)
+                400.0 * 4.0 ** torch.arange(num_heads, device=device)
             )
             model.add_module(f"layer_{layer_id}", attention)
 
@@ -346,16 +348,20 @@ class QKClipDistributedTest(DTensorTestBase):
         # One packed MAX all-reduce covers every layer and head; the 8 weights
         # this model clips must add nothing on top of it.
         self.assertEqual(total, 1, f"expected one collective, got {collectives}")
-        # A max logit of 400 gives the scale 100 / 400 = 0.25.
-        q_row_scales = [0.5] * qk_nope_head_dim + [0.25] * qk_rope_head_dim
-        kv_row_scales = [0.5] * qk_nope_head_dim + [1.0] * v_head_dim
+        # Head h gets the scale 100 / (400 * 4**h) = 4**-(h + 1), and
+        # alpha = 0.5 makes its NoPE scale 2**-(h + 1).
+        q_row_scales, kv_row_scales = [], []
+        for h in range(num_heads):
+            q_row_scales += [2.0 ** -(h + 1)] * qk_nope_head_dim
+            q_row_scales += [4.0 ** -(h + 1)] * qk_rope_head_dim
+            kv_row_scales += [2.0 ** -(h + 1)] * qk_nope_head_dim + [1.0] * v_head_dim
         for weight, row_scales in (
             (attention.wq_b.weight, q_row_scales),
             (attention.inner_attention.wkv_b.weight, kv_row_scales),
         ):
             torch.testing.assert_close(
                 weight.full_tensor(),
-                torch.tensor(row_scales, device=device)
-                .repeat(num_heads)[:, None]
-                .expand(-1, in_features),
+                torch.tensor(row_scales, device=device)[:, None].expand(
+                    -1, in_features
+                ),
             )
