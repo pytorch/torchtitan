@@ -5,13 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 import re
+from unittest import mock
 
 import pytest
 import torch
-
-pytest.importorskip("attn_gym")
-
-from torch._inductor.utils import run_and_get_code, run_fw_bw_and_get_code
+from torch._inductor.graph import GraphLowering
 
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.attention.gdn import (
@@ -30,11 +28,21 @@ SPLIT_SIZES = {
 
 
 def _triton_kernels(code: str) -> list[str]:
-    return re.findall(r"^(triton_\w+) = async_compile\.triton", code, re.MULTILINE)
+    return re.findall(r"^def (triton_\w+)\(", code, re.MULTILINE)
+
+
+def _run_and_get_code_no_reset(fn):
+    # run_and_get_code resets Dynamo first. Without the reset, the 37-token call sees
+    # the 64-token compile and recompiles as the dynamic graph.
+    codes: list[str] = []
+    with mock.patch.object(GraphLowering, "save_output_code", codes.append):
+        result = fn()
+    return result, codes
 
 
 @pytest.fixture
 def split_region():
+    torch._dynamo.reset()
     LocalCompileConfig(regions=["gdn_split_in_proj"]).apply()
     yield
     LocalCompileConfig().apply()
@@ -52,10 +60,10 @@ def test_split_in_proj_compiles_per_grad_mode(split_region, split_sizes) -> None
 
         # Inference: one combo kernel writes all four outputs.
         with torch.no_grad():
-            outputs, codes = run_and_get_code(
-                _split_in_proj, projected_TC, split_sizes, 128
+            outputs, codes = _run_and_get_code_no_reset(
+                lambda: _split_in_proj(projected_TC, split_sizes, 128)
             )
-        assert all(len(_triton_kernels(code)) == 1 for code in codes), num_tokens
+        assert [len(_triton_kernels(code)) for code in codes] == [1], num_tokens
         assert all(torch.equal(o, e) for o, e in zip(outputs, expected))
 
         # Training: the backward copies each gradient into its slice (a foreach
@@ -70,7 +78,10 @@ def test_split_in_proj_compiles_per_grad_mode(split_region, split_sizes) -> None
         reference_TC = projected_TC.clone().requires_grad_()
         loss_fn(_split_grouped_in_proj, reference_TC).backward()
         projected_TC.requires_grad_()
-        _, codes = run_fw_bw_and_get_code(lambda: loss_fn(_split_in_proj, projected_TC))
+        _, codes = _run_and_get_code_no_reset(
+            lambda: loss_fn(_split_in_proj, projected_TC).backward()
+        )
+        assert len(codes) == 2, num_tokens
         for backward_code in codes[1:]:
             backward_kernels = _triton_kernels(backward_code)
             assert backward_kernels and all(
