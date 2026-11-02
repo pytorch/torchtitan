@@ -1130,6 +1130,58 @@ class TestChunkedLossWrapper(unittest.TestCase):
                     else:
                         torch.testing.assert_close(skipped, full)
 
+    def test_skip_non_loss_tokens_with_mtp_matches_every_token(self):
+        """MTP: the outputs share the union of their loss tokens; same loss and grads."""
+        torch.manual_seed(42)
+        T, D, V, num_chunks = 64, 8, 17, 4
+        positions = torch.arange(T) % 16
+        labels = torch.randint(0, V, (T,))
+        labels[torch.rand(T) >= 0.15] = IGNORE_INDEX
+        loss_labels = (labels,) + tuple(
+            roll_mtp_sequence(
+                labels, shift=shift, positions=positions, fill_value=IGNORE_INDEX
+            )
+            for shift in (1, 2)
+        )
+        counts = torch.stack([(label != IGNORE_INDEX).sum() for label in loss_labels])
+        hidden = tuple(torch.randn(T, D) for _ in loss_labels)
+        lm_head = nn.Linear(D, V, bias=False)
+        results, lm_head_rows = [], []
+        for skip in (False, True):
+            head = copy.deepcopy(lm_head)
+            if skip:
+                head.register_forward_hook(
+                    lambda module, args, output: lm_head_rows.append(args[0].shape[0])
+                )
+            chunked_loss = ChunkedLossWrapper(
+                ChunkedLossWrapper.Config(
+                    num_chunks=num_chunks,
+                    skip_non_loss_tokens=skip,
+                    loss_fn=MTPCrossEntropyLoss.Config(global_vocab_size=V),
+                )
+            )
+            chunked_loss.set_lm_head(head)
+            hidden_inputs = tuple(h.clone().requires_grad_() for h in hidden)
+            loss, _ = chunked_loss(hidden_inputs, loss_labels, counts)
+            loss.backward()
+            results.append((loss, *(h.grad for h in hidden_inputs), head.weight.grad))
+
+        read_by_none = torch.stack(
+            [label == IGNORE_INDEX for label in loss_labels]
+        ).all(dim=0)
+        # Each output runs the lm_head on the union only (padded to whole chunks).
+        num_kept = int((~read_by_none).sum())
+        self.assertLess(sum(lm_head_rows), len(loss_labels) * T)
+        self.assertTrue(
+            len(loss_labels) * num_kept
+            <= sum(lm_head_rows)
+            < len(loss_labels) * (num_kept + len(lm_head_rows))
+        )
+        for grad in results[1][1:-1]:
+            self.assertTrue((grad[read_by_none] == 0).all())
+        for skipped, full in zip(results[1], results[0], strict=True):
+            torch.testing.assert_close(skipped, full)
+
     def test_skip_non_loss_tokens_rejects_indivisible_length(self):
         """Raises at every loss-token count, so no rank fails while its peers wait."""
         chunked_loss = ChunkedLossWrapper(
@@ -1144,16 +1196,6 @@ class TestChunkedLossWrapper(unittest.TestCase):
                 self.assertRaisesRegex(RuntimeError, "divisible by num_chunks"),
             ):
                 chunked_loss(torch.randn(10, 4, requires_grad=True), labels)
-
-    def test_skip_non_loss_tokens_rejects_multiple_outputs(self):
-        chunked_loss = ChunkedLossWrapper(
-            ChunkedLossWrapper.Config(num_chunks=2, skip_non_loss_tokens=True)
-        )
-        chunked_loss.set_lm_head(nn.Linear(4, 8, bias=False))
-        pred = (torch.randn(4, 4), torch.randn(4, 4))
-        labels = (torch.ones(4, dtype=torch.long), torch.ones(4, dtype=torch.long))
-        with self.assertRaisesRegex(ValueError, "multiple outputs"):
-            chunked_loss(pred, labels)
 
     def test_frozen_features_accumulate_head_gradients(self):
         """Head-only training matches cross entropy across chunks and microbatches."""

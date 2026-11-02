@@ -658,8 +658,8 @@ class ChunkedLossWrapper(Loss[LossInput]):
         skip_non_loss_tokens: bool = False
         """Run the lm_head only on loss tokens: ``loss_mask`` if passed (RL), else labels
         != ``IGNORE_INDEX`` (SFT). The rest get zero grad, so ``loss_fn`` must read only loss
-        tokens (no entropy or KL over all tokens). Needs accelerator graphs off. Not
-        supported with multiple outputs (MTP)."""
+        tokens (no entropy or KL over all tokens). Needs accelerator graphs off. With
+        multiple outputs (MTP), a token stays if any output's labels read it."""
 
     def __init__(self, config: Config):
         self.num_chunks = config.num_chunks
@@ -743,19 +743,18 @@ class ChunkedLossWrapper(Loss[LossInput]):
                 pred[0].shape[0] % num_chunks == 0,
                 lambda: "ChunkedLossWrapper sequence length must be divisible by num_chunks",
             )
-            if self.skip_non_loss_tokens and is_multi_output:
-                raise ValueError(
-                    "ChunkedLossWrapper.skip_non_loss_tokens does not support multiple "
-                    "outputs (MTP)."
-                )
             if self.skip_non_loss_tokens:
                 # Keep only the loss tokens: the code below runs unchanged on fewer chunks, and
-                # the backward of pred[0][rows] gives the other tokens zero grad. A stable sort
+                # the backward of hidden_state[rows] gives the other tokens zero grad. A stable sort
                 # puts loss tokens first, in order; the first non-loss tokens pad the last chunk
                 # (zero loss and grad). Chunks are never longer than without the skip:
                 #   T=8, num_chunks=4 (chunks of 2), is_loss_token=[F T T F F F T F]
                 #   -> rows=[1 2 | 6 0]: 3 loss tokens + 1 pad, 2 chunks of 2
-                is_loss_token = loss_inputs.get("loss_mask", labels[0] != IGNORE_INDEX)
+                # With multiple outputs (MTP), one row set serves all of them: their union.
+                is_loss_token = loss_inputs.get(
+                    "loss_mask",
+                    torch.stack([label != IGNORE_INDEX for label in labels]).any(dim=0),
+                )
                 num_tokens = is_loss_token.shape[0]
                 # At least one row: FSDP reduce-scatters the lm_head grad in the last chunk.
                 num_loss_tokens = max(1, int(is_loss_token.sum()))  # host sync
@@ -763,8 +762,8 @@ class ChunkedLossWrapper(Loss[LossInput]):
                 chunk_len = math.ceil(num_loss_tokens / num_chunks)
                 rows = torch.argsort(is_loss_token, descending=True, stable=True)
                 rows = rows[: num_chunks * chunk_len]
-                pred = (pred[0][rows],)
-                labels = (labels[0][rows],)
+                pred = tuple(hidden_state[rows] for hidden_state in pred)
+                labels = tuple(label[rows] for label in labels)
                 loss_inputs = {
                     key: value[rows] if isinstance(value, torch.Tensor) else value
                     for key, value in loss_inputs.items()
