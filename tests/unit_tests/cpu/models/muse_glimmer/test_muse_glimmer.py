@@ -13,6 +13,9 @@ import torch.nn.functional as F
 from torchtitan.config import ParallelismConfig
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.muse_glimmer import build_model_config
+from torchtitan.models.muse_glimmer.state_dict_adapter import (
+    MuseGlimmerStateDictAdapter,
+)
 
 
 def cpu_flex_attention(q, k, v, **kwargs):
@@ -151,10 +154,6 @@ class TestMuseGlimmerConditionalVision(unittest.TestCase):
                 torch.testing.assert_close(parameter.grad, torch.zeros_like(parameter))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestMuseGlimmerStateDictAdapterRowPermute(unittest.TestCase):
     def test_a_rank_wide_factor_permutes_like_its_projection(self):
         """The q/k RoPE permute reorders rows only, so a LoRA factor with the projection's rows
@@ -163,7 +162,7 @@ class TestMuseGlimmerStateDictAdapterRowPermute(unittest.TestCase):
         config = build_model_config(
             "debugmodel", parallelism=ParallelismConfig(), seq_len=64
         )
-        adapter = type(config)._owner.state_dict_adapter_cls(config, None)
+        adapter = MuseGlimmerStateDictAdapter(config, None)
         attention = config.layers[0].attention
         rows = (attention.n_heads + 2 * attention.n_kv_heads) * attention.head_dim
         rank = 4
@@ -194,3 +193,7 @@ class TestMuseGlimmerStateDictAdapterRowPermute(unittest.TestCase):
         )
         for name, tensor in exported.items():
             torch.testing.assert_close(tensor[:, 0], reference[name][:, 0])
+
+
+if __name__ == "__main__":
+    unittest.main()
