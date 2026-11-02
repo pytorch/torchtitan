@@ -415,9 +415,8 @@ class Controller(Configurable):
                         for model in (self.trainer.model, self.generator.model)
                         for _, attention, _, _ in model.traverse(Attention.Config)
                     )
-                    # ROCm varlen cannot use deterministic num_splits=1, and
-                    # other attention paths do not provide exact trainer-vLLM
-                    # parity. Allowing them would silently produce logprob drift.
+                    # vLLM's parity path uses compiled FlexAttention; ROCm varlen cannot
+                    # use the fixed split count needed to keep logprobs identical.
                     if not attention_configs or any(
                         not isinstance(
                             attention.inner_attention, FlexInnerAttention.Config
