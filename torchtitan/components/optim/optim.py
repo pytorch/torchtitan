@@ -92,8 +92,8 @@ class Optim(Configurable):
             ):
                 raise ValueError(
                     "enable_accelerator_graph does not support Adam state_offload: "
-                    "OptimizerStateOffloader.step() waits on the host for its copy "
-                    "streams, which a graph capture cannot record."
+                    "OptimizerStateOffloader.step() picks its chunks on the host and its "
+                    "first loads wait on events recorded outside the capture."
                 )
 
     optimizers: OptimizersContainer

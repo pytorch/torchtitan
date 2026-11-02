@@ -49,6 +49,9 @@ class OptimizerStateOffloader(Optimizer, Configurable):
         slot A copies: load 0  |               | store 0 -> load 2 |
         slot B copies:         | load 1        |                   | store 1 -> load 3
 
+    ``step()`` does not wait on the host. ``state_dict()`` and ``load_state_dict()`` wait for
+    the pending stores before the host reads or writes the slabs.
+
     Launch with ``torchrun --numa-binding=node`` so the slabs land on the GPU's NUMA node.
 
     Args:
@@ -129,7 +132,7 @@ class OptimizerStateOffloader(Optimizer, Configurable):
 
         1. Select parameters with gradients and load the first moment chunk.
         2. Alternate slots, overlapping each update with the surrounding copies.
-        3. Restore the full parameter groups and wait for CPU moments to be current.
+        3. Restore the full parameter groups. The compute stream waits for the last store.
 
         Args:
             closure: Unsupported; it must be ``None``.
@@ -149,8 +152,8 @@ class OptimizerStateOffloader(Optimizer, Configurable):
             return
 
         # Two slots, allocated on the compute stream so the caching allocator can hand the
-        # memory back to forward/backward after the step. Freed only after the side streams
-        # are synchronized below, so no cross-stream lifetime hazard remains.
+        # memory back to forward/backward after the step. Freed only after the compute stream
+        # waits for the D2H stream below, so later compute work cannot reuse them early.
         max_numel = max(_chunk_numel(chunk) for chunk in chunks)
         state_dtype = self.state[chunks[0][0]]["exp_avg"].dtype
         device = chunks[0][0].device
@@ -219,10 +222,15 @@ class OptimizerStateOffloader(Optimizer, Configurable):
 
         for group, params in zip(self.param_groups, group_params):
             group["params"] = params
-        # The CPU moments are current for checkpointing, and no copy still uses the slots
-        # when they are freed.
-        self._h2d_stream.synchronize()
+        # Later compute work, which may reuse the slots, and the next step's loads, which wait
+        # for the compute stream, run after every store. The H2D stream needs no join: the
+        # compute stream already waited for each load.
+        compute_stream.wait_stream(self._d2h_stream)
+
+    def state_dict(self) -> dict[str, Any]:
+        """Return the optimizer state dict after the last step's stores reach the slabs."""
         self._d2h_stream.synchronize()
+        return super().state_dict()
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         """Copy a loaded state dict into the existing pinned state, in place.
@@ -236,6 +244,8 @@ class OptimizerStateOffloader(Optimizer, Configurable):
             device. This override preserves the pinned slabs and copies values into them.
         """
         params = [param for group in self.param_groups for param in group["params"]]
+        # A pending store from the last step would overwrite the loaded values.
+        self._d2h_stream.synchronize()
 
         # Copy checkpoint values into the existing slab views instead of replacing
         # them with independently allocated tensors.

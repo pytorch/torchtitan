@@ -113,6 +113,8 @@ class TestOptimizerStateOffload(DTensorTestBase):
     def _assert_same(
         self, resident: OptimizersContainer, offloaded: OptimizersContainer
     ) -> None:
+        # step() leaves the stores into the CPU moments pending on the host.
+        torch.cuda.synchronize()
         for res_opt, off_opt in zip(resident.optimizers, offloaded.optimizers):
             for res_group, off_group in zip(res_opt.param_groups, off_opt.param_groups):
                 for res_param, off_param in zip(
