@@ -272,7 +272,6 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine.device = torch.device("cpu")
         engine.max_num_documents = None
         engine.preprocess_inputs_kwargs = {}
-        engine._model_has_aux_loss = False
         engine.ntokens_seen = 0
         engine.local_loss_token_count = 0
         microbatches = [
@@ -374,7 +373,6 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine.device = torch.device("cpu")
         engine.max_num_documents = None
         engine.preprocess_inputs_kwargs = {}
-        engine._model_has_aux_loss = False
         engine.ntokens_seen = 0
         engine.local_loss_token_count = 0
         microbatch = TokenizedTrainingMicrobatch(

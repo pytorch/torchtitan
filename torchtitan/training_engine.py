@@ -40,7 +40,7 @@ from torchtitan.distributed.pipeline_parallel import (
     prepare_pipeline_schedule_for_accelerator_graph,
 )
 from torchtitan.models.base import BaseModel
-from torchtitan.models.common.aux_loss import aux_loss_denominators, AuxLoss
+from torchtitan.models.common.aux_loss import aux_loss_denominators
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import (
     build_device_memory_monitor,
@@ -259,7 +259,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     global_loss_token_count: torch.Tensor
     """The step's loss tokens over the ranks whose gradients it sums (int64), set on
     device by ``optim_step``. A CPU zero before the first step."""
-    _model_has_aux_loss: bool
     _step_started: bool
     _forward_backward_captures_whole_step: bool
     """SDC replay or a whole-step graph: one ``forward_backward`` call per optimizer step."""
@@ -282,10 +281,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
         self.config = config
         self.model_config = model_config
-        # Without an aux loss, skip building its denominators (a host-to-device copy) per microbatch.
-        self._model_has_aux_loss = (
-            next(model_config.traverse(AuxLoss.Config), None) is not None
-        )
         self.max_num_documents = max_num_documents
         self.output_dir = output_dir
         self.has_quantization = has_quantization(model_config)
@@ -718,14 +713,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                         parallelism=self.config.parallelism,
                         max_num_documents=self.max_num_documents,
                         max_context_length=self.config.training.max_context_length,
-                        aux_loss_denominators=(
-                            aux_loss_denominators(
-                                microbatch.routing_token_counts,
-                                microbatch.loss_token_count,
-                                device=self.device,
-                            )
-                            if self._model_has_aux_loss
-                            else None
+                        aux_loss_denominators=aux_loss_denominators(
+                            microbatch.routing_token_counts,
+                            microbatch.loss_token_count,
+                            device=self.device,
                         ),
                         **self.preprocess_inputs_kwargs,
                     )
