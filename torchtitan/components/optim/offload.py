@@ -49,9 +49,6 @@ class OptimizerStateOffloader(Optimizer, Configurable):
         slot A copies: load 0  |               | store 0 -> load 2 |
         slot B copies:         | load 1        |                   | store 1 -> load 3
 
-    Two streams vs one stream (load, update, store in order) on Qwen3-4B FSDP=2 rank
-    shards, one GB300: fp32 moments 155 vs 176 ms per step, bf16 moments 65 vs 97 ms.
-
     Launch with ``torchrun --numa-binding=node`` so the slabs land on the GPU's NUMA node.
 
     Args:
@@ -348,6 +345,10 @@ def _state_like(param: torch.Tensor, local: torch.Tensor) -> torch.Tensor:
     if local.device.type == "cpu":
         # A DTensor inherits its local's storage offset. DCP's async stager reads a non-zero
         # data_ptr() as a dense tensor, so alias the slab view at offset 0.
+        # TODO: remove once DCP's DefaultStager stages a DTensor whose local tensor sits at a
+        # storage offset > 0. Repro: wrap slab[10:20] of a CPU tensor with DTensor.from_local
+        # on a 1-rank CPU mesh, then DefaultStager(StagingOptions(False, True, False,
+        # False)).stage({"x": dtensor}) raises "invalid python storage".
         local = torch.from_dlpack(local)
     spec = DTensorSpec(
         mesh=param.device_mesh,

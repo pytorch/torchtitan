@@ -4,11 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from unittest.mock import MagicMock
+
 import pytest
 import torch
 import torch.nn as nn
 from torchtitan.components.optim import (
     AdamW,
+    Optim,
     OptimizersContainer,
     OptimizerStateOffloader,
 )
@@ -50,3 +53,19 @@ def test_container_rejects_mixed_param_dtypes() -> None:
     )
     with pytest.raises(ValueError, match="one parameter dtype"):
         config.build(model_parts=[model])
+
+
+def test_build_rejects_graph_capture_set_after_construction() -> None:
+    # Recipes set both fields after construction; build() re-validates through replace().
+    config = Optim.Config(
+        optimizer=OptimizersContainer.Config(optimizers=[AdamW.Config(pattern=r".*")])
+    )
+    config.enable_accelerator_graph = True
+    config.optimizer.optimizers[0].state_offload = OptimizerStateOffloader.Config()
+    with pytest.raises(ValueError, match="enable_accelerator_graph"):
+        config.build(
+            model_parts=[nn.Linear(2, 2)],
+            parallelism_context=MagicMock(),
+            training_steps=1,
+            pp_has_last_stage=True,
+        )
