@@ -121,8 +121,9 @@ def _recurrent_gdn_fwd(
         dtype=torch.bool,
         device=q_BTHK.device,
     )
-    # Omit sequence metadata to keep the normalization layout identical
-    # across prefill and decode; recurrence still needs the boundaries.
+    # TODO: Use an explicit batch-invariant l2norm policy when available upstream.
+    # Omit metadata to keep the reduction layout fixed; recurrence needs boundaries.
+    # https://github.com/meta-pytorch/attention-gym/issues/687
     normalized_q_BTHK = l2norm(q_BTHK)
     normalized_k_BTHK = l2norm(k_BTHK)
     out_BTHV, _ = recurrent_gdn(
@@ -167,9 +168,9 @@ def _chunk_gdn_gradients(
         inputs = tuple(
             tensor.detach().requires_grad_(True) for tensor in (q, k, v, g, beta)
         )
-        # Pin normalization backward; autotune does not control its forward layout.
-        normalized_q = l2norm(inputs[0], autotune=False)
-        normalized_k = l2norm(inputs[1], autotune=False)
+        autotune = not torch.are_deterministic_algorithms_enabled()
+        normalized_q = l2norm(inputs[0], autotune=autotune)
+        normalized_k = l2norm(inputs[1], autotune=autotune)
         output, _ = chunk_gdn(
             normalized_q,
             normalized_k,

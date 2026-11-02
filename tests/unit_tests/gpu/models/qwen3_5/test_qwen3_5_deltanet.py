@@ -816,8 +816,8 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             cu_seqlens,
         )
 
-        normalized_q = l2norm(q, cu_seqlens=cu_seqlens)
-        normalized_k = l2norm(k, cu_seqlens=cu_seqlens)
+        normalized_q = l2norm(q)
+        normalized_k = l2norm(k)
         state_cache = torch.randn(
             5,
             num_value_heads,

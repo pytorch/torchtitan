@@ -333,8 +333,9 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
             impl="fused",
         )
         update_gate = torch.sigmoid(b).unsqueeze(0)
-        # Omit sequence metadata to keep the normalization layout identical
-        # across prefill and decode; recurrence still needs the boundaries.
+        # TODO: Use an explicit batch-invariant l2norm policy when available upstream.
+        # Omit metadata to keep the reduction layout fixed; recurrence needs boundaries.
+        # https://github.com/meta-pytorch/attention-gym/issues/687
         norm_cu_seqlens = None if is_in_batch_invariant_mode() else cu_seqlens
         query = l2norm(query, cu_seqlens=norm_cu_seqlens)
         key = l2norm(key, cu_seqlens=norm_cu_seqlens)
