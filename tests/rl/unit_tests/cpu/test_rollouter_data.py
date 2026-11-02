@@ -25,6 +25,13 @@ def _rollouter(validation_dataset: _ValidationConfig) -> Rollouter:
     return rollouter
 
 
+def test_disabled_validation_does_not_build_dataset() -> None:
+    config = _ValidationConfig((1, 2, 3))
+
+    assert _rollouter(config).get_validation_samples(0) == []
+    assert config.num_builds == 0
+
+
 def test_validation_steps_bound_iterable_source() -> None:
     config = _ValidationConfig((1, 2, 3))
     rollouter = _rollouter(config)

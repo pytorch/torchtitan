@@ -144,6 +144,8 @@ class Rollouter(Configurable):
 
     def get_validation_samples(self, steps: int) -> list[object]:
         """Materialize one fresh validation pass, optionally bounded by steps."""
+        if steps == 0:
+            return []
         validation_data = self._config.validation_dataset.build()
         try:
             iterator = iter(validation_data)
