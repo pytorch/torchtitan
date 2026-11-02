@@ -160,13 +160,23 @@ class TestMuseGlimmerStateDictAdapterRowPermute(unittest.TestCase):
         """The q/k RoPE permute reorders rows only, so a LoRA factor with the projection's rows
         and a rank-wide second dim must follow the weight's row order; sizing the k permute from
         the model config instead of the tensor used to fail on such a factor."""
-        config = build_model_config("debugmodel", parallelism=ParallelismConfig(), seq_len=64)
+        config = build_model_config(
+            "debugmodel", parallelism=ParallelismConfig(), seq_len=64
+        )
         adapter = type(config)._owner.state_dict_adapter_cls(config, None)
         attention = config.layers[0].attention
         rows = (attention.n_heads + 2 * attention.n_kv_heads) * attention.head_dim
         rank = 4
-        factor = torch.arange(rows, dtype=torch.float32)[:, None].expand(rows, rank).contiguous()
-        weight = torch.arange(rows, dtype=torch.float32)[:, None].expand(rows, config.dim).contiguous()
+        factor = (
+            torch.arange(rows, dtype=torch.float32)[:, None]
+            .expand(rows, rank)
+            .contiguous()
+        )
+        weight = (
+            torch.arange(rows, dtype=torch.float32)[:, None]
+            .expand(rows, config.dim)
+            .contiguous()
+        )
 
         exported = adapter.to_hf({"layers.0.attention.qkv_linear.wqkv.weight": factor})
         reference = adapter.to_hf({"layers.0.attention.qkv_linear.wqkv.weight": weight})
