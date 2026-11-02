@@ -17,6 +17,7 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 from torchtitan.config import Configurable
 
+from .offload import OptimizerStateOffloader
 from .optimizer import OptimizersContainer
 
 logger = logging.getLogger(__name__)
@@ -272,12 +273,16 @@ class LRSchedulersContainer(Stateful, Configurable):
     def get_metrics(self) -> dict[str, float]:
         """Return learning rates keyed by optimizer (and param-group index)."""
         metrics = {}
-        optimizer_counts = Counter(
-            type(scheduler.optimizer).__name__ for scheduler in self.schedulers
-        )
-        optimizer_indices: defaultdict[str, int] = defaultdict(int)
+        opt_names = []
         for scheduler in self.schedulers:
-            opt_name = type(scheduler.optimizer).__name__
+            optimizer = scheduler.optimizer
+            # Name an offloaded optimizer after the Adam/AdamW it wraps.
+            if isinstance(optimizer, OptimizerStateOffloader):
+                optimizer = optimizer.optimizer
+            opt_names.append(type(optimizer).__name__)
+        optimizer_counts = Counter(opt_names)
+        optimizer_indices: defaultdict[str, int] = defaultdict(int)
+        for scheduler, opt_name in zip(self.schedulers, opt_names):
             optimizer_index = optimizer_indices[opt_name]
             optimizer_indices[opt_name] += 1
             last_lrs = scheduler.get_last_host_lrs()

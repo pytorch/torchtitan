@@ -22,7 +22,7 @@ from torchtitan.tools.utils import device_module, device_type
 
 from .ema import EMA
 from .lr_scheduler import LRSchedulersContainer
-from .optimizer import OptimizersContainer
+from .optimizer import Adam, AdamW, OptimizersContainer
 
 
 logger = logging.getLogger(__name__)
@@ -85,6 +85,16 @@ class Optim(Configurable):
         def __post_init__(self) -> None:
             if self.max_norm < 0:
                 raise ValueError("max_norm must be greater than or equal to 0.")
+            if self.enable_accelerator_graph and any(
+                isinstance(optimizer, (Adam.Config, AdamW.Config))
+                and optimizer.state_offload is not None
+                for optimizer in self.optimizer.optimizers
+            ):
+                raise ValueError(
+                    "enable_accelerator_graph does not support Adam state_offload: "
+                    "OptimizerStateOffloader.step() waits on the host for its copy "
+                    "streams, which a graph capture cannot record."
+                )
 
     optimizers: OptimizersContainer
     lr_schedulers: LRSchedulersContainer

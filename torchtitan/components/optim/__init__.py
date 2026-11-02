@@ -6,6 +6,7 @@
 
 from .ema import EMA
 from .lr_scheduler import LRSchedulersContainer
+from .offload import OptimizerStateOffloader
 from .optim import GradientClipper, Optim
 from .optimizer import Adam, AdamW, BaseOptimizer, DistMuon, OptimizersContainer
 
@@ -19,4 +20,5 @@ __all__ = [
     "LRSchedulersContainer",
     "OptimizersContainer",
     "Optim",
+    "OptimizerStateOffloader",
 ]
