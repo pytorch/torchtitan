@@ -284,8 +284,8 @@ def _record_streamed_step(
     streamed_rows: list[list[list[_SizedSample]]] = []
     last_rows: list[list[list[_SizedSample]]] = []
 
-    def record_pack(*, streamed_bins=None):
-        if streamed_bins is None:
+    def record_pack(*, streamed_training_samples=None):
+        if streamed_training_samples is None:
             batcher._take_groups()
             last_rows.extend(
                 batcher._assign_training_samples_to_microbatches(
@@ -301,10 +301,9 @@ def _record_streamed_step(
                 group_ids=[],
                 min_policy_versions=[],
             )
-        assert len(streamed_bins) % (num_pp_microbatches * batcher._dp_degree) == 0
         streamed_rows.extend(
-            batcher._assign_bins_to_dp_ranks(
-                streamed_bins, num_pp_microbatches=num_pp_microbatches
+            batcher._assign_training_samples_to_microbatches(
+                streamed_training_samples, num_pp_microbatches=num_pp_microbatches
             )
         )
         return TrainerStepBatch(
@@ -352,55 +351,6 @@ def _streaming_batcher(
     )
 
 
-def _document_attention_imbalance(row: list[list[_SizedSample]]) -> float:
-    """Max over mean, across one row's DP ranks, of the sum of squared sample lengths."""
-    works = [sum(sample.num_tokens**2 for sample in bin_) for bin_ in row]
-    return max(works) / (sum(works) / len(works))
-
-
-def test_streamed_rows_balance_attention_on_realistic_lengths() -> None:
-    """A 16-rank step of agentic rollouts, lengths as in a 64K-context run (log-normal, median ~24K,
-    correlated within a group), 2 contexts per microbatch: each streamed row's ranks get about the same
-    attention work, most streamed bins are at least 98% full and all at least 90%, and the step needs
-    about as many rows as packing it at once.
-
-    Repacking FFD's longest unsent samples into exactly 16 bins per row instead rarely fits; the FFD
-    fallback averages 1.51x max/mean attention work on these lengths (1.11x here).
-    """
-    rng = np.random.default_rng(0)
-    num_tokens_per_microbatch, max_context_length, dp_degree = 131_072, 65_536, 16
-    groups = []
-    for _ in range(96):
-        center = rng.lognormal(mean=10.08, sigma=0.45)
-        lengths = center * rng.lognormal(mean=0.0, sigma=0.23, size=26)
-        groups.append(
-            [_SizedSample(int(n)) for n in np.clip(lengths, 1_000, max_context_length)]
-        )
-    batcher = _streaming_batcher(
-        num_tokens_per_microbatch=num_tokens_per_microbatch,
-        max_context_length=max_context_length,
-        num_groups=len(groups),
-        dp_degree=dp_degree,
-    )
-    streamed_rows, last_rows = _record_streamed_step(batcher, groups)
-
-    samples = [sample for group in groups for sample in group]
-    whole_step_rows = batcher._assign_training_samples_to_microbatches(samples)
-    assert len(streamed_rows) >= 0.8 * len(whole_step_rows)
-    assert len(streamed_rows) + len(last_rows) <= len(whole_step_rows) + 1
-    fills = [
-        sum(sample.num_tokens for sample in bin_) / num_tokens_per_microbatch
-        for row in streamed_rows
-        for bin_ in row
-    ]
-    # Most bins pass the 98% rule; the rest went out once 2 microbatch groups of tokens waited.
-    assert sum(fill < 0.98 for fill in fills) <= len(fills) // 8
-    assert min(fills) >= 0.9
-    imbalances = [_document_attention_imbalance(row) for row in streamed_rows]
-    assert sum(imbalances) / len(imbalances) < 1.15
-    assert max(imbalances) < 1.5
-
-
 @pytest.mark.parametrize("num_pp_microbatches", [1, 2])
 def test_streamed_packing_sends_each_sample_once_per_step(
     num_pp_microbatches: int,
@@ -442,45 +392,45 @@ def test_streamed_packing_sends_each_sample_once_per_step(
             packed = [id(s) for row in rows for bin_ in row for s in bin_]
             assert sorted(packed) == sorted(id(s) for group in groups for s in group)
             assert batcher._groups_for_next_batch == []
+            # Streamed batches carry no empty bin, and the step's last batch keeps one sample per bin
+            # of a microbatch group (or every sample, if the step has fewer).
+            assert all(bin_ for row in streamed_rows for bin_ in row)
+            num_last_batch_samples = sum(len(bin_) for row in last_rows for bin_ in row)
+            assert num_last_batch_samples >= min(
+                num_pp_microbatches * dp_degree, len(packed)
+            )
 
 
 @pytest.mark.parametrize(
-    ("lengths", "max_num_documents", "sent", "unsent"),
+    ("lengths", "sent", "unsent"),
     [
         # The `_pack_ready_microbatches` docstring cases: dp_degree=2, 10 tokens per bin.
-        ([6, 6, 4, 4], None, [[6, 4], [6, 4]], []),
-        ([6, 5, 4, 3], None, None, [3, 4, 5, 6]),
-        ([9, 9, 9, 1, 1], None, [[9, 1], [9, 1]], [9]),
-        ([9, 9, 9, 9, 9, 9, 3], None, [[9], [9]], [3, 9, 9, 9, 9]),
-        ([10, 10] + [6] * 8, None, [[10], [10], [6], [6]], [6] * 6),
-        # Bins full by their document limit, not by tokens.
-        ([1, 1, 1, 1], 2, [[1, 1], [1, 1]], []),
+        ([6, 6, 4, 4, 5, 3], [4, 4, 6, 6], [3, 5]),
+        # Sending both full bins would leave no sample for the step's last batch.
+        ([6, 6, 4, 4], None, [4, 4, 6, 6]),
+        # Sending 4 of the 5 bins would leave 1 sample; one group fewer leaves 3.
+        ([9, 9, 9, 9, 9, 1], [1, 9, 9], [9, 9, 9]),
     ],
 )
-def test_streaming_sends_the_microbatch_groups_the_unsent_samples_fill(
-    lengths: list[int],
-    max_num_documents: int | None,
-    sent: list[list[int]] | None,
-    unsent: list[int],
+def test_streaming_sends_full_microbatch_groups_and_holds_back_a_sample_per_bin(
+    lengths: list[int], sent: list[int] | None, unsent: list[int]
 ) -> None:
     batcher = _streaming_batcher(
-        num_tokens_per_microbatch=10,
-        max_context_length=10,
-        num_groups=1,
-        dp_degree=2,
-        max_num_documents=max_num_documents,
+        num_tokens_per_microbatch=10, max_context_length=10, num_groups=1, dp_degree=2
     )
     batcher.num_tokens_to_pack = lambda sample: sample.num_tokens
     batcher._unsent_training_samples = [_SizedSample(n) for n in lengths]
-    sent_bins = []
-    batcher._pack_one_training_batch = lambda *, streamed_bins: sent_bins.append(
-        streamed_bins
+    sent_samples = []
+    batcher._pack_one_training_batch = (
+        lambda *, streamed_training_samples: sent_samples.append(
+            streamed_training_samples
+        )
     )
 
     batcher._pack_ready_microbatches()
 
     if sent is None:
-        assert sent_bins == []
+        assert sent_samples == []
     else:
-        assert [[s.num_tokens for s in bin_] for bin_ in sent_bins[0]] == sent
+        assert sorted(s.num_tokens for s in sent_samples[0]) == sent
     assert sorted(s.num_tokens for s in batcher._unsent_training_samples) == unsent

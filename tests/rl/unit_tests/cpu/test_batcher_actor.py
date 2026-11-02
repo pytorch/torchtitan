@@ -159,9 +159,9 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
 
 
 def test_streaming_batcher_actor_returns_the_in_process_batches(tmp_path) -> None:
-    """With streaming, `add_group` returns a streamed batch per filled bin: the same batches as in
-    process."""
-    # Each sample packs 4 tokens, so a group's 4 samples fill one 16-token bin.
+    """With streaming, `add_group` returns the streamed batches: the same batches as in process."""
+    # Each sample packs 4 tokens, so a group's 4 samples fill one 16-token bin. Group 0's bin stays
+    # unsent (the step's last batch needs a sample); group 1 sends one bin and keeps the other.
     kwargs = dict(
         num_tokens_per_microbatch_per_dp_rank=16,
         max_context_length=16,
@@ -196,7 +196,7 @@ def test_streaming_batcher_actor_returns_the_in_process_batches(tmp_path) -> Non
     results = asyncio.run(run())
 
     assert [None if batch is None else batch.ends_step for batch, _ in expected] == [
-        False,
+        None,
         False,
         True,
     ]

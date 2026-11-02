@@ -104,10 +104,6 @@ class TrainerStepBatch:
 
 _MAX_CONSECUTIVE_UNTRAINABLE_BATCHES = 10
 
-# Streaming sends a microbatch group once each of its bins holds at least this fraction of its token
-# capacity (or its document limit), so streamed bins carry little padding.
-_STREAMED_MIN_BIN_FILL = 0.98
-
 # Per-field pad values + dtypes for a packed row.
 _PAD_VALUES: dict[str, int | float | bool] = {
     "input_ids": 0,  # overwritten with pad_id in __init__-bound builds
@@ -196,13 +192,15 @@ class Batcher(Configurable):
         # each TrainingMicrobatch.input: [256 tokens]
 
     With `stream_microbatches`, a group before the step's last also returns the microbatch groups
-    that the step's unsent samples fill:
+    that the step's unsent samples fill, keeping at least one sample per bin of a microbatch group
+    unsent (see `_pack_ready_microbatches`):
 
         batcher = Batcher.Config(stream_microbatches=True).build(..., num_prompts_per_train_step=3)
         batcher.add_training_samples(training_sample_group=group0)
-        # -> (TrainerStepBatch(ends_step=False), True): group0's samples fill a microbatch group
+        # -> (TrainerStepBatch(ends_step=False), True): group0's samples fill a microbatch group,
+        #    with samples to spare
         batcher.add_training_samples(training_sample_group=group1)
-        # -> (None, True): the unsent samples can't fill one yet
+        # -> (None, True): the unsent samples can't fill one more yet
         batcher.add_training_samples(training_sample_group=group2)
         # -> (TrainerStepBatch(ends_step=True), True): the step's last batch packs every unsent sample
 
@@ -236,9 +234,10 @@ class Batcher(Configurable):
         stream_microbatches: bool = False
         """When the trainer gets the step's microbatches:
             False: once, after all `num_prompts_per_train_step` groups are packed.
-            True: while the step's groups arrive, every microbatch group the unsent samples fill; the
-                step's last batch has the rest. Samples are packed in arrival order, so the microbatches
-                depend on which groups finish first.
+            True: while the step's groups arrive, every microbatch group the unsent samples fill,
+                keeping at least `dp_degree * num_pp_microbatches` samples for the step's last batch,
+                which has the rest. Samples are packed in arrival order, so the microbatches depend on
+                which groups finish first.
                 Needs: no RDMA, no SDC replay and no whole-step accelerator graph (config check; the
                 last two capture one call per step).
         Either way each loss returns a sum, and the trainer divides the gradients by the step's
@@ -482,129 +481,54 @@ class Batcher(Configurable):
         )
 
     def _pack_ready_microbatches(self) -> TrainerStepBatch | None:
-        """Streaming: pack the microbatch groups that the step's unsent samples fill, each of
-        `num_pp_microbatches * dp_degree` bins, and keep the other samples unsent.
+        """Streaming: send the unsent samples that fill whole microbatch groups, but keep at least
+        `num_pp_microbatches * dp_degree` samples unsent for the step's last batch.
 
-        The DP ranks run a microbatch at the same time, so each waits for the rank with the most
-        attention work. `_pack_streamed_bins` packs k groups' bins at once from every unsent sample.
-        Try k from the most groups that could be full down to 1; send the first k where
-          (a) every bin holds `_STREAMED_MIN_BIN_FILL` of its tokens (or its document limit), or
-          (b) k < the groups the unsent tokens fill: long samples with no short ones never reach 98%,
-              and waiting would idle the trainer until the step's last batch.
-        The step's last batch packs whatever is left.
+        First-fit decreasing (FFD) packs the unsent samples into bins, and each
+        `num_pp_microbatches * dp_degree` bins form a microbatch group. The samples of the whole
+        groups are packed like any batch (`_assign_training_samples_to_microbatches`); the rest stay
+        unsent. If fewer than one sample per bin of a group would stay unsent, one group fewer is sent,
+        so the step's last batch has a sample for every bin of its first microbatch group.
 
         Cases with dp_degree=2, no PP and 10 tokens per bin, by unsent sample lengths:
-            [6, 6, 4, 4]           -> bins [6+4] [6+4]                     -> send them
-            [6, 5, 4, 3]           -> bins [6+3] [5+4]                     -> send nothing: later samples fill them
-            [9, 9, 9, 1, 1]        -> bins [9+1] [9+1], one 9 stays unsent  -> send them
-            [9, 9, 9, 9, 9, 9, 3]  -> no bin reaches 98%, but 57 tokens hold 2 groups of 20 -> send
-                                      57 // 20 - 1 = 1 group: [9] [9]
-            [10, 10, 6, 6, 6, 6, 6, 6, 6, 6] -> [10] [10] are full, but 68 tokens hold 3 groups of 20
-                                      -> send 68 // 20 - 1 = 2 groups: [10] [10] [6] [6]
-
-        Why not repack the bins with `_assign_training_samples_to_microbatches`: repacking full bins into
-        exactly as many bins rarely fits, and its fallback keeps first-fit-decreasing's unbalanced bins
-        (one with 3 long samples next to one with 30 short ones).
+            [6, 6, 4, 4, 5, 3] -> FFD bins [6+4] [6+4] [5+3] -> send [6+4] [6+4]; 5 and 3 stay unsent
+            [6, 6, 4, 4]       -> FFD bins [6+4] [6+4]       -> send nothing: no sample would stay unsent
+            [9, 9, 9, 9, 9, 1] -> FFD bins [9+1] [9] [9] [9] [9] -> send [9+1] [9]: sending 4 bins
+                                  would leave one sample; three 9s stay unsent
         """
+        bins = self._first_fit_decreasing(self._unsent_training_samples)
         num_bins_per_microbatch_group = self._num_pp_microbatches * self._dp_degree
-        num_tokens_per_bin = self._num_rows_per_microbatch * self.seq_len
-        min_bin_num_tokens = _STREAMED_MIN_BIN_FILL * num_tokens_per_bin
-        num_unsent_tokens = sum(
-            map(self.num_tokens_to_pack, self._unsent_training_samples)
+        num_sent_bins = (
+            len(bins) // num_bins_per_microbatch_group * num_bins_per_microbatch_group
         )
-        num_unsent_microbatch_groups = num_unsent_tokens // (
-            num_bins_per_microbatch_group * num_tokens_per_bin
+        # FFD bins are never empty, so one group fewer always keeps enough samples.
+        if sum(map(len, bins[num_sent_bins:])) < num_bins_per_microbatch_group:
+            num_sent_bins -= num_bins_per_microbatch_group
+        if num_sent_bins <= 0:
+            return None
+        # FFD over these bins' samples rebuilds the same bins, so the batch has `num_sent_bins` bins:
+        # no padding bins.
+        streamed_training_samples = [
+            sample for bin_ in bins[:num_sent_bins] for sample in bin_
+        ]
+        self._unsent_training_samples = [
+            sample for bin_ in bins[num_sent_bins:] for sample in bin_
+        ]
+        return self._pack_one_training_batch(
+            streamed_training_samples=streamed_training_samples
         )
-
-        def bin_is_full(bin_: list[TrainingSample]) -> bool:
-            return sum(map(self.num_tokens_to_pack, bin_)) >= min_bin_num_tokens or (
-                self._max_num_documents is not None
-                and len(bin_) >= self._max_num_documents
-            )
-
-        # A full bin is full by tokens or by documents, which bounds how many bins can be full.
-        # TODO: with many short samples, the document term makes the bound loose: one 2000-sample group
-        # with max_num_documents=16 tries 16 packings (1.5 s); bound it with the shortest samples. Not
-        # done now because 16-sample groups take about 20 ms or less (20.5 ms at 64 DP ranks).
-        max_num_full_bins = num_unsent_tokens / min_bin_num_tokens
-        if self._max_num_documents is not None:
-            max_num_full_bins += (
-                len(self._unsent_training_samples) / self._max_num_documents
-            )
-        # Send the most groups whose bins are all full. Once the unsent tokens fill g >= 2 groups,
-        # g - 1 groups go even if some bins aren't full.
-        for num_groups in range(
-            int(max_num_full_bins // num_bins_per_microbatch_group), 0, -1
-        ):
-            bins, unplaced_training_samples = self._pack_streamed_bins(
-                self._unsent_training_samples,
-                num_bins=num_groups * num_bins_per_microbatch_group,
-            )
-            if num_groups < num_unsent_microbatch_groups or all(map(bin_is_full, bins)):
-                self._unsent_training_samples = unplaced_training_samples
-                return self._pack_one_training_batch(streamed_bins=bins)
-        return None
-
-    def _pack_streamed_bins(
-        self, training_samples: list[TrainingSample], *, num_bins: int
-    ) -> tuple[list[list[TrainingSample]], list[TrainingSample]]:
-        """Put each sample, longest first, in the bin with room whose documents have the least
-        attention work (sum of squared lengths; ties: fewer tokens). Return the bins and the samples
-        that fit no bin.
-
-        Unlike `_pack_with_lpt`, which fills a fixed bin count with slack and must place every sample,
-        this ranks bins by their documents only, without padding. On 64K agentic lengths, rows average
-        1.11-1.12x max/mean attention work this way and 1.17-1.21x with `_pack_with_lpt`'s key.
-
-        Example (10 tokens per bin):
-            _pack_streamed_bins(lengths [9, 6, 5, 4, 3], num_bins=2)
-            # 9 -> bin 0; 6 -> bin 1; 5 fits no bin; 4 -> bin 1; 3 fits no bin
-            # -> ([[9], [6, 4]], [5, 3])
-        """
-        num_tokens_per_bin = self._num_rows_per_microbatch * self.seq_len
-        bins: list[list[TrainingSample]] = [[] for _ in range(num_bins)]
-        bin_num_tokens = [0] * num_bins
-        bin_document_workloads = [0] * num_bins
-        unplaced_training_samples: list[TrainingSample] = []
-        for sample in sorted(
-            training_samples, key=self.num_tokens_to_pack, reverse=True
-        ):
-            num_tokens = self.num_tokens_to_pack(sample)
-            destination = min(
-                (
-                    index
-                    for index, bin_ in enumerate(bins)
-                    if bin_num_tokens[index] + num_tokens <= num_tokens_per_bin
-                    and (
-                        self._max_num_documents is None
-                        or len(bin_) < self._max_num_documents
-                    )
-                ),
-                key=lambda index: (
-                    bin_document_workloads[index],
-                    bin_num_tokens[index],
-                ),
-                default=None,
-            )
-            if destination is None:
-                unplaced_training_samples.append(sample)
-                continue
-            bins[destination].append(sample)
-            bin_num_tokens[destination] += num_tokens
-            bin_document_workloads[destination] += num_tokens**2
-        return bins, unplaced_training_samples
 
     def _pack_one_training_batch(
-        self, *, streamed_bins: list[list[TrainingSample]] | None = None
+        self, *, streamed_training_samples: list[TrainingSample] | None = None
     ) -> TrainerStepBatch:
         """Pack one training batch:
-        streamed_bins=None: the step's last batch. Takes the oldest accumulated groups (up to
-            `num_prompts_per_train_step` trainable groups), packs every sample no earlier batch sent, and
-            carries the step's metrics, group ids and policy versions.
-        streamed_bins=[...]: a streamed step's earlier batch: `num_groups * num_pp_microbatches * dp_degree`
-            bins of samples, already packed (see `_pack_ready_microbatches`).
+        streamed_training_samples=None: the step's last batch. Takes the oldest accumulated groups (up
+            to `num_prompts_per_train_step` trainable groups), packs every sample no earlier batch sent,
+            and carries the step's metrics, group ids and policy versions.
+        streamed_training_samples=[...]: a streamed step's earlier batch, with only these samples (see
+            `_pack_ready_microbatches`).
         """
-        if streamed_bins is None:
+        if streamed_training_samples is None:
             (
                 training_samples,
                 metrics,
@@ -618,13 +542,11 @@ class Batcher(Configurable):
                 if self._stream_microbatches
                 else training_samples
             )
-            assignments = self._assign_training_samples_to_microbatches(
-                samples_to_pack, num_pp_microbatches=self._num_pp_microbatches
-            )
         else:
-            assignments = self._assign_bins_to_dp_ranks(
-                streamed_bins, num_pp_microbatches=self._num_pp_microbatches
-            )
+            samples_to_pack = streamed_training_samples
+        assignments = self._assign_training_samples_to_microbatches(
+            samples_to_pack, num_pp_microbatches=self._num_pp_microbatches
+        )
         microbatches = [
             [self._pack_training_samples(samples) for samples in rank_assignments]
             for rank_assignments in assignments
@@ -639,7 +561,7 @@ class Batcher(Configurable):
             microbatches[start : start + num_pp_microbatches]
             for start in range(0, len(microbatches), num_pp_microbatches)
         ]
-        if streamed_bins is not None:
+        if streamed_training_samples is not None:
             self._num_microbatches_sent += len(assignments)
             self._num_loss_tokens_sent += num_loss_tokens
             return TrainerStepBatch(
@@ -754,18 +676,55 @@ class Batcher(Configurable):
         ``[G * M][D]``; the trainer runs each M consecutive microbatches as
         one pipeline step.
         """
-        num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
-
         # Step 1: find the bin count with FFD, retaining its fallback packing.
         ordered_samples = sorted(
             training_samples,
             key=self.num_tokens_to_pack,
             reverse=True,
         )
+        ffd_bins = self._first_fit_decreasing(ordered_samples)
+
+        # Step 2: make the [G][M][D] grid rectangular.
+        num_bins_per_step = num_pp_microbatches * self._dp_degree
+        assert num_bins_per_step > 0
+        target_num_bins = (
+            math.ceil(len(ffd_bins) / num_bins_per_step) * num_bins_per_step
+        )
+
+        # Step 3: repack across the entire grid, preserving the FFD bin count.
+        bins = self._pack_with_lpt(ordered_samples, target_num_bins=target_num_bins)
+        if bins is None:
+            bins = ffd_bins
+            self._expand_bins_by_splitting(bins, target_num_bins=target_num_bins)
+
+        # Step 4: estimate attention work, including tail padding.
+        workloads = [self._attention_workload(bin_) for bin_ in bins]
+        sorted_bin_indices = sorted(
+            range(len(bins)), key=workloads.__getitem__, reverse=True
+        )
+
+        # Steps 5-6: keep adjacent bins together and balance their rank totals.
+        bin_indices_by_rank = assign_sorted_bins_to_dp_ranks(
+            [workloads[index] for index in sorted_bin_indices],
+            dp_degree=self._dp_degree,
+            num_pp_microbatches=num_pp_microbatches,
+        )
+        return [
+            [bins[sorted_bin_indices[index]] for index in rank_indices]
+            for rank_indices in bin_indices_by_rank
+        ]
+
+    def _first_fit_decreasing(
+        self, training_samples: list[TrainingSample]
+    ) -> list[list[TrainingSample]]:
+        """Put each sample, longest first, in the first bin with room for its tokens and documents."""
+        num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
         ffd_bins: list[list[TrainingSample]] = []
         ffd_bin_num_tokens: list[int] = []
 
-        for training_sample in ordered_samples:
+        for training_sample in sorted(
+            training_samples, key=self.num_tokens_to_pack, reverse=True
+        ):
             num_tokens = self.num_tokens_to_pack(training_sample)
             destination = next(
                 (
@@ -786,46 +745,7 @@ class Batcher(Configurable):
 
             ffd_bins[destination].append(training_sample)
             ffd_bin_num_tokens[destination] += num_tokens
-
-        # Step 2: make the [G][M][D] grid rectangular.
-        num_bins_per_step = num_pp_microbatches * self._dp_degree
-        assert num_bins_per_step > 0
-        target_num_bins = (
-            math.ceil(len(ffd_bins) / num_bins_per_step) * num_bins_per_step
-        )
-
-        # Step 3: repack across the entire grid, preserving the FFD bin count.
-        bins = self._pack_with_lpt(ordered_samples, target_num_bins=target_num_bins)
-        if bins is None:
-            bins = ffd_bins
-            self._expand_bins_by_splitting(bins, target_num_bins=target_num_bins)
-
-        # Steps 4-6: sort the bins by attention work and balance their rank totals.
-        return self._assign_bins_to_dp_ranks(
-            bins, num_pp_microbatches=num_pp_microbatches
-        )
-
-    def _assign_bins_to_dp_ranks(
-        self, bins: list[list[TrainingSample]], *, num_pp_microbatches: int
-    ) -> list[list[list[TrainingSample]]]:
-        """Sort `[G * M * D]` bins by padding-aware attention work and assign them as `[G * M][D]`
-        with `assign_sorted_bins_to_dp_ranks`."""
-        # Step 4: estimate attention work, including tail padding.
-        workloads = [self._attention_workload(bin_) for bin_ in bins]
-        sorted_bin_indices = sorted(
-            range(len(bins)), key=workloads.__getitem__, reverse=True
-        )
-
-        # Steps 5-6: keep adjacent bins together and balance their rank totals.
-        bin_indices_by_rank = assign_sorted_bins_to_dp_ranks(
-            [workloads[index] for index in sorted_bin_indices],
-            dp_degree=self._dp_degree,
-            num_pp_microbatches=num_pp_microbatches,
-        )
-        return [
-            [bins[sorted_bin_indices[index]] for index in rank_indices]
-            for rank_indices in bin_indices_by_rank
-        ]
+        return ffd_bins
 
     def _attention_workload(self, training_samples: list[TrainingSample]) -> int:
         """Estimate document and tail-padding attention as squared lengths.

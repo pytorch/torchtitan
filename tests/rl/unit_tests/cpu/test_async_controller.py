@@ -256,8 +256,8 @@ def _stream_groups(groups: list[TrainingSampleGroup], *, stream: bool, dp_degree
 def test_streaming_batcher_sends_each_sample_once_and_ends_the_step_last(
     dp_degree: int,
 ) -> None:
-    # Untrainable groups first and mid-step; samples pack 1 to 9 tokens each. Groups 1 and 3 each
-    # complete a microbatch group whose bins are full (10 tokens), so they stream.
+    # Untrainable groups first and mid-step; samples pack 1 to 9 tokens each. After groups 1 and 3,
+    # the unsent samples fill a microbatch group with samples to spare, so they stream.
     def step_groups(step: int) -> list[TrainingSampleGroup]:
         first_id = 5 * step
         return [
