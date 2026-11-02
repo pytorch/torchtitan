@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from monarch.actor import Actor, concurrent_endpoint
@@ -20,13 +19,6 @@ from torchtitan.rl.trainer.trainer import OptimizerStepOutput, Trainer
 
 
 class _TrainerActorEndpoints:
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        # The controller sends a forward_backward call while the previous one runs, and a concurrent
-        # endpoint only starts queued calls in order. The lock runs them one at a time, in that order
-        # (ActorSystem's call convention), even if the body ever awaits.
-        self._forward_backward_lock = asyncio.Lock()
-
     @concurrent_endpoint
     async def initialize_torchstore_client(self) -> None:
         await super().initialize_torchstore_client()
@@ -58,8 +50,7 @@ class _TrainerActorEndpoints:
             list[list[TrainingMicrobatch]] | list[list[RDMAMicrobatch]]
         ),
     ) -> dict[str, float] | None:
-        async with self._forward_backward_lock:
-            return await super().forward_backward(microbatch_groups)
+        return await super().forward_backward(microbatch_groups)
 
     @concurrent_endpoint
     async def optim_step(

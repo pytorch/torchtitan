@@ -239,8 +239,8 @@ class Batcher(Configurable):
             True: while the step's groups arrive, every microbatch group the unsent samples fill; the
                 step's last batch has the rest. Samples are packed in arrival order, so the microbatches
                 depend on which groups finish first.
-                Needs: no RDMA (config check), no SDC replay and no whole-step accelerator graph (both
-                capture one call per step; the engine raises on the step's second call).
+                Needs: no RDMA, no SDC replay and no whole-step accelerator graph (config check; the
+                last two capture one call per step).
         Either way each loss returns a sum, and the trainer divides the gradients by the step's
         loss-token count before clipping.
         """

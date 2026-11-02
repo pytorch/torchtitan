@@ -64,14 +64,14 @@ def test_controller_config_maybe_log(tmp_path, caplog) -> None:
         None,
         "aux_loss",
         "mtp",
+        "per_group_accelerator_graphs",
         "accelerator_graphs",
         "sdc_replay",
         "deferred_reduction",
         "rdma",
     ],
 )
-def test_stream_microbatches_config_rejects_only_rdma(setting: str | None) -> None:
-    # Accelerator graphs and SDC replay are rejected by the engine, at a step's second call.
+def test_stream_microbatches_config_check(setting: str | None) -> None:
     from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_moe_debug_varlen
 
     config = rl_grpo_qwen3_moe_debug_varlen()
@@ -81,6 +81,9 @@ def test_stream_microbatches_config_rejects_only_rdma(setting: str | None) -> No
         moe.router.aux_loss = MicrobatchWiseLoadBalanceLoss.Config(coeff=0.01)
     elif setting == "mtp":
         batcher = dataclasses.replace(batcher, num_mtp_layers=1)
+    elif setting == "per_group_accelerator_graphs":
+        config.trainer.training.disable_accelerator_graphs = False
+        config.trainer.training.accelerator_graph_per_microbatch_group = True
     elif setting == "accelerator_graphs":
         config.trainer.training.disable_accelerator_graphs = False
     elif setting == "sdc_replay":
@@ -92,7 +95,7 @@ def test_stream_microbatches_config_rejects_only_rdma(setting: str | None) -> No
     config.async_loop = dataclasses.replace(config.async_loop, batcher=batcher)
 
     # replace() reruns __post_init__.
-    if setting != "rdma":
+    if setting not in ("accelerator_graphs", "sdc_replay", "rdma"):
         dataclasses.replace(config)
         return
     with pytest.raises(ValueError, match="stream_microbatches needs"):

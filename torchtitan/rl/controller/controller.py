@@ -376,17 +376,31 @@ class Controller(Configurable):
                     "ranks read all microbatches before forward/backward, with no overlap.",
                     stacklevel=2,
                 )
-            # TODO: support it. RDMA reads a queued call's microbatches only once the previous call
-            # returns, so every call's first read would be exposed (needs one reader per rank that
-            # starts when a call arrives).
-            if (
-                self.async_loop.batcher.stream_microbatches
-                and self.async_loop.batcher.rdma_min_tensor_bytes is not None
-            ):
-                raise ValueError(
-                    "async_loop.batcher.stream_microbatches needs "
-                    "async_loop.batcher.rdma_min_tensor_bytes=None."
-                )
+            if self.async_loop.batcher.stream_microbatches:
+                # TODO: support it. RDMA reads a queued call's microbatches only once the previous
+                # call returns, so every call's first read would be exposed (needs one reader per
+                # rank that starts when a call arrives).
+                if self.async_loop.batcher.rdma_min_tensor_bytes is not None:
+                    raise ValueError(
+                        "async_loop.batcher.stream_microbatches needs "
+                        "async_loop.batcher.rdma_min_tensor_bytes=None."
+                    )
+                training = self.trainer.training
+                # SDC replay and whole-step graphs capture one forward_backward call per step.
+                # Stricter than the engine: it also rejects graphs the model can't capture.
+                if self.trainer.sdc_replayer is not None or not (
+                    training.disable_accelerator_graphs
+                    or training.accelerator_graph_per_microbatch_group
+                ):
+                    raise ValueError(
+                        "async_loop.batcher.stream_microbatches needs trainer.sdc_replayer=None "
+                        "and trainer.training.disable_accelerator_graphs=True or "
+                        "trainer.training.accelerator_graph_per_microbatch_group=True, got "
+                        f"sdc_replayer set={self.trainer.sdc_replayer is not None}, "
+                        f"disable_accelerator_graphs={training.disable_accelerator_graphs}, "
+                        "accelerator_graph_per_microbatch_group="
+                        f"{training.accelerator_graph_per_microbatch_group}."
+                    )
             # TODO: read RDMA microbatches in pipeline-step groups.
             if (
                 self.async_loop.batcher.rdma_min_tensor_bytes is not None
