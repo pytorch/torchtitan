@@ -5,6 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import fields, replace
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -12,10 +15,14 @@ import torch
 from torchtitan.rl.generator.vllm import gdn
 from torchtitan.rl.generator.vllm.linear_attention import (
     LinearAttentionExecutionPath,
+    TorchTitanLinearAttentionBackend,
     TorchTitanLinearAttentionMetadata,
     TorchTitanLinearAttentionMetadataBuilder,
 )
-from torchtitan.rl.generator.vllm.worker import TorchTitanCudagraphDispatcher
+from torchtitan.rl.generator.vllm.worker import (
+    TorchTitanCudagraphDispatcher,
+    TorchTitanGPUModelRunner,
+)
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
@@ -23,11 +30,16 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
-from vllm.forward_context import ForwardContext, override_forward_context
+from vllm.forward_context import (
+    BatchDescriptor,
+    ForwardContext,
+    override_forward_context,
+)
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
 @pytest.mark.parametrize(
@@ -209,7 +221,10 @@ def test_full_metadata_and_native_dispatch_variants():
 
 
 @pytest.mark.parametrize("mode", ["align", "none"])
-@pytest.mark.parametrize("step", ["packed", "single_token", "padded_single_token"])
+@pytest.mark.parametrize(
+    "step",
+    ["packed", "single_token", "padded_single_token", "packed_graph_single_token"],
+)
 def test_update_block_table_matches_build(step, mode):
     """vLLM reuses one GDN group's metadata for the next; only the state slots differ."""
     config = VllmConfig()
@@ -237,6 +252,9 @@ def test_update_block_table_matches_build(step, mode):
         TorchTitanLinearAttentionMetadataBuilder(spec, [], config, torch.device("cpu"))
         for _ in range(3)
     )
+    replays_packed_graph = step in ("padded_single_token", "packed_graph_single_token")
+    for builder in (first, other, reference):
+        builder.replays_packed_graph = replays_packed_graph
     offsets = torch.tensor(
         [0, 1, 3] if step == "packed" else [0, 1, 2], dtype=torch.int32
     )
@@ -279,9 +297,38 @@ def test_update_block_table_matches_build(step, mode):
             assert (
                 got.data_ptr() == getattr(captured, field.name).data_ptr()
             ), field.name
-    if step == "padded_single_token":
+    if replays_packed_graph:
         # The mixed-batch graph reads this builder's offsets.
-        assert other.query_start_loc.tolist() == [0, 1, 2, 4]
+        assert other.query_start_loc.tolist() == [0, 1, 2, num_tokens]
+
+
+@pytest.mark.parametrize(
+    "mode, uniform, replays_packed_graph",
+    [
+        (CUDAGraphMode.FULL, False, True),
+        (CUDAGraphMode.FULL, True, False),
+        (CUDAGraphMode.NONE, False, False),
+    ],
+)
+def test_runner_tells_builders_the_selected_graph(mode, uniform, replays_packed_graph):
+    builder, other_builder = SimpleNamespace(), SimpleNamespace()
+    runner = cast(Any, object.__new__(TorchTitanGPUModelRunner))
+    runner.get_model = lambda: SimpleNamespace(set_num_valid_tokens=lambda n: None)
+    runner.attn_groups = [
+        [
+            SimpleNamespace(
+                backend=TorchTitanLinearAttentionBackend, metadata_builders=[builder]
+            ),
+            SimpleNamespace(backend=object, metadata_builders=[other_builder]),
+        ]
+    ]
+    selected = (mode, BatchDescriptor(4, uniform=uniform))
+    with patch.object(
+        GPUModelRunner, "_determine_batch_execution_and_padding", return_value=selected
+    ):
+        runner._determine_batch_execution_and_padding(4, 4)
+    assert builder.replays_packed_graph is replays_packed_graph
+    assert not hasattr(other_builder, "replays_packed_graph")
 
 
 @pytest.mark.parametrize("decode", [False, True])
