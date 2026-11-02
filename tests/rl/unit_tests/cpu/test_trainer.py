@@ -168,8 +168,9 @@ def test_forward_backward_uses_global_token_count() -> None:
         ),
         _accelerator_graph_per_microbatch_group_enabled=False,
         sdc_replayer=None,
+        flops_estimator=lambda inputs: inputs["input"].numel(),
     )
-    microbatch_groups = [[object()], [object()], [object()]]
+    microbatch_groups = [[_rl_microbatch(token)] for token in range(3)]
 
     result = TrainingEngine.forward_backward(
         engine,
@@ -179,6 +180,7 @@ def test_forward_backward_uses_global_token_count() -> None:
     )
 
     torch.testing.assert_close(result.loss, torch.tensor(1.0))
+    assert result.num_flops == 3
     engine.garbage_collector.run.assert_called_once_with(1)
     engine.optim.zero_grad.assert_called_once_with(set_to_none=True)
     assert engine.num_accumulation_steps == 3

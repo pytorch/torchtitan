@@ -1573,7 +1573,7 @@ def test_pp_lazy_preprocessing_prepares_each_group_before_its_step() -> None:
     events: list[str] = []
 
     def preprocess(microbatch_group, *, global_routing_token_counts):
-        events.append(f"preprocess {microbatch_group}")
+        events.append(f"preprocess group{int(microbatch_group[0].input.item())}")
         torch.testing.assert_close(global_routing_token_counts, torch.tensor([5]))
         return (None, [{}] * 2, None, [{}] * 2)
 
@@ -1589,20 +1589,27 @@ def test_pp_lazy_preprocessing_prepares_each_group_before_its_step() -> None:
                 dp_replicate_enabled=False,
             ),
             model_parts=[],
+            flops_estimator=lambda inputs: inputs["input"].numel(),
             _preprocess_microbatch_group=preprocess,
             _global_routing_token_counts=torch.tensor([5]),
             _pp_forward_backward_microbatch_group=pp_step,
         ),
     )
 
-    TrainingEngine._forward_backward_body(
+    microbatch_groups = [[_batch(), _batch()] for _ in range(2)]
+    for index, group in enumerate(microbatch_groups):
+        for microbatch in group:
+            microbatch.input.fill_(index)
+
+    result = TrainingEngine._forward_backward_body(
         engine,
-        ["group0", "group1"],
+        microbatch_groups,
         torch.tensor(2),
         defer_fsdp_gradient_reduction=True,
         preprocess_microbatch_groups_lazily=True,
     )
 
+    assert result.num_flops == 4
     assert events == [
         "preprocess group0",
         "step finalize=False",
