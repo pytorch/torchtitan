@@ -250,7 +250,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     ntokens_seen: int
     sdc_replayer: SDCReplayer | None
     model_param_count: int
-    model_active_param_count: int
     flops_estimator: FlopsEstimator
     has_quantization: bool
     loss: torch.Tensor
@@ -388,12 +387,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         )
         (
             self.model_param_count,
-            self.model_active_param_count,
+            model_active_param_count,
         ) = self.model_config.get_parameter_counts(model)
         logger.info(
             f"Model {type(self.model_config).__qualname__} size: "
             f"{self.model_param_count:,} total parameters, "
-            f"{self.model_active_param_count:,} architecturally active parameters"
+            f"{model_active_param_count:,} architecturally active parameters"
         )
         self.flops_estimator = self.model_config.build_flops_estimator(
             model, seq_len=self.model_config.max_context_length

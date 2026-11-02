@@ -332,8 +332,6 @@ class MuseGlimmerModel(MultimodalModel):
             seq_len: int,
             excluded_modules: tuple[Module | None, ...] = (),
         ) -> FlopsEstimator:
-            from torchtitan.models.common.flops import active_parameter_flops_per_unit
-
             model = cast(MuseGlimmerModel, model)
             vision_outputs = (
                 model.vision_adapter,
@@ -345,23 +343,16 @@ class MuseGlimmerModel(MultimodalModel):
                 seq_len=seq_len,
                 excluded_modules=(*vision_outputs, *excluded_modules),
             )
-            vision_output_flops = sum(
-                active_parameter_flops_per_unit(module)
-                for module in vision_outputs
-                if module is not None
+            vision_estimate = (
+                self.vision_encoder.build_output_flops_estimator(vision_outputs)
+                if self.vision_encoder is not None
+                else None
             )
-            vision_config = self.vision_encoder
-
-            def estimate(input_dict) -> int:
-                flops = base_estimate(input_dict)
-                if vision_config is not None:
-                    flops += (
-                        vision_config.get_num_output_tokens(input_dict)
-                        * vision_output_flops
-                    )
-                return flops
-
-            return estimate
+            if vision_estimate is None:
+                return base_estimate
+            return lambda input_dict: base_estimate(input_dict) + vision_estimate(
+                input_dict
+            )
 
     def __init__(self, config: "MuseGlimmerModel.Config") -> None:
         super().__init__(config)

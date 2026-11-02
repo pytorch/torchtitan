@@ -379,13 +379,15 @@ class Trainer(Configurable):
         # trainer metrics interface while preserving controller-side aggregation.
         mean_num_flops = self._num_flops
         if engine.parallelism_context.dp_cp_enabled:
-            mean_num_flops = dist_utils.dist_sum(
-                torch.tensor(mean_num_flops, dtype=torch.float64, device=engine.device),
-                engine.parallelism_context.get_optional_mesh("loss"),
-            ) / (
-                engine.parallelism_context.dp_replicate
-                * engine.parallelism_context.dp_shard
-                * engine.parallelism_context.cp
+            loss_mesh = engine.parallelism_context.get_mesh("loss")
+            mean_num_flops = (
+                dist_utils.dist_sum(
+                    torch.tensor(
+                        mean_num_flops, dtype=torch.float64, device=engine.device
+                    ),
+                    loss_mesh,
+                )
+                / loss_mesh.size()
             )
 
         performance = compute_training_performance_metrics(

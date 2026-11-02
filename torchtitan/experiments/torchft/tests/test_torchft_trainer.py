@@ -237,19 +237,21 @@ def test_ft_training_engine_rejects_optimizer_accelerator_graph() -> None:
     init.assert_not_called()
 
 
-def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
+@pytest.mark.parametrize("dp_cp_enabled", [True, False])
+def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch, dp_cp_enabled):
     engine = Mock(
         spec=ft.FaultTolerantTrainingEngine,
         config=Mock(training=Mock(disable_accelerator_graphs=True)),
         device=torch.device("cpu"),
         parallelism_context=Mock(
             dp_enabled=False,
-            dp_cp_enabled=True,
+            dp_cp_enabled=dp_cp_enabled,
             pp_enabled=False,
             ep_enabled=False,
             dp_replicate=1,
             dp_shard=1,
             cp=1,
+            get_mesh=Mock(return_value=SimpleNamespace(size=lambda: 1)),
         ),
         ft_manager=Mock(loss_sync_pg=Mock(size=lambda: 2), group_size=4),
         optim=Mock(lr_schedulers=Mock(schedulers=[Mock(get_last_lr=lambda: [0.1])])),
@@ -302,7 +304,7 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
     _, logged_loss, *_ = trainer.metrics_processor.log.call_args.args
     assert logged_loss == 2.0
     assert trainer.metrics_processor.log.call_args.kwargs["num_flops"] == 400
-    assert ft.dist_utils.dist_sum.call_count == 3
+    assert ft.dist_utils.dist_sum.call_count == (3 if dp_cp_enabled else 0)
 
 
 def test_ft_engine_installs_all_reduce_hook_after_model_initialization() -> None:

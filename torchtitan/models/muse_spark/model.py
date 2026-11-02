@@ -511,12 +511,11 @@ class MuseSparkModel(MultimodalModel):
                 seq_len=seq_len,
                 excluded_modules=(*vision_outputs, *excluded_modules),
             )
-            vision_output_flops = sum(
-                active_parameter_flops_per_unit(module)
-                for module in vision_outputs
-                if module is not None
+            vision_estimate = (
+                self.vision_encoder.build_output_flops_estimator(vision_outputs)
+                if self.vision_encoder is not None
+                else None
             )
-            vision_config = self.vision_encoder
             audio_config = self.audio_encoder
             audio_output_flops = (
                 active_parameter_flops_per_unit(model.perception_emb_norm)
@@ -526,11 +525,8 @@ class MuseSparkModel(MultimodalModel):
 
             def estimate(input_dict) -> int:
                 flops = base_estimate(input_dict)
-                if vision_config is not None:
-                    flops += (
-                        vision_config.get_num_output_tokens(input_dict)
-                        * vision_output_flops
-                    )
+                if vision_estimate is not None:
+                    flops += vision_estimate(input_dict)
                 if audio_config is not None:
                     flops += (
                         audio_config.get_num_output_tokens(input_dict)

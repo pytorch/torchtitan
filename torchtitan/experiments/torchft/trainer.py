@@ -431,11 +431,12 @@ class FaultTolerantTrainer(Configurable):
             return
 
         accumulated_loss = forward_backward_result.loss
+        mean_num_flops = self._local_num_flops_since_last_log
 
         if parallelism_context.dp_cp_enabled:
             # FT addition: use ft_manager.loss_sync_pg for extra process group
             ft_pg = engine.ft_manager.loss_sync_pg
-            loss_mesh = parallelism_context.get_optional_mesh("loss")
+            loss_mesh = parallelism_context.get_mesh("loss")
 
             # For global_avg_loss, we want the average loss across all ranks:
             # accumulated_loss = local_loss_sum / global_valid_tokens
@@ -464,28 +465,24 @@ class FaultTolerantTrainer(Configurable):
                     ft_pg,
                 ),
             )
+            mean_num_flops = (
+                dist_utils.dist_sum(
+                    torch.tensor(
+                        mean_num_flops, dtype=torch.float64, device=engine.device
+                    ),
+                    loss_mesh,
+                    ft_pg,
+                )
+                / loss_mesh.size()
+            )
             # ft_pg is None in semi-sync training.
             if ft_pg is not None:
                 # Avoid artificial jumps in logged loss when replicas leave or rejoin.
                 global_avg_loss /= ft_pg.size()
+                mean_num_flops /= ft_pg.size()
         else:
             global_avg_loss = global_max_loss = accumulated_loss.item()
             global_ntokens_seen = engine.ntokens_seen
-
-        mean_num_flops = self._local_num_flops_since_last_log
-        ft_pg = engine.ft_manager.loss_sync_pg
-        if parallelism_context.dp_cp_enabled or ft_pg is not None:
-            mean_num_flops = dist_utils.dist_sum(
-                torch.tensor(mean_num_flops, dtype=torch.float64, device=engine.device),
-                parallelism_context.get_optional_mesh("loss"),
-                ft_pg,
-            ) / (
-                parallelism_context.dp_replicate
-                * parallelism_context.dp_shard
-                * parallelism_context.cp
-            )
-            if ft_pg is not None:
-                mean_num_flops /= ft_pg.size()
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,

@@ -162,6 +162,21 @@ class NaViTEncoder(Module):
                 for temporal, height, width in get_packed_vision_grids(input_dict)
             )
 
+        def build_output_flops_estimator(
+            self, output_modules: tuple[Module | None, ...]
+        ) -> FlopsEstimator:
+            """Count modules applied once per encoded visual token."""
+            from torchtitan.models.common.flops import active_parameter_flops_per_unit
+
+            flops_per_token = sum(
+                active_parameter_flops_per_unit(module)
+                for module in output_modules
+                if module is not None
+            )
+            return lambda input_dict: (
+                self.get_num_output_tokens(input_dict) * flops_per_token
+            )
+
         def build_flops_estimator(self, encoder) -> FlopsEstimator:
             from torchtitan.models.common.flops import active_parameter_flops_per_unit
 

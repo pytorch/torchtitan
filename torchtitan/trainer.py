@@ -423,7 +423,7 @@ class Trainer(Configurable):
             )
 
             if parallelism_context.dp_cp_enabled:
-                loss_mesh = parallelism_context.get_optional_mesh("loss")
+                loss_mesh = parallelism_context.get_mesh("loss")
 
                 # For global_avg_loss, we want the average loss across all ranks:
                 # accumulated_loss = local_loss_sum / global_valid_tokens
@@ -451,17 +451,15 @@ class Trainer(Configurable):
                         loss_mesh,
                     ),
                 )
-                mean_num_flops = dist_utils.dist_sum(
-                    torch.tensor(
-                        mean_num_flops, dtype=torch.float64, device=engine.device
-                    ),
-                    parallelism_context.get_optional_mesh("loss"),
-                ) / (
-                    parallelism_context.dp_replicate
-                    * parallelism_context.dp_shard
-                    * parallelism_context.cp
+                mean_num_flops = (
+                    dist_utils.dist_sum(
+                        torch.tensor(
+                            mean_num_flops, dtype=torch.float64, device=engine.device
+                        ),
+                        loss_mesh,
+                    )
+                    / loss_mesh.size()
                 )
-
             else:
                 global_avg_loss = global_max_loss = float(accumulated_loss.item())
                 global_ntokens_seen = engine.ntokens_seen
