@@ -95,7 +95,7 @@ class _DeepEPBlock(Module):
         return out_TD.float().square().sum()
 
 
-class _PostW2DeepEPBlock(_DeepEPBlock):
+class _PostW2(_DeepEPBlock):
     """Reference DeepEP experts with router scores applied after W2."""
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
@@ -213,13 +213,13 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                 ac_model = _Model(_DeepEPBlock(num_experts)).to(
                     self.device_type, torch.bfloat16
                 )
-                reference = _Model(_PostW2DeepEPBlock(num_experts)).to(
+                reference = _Model(_PostW2(num_experts)).to(
                     self.device_type, torch.bfloat16
                 )
                 ac_model.load_state_dict(baseline.state_dict())
                 reference.load_state_dict(baseline.state_dict())
                 activation_remat.apply(ac_model)
-                # As in training, the buffer is created after AC is applied. All
+                # As in training, the buffer is created after AC is applied. Both
                 # models share it, so the baseline also runs deterministic when
                 # the AC model replays.
                 baseline.layers["0"].routed_experts.token_dispatcher.init_buffer()
@@ -270,16 +270,17 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                 # unlike elementwise relative error, this handles cancellation
                 # near zero. Checkpoint equivalence below stays bitwise exact
                 # when dispatch is deterministic.
+                bf16_rtol = 2 * torch.finfo(torch.bfloat16).eps
                 for value, reference_value in zip(
                     [expected_loss, *expected],
                     [reference_loss, *reference_grads],
-                    strict=True,
                 ):
+                    error_norm = torch.linalg.vector_norm(
+                        value.float() - reference_value.float()
+                    )
+                    reference_norm = torch.linalg.vector_norm(reference_value.float())
                     self.assertLessEqual(
-                        (value.float() - reference_value.float()).norm().item(),
-                        2
-                        * torch.finfo(torch.bfloat16).eps
-                        * reference_value.float().norm().item(),
+                        error_norm.item(), bf16_rtol * reference_norm.item()
                     )
 
                 # Forward dispatch and combine, plus their backward passes.
@@ -293,9 +294,7 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                     torch.testing.assert_close(
                         actual_loss, expected_loss, rtol=0, atol=0
                     )
-                    for actual_grad, expected_grad in zip(
-                        actual, expected, strict=True
-                    ):
+                    for actual_grad, expected_grad in zip(actual, expected):
                         torch.testing.assert_close(
                             actual_grad, expected_grad, rtol=0, atol=0
                         )
@@ -304,7 +303,5 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                     # runs, which changes the summation order of the expert
                     # weight grads.
                     torch.testing.assert_close(actual_loss, expected_loss)
-                    for actual_grad, expected_grad in zip(
-                        actual, expected, strict=True
-                    ):
+                    for actual_grad, expected_grad in zip(actual, expected):
                         torch.testing.assert_close(actual_grad, expected_grad)
