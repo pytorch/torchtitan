@@ -18,7 +18,10 @@ from torch.nn.attention import (
 )
 from torch.nn.attention.varlen import AuxRequest
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.attention.attention import get_attention_context
+from vllm.model_executor.layers.attention.attention import (
+    get_attention_context,
+    set_default_quant_scales,
+)
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionType
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
@@ -296,6 +299,11 @@ class TorchTitanVarlenInnerAttentionDiffKVImpl(TorchTitanVarlenInnerAttentionImp
 
 class _VLLMAttention(Attention, Module):
     """vLLM attention that participates in the TorchTitan Module protocol."""
+
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        # Set vLLM's 4 attention scales to their default 1.0 now: the model is built empty,
+        # and the weight-sync buffers copy these values before vLLM sets them.
+        set_default_quant_scales(self)
 
 
 def _exclude_vllm_attn_scales_from_state_dict(layer: torch.nn.Module) -> None:

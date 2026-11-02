@@ -195,6 +195,23 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
     asyncio.run(main())
 
 
+def test_prefetch_model_state_dict_raises_when_a_weight_is_not_published():
+    async def main():
+        generator = Generator.__new__(Generator)
+        # "expert_bias" is unpublished and raises; the vllm_attn scale is generator-only and is exempt.
+        generator._prefetched_model_state_dict = {
+            "weight": "old",
+            "expert_bias": "old",
+            "layers.0.attention.inner_attention.vllm_attn._k_scale": "old",
+        }
+        get_state_dict = AsyncMock(return_value={"weight": "fetched"})
+        with patch.object(generator_module.ts, "get_state_dict", get_state_dict):
+            with pytest.raises(RuntimeError, match=r"1 of .*'expert_bias'"):
+                await generator.prefetch_model_state_dict()
+
+    asyncio.run(main())
+
+
 def _dispatcher(*, rank=0, dp_degree=1, tp_degree=1, dp_routing_strategy=None):
     """A bare RequestDispatcher; broadcast_group is unused unless ``setup`` runs."""
     return RequestDispatcher(
