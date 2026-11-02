@@ -49,7 +49,7 @@ from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
-from torchtitan.rl.rollout.data import IterableRLDataLoader
+from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.trainer.losses import DAPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
@@ -72,7 +72,7 @@ def _verifiers_math_rollouter_config(
     *, max_rollout_tokens: int
 ) -> VerifiersRollouter.Config:
     return VerifiersRollouter.Config(
-        training_dataloader=IterableRLDataLoader.Config(
+        training_dataloader=IterableRolloutDataLoader.Config(
             dataset=VerifiersTaskDataset.Config(
                 verifiers_taskset=_math_taskset_config("dapo_math")
             ),

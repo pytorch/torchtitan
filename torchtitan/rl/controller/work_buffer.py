@@ -21,10 +21,10 @@ from torchtitan.rl.rollout import RolloutGroup
 
 
 class _RolloutGroupWorkState(enum.Enum):
-    """Where a RolloutGroupWork is in the WAITING -> INFLIGHT -> FINALIZED lifecycle."""
+    """Where a RolloutGroupWork is in the WAITING -> CLAIMED -> FINALIZED lifecycle."""
 
     WAITING = "waiting"
-    INFLIGHT = "inflight"
+    CLAIMED = "claimed"
     FINALIZED = "finalized"
 
 
@@ -54,7 +54,7 @@ class RolloutGroupWork:
 class RolloutGroupWorkBuffer(Configurable):
     """Buffer of `RolloutGroupWork` shared between the data-input, rollout, and batcher loops.
 
-    Each entry is a RolloutGroupWork moving WAITING -> INFLIGHT -> FINALIZED. An active-slot budget caps
+    Each entry is a RolloutGroupWork moving WAITING -> CLAIMED -> FINALIZED. An active-slot budget caps
     the pipeline at `max_active_rollout_groups` active slots. With `window_size=None`, the batcher takes
     the oldest finalized group anywhere in the buffer. A finite `window_size` restricts it to a look-ahead
     range anchored at the oldest entry.
@@ -68,7 +68,7 @@ class RolloutGroupWorkBuffer(Configurable):
     Otherwise, we would produce born-stale examples.
 
     Entry lifecycle vs active slot:
-        entry:        WAITING -> INFLIGHT -> FINALIZED -> removed by take_finalized()
+        entry:        WAITING -> CLAIMED -> FINALIZED -> removed by take_finalized()
         active slot:  charged by add_work() ............ freed by release_active_groups()
 
     Example:
@@ -143,19 +143,19 @@ class RolloutGroupWorkBuffer(Configurable):
             self._condition.notify_all()
 
     async def claim_next(self) -> RolloutGroupWork | None:
-        """Rollout loop: claim the oldest WAITING group (WAITING -> INFLIGHT). None once closed."""
+        """Rollout loop: claim the oldest WAITING group (WAITING -> CLAIMED). None once closed."""
         async with self._condition:
             while True:
                 if self._closed:
                     return None
                 for work in self._work_by_group_id.values():
                     if work.state is _RolloutGroupWorkState.WAITING:
-                        work.state = _RolloutGroupWorkState.INFLIGHT
+                        work.state = _RolloutGroupWorkState.CLAIMED
                         return work
                 await self._condition.wait()
 
     async def finalize_work(self, rollout_group: RolloutGroup) -> None:
-        """Rollout loop: store the produced RolloutGroup on its work entry (INFLIGHT -> FINALIZED) and wake the batcher."""
+        """Rollout loop: store the produced RolloutGroup on its work entry (CLAIMED -> FINALIZED) and wake the batcher."""
         async with self._condition:
             work = self._work_by_group_id.get(rollout_group.group_id)
             if work is None:
@@ -181,7 +181,7 @@ class RolloutGroupWorkBuffer(Configurable):
         Section 6.2.4 of https://arxiv.org/pdf/2605.26494.
 
         Example:
-            # window_size=3: g0 INFLIGHT, g1 WAITING, g2 and g3 FINALIZED
+            # window_size=3: g0 CLAIMED, g1 WAITING, g2 and g3 FINALIZED
             group = await buffer.take_finalized()
             assert group.group_id == 2  # g2 is inside [g0, g2].
             # g3 remains blocked. With window_size=None, g3 would be taken next.
@@ -253,8 +253,8 @@ class RolloutGroupWorkBuffer(Configurable):
                 m.NoReduce(float(states.count(state_enum.WAITING))),
             ),
             m.Metric(
-                "rollout_buffer/num_groups_inflight",
-                m.NoReduce(float(states.count(state_enum.INFLIGHT))),
+                "rollout_buffer/num_groups_claimed",
+                m.NoReduce(float(states.count(state_enum.CLAIMED))),
             ),
             m.Metric(
                 "rollout_buffer/num_groups_finalized",

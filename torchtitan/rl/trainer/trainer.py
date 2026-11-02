@@ -7,6 +7,7 @@
 import asyncio
 import logging
 import os
+import pickle
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from typing import Any
 
 import torch
 import torchstore as ts
+from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
 from torchstore import RankRole
 
@@ -29,7 +31,6 @@ from torchtitan.observability.logging import init_logger
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.rl.controller.metrics import combine_microbatch_metrics
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
-from torchtitan.rl.trainer.controller_state import CONTROLLER_STATE_KEY, MirroredState
 from torchtitan.rl.trainer.rdma_microbatch import (
     RDMAMicrobatch,
     RDMAMicrobatchPrefetcher,
@@ -38,6 +39,26 @@ from torchtitan.tools import utils
 from torchtitan.training_engine import TrainingEngine
 
 logger = logging.getLogger(__name__)
+
+
+class MirroredState(Stateful):
+    """Checkpoint state produced elsewhere and mirrored into the trainer.
+
+    ``value`` is replaced by the controller before saving the next trainer
+    checkpoint. ``loaded`` holds the value restored by the checkpointer so the
+    controller can retrieve it after actor startup. Separate fields prevent a
+    fresh value from being mistaken for restored state.
+    """
+
+    def __init__(self) -> None:
+        self.value: Any = None
+        self.loaded: Any = None
+
+    def state_dict(self) -> dict[str, bytes]:
+        return {"state": pickle.dumps(self.value)}
+
+    def load_state_dict(self, state_dict: dict[str, bytes]) -> None:
+        self.loaded = pickle.loads(state_dict["state"])
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +128,7 @@ class Trainer(Configurable):
             output_dir=output_dir,
         )
         engine = self.engine
-        self._controller_state = MirroredState()
+        self._resume_state = MirroredState()
         maybe_apply_numa_binding(engine.device.index, engine.device.type)
 
         # Only cast when the generator and training dtypes differ. A CPU
@@ -121,7 +142,7 @@ class Trainer(Configurable):
         )
         engine.initialize(
             hf_assets_path=hf_assets_path,
-            extra_states={CONTROLLER_STATE_KEY: self._controller_state},
+            extra_states={"resume": self._resume_state},
         )
 
         logger.info(f"Peak FLOPS used for computing MFU: {self.gpu_peak_flops:.3e}")
@@ -164,9 +185,9 @@ class Trainer(Configurable):
         """Number of completed optimizer steps, restored with engine state."""
         return self.engine.num_completed_steps
 
-    async def get_controller_state(self) -> dict[str, Any] | None:
-        """Return controller state restored with the trainer checkpoint."""
-        return self._controller_state.loaded
+    async def get_resume_state(self) -> dict[str, Any] | None:
+        """Return controller resume state restored with the trainer checkpoint."""
+        return self._resume_state.loaded
 
     def _mark_model_state_dict_ready_for_staging(self) -> None:
         """Order the staging stream after the latest model-weight updates."""
@@ -338,7 +359,7 @@ class Trainer(Configurable):
 
     @sl.log_trace_span("optim_step")
     async def optim_step(
-        self, *, controller_state: dict[str, Any], last_step: bool = False
+        self, *, resume_state: dict[str, Any], last_step: bool = False
     ) -> OptimizerStepOutput:
         """Clip gradients, step optimizer + LR scheduler, return updated state."""
         # TODO: Accept optional optimizer params (e.g. learning rate)
@@ -351,7 +372,7 @@ class Trainer(Configurable):
 
         grad_norm = engine.optim_step()
         self._mark_model_state_dict_ready_for_staging()
-        self._controller_state.value = controller_state
+        self._resume_state.value = resume_state
 
         # TODO: Move performance, LR, and auxiliary-loss reporting into a shared
         # trainer metrics interface while preserving controller-side aggregation.
