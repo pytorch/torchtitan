@@ -936,39 +936,17 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         routed_output_RD: torch.Tensor,
         metadata: DeepEPDispatchMetadata,
         x_TD: torch.Tensor,
-        *,
-        routed_scores_R: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Combine tokens via DeepEP and wait for completion."""
         del x_TD
         from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
 
-        def score_and_combine(
-            routed_output_RD: torch.Tensor,
-            routed_scores_R: torch.Tensor | None,
-        ) -> torch.Tensor:
-            """Apply unabsorbed scores, then run the pure-reduction combine."""
-            if routed_scores_R is not None:
-                routed_output_RD = routed_output_RD * routed_scores_R.to(
-                    routed_output_RD.dtype
-                ).reshape(-1, 1)
-            return combine_tokens(
-                routed_output_RD,
-                metadata.state,  # pyrefly: ignore [bad-argument-type]
-            )
-
         combined_TD = remat.region(
-            score_and_combine,
+            combine_tokens,
             self.remat_region_name("ep_communication.combine"),
-            # An absorbed combine reads the w2 output only in this body and is a
-            # pure reduction, so never replay it; unabsorbed combines follow the policy.
-            recompute=(
-                self._replays_communication() if routed_scores_R is not None else False
-            ),
-        )(routed_output_RD, routed_scores_R)
-        if routed_scores_R is not None:
-            # The caller consumes this output outside another remat region.
-            remat.recompute_needs_tensor(combined_TD)
+            # This pure reduction reads the w2 output only during forward.
+            recompute=False,
+        )(routed_output_RD, metadata.state)
         sync_combine()
         return combined_TD
 

@@ -116,11 +116,13 @@ class _PostW2DeepEPBlock(_DeepEPBlock):
         gate_up_R2F = experts.w13(routed_RD, offsets_E)
         hidden_RF = experts.activation_fn(gate_up_R2F, offsets=offsets_E)
         routed_output_RD = experts.w2(hidden_RF, offsets_E)
+        routed_output_RD = routed_output_RD * metadata.routed_scores_R.to(
+            routed_output_RD.dtype
+        ).reshape(-1, 1)
         out_TD = experts.token_dispatcher.combine(
             routed_output_RD,
             metadata,
             x_TD,
-            routed_scores_R=metadata.routed_scores_R,
         )
         remat.recompute_needs_tensor(out_TD)
         return out_TD.float().square().sum()

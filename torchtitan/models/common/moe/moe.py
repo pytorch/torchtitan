@@ -41,7 +41,7 @@ from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 
-from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
+from .token_dispatcher import DeepEPDispatchMetadata, LocalTokenDispatcher
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
@@ -139,17 +139,6 @@ class RoutedExperts(Module):
             dtype=torch.int32,
         )
 
-        routed_scores_R = getattr(metadata, "routed_scores_R", None)
-        combine_kwargs = {}
-        if isinstance(self.token_dispatcher, DeepEPTokenDispatcher):
-            if (
-                self.output_postprocess is not None
-                or getattr(self.w2, "bias", None) is not None
-            ):
-                combine_kwargs["routed_scores_R"] = routed_scores_R
-                routed_scores_R = None
-            else:
-                combine_kwargs["routed_scores_R"] = None
         with maybe_set_sparse_mesh():
             # w13 and w2 declare their own remat regions (<fqn>.grouped_mm).
             # The bf16 cast reads the dispatched tokens with bare ops.
@@ -157,7 +146,8 @@ class RoutedExperts(Module):
             gate_up_R2F = self.w13(routed_input_RD.bfloat16(), offsets_E)
             remat.recompute_needs_tensor(gate_up_R2F)
             hidden_RF = self.activation_fn(gate_up_R2F, offsets=offsets_E)
-            if routed_scores_R is not None:
+            if isinstance(metadata, DeepEPDispatchMetadata):
+                routed_scores_R = metadata.routed_scores_R
                 # Absorb the router scores into W2's input, in float32; the bare
                 # multiply reads the dispatch region's scores, so pin them.
                 remat.recompute_needs_tensor(routed_scores_R)
@@ -182,7 +172,6 @@ class RoutedExperts(Module):
             routed_output_RD,
             metadata,
             x_TD,
-            **combine_kwargs,
         )
         return out_TD
 
