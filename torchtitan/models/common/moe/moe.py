@@ -40,6 +40,7 @@ from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
+from torchtitan.tools.utils import device_type
 
 from .token_dispatcher import LocalTokenDispatcher
 
@@ -793,20 +794,18 @@ class BatchWiseLoadBalanceLoss(AuxLoss):
             return self.inject(loss, carrier=carrier, denominator=denominator)
 
 
-_SIDE_STREAMS: dict[int, torch.cuda.Stream] = {}
+_SIDE_STREAMS: dict[torch.device, torch.Stream] = {}
 
 
-def _shared_experts_side_stream(x_TD: torch.Tensor) -> torch.cuda.Stream | None:
+def _shared_experts_side_stream(x_TD: torch.Tensor) -> torch.Stream | None:
     """Side stream for the shared experts, or None to run them inline.
 
-    CUDA-graph only, so it uses ``torch.cuda`` streams: the capture query has no
-    ``torch.accelerator`` equivalent.
-
     None when:
-    - ``x_TD`` is not on CUDA (asking about capture would fail without a CUDA device),
+    - ``x_TD`` is not on the accelerator (on CPU the capture query would fail),
     - grad is enabled: the shared backward would run on the side stream too,
     - torch.compile is tracing,
-    - no CUDA graph is being captured: the overlap was measured only under graphs, or
+    - the current stream isn't capturing a graph: the overlap was measured only under
+      CUDA graphs, or
     - dense SP is on: the shared experts would all-gather and reduce-scatter on it.
 
     No collective runs on it: EP dispatch/combine and the final TP all-reduce launch from
@@ -816,17 +815,16 @@ def _shared_experts_side_stream(x_TD: torch.Tensor) -> torch.cuda.Stream | None:
     - all-to-all dispatcher at EP > 1: copies its splits to the host, can't be captured -> inline.
     """
     if (
-        not x_TD.is_cuda
+        x_TD.device.type != device_type
         or torch.is_grad_enabled()
         or torch.compiler.is_compiling()
-        or not torch.cuda.is_current_stream_capturing()
+        or not torch.accelerator.current_stream(x_TD.device).is_capturing()
         or spmd_dense_sp_enabled()
     ):
         return None
-    device = torch.cuda.current_device()
-    if device not in _SIDE_STREAMS:
-        _SIDE_STREAMS[device] = torch.cuda.Stream(device)
-    return _SIDE_STREAMS[device]
+    if x_TD.device not in _SIDE_STREAMS:
+        _SIDE_STREAMS[x_TD.device] = torch.Stream(device=x_TD.device)
+    return _SIDE_STREAMS[x_TD.device]
 
 
 class MoE(FeedForward):
@@ -942,8 +940,8 @@ class MoE(FeedForward):
         if self.shared_experts is not None:
             side_stream = _shared_experts_side_stream(x_TD)
             if side_stream is not None:
-                side_stream.wait_stream(torch.cuda.current_stream())
-                with torch.cuda.stream(side_stream):
+                side_stream.wait_stream(torch.accelerator.current_stream(x_TD.device))
+                with side_stream:
                     shared_TD = self.shared_experts(x_TD)
 
         out_TD = self.routed_experts(
@@ -956,7 +954,7 @@ class MoE(FeedForward):
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
         if self.shared_experts is not None:
             if side_stream is not None:
-                torch.cuda.current_stream().wait_stream(side_stream)
+                torch.accelerator.current_stream(x_TD.device).wait_stream(side_stream)
             else:
                 shared_TD = self.shared_experts(x_TD)
             # Trailing add, always saved: it saves nothing for backward, so replay skips

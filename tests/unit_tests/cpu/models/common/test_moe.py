@@ -388,8 +388,8 @@ class TestMoE(unittest.TestCase):
             training_counts,
         )
 
-    def test_cpu_no_grad_forward_never_asks_cuda_about_graph_capture(self):
-        # The capture query raises when no CUDA device is visible.
+    def test_cpu_no_grad_forward_never_queries_graph_capture(self):
+        # The capture query raises when no accelerator is visible.
         moe = self._build_moe()
         moe.shared_experts = make_shared_expert_ffn_config(
             dim=4, hidden_dim=8, w13_param_init={}, w2_param_init={}, enable_sp=False
@@ -397,8 +397,8 @@ class TestMoE(unittest.TestCase):
         moe.eval()
         with (
             patch(
-                "torch.cuda.is_current_stream_capturing",
-                side_effect=RuntimeError("no CUDA-capable device is detected"),
+                "torch.accelerator.current_stream",
+                side_effect=RuntimeError("no accelerator is available"),
             ),
             torch.no_grad(),
         ):
