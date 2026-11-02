@@ -288,6 +288,27 @@ class GraphRuntimeTraceTest(unittest.TestCase):
 
         _build_test_stage_graphs(stage, (x,), {}, None, {})
 
+    def test_float_stage_kwargs_get_no_input_grad(self) -> None:
+        class ScaledStage(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = nn.Parameter(torch.ones(4))
+
+            def forward(self, x, *, scale):
+                return x * self.weight / scale
+
+        stage = _make_test_stage(
+            ScaledStage(), is_last=False, output_grads=torch.empty(2, 4)
+        )
+
+        _build_test_stage_graphs(
+            stage, (torch.randn(2, 4),), {"scale": torch.tensor(2.0)}, None, {}
+        )
+
+        # Only x's grad goes to the previous stage; a float kwarg such as the aux-loss
+        # denominators is stage-local, so the grads match the grad send slots.
+        self.assertEqual(stage.graphs.meta.num_input_grad_values, 1)
+
     def test_last_graph_build_does_not_run_real_pretrace_forward_or_loss(
         self,
     ) -> None:
