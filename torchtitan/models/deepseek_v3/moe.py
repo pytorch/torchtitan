@@ -75,8 +75,10 @@ class DeepSeekV3Router(TokenChoiceTopKRouter):
                 expert_bias_E,
                 **router_kwargs,
             )
-        num_limited_groups = self.num_limited_groups
-        assert num_limited_groups is not None  # Config.__post_init__ requires it
+        if self.num_limited_groups is None:
+            raise ValueError(
+                "num_limited_groups must be set when num_expert_groups is set"
+            )
         num_experts_per_group = self.num_experts // self.num_expert_groups
         scores_for_choice_TE = (
             scores_TE if expert_bias_E is None else scores_TE + expert_bias_E
@@ -90,14 +92,14 @@ class DeepSeekV3Router(TokenChoiceTopKRouter):
                 -1, topk_ids_by_argmax(scores_TGP, 2)
             ).sum(dim=-1)
             selected_group_ids_TL = topk_ids_by_argmax(
-                group_scores_TG, num_limited_groups
+                group_scores_TG, self.num_limited_groups
             )
         else:
             top2_scores_TGQ = scores_TGP.topk(2, dim=-1).values
             group_scores_TG = top2_scores_TGQ.sum(dim=-1)
             selected_group_ids_TL = torch.topk(
                 group_scores_TG,
-                k=num_limited_groups,
+                k=self.num_limited_groups,
                 dim=-1,
                 sorted=False,
             ).indices
