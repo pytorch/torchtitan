@@ -822,11 +822,10 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     from its deduplicated output into expert-major order; expand dispatch already returns
     the static expert-major layout. Combine is synchronized before returning its result.
 
-    Dispatch and combine share one remat policy (``ep_communication``) because combine
-    consumes the handle produced by dispatch. A remat policy replays both unless
-    ``ep_communication`` is saved (the full policy never saves it); a replay
-    must receive rows in the forward's order, so ``init_buffer`` then makes the buffer
-    deterministic (a sort per dispatch).
+    Dispatch replay follows the ``ep_communication`` policy. A replay must receive
+    rows in the forward's order, so ``init_buffer`` makes the buffer deterministic
+    when dispatch is replayed (a sort per dispatch). Combine is never replayed with
+    absorbed scores; otherwise it follows the same policy.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -863,7 +862,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         from torchtitan.distributed.deepep import deepep  # noqa: F401
 
     def _replays_communication(self) -> bool:
-        """Whether activation remat replays dispatch/combine during backward."""
+        """Whether activation remat replays dispatch during backward."""
         # Without activation remat the regions have no fqn and do not affect execution
         # (remat_should_recompute is then True, since nothing is saved).
         return bool(self._remat_module_fqn) and self.remat_should_recompute(
@@ -874,7 +873,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         """Eagerly create the DeepEP buffer.
 
         Runs after activation checkpointing is applied, so it can make the buffer
-        deterministic when activation remat replays dispatch/combine.
+        deterministic when activation remat replays dispatch.
         """
         ep_group = _ep_process_group()
         assert ep_group is not None
