@@ -12,6 +12,7 @@ not recommendations for real training.
 The package is organized by ownership:
 
 - `models/` contains verified recipes for core models.
+- `sft/` contains supervised fine-tuning recipes, one module per dataset.
 - `graph_trainer/`, `torchft/`, and `rl/` mirror their owning experimental or
   training subsystem.
 - `overrides/` contains opt-in component implementations.
@@ -34,6 +35,7 @@ The package is organized by ownership:
 | `torchtitan_recipes.rl.search_r1` | RL Search-R1 | `torchtitan/rl/examples/search_r1/` |
 | `torchtitan_recipes.rl.verifiers_dapo_math` | RL verifiers DAPO math | `torchtitan/rl/examples/verifiers/dapo_math/` |
 | `torchtitan_recipes.rl.verifiers_terminal_bench` | RL verifiers terminal bench | `torchtitan/rl/examples/verifiers/terminal_bench/` |
+| `torchtitan_recipes.sft.slake` | SLAKE medical VQA LoRA SFT (Muse Spark) | `torchtitan_recipes/sft/slake.py` |
 | `torchtitan_recipes.decision.qwen3` | Typed-decision (Jev-style) fine-tuning | `torchtitan_recipes/decision/README.md` |
 | `torchtitan_recipes.torchft.llama3` | TorchFT replicated training | `torchtitan/experiments/torchft/README.md` |
 

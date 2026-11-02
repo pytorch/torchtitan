@@ -51,11 +51,11 @@ from torchtitan_recipes.models.muse_spark import (
     _muse_spark_context_parallel_transform,
     _MUSE_SPARK_FUSED_SWIGLU_OVERRIDE,
     _MUSE_SPARK_HF_ASSETS_PATH,
-    _muse_spark_mm_dataloader,
     _ultradata_lora_sft_optim,
     _ultradata_lora_sft_transform,
     _ultradata_sft_dataloader,
     _with_dist_moe,
+    muse_spark_mm_dataloader,
 )
 
 
@@ -210,10 +210,10 @@ def muse_spark_debugmodel_mm(
     config.vision_processor = VisionProcessor.Config(
         **MUSE_SPARK_VISION_PROCESSOR_KWARGS
     )
-    image_dataset = _muse_spark_mm_dataloader(
+    image_dataset = muse_spark_mm_dataloader(
         model_config, MM_DATASETS["cc12m-test"]
     ).dataset
-    video_loader = _muse_spark_mm_dataloader(
+    video_loader = muse_spark_mm_dataloader(
         model_config, SYNTHETIC_MM_DATASETS["synthetic-video-text"]
     )
     audio_encoder = model_config.audio_encoder
