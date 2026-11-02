@@ -160,6 +160,8 @@ class Decoder(BaseModel):
 
     # FSDP's per-parameter dtype override (``param_dtype_override_fn``); None casts every
     # parameter to ``training.mixed_precision_param``. The generator sets it.
+    # TODO: remove once parameters carry a per-FQN dtype, so FSDP keeps A_log/dt_bias
+    # in float32 without a model attribute.
     _fsdp_param_dtype_override_fn: Callable[
         [nn.Parameter], torch.dtype | None
     ] | None = None
