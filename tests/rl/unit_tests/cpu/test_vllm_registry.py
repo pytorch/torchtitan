@@ -98,8 +98,8 @@ def test_gdn_hybrid_model_registers_state_copy_funcs(monkeypatch):
 
     gdn_config = Mock(
         spec=GDN.Config,
-        in_proj_q=SimpleNamespace(out_features=8),
-        in_proj_v=SimpleNamespace(out_features=12),
+        n_key_heads=2,
+        n_heads=2,
         key_head_dim=4,
         value_head_dim=6,
         conv_kernel_size=4,
