@@ -656,10 +656,10 @@ class ChunkedLossWrapper(Loss[LossInput]):
         """Loss applied to each chunk's logits."""
 
         skip_non_loss_tokens: bool = False
-        """Run the lm_head only on loss tokens: ``loss_mask`` if passed (RL), else labels
-        != ``IGNORE_INDEX`` (SFT). The rest get zero grad, so ``loss_fn`` must read only loss
-        tokens (no entropy or KL over all tokens). Needs accelerator graphs off. With
-        multiple outputs (MTP), a token stays if any output's labels read it."""
+        """Run the lm_head only on loss tokens: labels != ``IGNORE_INDEX``. The rest get zero
+        grad, so ``loss_fn`` must read only loss tokens (no entropy or KL over all tokens).
+        Needs accelerator graphs off. With multiple outputs (MTP), a token stays if any
+        output's labels read it."""
 
     def __init__(self, config: Config):
         self.num_chunks = config.num_chunks
@@ -743,7 +743,6 @@ class ChunkedLossWrapper(Loss[LossInput]):
                 pred[0].shape[0] % num_chunks == 0,
                 lambda: "ChunkedLossWrapper sequence length must be divisible by num_chunks",
             )
-            row_chunks = None
             if self.skip_non_loss_tokens:
                 # Keep only the loss tokens, in fewer chunks. A stable sort puts them first, in
                 # order; the first non-loss tokens pad the last chunk (zero loss and grad). Chunks
@@ -751,10 +750,9 @@ class ChunkedLossWrapper(Loss[LossInput]):
                 #   T=8, num_chunks=4 (chunks of 2), is_loss_token=[F T T F F F T F]
                 #   -> rows=[1 2 | 6 0]: 3 loss tokens + 1 pad, 2 chunks of 2
                 # With multiple outputs (MTP), one row set serves all of them: their union.
-                is_loss_token = loss_inputs.get(
-                    "loss_mask",
-                    torch.stack([label != IGNORE_INDEX for label in labels]).any(dim=0),
-                )
+                is_loss_token = torch.stack(
+                    [label != IGNORE_INDEX for label in labels]
+                ).any(dim=0)
                 num_tokens = is_loss_token.shape[0]
                 # At least one row: FSDP reduce-scatters the lm_head grad in the last chunk.
                 num_loss_tokens = max(1, int(is_loss_token.sum()))  # host sync
@@ -768,9 +766,10 @@ class ChunkedLossWrapper(Loss[LossInput]):
                     for key, value in loss_inputs.items()
                 }
                 # The loop gathers pred's rows one chunk at a time, so no [K, D] copy of pred is
-                # held; their grads fill a [K, D] buffer, scattered into [T, D] after the loop.
-                row_chunks = rows.split(chunk_len)
+                # held. Their grads fill a [K, D] buffer, scattered into [T, D] after the loop.
+                hidden_state_chunks_per_output = ()
             else:
+                rows = None
                 # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
                 # accumulates ``.grad`` for ``GradAccumulator``.
                 hidden_state_chunks_per_output = tuple(
@@ -789,9 +788,7 @@ class ChunkedLossWrapper(Loss[LossInput]):
                 tuple(
                     GradAccumulator(
                         # Only its shape is read: [K, D] with the skip.
-                        hidden_state
-                        if row_chunks is None
-                        else hidden_state[: len(rows)],
+                        hidden_state if rows is None else hidden_state[: len(rows)],
                         num_chunks=num_chunks,
                         dtype=hidden_state.dtype,
                     )
@@ -834,13 +831,14 @@ class ChunkedLossWrapper(Loss[LossInput]):
                         True, recurse=False
                     )
 
-                if row_chunks is None:
+                if rows is None:
                     h_chunks = tuple(
                         chunks[chunk_index] for chunks in hidden_state_chunks_per_output
                     )
                 else:
+                    chunk_rows = rows.view(num_chunks, -1)[chunk_index]
                     h_chunks = tuple(
-                        hidden_state.detach()[row_chunks[chunk_index]].requires_grad_(
+                        hidden_state.detach()[chunk_rows].requires_grad_(
                             decoder_requires_grad
                         )
                         for hidden_state in pred
@@ -894,7 +892,7 @@ class ChunkedLossWrapper(Loss[LossInput]):
             accumulated_grads = tuple(
                 grad_accumulator.buffer for grad_accumulator in grad_accumulators
             )
-            if row_chunks is not None:
+            if rows is not None:
                 # Skipped tokens get zero grad.
                 accumulated_grads = tuple(
                     torch.zeros_like(hidden_state).index_copy_(0, rows, grad)

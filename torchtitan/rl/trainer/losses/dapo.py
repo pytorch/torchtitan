@@ -88,7 +88,8 @@ class DAPOLoss(Loss[torch.Tensor]):
 
         Args:
             pred: [T, V] current-policy logits.
-            labels: [T] pre-shifted target token ids.
+            labels: [T] pre-shifted target token ids; ``IGNORE_INDEX`` where the loss reads
+                nothing (outside ``loss_mask``, non-finite ``generator_logprobs``).
             generator_logprobs: [T] logprobs from the sampling policy.
             temperature: [T] temperature each token was sampled at.
             loss_mask: [T] bool mask; True for response tokens.

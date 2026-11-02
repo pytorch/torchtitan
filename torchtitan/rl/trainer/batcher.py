@@ -22,6 +22,7 @@ import numpy as np
 import torch
 
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
+from torchtitan.components.loss import IGNORE_INDEX
 
 from torchtitan.config import Configurable
 from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
@@ -827,14 +828,16 @@ class Batcher(Configurable):
         """Concatenate samples into one fixed-size local microbatch.
 
         - Labels and logits are shifted
+        - Labels are ``IGNORE_INDEX`` where the loss reads nothing (outside ``loss_mask``, at
+          non-finite generator logprobs, on padding), as in SFT
         -`positions` restart at 0 per sample
 
         Example:
 
-            # Two three-token samples in an eight-token local microbatch.
-            input_ids = [10, 11, 20, 21, 0, 0, 0, 0]
-            labels    = [11, 12, 21, 22, 0, 0, 0, 0]
-            positions = [ 0,  1,  0,  1, 0, 1, 2, 3]
+            # Two three-token samples in an eight-token local microbatch: prompts [10], [20, 21].
+            input_ids = [  10,   11,   20,   21,    0,    0,    0,    0]
+            labels    = [  11,   12, -100,   22, -100, -100, -100, -100]
+            positions = [   0,    1,    0,    1,    0,    1,    2,    3]
         """
         pad_values = {**_PAD_VALUES, "input_ids": self.pad_id, "labels": self.pad_id}
         keys = list(pad_values)
@@ -885,6 +888,7 @@ class Batcher(Configurable):
         generator_logprobs = packed["generator_logprobs"]
         loss_mask = packed["loss_mask"]
         target_mask = loss_mask & torch.isfinite(generator_logprobs)
+        labels = packed["labels"].masked_fill(~target_mask, IGNORE_INDEX)
         positions_tensor = torch.from_numpy(np.concatenate(positions))
         padding_mask_tensor = torch.from_numpy(np.concatenate(padding_mask))
         loss_token_counts, routing_token_counts = get_mtp_token_counts(
@@ -895,7 +899,7 @@ class Batcher(Configurable):
         )
         return TrainingMicrobatch(
             input=packed["input_ids"],
-            labels=packed["labels"],
+            labels=labels,
             positions=positions_tensor,
             generator_logprobs=generator_logprobs,
             # TODO: support per-turn temperature: record it on each RolloutTurn and carry it

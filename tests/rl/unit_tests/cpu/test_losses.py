@@ -15,7 +15,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.components.loss import ChunkedLossWrapper
+from torchtitan.components.loss import ChunkedLossWrapper, IGNORE_INDEX
 from torchtitan.rl.trainer.losses.dapo import _normalize, DAPOLoss
 
 
@@ -70,11 +70,13 @@ def _rl_loss_inputs(num_tokens: int, vocab: int, loss_token_frac: float) -> tupl
         "advantages": torch.randn(num_tokens) * loss_mask,
         "loss_mask": loss_mask,
     }
+    # As the batcher builds them: IGNORE_INDEX where the loss reads nothing.
     labels = torch.randint(0, vocab, (num_tokens,))
+    labels[~(loss_mask & torch.isfinite(generator_logprobs))] = IGNORE_INDEX
     return labels, loss_mask.sum().clamp_min(1).float(), loss_kwargs
 
 
-def test_chunked_loss_runs_lm_head_on_loss_mask_tokens() -> None:
+def test_chunked_loss_runs_lm_head_on_loss_tokens() -> None:
     # Same loss, metrics and gradients as the unchunked loss; 15% loss tokens run 3 chunks.
     # The wrapper's edge cases (0%, 100%, fewer tokens than chunks) are tested with SFT
     # cross-entropy in tests/unit_tests/cpu/components/test_loss.py.
@@ -110,10 +112,10 @@ def test_chunked_loss_runs_lm_head_on_loss_mask_tokens() -> None:
     loss.backward()
 
     # Every loss token, padded with fewer than len(lm_head_rows) non-loss rows.
-    num_kept = max(1, int(loss_kwargs["loss_mask"].sum()))
+    num_kept = max(1, int((labels != IGNORE_INDEX).sum()))
     assert num_kept <= sum(lm_head_rows) < num_kept + len(lm_head_rows)
     assert max(lm_head_rows) <= num_tokens // num_chunks
-    assert (hidden_input.grad[~loss_kwargs["loss_mask"]] == 0).all()
+    assert (hidden_input.grad[labels == IGNORE_INDEX] == 0).all()
     torch.testing.assert_close(loss, loss_ref)
     torch.testing.assert_close(metrics, metrics_ref)
     torch.testing.assert_close(hidden_input.grad, hidden_ref.grad)
