@@ -273,7 +273,7 @@ class _SizedSample:
 
     def __init__(self, num_tokens: int) -> None:
         self.num_tokens = num_tokens
-        # Read by the step's last batch for its metrics.
+        # Read by the step's last batch for its metrics and policy versions.
         self.token_ids = range(num_tokens + 1)
         self.loss_mask = np.zeros(num_tokens + 1, dtype=bool)
         self.min_policy_version = 0
