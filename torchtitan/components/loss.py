@@ -656,8 +656,9 @@ class ChunkedLossWrapper(Loss[LossInput]):
         """Loss applied to each chunk's logits."""
 
         skip_non_loss_tokens: bool = True
-        """Run the lm_head only on loss tokens: labels != ``IGNORE_INDEX``. The rest get zero
-        grad, so ``loss_fn`` must read only loss tokens (no entropy or KL over all tokens).
+        """Run the lm_head only on loss tokens: ``loss_mask`` if passed (RL), else labels
+        != ``IGNORE_INDEX`` (SFT). The rest get zero grad, so ``loss_fn`` must read only loss
+        tokens (no entropy or KL over all tokens).
         With multiple outputs (MTP), a token stays if any output's labels read it.
         ``TrainingEngine`` turns it off under accelerator graphs, which need a fixed row count;
         code that traces or captures this wrapper directly must set it to False."""
@@ -752,9 +753,12 @@ class ChunkedLossWrapper(Loss[LossInput]):
                 #   T=8, num_chunks=4 (chunks of 2), is_loss_token=[F T T F F F T F]
                 #   -> rows=[1 2 | 6 0]: 3 loss tokens + 1 pad, 2 chunks of 2
                 # With multiple outputs (MTP), one row set serves all of them: their union.
-                is_loss_token = torch.stack(
-                    [label != IGNORE_INDEX for label in labels]
-                ).any(dim=0)
+                # TODO: consider a loss_mask in SFT too, as RL passes, instead of reading labels:
+                # most libraries with SFT and RL use one mask for both.
+                is_loss_token = loss_inputs.get(
+                    "loss_mask",
+                    torch.stack([label != IGNORE_INDEX for label in labels]).any(dim=0),
+                )
                 num_tokens = is_loss_token.shape[0]
                 # At least one row: FSDP reduce-scatters the lm_head grad in the last chunk.
                 num_loss_tokens = max(1, int(is_loss_token.sum()))  # host sync

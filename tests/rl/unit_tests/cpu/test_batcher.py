@@ -10,9 +10,8 @@ import random
 
 import numpy as np
 import torch
-
-from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.rl.rollout.types import RolloutTurnID
+
 from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.training_sample_builder import TrainingSample
 
@@ -236,24 +235,6 @@ def test_microbatch_carries_the_sampling_temperature_into_the_loss() -> None:
     temperature = microbatch.as_input_dict()["loss_kwargs"]["temperature"]
     assert temperature.dtype == torch.float32
     assert temperature.tolist() == [0.5] * 8
-
-
-def test_labels_are_ignore_index_where_the_loss_reads_nothing() -> None:
-    batcher = Batcher.Config().build(
-        num_tokens_per_microbatch_per_dp_rank=8,
-        max_context_length=8,
-        num_prompts_per_train_step=1,
-        dp_degree=1,
-        pad_id=0,
-        temperature=1.0,
-    )
-    (sample,) = _make_samples([3])
-    sample.loss_mask[2] = False
-    sample.logprobs[3] = -np.inf
-    microbatch = batcher._pack_training_samples([sample])
-
-    # Kept: label 1. Ignored: outside loss_mask, a non-finite logprob, padding.
-    assert microbatch.labels.tolist() == [1] + [IGNORE_INDEX] * 7
 
 
 def test_microbatch_moves_loss_kwargs_with_the_model_inputs() -> None:
