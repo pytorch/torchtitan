@@ -161,7 +161,7 @@ class RoutedExperts(Module):
                 # Absorb the router scores into W2's input, in float32; the bare
                 # multiply reads the dispatch region's scores, so pin them.
                 remat.recompute_needs_tensor(routed_scores_R)
-                hidden_RF = (hidden_RF.float() * routed_scores_R.reshape(-1, 1)).to(
+                hidden_RF = (hidden_RF * routed_scores_R.reshape(-1, 1)).to(
                     hidden_RF.dtype
                 )
             routed_output_RD = self.w2(hidden_RF, offsets_E)
