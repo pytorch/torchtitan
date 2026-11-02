@@ -7,13 +7,14 @@
 """CPU tests for fixed-bin LPT packing and its FFD fallback."""
 
 import random
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 from torchtitan.rl.rollout.types import RolloutTurnID
 
-from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
+from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.training_sample_builder import (
     TrainingSample,
     TrainingSampleGroup,
@@ -268,10 +269,14 @@ def test_microbatch_moves_loss_kwargs_with_the_model_inputs() -> None:
 class _SizedSample:
     """Stands in for a TrainingSample in packing-only tests: packs `num_tokens` tokens."""
 
-    __slots__ = ("num_tokens",)
+    __slots__ = ("num_tokens", "token_ids", "loss_mask", "min_policy_version")
 
     def __init__(self, num_tokens: int) -> None:
         self.num_tokens = num_tokens
+        # Read by the step's last batch for its metrics.
+        self.token_ids = range(num_tokens + 1)
+        self.loss_mask = np.zeros(num_tokens + 1, dtype=bool)
+        self.min_policy_version = 0
 
 
 def _record_streamed_step(
@@ -280,43 +285,13 @@ def _record_streamed_step(
     """Add one step's groups to a streaming batcher of `_SizedSample`s; return the streamed batches'
     rows and the step's last batch's rows, each `[num_rows][dp_degree]` bins, as packing assigns them.
     """
-    num_pp_microbatches = batcher._num_pp_microbatches
+    batcher.num_tokens_to_pack = lambda sample: sample.num_tokens
+    # Each packed microbatch keeps its bin, so the rows can be read back from the batches.
+    batcher._pack_training_samples = lambda samples: SimpleNamespace(
+        samples=samples, loss_token_count=0
+    )
     streamed_rows: list[list[list[_SizedSample]]] = []
     last_rows: list[list[list[_SizedSample]]] = []
-
-    def record_pack(*, streamed_training_samples=None):
-        if streamed_training_samples is None:
-            batcher._take_groups()
-            last_rows.extend(
-                batcher._assign_training_samples_to_microbatches(
-                    batcher._unsent_training_samples,
-                    num_pp_microbatches=num_pp_microbatches,
-                )
-            )
-            batcher._unsent_training_samples = []
-            return TrainerStepBatch(
-                microbatch_groups=[],
-                num_loss_tokens=0,
-                metrics=[],
-                group_ids=[],
-                min_policy_versions=[],
-            )
-        streamed_rows.extend(
-            batcher._assign_training_samples_to_microbatches(
-                streamed_training_samples, num_pp_microbatches=num_pp_microbatches
-            )
-        )
-        return TrainerStepBatch(
-            microbatch_groups=[],
-            num_loss_tokens=0,
-            metrics=[],
-            group_ids=[],
-            min_policy_versions=[],
-            ends_step=False,
-        )
-
-    batcher.num_tokens_to_pack = lambda sample: sample.num_tokens
-    batcher._pack_one_training_batch = record_pack
     for group_id, samples in enumerate(groups):
         batch, _ = batcher.add_training_samples(
             training_sample_group=TrainingSampleGroup(
@@ -326,6 +301,13 @@ def _record_streamed_step(
         is_last_group = group_id == len(groups) - 1
         assert batch is None or batch.ends_step == is_last_group
         assert (batch is not None) or not is_last_group
+        if batch is not None:
+            rows = [
+                [microbatch.samples for microbatch in row]
+                for group in batch.microbatch_groups
+                for row in group
+            ]
+            (last_rows if batch.ends_step else streamed_rows).extend(rows)
     return streamed_rows, last_rows
 
 
@@ -370,7 +352,7 @@ def test_streamed_packing_sends_each_sample_once_per_step(
             num_pp_microbatches=num_pp_microbatches,
             max_num_documents=max_num_documents,
         )
-        # Two steps on one batcher: each ends at its own last group.
+        # Two steps on one batcher: the second must not repack the first step's samples.
         for _step in range(2):
             groups = [
                 [
@@ -392,8 +374,8 @@ def test_streamed_packing_sends_each_sample_once_per_step(
             packed = [id(s) for row in rows for bin_ in row for s in bin_]
             assert sorted(packed) == sorted(id(s) for group in groups for s in group)
             assert batcher._groups_for_next_batch == []
-            # Streamed batches carry no empty bin, and the step's last batch keeps one sample per bin
-            # of a microbatch group (or every sample, if the step has fewer).
+            # Streamed batches carry no empty bin, and the step's last batch keeps at least
+            # dp_degree * num_pp_microbatches samples (or every sample, if the step has fewer).
             assert all(bin_ for row in streamed_rows for bin_ in row)
             num_last_batch_samples = sum(len(bin_) for row in last_rows for bin_ in row)
             assert num_last_batch_samples >= min(

@@ -1179,8 +1179,8 @@ class Controller(Configurable):
                             # arrive. Calls finish in order, so wait for the one before the last.
                             # asyncio.wait returns without raising, so the group raises a failed call once.
                             await asyncio.wait([forward_backward_tasks[-2]])
-                        # TODO: each rank's first read is never hidden (~0.5 GB/s per rank, 4 ranks over TCP).
-                        # Sending the RDMAMicrobatches during the previous optim_step would hide it.
+                        # TODO: the step's first call's first read is never hidden (~0.5 GB/s per rank, 4 ranks
+                        # over TCP). Sending its RDMAMicrobatches during the previous optim_step would hide it.
                         sent_s = time.perf_counter()
                         # `.call` sends now, so each rank gets its calls in order.
                         # Send each DP rank only its column of the grid.

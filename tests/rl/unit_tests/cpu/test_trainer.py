@@ -433,13 +433,6 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
     asyncio.run(run())
 
 
-class _FixedReadTimePrefetcher:
-    """Stands in for RDMAMicrobatchPrefetcher: each call's reads take 0.25 s."""
-
-    def __init__(self, rdma_microbatches: list[RDMAMicrobatch]) -> None:
-        self.read_s = 0.25
-
-
 def test_streamed_forward_backward_calls_add_up_the_step_tokens_and_read_time() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
@@ -471,9 +464,10 @@ def test_streamed_forward_backward_calls_add_up_the_step_tokens_and_read_time() 
         )
 
         call_metrics = []
+        # Each call's reads take 0.25 s.
         with patch(
             "torchtitan.rl.trainer.trainer.RDMAMicrobatchPrefetcher",
-            _FixedReadTimePrefetcher,
+            return_value=SimpleNamespace(read_s=0.25),
         ):
             for batch_index in range(2):
                 microbatch = MagicMock(

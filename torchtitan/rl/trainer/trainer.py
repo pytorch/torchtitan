@@ -350,7 +350,8 @@ class Trainer(Configurable):
         metrics = combine_microbatch_metrics(microbatch_metrics)
         if uses_rdma:
             # The slowest rank's read time this step so far, hidden or not (max over the loss mesh).
-            # The controller keeps the max over a streamed step's calls: the last call's, the step total.
+            # Each call reports the step's running total, so the controller's max over the step's calls
+            # (`combine_microbatch_metrics`) is the step total.
             self._step_read_microbatches_s += microbatch_groups.read_s
             read_microbatches_s = torch.tensor(
                 self._step_read_microbatches_s, device=engine.device

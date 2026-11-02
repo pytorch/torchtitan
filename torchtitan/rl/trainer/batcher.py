@@ -192,13 +192,12 @@ class Batcher(Configurable):
         # each TrainingMicrobatch.input: [256 tokens]
 
     With `stream_microbatches`, a group before the step's last also returns the microbatch groups
-    that the step's unsent samples fill, keeping at least one sample per bin of a microbatch group
-    unsent (see `_pack_ready_microbatches`):
+    that the step's unsent samples fill (see `_pack_ready_microbatches`):
 
         batcher = Batcher.Config(stream_microbatches=True).build(..., num_prompts_per_train_step=3)
         batcher.add_training_samples(training_sample_group=group0)
-        # -> (TrainerStepBatch(ends_step=False), True): group0's samples fill a microbatch group,
-        #    with samples to spare
+        # -> (TrainerStepBatch(ends_step=False), True): group0's samples fill more than a microbatch
+        #    group
         batcher.add_training_samples(training_sample_group=group1)
         # -> (None, True): the unsent samples can't fill one more yet
         batcher.add_training_samples(training_sample_group=group2)
@@ -482,13 +481,13 @@ class Batcher(Configurable):
 
     def _pack_ready_microbatches(self) -> TrainerStepBatch | None:
         """Streaming: send the unsent samples that fill whole microbatch groups, but keep at least
-        `num_pp_microbatches * dp_degree` samples unsent for the step's last batch.
+        `dp_degree * num_pp_microbatches` samples unsent for the step's last batch.
 
         First-fit decreasing (FFD) packs the unsent samples into bins, and each
-        `num_pp_microbatches * dp_degree` bins form a microbatch group. The samples of the whole
+        `dp_degree * num_pp_microbatches` bins form a microbatch group. The samples of the whole
         groups are packed like any batch (`_assign_training_samples_to_microbatches`); the rest stay
-        unsent. If fewer than one sample per bin of a group would stay unsent, one group fewer is sent,
-        so the step's last batch has a sample for every bin of its first microbatch group.
+        unsent. If fewer than `dp_degree * num_pp_microbatches` samples would stay unsent, one group
+        fewer is sent.
 
         Cases with dp_degree=2, no PP and 10 tokens per bin, by unsent sample lengths:
             [6, 6, 4, 4, 5, 3] -> FFD bins [6+4] [6+4] [5+3] -> send [6+4] [6+4]; 5 and 3 stay unsent
