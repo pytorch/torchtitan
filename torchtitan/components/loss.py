@@ -42,10 +42,14 @@ class Loss(Function[LossResult], Generic[LossInputT], ABC):
         self,
         pred: LossInputT,
         labels: LossInputT,
-        global_loss_token_counts: torch.Tensor | None = None,
         **loss_inputs: Any,
     ) -> LossResult:
-        """Return the scaled loss and any metrics computed by the loss."""
+        """Return the loss summed over this microbatch's loss tokens, and its metrics.
+
+        The training engine divides every gradient by the step's loss-token count,
+        so a loss must not divide by a token count itself. Mean and fraction
+        metrics (``/mean``, ``/frac``) are token sums too; their consumer divides.
+        """
         ...
 
 
@@ -304,21 +308,13 @@ class CrossEntropyLoss(Loss[torch.Tensor]):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_loss_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> LossResult:
         del kwargs
         loss = self._loss_fn(pred, labels, global_vocab_size=self.global_vocab_size)
-        # loss: V->P, annotate global_loss_token_counts
+        # loss: V->P
         if current_spmd_mesh() is not None:
             spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P})
-            if global_loss_token_counts is not None:
-                spmd.assert_type(
-                    global_loss_token_counts,
-                    {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
-                )
-        if global_loss_token_counts is not None:
-            loss = loss / global_loss_token_counts
         return loss, {}
 
 
@@ -345,21 +341,13 @@ class MSELoss(Loss[torch.Tensor]):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_loss_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> LossResult:
         del kwargs
         loss = self._loss_fn(pred, labels)
-        # loss: V->P, annotate global_loss_token_counts
+        # loss: V->P
         if current_spmd_mesh() is not None:
             spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P})
-            if global_loss_token_counts is not None:
-                spmd.assert_type(
-                    global_loss_token_counts,
-                    {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
-                )
-        if global_loss_token_counts is not None:
-            loss = loss / global_loss_token_counts
         return loss, {}
 
 
@@ -666,7 +654,6 @@ class ChunkedLossWrapper(Loss[LossInput]):
         self,
         pred: LossInput,
         labels: LossInput,
-        global_loss_token_counts: torch.Tensor | None = None,
         **loss_inputs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute chunked loss.
@@ -816,7 +803,6 @@ class ChunkedLossWrapper(Loss[LossInput]):
                 chunk_loss, chunk_metrics = self.loss_fn(
                     logits,
                     label_chunks,
-                    global_loss_token_counts,
                     **loss_inputs,
                 )
                 # Free logits before backward.
@@ -862,10 +848,10 @@ class ChunkedLossWrapper(Loss[LossInput]):
     ) -> dict[str, torch.Tensor]:
         """Combine metrics from one sequence chunk into the local accumulator.
 
-        Mean/fraction metrics are expected to already be normalized by the
-        global valid-token count, so summing chunk contributions gives the
-        global mean for this rank's microbatch contribution. The trainer still
-        performs the cross-rank loss-mesh reduction on the returned metrics.
+        Mean/fraction metrics are token sums, so summing chunk contributions
+        gives this rank's microbatch sum. The trainer still performs the
+        cross-rank loss-mesh reduction on the returned metrics, and the
+        metrics' consumer divides by the step's loss-token count.
         """
         for key, value in values.items():
             previous = current.get(key)

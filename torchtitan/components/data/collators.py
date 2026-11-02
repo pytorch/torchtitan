@@ -110,19 +110,17 @@ class TextCollator(Collator):
             positions[num_tokens:].remainder_(self._max_context_length)
 
         target_mask = labels != IGNORE_INDEX
-        loss_token_counts, routing_token_counts = get_mtp_token_counts(
+        loss_token_count, routing_token_counts = get_mtp_token_counts(
             target_mask=target_mask,
             positions=positions,
             padding_mask=padding_mask,
             num_mtp_layers=self._num_mtp_layers,
         )
-        if self._num_mtp_layers == 0:
-            loss_token_counts = loss_token_counts[0]
         return TokenizedTrainingMicrobatch(
             input=input_ids,
             labels=labels,
             positions=positions,
             padding_mask=padding_mask,
-            loss_token_counts=loss_token_counts,
+            loss_token_count=loss_token_count,
             routing_token_counts=routing_token_counts,
         )

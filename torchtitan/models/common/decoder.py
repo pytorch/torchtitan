@@ -343,7 +343,7 @@ class Decoder(BaseModel):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
-        global_routing_token_counts: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[
         torch.Tensor | tuple[torch.Tensor, ...],
@@ -383,7 +383,7 @@ class Decoder(BaseModel):
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
         if next(self.config.traverse(AuxLoss.Config), None) is not None:
-            input_dict["aux_loss_denominators"] = global_routing_token_counts
+            input_dict["aux_loss_denominators"] = aux_loss_denominators
         return inputs, labels, input_dict, loss_kwargs
 
     def _cp_shard(

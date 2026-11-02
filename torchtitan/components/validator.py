@@ -318,9 +318,7 @@ class Validator(BaseValidator):
                     local_loss_token_count = torch.zeros((), dtype=torch.int64)
                     for _ in range(num_pp_microbatches):
                         microbatch = next(validation_iterator)
-                        local_loss_token_count.add_(
-                            microbatch.loss_token_counts.reshape(-1)[0]
-                        )
+                        local_loss_token_count.add_(microbatch.loss_token_count)
                         self.metrics_processor.ntokens_since_last_log += (
                             microbatch.labels.numel()
                         )

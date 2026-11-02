@@ -71,7 +71,7 @@ def _microbatch(num_tokens: int) -> TrainingMicrobatch:
         labels=tokens + 5,
         positions=tokens % 7,
         padding_mask=tokens % 3 == 0,
-        loss_token_counts=torch.tensor(2),
+        loss_token_count=torch.tensor(2),
         routing_token_counts=torch.tensor([2, 2]),
         generator_logprobs=-tokens.float() / num_tokens,
         temperature=torch.ones(num_tokens),

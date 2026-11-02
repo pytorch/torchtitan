@@ -20,7 +20,6 @@ import torch
 from torchtitan.models.common.moe.moe import MicrobatchWiseLoadBalanceLoss, MoE
 from torchtitan.rl.controller.controller import Controller
 from torchtitan.rl.controller.metrics import (
-    combine_microbatch_metrics,
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
     forward_backward_wait_and_busy_seconds,
@@ -60,7 +59,7 @@ def test_controller_config_maybe_log(tmp_path, caplog) -> None:
 
 
 @pytest.mark.parametrize(
-    "unsupported",
+    "setting",
     [
         None,
         "aux_loss",
@@ -71,30 +70,29 @@ def test_controller_config_maybe_log(tmp_path, caplog) -> None:
         "rdma",
     ],
 )
-def test_stream_microbatches_rejects_what_needs_the_whole_step(
-    unsupported: str | None,
-) -> None:
+def test_stream_microbatches_config_rejects_only_rdma(setting: str | None) -> None:
+    # Accelerator graphs and SDC replay are rejected by the engine, at a step's second call.
     from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_moe_debug_varlen
 
     config = rl_grpo_qwen3_moe_debug_varlen()
     batcher = dataclasses.replace(config.async_loop.batcher, stream_microbatches=True)
-    if unsupported == "aux_loss":
+    if setting == "aux_loss":
         _, moe, _, _ = next(config.trainer.model.traverse(MoE.Config))
         moe.router.aux_loss = MicrobatchWiseLoadBalanceLoss.Config(coeff=0.01)
-    elif unsupported == "mtp":
+    elif setting == "mtp":
         batcher = dataclasses.replace(batcher, num_mtp_layers=1)
-    elif unsupported == "accelerator_graphs":
+    elif setting == "accelerator_graphs":
         config.trainer.training.disable_accelerator_graphs = False
-    elif unsupported == "sdc_replay":
+    elif setting == "sdc_replay":
         config.trainer.sdc_replayer = MagicMock()
-    elif unsupported == "deferred_reduction":
+    elif setting == "deferred_reduction":
         config.trainer.parallelism.fsdp_defer_gradient_reduction = True
-    elif unsupported == "rdma":
+    elif setting == "rdma":
         batcher = dataclasses.replace(batcher, rdma_min_tensor_bytes=1)
     config.async_loop = dataclasses.replace(config.async_loop, batcher=batcher)
 
     # replace() reruns __post_init__.
-    if unsupported is None:
+    if setting != "rdma":
         dataclasses.replace(config)
         return
     with pytest.raises(ValueError, match="stream_microbatches needs"):
@@ -220,8 +218,16 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     )
     assert batch is not None
     assert group_is_trainable
-    assert batch.global_loss_token_counts[0] > 0
-    assert batch.global_routing_token_counts.shape == (1,)
+    microbatches = [
+        microbatch
+        for group in batch.microbatch_groups
+        for row in group
+        for microbatch in row
+    ]
+    assert batch.num_loss_tokens > 0
+    assert batch.num_loss_tokens == sum(
+        int(microbatch.loss_token_count) for microbatch in microbatches
+    )
     assert batch.group_ids == [0, 1]
 
 
@@ -309,8 +315,9 @@ def test_streaming_batcher_sends_each_sample_once_and_ends_the_step_last(
         assert num_sample_tokens == sum(
             length - 1 for length in [7, 6, 5, 4, 7, 6, 10, 9, 3, 2, 8, 5, 4, 4]
         )
-        assert sum(batch.global_loss_token_counts for batch in streamed).tolist() == (
-            whole_step.global_loss_token_counts.tolist()
+        assert (
+            sum(batch.num_loss_tokens for batch in streamed)
+            == whole_step.num_loss_tokens
         )
         assert (
             _metric_value(last, "train_batch/num_microbatches")
@@ -318,15 +325,17 @@ def test_streaming_batcher_sends_each_sample_once_and_ends_the_step_last(
         )
 
 
-def test_batcher_prepares_per_depth_mtp_token_counts() -> None:
+def test_batcher_prepares_per_depth_mtp_routing_token_counts() -> None:
     batcher = _build_batcher(num_prompts_per_train_step=1, num_mtp_layers=2)
     batch, _ = batcher.add_training_samples(
         training_sample_group=_trainable_group(1, num_samples=2)
     )
 
     assert batch is not None
-    assert batch.global_loss_token_counts.shape == (3,)
-    assert batch.global_routing_token_counts.shape == (3,)
+    microbatch = batch.microbatch_groups[0][0][0]
+    # One loss-token count (the main objective's); routing counts per depth.
+    assert microbatch.loss_token_count.shape == ()
+    assert microbatch.routing_token_counts.shape == (3,)
 
 
 def test_batcher_warns_after_each_batch_of_untrainable_groups(
@@ -422,7 +431,7 @@ def test_batcher_uses_flat_rank_capacity_and_reports_padding() -> None:
     microbatch = batch.microbatch_groups[0][0][0]
     assert microbatch.positions.tolist() == [0, 1, 2, 0, 1, 2, 0, 1]
     assert not microbatch.padding_mask.any()
-    torch.testing.assert_close(microbatch.loss_token_counts, torch.tensor([8]))
+    torch.testing.assert_close(microbatch.loss_token_count, torch.tensor(8))
     assert _metric_value(batch, "train_batch/padding_frac") == 0.0
 
 
@@ -442,7 +451,7 @@ def test_flat_rank_packing_preserves_padding_mask() -> None:
     assert batch is not None
     microbatch = batch.microbatch_groups[0][0][0]
     assert microbatch.positions.tolist() == [0, 1, 2, 3, 0, 1, 2, 3]
-    torch.testing.assert_close(microbatch.loss_token_counts, torch.tensor([3]))
+    torch.testing.assert_close(microbatch.loss_token_count, torch.tensor(3))
     assert microbatch.padding_mask.tolist() == [
         False,
         False,
@@ -741,21 +750,6 @@ def test_forward_backward_wait_and_busy_seconds_follow_the_trainer() -> None:
     ) == (4.0, 9.0)
     # One call per step: the wait for the batch, then the call.
     assert forward_backward_wait_and_busy_seconds(0.0, [(2.0, 5.0)]) == (2.0, 3.0)
-
-
-def test_combine_microbatch_metrics_divides_streamed_sums_by_the_step_count() -> None:
-    combined = combine_microbatch_metrics(
-        [
-            {"loss/mean": 1.0, "loss/ratio_clipped_frac": 2.0, "x/max": 2.0},
-            {"loss/mean": 3.0, "loss/ratio_clipped_frac": 1.0, "x/max": 5.0},
-        ],
-        num_global_loss_tokens=4,
-    )
-    assert combined == {"loss/mean": 1.0, "loss/ratio_clipped_frac": 0.75, "x/max": 5.0}
-    # A step with no loss tokens logs zeros.
-    assert combine_microbatch_metrics(
-        [{"loss/mean": 0.0}], num_global_loss_tokens=0
-    ) == {"loss/mean": 0.0}
 
 
 def test_rollout_id_to_string_is_callable_and_uses_int_group_id() -> None:

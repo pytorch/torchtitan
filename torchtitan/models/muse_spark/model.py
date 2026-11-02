@@ -547,7 +547,7 @@ class MuseSparkModel(MultimodalModel):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
-        global_routing_token_counts: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         from torchtitan.models.muse_spark.sharding import (
@@ -638,7 +638,7 @@ class MuseSparkModel(MultimodalModel):
         inputs = batch.pop("input")
         labels = batch.pop("labels")
         if next(self.config.traverse(AuxLoss.Config), None) is not None:
-            batch["aux_loss_denominators"] = global_routing_token_counts
+            batch["aux_loss_denominators"] = aux_loss_denominators
         return inputs, labels, batch, loss_kwargs
 
     def _get_visual_bank(

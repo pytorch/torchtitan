@@ -82,8 +82,7 @@ class TrainerStepBatch:
         #    microbatch_groups = [[[TrainingMicrobatch(input=[20])]],
         #                         [[TrainingMicrobatch(input=[20])]]]
         # The second microbatch contains one real row and one pad row.
-        # global_loss_token_counts = per-objective loss-token counts
-        # global_routing_token_counts = per-depth non-padding token counts
+        # num_loss_tokens = the microbatches' loss tokens, over every DP rank
     """
 
     # [num_groups][num_microbatches_per_group][dp_degree]; under PP, each group runs as one
@@ -91,9 +90,8 @@ class TrainerStepBatch:
     microbatch_groups: (
         list[list[list[TrainingMicrobatch]]] | list[list[list[RDMAMicrobatch]]]
     )
-    # Counts over this batch's microbatches.
-    global_loss_token_counts: torch.Tensor
-    global_routing_token_counts: torch.Tensor
+    # Loss tokens over this batch's microbatches.
+    num_loss_tokens: int
     # The step's metrics, group ids and policy versions; empty on a streamed step's earlier batches.
     metrics: list[m.Metric]
     group_ids: list[int]
@@ -237,14 +235,13 @@ class Batcher(Configurable):
         included."""
         stream_microbatches: bool = False
         """When the trainer gets the step's microbatches:
-            False: once, after all `num_prompts_per_train_step` groups are packed. Each loss divides by the
-                step's loss-token count.
+            False: once, after all `num_prompts_per_train_step` groups are packed.
             True: while the step's groups arrive, every microbatch group the unsent samples fill; the
-                step's last batch has the rest. Each loss returns a sum, and the trainer divides the
-                gradients by the step's count before clipping. Samples are packed in arrival order, so
-                the microbatches depend on which groups finish first.
-                Needs: accelerator graphs off, no SDC replay, no deferred FSDP reduction, no MoE auxiliary
-                loss, no MTP, no RDMA.
+                step's last batch has the rest. Samples are packed in arrival order, so the microbatches
+                depend on which groups finish first.
+                Needs: accelerator graphs off, no SDC replay (both capture one call per step), no RDMA.
+        Either way each loss returns a sum, and the trainer divides the gradients by the step's
+        loss-token count before clipping.
         """
         training_sample_builder: TrainingSampleBuilder.Config = field(
             default_factory=TrainingSampleBuilder.Config
@@ -629,22 +626,11 @@ class Batcher(Configurable):
             [self._pack_training_samples(samples) for samples in rank_assignments]
             for rank_assignments in assignments
         ]
-        global_loss_token_counts: torch.Tensor | None = None
-        global_routing_token_counts: torch.Tensor | None = None
-        for rank_microbatches in microbatches:
-            for microbatch in rank_microbatches:
-                if global_loss_token_counts is None:
-                    global_loss_token_counts = torch.zeros_like(
-                        microbatch.loss_token_counts
-                    )
-                    global_routing_token_counts = torch.zeros_like(
-                        microbatch.routing_token_counts
-                    )
-                global_loss_token_counts.add_(microbatch.loss_token_counts)
-                assert global_routing_token_counts is not None
-                global_routing_token_counts.add_(microbatch.routing_token_counts)
-        assert global_loss_token_counts is not None
-        assert global_routing_token_counts is not None
+        num_loss_tokens = sum(
+            int(microbatch.loss_token_count)
+            for rank_microbatches in microbatches
+            for microbatch in rank_microbatches
+        )
         num_pp_microbatches = self._num_pp_microbatches
         microbatch_groups = [
             microbatches[start : start + num_pp_microbatches]
@@ -654,8 +640,7 @@ class Batcher(Configurable):
             self._num_microbatches_sent += len(assignments)
             return TrainerStepBatch(
                 microbatch_groups=microbatch_groups,
-                global_loss_token_counts=global_loss_token_counts,
-                global_routing_token_counts=global_routing_token_counts,
+                num_loss_tokens=num_loss_tokens,
                 metrics=[],
                 group_ids=[],
                 min_policy_versions=[],
@@ -679,8 +664,7 @@ class Batcher(Configurable):
         )
         return TrainerStepBatch(
             microbatch_groups=microbatch_groups,
-            global_loss_token_counts=global_loss_token_counts,
-            global_routing_token_counts=global_routing_token_counts,
+            num_loss_tokens=num_loss_tokens,
             metrics=[
                 *metrics,
                 # Keep this response-level metric exact without adding a second
@@ -1092,7 +1076,7 @@ class Batcher(Configurable):
         target_mask = loss_mask & torch.isfinite(generator_logprobs)
         positions_tensor = torch.from_numpy(np.concatenate(positions))
         padding_mask_tensor = torch.from_numpy(np.concatenate(padding_mask))
-        loss_token_counts, routing_token_counts = get_mtp_token_counts(
+        loss_token_count, routing_token_counts = get_mtp_token_counts(
             target_mask=target_mask,
             positions=positions_tensor,
             padding_mask=padding_mask_tensor,
@@ -1109,7 +1093,7 @@ class Batcher(Configurable):
             loss_mask=loss_mask,
             advantages=packed["advantages"],
             padding_mask=padding_mask_tensor,
-            loss_token_counts=loss_token_counts,
+            loss_token_count=loss_token_count,
             routing_token_counts=routing_token_counts,
         )
 

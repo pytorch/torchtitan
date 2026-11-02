@@ -171,7 +171,8 @@ class TorchFTManager(Configurable):
         if self.enabled and self.use_async_quorum:
 
             def all_reduce_hook(output):
-                dist.all_reduce(output, group=self.replicate_pg, op=ReduceOp.AVG)
+                # Sum: optim_step divides by the loss-token count summed over the same replicas.
+                dist.all_reduce(output, group=self.replicate_pg, op=ReduceOp.SUM)
 
             def apply_set_all_reduce_hook(m):
                 if isinstance(m, FSDPModule):

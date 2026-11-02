@@ -108,7 +108,6 @@ import torch  # noqa: F401
 from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import apply_overrides, Configurable, OverrideConfig
-from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.system import ActorSystem, TrainerHandle
 from torchtitan.rl.controller.metrics import (
@@ -116,6 +115,7 @@ from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
     compute_rollout_metrics,
+    divide_token_sums,
     forward_backward_wait_and_busy_seconds,
     MetricsTimer,
 )
@@ -376,24 +376,15 @@ class Controller(Configurable):
                     "ranks read all microbatches before forward/backward, with no overlap.",
                     stacklevel=2,
                 )
-            # TODO: support them. An auxiliary loss divides by the step's routed-token count, and MTP
-            # by one loss-token count per depth, both before forward/backward. Accelerator graphs and
-            # SDC replay capture one whole step; deferred reduction keeps the parameters unsharded
-            # between calls. RDMA reads a queued call's microbatches only once the previous call
+            # TODO: support it. RDMA reads a queued call's microbatches only once the previous call
             # returns, so every call's first read would be exposed (needs one reader per rank that
             # starts when a call arrives).
-            if self.async_loop.batcher.stream_microbatches and (
-                next(self.trainer.model.traverse(AuxLoss.Config), None) is not None
-                or self.async_loop.batcher.num_mtp_layers > 0
-                or not self.trainer.training.disable_accelerator_graphs
-                or self.trainer.sdc_replayer is not None
-                or self.trainer.parallelism.fsdp_defer_gradient_reduction
-                or self.async_loop.batcher.rdma_min_tensor_bytes is not None
+            if (
+                self.async_loop.batcher.stream_microbatches
+                and self.async_loop.batcher.rdma_min_tensor_bytes is not None
             ):
                 raise ValueError(
-                    "async_loop.batcher.stream_microbatches needs no MoE auxiliary loss, no MTP, "
-                    "trainer.training.disable_accelerator_graphs=True, no trainer.sdc_replayer, "
-                    "trainer.parallelism.fsdp_defer_gradient_reduction=False and "
+                    "async_loop.batcher.stream_microbatches needs "
                     "async_loop.batcher.rdma_min_tensor_bytes=None."
                 )
             # TODO: read RDMA microbatches in pipeline-step groups.
@@ -1131,7 +1122,6 @@ class Controller(Configurable):
             waits for:    the call before the previous one to finish (at most 2 in flight)
             unblocked by: the trainer finishing that call
         """
-        stream_microbatches = self.config.async_loop.batcher.stream_microbatches
         # The previous step's push and pull, each returning its wall time; None before the first.
         push_task: asyncio.Task[float] | None = None
         pull_task: asyncio.Task[float] | None = None
@@ -1178,15 +1168,6 @@ class Controller(Configurable):
                                 max_offpolicy_steps=self.config.async_loop.max_offpolicy_steps,
                             )
 
-                        # Streamed losses are sums: optim_step gets the step's loss-token count instead.
-                        loss_token_counts, routing_token_counts = (
-                            (None, None)
-                            if stream_microbatches
-                            else (
-                                packed.global_loss_token_counts,
-                                packed.global_routing_token_counts,
-                            )
-                        )
                         if len(forward_backward_tasks) >= 2:
                             # At most 2 calls in flight: one runs while the next one's microbatches
                             # arrive. Calls finish in order, so wait for the one before the last.
@@ -1203,9 +1184,6 @@ class Controller(Configurable):
                                     [row[dp_rank] for row in group]
                                     for group in packed.microbatch_groups
                                 ],
-                                loss_token_counts,
-                                routing_token_counts,
-                                ends_step=packed.ends_step,
                             )
                             for dp_rank, trainer_at_dp_rank in enumerate(
                                 self.trainer.by_dp_rank
@@ -1231,17 +1209,15 @@ class Controller(Configurable):
                 wait_s, forward_backward_s = forward_backward_wait_and_busy_seconds(
                     step_start_s, [times_s for _, times_s in forward_backward_results]
                 )
-                batch_fwd_bwd_metrics = [
-                    metrics for metrics, _ in forward_backward_results
-                ]
-                step_loss_token_counts = sum(
-                    batch.global_loss_token_counts for batch in step_batches
+                # Losses and their mean/frac metrics are sums over the step's calls; divide once.
+                step_num_loss_tokens = sum(
+                    batch.num_loss_tokens for batch in step_batches
                 )
-                fwd_bwd_metrics = combine_microbatch_metrics(
-                    batch_fwd_bwd_metrics,
-                    num_global_loss_tokens=(
-                        int(step_loss_token_counts[0]) if stream_microbatches else None
+                fwd_bwd_metrics = divide_token_sums(
+                    combine_microbatch_metrics(
+                        [metrics for metrics, _ in forward_backward_results]
                     ),
+                    num_loss_tokens=step_num_loss_tokens,
                 )
                 if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
                     logger.error("Loss is NaN/Inf; training diverged")
@@ -1270,9 +1246,6 @@ class Controller(Configurable):
                         await self.trainer.all_ranks.optim_step.call(
                             resume_state=self._rollouter.state_dict(),
                             last_step=(step == num_training_steps),
-                            global_loss_token_counts=(
-                                step_loss_token_counts if stream_microbatches else None
-                            ),
                         )
                     )
                 self._trainer_policy_version = optimizer_result.policy_version
@@ -1329,7 +1302,7 @@ class Controller(Configurable):
                             m.NoReduce(pull_s),
                         ),
                         *compute_perf_ratio_metrics(
-                            num_global_valid_tokens=int(step_loss_token_counts[0]),
+                            num_global_valid_tokens=step_num_loss_tokens,
                             time_metrics=time_metrics,
                         ),
                     ],

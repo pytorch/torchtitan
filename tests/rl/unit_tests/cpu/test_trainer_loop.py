@@ -15,7 +15,6 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-import torch
 
 from torchtitan.rl.actors.system import TrainerHandle
 from torchtitan.rl.controller.controller import Controller
@@ -56,27 +55,19 @@ def _controller(
     *,
     on_push=None,
     on_pull=None,
-    stream_microbatches: bool = False,
 ) -> Controller:
     """A controller with only the state `_trainer_loop` reads; each actor call appends to `events`."""
     version = 0
 
-    async def forward_backward(
-        microbatch_groups,
-        global_loss_token_counts,
-        global_routing_token_counts,
-        *,
-        ends_step,
-    ):
+    async def forward_backward(microbatch_groups):
         events.append(f"fwd_bwd {version + 1}")
-        controller.forward_backward_calls.append((global_loss_token_counts, ends_step))
+        controller.forward_backward_calls.append(microbatch_groups)
         return _RankValues({"loss/mean": 1.0})
 
-    async def optim_step(*, global_loss_token_counts, **kwargs):
+    async def optim_step(**kwargs):
         nonlocal version
         version += 1
         events.append(f"optim {version}")
-        controller.optim_step_counts.append(global_loss_token_counts)
         return _RankValues(SimpleNamespace(policy_version=version, metrics={}))
 
     async def push():
@@ -99,11 +90,9 @@ def _controller(
             target_offpolicy_steps=1,
             max_offpolicy_steps=None,
             num_prompts_per_train_step=5,
-            batcher=SimpleNamespace(stream_microbatches=stream_microbatches),
         )
     )
     controller.forward_backward_calls = []
-    controller.optim_step_counts = []
     controller.start_step = 0
     controller._trainer_policy_version = 0
     trainer = SimpleNamespace(
@@ -147,8 +136,7 @@ def _controller(
 def _batch(*, num_loss_tokens: int = 1, ends_step: bool = True) -> SimpleNamespace:
     return SimpleNamespace(
         microbatch_groups=[],
-        global_loss_token_counts=torch.tensor([num_loss_tokens]),
-        global_routing_token_counts=None,
+        num_loss_tokens=num_loss_tokens,
         group_ids=[],
         min_policy_versions=[0],
         metrics=[],
@@ -249,9 +237,9 @@ def test_push_failure_fails_the_loop() -> None:
         _run(controller, num_training_steps=2)
 
 
-def test_streamed_step_trains_each_batch_then_divides_by_the_step_count() -> None:
+def test_streamed_step_trains_each_batch_then_divides_its_metrics_once() -> None:
     events: list[str] = []
-    controller = _controller(events, stream_microbatches=True)
+    controller = _controller(events)
     queue: asyncio.Queue = asyncio.Queue()
     for batch in (
         _batch(num_loss_tokens=3, ends_step=False),
@@ -262,31 +250,28 @@ def test_streamed_step_trains_each_batch_then_divides_by_the_step_count() -> Non
 
     asyncio.run(controller._trainer_loop(queue, num_training_steps=1))
 
-    # Each batch's losses are sums; the optimizer step gets the step's 3 + 4 + 5 loss tokens.
+    # One call per batch, then one optimizer step for the step's 3 + 4 + 5 loss tokens.
     assert events[:4] == ["fwd_bwd 1", "fwd_bwd 1", "fwd_bwd 1", "optim 1"]
-    assert controller.forward_backward_calls == [
-        (None, False),
-        (None, False),
-        (None, True),
-    ]
-    assert controller.optim_step_counts[0].tolist() == [12]
+    assert len(controller.forward_backward_calls) == 3
     # Each fake batch returns a summed loss of 1.0: 3.0 over 12 loss tokens.
     assert controller.logged_metrics[0]["loss/mean"].value.value == 0.25
 
 
-def test_one_batch_step_passes_counts_to_forward_backward() -> None:
+def test_one_batch_step_divides_its_metrics_by_the_batch_count() -> None:
     events: list[str] = []
     controller = _controller(events)
-    _run(controller, num_training_steps=1)
+    queue: asyncio.Queue = asyncio.Queue()
+    queue.put_nowait(_batch(num_loss_tokens=4))
 
-    assert controller.forward_backward_calls[0][1] is True
-    assert controller.forward_backward_calls[0][0].tolist() == [1]
-    assert controller.optim_step_counts == [None]
+    asyncio.run(controller._trainer_loop(queue, num_training_steps=1))
+
+    assert events[:2] == ["fwd_bwd 1", "optim 1"]
+    assert controller.logged_metrics[0]["loss/mean"].value.value == 0.25
 
 
 def test_stream_closing_mid_step_skips_the_optimizer_step() -> None:
     events: list[str] = []
-    controller = _controller(events, stream_microbatches=True)
+    controller = _controller(events)
     queue: asyncio.Queue = asyncio.Queue()
     queue.put_nowait(_batch(ends_step=False))
     queue.put_nowait(None)
@@ -298,7 +283,7 @@ def test_stream_closing_mid_step_skips_the_optimizer_step() -> None:
 
 def test_nan_loss_mid_step_skips_the_optimizer_step() -> None:
     events: list[str] = []
-    controller = _controller(events, stream_microbatches=True)
+    controller = _controller(events)
     losses = iter([float("nan"), 1.0])
 
     async def forward_backward(*args, **kwargs):
@@ -317,12 +302,12 @@ def test_nan_loss_mid_step_skips_the_optimizer_step() -> None:
 
 def test_batches_are_sent_before_earlier_calls_return() -> None:
     events: list[str] = []
-    controller = _controller(events, stream_microbatches=True)
+    controller = _controller(events)
     calls: list[asyncio.Task] = []
     num_finished = 0
     num_in_flight_at_send: list[int] = []
 
-    def forward_backward_call(*args, ends_step):
+    def forward_backward_call(*args):
         # Like the trainer actor: the call is sent at once, and calls run one after another.
         async def run(previous: asyncio.Task | None):
             nonlocal num_finished
@@ -365,7 +350,7 @@ def test_batches_are_sent_before_earlier_calls_return() -> None:
 
 
 def test_step_times_are_the_trainers_wait_and_forward_backward() -> None:
-    controller = _controller([], stream_microbatches=True)
+    controller = _controller([])
 
     async def forward_backward(*args, **kwargs):
         await asyncio.sleep(0.05)
@@ -398,7 +383,7 @@ def test_forward_backward_failure_stops_the_step_at_once() -> None:
         raise RuntimeError("forward_backward failed")
 
     events: list[str] = []
-    controller = _controller(events, stream_microbatches=True)
+    controller = _controller(events)
     controller.trainer.by_dp_rank[0].forward_backward = _Endpoint(
         failing_forward_backward
     )

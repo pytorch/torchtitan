@@ -296,8 +296,7 @@ def _record_streamed_step(
             batcher._unsent_training_samples = []
             return TrainerStepBatch(
                 microbatch_groups=[],
-                global_loss_token_counts=torch.zeros(1),
-                global_routing_token_counts=torch.zeros(1),
+                num_loss_tokens=0,
                 metrics=[],
                 group_ids=[],
                 min_policy_versions=[],
@@ -310,8 +309,7 @@ def _record_streamed_step(
         )
         return TrainerStepBatch(
             microbatch_groups=[],
-            global_loss_token_counts=torch.zeros(1),
-            global_routing_token_counts=torch.zeros(1),
+            num_loss_tokens=0,
             metrics=[],
             group_ids=[],
             min_policy_versions=[],

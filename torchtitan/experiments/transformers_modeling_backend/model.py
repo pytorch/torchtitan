@@ -1228,10 +1228,10 @@ class HFTransformerModel(BaseModel):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
-        global_routing_token_counts: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Build the attention mask (when positions are present), CP-shard, return."""
-        del max_num_documents, max_context_length, global_routing_token_counts
+        del max_num_documents, max_context_length, aux_loss_denominators
         # Function-local import avoids a circular import.
         from torchtitan.distributed import context_parallel
         from torchtitan.distributed.spmd_types import annotate_input_spmd_types

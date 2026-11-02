@@ -250,7 +250,7 @@ def test_rl_trainer_validates_model_training_config_before_initialization(
     )
 
 
-def test_forward_backward_uses_global_token_count() -> None:
+def test_forward_backward_preprocesses_every_group() -> None:
     engine = SimpleNamespace(
         device=torch.device("cpu"),
         num_completed_steps=0,
@@ -277,7 +277,8 @@ def test_forward_backward_uses_global_token_count() -> None:
             return_value=ForwardBackwardResult(torch.tensor(1.0), [])
         ),
         _accelerator_graph_per_microbatch_group_enabled=False,
-        _step_is_open=False,
+        _step_started=False,
+        _forward_backward_captures_whole_step=False,
         sdc_replayer=None,
     )
     microbatch_groups = [[object()], [object()], [object()]]
@@ -285,17 +286,12 @@ def test_forward_backward_uses_global_token_count() -> None:
     result = TrainingEngine.forward_backward(
         engine,
         microbatch_groups=microbatch_groups,
-        global_loss_token_counts=17,
-        global_routing_token_counts=torch.tensor([19]),
     )
 
     torch.testing.assert_close(result.loss, torch.tensor(1.0))
     engine.garbage_collector.run.assert_called_once_with(1)
     engine.optim.zero_grad.assert_called_once_with(set_to_none=True)
-    assert engine.num_accumulation_steps == 3
-    engine._preprocess_microbatch_groups.assert_called_once_with(
-        microbatch_groups, global_routing_token_counts=torch.tensor([19])
-    )
+    engine._preprocess_microbatch_groups.assert_called_once_with(microbatch_groups)
 
 
 def test_close_stops_training_engine() -> None:
@@ -389,7 +385,7 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
             labels=torch.tensor([2]),
             positions=torch.tensor([0]),
             padding_mask=torch.tensor([False]),
-            loss_token_counts=torch.tensor([1]),
+            loss_token_count=torch.tensor(1),
             routing_token_counts=torch.tensor([1]),
             generator_logprobs=torch.tensor([0.0]),
             temperature=torch.tensor([1.0]),
@@ -414,18 +410,10 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
         )
 
         result = await Trainer.forward_backward(
-            trainer,
-            [[microbatch] for microbatch in microbatches],
-            torch.tensor([3]),
-            torch.tensor([2]),
+            trainer, [[microbatch] for microbatch in microbatches]
         )
 
-        engine.forward_backward.assert_called_once_with(
-            microbatch_groups=ANY,
-            global_loss_token_counts=torch.tensor([3]),
-            global_routing_token_counts=torch.tensor([2]),
-            ends_step=True,
-        )
+        engine.forward_backward.assert_called_once_with(microbatch_groups=ANY)
         # RDMAMicrobatches are read through the prefetcher; by value, the column is passed as is.
         groups = engine.forward_backward.call_args.kwargs["microbatch_groups"]
         assert isinstance(groups, RDMAMicrobatchPrefetcher) == rdma
@@ -472,20 +460,15 @@ def test_streamed_forward_backward_calls_add_up_the_step_tokens() -> None:
             }
         )
 
-        for ends_step in (False, True):
-            await Trainer.forward_backward(
-                trainer, [[object()]], None, None, ends_step=ends_step
-            )
+        for _ in range(2):
+            await Trainer.forward_backward(trainer, [[object()]])
 
         # optim_step reports the step's tokens and busy time over both calls.
         assert trainer._step_num_tokens_per_dp_rank == (
             2 * trainer.config.training.num_tokens_per_microbatch_per_dp_rank
         )
         assert trainer._step_forward_backward_s > 0.0
-        assert [
-            call.kwargs["ends_step"]
-            for call in trainer.engine.forward_backward.call_args_list
-        ] == [False, True]
+        assert trainer.engine.forward_backward.call_count == 2
 
     asyncio.run(run())
 
@@ -512,11 +495,7 @@ def test_forward_backward_rejects_a_misplaced_rdma_microbatch(
     )
 
     with pytest.raises(ValueError, match=r"expected \(0, 1, 0\)"):
-        asyncio.run(
-            Trainer.forward_backward(
-                trainer, [[wrong]], torch.tensor([1]), torch.tensor([1])
-            )
-        )
+        asyncio.run(Trainer.forward_backward(trainer, [[wrong]]))
     wrong.read.assert_not_called()
 
 
@@ -526,7 +505,7 @@ def _rl_microbatch(token: int) -> TrainingMicrobatch:
         labels=torch.tensor([token + 1]),
         positions=torch.tensor([0]),
         padding_mask=torch.tensor([False]),
-        loss_token_counts=torch.tensor([1]),
+        loss_token_count=torch.tensor(1),
         routing_token_counts=torch.tensor([1]),
         generator_logprobs=torch.tensor([0.0]),
         loss_mask=torch.tensor([True]),
@@ -560,18 +539,13 @@ def test_forward_backward_without_last_pipeline_stage_returns_no_metrics() -> No
         with patch(
             "torchtitan.rl.trainer.trainer.torch.accelerator.current_stream"
         ) as current_stream:
-            result = await Trainer.forward_backward(
-                trainer, microbatch_groups, torch.tensor([3]), torch.tensor([2])
-            )
+            result = await Trainer.forward_backward(trainer, microbatch_groups)
 
         # Its busy time waits for the GPU, like the ranks that reduce the loss metrics.
         current_stream.assert_called_once_with(engine.device)
         current_stream.return_value.synchronize.assert_called_once_with()
         engine.forward_backward.assert_called_once_with(
-            microbatch_groups=microbatch_groups,
-            global_loss_token_counts=torch.tensor([3]),
-            global_routing_token_counts=torch.tensor([2]),
-            ends_step=True,
+            microbatch_groups=microbatch_groups
         )
         assert trainer._step_num_tokens_per_dp_rank == (
             4 * trainer.config.training.num_tokens_per_microbatch_per_dp_rank
@@ -607,6 +581,7 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
             ),
             parallelism_context=SimpleNamespace(non_data_parallel_size=1),
             num_completed_steps=4,
+            global_loss_token_count=torch.tensor(7),
             ntokens_seen=12,
             num_flops_per_token=200,
             has_quantization=False,
@@ -616,7 +591,7 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
             save_checkpoint=MagicMock(),
             step_profiler=MagicMock(),
         )
-        engine.optim_step.side_effect = lambda *, global_loss_token_counts: (
+        engine.optim_step.side_effect = lambda: (
             setattr(engine, "num_completed_steps", engine.num_completed_steps + 1),
             torch.tensor(2.0),
         )[1]
@@ -638,7 +613,7 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
             patch(
                 "torchtitan.rl.trainer.trainer.collect_aux_loss_metrics",
                 return_value={"aux_loss/mean": 0.5},
-            ),
+            ) as collect_aux_loss_metrics,
             patch(
                 "torchtitan.rl.trainer.trainer.compute_training_performance_metrics",
                 return_value={
@@ -673,7 +648,10 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
             "trainer/mfu_percent": 50.0,
             "aux_loss/mean": 0.5,
         }
-        engine.optim_step.assert_called_once_with(global_loss_token_counts=None)
+        engine.optim_step.assert_called_once_with()
+        collect_aux_loss_metrics.assert_called_once_with(
+            engine.parallelism_context, num_loss_tokens=7
+        )
         assert trainer._resume_state.value == {"next_index": 3}
         engine.save_checkpoint.assert_called_once_with(last_step=False)
         engine.step_profiler.assert_called_once_with()

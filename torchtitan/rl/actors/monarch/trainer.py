@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-import torch
 from monarch.actor import Actor, concurrent_endpoint
 
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
@@ -58,31 +57,15 @@ class _TrainerActorEndpoints:
         microbatch_groups: (
             list[list[TrainingMicrobatch]] | list[list[RDMAMicrobatch]]
         ),
-        global_loss_token_counts: torch.Tensor | None,
-        global_routing_token_counts: torch.Tensor | None,
-        ends_step: bool = True,
     ) -> dict[str, float] | None:
         async with self._forward_backward_lock:
-            return await super().forward_backward(
-                microbatch_groups,
-                global_loss_token_counts,
-                global_routing_token_counts,
-                ends_step=ends_step,
-            )
+            return await super().forward_backward(microbatch_groups)
 
     @concurrent_endpoint
     async def optim_step(
-        self,
-        *,
-        resume_state: dict[str, Any],
-        last_step: bool = False,
-        global_loss_token_counts: torch.Tensor | None = None,
+        self, *, resume_state: dict[str, Any], last_step: bool = False
     ) -> OptimizerStepOutput:
-        return await super().optim_step(
-            resume_state=resume_state,
-            last_step=last_step,
-            global_loss_token_counts=global_loss_token_counts,
-        )
+        return await super().optim_step(resume_state=resume_state, last_step=last_step)
 
     @concurrent_endpoint
     async def push_model_state_dict(self) -> None:

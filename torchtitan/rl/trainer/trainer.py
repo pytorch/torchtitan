@@ -259,9 +259,6 @@ class Trainer(Configurable):
         microbatch_groups: (
             list[list[TrainingMicrobatch]] | list[list[RDMAMicrobatch]]
         ),
-        global_loss_token_counts: torch.Tensor | None,
-        global_routing_token_counts: torch.Tensor | None,
-        ends_step: bool = True,
     ) -> dict[str, float] | None:
         """Run one optimizer step's forward/backward microbatches, or part of them when the batcher
         streams microbatches.
@@ -271,16 +268,12 @@ class Trainer(Configurable):
                 `[num_groups][num_microbatches_per_group][dp_degree]` grid. Under PP, each group runs
                 as one pipeline step. `RDMAMicrobatch`es when `rdma_min_tensor_bytes` is set,
                 read a few ahead of training.
-            global_loss_token_counts: Per-objective loss-token counts across the
-                global batch. None: the losses and the mean/frac metrics are sums, and
-                `optim_step` gets the counts.
-            global_routing_token_counts: Per-depth non-padding routing-token
-                counts across the global batch; None with streamed microbatches.
-            ends_step: False when later calls add to this step's gradients.
 
         Returns:
             dict[str, float] | None: Globally-reduced metrics, or ``None`` on
                 ranks without the last pipeline stage, which compute no loss.
+                /mean and /frac metrics are token sums: the caller divides them
+                by the step's loss-token count.
 
         Example:
             # dp_degree=2, tp=2, one microbatch per group,
@@ -323,12 +316,7 @@ class Trainer(Configurable):
             # and broadcast it, to cut the trainer's reads by cp * tp. Needs a per-replica group.
             # The controller rejects RDMA with PP, so every group holds one microbatch.
             microbatch_groups = RDMAMicrobatchPrefetcher(microbatches)
-        result = engine.forward_backward(
-            microbatch_groups=microbatch_groups,
-            global_loss_token_counts=global_loss_token_counts,
-            global_routing_token_counts=global_routing_token_counts,
-            ends_step=ends_step,
-        )
+        result = engine.forward_backward(microbatch_groups=microbatch_groups)
         if not engine.pp_has_last_stage:
             # Ranks with the last stage wait for the GPU when they reduce the loss metrics below.
             # Wait here too, so this call's busy time includes its GPU work.
@@ -374,16 +362,9 @@ class Trainer(Configurable):
 
     @sl.log_trace_span("optim_step")
     async def optim_step(
-        self,
-        *,
-        resume_state: dict[str, Any],
-        last_step: bool = False,
-        global_loss_token_counts: torch.Tensor | None = None,
+        self, *, resume_state: dict[str, Any], last_step: bool = False
     ) -> OptimizerStepOutput:
-        """Clip gradients, step optimizer + LR scheduler, return updated state.
-
-        `global_loss_token_counts` is the step's count when its `forward_backward` calls got None.
-        """
+        """Clip gradients, step optimizer + LR scheduler, return updated state."""
         # TODO: Accept optional optimizer params (e.g. learning rate)
         # to allow controller-owned schedules.
 
@@ -393,7 +374,7 @@ class Trainer(Configurable):
         lr_metrics = engine.optim.lr_schedulers.get_metrics()
 
         optim_start = time.perf_counter()
-        grad_norm = engine.optim_step(global_loss_token_counts=global_loss_token_counts)
+        grad_norm = engine.optim_step()
         self._mark_model_state_dict_ready_for_staging()
         self._resume_state.value = resume_state
 
@@ -441,7 +422,10 @@ class Trainer(Configurable):
                     device_mem_stats.num_alloc_retries
                 ),
                 "trainer/memory/num_ooms": float(device_mem_stats.num_ooms),
-                **collect_aux_loss_metrics(engine.parallelism_context),
+                **collect_aux_loss_metrics(
+                    engine.parallelism_context,
+                    num_loss_tokens=int(engine.global_loss_token_count),
+                ),
                 **(
                     {"trainer/mfu_percent": performance["mfu_percent"]}
                     if "mfu_percent" in performance
