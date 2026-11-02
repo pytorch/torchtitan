@@ -4,7 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import replace
+from dataclasses import fields, replace
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -12,10 +15,14 @@ import torch
 from torchtitan.rl.generator.vllm import gdn
 from torchtitan.rl.generator.vllm.linear_attention import (
     LinearAttentionExecutionPath,
+    TorchTitanLinearAttentionBackend,
     TorchTitanLinearAttentionMetadata,
     TorchTitanLinearAttentionMetadataBuilder,
 )
-from torchtitan.rl.generator.vllm.worker import TorchTitanCudagraphDispatcher
+from torchtitan.rl.generator.vllm.worker import (
+    TorchTitanCudagraphDispatcher,
+    TorchTitanGPUModelRunner,
+)
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
@@ -23,11 +30,16 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
-from vllm.forward_context import ForwardContext, override_forward_context
+from vllm.forward_context import (
+    BatchDescriptor,
+    ForwardContext,
+    override_forward_context,
+)
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
 @pytest.mark.parametrize(
@@ -208,11 +220,123 @@ def test_full_metadata_and_native_dispatch_variants():
     assert dispatcher.dispatch(2, uniform_decode=True)[0] == CUDAGraphMode.NONE
 
 
+@pytest.mark.parametrize("mode", ["align", "none"])
+@pytest.mark.parametrize(
+    "step",
+    ["packed", "single_token", "padded_single_token", "packed_graph_single_token"],
+)
+def test_update_block_table_matches_build(step, mode):
+    """vLLM reuses one GDN group's metadata for the next; only the state slots differ."""
+    config = VllmConfig()
+    config.compilation_config = CompilationConfig(
+        mode=CompilationMode.NONE,
+        cudagraph_mode=CUDAGraphMode.FULL,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+        max_cudagraph_capture_size=8,
+        cudagraph_num_of_warmups=1,
+    )
+    config.scheduler_config = SchedulerConfig(
+        max_model_len=16,
+        max_num_seqs=2,
+        max_num_batched_tokens=8,
+        is_encoder_decoder=False,
+    )
+    config.cache_config.mamba_cache_mode = mode
+    spec = MambaSpec(
+        block_size=8,
+        shapes=((3, 512), (2, 128, 128)),
+        dtypes=(torch.bfloat16, torch.float32),
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+    )
+    first, other, reference = (
+        TorchTitanLinearAttentionMetadataBuilder(spec, [], config, torch.device("cpu"))
+        for _ in range(3)
+    )
+    replays_packed_graph = step in ("padded_single_token", "packed_graph_single_token")
+    for builder in (first, other, reference):
+        builder.replays_packed_graph = replays_packed_graph
+    offsets = torch.tensor(
+        [0, 1, 3] if step == "packed" else [0, 1, 2], dtype=torch.int32
+    )
+    # Padded past max_num_seqs (2), a one-token step replays the mixed-batch graph.
+    num_tokens = 4 if step == "padded_single_token" else int(offsets[-1])
+    common = CommonAttentionMetadata(
+        query_start_loc=offsets,
+        query_start_loc_cpu=offsets,
+        # "align": running states in block-table columns 1 and 0; "none": column 0.
+        seq_lens=torch.tensor([16, 2], dtype=torch.int32),
+        num_reqs=2,
+        num_actual_tokens=num_tokens,
+        max_query_len=2 if step == "packed" else 1,
+        max_seq_len=16,
+        block_table_tensor=torch.tensor([[1, 5], [2, 6]], dtype=torch.int32),
+        slot_mapping=torch.zeros(num_tokens, dtype=torch.int64),
+    )
+    other_table = torch.tensor([[3, 7], [4, 8]], dtype=torch.int32)
+    captured = other.build_for_cudagraph_capture(common)
+    # Stale values from an earlier step, so every copy and zeroing is checked.
+    for buffer in (other.query_start_loc, other.state_indices, other.has_initial_state):
+        buffer.fill_(True if buffer.dtype == torch.bool else -1)
+
+    updated = other.update_block_table(
+        first.build(0, common), other_table, common.slot_mapping
+    )
+
+    expected = reference.build(0, replace(common, block_table_tensor=other_table))
+    assert expected.non_spec_state_indices_tensor.tolist()[:2] == (
+        [7, 4] if mode == "align" else [3, 4]
+    )
+    for field in fields(expected):
+        want, got = getattr(expected, field.name), getattr(updated, field.name)
+        if not isinstance(want, torch.Tensor):
+            assert got == want, field.name
+            continue
+        assert torch.equal(got, want), field.name
+        # The graph captured this builder's buffers, not the first group's.
+        if field.name != "state_block_column":
+            assert (
+                got.data_ptr() == getattr(captured, field.name).data_ptr()
+            ), field.name
+    if replays_packed_graph:
+        # The mixed-batch graph reads this builder's offsets.
+        assert other.query_start_loc.tolist() == [0, 1, 2, num_tokens]
+
+
+@pytest.mark.parametrize(
+    "mode, uniform, replays_packed_graph",
+    [
+        (CUDAGraphMode.FULL, False, True),
+        (CUDAGraphMode.FULL, True, False),
+        (CUDAGraphMode.NONE, False, False),
+    ],
+)
+def test_runner_tells_builders_the_selected_graph(mode, uniform, replays_packed_graph):
+    builder, other_builder = SimpleNamespace(), SimpleNamespace()
+    runner = cast(Any, object.__new__(TorchTitanGPUModelRunner))
+    runner.get_model = lambda: SimpleNamespace(set_num_valid_tokens=lambda n: None)
+    runner.attn_groups = [
+        [
+            SimpleNamespace(
+                backend=TorchTitanLinearAttentionBackend, metadata_builders=[builder]
+            ),
+            SimpleNamespace(backend=object, metadata_builders=[other_builder]),
+        ]
+    ]
+    selected = (mode, BatchDescriptor(4, uniform=uniform))
+    with patch.object(
+        GPUModelRunner, "_determine_batch_execution_and_padding", return_value=selected
+    ):
+        runner._determine_batch_execution_and_padding(4, 4)
+    assert builder.replays_packed_graph is replays_packed_graph
+    assert not hasattr(other_builder, "replays_packed_graph")
+
+
 @pytest.mark.parametrize("decode", [False, True])
 def test_forward_respects_prepared_extent_and_decode_padding(monkeypatch, decode):
     layer = gdn.VLLMInnerGDN.__new__(gdn.VLLMInnerGDN)
     torch.nn.Module.__init__(layer)
     layer.prefix, layer.kv_cache = "gdn", (torch.empty(0), torch.empty(0))
+    layer.local_num_v_heads = layer.head_v_dim = 1
     extent = 4 if decode else 3
     metadata = TorchTitanLinearAttentionMetadata(
         execution_path=(
@@ -235,6 +359,7 @@ def test_forward_respects_prepared_extent_and_decode_padding(monkeypatch, decode
             torch.tensor([1, 2, 0, 0]) if decode else torch.tensor([1, 2, 3, 0])
         ),
         has_initial_state=torch.tensor([False, True, False, False]),
+        state_block_column=torch.zeros(extent, 1, dtype=torch.long),
     )
     monkeypatch.setattr(gdn, "is_in_batch_invariant_mode", lambda: True)
 
@@ -245,26 +370,32 @@ def test_forward_respects_prepared_extent_and_decode_padding(monkeypatch, decode
     monkeypatch.setattr(gdn, "causal_conv1d_decode", convolution)
     monkeypatch.setattr(gdn, "paged_causal_conv1d", convolution)
 
-    def recurrent(conv, a, b, A_log, bias, out, offsets, slots, initial):
-        assert conv.shape[0] == out.shape[0] == extent
+    def recurrent(conv, a, b, A_log, bias, offsets, slots, initial):
+        assert conv.shape[0] == extent
         assert offsets[-1] == extent
         assert initial is metadata.has_initial_state
-        out.fill_(1)
+        return torch.ones(extent, 1, 1)
 
     monkeypatch.setattr(layer, "_forward_gdn", recurrent)
+    # NaN catches a row that is neither written nor zeroed.
+    monkeypatch.setattr(
+        torch.Tensor, "new_empty", lambda self, size: self.new_full(size, float("nan"))
+    )
     context = ForwardContext(
         no_compile_layers={}, attn_metadata={"gdn": metadata}, slot_mapping={}
     )
-    value, output = torch.ones(6, 1), torch.zeros(6, 1)
+    value = torch.ones(6, 1)
     with override_forward_context(context):
-        layer._forward(value, value, value, value, None, value, value, output)
-        # Reject bias even in profiling and empty-batch early returns.
+        output = layer._forward(value, value, value, value, None, value, value)
+        # Profiling and empty-batch early returns reject bias and return zeros.
         for attn_metadata in (None, {"gdn": replace(metadata, num_actual_tokens=0)}):
             context.attn_metadata = attn_metadata
             with pytest.raises(
                 AssertionError,
                 match="Attention Gym convolution kernels do not support bias",
             ):
-                layer._forward(value, value, value, value, value, value, value, output)
+                layer._forward(value, value, value, value, value, value, value)
+            early = layer._forward(value, value, value, value, None, value, value)
+            assert torch.equal(early, torch.zeros(6, 1, 1))
     assert metadata.num_actual_tokens == 3
-    assert torch.equal(output[:, 0], (torch.arange(6) < extent).float())
+    assert torch.equal(output.flatten(), (torch.arange(6) < extent).float())
