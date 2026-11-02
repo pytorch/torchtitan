@@ -179,9 +179,10 @@ class Trainer(Configurable):
             self.dp_rank = 0
         # Batches read over RDMA so far; the next batch's `batch_index` must equal it.
         self._num_rdma_batches_read = 0
-        # This step's totals over its forward_backward calls; optim_step reports and resets them.
+        # This step's totals over its forward_backward calls; optim_step resets them.
         self._step_forward_backward_s = 0.0
         self._step_num_tokens_per_dp_rank = 0
+        self._step_read_microbatches_s = 0.0
 
     @property
     def policy_version(self) -> int:
@@ -348,11 +349,11 @@ class Trainer(Configurable):
 
         metrics = combine_microbatch_metrics(microbatch_metrics)
         if uses_rdma:
-            # The slowest rank's total read time this call, hidden or not (max over the loss mesh).
-            # TODO: a streamed step reports its slowest call (the controller takes the max over calls),
-            # not the step's total.
+            # The slowest rank's read time this step so far, hidden or not (max over the loss mesh).
+            # The controller keeps the max over a streamed step's calls: the last call's, the step total.
+            self._step_read_microbatches_s += microbatch_groups.read_s
             read_microbatches_s = torch.tensor(
-                microbatch_groups.read_s, device=engine.device
+                self._step_read_microbatches_s, device=engine.device
             )
             metrics.update(
                 self._reduce_forward_backward_metrics(
@@ -398,6 +399,7 @@ class Trainer(Configurable):
         )
         self._step_forward_backward_s = 0.0
         self._step_num_tokens_per_dp_rank = 0
+        self._step_read_microbatches_s = 0.0
 
         engine.save_checkpoint(last_step=last_step)
         engine.step_profiler()

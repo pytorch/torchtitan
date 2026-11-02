@@ -19,6 +19,7 @@ from torchtitan.components.data.types import (
 from torchtitan.config import Configurable, DebugConfig, TrainingConfig
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.rl.actors.monarch.trainer import TrainerActor
+from torchtitan.rl.controller.metrics import combine_microbatch_metrics
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import (
     RDMAMicrobatch,
@@ -371,6 +372,7 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
         trainer._num_rdma_batches_read = 0
         trainer._step_forward_backward_s = 0.0
         trainer._step_num_tokens_per_dp_rank = 0
+        trainer._step_read_microbatches_s = 0.0
         trainer._reduce_forward_backward_metrics = MagicMock(
             side_effect=lambda *, sum_reduced_metrics, max_reduced_metrics: {
                 key: float(value.item())
@@ -431,7 +433,14 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
     asyncio.run(run())
 
 
-def test_streamed_forward_backward_calls_add_up_the_step_tokens() -> None:
+class _FixedReadTimePrefetcher:
+    """Stands in for RDMAMicrobatchPrefetcher: each call's reads take 0.25 s."""
+
+    def __init__(self, rdma_microbatches: list[RDMAMicrobatch]) -> None:
+        self.read_s = 0.25
+
+
+def test_streamed_forward_backward_calls_add_up_the_step_tokens_and_read_time() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
         trainer.engine = SimpleNamespace(
@@ -450,6 +459,7 @@ def test_streamed_forward_backward_calls_add_up_the_step_tokens() -> None:
         trainer._num_rdma_batches_read = 0
         trainer._step_forward_backward_s = 0.0
         trainer._step_num_tokens_per_dp_rank = 0
+        trainer._step_read_microbatches_s = 0.0
         trainer._reduce_forward_backward_metrics = MagicMock(
             side_effect=lambda *, sum_reduced_metrics, max_reduced_metrics: {
                 key: float(value.item())
@@ -460,8 +470,21 @@ def test_streamed_forward_backward_calls_add_up_the_step_tokens() -> None:
             }
         )
 
-        for _ in range(2):
-            await Trainer.forward_backward(trainer, [[object()]])
+        call_metrics = []
+        with patch(
+            "torchtitan.rl.trainer.trainer.RDMAMicrobatchPrefetcher",
+            _FixedReadTimePrefetcher,
+        ):
+            for batch_index in range(2):
+                microbatch = MagicMock(
+                    spec=RDMAMicrobatch,
+                    batch_index=batch_index,
+                    dp_rank=0,
+                    microbatch_index=0,
+                )
+                call_metrics.append(
+                    await Trainer.forward_backward(trainer, [[microbatch]])
+                )
 
         # optim_step reports the step's tokens and busy time over both calls.
         assert trainer._step_num_tokens_per_dp_rank == (
@@ -469,6 +492,11 @@ def test_streamed_forward_backward_calls_add_up_the_step_tokens() -> None:
         )
         assert trainer._step_forward_backward_s > 0.0
         assert trainer.engine.forward_backward.call_count == 2
+        # The controller combines the calls' metrics; the step reports both calls' reads.
+        read_s = combine_microbatch_metrics(call_metrics)[
+            "timing/trainer/read_microbatches/max"
+        ]
+        assert read_s == 0.5
 
     asyncio.run(run())
 
@@ -601,6 +629,7 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
         # forward_backward's busy time; the patched clock makes the update itself take 0 s.
         trainer._step_forward_backward_s = 2.0
         trainer._step_num_tokens_per_dp_rank = 10
+        trainer._step_read_microbatches_s = 0.5
         trainer._staging_model_state_dict_stream = MagicMock()
         compute_stream = MagicMock()
 
@@ -666,6 +695,7 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
         # The next step starts counting from zero.
         assert trainer._step_forward_backward_s == 0.0
         assert trainer._step_num_tokens_per_dp_rank == 0
+        assert trainer._step_read_microbatches_s == 0.0
         device_memory_monitor.get_peak_stats.assert_called_once_with()
         device_memory_monitor.reset_peak_stats.assert_called_once_with()
 
