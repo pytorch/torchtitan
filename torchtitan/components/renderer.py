@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from renderers import create_renderer, Renderer
+from renderers import create_renderer, Message, Renderer
 from renderers.configs import RendererConfig as PrimeRendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
@@ -90,6 +90,27 @@ class RenderersConfigAdapter(RendererConfig):
 def from_renderers(config: PrimeRendererConfig) -> RendererConfig:
     """Adapt a `renderers` config to TorchTitan's renderer config interface."""
     return RenderersConfigAdapter(renderers_config=config)
+
+
+_TEXT_CONTENT_TYPES = frozenset({"text", "input_text", "output_text", "thinking"})
+
+
+def require_text_content(messages: list[Message]) -> None:
+    """Raise if a message has a non-text content part.
+
+    Text paths keep only token ids. An image part would render as a placeholder
+    token with no pixels behind it.
+    """
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if part.get("type", "text") not in _TEXT_CONTENT_TYPES:
+                raise ValueError(
+                    f"This path supports text content only, got a "
+                    f"{part.get('type')!r} content part."
+                )
 
 
 class RendererTokenizerWrapper:
