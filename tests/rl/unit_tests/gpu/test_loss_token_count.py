@@ -15,8 +15,8 @@ two calls run the same operations, so the gradients are bitwise equal on 1 GPU a
 all-reduces the replicas once per call instead of once per step, which reassociates the sum
 (allclose).
 
-    pytest tests/rl/unit_tests/gpu/test_gradient_accumulation.py                 # 1 GPU
-    pytest tests/rl/unit_tests/gpu/test_gradient_accumulation.py -m multi_gpu    # 2 GPUs
+    pytest tests/rl/unit_tests/gpu/test_loss_token_count.py                 # 1 GPU
+    pytest tests/rl/unit_tests/gpu/test_loss_token_count.py -m multi_gpu    # 2 GPUs
 """
 
 import dataclasses
