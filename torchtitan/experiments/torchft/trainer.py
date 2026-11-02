@@ -535,6 +535,9 @@ class FaultTolerantTrainer(Configurable):
                         engine.model_parts, engine.num_completed_steps
                     )
 
+                # Training and validation have logged this step; push it now.
+                self.metrics_processor.commit()
+
                 # signal the profiler that the next profiling step has started
                 profiler.step()
 
