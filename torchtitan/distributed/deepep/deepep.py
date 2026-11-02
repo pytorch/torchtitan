@@ -29,8 +29,12 @@ before the pure-reduction combine op), so autograd handles the score gradient an
 custom ops stay pure communication.
 """
 
+# Shape suffixes: U = received tokens, R = expand rows (one per received (token, local
+# expert) pick), K = top_k, D = hidden dim.
+
 import weakref
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch_remat as remat
@@ -392,9 +396,10 @@ class _OneRowPerTokenHooks:
         recv_x = [A, C, A, B]  ->  kept: recv_x_UD = [A, B, C], row_to_token_R = [0, 2, 0, 1]
     """
 
-    def __init__(self) -> None:
-        # Set when dispatch returns. Remat packs recv_x later, when a consumer needs it.
-        self.handle_id: torch.Tensor | None = None
+    def __init__(self, *, top_k: int) -> None:
+        self.top_k = top_k
+        # Set when dispatch returns, before remat packs recv_x at recompute_needs_tensor.
+        self.handle: Any = None
 
     def pack(
         self, tensor: torch.Tensor
@@ -402,17 +407,15 @@ class _OneRowPerTokenHooks:
         # recv_x is the only 2D dispatch output; the scores, counts and handle id stay.
         if tensor.dim() != 2:
             return tensor
-        if self.handle_id is None:
-            raise RuntimeError("DeepEP recv_x was packed before dispatch returned")
-        handle = _handle_cache[self.handle_id.item()]
-        if handle.expert_alignment != 1:
-            raise ValueError(
-                f"DeepEP expert_alignment={handle.expert_alignment} adds padding rows "
-                "that no received token owns, so remat can't rebuild recv_x from one "
-                "row per token; it must be 1."
-            )
-        # [received tokens, top_k]: the rows of each token, -1 for picks on other ranks.
-        row_ids_UK = handle.recv_src_metadata[:, 2:].long()
+        assert self.handle is not None, "recv_x was packed before dispatch returned"
+        # TODO: recv_src_metadata[:, 2:] (each received token's expand-row ids, -1 for picks
+        # on other ranks) is a DeepEP-internal layout, not a public API. Ask DeepEP to expose
+        # the row -> token map on the handle.
+        assert self.handle.recv_src_metadata.shape[1] == 2 + self.top_k, (
+            f"DeepEP recv_src_metadata has {self.handle.recv_src_metadata.shape[1]} columns, "
+            f"expected 2 + top_k = {2 + self.top_k}"
+        )
+        row_ids_UK = self.handle.recv_src_metadata[:, 2:].long()
         num_rows = tensor.shape[0]
         token_ids_UK = torch.arange(
             row_ids_UK.shape[0], dtype=torch.int32, device=tensor.device
@@ -532,7 +535,7 @@ def dispatch_tokens(
     # When remat saves this region, it keeps recv_x for the replayed grouped GEMM. These hooks
     # store it as one row per received token and rebuild recv_x in replay; without remat
     # they never run.
-    one_row_per_token = _OneRowPerTokenHooks()
+    one_row_per_token = _OneRowPerTokenHooks(top_k=selected_experts_indices.shape[1])
     with remat.saved_tensors_hooks(one_row_per_token.pack, one_row_per_token.unpack):
         recv_x, recv_scores, num_recv_per_expert, handle_id = dispatch_region(
             hidden_states,
@@ -542,8 +545,9 @@ def dispatch_tokens(
             num_tokens_per_rank=num_tokens_per_rank,
             cuda_graph_compatible=cuda_graph_compatible,
         )
-    # Remat packs recv_x at recompute_needs_tensor below; pack reads the routing handle.
-    one_row_per_token.handle_id = handle_id
+    # Remat packs recv_x at recompute_needs_tensor below; pack reads the routing handle. In
+    # replay the cache entry may be gone (combine removes it), but nothing is packed then.
+    one_row_per_token.handle = _handle_cache.get(handle_id.item())
     # The saved region is skipped during replay, while the caller (grouped GEMM, score
     # multiply in combine_tokens) still runs and needs its original outputs.
     remat.recompute_needs_tensor(recv_x, recv_scores, num_recv_per_expert, handle_id)
