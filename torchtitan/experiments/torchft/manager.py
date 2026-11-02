@@ -169,6 +169,15 @@ class TorchFTManager(Configurable):
 
     def maybe_set_all_reduce_hook(self, model_parts: list[torch.nn.Module]) -> None:
         if self.enabled and self.use_async_quorum:
+            # FSDP runs the hook below, which is the only gradient sync across
+            # replicas, so a model part without FSDP would train apart.
+            for model_part in model_parts:
+                if not isinstance(model_part, FSDPModule):
+                    raise ValueError(
+                        "TorchFT with async quorum sums gradients over the replicas "
+                        "in an FSDP all-reduce hook, so every model part must be "
+                        f"wrapped in FSDP, got {type(model_part).__name__}."
+                    )
 
             def all_reduce_hook(output):
                 # Sum: optim_step divides by the loss-token count summed over the same replicas.
