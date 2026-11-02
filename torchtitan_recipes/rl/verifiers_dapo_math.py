@@ -182,6 +182,7 @@ def _qwen3_4b_verifiers_config(
             ),
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
+                skip_non_loss_tokens=True,
                 loss_fn=DAPOLoss.Config(
                     ratio_clip_low=0.2,
                     ratio_clip_high=0.28,

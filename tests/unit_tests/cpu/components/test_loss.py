@@ -1083,6 +1083,120 @@ class TestChunkedLossWrapper(unittest.TestCase):
             model_chunked.output.weight.grad, model_ref.output.weight.grad
         )
 
+    def test_skip_non_loss_tokens_matches_every_token(self):
+        """SFT: the lm_head runs only on labels != IGNORE_INDEX, with the same loss and grads."""
+        T, D, V, num_chunks = 256, 8, 32, 8
+        # 0.15 runs 2 chunks, 0.004 keeps fewer tokens than chunks, 0.0 runs one non-loss row.
+        for loss_token_frac in (0.15, 0.004, 0.0, 1.0):
+            with self.subTest(loss_token_frac=loss_token_frac):
+                torch.manual_seed(42)
+                hidden = torch.randn(T, D)
+                labels = torch.randint(0, V, (T,))
+                labels[torch.rand(T) >= loss_token_frac] = IGNORE_INDEX
+                num_kept = max(1, int((labels != IGNORE_INDEX).sum()))
+                lm_head = nn.Linear(D, V, bias=False)
+                results, lm_head_rows = [], []
+                for skip in (False, True):
+                    head = copy.deepcopy(lm_head)
+                    if skip:
+                        head.register_forward_hook(
+                            lambda module, args, output: lm_head_rows.append(
+                                args[0].shape[0]
+                            )
+                        )
+                    chunked_loss = ChunkedLossWrapper(
+                        ChunkedLossWrapper.Config(
+                            num_chunks=num_chunks, skip_non_loss_tokens=skip
+                        )
+                    )
+                    chunked_loss.set_lm_head(head)
+                    hidden_input = hidden.clone().requires_grad_()
+                    loss, _ = chunked_loss(
+                        hidden_input, labels, torch.tensor(float(num_kept))
+                    )
+                    loss.backward()
+                    results.append((loss, hidden_input.grad, head.weight.grad))
+
+                # Every loss token, padded with fewer than len(lm_head_rows) non-loss rows.
+                self.assertTrue(
+                    num_kept <= sum(lm_head_rows) < num_kept + len(lm_head_rows)
+                )
+                self.assertLessEqual(max(lm_head_rows), T // num_chunks)
+                grad_skipped = results[1][1]
+                self.assertTrue((grad_skipped[labels == IGNORE_INDEX] == 0).all())
+                for skipped, full in zip(results[1], results[0], strict=True):
+                    if loss_token_frac == 1.0:
+                        self.assertTrue(torch.equal(skipped, full))
+                    else:
+                        torch.testing.assert_close(skipped, full)
+
+    def test_skip_non_loss_tokens_with_mtp_matches_every_token(self):
+        """MTP: the outputs share the union of their loss tokens; same loss and grads."""
+        torch.manual_seed(42)
+        T, D, V, num_chunks = 64, 8, 17, 4
+        positions = torch.arange(T) % 16
+        labels = torch.randint(0, V, (T,))
+        labels[torch.rand(T) >= 0.15] = IGNORE_INDEX
+        loss_labels = (labels,) + tuple(
+            roll_mtp_sequence(
+                labels, shift=shift, positions=positions, fill_value=IGNORE_INDEX
+            )
+            for shift in (1, 2)
+        )
+        counts = torch.stack([(label != IGNORE_INDEX).sum() for label in loss_labels])
+        hidden = tuple(torch.randn(T, D) for _ in loss_labels)
+        lm_head = nn.Linear(D, V, bias=False)
+        results, lm_head_rows = [], []
+        for skip in (False, True):
+            head = copy.deepcopy(lm_head)
+            if skip:
+                head.register_forward_hook(
+                    lambda module, args, output: lm_head_rows.append(args[0].shape[0])
+                )
+            chunked_loss = ChunkedLossWrapper(
+                ChunkedLossWrapper.Config(
+                    num_chunks=num_chunks,
+                    skip_non_loss_tokens=skip,
+                    loss_fn=MTPCrossEntropyLoss.Config(global_vocab_size=V),
+                )
+            )
+            chunked_loss.set_lm_head(head)
+            hidden_inputs = tuple(h.clone().requires_grad_() for h in hidden)
+            loss, _ = chunked_loss(hidden_inputs, loss_labels, counts)
+            loss.backward()
+            results.append((loss, *(h.grad for h in hidden_inputs), head.weight.grad))
+
+        read_by_none = torch.stack(
+            [label == IGNORE_INDEX for label in loss_labels]
+        ).all(dim=0)
+        # Each output runs the lm_head on the union only (padded to whole chunks).
+        num_kept = int((~read_by_none).sum())
+        self.assertLess(sum(lm_head_rows), len(loss_labels) * T)
+        self.assertTrue(
+            len(loss_labels) * num_kept
+            <= sum(lm_head_rows)
+            < len(loss_labels) * (num_kept + len(lm_head_rows))
+        )
+        for grad in results[1][1:-1]:
+            self.assertTrue((grad[read_by_none] == 0).all())
+        for skipped, full in zip(results[1], results[0], strict=True):
+            torch.testing.assert_close(skipped, full)
+
+    def test_skip_non_loss_tokens_rejects_indivisible_length(self):
+        """Raises at every loss-token count, so no rank fails while its peers wait."""
+        chunked_loss = ChunkedLossWrapper(
+            ChunkedLossWrapper.Config(num_chunks=4, skip_non_loss_tokens=True)
+        )
+        chunked_loss.set_lm_head(nn.Linear(4, 8, bias=False))
+        for num_loss_tokens in (0, 3, 10):
+            labels = torch.full((10,), IGNORE_INDEX)
+            labels[:num_loss_tokens] = 1
+            with (
+                self.subTest(num_loss_tokens=num_loss_tokens),
+                self.assertRaisesRegex(RuntimeError, "divisible by num_chunks"),
+            ):
+                chunked_loss(torch.randn(10, 4, requires_grad=True), labels)
+
     def test_frozen_features_accumulate_head_gradients(self):
         """Head-only training matches cross entropy across chunks and microbatches."""
         for num_chunks in (1, 2, 4):
@@ -1630,6 +1744,7 @@ class TestChunkedLossWrapperSPMD(DTensorTestBase):
         lm_head: nn.Module,
         *,
         num_chunks=4,
+        skip_non_loss_tokens=False,
     ):
         """Create the ChunkedLossWrapper variant under SPMD typecheck."""
         chunked_loss = ChunkedLossWrapper(
@@ -1638,6 +1753,7 @@ class TestChunkedLossWrapperSPMD(DTensorTestBase):
                 loss_fn=CrossEntropyLoss.Config(
                     global_vocab_size=lm_head.out_features,
                 ),
+                skip_non_loss_tokens=skip_non_loss_tokens,
             )
         )
         chunked_loss.set_lm_head(lm_head)
@@ -1695,7 +1811,6 @@ class TestChunkedLossWrapperSPMD(DTensorTestBase):
         lm_head_spmd = self._make_vocab_parallel_lm_head(D, V, tp_group).to(
             self.device_type
         )
-        loss_spmd_fn = self._make_loss(lm_head_spmd, num_chunks=num_chunks)
 
         # copy over vocab shard
         chunk_size = (V + tp_degree - 1) // tp_degree
@@ -1709,23 +1824,29 @@ class TestChunkedLossWrapperSPMD(DTensorTestBase):
         loss_ref.backward()
         h_grad_ref = h_ref.grad.clone()
 
-        # run SPMD path, typecheck
-        h_spmd = hidden_states.clone().detach().requires_grad_(True)
-        with set_current_spmd_mesh(mesh):
-            spmd.assert_type(h_spmd, {tp_group: spmd.R})
-            spmd.assert_type(labels, {tp_group: spmd.I})
-            spmd.assert_type(lm_head_spmd.weight, {tp_group: spmd.S(0)})
-            with typecheck(strict_mode="strict", local=False):
-                loss_spmd, _ = loss_spmd_fn(h_spmd, labels)
-            # ChunkedLossWrapper returns through an autograd bridge under
-            # no_typecheck, so the returned scalar is intentionally untyped.
+        for skip_non_loss_tokens in (False, True):
+            loss_spmd_fn = self._make_loss(
+                lm_head_spmd,
+                num_chunks=num_chunks,
+                skip_non_loss_tokens=skip_non_loss_tokens,
+            )
+            # run SPMD path, typecheck
+            h_spmd = hidden_states.clone().detach().requires_grad_(True)
+            with set_current_spmd_mesh(mesh):
+                spmd.assert_type(h_spmd, {tp_group: spmd.R})
+                spmd.assert_type(labels, {tp_group: spmd.I})
+                spmd.assert_type(lm_head_spmd.weight, {tp_group: spmd.S(0)})
+                with typecheck(strict_mode="strict", local=False):
+                    loss_spmd, _ = loss_spmd_fn(h_spmd, labels)
+                # ChunkedLossWrapper returns through an autograd bridge under
+                # no_typecheck, so the returned scalar is intentionally untyped.
 
-        # numerics check
-        loss_spmd.backward()
-        torch.testing.assert_close(loss_spmd, loss_ref)
-        h_grad_spmd = h_spmd.grad.clone()
-        dist.all_reduce(h_grad_spmd, group=tp_group)
-        torch.testing.assert_close(h_grad_spmd, h_grad_ref)
+            # numerics check
+            loss_spmd.backward()
+            torch.testing.assert_close(loss_spmd, loss_ref)
+            h_grad_spmd = h_spmd.grad.clone()
+            dist.all_reduce(h_grad_spmd, group=tp_group)
+            torch.testing.assert_close(h_grad_spmd, h_grad_ref)
 
 
 if __name__ == "__main__":
