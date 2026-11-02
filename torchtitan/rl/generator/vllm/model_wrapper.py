@@ -578,8 +578,9 @@ class VLLMModelWrapper(Module):
             after `norm` would all-gather `lm_head` before it loads.
 
         Args:
-            fetch: Fills each tensor of the given subset of `self.model.state_dict()`
-                in place with the new weights and returns the keys it filled, e.g. a
+            fetch: Fills each tensor of the given subset of `self.model.state_dict()`,
+                with parameters in the model dtype as the trainer sends them, in place
+                with the new weights and returns the keys it filled, e.g. a
                 copy from the generator's pinned CPU buffers or a TorchStore read. Each
                 group's sharded storage is reallocated just before its fetch, so a
                 fetch writing outside the current stream (e.g. RDMA) must first wait
@@ -599,14 +600,28 @@ class VLLMModelWrapper(Module):
                         key: fsdp_param.sharded_param
                         for key, fsdp_param in keyed_params
                     }
+                    # The trainer sends parameters in the model dtype. Fetch the
+                    # float32 GDN parameters into staging tensors, then cast.
+                    received = {
+                        key: (
+                            param
+                            if param.dtype == self._model_dtype
+                            else torch.empty_like(param, dtype=self._model_dtype)
+                        )
+                        for key, param in params.items()
+                    }
                     # An unfilled parameter would load its just-reallocated,
                     # uninitialized storage.
-                    missing = params.keys() - fetch(params)
+                    missing = params.keys() - fetch(received)
                     if missing:
                         raise RuntimeError(
                             f"fetch did not fill {len(missing)} weights, e.g. "
                             f"{sorted(missing)[:5]}"
                         )
+                    with torch.no_grad():
+                        for key, param in params.items():
+                            if received[key] is not param:
+                                param.copy_(received[key])
                 except Exception as e:
                     error = e
             _unshard_and_free_sharded_params(module)
