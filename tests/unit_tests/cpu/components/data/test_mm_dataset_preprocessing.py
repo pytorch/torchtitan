@@ -36,6 +36,7 @@ from torchtitan.components.data.multimodal.mm_datasets import (
 from torchtitan.components.data.multimodal.utils.image import (
     calculate_vision_tokens,
     process_image,
+    resize_to_muse_glimmer_patch_grid,
     resize_to_navit_patch_grid,
     resize_to_pixel_budget,
     vision_to_patches,
@@ -414,6 +415,23 @@ class TestProcessMmSampleTemporalPatchSize(unittest.TestCase):
             self.assertIsNotNone(sample)
             counts.append(int((sample["input_ids"] == _FakeMMTokenizer.image_id).sum()))
         self.assertTrue(all(count == expected_tokens for count in counts))
+
+
+# Grids match the HF MuseGlimmerImageProcessor. 4000x3000 would be 20,000 merged
+# tokens, so it takes the 4096-token cap path.
+@pytest.mark.parametrize(
+    "height, width, expected",
+    [
+        (256, 256, (280, 280, 0, 0)),
+        (240, 240, (224, 224, 0, 0)),
+        (4000, 3000, (2044, 1540, 0, 0)),
+    ],
+)
+def test_resize_to_muse_glimmer_patch_grid(height, width, expected):
+    assert (
+        resize_to_muse_glimmer_patch_grid(height, width, patch_size=14, merge_size=2)
+        == expected
+    )
 
 
 def test_expand_image_placeholders_rejects_count_mismatch():

@@ -6,7 +6,9 @@
 
 """Muse Glimmer model configurations used by tests."""
 
+from collections.abc import Callable
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.data.text_datasets import DATASETS
@@ -36,11 +38,14 @@ from torchtitan.trainer import Trainer
 
 from torchtitan_recipes.data import c4_document_capacity
 
+if TYPE_CHECKING:
+    import torchvision.transforms.v2.functional as TVF
+
 
 # Multimodal special tokens for the Muse Glimmer debug flavor. The debug tokenizer asset
 # (``./tests/assets/tokenizer``) already defines these (IDs 2004-2008, all <
 # debugmodel_mm's vocab_size=2048), so no asset change is needed.
-MUSE_GLIMMER_SPECIAL_TOKENS = {
+MUSE_GLIMMER_DEBUG_SPECIAL_TOKENS = {
     "image_token": "<|image_pad|>",
     "video_token": "<|video_pad|>",
     "vision_start_token": "<|vision_start|>",
@@ -48,9 +53,22 @@ MUSE_GLIMMER_SPECIAL_TOKENS = {
     "pad_token": "<|endoftext|>",
 }
 
+# Multimodal special tokens of the released Muse Glimmer 30B tokenizer.
+MUSE_GLIMMER_30B_SPECIAL_TOKENS = {
+    "image_token": "<|patch|>",
+    "video_token": "<|video|>",
+    "vision_start_token": "<|image_start|>",
+    "vision_end_token": "<|image_end|>",
+    "pad_token": "<|finetune_right_pad|>",
+}
+
 
 def _muse_glimmer_mm_dataloader(
-    model_config: MuseGlimmerModel.Config, dataset_name: str
+    model_config: MuseGlimmerModel.Config,
+    dataset_name: str,
+    *,
+    resize_fn: Callable[..., tuple[int, int, int, int]],
+    image_interpolation_mode: "TVF.InterpolationMode",
 ) -> GrainDataLoader.Config:
     """Build the shared multimodal dataloader config, taking the vision-patch
     geometry from the model's own vision encoder.
@@ -63,8 +81,8 @@ def _muse_glimmer_mm_dataloader(
     grid); ``build_mrope_positions=False`` since Muse Glimmer uses 1D ComplexRoPE
     on the LLM side, not MRoPE.
 
-    NOTE: the multimodal dataloader imports (``MultiModalCollator`` /
-    ``resize_to_pixel_budget``) are done lazily here because they pull in
+    NOTE: ``MultiModalCollator``, ``MM_DATASETS``, and the resize functions passed
+    by the multimodal recipes are imported lazily because they pull in
     ``torchvision`` (via ``torchtitan.components.data.multimodal.utils.image``).
     ``torchvision`` is an optional dependency (not in requirements.txt /
     pyproject.toml), so importing it at module top level breaks the text-only
@@ -77,7 +95,6 @@ def _muse_glimmer_mm_dataloader(
         MM_DATASETS,
         VisionProcessor,
     )
-    from torchtitan.components.data.multimodal.utils.image import resize_to_pixel_budget
 
     encoder = model_config.vision_encoder
     if encoder is None:
@@ -94,7 +111,8 @@ def _muse_glimmer_mm_dataloader(
         patch_size=encoder.patch_size,
         temporal_patch_size=encoder.patch_temporal,
         spatial_merge_size=encoder.downsample_factor,
-        resize_fn=resize_to_pixel_budget,
+        resize_fn=resize_fn,
+        image_interpolation_mode=image_interpolation_mode,
         min_pixels=784,
         max_pixels=3136,
         image_mean=(0.5, 0.5, 0.5),
@@ -189,6 +207,10 @@ def muse_glimmer_debugmodel_mm(
 
     The integration smoke suite covers the TP+CP+PP+SP path.
     """
+    import torchvision.transforms.v2.functional as TVF
+
+    from torchtitan.components.data.multimodal.utils.image import resize_to_pixel_budget
+
     parallelism = ParallelismConfig()
     mm_model_spec = build_model_config(
         "debugmodel_mm",
@@ -203,10 +225,15 @@ def muse_glimmer_debugmodel_mm(
             ),
         ),
         hf_assets_path="./tests/assets/tokenizer",
-        tokenizer=MultiModalTokenizer.Config(**MUSE_GLIMMER_SPECIAL_TOKENS),
+        tokenizer=MultiModalTokenizer.Config(**MUSE_GLIMMER_DEBUG_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=mm_model_spec,
-        dataloader=_muse_glimmer_mm_dataloader(mm_model_spec, "cc12m-test"),
+        dataloader=_muse_glimmer_mm_dataloader(
+            mm_model_spec,
+            "cc12m-test",
+            resize_fn=resize_to_pixel_budget,
+            image_interpolation_mode=TVF.InterpolationMode.BICUBIC,
+        ),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
@@ -272,6 +299,12 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
 
 
 def muse_glimmer_30b_mm(seq_len: int | None = None) -> Trainer.Config:
+    import torchvision.transforms.v2.functional as TVF
+
+    from torchtitan.components.data.multimodal.utils.image import (
+        resize_to_muse_glimmer_patch_grid,
+    )
+
     parallelism = ParallelismConfig(
         data_parallel_shard_degree=-1,
         tensor_parallel_degree=1,
@@ -291,9 +324,15 @@ def muse_glimmer_30b_mm(seq_len: int | None = None) -> Trainer.Config:
             ),
         ),
         hf_assets_path="./assets/hf/Muse-Glimmer-30B",
-        tokenizer=MultiModalTokenizer.Config(**MUSE_GLIMMER_SPECIAL_TOKENS),
+        tokenizer=MultiModalTokenizer.Config(**MUSE_GLIMMER_30B_SPECIAL_TOKENS),
         model=model_config,
-        dataloader=_muse_glimmer_mm_dataloader(model_config, "cc12m"),
+        # The released image processor, not the debug pixel budget.
+        dataloader=_muse_glimmer_mm_dataloader(
+            model_config,
+            "cc12m",
+            resize_fn=resize_to_muse_glimmer_patch_grid,
+            image_interpolation_mode=TVF.InterpolationMode.LANCZOS,
+        ),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=3e-4)]
