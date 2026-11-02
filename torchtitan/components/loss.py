@@ -743,11 +743,11 @@ class ChunkedLossWrapper(Loss[LossInput]):
                 pred[0].shape[0] % num_chunks == 0,
                 lambda: "ChunkedLossWrapper sequence length must be divisible by num_chunks",
             )
+            row_chunks = None
             if self.skip_non_loss_tokens:
-                # Keep only the loss tokens: the code below runs unchanged on fewer chunks, and
-                # the backward of hidden_state[rows] gives the other tokens zero grad. A stable sort
-                # puts loss tokens first, in order; the first non-loss tokens pad the last chunk
-                # (zero loss and grad). Chunks are never longer than without the skip:
+                # Keep only the loss tokens, in fewer chunks. A stable sort puts them first, in
+                # order; the first non-loss tokens pad the last chunk (zero loss and grad). Chunks
+                # are never longer than without the skip:
                 #   T=8, num_chunks=4 (chunks of 2), is_loss_token=[F T T F F F T F]
                 #   -> rows=[1 2 | 6 0]: 3 loss tokens + 1 pad, 2 chunks of 2
                 # With multiple outputs (MTP), one row set serves all of them: their union.
@@ -762,22 +762,24 @@ class ChunkedLossWrapper(Loss[LossInput]):
                 chunk_len = math.ceil(num_loss_tokens / num_chunks)
                 rows = torch.argsort(is_loss_token, descending=True, stable=True)
                 rows = rows[: num_chunks * chunk_len]
-                pred = tuple(hidden_state[rows] for hidden_state in pred)
                 labels = tuple(label[rows] for label in labels)
                 loss_inputs = {
                     key: value[rows] if isinstance(value, torch.Tensor) else value
                     for key, value in loss_inputs.items()
                 }
-
-            # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
-            # accumulates ``.grad`` for ``GradAccumulator``.
-            hidden_state_chunks_per_output = tuple(
-                tuple(
-                    chunk.detach().requires_grad_(decoder_requires_grad)
-                    for chunk in _chunk_local(hidden_state)
+                # The loop gathers pred's rows one chunk at a time, so no [K, D] copy of pred is
+                # held; their grads fill a [K, D] buffer, scattered into [T, D] after the loop.
+                row_chunks = rows.split(chunk_len)
+            else:
+                # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
+                # accumulates ``.grad`` for ``GradAccumulator``.
+                hidden_state_chunks_per_output = tuple(
+                    tuple(
+                        chunk.detach().requires_grad_(decoder_requires_grad)
+                        for chunk in _chunk_local(hidden_state)
+                    )
+                    for hidden_state in pred
                 )
-                for hidden_state in pred
-            )
             label_chunks_per_output = tuple(_chunk_local(label) for label in labels)
             input_chunks = {
                 key: _chunk_local(value) if isinstance(value, torch.Tensor) else value
@@ -786,7 +788,10 @@ class ChunkedLossWrapper(Loss[LossInput]):
             grad_accumulators = (
                 tuple(
                     GradAccumulator(
-                        hidden_state,
+                        # Only its shape is read: [K, D] with the skip.
+                        hidden_state
+                        if row_chunks is None
+                        else hidden_state[: len(rows)],
                         num_chunks=num_chunks,
                         dtype=hidden_state.dtype,
                     )
@@ -829,9 +834,17 @@ class ChunkedLossWrapper(Loss[LossInput]):
                         True, recurse=False
                     )
 
-                h_chunks = tuple(
-                    chunks[chunk_index] for chunks in hidden_state_chunks_per_output
-                )
+                if row_chunks is None:
+                    h_chunks = tuple(
+                        chunks[chunk_index] for chunks in hidden_state_chunks_per_output
+                    )
+                else:
+                    h_chunks = tuple(
+                        hidden_state.detach()[row_chunks[chunk_index]].requires_grad_(
+                            decoder_requires_grad
+                        )
+                        for hidden_state in pred
+                    )
                 label_chunks: LossInput = tuple(
                     chunks[chunk_index] for chunks in label_chunks_per_output
                 )
@@ -881,6 +894,12 @@ class ChunkedLossWrapper(Loss[LossInput]):
             accumulated_grads = tuple(
                 grad_accumulator.buffer for grad_accumulator in grad_accumulators
             )
+            if row_chunks is not None:
+                # Skipped tokens get zero grad.
+                accumulated_grads = tuple(
+                    torch.zeros_like(hidden_state).index_copy_(0, rows, grad)
+                    for hidden_state, grad in zip(pred, accumulated_grads, strict=True)
+                )
 
         with spmd.no_typecheck():
             loss = self._gradient_backprop(
