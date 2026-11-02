@@ -392,12 +392,25 @@ class TokenEnv(Configurable):
 
         Images need an image-reference renderer (e.g. ``Qwen35ImageRefRenderer``): each
         image's mm_hash is its file's hash and its ``pixel_values`` is None. Raises
-        otherwise, and on non-image modalities. Renderers emit images in message order,
-        so the n-th image part of the conversation names the n-th image's file, read
-        here (`_read_image_file`). Reads files, so callers run it in a worker thread.
+        otherwise, on non-image modalities, and when image parts render no images (e.g.
+        as a placeholder token with no data behind it). Renderers emit images in message
+        order, so the n-th image part of the conversation names the n-th image's file,
+        read here (`_read_image_file`). Reads files, so callers run it in a worker thread.
         """
+        image_parts = [
+            part
+            for message in self._messages
+            if isinstance(message.get("content"), list)
+            for part in message["content"]
+            if part.get("type") == "image"
+        ]
         multi_modal_data = rendered.multi_modal_data
         if multi_modal_data is None:
+            if image_parts:
+                raise ValueError(
+                    f"The messages have {len(image_parts)} image parts but the "
+                    "renderer placed no images."
+                )
             return Prompt(token_ids=rendered.token_ids)
         modalities = {
             modality
@@ -415,13 +428,7 @@ class TokenEnv(Configurable):
                 f"RL prompts support images only, got modalities {sorted(modalities)}."
             )
         image_hashes = multi_modal_data.mm_hashes.get("image", [])
-        paths = [
-            part["path"]
-            for message in self._messages
-            if isinstance(message.get("content"), list)
-            for part in message["content"]
-            if part.get("type") == "image"
-        ]
+        paths = [part["path"] for part in image_parts]
         if len(paths) != len(image_hashes):
             raise ValueError(
                 f"The rendered prompt has {len(image_hashes)} images but its messages have "

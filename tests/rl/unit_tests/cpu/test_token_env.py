@@ -279,7 +279,7 @@ def test_env_carries_rendered_images_across_turns(monkeypatch) -> None:
     assert [image.data for image in second.next_prompt.images] == [b"file a", b"file b"]
 
 
-def _init_prompt(multi_modal_data: MultiModalData, messages: list) -> None:
+def _init_prompt(multi_modal_data: MultiModalData | None, messages: list) -> None:
     """Run `TokenEnv.init` on ``messages`` with a renderer that places ``multi_modal_data``."""
 
     class _Renderer(_RecordingRenderer):
@@ -321,6 +321,12 @@ def test_env_rejects_a_message_image_count_mismatch() -> None:
     data = _image_data(("img-a", (1, 2, 4), 1))
     with pytest.raises(ValueError, match="1 images but its messages have 2"):
         _init_prompt(data, [_image_message("a.png", "b.png")])
+
+
+def test_env_rejects_image_parts_rendered_without_images() -> None:
+    # E.g. Muse Spark renders an image part as one <|patch|> token with no image data.
+    with pytest.raises(ValueError, match="1 image parts but the renderer placed no"):
+        _init_prompt(None, [_image_message("a.png")])
 
 
 def test_read_image_file_rejects_a_changed_file(tmp_path) -> None:
