@@ -228,9 +228,9 @@ class Trainer(Configurable):
         """Reduce forward/backward metrics across the loss mesh.
 
         Args:
-            sum_reduced_metrics: Per-rank shares to be SUM-reduced. Each
-                value must be pre-normalized so that summing across ranks
-                reconstructs the global metric.
+            sum_reduced_metrics: Per-rank token sums (mean/frac keys) to be
+                SUM-reduced; the controller divides them by the step's
+                loss-token count.
             max_reduced_metrics: Per-rank values to be MAX-reduced.
 
         Returns:

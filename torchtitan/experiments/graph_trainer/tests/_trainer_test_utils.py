@@ -40,6 +40,7 @@ from torchtitan.experiments.graph_trainer.trainer import (
     GraphTrainer,
     GraphTrainingEngine,
 )
+from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
@@ -101,6 +102,9 @@ def build_minimal_trainer(
     engine.loss_fn = CrossEntropyLoss.Config().build()
     engine.parallelism_context = parallelism_context
     engine.model_config = model_config
+    engine._model_has_aux_loss = (
+        next(model_config.traverse(AuxLoss.Config), None) is not None
+    )
     engine.device = torch.device("cuda")
     engine.preprocess_inputs_kwargs = {}
     trainer.tokenizer = tokenizer

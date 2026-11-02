@@ -355,7 +355,8 @@ class Trainer(Configurable):
         if not should_log:
             return
 
-        # Losses are sums over loss tokens; dividing by a step with none keeps them 0.
+        # Losses are sums; divide by the step's loss tokens (at least 1, so a
+        # step with none logs 0).
         num_global_loss_tokens = int(engine.global_loss_token_count)
         loss_sum = forward_backward_result.loss
 

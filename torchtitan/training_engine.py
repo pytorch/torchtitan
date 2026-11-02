@@ -40,7 +40,7 @@ from torchtitan.distributed.pipeline_parallel import (
     prepare_pipeline_schedule_for_accelerator_graph,
 )
 from torchtitan.models.base import BaseModel
-from torchtitan.models.common.aux_loss import aux_loss_denominators
+from torchtitan.models.common.aux_loss import aux_loss_denominators, AuxLoss
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import (
     build_device_memory_monitor,
@@ -63,6 +63,7 @@ logger = logging.getLogger(__name__)
 
 class ForwardBackwardResult(NamedTuple):
     loss: torch.Tensor
+    """This rank's loss summed over the call's loss tokens."""
     loss_metrics: list[list[dict[str, torch.Tensor]]]
     """Loss metrics, one list per microbatch group with one dict per
     microbatch. Under PP, they are empty on ranks without the last stage."""
@@ -106,6 +107,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         |
         +-- TrainingEngine.optim_step
             |
+            +-- divide gradients by the step's loss-token count (all-reduced over DP)
             +-- Optim.step
                 |
                 +-- _update (maybe_wrapped_with_accelerator_graph)
@@ -253,7 +255,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     local_loss_token_count: int
     """This rank's loss tokens in the current step, counted by ``forward_backward``."""
     global_loss_token_count: torch.Tensor
-    """The step's loss tokens over all DP ranks (int64), set on device by ``optim_step``."""
+    """The step's loss tokens over the ranks whose gradients it sums (int64), set on
+    device by ``optim_step``. A CPU zero before the first step."""
+    _model_has_aux_loss: bool
     _step_started: bool
     _forward_backward_captures_whole_step: bool
     """SDC replay or a whole-step graph: one ``forward_backward`` call per optimizer step."""
@@ -276,6 +280,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
         self.config = config
         self.model_config = model_config
+        # Without an aux loss, skip building its denominators (a host-to-device copy) per microbatch.
+        self._model_has_aux_loss = (
+            next(model_config.traverse(AuxLoss.Config), None) is not None
+        )
         self.max_num_documents = max_num_documents
         self.output_dir = output_dir
         self.has_quantization = has_quantization(model_config)
@@ -708,10 +716,14 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                         parallelism=self.config.parallelism,
                         max_num_documents=self.max_num_documents,
                         max_context_length=self.config.training.max_context_length,
-                        aux_loss_denominators=aux_loss_denominators(
-                            microbatch.routing_token_counts,
-                            microbatch.loss_token_count,
-                            device=self.device,
+                        aux_loss_denominators=(
+                            aux_loss_denominators(
+                                microbatch.routing_token_counts,
+                                microbatch.loss_token_count,
+                                device=self.device,
+                            )
+                            if self._model_has_aux_loss
+                            else None
                         ),
                         **self.preprocess_inputs_kwargs,
                     )
@@ -890,13 +902,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         if hasattr(self, "checkpointer"):
             self.checkpointer.maybe_wait_for_staging()
         # non_blocking: a pageable copy would wait for the whole backward before launching the update.
-        loss_token_count = torch.tensor(
-            self.local_loss_token_count, dtype=torch.int64
-        ).to(self.device, non_blocking=True)
-        loss_token_count = self._sum_loss_token_count(loss_token_count)
-        self.global_loss_token_count = loss_token_count
+        local_count = torch.tensor(self.local_loss_token_count, dtype=torch.int64).to(
+            self.device, non_blocking=True
+        )
+        self.global_loss_token_count = self._sum_loss_token_count(local_count)
         # A step with no loss tokens has all-zero gradients; dividing by 1 keeps them zero.
-        divisor = loss_token_count.clamp_min(1).to(torch.float32)
+        divisor = self.global_loss_token_count.clamp_min(1).to(torch.float32)
         gradients_by_device: dict[torch.device, list[torch.Tensor]] = {}
         for parameter in self.optim.parameters:
             if parameter.grad is not None:

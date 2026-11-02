@@ -387,13 +387,16 @@ class FaultTolerantTrainer(Configurable):
         if not should_log:
             return
 
-        # Losses are sums over loss tokens; dividing by a step with none keeps them 0.
+        # Losses are sums; divide by the step's loss tokens (at least 1, so a
+        # step with none logs 0).
         num_global_loss_tokens = int(engine.global_loss_token_count)
         loss_sum = forward_backward_result.loss
+        # FT addition: use ft_manager.loss_sync_pg for extra process group
+        ft_pg = engine.ft_manager.loss_sync_pg
 
-        if parallelism_context.dp_cp_enabled:
-            # FT addition: use ft_manager.loss_sync_pg for extra process group
-            ft_pg = engine.ft_manager.loss_sync_pg
+        # The step's count covers the replicas in ft_pg (_sum_loss_token_count),
+        # so the loss sum must cover them too, even without DP or CP.
+        if parallelism_context.dp_cp_enabled or ft_pg is not None:
             loss_mesh = parallelism_context.get_optional_mesh("loss")
 
             # global_avg_loss: the summed loss over all ranks / the step's loss tokens.
@@ -425,7 +428,9 @@ class FaultTolerantTrainer(Configurable):
             "n_tokens_seen": global_ntokens_seen,
             "lr": lr,
             **collect_aux_loss_metrics(
-                engine.parallelism_context, num_loss_tokens=num_global_loss_tokens
+                engine.parallelism_context,
+                num_loss_tokens=num_global_loss_tokens,
+                extra_pg=ft_pg,
             ),
         }
         self.metrics_processor.log(

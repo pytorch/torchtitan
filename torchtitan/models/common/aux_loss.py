@@ -30,6 +30,7 @@ from typing import ClassVar
 
 import spmd_types as spmd
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 import torch_remat as remat
 from torch import nn
@@ -283,12 +284,15 @@ def collect_aux_loss_metrics(
     parallelism_context: ParallelismContext,
     *,
     num_loss_tokens: int,
+    extra_pg: dist.ProcessGroup | None = None,
 ) -> dict[str, float]:
     """Reduce the current step's ``group_acc`` registers for logging.
 
     Returns ``{metric_name}/mean`` per group, ``{}`` if none configured.  All
     ranks call this at log time with the step's loss-token count, which
     divides the accumulated values as the engine divides the gradients.
+    ``extra_pg`` also sums the values over a group outside the mesh (TorchFT
+    replicas) whose loss tokens ``num_loss_tokens`` counts.
 
     TODO(#4202): migrate aux-loss metric collection to the distributed tensor
     logging framework once it lands.
@@ -311,15 +315,15 @@ def collect_aux_loss_metrics(
     for key, total in sorted(group_accs.items()):
         mesh_name, tag = key
         reduce_mesh = parallelism_context.get_optional_mesh(mesh_name)
-        for mesh in (reduce_mesh, pp_mesh):
-            if mesh is None:
+        for group in (reduce_mesh, pp_mesh, extra_pg):
+            if group is None:
                 continue
             # Sum: each coordinate contributes its own data, and every layer
             # lives on exactly one pipeline stage, so summing over the reduce
             # mesh and the stages counts every layer once.  Dividing by the
             # build-time instance count below (identical on every rank) then
             # gives the mean over all layers.
-            total = all_reduce(total, reduceOp="sum", group=mesh)
+            total = all_reduce(total, reduceOp="sum", group=group)
         metrics[f"{tag}/mean"] = (
             float(total.item()) / max(num_loss_tokens, 1) / AuxLoss._group_counts[key]
         )

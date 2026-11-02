@@ -271,10 +271,14 @@ class GraphTrainingEngine(TrainingEngine):
                         parallelism=self.config.parallelism,
                         max_num_documents=self.max_num_documents,
                         max_context_length=self.config.training.max_context_length,
-                        aux_loss_denominators=aux_loss_denominators(
-                            microbatch.routing_token_counts,
-                            microbatch.loss_token_count,
-                            device=self.device,
+                        aux_loss_denominators=(
+                            aux_loss_denominators(
+                                microbatch.routing_token_counts,
+                                microbatch.loss_token_count,
+                                device=self.device,
+                            )
+                            if self._model_has_aux_loss
+                            else None
                         ),
                         **self.preprocess_inputs_kwargs,
                     )

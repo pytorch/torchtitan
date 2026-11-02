@@ -20,6 +20,8 @@ from torchtitan.config import override
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import LoRATransform
 from torchtitan.distributed import DistributedTopology, ParallelismContext
+from torchtitan.models.common import aux_loss
+from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.llama3 import build_model_config
@@ -241,15 +243,22 @@ def test_ft_training_engine_rejects_optimizer_accelerator_graph() -> None:
     init.assert_not_called()
 
 
-def test_ft_logs_loss_over_the_loss_tokens_of_every_replica(monkeypatch):
+@pytest.mark.parametrize("dp_cp_enabled", [True, False])
+def test_ft_logs_loss_over_the_loss_tokens_of_every_replica(monkeypatch, dp_cp_enabled):
+    replicate_pg = object()
     engine = Mock(
         spec=ft.FaultTolerantTrainingEngine,
         config=Mock(training=Mock(disable_accelerator_graphs=True)),
         device=torch.device("cpu"),
+        # Size-1 DP and CP meshes: only the replicas reduce.
         parallelism_context=Mock(
-            dp_enabled=False, dp_cp_enabled=True, pp_enabled=False, ep_enabled=False
+            dp_enabled=False,
+            dp_cp_enabled=dp_cp_enabled,
+            pp_enabled=False,
+            ep_enabled=False,
+            get_optional_mesh=lambda name: None,
         ),
-        ft_manager=Mock(loss_sync_pg=Mock(size=lambda: 2), group_size=4),
+        ft_manager=Mock(loss_sync_pg=replicate_pg, group_size=4),
         optim=Mock(lr_schedulers=Mock(schedulers=[Mock(get_last_lr=lambda: [0.1])])),
         num_completed_steps=1,
         ntokens_seen=4,
@@ -273,11 +282,25 @@ def test_ft_logs_loss_over_the_loss_tokens_of_every_replica(monkeypatch):
         gradient_accumulation_steps=1,
         num_pp_microbatches=1,
     )
-    # Two active replicas contribute a loss sum of 16.0, despite group_size=4.
-    monkeypatch.setattr(ft.dist_utils, "dist_sum", Mock(side_effect=[16.0, 8]))
-    dist_max = Mock(return_value=2.0)
-    monkeypatch.setattr(ft.dist_utils, "dist_max", dist_max)
-    monkeypatch.setattr(ft, "collect_aux_loss_metrics", Mock(return_value={}))
+
+    # Two active replicas with this replica's values, despite group_size=4.
+    def replica_sum(x, mesh=None, extra_pg=None):
+        return float(x) * (2 if extra_pg is replicate_pg else 1)
+
+    monkeypatch.setattr(ft.dist_utils, "dist_sum", replica_sum)
+    monkeypatch.setattr(
+        ft.dist_utils, "dist_max", lambda x, mesh=None, extra_pg=None: float(x)
+    )
+    monkeypatch.setattr(
+        aux_loss,
+        "all_reduce",
+        lambda x, reduceOp, group: x * 2 if group is replicate_pg else x,
+    )
+    # One aux-loss layer whose value this step is 3.0 on this replica.
+    monkeypatch.setattr(AuxLoss, "_group_counts", {("dp", "load_balance"): 1})
+    monkeypatch.setattr(
+        AuxLoss, "group_acc", {("dp", "load_balance"): torch.tensor(3.0)}
+    )
 
     microbatch = SimpleNamespace(
         labels=torch.arange(4),
@@ -293,30 +316,39 @@ def test_ft_logs_loss_over_the_loss_tokens_of_every_replica(monkeypatch):
     engine.forward_backward.assert_called_once()
     forward_backward_args = engine.forward_backward.call_args.kwargs
     assert forward_backward_args == {"microbatch_groups": [[microbatch]]}
-    # global_max_loss: this rank's summed loss over its own loss tokens.
-    torch.testing.assert_close(dist_max.call_args.args[0], torch.tensor(2.0))
     trainer.metrics_processor.log.assert_called_once()
-    _, logged_loss, *_ = trainer.metrics_processor.log.call_args.args
+    log_call = trainer.metrics_processor.log.call_args
+    _, logged_loss, logged_max_loss, _ = log_call.args
+    # Both replicas' loss sums over both replicas' loss tokens: (8 + 8) / 8.
     assert logged_loss == 2.0
+    # The max over ranks of each rank's sum over its own loss tokens: 8 / 4.
+    assert logged_max_loss == 2.0
+    # The aux value sums over the same replicas as the count: (3 + 3) / 8.
+    assert log_call.kwargs["extra_metrics"]["load_balance/mean"] == 0.75
+    assert log_call.kwargs["extra_metrics"]["n_tokens_seen"] == 8
 
 
 @pytest.mark.parametrize("dp_enabled", [False, True])
 def test_ft_engine_counts_loss_tokens_over_the_replicas(monkeypatch, dp_enabled):
     engine = object.__new__(ft.FaultTolerantTrainingEngine)
-    dp_mesh = object()
+    dp_mesh, replicate_pg = object(), object()
     engine.parallelism_context = SimpleNamespace(
         dp_enabled=dp_enabled, get_mesh=lambda name: {"dp": dp_mesh}[name]
     )
-    engine.ft_manager = SimpleNamespace(loss_sync_pg="replicate_pg")
-    dist_sum_tensor = Mock(side_effect=lambda count, mesh=None, extra_pg=None: count)
-    monkeypatch.setattr(ft.dist_utils, "dist_sum_tensor", dist_sum_tensor)
+    engine.ft_manager = SimpleNamespace(loss_sync_pg=replicate_pg)
 
-    engine._sum_loss_token_count(torch.tensor(4))
+    # 2 DP ranks and 3 replicas, each with this rank's count.
+    def fake_dist_sum_tensor(count, mesh=None, extra_pg=None):
+        dp_ranks = 2 if mesh is dp_mesh else 1
+        replicas = 3 if extra_pg is replicate_pg else 1
+        return count * dp_ranks * replicas
 
-    *dp_calls, replica_call = dist_sum_tensor.call_args_list
-    assert [call.args[1:] for call in dp_calls] == ([(dp_mesh,)] if dp_enabled else [])
+    monkeypatch.setattr(ft.dist_utils, "dist_sum_tensor", fake_dist_sum_tensor)
+
+    count = engine._sum_loss_token_count(torch.tensor(4))
+
     # The all-reduce hook sums gradients over the replicas, so the count covers them too.
-    assert replica_call.kwargs == {"extra_pg": "replicate_pg"}
+    assert int(count) == (4 * 2 * 3 if dp_enabled else 4 * 3)
 
 
 def test_ft_engine_installs_all_reduce_hook_after_model_initialization() -> None:
