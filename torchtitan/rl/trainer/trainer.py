@@ -315,6 +315,9 @@ class Trainer(Configurable):
             # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
             # and broadcast it, to cut the trainer's reads by cp * tp. Needs a per-replica group.
             # The controller rejects RDMA with PP, so every group holds one microbatch.
+            # TODO: with stream_microbatches, each call's first read is not overlapped: this method
+            # never awaits, so a queued call starts reading only after the previous call returns.
+            # Start the reads when a call arrives.
             microbatch_groups = RDMAMicrobatchPrefetcher(microbatches)
         result = engine.forward_backward(microbatch_groups=microbatch_groups)
         if not engine.pp_has_last_stage:
@@ -345,7 +348,9 @@ class Trainer(Configurable):
 
         metrics = combine_microbatch_metrics(microbatch_metrics)
         if uses_rdma:
-            # The slowest rank's total read time this step, hidden or not (max over the loss mesh).
+            # The slowest rank's total read time this call, hidden or not (max over the loss mesh).
+            # TODO: a streamed step reports its slowest call (the controller takes the max over calls),
+            # not the step's total.
             read_microbatches_s = torch.tensor(
                 microbatch_groups.read_s, device=engine.device
             )

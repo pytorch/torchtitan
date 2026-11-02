@@ -377,14 +377,6 @@ class Controller(Configurable):
                     stacklevel=2,
                 )
             if self.async_loop.batcher.stream_microbatches:
-                # TODO: support it. RDMA reads a queued call's microbatches only once the previous
-                # call returns, so every call's first read would be exposed (needs one reader per
-                # rank that starts when a call arrives).
-                if self.async_loop.batcher.rdma_min_tensor_bytes is not None:
-                    raise ValueError(
-                        "async_loop.batcher.stream_microbatches needs "
-                        "async_loop.batcher.rdma_min_tensor_bytes=None."
-                    )
                 training = self.trainer.training
                 # SDC replay and whole-step graphs capture one forward_backward call per step.
                 # Stricter than the engine: it also rejects graphs the model can't capture.

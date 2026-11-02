@@ -92,10 +92,11 @@ def test_stream_microbatches_config_check(setting: str | None) -> None:
         config.trainer.parallelism.fsdp_defer_gradient_reduction = True
     elif setting == "rdma":
         batcher = dataclasses.replace(batcher, rdma_min_tensor_bytes=1)
+        config.trainer.training.preprocess_microbatch_groups_lazily = True
     config.async_loop = dataclasses.replace(config.async_loop, batcher=batcher)
 
     # replace() reruns __post_init__.
-    if setting not in ("accelerator_graphs", "sdc_replay", "rdma"):
+    if setting not in ("accelerator_graphs", "sdc_replay"):
         dataclasses.replace(config)
         return
     with pytest.raises(ValueError, match="stream_microbatches needs"):
