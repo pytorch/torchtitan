@@ -105,10 +105,8 @@ def _make_inputs(T: int, E: int, K: int):
     return scores_TE, scores_TE.gather(dim=-1, index=ids_TK), _routing_map(ids_TK, E)
 
 
-def _make_loss(
-    coeff: float, per_step_denominator: int
-) -> MicrobatchWiseLoadBalanceLoss:
-    """Loss with the given coeff and an explicit step denominator.
+def _make_loss(coeff: float, denominator: int) -> MicrobatchWiseLoadBalanceLoss:
+    """Loss with the given coeff and an explicit denominator.
 
     The denominator is float64 here so the assertions stay exact; in training
     it is the microbatch's fp32 ``aux_loss_denominators``.
@@ -116,9 +114,7 @@ def _make_loss(
     loss = MicrobatchWiseLoadBalanceLoss(
         MicrobatchWiseLoadBalanceLoss.Config(coeff=coeff)
     )
-    loss.test_denominator = torch.tensor(
-        float(per_step_denominator), dtype=torch.float64
-    )
+    loss.test_denominator = torch.tensor(float(denominator), dtype=torch.float64)
     loss.train()
     return loss
 
@@ -295,7 +291,7 @@ class TestAuxLossDenominators(_AuxLossTestCase):
 
     def test_microbatch_without_loss_tokens_adds_nothing(self):
         scores_TE, carrier_TK, routing_map_TE = _make_inputs(15, 7, 2)
-        loss = _make_loss(coeff=0.125, per_step_denominator=1)
+        loss = _make_loss(coeff=0.125, denominator=1)
 
         out_TK = loss(
             scores_TE,

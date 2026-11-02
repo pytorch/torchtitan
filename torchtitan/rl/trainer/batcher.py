@@ -454,7 +454,7 @@ class Batcher(Configurable):
             [self._pack_training_samples(samples) for samples in rank_assignments]
             for rank_assignments in assignments
         ]
-        num_global_loss_tokens = sum(
+        num_loss_tokens = sum(
             int(microbatch.loss_token_count)
             for rank_microbatches in microbatches
             for microbatch in rank_microbatches
@@ -470,7 +470,7 @@ class Batcher(Configurable):
                 microbatches[start : start + num_pp_microbatches]
                 for start in range(0, len(microbatches), num_pp_microbatches)
             ],
-            num_loss_tokens=num_global_loss_tokens,
+            num_loss_tokens=num_loss_tokens,
             metrics=[
                 *metrics,
                 # Keep this response-level metric exact without adding a second
@@ -478,7 +478,7 @@ class Batcher(Configurable):
                 m.Metric(
                     "loss/generator_logprob_nan_frac",
                     m.NoReduce(
-                        (num_response_tokens - num_global_loss_tokens)
+                        (num_response_tokens - num_loss_tokens)
                         / max(num_response_tokens, 1)
                     ),
                 ),

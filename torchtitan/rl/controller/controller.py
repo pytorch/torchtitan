@@ -1154,10 +1154,13 @@ class Controller(Configurable):
                         )
                         # Under PP, only trainer ranks holding the last stage
                         # compute the loss; the others return None.
-                        fwd_bwd_metrics = next(
-                            rank_metrics
-                            for rank_metrics in fwd_bwd_results[0].values()
-                            if rank_metrics is not None
+                        fwd_bwd_metrics = divide_token_sums(
+                            next(
+                                rank_metrics
+                                for rank_metrics in fwd_bwd_results[0].values()
+                                if rank_metrics is not None
+                            ),
+                            num_loss_tokens=packed.num_loss_tokens,
                         )
                     finally:
                         # With RDMA, every rank has read its column (or the step failed).
@@ -1223,9 +1226,7 @@ class Controller(Configurable):
                         *packed.metrics,
                         *[
                             m.Metric(key, m.NoReduce(value))
-                            for key, value in divide_token_sums(
-                                fwd_bwd_metrics, num_loss_tokens=packed.num_loss_tokens
-                            ).items()
+                            for key, value in fwd_bwd_metrics.items()
                         ],
                         *[
                             m.Metric(key, m.NoReduce(value))

@@ -63,6 +63,7 @@ logger = logging.getLogger(__name__)
 
 class ForwardBackwardResult(NamedTuple):
     loss: torch.Tensor
+    """This rank's loss summed over the call's loss tokens."""
     loss_metrics: list[list[dict[str, torch.Tensor]]]
     """Loss metrics, one list per microbatch group with one dict per
     microbatch. Under PP, they are empty on ranks without the last stage."""
@@ -106,6 +107,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         |
         +-- TrainingEngine.optim_step
             |
+            +-- divide gradients by the step's loss-token count (all-reduced over DP)
             +-- Optim.step
                 |
                 +-- _update (maybe_wrapped_with_accelerator_graph)
@@ -254,7 +256,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     local_loss_token_count: int
     """This rank's loss tokens in the current step, counted by ``forward_backward``."""
     global_loss_token_count: torch.Tensor
-    """The step's loss tokens over all DP ranks (int64), set on device by ``optim_step``."""
+    """The step's loss tokens over the ranks whose gradients it sums (int64), set on
+    device by ``optim_step``. A CPU zero before the first step."""
     _step_started: bool
     device_memory_monitor: DeviceMemoryMonitor
     model_device_mem_stats: DeviceMemStats
@@ -877,13 +880,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         if hasattr(self, "checkpointer"):
             self.checkpointer.maybe_wait_for_staging()
         # non_blocking: a pageable copy would wait for the whole backward before launching the update.
-        loss_token_count = torch.tensor(
-            self.local_loss_token_count, dtype=torch.int64
-        ).to(self.device, non_blocking=True)
-        loss_token_count = self._sum_loss_token_count(loss_token_count)
-        self.global_loss_token_count = loss_token_count
+        local_count = torch.tensor(self.local_loss_token_count, dtype=torch.int64).to(
+            self.device, non_blocking=True
+        )
+        self.global_loss_token_count = self._sum_loss_token_count(local_count)
         # A step with no loss tokens has all-zero gradients; dividing by 1 keeps them zero.
-        divisor = loss_token_count.clamp_min(1).to(torch.float32)
+        divisor = self.global_loss_token_count.clamp_min(1).to(torch.float32)
         gradients_by_device: dict[torch.device, list[torch.Tensor]] = {}
         for parameter in self.optim.parameters:
             if parameter.grad is not None:
