@@ -634,11 +634,8 @@ def _requires_grad_like(value: Any) -> Any:
     return value
 
 
-def _grad_input_leaves(
-    stage_args: tuple[Any, ...],
-    stage_kwargs: dict[str, Any],
-) -> list[torch.Tensor]:
-    flat_inputs, _ = pytree.tree_flatten((stage_args, stage_kwargs))
+def _grad_input_leaves(stage_args: tuple[Any, ...]) -> list[torch.Tensor]:
+    flat_inputs, _ = pytree.tree_flatten(stage_args)
     return [
         value
         for value in flat_inputs
@@ -800,8 +797,11 @@ def _build_stage_graphs(
     # 1. Prepare representative trace inputs. ``minimal_fx_tracer`` fakeifies
     # these tensors before running the stage function, so this must not execute
     # the real eager stage forward outside tracing.
+    # Only positional args get input grads (sent to the previous stage), as in upstream
+    # PipelineStage. Kwargs are stage-local microbatch inputs, such as the fp32 aux-loss
+    # denominators.
     stage_args = pytree.tree_map_only(torch.Tensor, _requires_grad_like, args)
-    stage_kwargs = pytree.tree_map_only(torch.Tensor, _requires_grad_like, kwargs)
+    stage_kwargs = kwargs
 
     state_params = [p for _, p in stage.submod.named_parameters(remove_duplicate=False)]
     state_buffers = [b for _, b in stage.submod.named_buffers(remove_duplicate=False)]
@@ -809,7 +809,7 @@ def _build_stage_graphs(
     num_state_param_values = len(flatten_graph_values(state_params))
     num_state_buffer_values = len(flatten_graph_values(state_buffers))
     num_grad_params = len(grad_params)
-    num_input_grad_leaves = len(_grad_input_leaves(stage_args, stage_kwargs))
+    num_input_grad_leaves = len(_grad_input_leaves(stage_args))
 
     # 2. Trace the stage functions.
     # Calling convention:
@@ -849,7 +849,7 @@ def _build_stage_graphs(
             grad_params = [parameter for _, parameter in named_grad_params]
             grad_inputs = [
                 *grad_params,
-                *_grad_input_leaves(stage_args, stage_kwargs),
+                *_grad_input_leaves(stage_args),
             ]
             grads = torch.autograd.grad(
                 loss,
@@ -902,7 +902,7 @@ def _build_stage_graphs(
             grad_params = [parameter for _, parameter in named_grad_params]
             grad_inputs = [
                 *grad_params,
-                *_grad_input_leaves(stage_args, stage_kwargs),
+                *_grad_input_leaves(stage_args),
             ]
             grads = torch.autograd.grad(
                 flat_outputs,
