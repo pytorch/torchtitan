@@ -251,6 +251,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     num_flops_per_token: int
     has_quantization: bool
     loss: torch.Tensor
+    """The step's summed loss over its ``forward_backward`` calls; ``optim_step`` checks it
+    is finite."""
     loss_metrics: dict[str, torch.Tensor]
     local_loss_token_count: int
     """This rank's loss tokens in the current step, counted by ``forward_backward``."""
@@ -773,7 +775,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 prepared_inputs = self._preprocess_microbatch_group(microbatch_group)
 
             if self.parallelism_context.dp_replicate_enabled:
-                # All-reduce HSDP replicas only with the final accumulated gradient.
+                # All-reduce HSDP replicas only with each call's final accumulated gradient.
                 for model_part in self.model_parts:
                     fsdp_root = cast(FSDPModule, model_part)
                     fsdp_root.set_requires_all_reduce(is_last_accumulation_step)

@@ -319,6 +319,9 @@ def test_streaming_batcher_sends_each_sample_once_and_ends_the_step_last(
             sum(batch.num_loss_tokens for batch in streamed)
             == whole_step.num_loss_tokens
         )
+        # The last batch's step metrics count the loss tokens of every batch.
+        nan_frac = "loss/generator_logprob_nan_frac"
+        assert _metric_value(last, nan_frac) == _metric_value(whole_step, nan_frac)
         assert (
             _metric_value(last, "train_batch/num_microbatches")
             == len(microbatches) / dp_degree

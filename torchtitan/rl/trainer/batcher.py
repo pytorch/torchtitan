@@ -239,7 +239,8 @@ class Batcher(Configurable):
             True: while the step's groups arrive, every microbatch group the unsent samples fill; the
                 step's last batch has the rest. Samples are packed in arrival order, so the microbatches
                 depend on which groups finish first.
-                Needs: accelerator graphs off, no SDC replay (both capture one call per step), no RDMA.
+                Needs: no RDMA (config check), no SDC replay and no whole-step accelerator graph (both
+                capture one call per step; the engine raises on the step's second call).
         Either way each loss returns a sum, and the trainer divides the gradients by the step's
         loss-token count before clipping.
         """
@@ -306,9 +307,11 @@ class Batcher(Configurable):
         self._groups_for_next_batch: list[TrainingSampleGroup] = []
         self._num_consecutive_zero_output_groups = 0
         self._stream_microbatches = config.stream_microbatches
-        # Streaming: this step's samples that no batch has sent yet, and the microbatches sent so far.
+        # Streaming: this step's samples that no batch has sent yet, and the microbatches and loss
+        # tokens sent so far.
         self._unsent_training_samples: list[TrainingSample] = []
         self._num_microbatches_sent = 0
+        self._num_loss_tokens_sent = 0
         self._rdma_min_tensor_bytes = config.rdma_min_tensor_bytes
         self._register_rdma_microbatch = register_rdma_microbatch
         # Batches that trainer ranks may still read, oldest first; each buffer keeps its tensor alive until drop().
@@ -638,6 +641,7 @@ class Batcher(Configurable):
         ]
         if streamed_bins is not None:
             self._num_microbatches_sent += len(assignments)
+            self._num_loss_tokens_sent += num_loss_tokens
             return TrainerStepBatch(
                 microbatch_groups=microbatch_groups,
                 num_loss_tokens=num_loss_tokens,
@@ -648,19 +652,12 @@ class Batcher(Configurable):
             )
 
         num_microbatches = self._num_microbatches_sent + len(assignments)
+        step_num_loss_tokens = self._num_loss_tokens_sent + num_loss_tokens
         self._unsent_training_samples = []
         self._num_microbatches_sent = 0
-        # Response tokens, and those with a finite generator logprob (the loss tokens), over the step.
-        num_response_tokens = sum(
+        self._num_loss_tokens_sent = 0
+        step_num_response_tokens = sum(
             int(np.count_nonzero(sample.loss_mask[1:])) for sample in training_samples
-        )
-        num_global_loss_tokens = sum(
-            int(
-                np.count_nonzero(
-                    sample.loss_mask[1:] & np.isfinite(sample.logprobs[1:])
-                )
-            )
-            for sample in training_samples
         )
         return TrainerStepBatch(
             microbatch_groups=microbatch_groups,
@@ -672,8 +669,8 @@ class Batcher(Configurable):
                 m.Metric(
                     "loss/generator_logprob_nan_frac",
                     m.NoReduce(
-                        (num_response_tokens - num_global_loss_tokens)
-                        / max(num_response_tokens, 1)
+                        (step_num_response_tokens - step_num_loss_tokens)
+                        / max(step_num_response_tokens, 1)
                     ),
                 ),
                 *self._packing_metrics(
