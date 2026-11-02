@@ -40,7 +40,7 @@ _TOP_K = 2
 
 
 class _DeepEPBlock(Module):
-    def __init__(self, num_experts: int, *, score_after_w2: bool = False):
+    def __init__(self, num_experts: int):
         super().__init__()
         # RoutedExperts.forward runs after EP has selected this rank's local
         # expert-weight shard. This test bypasses parallelization, so construct
@@ -73,7 +73,6 @@ class _DeepEPBlock(Module):
                 parameter.normal_(std=0.05)
         self.routed_experts = routed_experts
         self.num_experts = num_experts
-        self.score_after_w2 = score_after_w2
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
         num_tokens = x_TD.shape[0]
@@ -85,31 +84,44 @@ class _DeepEPBlock(Module):
         routing_map_TE = torch.zeros(
             num_tokens, self.num_experts, dtype=torch.bool, device=x_TD.device
         ).scatter_(1, expert_ids_TK, True)
-        if self.score_after_w2:
-            # Reference the original DeepEP path: compute unscaled experts, then
-            # apply router scores in combine, after W2.
-            experts = self.routed_experts
-            routed_RD, counts_E, metadata = experts.token_dispatcher.dispatch(
-                x_TD, scores_TK, expert_ids_TK, routing_map_TE
-            )
-            offsets_E = counts_E.cumsum(dim=0, dtype=torch.int32)
-            gate_up_R2F = experts.w13(routed_RD, offsets_E)
-            hidden_RF = experts.activation_fn(gate_up_R2F, offsets=offsets_E)
-            routed_output_RD = experts.w2(hidden_RF, offsets_E)
-            out_TD = experts.token_dispatcher.combine(
-                routed_output_RD,
-                metadata,
-                x_TD,
-                routed_scores_R=metadata.routed_scores_R,
-            )
-        else:
-            out_TD = self.routed_experts(
-                x_TD,
-                scores_TK,
-                expert_ids_TK,
-                routing_map_TE,
-            )
+        out_TD = self.routed_experts(
+            x_TD,
+            scores_TK,
+            expert_ids_TK,
+            routing_map_TE,
+        )
         # The loss is a bare consumer of the routed-expert output.
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD.float().square().sum()
+
+
+class _PostW2DeepEPBlock(_DeepEPBlock):
+    """Reference DeepEP experts with router scores applied after W2."""
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        num_tokens = x_TD.shape[0]
+        token_ids_T1 = torch.arange(num_tokens, device=x_TD.device).unsqueeze(-1)
+        offsets_1K = torch.arange(_TOP_K, device=x_TD.device).unsqueeze(0)
+        expert_ids_TK = (token_ids_T1 + offsets_1K) % self.num_experts
+        # Scores depend on the gate, so the router gets a gradient too.
+        scores_TK = torch.sigmoid(self.gate(x_TD)).gather(1, expert_ids_TK)
+        routing_map_TE = torch.zeros(
+            num_tokens, self.num_experts, dtype=torch.bool, device=x_TD.device
+        ).scatter_(1, expert_ids_TK, True)
+        experts = self.routed_experts
+        routed_RD, counts_E, metadata = experts.token_dispatcher.dispatch(
+            x_TD, scores_TK, expert_ids_TK, routing_map_TE
+        )
+        offsets_E = counts_E.cumsum(dim=0, dtype=torch.int32)
+        gate_up_R2F = experts.w13(routed_RD, offsets_E)
+        hidden_RF = experts.activation_fn(gate_up_R2F, offsets=offsets_E)
+        routed_output_RD = experts.w2(hidden_RF, offsets_E)
+        out_TD = experts.token_dispatcher.combine(
+            routed_output_RD,
+            metadata,
+            x_TD,
+            routed_scores_R=metadata.routed_scores_R,
+        )
         remat.recompute_needs_tensor(out_TD)
         return out_TD.float().square().sum()
 
@@ -199,7 +211,7 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                 ac_model = _Model(_DeepEPBlock(num_experts)).to(
                     self.device_type, torch.bfloat16
                 )
-                reference = _Model(_DeepEPBlock(num_experts, score_after_w2=True)).to(
+                reference = _Model(_PostW2DeepEPBlock(num_experts)).to(
                     self.device_type, torch.bfloat16
                 )
                 ac_model.load_state_dict(baseline.state_dict())
