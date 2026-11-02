@@ -270,8 +270,9 @@ which regions are saved or recomputed.
 ## Forward side effects
 
 State accumulated for logging or optimizer-step updates must advance only on
-the original forward. The always-retained MoE `routing_decision` region owns
-expert selection, while token-count accumulation and quantile-histogram
+the original forward. The MoE `routing_decision` region owns expert selection
+(retained with `moe_router_topk` off; with it on, replay recomputes the same
+selection), while token-count accumulation and quantile-histogram
 observation explicitly ignore checkpoint replay. Both reuse the routing map
 built for dispatch and auxiliary loss. Kimi K2.7 QK-clipping statistics also
 ignore replay. Auxiliary-loss accumulation uses an always-retained region.
