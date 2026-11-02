@@ -278,6 +278,7 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
     # As a model state dict load: fill the pinned CPU copy, then load it with load_state_dict.
     vllm_sd = wrapper._prefetched_model_state_dict
 
+    trainer_buffers = {name for name, _ in trainer_model.named_buffers()}
     missing = []
     for name, vparam in vllm_sd.items():
         tparam = trainer_sd.get(name)
@@ -285,6 +286,12 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
             missing.append(name)
             continue
         full = tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
+        # Weight sync over RDMA copies bytes, so the receive dtype is what the trainer sends:
+        # parameters in the generator dtype, buffers in their own.
+        sent_dtype = (
+            full.dtype if name in trainer_buffers else engine.model_config.dtype
+        )
+        assert vparam.dtype == sent_dtype, (name, vparam.dtype, sent_dtype)
         with torch.inference_mode():
             if isinstance(vparam, DTensor):
                 vparam.copy_(

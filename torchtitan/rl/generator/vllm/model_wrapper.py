@@ -397,6 +397,16 @@ class VLLMModelWrapper(Module):
         # Build model on meta device to avoid allocating full model on every GPU
         with self.parallelism_context.activate_spmd(), torch.device("meta"):
             self.model = self.config.build()
+        # The GDN kernels read A_log and dt_bias in float32. Keeping them in float32
+        # casts them once per weight load instead of in every step. Frozen: FSDP needs
+        # one dtype among parameters with grad.
+        for module in self.model.modules():
+            if isinstance(module, GDN):
+                for param in (module.A_log, module.dt_bias):
+                    param.data = param.data.float()
+                    param.requires_grad_(False)
+        # FSDP keeps each parameter in its own dtype: the rest are already the model dtype.
+        self.model._fsdp_param_dtype_override_fn = lambda param: param.dtype
         self.model._skip_lm_head = True
         if getattr(self.model, "vision_encoder", None) is not None:
             self.model.vision_encoder = None
@@ -452,9 +462,21 @@ class VLLMModelWrapper(Module):
         # is still sharded. Bind first so first-touch places them on the
         # NUMA node local to this rank's GPU.
         maybe_apply_numa_binding(torch.cuda.current_device(), "cuda")
+        # Receive what the trainer sends: parameters in the model dtype, buffers in their own.
+        # torchstore's RDMA transport copies bytes and asserts matching dtypes;
+        # load_state_dict casts the float32 GDN parameters.
+        buffer_names = {name for name, _ in self.model.named_buffers()}
+        model_state_dict = {
+            name: (
+                tensor
+                if name in buffer_names
+                else tensor.to(vllm_config.model_config.dtype)
+            )
+            for name, tensor in self.model.state_dict().items()
+        }
         with torch.device("cpu"):
             self._prefetched_model_state_dict = _create_cpu_state_dict(
-                self.model.state_dict(), pin_memory=True
+                model_state_dict, pin_memory=True
             )
 
         # Unshard the model here so vLLM performs its GPU memory profiling
