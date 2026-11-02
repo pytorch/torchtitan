@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -17,8 +16,6 @@ from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_group
 from torchtitan.models.base.module import Module
 from torchtitan.ops.scatter_add import deterministic_scatter_add
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, kw_only=True)
