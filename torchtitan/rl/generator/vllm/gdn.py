@@ -257,8 +257,8 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
                     conv_output,
                     a[:num_decode_rows].unsqueeze(0),
                     b[:num_decode_rows].unsqueeze(0),
-                    A_log.float(),
-                    dt_bias.float(),
+                    A_log,
+                    dt_bias,
                     self.kv_cache[1],
                     state_indices,
                     has_initial_state=has_initial_state,
@@ -329,8 +329,8 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
                     conv_output[:num_decode_rows],
                     a[:num_decode_rows].unsqueeze(0),
                     b[:num_decode_rows].unsqueeze(0),
-                    A_log.float(),
-                    dt_bias.float(),
+                    A_log,
+                    dt_bias,
                     self.kv_cache[1],
                     decode_state_indices[:num_decode_rows],
                     has_initial_state=has_initial_state[:num_decode_rows],
@@ -367,8 +367,8 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
         # Keep the existing FP32 arithmetic while reusing the GDN gate contract.
         decay = gate_transform(
             a.unsqueeze(0),
-            A_log.float(),
-            dt_bias.float(),
+            A_log,
+            dt_bias,
             kind="softplus",
             fastmath=False,
             impl="fused",
@@ -423,7 +423,11 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
         value_head_dim: int,
         attention_metadata: LinearAttentionMetadata | None,
     ) -> torch.Tensor:
-        """Run the flattened vLLM cache operation on rank-local tensors."""
+        """Run the flattened vLLM cache operation on rank-local tensors.
+
+        ``A_log_H`` and ``dt_bias_H`` are float32 (the model wrapper keeps them so); the
+        GDN kernels reject other dtypes.
+        """
         del attention_metadata
         assert key_head_dim == self.head_k_dim
         assert value_head_dim == self.head_v_dim
