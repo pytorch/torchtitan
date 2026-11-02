@@ -99,7 +99,7 @@ class TestMuseGlimmerConditionalVision(unittest.TestCase):
         assert config.vision_adapter is not None
 
         self.assertIsNotNone(config.vision_encoder.sharding_config)
-        self.assertIsNotNone(config.vision_encoder.conv1.sharding_config)
+        self.assertIsNotNone(config.vision_encoder.conv1_linear.sharding_config)
         self.assertIsNotNone(config.vision_encoder.block.attn.wq.sharding_config)
         self.assertIsNotNone(config.vision_adapter.c_fc.sharding_config)
 
