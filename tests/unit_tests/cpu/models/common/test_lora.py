@@ -42,7 +42,10 @@ from torchtitan.models.common.linear import (
     Linear,
     RowParallelLinear,
 )
-from torchtitan.models.common.moe.sharding import expert_param_placement_sparse
+from torchtitan.models.common.moe.sharding import (
+    expert_param_placement_sparse,
+    replicated_param_placement_sparse,
+)
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 from torchtitan.models.llama3 import build_model_config
@@ -271,6 +274,145 @@ def test_lora_targets_fused_grouped_projection():
     assert grouped.weight.grad is None
     assert grouped.lora_a.weight.grad is not None
     assert grouped.lora_b.weight.grad is not None
+
+
+class _RoutedProjections(Module):
+    """The two grouped projections of a routed-expert block, by their field names."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        w13: GroupedLinear.Config
+        w2: GroupedLinear.Config
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.w13 = config.w13.build()
+        self.w2 = config.w2.build()
+
+
+def _routed_projections_config(
+    *, num_experts: int = 2, dim: int = 8, hidden_dim: int = 16
+) -> _RoutedProjections.Config:
+    return _RoutedProjections.Config(
+        w13=GroupedLinear.Config(
+            group_size=num_experts,
+            in_features=dim,
+            out_features=hidden_dim,
+            num_linears=2,
+            param_init={"weight": torch.nn.init.ones_},
+        ),
+        w2=GroupedLinear.Config(
+            group_size=num_experts,
+            in_features=hidden_dim,
+            out_features=dim,
+            param_init={"weight": torch.nn.init.ones_},
+        ),
+    )
+
+
+def _shared_outer_reference(
+    projection, input_RI: torch.Tensor, offsets_E: torch.Tensor
+) -> torch.Tensor:
+    """Per-expert loop over the rows with the shared factor broadcast."""
+    parts = []
+    start = 0
+    for expert, end in enumerate(offsets_E.tolist()):
+        rows_RI = input_RI[start:end]
+        weight_a = projection.lora_a.weight
+        weight_b = projection.lora_b.weight
+        weight_a_LI = weight_a if weight_a.dim() == 2 else weight_a[expert]
+        weight_b_OL = (
+            weight_b.flatten(0, -2)
+            if isinstance(projection.lora_b, Linear)
+            else weight_b[expert].flatten(0, -2)
+        )
+        base_RO = F.linear(rows_RI, projection.weight[expert].flatten(0, -2).bfloat16())
+        update_RO = F.linear(
+            F.linear(rows_RI, weight_a_LI.bfloat16()), weight_b_OL.bfloat16()
+        )
+        parts.append(base_RO + 2 * update_RO)
+        start = end
+    return torch.cat(parts)
+
+
+def test_shared_outer_adapters_share_the_model_side_factor():
+    """W13 shares A, W2 shares B, and the routed rows see the same update a per-expert loop gives."""
+    config = LoRATransform(
+        rank=8, alpha=16.0, expert_adapter_layout="shared_outer"
+    ).transform(_routed_projections_config())
+    experts = config.build()
+    experts.init_states()
+
+    assert isinstance(experts.w13.lora_a, Linear)
+    assert experts.w13.lora_a.weight.shape == (8, 8)
+    assert experts.w13.lora_b.weight.shape == (2, 2, 16, 8)
+    assert experts.w2.lora_a.weight.shape == (2, 8, 16)
+    assert isinstance(experts.w2.lora_b, Linear)
+    assert experts.w2.lora_b.weight.shape == (8, 8)
+    assert set(experts.state_dict()) == {
+        f"{projection}.{name}"
+        for projection in ("w13", "w2")
+        for name in ("weight", "lora_a.weight", "lora_b.weight")
+    }
+    for projection in (experts.w13, experts.w2):
+        assert not projection.weight.requires_grad
+        assert torch.count_nonzero(projection.lora_b.weight) == 0
+        with torch.no_grad():
+            projection.lora_a.weight.copy_(torch.randn_like(projection.lora_a.weight))
+            projection.lora_b.weight.copy_(torch.randn_like(projection.lora_b.weight))
+
+    offsets_E = torch.tensor([2, 5], dtype=torch.int32)
+    input_RD = torch.randn(5, 8, dtype=torch.bfloat16, requires_grad=True)
+    hidden_R2F = experts.w13(input_RD, offsets_E)
+    torch.testing.assert_close(
+        hidden_R2F,
+        _shared_outer_reference(experts.w13, input_RD, offsets_E).unflatten(
+            -1, (2, 16)
+        ),
+    )
+    input_RF = torch.randn(5, 16, dtype=torch.bfloat16, requires_grad=True)
+    output_RD = experts.w2(input_RF, offsets_E)
+    torch.testing.assert_close(
+        output_RD, _shared_outer_reference(experts.w2, input_RF, offsets_E)
+    )
+
+    (hidden_R2F.float().sum() + output_RD.float().sum()).backward()
+    for projection in (experts.w13, experts.w2):
+        assert projection.weight.grad is None
+        assert projection.lora_a.weight.grad is not None
+        assert projection.lora_b.weight.grad is not None
+
+
+def test_shared_outer_adapters_follow_expert_sharding():
+    """The shared factor is replicated across experts; the per-expert one keeps the expert placement."""
+    expert_placement = expert_param_placement_sparse()
+    config = _routed_projections_config()
+    for projection in (config.w13, config.w2):
+        projection.sharding_config = ShardingConfig(
+            state_shardings={"weight": expert_placement}
+        )
+    experts = (
+        LoRATransform(rank=8, expert_adapter_layout="shared_outer")
+        .transform(config)
+        .build()
+    )
+
+    shared = replicated_param_placement_sparse()
+    assert experts.w13.lora_a._sharding_config.state_shardings == {"weight": shared}
+    assert experts.w13.lora_b._sharding_config.state_shardings == {
+        "weight": expert_placement
+    }
+    assert experts.w2.lora_a._sharding_config.state_shardings == {
+        "weight": expert_placement
+    }
+    assert experts.w2.lora_b._sharding_config.state_shardings == {"weight": shared}
+
+
+def test_shared_outer_rejects_a_grouped_projection_outside_the_experts():
+    with pytest.raises(ValueError, match="w13 and w2 only"):
+        LoRATransform(rank=8, expert_adapter_layout="shared_outer").transform(
+            GroupedLinear.Config(group_size=2, in_features=8, out_features=8)
+        )
 
 
 def test_grouped_lora_preserves_specialized_projection():
