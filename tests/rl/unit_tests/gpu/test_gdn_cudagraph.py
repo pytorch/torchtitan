@@ -42,7 +42,15 @@ MODEL_ENV = "TORCHTITAN_QWEN3_5_0_8B_HF_PATH"
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
 
-def test_batch_invariant_query_normalization_matches_prefill(monkeypatch):
+# The 16-head case exercises Blackwell decode normalization dispatch.
+@pytest.mark.parametrize(
+    ("num_key_heads", "num_value_heads"),
+    [(1, 2), (16, 16)],
+    ids=["one-key-head", "qwen3_5-heads"],
+)
+def test_batch_invariant_query_normalization_matches_prefill(
+    monkeypatch, num_key_heads, num_value_heads
+):
     monkeypatch.setattr(gdn, "is_in_batch_invariant_mode", lambda: True)
     # Captured BF16 query with different rounding under decode's reduction layout.
     raw = bytes.fromhex(
@@ -58,9 +66,10 @@ def test_batch_invariant_query_normalization_matches_prefill(monkeypatch):
     query = torch.frombuffer(bytearray(raw), dtype=torch.bfloat16).cuda()
     layer = object.__new__(gdn.VLLMInnerGDN)
     torch.nn.Module.__init__(layer)
-    layer.local_num_k_heads = 1
-    layer.local_num_v_heads = 2
-    layer.local_key_dim = layer.head_k_dim = layer.head_v_dim = 128
+    layer.local_num_k_heads = num_key_heads
+    layer.local_num_v_heads = num_value_heads
+    layer.local_key_dim = num_key_heads * 128
+    layer.head_k_dim = layer.head_v_dim = 128
     normalized = []
     original = gdn.recurrent_gdn
 
@@ -73,13 +82,20 @@ def test_batch_invariant_query_normalization_matches_prefill(monkeypatch):
     def run(num_tokens, position, offsets):
         layer.kv_cache = (
             torch.empty(0, device="cuda"),
-            torch.zeros(4, 2, 128, 128, device="cuda"),
+            torch.zeros(4, num_value_heads, 128, 128, device="cuda"),
         )
-        mixed = torch.zeros(num_tokens, 512, device="cuda", dtype=torch.bfloat16)
-        mixed[position, :128] = query
-        mixed[:, 128:] = 1
-        gates = torch.zeros(num_tokens, 2, device="cuda", dtype=torch.bfloat16)
-        parameters = torch.zeros(2, device="cuda", dtype=torch.bfloat16)
+        mixed = torch.zeros(
+            num_tokens,
+            2 * layer.local_key_dim + num_value_heads * 128,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        mixed[position, : layer.local_key_dim] = query.repeat(num_key_heads)
+        mixed[:, layer.local_key_dim :] = 1
+        gates = torch.zeros(
+            num_tokens, num_value_heads, device="cuda", dtype=torch.bfloat16
+        )
+        parameters = torch.zeros(num_value_heads, device="cuda", dtype=torch.bfloat16)
         output = layer._forward_gdn(
             mixed,
             gates,
