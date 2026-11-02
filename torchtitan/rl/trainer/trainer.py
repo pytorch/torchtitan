@@ -97,6 +97,7 @@ class Trainer(Configurable):
         hf_assets_path: str = "",
         generator_dtype: str = "",
         output_dir: str,
+        model_state_dict_delta_max_fraction: float | None,
     ):
         init_logger()
         # Quiet torchstore's per-op transport-resolve INFO spam (very noisy in CI).
@@ -150,6 +151,16 @@ class Trainer(Configurable):
         )
 
         engine.load_checkpoint()
+        # Keeps the previous version in host memory, not accelerator memory.
+        self._model_state_dict_delta = None
+        if model_state_dict_delta_max_fraction is not None:
+            model_state_dict = self._model_state_dict()
+            self._model_state_dict_delta = ts.StateDictDelta(
+                model_state_dict,
+                max_fraction=model_state_dict_delta_max_fraction,
+                transfer_dtype=self._transfer_dtype,
+                preserve_dtype_keys=self._model_buffer_names(model_state_dict),
+            )
         if engine.device.type == "cpu":
             self._push_model_state_dict_stream = None
         else:
@@ -460,6 +471,12 @@ class Trainer(Configurable):
         with stream if stream is not None else nullcontext():
             if stream is not None:
                 stream.synchronize()
+            delta = self._model_state_dict_delta
+            if delta is not None:
+                asyncio.run(
+                    ts.put_state_dict_delta(delta, model_state_dict, "model_state_dict")
+                )
+                return
             asyncio.run(
                 ts.put_state_dict(
                     model_state_dict,

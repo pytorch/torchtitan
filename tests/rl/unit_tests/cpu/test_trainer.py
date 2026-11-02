@@ -79,6 +79,7 @@ def test_push_model_state_dict_puts_on_push_stream_in_worker() -> None:
         # Under PP, a rank publishes the merged state dicts of its model parts.
         trainer.engine = SimpleNamespace(model_parts=[weight_part, buffer_part])
         trainer._transfer_dtype = torch.bfloat16
+        trainer._model_state_dict_delta = None
         stream = MagicMock()
         trainer._push_model_state_dict_stream = stream
         main_thread_id = threading.get_ident()
@@ -121,6 +122,48 @@ def test_push_model_state_dict_puts_on_push_stream_in_worker() -> None:
     asyncio.run(run())
 
 
+def test_push_model_state_dict_puts_delta_on_push_stream_in_worker() -> None:
+    async def run() -> None:
+        trainer = object.__new__(Trainer)
+        model_part = torch.nn.Linear(2, 2, bias=False)
+        trainer.engine = SimpleNamespace(model_parts=[model_part])
+        delta = MagicMock()
+        trainer._model_state_dict_delta = delta
+        stream = MagicMock()
+        trainer._push_model_state_dict_stream = stream
+        main_thread_id = threading.get_ident()
+        worker_thread_ids = []
+
+        async def put_state_dict_delta(*args, **kwargs) -> None:
+            # The delta is computed from the live tensors once they are final.
+            stream.__exit__.assert_not_called()
+            stream.synchronize.assert_called_once()
+            worker_thread_ids.append(threading.get_ident())
+
+        with (
+            patch(
+                "torchtitan.rl.trainer.trainer.ts.put_state_dict",
+                new_callable=AsyncMock,
+            ) as put,
+            patch(
+                "torchtitan.rl.trainer.trainer.ts.put_state_dict_delta",
+                new_callable=AsyncMock,
+                side_effect=put_state_dict_delta,
+            ) as put_delta,
+        ):
+            await trainer.push_model_state_dict()
+
+        put.assert_not_awaited()
+        put_delta.assert_awaited_once_with(delta, ANY, "model_state_dict")
+        state_dict = put_delta.await_args.args[1]
+        assert state_dict["weight"].data_ptr() == model_part.weight.data_ptr()
+        stream.__exit__.assert_called_once()
+        assert len(worker_thread_ids) == 1
+        assert worker_thread_ids[0] != main_thread_id
+
+    asyncio.run(run())
+
+
 def test_rl_trainer_accepts_core_sdc_replay_config() -> None:
     config = Trainer.Config(
         model=MagicMock(),
@@ -152,6 +195,7 @@ def test_rl_trainer_validates_model_training_config_before_initialization(
                 config,
                 max_num_documents=None,
                 output_dir=str(tmp_path),
+                model_state_dict_delta_max_fraction=None,
             )
 
     validate.assert_called_once_with(

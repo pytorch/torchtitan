@@ -889,6 +889,7 @@ def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
         generator = object.__new__(Generator)
         generator._engine_loop = engine_thread(engine)
         generator._prefetched_model_state_dict = {}
+        generator._pull_model_state_dict_delta = False
         await generator.start_engine_loop()
         first = _generate(generator._engine_loop, "r0")
         assert await asyncio.to_thread(gate.entered.wait, _TIMEOUT_S)
