@@ -22,7 +22,7 @@ from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 
 # Shape suffixes:
 # T = packed tokens, H = attention heads, D = projection rows per head,
-# I = input features.
+# I = input features, R = weight rows (H * D).
 
 
 class QKClipFlexInnerAttention(FlexInnerAttention):
@@ -90,20 +90,31 @@ def _scale_mla_heads(
 ) -> None:
     """Scale the NoPE and remaining rows of every MLA head in place.
 
-    ``weight`` is viewed as ``[num_heads, rows_per_head, in_features]``, and
-    ``scales_H`` contains one scale per head. The remaining rows are unchanged
-    when ``remaining_scale_exponent`` is ``None``.
+    Rows ``[h * rows_per_head, (h + 1) * rows_per_head)`` of ``weight`` belong to
+    head ``h``, and ``scales_H`` contains one scale per head. The remaining rows
+    are unchanged when ``remaining_scale_exponent`` is ``None``.
     """
     num_heads = scales_H.numel()
     if weight.ndim != 2 or weight.shape[0] != num_heads * rows_per_head:
         raise ValueError("QK clip scales do not match the MLA weight shape.")
     _validate_head_sharding(weight)
 
-    scales_H11 = _replicated_scales(scales_H, weight).view(-1, 1, 1)
-    heads_HDI = weight.view(num_heads, rows_per_head, weight.shape[1])
-    heads_HDI[:, :nope_rows_per_head].mul_(scales_H11.pow(nope_scale_exponent))
-    if remaining_scale_exponent is not None:
-        heads_HDI[:, nope_rows_per_head:].mul_(scales_H11.pow(remaining_scale_exponent))
+    # Scale rows, not a [num_heads, rows_per_head, in_features] view: Shard(0)
+    # can split a head across ranks when num_heads is not a multiple of the
+    # shard count, and DTensor cannot view such a tensor.
+    remaining_scales_H = (
+        torch.ones_like(scales_H)
+        if remaining_scale_exponent is None
+        else scales_H.pow(remaining_scale_exponent)
+    )
+    row_scales_R1 = torch.cat(
+        [
+            scales_H.pow(nope_scale_exponent)[:, None].expand(-1, nope_rows_per_head),
+            remaining_scales_H[:, None].expand(-1, rows_per_head - nope_rows_per_head),
+        ],
+        dim=1,
+    ).view(-1, 1)
+    weight.mul_(_replicated_scales(row_scales_R1, weight))
 
 
 @torch.no_grad()

@@ -290,6 +290,8 @@ class QKClipDistributedTest(DTensorTestBase):
         Building the replicated scales with ``distribute_tensor`` instead of
         ``from_local`` would broadcast once per weight per step, so this asserts
         the packed maxima all-reduce is the only collective ``qk_clip`` issues.
+        The head count is not a multiple of the shard count, so ``Shard(0)``
+        splits a head across ranks.
         """
         mesh = init_device_mesh(
             self.device_type,
@@ -297,7 +299,7 @@ class QKClipDistributedTest(DTensorTestBase):
             mesh_dim_names=("dp_shard",),
         )
         device = torch.device(self.device_type, self.rank)
-        num_heads = self.world_size
+        num_heads = self.world_size + 1
         qk_nope_head_dim, qk_rope_head_dim, v_head_dim, in_features = 2, 1, 2, 2
         num_layers = 4
 
@@ -344,3 +346,16 @@ class QKClipDistributedTest(DTensorTestBase):
         # One packed MAX all-reduce covers every layer and head; the 8 weights
         # this model clips must add nothing on top of it.
         self.assertEqual(total, 1, f"expected one collective, got {collectives}")
+        # A max logit of 400 gives the scale 100 / 400 = 0.25.
+        q_row_scales = [0.5] * qk_nope_head_dim + [0.25] * qk_rope_head_dim
+        kv_row_scales = [0.5] * qk_nope_head_dim + [1.0] * v_head_dim
+        for weight, row_scales in (
+            (attention.wq_b.weight, q_row_scales),
+            (attention.inner_attention.wkv_b.weight, kv_row_scales),
+        ):
+            torch.testing.assert_close(
+                weight.full_tensor(),
+                torch.tensor(row_scales, device=device)
+                .repeat(num_heads)[:, None]
+                .expand(-1, in_features),
+            )
