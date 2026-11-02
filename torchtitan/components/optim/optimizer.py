@@ -11,7 +11,7 @@ import logging
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, cast, Literal, overload
+from typing import Any, cast, Literal, overload, TypeGuard
 
 import torch
 import torch.nn as nn
@@ -45,6 +45,7 @@ __all__ = [
     "BaseOptimizer",
     "DistMuon",
     "OptimizersContainer",
+    "offloads_state",
 ]
 
 MomentDType = Literal["parameter", "bfloat16"]
@@ -194,6 +195,16 @@ class AdamW(torch.optim.AdamW, BaseOptimizer):
         )
         if config.moment_dtype == "bfloat16":
             _register_bfloat16_moment_hooks(self)
+
+
+def offloads_state(
+    config: BaseOptimizer.Config,
+) -> TypeGuard[Adam.Config | AdamW.Config]:
+    """Whether ``config`` is an Adam or AdamW config with ``state_offload`` set."""
+    return (
+        isinstance(config, (Adam.Config, AdamW.Config))
+        and config.state_offload is not None
+    )
 
 
 class DistMuon(FlexShardDistMuon, BaseOptimizer):
@@ -428,10 +439,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
                     part_idx,
                     optimizer_config.pattern,
                 )
-                if (
-                    isinstance(optimizer_config, (Adam.Config, AdamW.Config))
-                    and optimizer_config.state_offload is not None
-                ):
+                if offloads_state(optimizer_config):
                     # One slab dtype per optimizer, while resident Adam matches each param.
                     param_dtypes = {param.dtype for param in param_group["params"]}
                     if (
@@ -442,7 +450,11 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
                             "state_offload needs one parameter dtype per optimizer, but "
                             f"{optimizer_config.pattern!r} matched {param_dtypes}"
                         )
-                    optimizer = optimizer_config.state_offload.build(
+                    # offloads_state() checked that state_offload is set.
+                    offload_config = cast(
+                        OptimizerStateOffloader.Config, optimizer_config.state_offload
+                    )
+                    optimizer = offload_config.build(
                         optimizer=optimizer,
                         state_dtype=(
                             torch.bfloat16

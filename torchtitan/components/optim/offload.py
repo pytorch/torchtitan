@@ -49,8 +49,8 @@ class OptimizerStateOffloader(Optimizer, Configurable):
         slot A copies: load 0  |               | store 0 -> load 2 |
         slot B copies:         | load 1        |                   | store 1 -> load 3
 
-    ``step()`` does not wait on the host. ``state_dict()`` and ``load_state_dict()`` wait for
-    the pending stores before the host reads or writes the slabs.
+    ``step()`` does not wait on the host, so read the CPU moments through ``state_dict()`` or
+    after a device sync.
 
     Launch with ``torchrun --numa-binding=node`` so the slabs land on the GPU's NUMA node.
 
@@ -99,15 +99,16 @@ class OptimizerStateOffloader(Optimizer, Configurable):
         self.param_groups = optimizer.param_groups
         self.state = optimizer.state
 
-        # Partition parameters, allocate their canonical CPU state, then create the
-        # independent streams that move chunks in each direction.
+        # Create the streams that move chunks in each direction first: each slab waits for the
+        # D2H stream before it is unpinned. Then partition parameters and allocate their
+        # canonical CPU state.
+        self._h2d_stream = torch.Stream()
+        self._d2h_stream = torch.Stream()
         params = [param for group in self.param_groups for param in group["params"]]
         self._chunks = _pack_params_by_state_bytes(
             params, chunk_size_bytes=_CHUNK_SIZE_BYTES, state_dtype=state_dtype
         )
         self._allocate_pinned_state(params, state_dtype)
-        self._h2d_stream = torch.Stream()
-        self._d2h_stream = torch.Stream()
 
         largest_chunk_mib = max(_chunk_numel(chunk) for chunk in self._chunks)
         largest_chunk_mib *= len(_MOMENT_KEYS) * state_dtype.itemsize / 2**20
@@ -274,9 +275,10 @@ class OptimizerStateOffloader(Optimizer, Configurable):
             # which cudaHostRegister rejects.
             if slab.numel() > 0:
                 pin_memory_utils.pin_memory(slab.data_ptr(), slab.nbytes)
-                # Unpin when the slab is freed, but not at exit, after the CUDA context is gone.
+                # Unpin when the slab is freed, after the last step's stores into it finish, but
+                # not at exit, after the CUDA context is gone.
                 unpin = weakref.finalize(
-                    slab, pin_memory_utils.unpin_memory, slab.data_ptr()
+                    slab, _unpin_after_stores, self._d2h_stream, slab.data_ptr()
                 )
                 unpin.atexit = False
             self._slabs[key] = slab
@@ -295,6 +297,12 @@ class OptimizerStateOffloader(Optimizer, Configurable):
                 )
                 state[key] = _state_like(param, view)
             offset += local.numel()
+
+
+def _unpin_after_stores(d2h_stream: torch.Stream, data_ptr: int) -> None:
+    """Unpin a slab once the D2H stream has finished writing into it."""
+    d2h_stream.synchronize()
+    pin_memory_utils.unpin_memory(data_ptr)
 
 
 def _pack_params_by_state_bytes(
@@ -353,12 +361,12 @@ def _state_like(param: torch.Tensor, local: torch.Tensor) -> torch.Tensor:
     if not isinstance(param, DTensor):
         return local
     if local.device.type == "cpu":
-        # A DTensor inherits its local's storage offset. DCP's async stager reads a non-zero
-        # data_ptr() as a dense tensor, so alias the slab view at offset 0.
-        # TODO: remove once DCP's DefaultStager stages a DTensor whose local tensor sits at a
-        # storage offset > 0. Repro: wrap slab[10:20] of a CPU tensor with DTensor.from_local
-        # on a 1-rank CPU mesh, then DefaultStager(StagingOptions(False, True, False,
-        # False)).stage({"x": dtensor}) raises "invalid python storage".
+        # DCP's stager takes a DTensor with a non-zero data_ptr() as owning a storage, and a
+        # DTensor inherits its local's storage offset, so alias the slab view at offset 0.
+        # TODO: drop the alias once DCP fixes it. Repro: DTensor.from_local(slab[10:20]) on a
+        # 1-rank CPU mesh, then DefaultStager(StagingOptions(use_pinned_memory=False,
+        # use_shared_memory=True, use_async_staging=False, use_non_blocking_copy=False))
+        # .stage({"x": dtensor}) raises "invalid python storage".
         local = torch.from_dlpack(local)
     spec = DTensorSpec(
         mesh=param.device_mesh,

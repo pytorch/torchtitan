@@ -198,10 +198,12 @@ class TestTorchFTNonFiniteStep(unittest.TestCase):
 
 
 class TestTorchFTOptimizersContainerConfig(unittest.TestCase):
-    def test_build_rejects_adam_state_offload(self):
-        config = TorchFTOptimizersContainer.Config(
-            optimizers=[AdamW.Config(pattern=r".*")]
-        )
-        config.optimizers[0].state_offload = OptimizerStateOffloader.Config()
+    def test_rejects_adam_state_offload(self):
         with self.assertRaisesRegex(ValueError, "state_offload"):
-            config.build(model_parts=[])
+            TorchFTOptimizersContainer.Config(
+                optimizers=[
+                    AdamW.Config(
+                        pattern=r".*", state_offload=OptimizerStateOffloader.Config()
+                    )
+                ]
+            )
