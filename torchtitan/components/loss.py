@@ -86,6 +86,36 @@ def cross_entropy_loss(
     )
 
 
+@local_compile("loss", batch_invariant=False)
+def cross_entropy_and_logsumexp(
+    pred: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    global_vocab_size: int | None = None,
+    reduction: Literal["sum", "none"] = "sum",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if spmd_mesh_size("tp") > 1:
+        return _LossParallelCrossEntropy.apply(
+            pred.float(),
+            labels,
+            current_spmd_mesh().get_group("tp"),  # pyrefly: ignore[missing-attribute]
+            global_vocab_size,
+            reduction,
+            True,  # return_lse; apply() is positional-only under spmd typechecking
+        )
+    logits = pred.float()
+    valid = labels != IGNORE_INDEX
+    lse = torch.logsumexp(logits, dim=-1)
+    target = logits.gather(-1, torch.where(valid, labels, 0).unsqueeze(-1)).squeeze(-1)
+    match reduction:
+        case "none":
+            return torch.where(valid, lse - target, 0), torch.where(valid, lse, 0)
+        case "sum":
+            return torch.where(valid, lse - target, 0).sum(), torch.where(valid, lse, 0)
+        case _:
+            raise ValueError(f"Unsupported cross-entropy reduction: {reduction}")
+
+
 class _LossParallelCrossEntropy(torch.autograd.Function):
     """
     Vocab-parallel cross-entropy on local ``[T, V_local]`` logits.
@@ -99,28 +129,36 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
     gather) to aggregate intermediate results in distributed softmax;
     backward is fused (NLL + log-softmax) with zero collectives.
 
+    With ``return_lse=True`` it also returns the full-vocab per-token
+    logsumexp ``[T]`` (0 for ``IGNORE_INDEX``), built from the already
+    all-reduced max and sumexp, so it costs no extra collective. Its backward
+    term ``softmax * grad_lse`` is also local.
+
     All inputs and outputs are plain ``torch.Tensor`` (not DTensor).
     """
 
     @staticmethod
     def spmd_typecheck(
-        result: torch.Tensor,
+        result: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         *,
         logits: torch.Tensor,
         labels: torch.Tensor,
         tp_group: dist.ProcessGroup,
+        return_lse: bool = False,
     ) -> None:
         """
-        SPMD type: logits S(-1)@TP, labels I@TP -> loss I@TP.
-        Non-TP axes are passed through from logits to the output.
+        SPMD type: logits S(-1)@TP, labels I@TP -> loss (and lse) I@TP.
+        Non-TP axes are passed through from logits to the outputs.
         """
         spmd.assert_type(logits, {tp_group: spmd.S(logits.dim() - 1)})
         spmd.assert_type(labels, {tp_group: spmd.I})
-        spmd.assert_local_type_like(
-            result,
-            logits,
-            {tp_group: spmd.I},  # pyrefly: ignore [bad-argument-type]
-        )
+        outputs = result if return_lse else (result,)
+        for output in outputs:
+            spmd.assert_local_type_like(
+                output,
+                logits,
+                {tp_group: spmd.I},  # pyrefly: ignore [bad-argument-type]
+            )
 
     @staticmethod
     # pyrefly: ignore [bad-override]
@@ -131,12 +169,14 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         tp_group: dist.ProcessGroup,
         global_vocab_size: int,
         reduction: str = "sum",
-    ) -> torch.Tensor:
+        return_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Compute exact CE from local vocab shards via TP all-reduces.
 
         ``reduction="sum"`` returns the scalar summed loss (SFT/CE).
         ``reduction="none"`` returns the per-token NLL ``[T]``, which GRPO
         negates to get per-token logprobs without all-gathering the vocab.
+        ``return_lse=True`` returns ``(loss, lse)`` with ``lse`` of shape ``[T]``.
         """
         logits_dtype = logits.dtype
         logits = logits.float()
@@ -179,7 +219,8 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         shifted_sumexp = funcol.all_reduce(
             shifted_sumexp, reduceOp=dist.ReduceOp.SUM.name, group=tp_group
         )
-        log_probs = shifted - torch.log(shifted_sumexp)
+        log_sumexp = torch.log(shifted_sumexp)
+        log_probs = shifted - log_sumexp
 
         # Mask labels outside this vocab shard; the TP all-reduce below selects
         # the owner rank's log probability for each target token.
@@ -206,15 +247,20 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         ctx.vocab_start = vocab_start
         ctx.local_vocab_size = local_vocab_size
         ctx.reduction = reduction
-        if reduction == "none":
-            return result
-        return result.sum()
+        ctx.return_lse = return_lse
+        loss = result if reduction == "none" else result.sum()
+        if not return_lse:
+            return loss
+        # Full-vocab logsumexp, identical on every TP rank after the all-reduces.
+        lse = (local_max + log_sumexp).squeeze(-1)
+        return loss, torch.where(labels != IGNORE_INDEX, lse, 0)
 
     @staticmethod
     def backward(  # pyrefly: ignore[bad-override]
         ctx,
         grad_output: torch.Tensor,
-    ) -> tuple[torch.Tensor, None, None, None, None]:
+        grad_lse: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, None, None, None, None, None]:
         log_probs, labels = ctx.saved_tensors
         safe_labels = torch.where(labels != IGNORE_INDEX, labels, 0)
         out_of_range = (safe_labels < ctx.vocab_start) | (
@@ -237,8 +283,13 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
             (labels != IGNORE_INDEX).unsqueeze(-1), grad_output, 0
         )
         grad_logits = (grad_input + torch.exp(log_probs)) * grad_output
+        if ctx.return_lse:
+            # d lse / d logits = softmax; ignored tokens get no lse gradient.
+            assert grad_lse is not None
+            grad_lse = torch.where(labels != IGNORE_INDEX, grad_lse, 0)
+            grad_logits = grad_logits + torch.exp(log_probs) * grad_lse.unsqueeze(-1)
         grad_logits = grad_logits.to(ctx.logits_dtype)
-        return grad_logits, None, None, None, None
+        return grad_logits, None, None, None, None, None
 
 
 class CrossEntropyLoss(Loss[torch.Tensor]):
@@ -248,10 +299,17 @@ class CrossEntropyLoss(Loss[torch.Tensor]):
     class Config(Loss.Config):
         global_vocab_size: int | None = None
         """Full vocabulary size, needed for spmd_types loss-parallel CE."""
+        z_loss_weight: float | None = None
+        """Optional z-loss weight for regularization (ignored)."""
 
     def __init__(self, config: Config):
-        self._loss_fn: LossFunction = cross_entropy_loss
+        self._loss_fn: LossFunction = (
+            cross_entropy_loss
+            if config.z_loss_weight is None
+            else cross_entropy_and_logsumexp
+        )
         self.global_vocab_size = config.global_vocab_size
+        self.z_loss_weight = config.z_loss_weight
 
     def __call__(
         self,
@@ -261,18 +319,44 @@ class CrossEntropyLoss(Loss[torch.Tensor]):
         **kwargs: Any,
     ) -> LossResult:
         del kwargs
-        loss = self._loss_fn(pred, labels, global_vocab_size=self.global_vocab_size)
+        if self.z_loss_weight is not None:
+            ce, lse = self._loss_fn(
+                pred, labels, global_vocab_size=self.global_vocab_size
+            )
+        else:
+            ce = self._loss_fn(pred, labels, global_vocab_size=self.global_vocab_size)
+
         # loss: V->P, annotate global_loss_token_counts
         if current_spmd_mesh() is not None:
-            spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P})
+            spmd.assert_type(ce, {"dp": spmd.P, "cp": spmd.P})
             if global_loss_token_counts is not None:
                 spmd.assert_type(
                     global_loss_token_counts,
                     {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
                 )
+
+        if self.z_loss_weight is not None:
+            z = lse.pow(2).sum()
+            metrics = (
+                {
+                    "z/mean": z.detach() / global_loss_token_counts,
+                    "ce/mean": ce.detach() / global_loss_token_counts,
+                }
+                if global_loss_token_counts is not None
+                else {
+                    "z/mean": z.detach(),
+                    "ce/mean": ce.detach(),
+                }
+            )
+            loss = ce + self.z_loss_weight * z
+        else:
+            loss = ce
+            metrics = {}
+
         if global_loss_token_counts is not None:
             loss = loss / global_loss_token_counts
-        return loss, {}
+
+        return loss, metrics
 
 
 @local_compile("loss", batch_invariant=False)

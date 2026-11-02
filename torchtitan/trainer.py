@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import time
+from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
@@ -406,6 +407,26 @@ class Trainer(Configurable):
                 {"global_valid_tokens": int(global_main_loss_token_count)}
             )
 
+            # /mean loss metrics are pre-normalized by the global token count, so
+            # their sum over microbatches and loss-mesh ranks is the global mean.
+            # Under PP, ranks without the last stage have none.
+            values_by_key: dict[str, list[torch.Tensor]] = defaultdict(list)
+            for group_metrics in forward_backward_result.loss_metrics:
+                for microbatch_metrics in group_metrics:
+                    for key, value in microbatch_metrics.items():
+                        values_by_key[key].append(value)
+            local_loss_metrics: dict[str, torch.Tensor] = {}
+            for key, values in sorted(values_by_key.items()):
+                if key.endswith("/mean"):
+                    local_loss_metrics[key] = torch.stack(values).sum()
+                elif key.endswith("/max"):
+                    local_loss_metrics[key] = torch.stack(values).amax()
+                else:
+                    raise ValueError(
+                        f"Do not know how to reduce loss metric '{key}'. "
+                        "Use a /mean or /max suffix."
+                    )
+
             if parallelism_context.dp_cp_enabled:
                 loss_mesh = parallelism_context.get_optional_mesh("loss")
 
@@ -435,14 +456,27 @@ class Trainer(Configurable):
                         loss_mesh,
                     ),
                 )
+                loss_metrics = {
+                    key: (
+                        dist_utils.dist_max
+                        if key.endswith("/max")
+                        else dist_utils.dist_sum
+                    )(value, loss_mesh)
+                    for key, value in local_loss_metrics.items()
+                }
             else:
                 global_avg_loss = global_max_loss = float(accumulated_loss.item())
                 global_ntokens_seen = engine.ntokens_seen
+                loss_metrics = {
+                    key: float(value.item())
+                    for key, value in local_loss_metrics.items()
+                }
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
             **collect_aux_loss_metrics(parallelism_context),
+            **loss_metrics,
         }
         self.metrics_processor.log(
             engine.num_completed_steps,

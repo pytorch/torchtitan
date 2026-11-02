@@ -27,6 +27,7 @@ from torchtitan.components.loss import (
     _LossParallelCrossEntropy,
     ChunkedLossWrapper,
     compute_logprobs,
+    cross_entropy_and_logsumexp,
     cross_entropy_loss,
     CrossEntropyLoss,
     GradAccumulator,
@@ -408,6 +409,25 @@ class TestLoss(unittest.TestCase):
             msg="Global averaged loss should equal weighted average of per-token losses",
         )
 
+    def test_cross_entropy_and_logsumexp_matches_cross_entropy_loss(self):
+        """CE matches ``cross_entropy_loss``; lse is the per-token logsumexp, 0 when ignored."""
+        torch.manual_seed(0)
+        num_tokens, vocab_size = 32, 100
+        pred = torch.randn(num_tokens, vocab_size) * 4
+        labels = torch.randint(0, vocab_size, (num_tokens,))
+        labels[::3] = IGNORE_INDEX
+        expected_lse = torch.where(
+            labels != IGNORE_INDEX, torch.logsumexp(pred.double(), dim=-1), 0
+        )
+
+        for reduction in ("sum", "none"):
+            with self.subTest(reduction=reduction):
+                ce, lse = cross_entropy_and_logsumexp(pred, labels, reduction=reduction)
+                torch.testing.assert_close(
+                    ce, cross_entropy_loss(pred, labels, reduction=reduction)
+                )
+                torch.testing.assert_close(lse, expected_lse.float())
+
 
 class TestGradAccumulator(unittest.TestCase):
     def test_accumulate_matches_cat(self):
@@ -573,6 +593,66 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                             logits_dtensor.grad.full_tensor(),
                         )
                     )
+
+    @with_comms
+    def test_cross_entropy_and_logsumexp_parity(self):
+        """
+        Vocab-parallel ``cross_entropy_and_logsumexp`` under strict typechecking,
+        with uneven vocab shards and IGNORE_INDEX labels: CE matches
+        ``cross_entropy_loss`` bitwise, lse matches the full-vocab logsumexp,
+        and the gradient of ``CE + sum(lse**2)`` matches an fp64 reference.
+        """
+        T, vocab_size = 64, 1003
+        mesh = init_device_mesh(self.device_type, (4,), mesh_dim_names=("tp",))
+        tp_group = mesh.get_group("tp")
+        generator = torch.Generator().manual_seed(0)
+        logits = torch.randn(T, vocab_size, generator=generator) * 4
+        labels = torch.randint(0, vocab_size, (T,), generator=generator)
+        labels[torch.rand(T, generator=generator) < 0.3] = IGNORE_INDEX
+        logits, labels = logits.to(self.device_type), labels.to(self.device_type)
+
+        # fp64 reference over the full vocab.
+        ref_logits = logits.double().requires_grad_(True)
+        ref_lse = torch.where(
+            labels != IGNORE_INDEX, torch.logsumexp(ref_logits, dim=-1), 0
+        )
+        ref_ce = F.cross_entropy(
+            ref_logits, labels, reduction="sum", ignore_index=IGNORE_INDEX
+        )
+        (ref_ce + ref_lse.square().sum()).backward()
+
+        local_labels = distribute_tensor(labels, mesh, (Replicate(),)).to_local()
+        spmd.assert_type(local_labels, {tp_group: spmd.I})
+        for reduction in ("sum", "none"):
+            with self.subTest(reduction=reduction):
+                local_logits = (
+                    distribute_tensor(logits, mesh, (Shard(1),))
+                    .to_local()
+                    .requires_grad_(True)
+                )
+                spmd.assert_type(local_logits, {tp_group: spmd.S(1)})
+                with set_current_spmd_mesh(mesh):
+                    with typecheck(strict_mode="strict"):
+                        ce, lse = cross_entropy_and_logsumexp(
+                            local_logits,
+                            local_labels,
+                            global_vocab_size=vocab_size,
+                            reduction=reduction,
+                        )
+                        expected_ce = cross_entropy_loss(
+                            local_logits.detach(),
+                            local_labels,
+                            global_vocab_size=vocab_size,
+                            reduction=reduction,
+                        )
+                self.assertTrue(torch.equal(ce, expected_ce))
+                torch.testing.assert_close(lse, ref_lse.detach().float())
+
+                (ce.sum() + lse.square().sum()).backward()
+                # Uneven sharding: ceil(1003 / 4) = 251 columns per rank, 250 on the last.
+                start = self.rank * 251
+                ref_grad = ref_logits.grad[:, start : start + local_logits.shape[1]]
+                torch.testing.assert_close(local_logits.grad, ref_grad.float())
 
     @with_comms
     def test_vocab_parallel_policy_stats_parity(self):
