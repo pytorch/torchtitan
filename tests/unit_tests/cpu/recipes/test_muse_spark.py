@@ -7,6 +7,8 @@
 from unittest.mock import patch
 
 import pytest
+import torch
+from torchtitan.config.transform import transform_model_config_
 from torchtitan.models.common.attention.cp_attention import (
     UlyssesSlidingWindowVarlenInnerAttention,
     UlyssesVarlenInnerAttention,
@@ -73,3 +75,42 @@ def test_debug_recipe_tokenizer(recipe):
     config.__post_init__()
     tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
     assert tokenizer.encode("Hello, world!")
+
+
+_VISION_PREFIXES = ("vision_encoder.", "vision_adapter.", "vision_projection.")
+
+
+@pytest.mark.parametrize("variant", ["lora_decoder", "lora_vision_decoder"])
+def test_slake_lora_trainable_split(variant):
+    # LoRA only warns on unmatched targets; this catches a renamed module.
+    model_config = muse_spark_debugmodel_mm().model
+    model_config = transform_model_config_(
+        model_config, [recipes._slake_lora_transform(variant)]
+    )
+    with torch.device("meta"):
+        model = model_config.build()
+    trainable = {
+        name for name, param in model.named_parameters() if param.requires_grad
+    }
+    vision = {name for name in trainable if name.startswith(_VISION_PREFIXES)}
+    lora = {name for name in trainable if ".lora_" in name}
+    assert trainable == lora
+    expected_vision = {
+        "vision_encoder.layers.0.attn.wq",
+        "vision_encoder.layers.0.attn.wk",
+        "vision_encoder.layers.0.attn.wv",
+        "vision_encoder.layers.0.attn.proj",
+        "vision_encoder.layers.0.mlp.linear_fc1",
+        "vision_encoder.layers.0.mlp.linear_fc2",
+        "vision_adapter.c_fc",
+        "vision_adapter.c_proj",
+        "vision_projection",
+    }
+    adapted_vision = {name.rsplit(".lora_", 1)[0] for name in vision}
+    decoder = {name for name in lora if name.startswith("layers.")}
+    assert decoder
+    if variant == "lora_decoder":
+        assert not vision
+    else:
+        assert expected_vision <= adapted_vision
+        assert not any("conv1" in name for name in adapted_vision)

@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import functools
+import math
 import os
 from collections.abc import Sequence
 from dataclasses import replace
@@ -23,6 +25,7 @@ from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
     FirstFitPackingConfig,
     GrainDataLoader,
+    HuggingFaceRandomAccessSource,
     HuggingFaceStreamingSource,
     IndexedJsonlSource,
     SingleDatasetConfig,
@@ -36,6 +39,7 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.components.validator import Validator
 from torchtitan.config import OverrideConfig, PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
@@ -43,6 +47,7 @@ from torchtitan.config.transform import (
     AsyncTensorParallelTransform,
     ContextParallelTransform,
     LoRATransform,
+    ModelConfigTransform,
     transform_model_config_,
 )
 from torchtitan.config.transform.base import convert_config_type
@@ -76,7 +81,7 @@ from torchtitan.models.muse_spark import build_model_config
 from torchtitan.models.muse_spark.model import MuseSparkModel
 from torchtitan.models.muse_spark.renderer import MuseSparkRendererConfig
 from torchtitan.models.muse_spark.tokenizer import MuseSparkTokenizer
-from torchtitan.observability.metrics import MetricsProcessor
+from torchtitan.observability.metrics import MetricsProcessor, TensorBoardLogger
 from torchtitan.trainer import Trainer
 
 
@@ -232,7 +237,10 @@ def _muse_spark_mm_dataloader(
     import torchvision.transforms.v2.functional as TVF
 
     from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
-    from torchtitan.components.data.multimodal.mm_datasets import VisionProcessor
+    from torchtitan.components.data.multimodal.mm_datasets import (
+        MultiModalChatProcessor,
+        VisionProcessor,
+    )
     from torchtitan.components.data.multimodal.utils.image import (
         resize_to_muse_glimmer_patch_grid,
     )
@@ -242,8 +250,13 @@ def _muse_spark_mm_dataloader(
         raise ValueError("Multimodal Muse Spark must own a vision encoder")
 
     base_processor = dataset.processor
-    if not isinstance(base_processor, VisionProcessor.Config):
-        raise ValueError("Multimodal vision datasets must use VisionProcessor.Config")
+    if not isinstance(
+        base_processor, (VisionProcessor.Config, MultiModalChatProcessor.Config)
+    ):
+        raise ValueError(
+            "Multimodal vision datasets must use VisionProcessor.Config or "
+            "MultiModalChatProcessor.Config"
+        )
     processor = replace(
         base_processor,
         patch_size=vision_encoder.patch_size,
@@ -676,12 +689,37 @@ def _ultradata_lora_sft_optim(*, warmup_steps: int) -> Optim.Config:
     )
 
 
+# Decoder LoRA targets for the UltraData and SLAKE recipes; the router gate is not
+# a target.
+_MUSE_SPARK_LORA_DECODER_TARGETS = ("wqkv", "wo", "output_gate", "w13", "w2")
+
+
 def _ultradata_lora_sft_transform() -> LoRATransform:
     return LoRATransform(
         rank=8,
         alpha=16.0,
-        target_modules=["wqkv", "wo", "output_gate", "w13", "w2"],
+        target_modules=list(_MUSE_SPARK_LORA_DECODER_TARGETS),
     )
+
+
+def _use_gb300_lora_dist_moe(config: Trainer.Config) -> ModelConfigTransform:
+    """Set the GB300 BF16 Dist-MoE runtime, remat and compile regions for LoRA SFT.
+
+    Returns the Dist-MoE transform; apply it before the LoRA transform.
+    """
+    from torchtitan.config.transform.dist_moe import DistMoeTransform
+    from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
+
+    config.model.local_compile.regions = ["loss"]
+    config.activation_remat = ActivationRematConfig(
+        save_regions=list(_MUSE_SPARK_DIST_MOE_SAVE_REGIONS),
+    )
+    config.dist_moe_runtime = DistMoeRuntime.Config(
+        activation_slot_capacity_factor=0.25,
+        scratch_capacity_factor=16.0,
+        vmm_capacity_factor=None,
+    )
+    return DistMoeTransform(expert_precision="bf16", inplace_wgrad_accum=False)
 
 
 def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
@@ -712,9 +750,6 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
     Use the environment overrides above for paths; edit or derive this recipe
     for other configuration changes.
     """
-    from torchtitan.config.transform.dist_moe import DistMoeTransform
-    from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
-
     seq_len = 131_072
 
     config = _muse_spark_816b_a42b(
@@ -752,16 +787,8 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
     )
     config.comm.init_timeout_seconds = 1800
     config.comm.train_timeout_seconds = 1800
-    config.model.local_compile.regions = ["loss"]
     config.debug.seed = 42
-    config.activation_remat = ActivationRematConfig(
-        save_regions=list(_MUSE_SPARK_DIST_MOE_SAVE_REGIONS),
-    )
-    config.dist_moe_runtime = DistMoeRuntime.Config(
-        activation_slot_capacity_factor=0.25,
-        scratch_capacity_factor=16.0,
-        vmm_capacity_factor=None,
-    )
+    dist_moe_transform = _use_gb300_lora_dist_moe(config)
     config.override.imports = []
     config.checkpointer = cast(
         CheckpointManager.Config,
@@ -783,12 +810,204 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
     )
     config = apply_transforms(
         config,
-        [
-            DistMoeTransform(expert_precision="bf16", inplace_wgrad_accum=False),
-            _ultradata_lora_sft_transform(),
-        ],
+        [dist_moe_transform, _ultradata_lora_sft_transform()],
     )
     # VarlenInnerAttention defaults to cuDNN first; on the 128k global layers it is ~13% slower than FA4.
     for _, inner_attention, _, _ in config.model.traverse(VarlenInnerAttention.Config):
         inner_attention.sdpa_backends = ["FLASH_ATTENTION"]
     return config
+
+
+# SLAKE medical VQA SFT recipes.
+
+_SLAKE_DATASET_PATH = "./assets/datasets/slake"
+# The shortest English SLAKE sample is 219 tokens (64 image tokens).
+_SLAKE_MIN_SAMPLE_TOKENS = 219
+# The English validation split packs into 214 microbatches of 4096 tokens.
+_SLAKE_VALIDATION_MICROBATCHES = 214
+# conv1_linear (the patch embedding) stays frozen.
+_SLAKE_LORA_VISION_TARGETS = [
+    "vision_encoder.block.attn.wq",
+    "vision_encoder.block.attn.wk",
+    "vision_encoder.block.attn.wv",
+    "vision_encoder.block.attn.proj",
+    "vision_encoder.block.mlp.fc1",
+    "vision_encoder.block.mlp.fc2",
+    "vision_adapter.c_fc",
+    "vision_adapter.c_proj",
+    "vision_projection",
+]
+_SlakeVariant = Literal["lora_decoder", "lora_vision_decoder"]
+# SLAKE answers are single words or short phrases. Without this LLaVA 1.5 prompt
+# the model answers in full sentences, so <|eot|> after a one-word label is very
+# unlikely. Training also teaches it to answer to=user directly when the prompt
+# is present. Eval and RL prompts must use the same text. RL that keeps direct
+# answers needs it too. RL that should reason before answering conflicts with this
+# SFT: drop the prompt there, or stop training the to=user header here.
+_SLAKE_ANSWER_INSTRUCTION = "Answer the question using a single word or phrase."
+
+
+def slake_messages(row: dict[str, Any], *, root: str) -> list[Message]:
+    """Return a user turn with the image, question and answer instruction, and
+    the answer turn."""
+    image_path = os.path.join(root, "imgs", row["img_name"])
+    return cast(
+        list[Message],
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image_path},
+                    {
+                        "type": "text",
+                        "text": f"{row['question']}\n{_SLAKE_ANSWER_INSTRUCTION}",
+                    },
+                ],
+            },
+            {"role": "assistant", "content": str(row["answer"])},
+        ],
+    )
+
+
+def _slake_dataset(root: str) -> SingleDatasetConfig:
+    from torchtitan.components.data.multimodal.mm_datasets import (
+        MultiModalChatProcessor,
+    )
+
+    # TODO: Drop train rows whose image is a duplicate or an adjacent slice of a
+    # validation or test image (same scan series), so test cases do not leak.
+    return SingleDatasetConfig(
+        source=HuggingFaceRandomAccessSource.Config(
+            path="json",
+            split="train",
+            load_dataset_kwargs={"data_files": os.path.join(root, "train.json")},
+        ),
+        pre_filters=(lambda row: row["q_lang"] == "en",),
+        processor=MultiModalChatProcessor.Config(
+            messages_fn=functools.partial(slake_messages, root=root),
+            # low (Reasoning strength 8) is the lowest level the published Muse Spark
+            # chat template supports.
+            renderer=MuseSparkRendererConfig(reasoning_effort="low", current_date=""),
+        ),
+        post_filters=(lambda sample: sample is not None,),
+    )
+
+
+def _use_slake_sft_data(config: Trainer.Config) -> None:
+    """Train on English SLAKE with vision as the only dataset modality.
+
+    Validation loss on the English validation split runs at step 1 and every 10
+    steps; training loss alone hides overfitting on this small dataset.
+    ``MUSE_SPARK_SLAKE_PATH`` overrides the SLAKE root, which holds
+    ``train.json``, ``validation.json`` and ``imgs/``.
+    """
+    from torchtitan.components.data.multimodal.mm_datasets import MMSamplePackingConfig
+
+    model_config = config.model
+    assert isinstance(model_config, MuseSparkModel.Config)
+    model_config = replace(model_config, dataset_modalities=("vision",))
+    config.model = model_config
+    root = os.environ.get("MUSE_SPARK_SLAKE_PATH", _SLAKE_DATASET_PATH)
+    loader = _muse_spark_mm_dataloader(model_config, _slake_dataset(root))
+    num_tokens = config.training.num_tokens_per_microbatch_per_dp_rank
+    config.dataloader = replace(
+        loader,
+        dataset=MMSamplePackingConfig(dataset=loader.dataset),
+        collator=replace(
+            loader.collator,
+            max_images_per_microbatch=num_tokens // _SLAKE_MIN_SAMPLE_TOKENS,
+        ),
+    )
+    parallelism = config.parallelism
+    dp_degree = (
+        parallelism.data_parallel_replicate_degree
+        * parallelism.data_parallel_shard_degree
+    )
+    # Same dataset config as training (processor, image resize and normalization)
+    # with validation.json as the source.
+    train_dataset = loader.dataset
+    assert isinstance(train_dataset, SingleDatasetConfig)
+    validation_dataset = replace(
+        train_dataset,
+        source=replace(
+            train_dataset.source,
+            load_dataset_kwargs={"data_files": os.path.join(root, "validation.json")},
+        ),
+    )
+    config.validator = Validator.Config(
+        freq=10,
+        # One validation step is one microbatch per DP rank; cover the split once.
+        steps=math.ceil(_SLAKE_VALIDATION_MICROBATCHES / dp_degree),
+        dataloader=replace(
+            config.dataloader,
+            dataset=MMSamplePackingConfig(dataset=validation_dataset),
+        ),
+    )
+
+
+def _slake_lora_transform(variant: _SlakeVariant) -> LoRATransform:
+    targets = list(_MUSE_SPARK_LORA_DECODER_TARGETS)
+    if variant == "lora_vision_decoder":
+        targets += _SLAKE_LORA_VISION_TARGETS
+    return LoRATransform(rank=8, alpha=16.0, target_modules=targets)
+
+
+def _muse_spark_816b_a42b_slake_sft(
+    variant: _SlakeVariant,
+) -> Trainer.Config:
+    """Configure English SLAKE LoRA SFT from released Muse Spark Open weights.
+
+    Stage ``meta-models/Muse-Spark-Open-816B-A42B`` at
+    ``./assets/hf/Muse-Spark-Open-816B-A42B``, or set
+    ``MUSE_SPARK_HF_ASSETS_PATH``. See ``_use_slake_sft_data`` for the data path.
+    Learning rates and step counts are untuned starting points.
+    """
+    seq_len = 4096  # The longest English SLAKE sample is 1553 tokens.
+    # LoRA runs on 8 GB300 GPUs (Dist-MoE and FA4 need SM100). A fake-PG run
+    # (random init, forced balanced routing) of this layout used 254 GiB
+    # allocated / 261 GiB reserved of 276.6 GiB per GPU. Use dp_shard=16 and
+    # EP=16 for more headroom.
+    parallelism = ParallelismConfig(
+        data_parallel_shard_degree=8,
+        tensor_parallel_degree=1,
+        context_parallel_degree=1,
+        expert_parallel_degree=8,
+        pipeline_parallel_degree=1,
+        enable_sequence_parallel=False,
+    )
+    config = _muse_spark_816b_a42b(seq_len, parallelism=parallelism)
+    config.model = build_model_config(
+        "816B-A42B_mm",
+        parallelism=config.parallelism,
+        seq_len=seq_len,
+        moe_comm_backend="standard",
+        attn_backend="flex",
+    )
+    config.hf_assets_path = os.environ.get(
+        "MUSE_SPARK_HF_ASSETS_PATH", _MUSE_SPARK_HF_ASSETS_PATH
+    )
+    # One pass over the English train split is 28.7 steps of 32 x 4096 tokens.
+    # LoRA vision + decoder validation loss was lowest after about 2 passes (step
+    # 60 of a 90-step run) and rose after that.
+    config.training.steps = 60
+    config.metrics.loggers = [TensorBoardLogger.Config()]
+    _use_slake_sft_data(config)
+    # LoRA freezes the router gates that the default optimizer groups match.
+    config.optim = _ultradata_lora_sft_optim(warmup_steps=10)
+    config.comm.init_timeout_seconds = 1800
+    config.comm.train_timeout_seconds = 1800
+    config.override.imports = []
+    _use_flex_flash_attention(config.model)
+    transforms = [_use_gb300_lora_dist_moe(config), _slake_lora_transform(variant)]
+    checkpointer = config.checkpointer
+    assert isinstance(checkpointer, TorchCheckpointingManager.Config)
+    checkpointer.folder = f"muse_spark_slake_{variant}"
+    return apply_transforms(config, transforms)
+
+
+def muse_spark_816b_a42b_slake_lora_decoder_sft() -> Trainer.Config:
+    return _muse_spark_816b_a42b_slake_sft("lora_decoder")
+
+
+def muse_spark_816b_a42b_slake_lora_vision_decoder_sft() -> Trainer.Config:
+    return _muse_spark_816b_a42b_slake_sft("lora_vision_decoder")
