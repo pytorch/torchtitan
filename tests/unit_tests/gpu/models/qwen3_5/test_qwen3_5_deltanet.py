@@ -529,7 +529,9 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
                 )
                 actual = model(x_TD, metadata)
             expected = self._main_forward_reference(model, x_TD, masks)
-            self.assertTrue(torch.equal(actual, expected))
+            # One in_proj GEMM vs six: cuBLAS may pick other kernels (A10G does), so
+            # compare at fp32 tolerance rather than bitwise.
+            torch.testing.assert_close(actual, expected)
 
     def _assert_packed_run_matches_per_document(self, model, x, positions, masks):
         """Packed forward under ``masks`` must equal stitched per-doc forwards.
