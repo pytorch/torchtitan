@@ -124,7 +124,7 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
         return 2
 
     @with_comms
-    def test_absorbed_router_scores_match_post_combine(self):
+    def test_router_scores_match_identity_expert_reference(self):
         mesh = init_device_mesh(
             self.device_type, (self.world_size,), mesh_dim_names=("ep",)
         )
@@ -140,8 +140,7 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                 num_max_tokens_per_rank=_NUM_TOKENS,
             ).build()
             dispatcher.init_buffer()
-            # Dyadic values keep score multiplication exact in BF16, isolating
-            # communication alignment from rounding differences around W2.
+            # Dyadic values make the identity-expert reference exact in BF16.
             x_TD = (
                 (torch.arange(_NUM_TOKENS, device=self.device_type) % 3 + 1)
                 .to(torch.bfloat16)[:, None]
@@ -161,7 +160,17 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
             ) % 3 + 1
             scores_TK = (2.0**-score_exponents_TK).requires_grad_()
             routing_map_TE = torch.nn.functional.one_hot(expert_ids_TK, 8).any(dim=1)
-            results = []
+            score_sum_T1 = scores_TK.detach().sum(dim=-1, keepdim=True)
+            expected_TD = (x_TD.detach().float() * score_sum_T1).to(x_TD.dtype)
+            # Closed-form gradients for loss = sum(output**2), in original token order.
+            expected_input_grad_TD = (2 * expected_TD.float() * score_sum_T1).to(
+                x_TD.dtype
+            )
+            expected_score_grad_TK = (
+                (2 * expected_TD.float() * x_TD.detach().float())
+                .sum(dim=-1, keepdim=True)
+                .expand_as(scores_TK)
+            )
             for absorb in (False, True):
                 routed_RD, _, metadata = dispatcher.dispatch(
                     x_TD,
@@ -169,9 +178,7 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                     expert_ids_TK,
                     routing_map_TE,
                 )
-                remat.recompute_needs_tensor(routed_RD)
                 if absorb:
-                    remat.recompute_needs_tensor(metadata.routed_scores_R)
                     routed_RD = (
                         routed_RD.float() * metadata.routed_scores_R[:, None]
                     ).bfloat16()
@@ -181,13 +188,16 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                     x_TD,
                     routed_scores_R=None if absorb else metadata.routed_scores_R,
                 )
-                remat.recompute_needs_tensor(out_TD)
                 grads = torch.autograd.grad(
                     out_TD.float().square().sum(), (x_TD, scores_TK)
                 )
-                results.append((out_TD.detach(), *grads))
-            for actual, expected in zip(results[1], results[0]):
-                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                torch.testing.assert_close(out_TD, expected_TD, rtol=0, atol=0)
+                torch.testing.assert_close(
+                    grads[0], expected_input_grad_TD, rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    grads[1], expected_score_grad_TK, rtol=0, atol=0
+                )
 
     @with_comms
     def test_dispatch_and_combine_are_saved_not_replayed(self):
