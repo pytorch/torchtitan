@@ -292,6 +292,7 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs(
             ),
             max_num_documents=4,
             preprocess_inputs_kwargs={},
+            _model_has_aux_loss=False,
             config=SimpleNamespace(
                 parallelism="PARA",
                 training=SimpleNamespace(
@@ -440,6 +441,7 @@ def test_forward_backward_runs_whole_accumulation(
         ),
     )
     engine.preprocess_inputs_kwargs = {"processor": "VALUE"}
+    engine._model_has_aux_loss = True
     engine.ntokens_seen = 100
     engine.num_completed_steps = 0
     engine.device = torch.device("cpu")
