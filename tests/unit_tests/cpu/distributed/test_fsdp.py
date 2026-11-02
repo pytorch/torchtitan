@@ -8,19 +8,23 @@ from unittest import mock
 
 import pytest
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.tensor import Shard
 
+from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.config.parallelism import FSDPSymmMemScope
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     enable_fsdp_symm_mem,
     linear_param_shard_placements,
 )
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
+from torchtitan.models.llama3.flavors import build_model_config
 
 
 class _FSDPModule(nn.Module):
@@ -68,6 +72,44 @@ def test_apply_fsdp_to_decoder_forwards_param_dtype_override_fn() -> None:
 
     mp_policy = fully_shard.call_args.kwargs["mp_policy"]
     assert mp_policy.param_dtype_override_fn is param_dtype_override_fn
+
+
+@pytest.mark.parametrize("keep_dtype", [True, False])
+@mock.patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
+def test_decoder_fsdp_param_dtype_override_fn_keeps_float32_param(
+    keep_dtype: bool,
+) -> None:
+    # As the RL generator does: a bf16 model with one frozen float32 parameter.
+    dist.init_process_group("gloo", store=dist.HashStore(), rank=0, world_size=1)
+    try:
+        parallelism = ParallelismConfig()
+        model = build_model_config("debugmodel", parallelism=parallelism).build()
+        model.to(torch.bfloat16)
+        model.norm.weight.data = model.norm.weight.data.float()
+        model.norm.weight.requires_grad_(False)
+        if keep_dtype:
+            model._fsdp_param_dtype_override_fn = lambda param: param.dtype
+        model._apply_fsdp(
+            parallelism_context=ParallelismContext(
+                dp_replicate=1,
+                dp_shard=1,
+                cp=1,
+                tp=1,
+                pp=1,
+                ep=1,
+                world_size=1,
+                enable_sequence_parallel=False,
+            ),
+            training=TrainingConfig(),
+            parallelism=parallelism,
+        )
+        model.norm.unshard()
+        assert model.norm.weight.dtype == (
+            torch.float32 if keep_dtype else torch.bfloat16
+        )
+        assert model.lm_head.weight.dtype == torch.bfloat16
+    finally:
+        dist.destroy_process_group()
 
 
 def test_apply_fsdp_to_decoder_shards_an_moe_held_as_mlp() -> None:

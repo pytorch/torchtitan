@@ -9,7 +9,7 @@
 # Shape suffixes:
 # T = packed tokens, D = model dimension, C = projection channels,
 # H = attention heads, K = query/key head dimension, V = value head dimension,
-# S = state slots, W = convolution kernel width.
+# S = state slots, W = convolution kernel width, G = key-head groups.
 
 from dataclasses import dataclass
 
@@ -20,6 +20,7 @@ import torch_remat as remat
 from torch import nn
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.base.module import Module
 
 from torchtitan.models.common.attn_gym import (
@@ -36,11 +37,7 @@ from torchtitan.models.common.attn_gym import (
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.models.common.norm import GatedRMSNorm
-from .attention import (
-    create_varlen_metadata_for_document,
-    InnerAttention,
-    local_head_split,
-)
+from .attention import create_varlen_metadata_for_document, InnerAttention
 from .linear_attention import (
     chunk_kernel_options,
     LinearAttention,
@@ -207,6 +204,51 @@ _recurrent_gdn_fwd.register_autograd(
 )
 
 
+@spmd.local_map(
+    # split_sizes is a list of six ints.
+    in_types=(spmd.PartitionSpec(("dp", "cp"), "tp"), [None] * 6, None),
+    out_types=(
+        # Nominal tp S(1): each rank holds its own [q | k | v]; never redistribute or gather it.
+        spmd.PartitionSpec(("dp", "cp"), "tp"),  # mixed_qkv_TC
+        spmd.PartitionSpec(("dp", "cp"), "tp"),  # a_TH
+        spmd.PartitionSpec(("dp", "cp"), "tp"),  # b_TH
+        spmd.PartitionSpec(("dp", "cp"), "tp", None),  # gate_THV
+    ),
+)
+@local_compile("gdn_split_in_proj", batch_invariant=True)
+def _split_in_proj(
+    projected_TC: torch.Tensor,
+    split_sizes: list[int],
+    value_head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Split ``GDN.in_proj``'s output into ``(mixed_qkv_TC, a_TH, b_TH, gate_THV)``.
+
+    ``in_proj`` rows are grouped by key head, so ``q|k|v`` is copied into one
+    contiguous block for the convolution. Example, 27B at TP4 (4 local key heads,
+    3 value heads per key head, head dims 128):
+
+        projected_TC [T, 4 * 1030]   per key head [q 128 | k 128 | v 384 | z 384 | a 3 | b 3]
+        mixed_qkv_TC [T, 2560]       [q 512 | k 512 | v 1536]
+        a_TH, b_TH   [T, 12]
+        gate_THV     [T, 12, 128]
+    """
+    num_tokens = projected_TC.shape[0]
+    grouped_TGC = projected_TC.unflatten(-1, (-1, sum(split_sizes)))
+    query, key, value, gate, a, b = grouped_TGC.split(split_sizes, dim=-1)
+    mixed_qkv_TC = torch.cat(
+        [query.flatten(1), key.flatten(1), value.flatten(1)], dim=-1
+    )
+    gate_THV = gate.reshape(num_tokens, -1, value_head_dim)
+    # The GDN kernels need contiguous heads. With one value head per key head (0.8B, 2B),
+    # flatten and reshape return strided views instead of copies.
+    return (
+        mixed_qkv_TC,
+        a.flatten(1).contiguous(),
+        b.flatten(1).contiguous(),
+        gate_THV.contiguous(),
+    )
+
+
 class GDNKernel(Module):
     """Run GDN on rank-local tensors.
 
@@ -269,9 +311,9 @@ class GDNKernel(Module):
 class InnerGDN(InnerAttention):
     """Dense GDN computation behind the vLLM replacement boundary.
 
-    The trainer keeps Q, K, and V separate, matching the main-branch GDN flow.
-    The vLLM replacement may fuse them internally for its paged convolution
-    cache without changing this dense path.
+    ``mixed_qkv_TC`` holds each rank's ``[q | k | v]`` columns. This dense path
+    convolves the three blocks separately; the vLLM replacement convolves them
+    in one paged call.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -306,9 +348,7 @@ class InnerGDN(InnerAttention):
 
     def forward(
         self,
-        query_TC: torch.Tensor,
-        key_TC: torch.Tensor,
-        value_TC: torch.Tensor,
+        mixed_qkv_TC: torch.Tensor,
         a_TH: torch.Tensor,
         b_TH: torch.Tensor,
         conv_q_weight_C1W: torch.Tensor,
@@ -321,6 +361,14 @@ class InnerGDN(InnerAttention):
         value_head_dim: int,
         attention_metadata: LinearAttentionMetadata | None,
     ) -> torch.Tensor:
+        query_TC, key_TC, value_TC = mixed_qkv_TC.split(
+            [
+                conv_q_weight_C1W.shape[0],
+                conv_k_weight_C1W.shape[0],
+                conv_v_weight_C1W.shape[0],
+            ],
+            dim=-1,
+        )
         varlen = attention_metadata.varlen if attention_metadata is not None else None
         cu_seqlens = varlen.cu_seq_q if varlen is not None else None
         if cu_seqlens is None and is_in_batch_invariant_mode():
@@ -476,32 +524,57 @@ class GDN(LinearAttention):
     class Config(LinearAttention.Config):
         key_head_dim: int
         value_head_dim: int
+        # Query/key heads; n_heads counts value heads.
+        n_key_heads: int
         conv_kernel_size: int = 4
 
         # Sub-module configs
-        in_proj_q: Linear.Config
-        in_proj_k: Linear.Config
-        in_proj_v: Linear.Config
-        in_proj_z: Linear.Config
-        in_proj_a: Linear.Config
-        in_proj_b: Linear.Config
+        # One projection for q, k, v, z, a and b, with rows grouped by key head
+        # (r = n_heads // n_key_heads value heads per key head):
+        #   [q key_head_dim | k key_head_dim | v r*value_head_dim | z r*value_head_dim | a r | b r]
+        # so a TP shard holds whole heads of all six, like QKVLinear's wqkv per KV group.
+        in_proj: Linear.Config
         conv_q: Conv1d.Config
         conv_k: Conv1d.Config
         conv_v: Conv1d.Config
         norm: GatedRMSNorm.Config
         out_proj: Linear.Config
 
+        @property
+        def in_proj_split_sizes(self) -> list[int]:
+            """Rows of q, k, v, z, a, b per key head; 27B: [128, 128, 384, 384, 3, 3]."""
+            heads_per_key = self.n_heads // self.n_key_heads
+            value_dim = heads_per_key * self.value_head_dim
+            return [
+                self.key_head_dim,
+                self.key_head_dim,
+                value_dim,
+                value_dim,
+                heads_per_key,
+                heads_per_key,
+            ]
+
+        def __post_init__(self):
+            LinearAttention.Config.__post_init__(self)
+            if self.n_heads % self.n_key_heads != 0:
+                raise ValueError(
+                    f"n_heads ({self.n_heads}) must be divisible by "
+                    f"n_key_heads ({self.n_key_heads})"
+                )
+            in_proj_rows = self.n_key_heads * sum(self.in_proj_split_sizes)
+            if self.in_proj.out_features != in_proj_rows:
+                raise ValueError(
+                    f"in_proj.out_features ({self.in_proj.out_features}) must be "
+                    f"n_key_heads * sum(in_proj_split_sizes) ({in_proj_rows})"
+                )
+
     def __init__(self, config: Config):
         super().__init__()
         self.key_head_dim = config.key_head_dim
         self.value_head_dim = config.value_head_dim
+        self.in_proj_split_sizes = config.in_proj_split_sizes
 
-        self.in_proj_q = config.in_proj_q.build()
-        self.in_proj_k = config.in_proj_k.build()
-        self.in_proj_v = config.in_proj_v.build()
-        self.in_proj_z = config.in_proj_z.build()
-        self.in_proj_a = config.in_proj_a.build()
-        self.in_proj_b = config.in_proj_b.build()
+        self.in_proj = config.in_proj.build()
 
         self.conv_q = config.conv_q.build()
         self.conv_k = config.conv_k.build()
@@ -519,26 +592,22 @@ class GDN(LinearAttention):
         x_TD: torch.Tensor,
         attention_metadata: LinearAttentionMetadata | None = None,
     ) -> torch.Tensor:
-        # All six input projections consume x, so gather it once before
-        # entering their separate compute paths.
         x_TD = maybe_gather_tp_input(self, x_TD)
 
         num_tokens = x_TD.shape[0]
-        query_TC = self.in_proj_q(x_TD)
-        key_TC = self.in_proj_k(x_TD)
-        value_TC = self.in_proj_v(x_TD)
-        gate_TC = self.in_proj_z(x_TD)
-        a_TH = self.in_proj_a(x_TD)
-        b_TH = self.in_proj_b(x_TD)
+        projected_TC = self.in_proj(x_TD)
+        # The split copies the in_proj output with bare ops.
+        remat.recompute_needs_tensor(projected_TC)
+        mixed_qkv_TC, a_TH, b_TH, gate_THV = _split_in_proj(
+            projected_TC, self.in_proj_split_sizes, self.value_head_dim
+        )
 
         output_THV = remat.region(
             self.inner_attention,
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
         )(
-            query_TC,
-            key_TC,
-            value_TC,
+            mixed_qkv_TC,
             a_TH,
             b_TH,
             self.conv_q.weight,
@@ -550,9 +619,7 @@ class GDN(LinearAttention):
             value_head_dim=self.value_head_dim,
             attention_metadata=attention_metadata,
         )
-        gate_THV = local_head_split(gate_TC, self.value_head_dim, cp_shard_dim=0)
-        # The gated norm reads the inner_attention and in_proj_z projection outputs
-        # with bare ops.
+        # The gated norm reads the inner_attention and split outputs with bare ops.
         remat.recompute_needs_tensor(output_THV, gate_THV)
         output_THV = self.norm(output_THV, gate_THV)
         out_TD = output_THV.reshape(num_tokens, -1)

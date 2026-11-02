@@ -145,12 +145,8 @@ def _replace_vllm_layer_configs(model_config):
 
             vllm_inner_gdn_cfg = VLLMInnerGDN.Config(
                 layer_idx=layer_idx,
-                num_k_heads=(
-                    delta_net_cfg.in_proj_q.out_features // delta_net_cfg.key_head_dim
-                ),
-                num_v_heads=(
-                    delta_net_cfg.in_proj_v.out_features // delta_net_cfg.value_head_dim
-                ),
+                num_k_heads=delta_net_cfg.n_key_heads,
+                num_v_heads=delta_net_cfg.n_heads,
                 head_k_dim=delta_net_cfg.key_head_dim,
                 head_v_dim=delta_net_cfg.value_head_dim,
                 conv_kernel_size=delta_net_cfg.conv_kernel_size,
@@ -462,6 +458,16 @@ class VLLMModelWrapper(Module):
         # Build model on meta device to avoid allocating full model on every GPU
         with self.parallelism_context.activate_spmd(), torch.device("meta"):
             self.model = self.config.build()
+        # The GDN kernels read A_log and dt_bias in float32. Keeping them in float32
+        # casts them once per weight load instead of in every step. Frozen: FSDP needs
+        # one dtype among parameters with grad.
+        for module in self.model.modules():
+            if isinstance(module, GDN):
+                for param in (module.A_log, module.dt_bias):
+                    param.data = param.data.float()
+                    param.requires_grad_(False)
+        # FSDP keeps each parameter in its own dtype: the rest are already the model dtype.
+        self.model._fsdp_param_dtype_override_fn = lambda param: param.dtype
         self.model._skip_lm_head = True
         if getattr(self.model, "vision_encoder", None) is not None:
             self.model.vision_encoder = None
@@ -513,6 +519,7 @@ class VLLMModelWrapper(Module):
         if self.parallelism_context.tp_enabled and not is_in_batch_invariant_mode():
             _patch_vllm_all_reduce()
 
+        self._model_dtype = vllm_config.model_config.dtype
         self._fsdp_load_groups, self._buffer_keys = _fsdp_load_groups(self.model)
         if model_state_dict_load_mode == "gpu_fetch":
             # gpu_fetch writes into the sharded parameter itself, not a quantized
@@ -531,9 +538,17 @@ class VLLMModelWrapper(Module):
         maybe_apply_numa_binding(torch.cuda.current_device(), "cuda")
         self._prefetched_model_state_dict: dict[str, torch.Tensor] | None = None
         if model_state_dict_load_mode == "cpu_prefetch":
+            # Receive what the trainer sends: parameters in the model dtype, buffers in their own.
+            # torchstore's RDMA transport copies bytes and asserts matching dtypes.
+            # The load casts the float32 GDN parameters.
+            buffer_keys = set(self._buffer_keys)
+            model_state_dict = {
+                key: (tensor if key in buffer_keys else tensor.to(self._model_dtype))
+                for key, tensor in self.model.state_dict().items()
+            }
             with torch.device("cpu"):
                 self._prefetched_model_state_dict = _create_cpu_state_dict(
-                    self.model.state_dict(), pin_memory=True
+                    model_state_dict, pin_memory=True
                 )
 
         # Unshard the model here so vLLM performs its GPU memory profiling
