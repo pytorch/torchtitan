@@ -40,7 +40,7 @@ _TOP_K = 2
 
 
 class _DeepEPBlock(Module):
-    def __init__(self, num_experts: int):
+    def __init__(self, num_experts: int, *, score_after_w2: bool = False):
         super().__init__()
         # RoutedExperts.forward runs after EP has selected this rank's local
         # expert-weight shard. This test bypasses parallelization, so construct
@@ -73,6 +73,7 @@ class _DeepEPBlock(Module):
                 parameter.normal_(std=0.05)
         self.routed_experts = routed_experts
         self.num_experts = num_experts
+        self.score_after_w2 = score_after_w2
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
         num_tokens = x_TD.shape[0]
@@ -84,12 +85,30 @@ class _DeepEPBlock(Module):
         routing_map_TE = torch.zeros(
             num_tokens, self.num_experts, dtype=torch.bool, device=x_TD.device
         ).scatter_(1, expert_ids_TK, True)
-        out_TD = self.routed_experts(
-            x_TD,
-            scores_TK,
-            expert_ids_TK,
-            routing_map_TE,
-        )
+        if self.score_after_w2:
+            # Reference the original DeepEP path: compute unscaled experts, then
+            # apply router scores in combine, after W2.
+            experts = self.routed_experts
+            routed_RD, counts_E, metadata = experts.token_dispatcher.dispatch(
+                x_TD, scores_TK, expert_ids_TK, routing_map_TE
+            )
+            offsets_E = counts_E.cumsum(dim=0, dtype=torch.int32)
+            gate_up_R2F = experts.w13(routed_RD, offsets_E)
+            hidden_RF = experts.activation_fn(gate_up_R2F, offsets=offsets_E)
+            routed_output_RD = experts.w2(hidden_RF, offsets_E)
+            out_TD = experts.token_dispatcher.combine(
+                routed_output_RD,
+                metadata,
+                x_TD,
+                routed_scores_R=metadata.routed_scores_R,
+            )
+        else:
+            out_TD = self.routed_experts(
+                x_TD,
+                scores_TK,
+                expert_ids_TK,
+                routing_map_TE,
+            )
         # The loss is a bare consumer of the routed-expert output.
         remat.recompute_needs_tensor(out_TD)
         return out_TD.float().square().sum()
@@ -110,11 +129,12 @@ def _run_forward_backward(
 ) -> tuple[torch.Tensor, list[torch.Tensor]]:
     model.zero_grad(set_to_none=True)
     input_TD = x_TD.detach().clone().requires_grad_(True)
-    model(input_TD).backward()
+    loss = model(input_TD)
+    loss.backward()
     assert input_TD.grad is not None
     grads = [input_TD.grad.detach().clone()]
     grads += [parameter.grad.detach().clone() for parameter in model.parameters()]
-    return grads
+    return loss.detach().clone(), grads
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
@@ -122,82 +142,6 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
     @property
     def world_size(self) -> int:
         return 2
-
-    @with_comms
-    def test_router_scores_match_identity_expert_reference(self):
-        mesh = init_device_mesh(
-            self.device_type, (self.world_size,), mesh_dim_names=("ep",)
-        )
-        set_spmd_meshes(dense_mesh=mesh, sparse_mesh=mesh, dense_sp_enabled=False)
-        with (
-            set_current_spmd_mesh(mesh),
-            torch.autograd.set_multithreading_enabled(False),
-        ):
-            dispatcher = DeepEPTokenDispatcher.Config(
-                num_experts=8,
-                top_k=_TOP_K,
-                hidden_dim=_MODEL_DIM,
-                num_max_tokens_per_rank=_NUM_TOKENS,
-            ).build()
-            dispatcher.init_buffer()
-            # Dyadic values make the identity-expert reference exact in BF16.
-            x_TD = (
-                (torch.arange(_NUM_TOKENS, device=self.device_type) % 3 + 1)
-                .to(torch.bfloat16)[:, None]
-                .expand(-1, _MODEL_DIM)
-                .clone()
-                .requires_grad_()
-            )
-            expert_ids_TK = (
-                torch.arange(_NUM_TOKENS, device=self.device_type)[:, None]
-                + torch.arange(_TOP_K, device=self.device_type)
-                + self.rank
-            ) % 8
-            score_exponents_TK = (
-                torch.arange(_NUM_TOKENS, device=self.device_type)[:, None] // 8
-                + torch.arange(_TOP_K, device=self.device_type)
-                + self.rank
-            ) % 3 + 1
-            scores_TK = (2.0**-score_exponents_TK).requires_grad_()
-            routing_map_TE = torch.nn.functional.one_hot(expert_ids_TK, 8).any(dim=1)
-            score_sum_T1 = scores_TK.detach().sum(dim=-1, keepdim=True)
-            expected_TD = (x_TD.detach().float() * score_sum_T1).to(x_TD.dtype)
-            # Closed-form gradients for loss = sum(output**2), in original token order.
-            expected_input_grad_TD = (2 * expected_TD.float() * score_sum_T1).to(
-                x_TD.dtype
-            )
-            expected_score_grad_TK = (
-                (2 * expected_TD.float() * x_TD.detach().float())
-                .sum(dim=-1, keepdim=True)
-                .expand_as(scores_TK)
-            )
-            for absorb in (False, True):
-                routed_RD, _, metadata = dispatcher.dispatch(
-                    x_TD,
-                    scores_TK,
-                    expert_ids_TK,
-                    routing_map_TE,
-                )
-                if absorb:
-                    routed_RD = (
-                        routed_RD.float() * metadata.routed_scores_R[:, None]
-                    ).bfloat16()
-                out_TD = dispatcher.combine(
-                    routed_RD,
-                    metadata,
-                    x_TD,
-                    routed_scores_R=None if absorb else metadata.routed_scores_R,
-                )
-                grads = torch.autograd.grad(
-                    out_TD.float().square().sum(), (x_TD, scores_TK)
-                )
-                torch.testing.assert_close(out_TD, expected_TD, rtol=0, atol=0)
-                torch.testing.assert_close(
-                    grads[0], expected_input_grad_TD, rtol=0, atol=0
-                )
-                torch.testing.assert_close(
-                    grads[1], expected_score_grad_TK, rtol=0, atol=0
-                )
 
     @with_comms
     def test_dispatch_and_combine_are_saved_not_replayed(self):
@@ -215,9 +159,8 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
 
     @with_comms
     def test_region_ac_replay_is_exact(self):
-        # The full policy and policies without ep_communication saved replay dispatch and
-        # combine. DeepEP then uses a deterministic buffer, which receives rows in
-        # the forward's order, so the gradients match the run without AC bitwise.
+        # These policies replay dispatch with a deterministic buffer, so the
+        # gradients match the run without AC bitwise. Combine is always saved.
         self._check_deepep_activation_checkpointing(
             (
                 FullActivationRematConfig(),
@@ -256,13 +199,18 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                 ac_model = _Model(_DeepEPBlock(num_experts)).to(
                     self.device_type, torch.bfloat16
                 )
+                reference = _Model(_DeepEPBlock(num_experts, score_after_w2=True)).to(
+                    self.device_type, torch.bfloat16
+                )
                 ac_model.load_state_dict(baseline.state_dict())
+                reference.load_state_dict(baseline.state_dict())
                 activation_remat.apply(ac_model)
-                # As in training, the buffer is created after AC is applied. Both
+                # As in training, the buffer is created after AC is applied. All
                 # models share it, so the baseline also runs deterministic when
                 # the AC model replays.
                 baseline.layers["0"].routed_experts.token_dispatcher.init_buffer()
                 ac_model.layers["0"].routed_experts.token_dispatcher.init_buffer()
+                reference.layers["0"].routed_experts.token_dispatcher.init_buffer()
 
                 num_calls = {"dispatch": 0, "combine": 0}
                 original = {
@@ -297,10 +245,28 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                         side_effect=counted("combine"),
                     ),
                 ):
-                    expected = _run_forward_backward(baseline, x_TD)
+                    expected_loss, expected = _run_forward_backward(baseline, x_TD)
                     baseline_calls = dict(num_calls)
                     num_calls.update(dispatch=0, combine=0)
-                    actual = _run_forward_backward(ac_model, x_TD)
+                    actual_loss, actual = _run_forward_backward(ac_model, x_TD)
+
+                reference_loss, reference_grads = _run_forward_backward(reference, x_TD)
+                # Moving the multiply across W2 changes BF16 rounding. Bound
+                # relative L2 error by two BF16 epsilons for loss and each grad;
+                # unlike elementwise relative error, this handles cancellation
+                # near zero. Checkpoint equivalence below stays bitwise exact
+                # when dispatch is deterministic.
+                for value, reference_value in zip(
+                    [expected_loss, *expected],
+                    [reference_loss, *reference_grads],
+                    strict=True,
+                ):
+                    self.assertLessEqual(
+                        (value.float() - reference_value.float()).norm().item(),
+                        2
+                        * torch.finfo(torch.bfloat16).eps
+                        * reference_value.float().norm().item(),
+                    )
 
                 # Forward dispatch and combine, plus their backward passes.
                 self.assertEqual(baseline_calls, {"dispatch": 2, "combine": 2})
@@ -310,7 +276,12 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                     msg=f"unexpected DeepEP replays: {num_calls}",
                 )
                 if num_replays:
-                    for actual_grad, expected_grad in zip(actual, expected):
+                    torch.testing.assert_close(
+                        actual_loss, expected_loss, rtol=0, atol=0
+                    )
+                    for actual_grad, expected_grad in zip(
+                        actual, expected, strict=True
+                    ):
                         torch.testing.assert_close(
                             actual_grad, expected_grad, rtol=0, atol=0
                         )
@@ -318,5 +289,8 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                     # Not bitwise: the receive order can differ between the two
                     # runs, which changes the summation order of the expert
                     # weight grads.
-                    for actual_grad, expected_grad in zip(actual, expected):
+                    torch.testing.assert_close(actual_loss, expected_loss)
+                    for actual_grad, expected_grad in zip(
+                        actual, expected, strict=True
+                    ):
                         torch.testing.assert_close(actual_grad, expected_grad)
