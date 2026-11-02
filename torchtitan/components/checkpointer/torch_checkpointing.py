@@ -522,6 +522,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
                 self._manager.close()
 
     def _save_last_step(self, curr_step: int) -> None:
+        checkpoint_id = self._create_last_step_id(curr_step)
         if self.last_save_model_only:
             model_state = self.states[MODEL].state_dict()
             # Cast floating-point tensors to the export dtype and preserve other
@@ -537,7 +538,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             states: dict[str, Any] = {MODEL: model_state}
             logger.info(
                 f"Saving a model only checkpoint in {self.export_dtype} "
-                f"at last step, step {curr_step}."
+                f"at last step, step {curr_step}, to {checkpoint_id}."
             )
         else:
             states = self.states
@@ -545,7 +546,6 @@ class TorchCheckpointingManager(BaseCheckpointManager):
 
         # The final save must land before the process exits, so retire the async
         # manager and write synchronously through a fresh one.
-        checkpoint_id = self._create_checkpoint_id(curr_step)
         self._manager.close()
         storage_config = self._manager_config.storage_config
         input_checkpoint_id = checkpoint_id

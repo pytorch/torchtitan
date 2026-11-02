@@ -217,6 +217,7 @@ class BaseCheckpointManager(Configurable, ABC):
     initial_load_model_only: bool
     initial_load_in_hf: bool
     initial_load_in_hf_quantized: bool
+    last_save_model_only: bool
     sd_adapter: BaseStateDictAdapter | None
     purge_exempt: Callable[[int], bool] | None = None
     purge_thread: threading.Thread | None
@@ -392,6 +393,20 @@ class BaseCheckpointManager(Configurable, ABC):
         """Standardized checkpoint path, e.g. ``checkpoints/step-100``."""
         folder = folder or self.folder
         return filesystem.join(folder, f"step-{step}")
+
+    def _create_last_step_id(self, step: int) -> str:
+        """Path for the final save of a training run.
+
+        A model-only final save is an export that cannot restore the training
+        state, so it goes to ``exports/step-N``, where automatic loading never
+        looks. Step 0 is the seed checkpoint (``create_seed_checkpoint``), which
+        ``load()`` restores as model-only, so it stays at ``step-0``.
+        """
+        if self.last_save_model_only and step > 0:
+            return self._create_checkpoint_id(
+                step, folder=filesystem.join(self.folder, "exports")
+            )
+        return self._create_checkpoint_id(step)
 
     @abstractmethod
     def _load_checkpoint(

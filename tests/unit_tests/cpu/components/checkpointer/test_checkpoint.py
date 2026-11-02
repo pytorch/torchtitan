@@ -734,6 +734,67 @@ class TestCheckpointManager(unittest.TestCase):
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch.object(dist_checkpoint, "save")
     @mock.patch.object(dist_checkpoint, "load")
+    def test_auto_resume_skips_final_model_only_export(
+        self, mock_load, mock_save, mock_rank
+    ):
+        # Regression for #5054: the final model-only save cannot restore the
+        # training state, so rerunning with more steps must resume from the
+        # newest full checkpoint instead of failing on the export.
+        mock_save.side_effect = self.fake_save
+        mock_load.side_effect = self.fake_load
+        cfg = self.trainer_config.checkpointer
+        cfg.interval = 2
+        cfg.keep_latest_k = 0
+        cfg.last_save_model_only = True
+        manager = CheckpointManager(
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            ema=self.ema,
+            extra_states=self.states,
+            config=self.trainer_config.checkpointer,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+        manager.save(curr_step=2)
+        manager.save(curr_step=3, last_step=True)
+        self.assertEqual(["exports", "step-2"], sorted(os.listdir(self.test_folder)))
+        self.assertEqual(
+            ["step-3"], os.listdir(os.path.join(self.test_folder, "exports"))
+        )
+
+        self.assertTrue(manager.load())
+        _, kwargs = mock_load.call_args
+        self.assertEqual(
+            os.path.join(self.test_folder, "step-2"), kwargs.get("checkpoint_id")
+        )
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch.object(dist_checkpoint, "save")
+    def test_seed_checkpoint_stays_at_step_zero(self, mock_save, mock_rank):
+        # create_seed_checkpoint saves through the last-step path at step 0, and
+        # load() restores step-0 as the model-only seed. Moving it under
+        # exports/ would make every seeded run silently start from scratch.
+        mock_save.side_effect = self.fake_save
+        self.trainer_config.checkpointer.last_save_model_only = True
+        manager = CheckpointManager(
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            ema=self.ema,
+            extra_states=self.states,
+            config=self.trainer_config.checkpointer,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+        manager.save(curr_step=0, last_step=True)
+        self.assertEqual(["step-0"], os.listdir(self.test_folder))
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch.object(dist_checkpoint, "save")
+    @mock.patch.object(dist_checkpoint, "load")
     def test_last_save_model_only_and_initial_load_model_only(
         self, mock_load, mock_save, mock_rank
     ):
@@ -752,9 +813,9 @@ class TestCheckpointManager(unittest.TestCase):
             base_folder=self.trainer_config.dump_folder,
         )
         manager1.save(curr_step=1, last_step=True)
-        path1 = os.path.join(self.test_folder, "step-1")
+        path1 = os.path.join(self.test_folder, "exports", "step-1")
         self.assertTrue(os.path.isdir(path1))
-        # Phase 2: initial load from step-1
+        # Phase 2: initial load from the export
         cfg = self.trainer_config.checkpointer
         cfg.last_save_model_only = False
         cfg.initial_load_model_only = True
