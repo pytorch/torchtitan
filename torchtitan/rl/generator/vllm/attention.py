@@ -298,6 +298,17 @@ class _VLLMAttention(Attention, Module):
     """vLLM attention that participates in the TorchTitan Module protocol."""
 
 
+def _exclude_vllm_attn_scales_from_state_dict(layer: torch.nn.Module) -> None:
+    """Re-register a vLLM attention layer's quantization scales as non-persistent.
+
+    vLLM registers them as persistent buffers, but they are not model weights, so
+    keeping them in the state dict breaks HF state dict adapters that reject
+    unmapped keys.
+    """
+    for name in VLLMInnerAttention.vllm_attn_scale_buffer_names:
+        layer.register_buffer(name, layer._buffers.pop(name), persistent=False)
+
+
 class VLLMInnerAttention(InnerAttention):
     """Adapter from TorchTitan tensor layout to ``vllm.Attention``.
 
@@ -401,6 +412,7 @@ class VLLMInnerAttention(InnerAttention):
             prefix=f"model.layers.{layer_id}.attention.inner_attention",
             **diff_kv_kwargs,
         )
+        _exclude_vllm_attn_scales_from_state_dict(self.vllm_attn)
         # Set sharding config for the inner vLLM attention module, which has scale
         # buffers that need to be replicated on all ranks in the dense mesh
         replicated_dense = dense_param_placement(tp=spmd.R)
@@ -420,7 +432,7 @@ class VLLMInnerAttention(InnerAttention):
         scale: float | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        """Run vLLM paged attention on local (non-DTensor) tensors.
+        """Run vLLM paged attention on rank-local tensors.
 
         Args:
             q_THK: ``(num_tokens, num_heads, query/key_head_dim)``

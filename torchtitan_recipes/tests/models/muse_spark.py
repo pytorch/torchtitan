@@ -134,7 +134,7 @@ def muse_spark_debugmodel(
             dtype="float32",
             mixed_precision_param="bfloat16",
             mixed_precision_reduce="float32",
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=None,
@@ -291,7 +291,7 @@ def muse_spark_debugmodel_ultradata_lora_sft() -> Trainer.Config:
         dtype="bfloat16",
         mixed_precision_param="bfloat16",
         mixed_precision_reduce="float32",
-        disable_cuda_graphs=True,
+        disable_accelerator_graphs=True,
     )
     config.parallelism = ParallelismConfig(
         data_parallel_replicate_degree=1,

@@ -20,12 +20,11 @@ from torchtitan.config import Configurable, DebugConfig, TrainingConfig
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.rl.actors.monarch.trainer import TrainerActor
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
-from torchtitan.rl.trainer.controller_state import MirroredState
 from torchtitan.rl.trainer.rdma_microbatch import (
     RDMAMicrobatch,
     RDMAMicrobatchPrefetcher,
 )
-from torchtitan.rl.trainer.trainer import Trainer
+from torchtitan.rl.trainer.trainer import MirroredState, Trainer
 from torchtitan.trainer import Trainer as DatasetTrainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
@@ -53,7 +52,7 @@ def test_mirrored_state_uses_a_fixed_opaque_template() -> None:
 
 
 def test_rl_trainer_uses_training_engine_config_defaults() -> None:
-    assert not Trainer.Config(model=MagicMock()).training.disable_cuda_graphs
+    assert not Trainer.Config(model=MagicMock()).training.disable_accelerator_graphs
 
 
 def test_initialize_torchstore_client_uses_publisher_role() -> None:
@@ -212,7 +211,7 @@ def test_rl_trainer_accepts_core_sdc_replay_config() -> None:
     config = Trainer.Config(
         model=MagicMock(),
         debug=DebugConfig(deterministic=True),
-        training=TrainingConfig(disable_cuda_graphs=True),
+        training=TrainingConfig(disable_accelerator_graphs=True),
         sdc_replayer=SDCReplayer.Config(),
     )
 
@@ -227,7 +226,7 @@ def test_rl_trainer_validates_model_training_config_before_initialization(
 
     model_config = MagicMock()
     config = Trainer.Config(
-        model=model_config, training=TrainingConfig(disable_cuda_graphs=True)
+        model=model_config, training=TrainingConfig(disable_accelerator_graphs=True)
     )
 
     with patch(
@@ -259,7 +258,8 @@ def test_forward_backward_uses_global_token_count() -> None:
         optim=SimpleNamespace(zero_grad=MagicMock()),
         config=SimpleNamespace(
             training=SimpleNamespace(
-                disable_cuda_graphs=True, preprocess_microbatch_groups_lazily=False
+                disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=False,
             ),
             parallelism=SimpleNamespace(
                 fsdp_defer_gradient_reduction=False,
@@ -276,7 +276,7 @@ def test_forward_backward_uses_global_token_count() -> None:
         _run_forward_backward=MagicMock(
             return_value=ForwardBackwardResult(torch.tensor(1.0), [])
         ),
-        _cuda_graph_per_microbatch_group_enabled=False,
+        _accelerator_graph_per_microbatch_group_enabled=False,
         sdc_replayer=None,
     )
     microbatch_groups = [[object()], [object()], [object()]]
@@ -304,7 +304,7 @@ def test_close_stops_training_engine() -> None:
             close=MagicMock(),
         )
         trainer.engine = engine
-        trainer._controller_state = MirroredState()
+        trainer._resume_state = MirroredState()
 
         await Trainer.close(trainer)
 
@@ -326,15 +326,13 @@ def test_policy_version_is_restored_with_training_engine_state() -> None:
     assert trainer.policy_version == 7
 
 
-def test_get_controller_state_returns_restored_state() -> None:
+def test_get_resume_state_returns_restored_state() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
-        trainer._controller_state = MirroredState()
-        trainer._controller_state.loaded = {"dataloader": {"next_index": 11}}
+        trainer._resume_state = MirroredState()
+        trainer._resume_state.loaded = {"next_index": 11}
 
-        assert await trainer.get_controller_state() == {
-            "dataloader": {"next_index": 11}
-        }
+        assert await trainer.get_resume_state() == {"next_index": 11}
 
     asyncio.run(run())
 
@@ -561,7 +559,7 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
             torch.tensor(2.0),
         )[1]
         trainer.engine = engine
-        trainer._controller_state = MirroredState()
+        trainer._resume_state = MirroredState()
         trainer.gpu_peak_flops = 1000
         trainer._step_compute_start = 0.0
         trainer._step_num_tokens_per_dp_rank = 10
@@ -589,7 +587,7 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
         ):
             result = await Trainer.optim_step(
                 trainer,
-                controller_state={"dataloader": {"next_index": 3}},
+                resume_state={"next_index": 3},
             )
 
         assert result.policy_version == 5
@@ -613,7 +611,7 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
             "aux_loss/mean": 0.5,
         }
         engine.optim_step.assert_called_once_with()
-        assert trainer._controller_state.value == {"dataloader": {"next_index": 3}}
+        assert trainer._resume_state.value == {"next_index": 3}
         engine.save_checkpoint.assert_called_once_with(last_step=False)
         engine.step_profiler.assert_called_once_with()
         compute_performance.assert_called_once_with(

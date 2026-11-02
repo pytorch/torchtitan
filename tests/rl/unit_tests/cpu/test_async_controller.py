@@ -759,7 +759,7 @@ def test_windowed_fifo_takes_within_anchored_window() -> None:
 
 def test_no_window_takes_oldest_ready_group_past_a_stuck_head() -> None:
     async def run() -> None:
-        # S=1, P=4 -> 8 slots, no window. g0..g4 INFLIGHT; g0 never finishes; g1..g4 finish out of id order.
+        # S=1, P=4 -> 8 slots, no window. g0..g4 CLAIMED; g0 never finishes; g1..g4 finish out of id order.
         buffer = _buffer(capacity=8, window_size=None)
         for group_id in range(8):
             await _admit(buffer, group_id)
@@ -779,8 +779,8 @@ def test_no_window_takes_oldest_ready_group_past_a_stuck_head() -> None:
         taker = asyncio.create_task(buffer.take_finalized())
         await asyncio.sleep(0)
         assert not taker.done()
-        await buffer.claim_next()  # g5 -> INFLIGHT
-        await buffer.claim_next()  # g6 -> INFLIGHT
+        await buffer.claim_next()  # g5 -> CLAIMED
+        await buffer.claim_next()  # g6 -> CLAIMED
         await _finalize(buffer, 6)
         await asyncio.sleep(0)
         assert taker.done()

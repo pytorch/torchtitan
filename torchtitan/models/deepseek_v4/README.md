@@ -28,17 +28,17 @@ shipped for them.
 
 ## Smoke Test
 
-Run the debug model on 4 GPUs with FSDP2, TP2, and EP2:
+Run the DistMuon + AdamW debug model on 4 GPUs with FSDP4 and EP4:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 NGPU=4 \
-  MODULE=torchtitan_recipes.tests.models.deepseek_v4 CONFIG=deepseek_v4_debugmodel_fsdp2_tp2_ep2 \
+  MODULE=torchtitan_recipes.tests.models.deepseek_v4 CONFIG=deepseek_v4_debugmodel_fsdp4_ep4 \
   ./run_train.sh
 ```
 
 ## Status
 
-The debug model has been smoke-tested with 4 GPUs using FSDP2, TP2, EP2, and the
-`spmd_types` backend. The optional MTP path is available through
+The AdamW debug model has been smoke-tested with 4 GPUs using FSDP2, TP2, EP2,
+and the `spmd_types` backend. The optional MTP path is available through
 `deepseek_v4_mtp_debugmodel`. Checkpoint compatibility and larger-scale
 convergence validation should be completed before adding production recipes.

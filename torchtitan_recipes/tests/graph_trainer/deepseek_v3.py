@@ -85,7 +85,7 @@ def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
     config = to_graph_trainer_config(base, GraphTrainerDeepSeekV3Model.Config)
     config.compile = GraphTrainerCompileConfig()
     # HybridEP's non-blocking dispatch has no CPU sync, so CUDA graphs stay on.
-    config.training.disable_cuda_graphs = False
+    config.training.disable_accelerator_graphs = False
     return apply_transforms(
         config,
         [

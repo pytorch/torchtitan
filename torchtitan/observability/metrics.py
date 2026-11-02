@@ -8,6 +8,7 @@
 
 import logging
 import os
+import sys
 import time
 from collections import namedtuple
 from dataclasses import dataclass
@@ -213,6 +214,46 @@ class WandBLogger(BaseLogger):
             self.wandb.finish()
 
 
+class MLFlowLogger(BaseLogger):
+    """Logger implementation for MLflow."""
+
+    def __init__(
+        self,
+        config_dict: dict[str, Any] | None = None,
+        tag: str | None = None,
+    ):
+        import mlflow
+
+        self.mlflow = mlflow
+        self.tag = tag
+        run = mlflow.active_run()
+        self.owns_run = run is None
+        if run is None:
+            run = mlflow.start_run()
+        if config_dict is not None:
+            mlflow.log_dict(config_dict, "torchtitan_config.json")
+        logger.info("MLflow logging enabled for run %s", run.info.run_id)
+
+    def log(self, metrics: dict[str, Any], step: int) -> None:
+        # MLflow does not accept parentheses or percent signs in metric names.
+        mlflow_metrics = {
+            (key if self.tag is None else f"{self.tag}/{key}")
+            .replace("(", "_")
+            .replace(")", "")
+            .replace("%", "percent"): value
+            for key, value in metrics.items()
+        }
+        if len(mlflow_metrics) != len(metrics):
+            raise ValueError("MLflow metric names collide after normalization")
+        self.mlflow.log_metrics(mlflow_metrics, step=step)
+
+    def close(self) -> None:
+        if self.owns_run:
+            status = "FAILED" if sys.exc_info()[0] is not None else "FINISHED"
+            self.mlflow.end_run(status=status)
+            self.owns_run = False
+
+
 class LoggerContainer(BaseLogger):
     """Container to call all loggers enabled in the job config."""
 
@@ -306,7 +347,7 @@ class MetricsProcessor(Configurable):
     """Metrics processor to processes the metrics and log metrics.
 
     The current MetricsProcessor log some metrics to STDOUT and some metrics to
-    TensorBoard or WandB.
+    TensorBoard, WandB, or MLflow.
 
     Args:
         config (Config): Metrics configuration.
@@ -317,8 +358,8 @@ class MetricsProcessor(Configurable):
         pp_schedule (str): Pipeline parallel schedule name.
         ft_enable (bool): Whether fault tolerance is enabled.
         ft_replica_id (int): Fault tolerance replica ID.
-        config_dict (dict | None): Full job config dict for WandB logging.
-        tag (str | None): Tag to use for TensorBoard or WandB. Defaults to None.
+        config_dict (dict | None): Full job config dict for logging.
+        tag (str | None): Prefix for metric names. Defaults to None.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -345,6 +386,9 @@ class MetricsProcessor(Configurable):
 
         enable_wandb: bool = False
         """Whether to log metrics to Weights & Biases"""
+
+        enable_mlflow: bool = False
+        """Whether to log metrics to MLflow"""
 
         def __post_init__(self) -> None:
             if self.log_freq <= 0:
@@ -438,11 +482,26 @@ class MetricsProcessor(Configurable):
         # Log initial config state
         logger.debug(
             f"Building logger with config: wandb={config.enable_wandb}, "
-            f"tensorboard={config.enable_tensorboard}"
+            f"tensorboard={config.enable_tensorboard}, mlflow={config.enable_mlflow}"
         )
 
+        # Check on every rank so missing dependencies fail consistently.
+        if config.enable_mlflow:
+            try:
+                import mlflow  # noqa: F401
+            except ModuleNotFoundError as error:
+                if error.name != "mlflow":
+                    raise
+                raise ModuleNotFoundError(
+                    "MLflow logging requires the optional mlflow package. "
+                    "Install it with pip install mlflow-skinny.",
+                    name="mlflow",
+                ) from error
+
         # Check if any logging backend is enabled
-        has_logging_enabled = config.enable_tensorboard or config.enable_wandb
+        has_logging_enabled = (
+            config.enable_tensorboard or config.enable_wandb or config.enable_mlflow
+        )
 
         # Determine if this rank should log
         should_log = has_logging_enabled
@@ -501,6 +560,13 @@ class MetricsProcessor(Configurable):
             logger.debug("Creating TensorBoard logger")
             tensorboard_logger = TensorBoardLogger(base_log_dir, tag)
             logger_container.add_logger(tensorboard_logger)
+
+        # MLflow writes to a shared tracking server rather than per-rank files,
+        # so only the metrics rank logs to it, even with save_for_all_ranks.
+        if config.enable_mlflow and torch.distributed.get_rank() == _get_metrics_rank(
+            parallelism_context=parallelism_context, pp_schedule=pp_schedule
+        ):
+            logger_container.add_logger(MLFlowLogger(config_dict=config_dict, tag=tag))
 
         if logger_container.number_of_loggers == 0:
             logger.debug("No loggers enabled, returning an empty LoggerContainer")

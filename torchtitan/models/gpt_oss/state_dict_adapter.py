@@ -52,12 +52,11 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         super().__init__(model_config, hf_assets_path)
         # fqn_to_index_mapping always uses unquantized names: only HF saves read
         # it, and they write unquantized experts. hf_assets_path may hold the
-        # released MXFP4 index, so X_blocks is saved as X and X_scales is not saved.
+        # released MXFP4 index, so X_blocks is saved as X.
         if self.fqn_to_index_mapping is not None:
             self.fqn_to_index_mapping = {
                 key.removesuffix("_blocks"): index
                 for key, index in self.fqn_to_index_mapping.items()
-                if not key.endswith("_scales")
             }
 
         # HF GPT-OSS checkpoints do not have the auxiliary load-balancing bias.

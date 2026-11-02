@@ -143,7 +143,7 @@ def test_ft_trainer_composes_specialized_training_engine() -> None:
     assert issubclass(ft.FaultTolerantTrainingEngine, TrainingEngine)
 
 
-def test_ft_accepts_validation_with_training_cuda_graphs():
+def test_ft_accepts_validation_with_training_accelerator_graphs():
     parallelism = ParallelismConfig()
     config = ft.FaultTolerantTrainer.Config(
         model=build_muse_glimmer_config(
@@ -154,7 +154,7 @@ def test_ft_accepts_validation_with_training_cuda_graphs():
         parallelism=parallelism,
     )
     config.validator = Validator.Config(steps=1)
-    config.training.disable_cuda_graphs = False
+    config.training.disable_accelerator_graphs = False
     config.__post_init__()
 
 
@@ -168,12 +168,12 @@ def test_ft_accepts_eager_validation():
         loss=CrossEntropyLoss.Config(),
         parallelism=parallelism,
     )
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     config.validator = Validator.Config(steps=1)
     config.__post_init__()
 
 
-def test_ft_rejects_cuda_graphed_fsdp_gradient_accumulation(monkeypatch) -> None:
+def test_ft_rejects_accelerator_graphed_fsdp_gradient_accumulation(monkeypatch) -> None:
     config = ft.FaultTolerantTrainer.Config(
         model=build_model_config(
             "debugmodel",
@@ -185,7 +185,7 @@ def test_ft_rejects_cuda_graphed_fsdp_gradient_accumulation(monkeypatch) -> None
         loss=CrossEntropyLoss.Config(),
     )
     config.fault_tolerance.enable = True
-    config.training.disable_cuda_graphs = False
+    config.training.disable_accelerator_graphs = False
     config.training.num_tokens_per_train_step = (
         2 * config.training.num_tokens_per_microbatch_per_dp_rank
     )
@@ -212,17 +212,18 @@ def test_ft_rejects_cuda_graphed_fsdp_gradient_accumulation(monkeypatch) -> None
         "build",
         lambda self, **kwargs: SimpleNamespace(color=""),
     )
-    monkeypatch.setattr(ft, "cuda_graphs_supported", lambda: True)
+    monkeypatch.setattr(ft, "accelerator_graphs_supported", lambda: True)
 
     with pytest.raises(
-        ValueError, match="does not support CUDA-graphed FSDP gradient accumulation"
+        ValueError,
+        match="does not support accelerator-graphed FSDP gradient accumulation",
     ):
         ft.FaultTolerantTrainer(config)
 
 
-def test_ft_training_engine_rejects_optimizer_cuda_graph() -> None:
+def test_ft_training_engine_rejects_optimizer_accelerator_graph() -> None:
     config = SimpleNamespace(
-        optim=SimpleNamespace(enable_cuda_graph=True),
+        optim=SimpleNamespace(enable_accelerator_graph=True),
     )
 
     with (
@@ -243,7 +244,7 @@ def test_ft_training_engine_rejects_optimizer_cuda_graph() -> None:
 def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
     engine = Mock(
         spec=ft.FaultTolerantTrainingEngine,
-        config=Mock(training=Mock(disable_cuda_graphs=True)),
+        config=Mock(training=Mock(disable_accelerator_graphs=True)),
         device=torch.device("cpu"),
         parallelism_context=Mock(
             dp_enabled=False, dp_cp_enabled=True, pp_enabled=False, ep_enabled=False

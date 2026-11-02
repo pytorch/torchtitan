@@ -262,7 +262,7 @@ class Trainer(Configurable):
             )
 
             self.validator = config.validator.build(
-                cuda_graph_enabled=engine._forward_backward_cuda_graph_enabled,
+                accelerator_graph_enabled=engine._forward_backward_accelerator_graph_enabled,
                 cuda_graph_annotation_config=config.profiler.maybe_cuda_graph_annotation_config(),
                 parallelism=config.parallelism,
                 dp_world_size=dp_degree,

@@ -70,20 +70,20 @@ class TrainingConfig:
     Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP
     """
 
-    disable_cuda_graphs: bool = False
+    disable_accelerator_graphs: bool = False
     """
-    Disable CUDA graph capture and replay for the forward and backward pass. CUDA
-    graphs require fixed-shape inputs and no CPU<->GPU synchronization during
+    Disable accelerator graph capture and replay for the forward and backward
+    pass. Accelerator graphs require fixed-shape inputs and no CPU<->GPU synchronization during
     the captured region. Expert parallelism is supported only with HybridEP
     when ``non_blocking_capacity_factor`` is set. Other EP backends synchronize
     with the host during dispatch. For pipeline parallelism, TorchTitan
     configures the schedule-derived directed-edge process groups required by
-    looped and split-backward schedule replay. CUDA graphs are independent of
-    ``torch.compile(mode="reduce-overhead")``, which performs its own CUDA graph
-    capture.
+    looped and split-backward schedule replay. Accelerator graphs are
+    independent of ``torch.compile(mode="reduce-overhead")``, which performs its
+    own CUDA graph capture.
     """
 
-    cuda_graph_per_microbatch_group: bool = False
+    accelerator_graph_per_microbatch_group: bool = False
     """Capture and replay one uniform microbatch group.
 
     Every group must have the same input structure, tensor metadata, and set of
@@ -94,13 +94,13 @@ class TrainingConfig:
     This mode supports RL workloads where the number of microbatch groups can
     change.
     """
-    # TODO: Remove this option when multiple CUDA graphs support variable group
+    # TODO: Remove this option when multiple accelerator graphs support variable group
     # counts without duplicating the gradient accumulation logic.
 
     preprocess_microbatch_groups_lazily: bool = False
     """Preprocess each microbatch group (host-to-device copy, masks) just before its
     forward/backward, not all groups up front, so RL can read the next microbatches
-    during training. Requires ``disable_cuda_graphs=True`` and no SDC replay.
+    during training. Requires ``disable_accelerator_graphs=True`` and no SDC replay.
     """
 
     dtype: Literal["bfloat16", "float32"] = "float32"
@@ -155,7 +155,7 @@ class CommConfig:
       shapes, ownership, and PyTorch-managed memory without real transport.
     - ``"real_pp_fake_spmd"`` runs one physical process per PP rank and
       uses a real NCCL PP group while DP, TP, CP, and EP remain fake. It
-      exercises pipeline transport, buffers, and CUDA graphs without allocating
+      exercises pipeline transport, buffers, and accelerator graphs without allocating
       the complete logical world.
 
     ``NGPU`` is the complete logical world size. ``FAKE_PP_RANK`` applies only

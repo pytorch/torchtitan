@@ -122,7 +122,7 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
             num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
             steps=10000,
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=None,
@@ -159,7 +159,7 @@ def deepseek_v3_671b_dist_moe_bf16(seq_len: int = 4096) -> Trainer.Config:
         config.model.max_context_length
     )
     config.training.num_tokens_per_train_step = 15360 * config.model.max_context_length
-    config.training.disable_cuda_graphs = False
+    config.training.disable_accelerator_graphs = False
     config.training.dtype = "float32"
     config.training.mixed_precision_param = "bfloat16"
     config.training.mixed_precision_reduce = "bfloat16"
@@ -204,7 +204,7 @@ def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int = 4096) -> Trainer.Config:
         config.model.max_context_length
     )
     config.training.num_tokens_per_train_step = 15360 * config.model.max_context_length
-    config.training.disable_cuda_graphs = False
+    config.training.disable_accelerator_graphs = False
     config.training.dtype = "float32"
     config.training.mixed_precision_param = "bfloat16"
     config.training.mixed_precision_reduce = "bfloat16"

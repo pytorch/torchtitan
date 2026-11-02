@@ -623,14 +623,14 @@ class TestCudaGraphPass(unittest.TestCase):
             cuda_graph_pass(plain_fn, (torch.zeros(4),), static_input_indices=[0])
 
     def test_graphmodule_wraps_forward(self):
-        """cuda_graph_pass wraps gm.forward with CUDAGraphWrapper."""
+        """cuda_graph_pass wraps gm.forward with AcceleratorGraphWrapper."""
         from torchtitan.experiments.graph_trainer.cuda_graph import cuda_graph_pass
 
         gm = torch.fx.GraphModule(torch.nn.Module(), torch.fx.Graph())
         example_inputs = (torch.zeros(4),)
 
         with patch(
-            "torchtitan.experiments.graph_trainer.cuda_graph.CUDAGraphWrapper"
+            "torchtitan.experiments.graph_trainer.cuda_graph.AcceleratorGraphWrapper"
         ) as MockWrapper:
             mock_instance = MagicMock()
             MockWrapper.return_value = mock_instance

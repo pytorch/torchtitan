@@ -150,7 +150,7 @@ def _with_dist_moe(
             name="dist_moe",
         ) from error
 
-    config.training.disable_cuda_graphs = False
+    config.training.disable_accelerator_graphs = False
     # Activation remat retains the expensive attention and effectful Dist-MoE
     # regions. Projections, routing preparation, norms, and pool/unpool boundaries
     # are cheaper to replay and provide the activation-memory reduction.
@@ -392,7 +392,7 @@ def _muse_spark_816b_a42b(
             dtype="float32",
             mixed_precision_param="bfloat16",
             mixed_precision_reduce="float32",
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=cast(
@@ -496,7 +496,7 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     # Non-deferred reduction makes every outer-accumulation group identical.
     # Capture one group and replay it instead of unrolling all eight groups into
     # one graph; persistent sharded gradients accumulate across those replays.
-    config.training.cuda_graph_per_microbatch_group = True
+    config.training.accelerator_graph_per_microbatch_group = True
 
     p = config.parallelism
     p.data_parallel_replicate_degree = 1
@@ -772,7 +772,7 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
         IndexedJsonlSource.Config(patterns=(jsonl_pattern,))
     )
     config.optim = _ultradata_lora_sft_optim(warmup_steps=100)
-    config.optim.enable_cuda_graph = False
+    config.optim.enable_accelerator_graph = False
     config.optim.lr_scheduler.total_steps = 1000
     config.training = TrainingConfig(
         num_tokens_per_microbatch_per_dp_rank=seq_len,
@@ -782,7 +782,7 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
         dtype="bfloat16",
         mixed_precision_param="bfloat16",
         mixed_precision_reduce="float32",
-        disable_cuda_graphs=False,
+        disable_accelerator_graphs=False,
     )
     config.comm.init_timeout_seconds = 1800
     config.comm.train_timeout_seconds = 1800

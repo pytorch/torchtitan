@@ -140,6 +140,9 @@ look for them in added lines with a quick search of the diff.
 
 - [ ] One concern per PR: unrelated renames, reformatting, comment rewrites, or
   drive-by fixes are flagged ("accidental?", "does this belong to this PR?").
+- [ ] "Summary (human-written)" is filled in and matches the code. A missing
+  summary or a leftover placeholder is a must-fix. Don't guess whether a human
+  wrote it; judge only whether it is present and accurate.
 - [ ] Description: concrete problem and example, before/after for user-facing
   changes, numerics evidence, what was tested. Claims match the code (defaults,
   behavior). AI-generated summaries that don't say what concretely changes are a

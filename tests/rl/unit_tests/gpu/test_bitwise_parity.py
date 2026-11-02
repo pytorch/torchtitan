@@ -934,7 +934,6 @@ def _kimi_k3_debug_bitwise_config() -> Controller.Config:
     return config
 
 
-@unittest.skip("MLA attention is not supported by the TorchTitan vLLM wrapper yet.")
 class TestBitwiseParityKimiK3DebugVarlen(KimiK3BitwiseParityTestBase):
     """Kimi K3 KDA/MLA parity with random weights and matched TP=1."""
 
