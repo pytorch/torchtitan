@@ -29,6 +29,7 @@ _MOMENT_KEYS = ("exp_avg", "exp_avg_sq")
 
 # Target bytes of both moments per chunk. step() holds two slots of the largest chunk on the
 # GPU, and a parameter shard larger than this is a chunk of its own, so it sets the floor.
+# 256 MiB keeps the two slots small next to a step's activations; not tuned.
 _CHUNK_SIZE_BYTES = 256 * 2**20
 
 

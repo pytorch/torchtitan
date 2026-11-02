@@ -65,10 +65,8 @@ class TestOptimizerStateOffload(DTensorTestBase):
     def world_size(self) -> int:
         return 2
 
-    def _build(
-        self, *, offload: bool, seed: int = 0
-    ) -> tuple[_Model, OptimizersContainer]:
-        torch.manual_seed(seed)
+    def _build(self, *, offload: bool) -> tuple[_Model, OptimizersContainer]:
+        torch.manual_seed(0)
         model = _Model().cuda()
         mesh = self.build_device_mesh()
         for module in (*model.blocks, model.wide, model.unused, model.tiny):

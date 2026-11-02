@@ -230,12 +230,11 @@ def llama3_debugmodel_tp2_no_sp() -> Trainer.Config:
 def llama3_debugmodel_full_checkpoint_save() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
-    # Offloaded moments, so the load twin also resumes from an offloaded checkpoint.
-    config.optim.optimizer = OptimizersContainer.Config(
-        optimizers=[
-            AdamW.Config(pattern=r".*", state_offload=OptimizerStateOffloader.Config())
-        ]
-    )
+    # Offloaded moments: the load twin resumes from an offloaded checkpoint, and the HF and
+    # bf16 entries built from this one train with offload too.
+    config.optim.optimizer.optimizers[
+        0
+    ].state_offload = OptimizerStateOffloader.Config()
     config.checkpointer = CheckpointManager.Config(
         interval=10,
         last_save_model_only=False,
