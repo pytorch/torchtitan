@@ -82,8 +82,7 @@ class TrainerStepBatch:
         #    microbatch_groups = [[[TrainingMicrobatch(input=[20])]],
         #                         [[TrainingMicrobatch(input=[20])]]]
         # The second microbatch contains one real row and one pad row.
-        # global_loss_token_counts = per-objective loss-token counts
-        # global_routing_token_counts = per-depth non-padding token counts
+        # num_loss_tokens = the microbatches' loss tokens, over every DP rank
     """
 
     # [num_groups][num_microbatches_per_group][dp_degree]; under PP, each group runs as one
@@ -91,8 +90,7 @@ class TrainerStepBatch:
     microbatch_groups: (
         list[list[list[TrainingMicrobatch]]] | list[list[list[RDMAMicrobatch]]]
     )
-    global_loss_token_counts: torch.Tensor
-    global_routing_token_counts: torch.Tensor
+    num_loss_tokens: int
     metrics: list[m.Metric]
     group_ids: list[int]
     """Every consumed rollout group, including metric-only groups."""
@@ -456,23 +454,11 @@ class Batcher(Configurable):
             [self._pack_training_samples(samples) for samples in rank_assignments]
             for rank_assignments in assignments
         ]
-        global_loss_token_counts: torch.Tensor | None = None
-        global_routing_token_counts: torch.Tensor | None = None
-        for rank_microbatches in microbatches:
-            for microbatch in rank_microbatches:
-                if global_loss_token_counts is None:
-                    global_loss_token_counts = torch.zeros_like(
-                        microbatch.loss_token_counts
-                    )
-                    global_routing_token_counts = torch.zeros_like(
-                        microbatch.routing_token_counts
-                    )
-                global_loss_token_counts.add_(microbatch.loss_token_counts)
-                assert global_routing_token_counts is not None
-                global_routing_token_counts.add_(microbatch.routing_token_counts)
-        assert global_loss_token_counts is not None
-        assert global_routing_token_counts is not None
-        num_global_loss_tokens = int(global_loss_token_counts.reshape(-1)[0].item())
+        num_global_loss_tokens = sum(
+            int(microbatch.loss_token_count)
+            for rank_microbatches in microbatches
+            for microbatch in rank_microbatches
+        )
         num_response_tokens = sum(
             int(microbatch.loss_mask.sum().item())
             for rank_microbatches in microbatches
@@ -484,8 +470,7 @@ class Batcher(Configurable):
                 microbatches[start : start + num_pp_microbatches]
                 for start in range(0, len(microbatches), num_pp_microbatches)
             ],
-            global_loss_token_counts=global_loss_token_counts,
-            global_routing_token_counts=global_routing_token_counts,
+            num_loss_tokens=num_global_loss_tokens,
             metrics=[
                 *metrics,
                 # Keep this response-level metric exact without adding a second
@@ -887,7 +872,7 @@ class Batcher(Configurable):
         target_mask = loss_mask & torch.isfinite(generator_logprobs)
         positions_tensor = torch.from_numpy(np.concatenate(positions))
         padding_mask_tensor = torch.from_numpy(np.concatenate(padding_mask))
-        loss_token_counts, routing_token_counts = get_mtp_token_counts(
+        loss_token_count, routing_token_counts = get_mtp_token_counts(
             target_mask=target_mask,
             positions=positions_tensor,
             padding_mask=padding_mask_tensor,
@@ -904,7 +889,7 @@ class Batcher(Configurable):
             loss_mask=loss_mask,
             advantages=packed["advantages"],
             padding_mask=padding_mask_tensor,
-            loss_token_counts=loss_token_counts,
+            loss_token_count=loss_token_count,
             routing_token_counts=routing_token_counts,
         )
 

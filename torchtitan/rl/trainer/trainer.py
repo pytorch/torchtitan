@@ -256,8 +256,6 @@ class Trainer(Configurable):
         microbatch_groups: (
             list[list[TrainingMicrobatch]] | list[list[RDMAMicrobatch]]
         ),
-        global_loss_token_counts: torch.Tensor,
-        global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float] | None:
         """Run one optimizer step's forward/backward microbatches.
 
@@ -266,14 +264,12 @@ class Trainer(Configurable):
                 `[num_groups][num_microbatches_per_group][dp_degree]` grid. Under PP, each group runs
                 as one pipeline step. `RDMAMicrobatch`es when `rdma_min_tensor_bytes` is set,
                 read a few ahead of training.
-            global_loss_token_counts: Per-objective loss-token counts across the
-                global batch.
-            global_routing_token_counts: Per-depth non-padding routing-token
-                counts across the global batch.
 
         Returns:
             dict[str, float] | None: Globally-reduced metrics, or ``None`` on
                 ranks without the last pipeline stage, which compute no loss.
+                /mean and /frac metrics are token sums: the caller divides them
+                by the step's loss-token count.
 
         Example:
             # dp_degree=2, tp=2, one microbatch per group,
@@ -316,11 +312,7 @@ class Trainer(Configurable):
             # and broadcast it, to cut the trainer's reads by cp * tp. Needs a per-replica group.
             # The controller rejects RDMA with PP, so every group holds one microbatch.
             microbatch_groups = RDMAMicrobatchPrefetcher(microbatches)
-        result = engine.forward_backward(
-            microbatch_groups=microbatch_groups,
-            global_loss_token_counts=global_loss_token_counts,
-            global_routing_token_counts=global_routing_token_counts,
-        )
+        result = engine.forward_backward(microbatch_groups=microbatch_groups)
         if not engine.pp_has_last_stage:
             return None
         microbatch_metrics: list[dict[str, float]] = []
@@ -413,7 +405,10 @@ class Trainer(Configurable):
                     device_mem_stats.num_alloc_retries
                 ),
                 "trainer/memory/num_ooms": float(device_mem_stats.num_ooms),
-                **collect_aux_loss_metrics(engine.parallelism_context),
+                **collect_aux_loss_metrics(
+                    engine.parallelism_context,
+                    num_loss_tokens=int(engine.global_loss_token_count),
+                ),
                 **(
                     {"trainer/mfu_percent": performance["mfu_percent"]}
                     if "mfu_percent" in performance

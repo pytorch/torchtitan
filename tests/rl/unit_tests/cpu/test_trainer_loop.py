@@ -132,8 +132,7 @@ def _batch_queue(num_batches: int) -> asyncio.Queue:
         queue.put_nowait(
             SimpleNamespace(
                 microbatch_groups=[],
-                global_loss_token_counts=[1],
-                global_routing_token_counts=None,
+                num_loss_tokens=1,
                 group_ids=[],
                 min_policy_versions=[0],
                 metrics=[],

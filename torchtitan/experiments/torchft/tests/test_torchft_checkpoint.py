@@ -492,12 +492,12 @@ class TestFTManager(unittest.TestCase):
                 mock.call(
                     dense_gradient,
                     group=mock.sentinel.replicate_pg,
-                    op=dist.ReduceOp.AVG,
+                    op=dist.ReduceOp.SUM,
                 ),
                 mock.call(
                     expert_gradient,
                     group=mock.sentinel.replicate_pg,
-                    op=dist.ReduceOp.AVG,
+                    op=dist.ReduceOp.SUM,
                 ),
             ],
         )

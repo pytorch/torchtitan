@@ -15,6 +15,7 @@ DP ranks' streams, with and without the SPMD typechecker.
 
 import contextlib
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import spmd_types as spmd
@@ -37,6 +38,7 @@ from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.aux_loss import (
     _zero_aux_losses,
+    aux_loss_denominators,
     AuxLoss,
     collect_aux_loss_metrics,
 )
@@ -109,7 +111,7 @@ def _make_loss(
     """Loss with the given coeff and an explicit step denominator.
 
     The denominator is float64 here so the assertions stay exact; in training
-    it is the step's int64 ``global_loss_token_counts``.
+    it is the microbatch's fp32 ``aux_loss_denominators``.
     """
     loss = MicrobatchWiseLoadBalanceLoss(
         MicrobatchWiseLoadBalanceLoss.Config(coeff=coeff)
@@ -267,6 +269,102 @@ class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
             ref / self.denominator,
             places=5,
         )
+
+
+class TestAuxLossDenominators(_AuxLossTestCase):
+    """Per-microbatch denominators R_mb / N_mb, then the engine's divide by the
+    step's loss-token count N."""
+
+    def test_denominators_are_fp32_routed_tokens_per_loss_token(self):
+        cpu = torch.device("cpu")
+        denominators = aux_loss_denominators(
+            torch.tensor([8, 6, 0]), torch.tensor(4), device=cpu
+        )
+        self.assertEqual(denominators.dtype, torch.float32)
+        torch.testing.assert_close(denominators, torch.tensor([2.0, 1.5, 0.25]))
+        on_meta = aux_loss_denominators(
+            torch.tensor([8]), torch.tensor(4), device=torch.device("meta")
+        )
+        self.assertEqual(on_meta.device.type, "meta")
+        # No loss tokens: inf, so the microbatch's auxiliary loss scales by 0.
+        self.assertTrue(
+            torch.isinf(
+                aux_loss_denominators(torch.tensor([8]), torch.tensor(0), device=cpu)
+            ).all()
+        )
+
+    def test_microbatch_without_loss_tokens_adds_nothing(self):
+        scores_TE, carrier_TK, routing_map_TE = _make_inputs(15, 7, 2)
+        loss = _make_loss(coeff=0.125, per_step_denominator=1)
+
+        out_TK = loss(
+            scores_TE,
+            routing_map_TE,
+            carrier=carrier_TK,
+            denominator=torch.tensor(float("inf")),
+        )
+        out_TK.sum().backward()
+
+        # Only the carrier's own gradient reaches the scores.
+        self.assertTrue(torch.equal(scores_TE.grad, routing_map_TE.to(torch.float64)))
+        _zero_aux_losses([loss])
+        self.assertEqual(AuxLoss.group_acc[_METRIC_KEY].item(), 0.0)
+
+    def test_power_of_two_counts_match_the_step_denominator_bitwise(self):
+        """With R_mb = N_mb = 2^k the denominator is 1, and dividing the
+        gradients and the metric by N afterwards matches the old scaling by
+        the step's routed-token count bit for bit: a power-of-two scale is
+        exact in floating point."""
+        coeff, num_tokens, num_experts, top_k = 0.1, 16, 8, 2
+        step_tokens = 2 * num_tokens
+        torch.manual_seed(0)
+        weight = torch.randn(num_experts, 4)
+        microbatches = [torch.randn(num_tokens, 4) for _ in range(2)]
+
+        def run(*, denominator: torch.Tensor, main_scale: float):
+            _clear_aux_loss_registry()
+            router = torch.nn.Parameter(weight.clone())
+            loss = MicrobatchWiseLoadBalanceLoss(
+                MicrobatchWiseLoadBalanceLoss.Config(coeff=coeff)
+            )
+            loss.train()
+            for x_TD in microbatches:
+                scores_TE = torch.sigmoid(x_TD @ router.T)
+                ids_TK = torch.topk(scores_TE.detach(), k=top_k, dim=-1).indices
+                carrier_TK = scores_TE.gather(dim=-1, index=ids_TK)
+                out_TK = loss(
+                    scores_TE,
+                    _routing_map(ids_TK, num_experts),
+                    carrier=carrier_TK,
+                    denominator=denominator,
+                )
+                (out_TK.sum() * main_scale).backward()
+            _zero_aux_losses([loss])
+            return router.grad, AuxLoss.group_acc[_METRIC_KEY].clone()
+
+        # Old: losses divided by the step count, aux by the step's routed tokens.
+        old_grad, old_acc = run(
+            denominator=torch.tensor(float(step_tokens)), main_scale=1 / step_tokens
+        )
+        old_metric = float(old_acc.item())
+        # New: sums, aux by R_mb / N_mb, then optim_step's divide by N.
+        new_grad, new_acc = run(
+            denominator=aux_loss_denominators(
+                torch.tensor(num_tokens),
+                torch.tensor(num_tokens),
+                device=torch.device("cpu"),
+            ),
+            main_scale=1.0,
+        )
+        torch._foreach_div_([new_grad], torch.tensor(float(step_tokens)))
+        AuxLoss.group_acc[_METRIC_KEY] = new_acc
+        new_metric = collect_aux_loss_metrics(
+            SimpleNamespace(get_optional_mesh=lambda name: None),
+            num_loss_tokens=step_tokens,
+        )[f"{_METRIC_KEY[1]}/mean"]
+
+        self.assertTrue(torch.equal(new_grad, old_grad))
+        self.assertEqual(new_metric, old_metric)
 
 
 class TestBatchWiseLoadBalanceLoss(_AuxLossTestCase):
@@ -560,7 +658,7 @@ class TestLoadBalanceLossSpmdTypes(DTensorTestBase):
         AuxLoss._group_counts[_METRIC_KEY] = 6
         AuxLoss.group_acc[_METRIC_KEY] = torch.tensor(3.0, dtype=torch.float32)
 
-        metrics = collect_aux_loss_metrics(parallelism_context)
+        metrics = collect_aux_loss_metrics(parallelism_context, num_loss_tokens=1)
         self.assertAlmostEqual(metrics[f"{_METRIC_KEY[1]}/mean"], 2.0, places=6)
         _clear_aux_loss_registry()
 
@@ -645,7 +743,7 @@ class TestLoadBalanceLossSpmdTypes(DTensorTestBase):
             ref_total += _reference_loss(
                 stream_scores, _routing_map(stream_ids_TK, E), K
             ).item()
-        metrics = collect_aux_loss_metrics(parallelism_context)
+        metrics = collect_aux_loss_metrics(parallelism_context, num_loss_tokens=1)
         self.assertAlmostEqual(metrics[f"{_METRIC_KEY[1]}/mean"], ref_total, places=4)
         _clear_aux_loss_registry()
 
@@ -732,7 +830,7 @@ class TestLoadBalanceLossSpmdTypes(DTensorTestBase):
                 )
 
         _zero_aux_losses([loss])
-        metrics = collect_aux_loss_metrics(parallelism_context)
+        metrics = collect_aux_loss_metrics(parallelism_context, num_loss_tokens=1)
         ref_metric = (
             _reference_loss(
                 global_scores_TE,

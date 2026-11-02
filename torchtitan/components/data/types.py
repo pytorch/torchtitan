@@ -19,15 +19,15 @@ from torchtitan.components.tokenizer import BaseTokenizer
 class TrainingMicrobatch(ABC):
     """A data-parallel-rank-local input to one training forward/backward.
 
-    ``loss_token_counts`` is scalar for one objective and has one entry per
-    objective for MTP. ``routing_token_counts`` has one entry per routing depth.
-    Both are local counts; the standard trainer accumulates and reduces them.
+    ``loss_token_count`` is a scalar: the tokens the loss sums over (MTP depths
+    are divided by the same count). ``routing_token_counts`` has one entry per
+    routing depth. Both are local counts; the training engine adds them up.
     """
 
     __slots__ = ()
 
     labels: torch.Tensor
-    loss_token_counts: torch.Tensor
+    loss_token_count: torch.Tensor
     routing_token_counts: torch.Tensor
 
     @abstractmethod
@@ -69,7 +69,7 @@ class TokenizedTrainingMicrobatch(TrainingMicrobatch):
     labels: torch.Tensor
     positions: torch.Tensor
     padding_mask: torch.Tensor
-    loss_token_counts: torch.Tensor
+    loss_token_count: torch.Tensor
     routing_token_counts: torch.Tensor
     model_kwargs: dict[str, Any] = field(default_factory=dict)
 

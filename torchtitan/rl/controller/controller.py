@@ -110,6 +110,7 @@ from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
     compute_rollout_metrics,
+    divide_token_sums,
     MetricsTimer,
 )
 from torchtitan.rl.controller.work_buffer import (
@@ -1128,9 +1129,8 @@ class Controller(Configurable):
                     max_offpolicy_steps=self.config.async_loop.max_offpolicy_steps,
                 )
 
-                # TODO(async): can't stream microbatches (interleave pack->train) -- the loss is normalized by
-                #   global counts over ALL microbatches, needed before any fwd/bwd. To
-                #   support streaming, accumulate raw loss/token counts across microbatches and scale before optimizer.
+                # TODO(async): stream microbatches (interleave pack->train). Losses are sums and optim_step
+                #   divides by the step's loss-token count, so only the batcher and this loop need to change.
                 with (
                     sl.log_trace_span("forward_backward"),
                     step_timer.record("timing/step/forward_backward"),
@@ -1146,8 +1146,6 @@ class Controller(Configurable):
                                         [row[dp_rank] for row in group]
                                         for group in packed.microbatch_groups
                                     ],
-                                    packed.global_loss_token_counts,
-                                    packed.global_routing_token_counts,
                                 )
                                 for dp_rank, trainer_at_dp_rank in enumerate(
                                     self.trainer.by_dp_rank
@@ -1225,7 +1223,9 @@ class Controller(Configurable):
                         *packed.metrics,
                         *[
                             m.Metric(key, m.NoReduce(value))
-                            for key, value in fwd_bwd_metrics.items()
+                            for key, value in divide_token_sums(
+                                fwd_bwd_metrics, num_loss_tokens=packed.num_loss_tokens
+                            ).items()
                         ],
                         *[
                             m.Metric(key, m.NoReduce(value))
@@ -1244,9 +1244,7 @@ class Controller(Configurable):
                             m.NoReduce(pull_s),
                         ),
                         *compute_perf_ratio_metrics(
-                            num_global_valid_tokens=int(
-                                packed.global_loss_token_counts[0]
-                            ),
+                            num_global_valid_tokens=packed.num_loss_tokens,
                             time_metrics=time_metrics,
                         ),
                     ],

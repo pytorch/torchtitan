@@ -20,23 +20,6 @@ from torchtitan.distributed.spmd_types import spmd_mesh_group
 _MAX_LOG_RATIO = 10.0
 
 
-def _normalize(
-    value: torch.Tensor,
-    global_loss_token_counts: torch.Tensor | None,
-) -> torch.Tensor:
-    if global_loss_token_counts is None:
-        return value
-    global_loss_token_count = (
-        global_loss_token_counts
-        if global_loss_token_counts.ndim == 0
-        else global_loss_token_counts[0]
-    )
-    # A device tensor is required because the count is a mutable CUDA graph
-    # input. Multiplication also preserves the established CUDA scalar-division
-    # rounding for the float32 RL loss.
-    return value * global_loss_token_count.clamp_min(1).reciprocal()
-
-
 class DAPOLoss(Loss[torch.Tensor]):
     """Per-token clipped surrogate loss with DAPO-style "clip-higher".
 
@@ -47,9 +30,9 @@ class DAPOLoss(Loss[torch.Tensor]):
     loss rather than trained as if it were on-policy.
 
     The scalar loss is the sum of per-token losses over positions with a finite
-    old-policy logprob divided by ``global_loss_token_counts``, so gradient accumulation
-    matches a single large batch. ``logits`` is the current-policy output passed to
-    ``compute_logprobs``.
+    old-policy logprob; the engine divides the gradients by the step's count of those
+    positions, so gradient accumulation matches a single large batch. ``logits`` is the
+    current-policy output passed to ``compute_logprobs``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -74,7 +57,6 @@ class DAPOLoss(Loss[torch.Tensor]):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_loss_token_counts: torch.Tensor | None = None,
         *,
         generator_logprobs: torch.Tensor,
         temperature: torch.Tensor,
@@ -90,12 +72,11 @@ class DAPOLoss(Loss[torch.Tensor]):
             temperature: [T] temperature each token was sampled at.
             loss_mask: [T] bool mask; True for response tokens.
             advantages: [T] per-token advantages (0.0 for prompt/padding).
-            global_loss_token_counts: total response tokens with finite generator logprobs
-                across all microbatches and DP ranks; the loss denominator.
 
         Returns:
-            (loss, metrics) where loss is a scalar tensor and metrics is a dict of
-            scalar tensors pre-normalized for SUM reduction across DP ranks.
+            (loss, metrics) where loss is the summed per-token loss and metrics is a dict
+            of scalar tensors: token sums for /mean and /frac keys (the controller divides
+            them by the step's loss-token count), maxima for /max keys.
         """
         # Score tokens under the distribution vLLM sampled from. Dividing by a per-token fp32
         # tensor matches vLLM's op, so batch-invariant runs stay bitwise equal to the generator.
@@ -124,7 +105,7 @@ class DAPOLoss(Loss[torch.Tensor]):
         token_loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
 
         masked_loss = token_loss * effective_loss_mask
-        loss = _normalize(masked_loss.sum(), global_loss_token_counts)
+        loss = masked_loss.sum()
 
         with torch.no_grad():
             diff_for_metrics = torch.where(
@@ -135,33 +116,20 @@ class DAPOLoss(Loss[torch.Tensor]):
             masked_ratio = ratio * effective_loss_mask
             metrics = {
                 "loss/mean": loss.detach(),
-                "loss/ratio_mean": _normalize(
-                    masked_ratio.sum(), global_loss_token_counts
-                ),
-                "loss/ratio_clipped_frac": _normalize(
-                    (
-                        (torch.abs(ratio - clipped_ratio) > 1e-6).float()
-                        * effective_loss_mask
-                    ).sum(),
-                    global_loss_token_counts,
-                ),
+                "loss/ratio_mean": masked_ratio.sum(),
+                "loss/ratio_clipped_frac": (
+                    (torch.abs(ratio - clipped_ratio) > 1e-6).float()
+                    * effective_loss_mask
+                ).sum(),
                 # Mean per-token log-ratio (log p_trainer - log q_generator) over
                 # sampled tokens. This is the k1 Monte-Carlo estimate of -KL(q || p).
-                "bit_wise/logprob_diff/mean": _normalize(
-                    diff_for_metrics.float().sum(), global_loss_token_counts
-                ),
-                "bit_wise/ratio_tokens_different/mean": _normalize(
-                    (
-                        (diff_for_metrics.abs() > 1e-6).float() * effective_loss_mask
-                    ).sum(),
-                    global_loss_token_counts,
-                ),
+                "bit_wise/logprob_diff/mean": diff_for_metrics.float().sum(),
+                "bit_wise/ratio_tokens_different/mean": (
+                    (diff_for_metrics.abs() > 1e-6).float() * effective_loss_mask
+                ).sum(),
                 "bit_wise/logprob_diff/max": diff_for_metrics.abs().max(),
                 # Mean entropy of softmax(logits / temperature) over tokens used by the loss.
-                "trainer/entropy/mean": _normalize(
-                    (token_entropy * effective_loss_mask).sum(),
-                    global_loss_token_counts,
-                ),
+                "trainer/entropy/mean": (token_entropy * effective_loss_mask).sum(),
             }
 
         return loss, metrics

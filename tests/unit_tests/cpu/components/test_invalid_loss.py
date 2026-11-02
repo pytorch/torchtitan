@@ -47,8 +47,6 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.config.training.preprocess_microbatch_groups_lazily = False
         trainer.device = torch.device("cpu")
         trainer.num_completed_steps = 1
-        trainer._step_is_open = False
-        trainer._losses_are_sums = False
         trainer.ntokens_seen = 0
         trainer.garbage_collector = MagicMock()
         trainer._deferred_cuda_graph_options = None
@@ -97,7 +95,7 @@ class TestInvalidLoss(unittest.TestCase):
                 labels=labels,
                 positions=torch.arange(3),
                 padding_mask=torch.zeros(3, dtype=torch.bool),
-                loss_token_counts=torch.tensor(2),
+                loss_token_count=torch.tensor(2),
                 routing_token_counts=torch.tensor([3]),
             )
 

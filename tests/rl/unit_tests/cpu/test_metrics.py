@@ -17,7 +17,11 @@ import numpy as np
 import pytest
 
 from torchtitan.observability.metrics import BaseLogger, TensorBoardLogger, WandBLogger
-from torchtitan.rl.controller.metrics import compute_rollout_metrics
+from torchtitan.rl.controller.metrics import (
+    combine_microbatch_metrics,
+    compute_rollout_metrics,
+    divide_token_sums,
+)
 
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
@@ -855,3 +859,22 @@ class TestIsValidationSwitch:
             is_validation=True,
         )
         assert [step for _, step in backend.calls] == [0, 1]
+
+
+def test_loss_metrics_are_token_sums_divided_once_per_step() -> None:
+    combined = combine_microbatch_metrics(
+        [
+            {"loss/ratio_clipped_frac": 1.0, "trainer/entropy/mean": 4.0, "x/max": 2.0},
+            {"loss/ratio_clipped_frac": 2.0, "trainer/entropy/mean": 6.0, "x/max": 5.0},
+        ]
+    )
+
+    assert divide_token_sums(combined, num_loss_tokens=10) == {
+        "loss/ratio_clipped_frac": 0.3,
+        "trainer/entropy/mean": 1.0,
+        "x/max": 5.0,
+    }
+    # A step without loss tokens has zero sums; they stay zero.
+    assert divide_token_sums({"loss/mean": 0.0}, num_loss_tokens=0) == {
+        "loss/mean": 0.0
+    }

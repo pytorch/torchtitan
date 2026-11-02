@@ -239,12 +239,7 @@ class GraphTrainerScheduledFwdBwdStageGraphs(JointStageGraphs):
         grad_accumulators: list[Any] | None,
         runtime_validate: bool,
     ) -> list[Any]:
-        runtime_args = (
-            self._model_input(args),
-            target,
-            loss_kwargs["global_loss_token_counts"],
-            kwargs,
-        )
+        runtime_args = (self._model_input(args), target, kwargs)
         user_inputs, _ = pytree.tree_flatten((runtime_args, {}))
         full_args = _pack_graph_args(
             graph_name="Scheduled forward-backward graph",

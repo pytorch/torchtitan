@@ -248,12 +248,14 @@ averaging the MTP losses and then scaling by `mtp_scale`:
 total_loss = main_loss + mtp_scale * mean(mtp_losses)
 ```
 
-Preprocessing also produces separate target-token and routed-token count
-vectors ordered as `(main, depth 1, ..., depth N)`. The trainer sums both
-vectors over the optimizer step and reduces them together. Each prediction
-loss uses its target count, while each MoE auxiliary loss uses the routed-token
-count for the block that owns it. This keeps instruction-style label masking
-independent from MoE routing.
+Every prediction loss returns its sum. Preprocessing counts the main
+objective's target tokens and the routed tokens of every depth
+`(main, depth 1, ..., depth N)`. The engine divides the step's gradients by the
+main target-token count, so every depth is divided by the same count, as the
+DeepSeek-V3 report divides every depth by the input length T (eq. 24). Each MoE
+auxiliary loss is divided by its microbatch's routed tokens (for the block that
+owns it) per main target token, so each microbatch's mean auxiliary loss is
+weighted by its share of the step's target tokens.
 
 ### 4.4 Loss Parallel
 
