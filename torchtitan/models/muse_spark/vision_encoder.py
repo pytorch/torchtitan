@@ -145,7 +145,7 @@ class NaViTEncoder(Module):
         pos_emb_grid_h: int
         pos_emb_grid_w: int
         rope_freq: VisionRopeFreq.Config
-        conv1: Linear.Config
+        conv1_linear: Linear.Config
         ln_pre: LayerNorm.Config
         block: VisionTransformerBlock.Config
         ln_post: LayerNorm.Config
@@ -188,7 +188,7 @@ class NaViTEncoder(Module):
         self.pos_emb_grid_order = config.pos_emb_grid_order
 
         self.rope_freq = config.rope_freq.build()
-        self.conv1_linear = config.conv1.build()
+        self.conv1_linear = config.conv1_linear.build()
         self.positional_embedding_vlm = nn.Parameter(
             torch.empty(
                 config.pos_emb_grid_h * config.pos_emb_grid_w,
