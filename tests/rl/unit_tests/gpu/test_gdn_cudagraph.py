@@ -127,6 +127,8 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
     assert eager["states"] == full["states"]
     assert all(step["mode"] == "NONE" for step in eager["dispatch"])
     replayed = [step for step in full["dispatch"] if step["mode"] == "FULL"]
+    # The builder follows the graph the runner picked.
+    assert all((step["path"] == "PACKED") == (not step["uniform"]) for step in replayed)
     kinds = {step["kind"] for step in replayed}
     if kinds != {"prefill", "mixed", "decode"}:
         dispatch_summary = [
@@ -171,6 +173,7 @@ def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -
         non_spec_query_start_loc=torch.arange(5, device=device, dtype=torch.int32),
         non_spec_state_indices_tensor=state_indices,
         has_initial_state=has_initial_state,
+        state_block_column=torch.zeros(4, 1, device=device, dtype=torch.long),
     )
     context = ForwardContext(
         no_compile_layers={}, attn_metadata={"gdn": metadata}, slot_mapping={}
