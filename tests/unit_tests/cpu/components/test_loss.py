@@ -1145,6 +1145,16 @@ class TestChunkedLossWrapper(unittest.TestCase):
             ):
                 chunked_loss(torch.randn(10, 4, requires_grad=True), labels)
 
+    def test_skip_non_loss_tokens_rejects_multiple_outputs(self):
+        chunked_loss = ChunkedLossWrapper(
+            ChunkedLossWrapper.Config(num_chunks=2, skip_non_loss_tokens=True)
+        )
+        chunked_loss.set_lm_head(nn.Linear(4, 8, bias=False))
+        pred = (torch.randn(4, 4), torch.randn(4, 4))
+        labels = (torch.ones(4, dtype=torch.long), torch.ones(4, dtype=torch.long))
+        with self.assertRaisesRegex(ValueError, "multiple outputs"):
+            chunked_loss(pred, labels)
+
     def test_frozen_features_accumulate_head_gradients(self):
         """Head-only training matches cross entropy across chunks and microbatches."""
         for num_chunks in (1, 2, 4):

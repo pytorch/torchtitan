@@ -658,8 +658,8 @@ class ChunkedLossWrapper(Loss[LossInput]):
         skip_non_loss_tokens: bool = False
         """Run the lm_head only on loss tokens: ``loss_mask`` if passed (RL), else labels
         != ``IGNORE_INDEX`` (SFT). The rest get zero grad, so ``loss_fn`` must read only loss
-        tokens (no entropy or KL over all tokens). Needs accelerator graphs off. No effect
-        with multiple outputs (MTP)."""
+        tokens (no entropy or KL over all tokens). Needs accelerator graphs off. Not
+        supported with multiple outputs (MTP)."""
 
     def __init__(self, config: Config):
         self.num_chunks = config.num_chunks
@@ -743,7 +743,12 @@ class ChunkedLossWrapper(Loss[LossInput]):
                 pred[0].shape[0] % num_chunks == 0,
                 lambda: "ChunkedLossWrapper sequence length must be divisible by num_chunks",
             )
-            if self.skip_non_loss_tokens and not is_multi_output:
+            if self.skip_non_loss_tokens and is_multi_output:
+                raise ValueError(
+                    "ChunkedLossWrapper.skip_non_loss_tokens does not support multiple "
+                    "outputs (MTP)."
+                )
+            if self.skip_non_loss_tokens:
                 # Keep only the loss tokens: the code below runs unchanged on fewer chunks, and
                 # the backward of pred[0][rows] gives the other tokens zero grad. A stable sort
                 # puts loss tokens first, in order; the first non-loss tokens pad the last chunk
