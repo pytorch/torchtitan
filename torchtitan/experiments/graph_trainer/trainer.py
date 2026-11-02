@@ -170,6 +170,8 @@ class GraphTrainingEngine(TrainingEngine):
                 modules=self.model_parts,
                 device=self.device,
             )
+        # The graph runtime and the paged stash cover every microbatch group of the step.
+        self._forward_backward_captures_whole_step = True
 
         if self.parallelism_context.pp_enabled:
             self._pp_loss_sentinel_on_non_last_stage = torch.full(

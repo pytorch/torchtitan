@@ -67,6 +67,8 @@ def _measure_step(
 ) -> StepResult:
     model = trainer.engine.model_parts[0]
     model.zero_grad(set_to_none=True)
+    # Each measured call is its own step: the test runs no optim_step.
+    trainer.engine._step_started = False
     # The dataloader always supplies per-document positions, which the trainer
     # requires to build the FlexInnerAttention mask. Reset positions between the
     # packed documents.

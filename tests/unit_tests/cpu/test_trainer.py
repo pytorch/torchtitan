@@ -446,6 +446,8 @@ def test_forward_backward_runs_whole_accumulation(
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
     engine._accelerator_graph_per_microbatch_group_enabled = per_group_graph
+    engine._step_started = False
+    engine._forward_backward_captures_whole_step = False
     engine.sdc_replayer = None
     engine._non_pp_forward_backward_microbatch = forward_backward_body
     engine._run_forward_backward = partial(
@@ -471,7 +473,6 @@ def test_forward_backward_runs_whole_accumulation(
         1.0,
         2.0,
     ]
-    assert engine.num_accumulation_steps == 2
     assert engine.ntokens_seen == 114
     # Lazy preprocessing moves each microbatch to the device just before its forward.
     assert events == (
@@ -502,6 +503,143 @@ def test_forward_backward_runs_whole_accumulation(
         "max_context_length": 2048,
         "processor": "VALUE",
     }
+
+
+def _streaming_engine(
+    events: list[str], *, captures_whole_step: bool = False
+) -> tuple[TrainingEngine, torch.nn.Parameter, list[torch.Tensor]]:
+    """An eager engine whose microbatch loss is ``parameter * input``; the optimizer records
+    the gradient it would clip."""
+    parameter = torch.nn.Parameter(torch.ones(1))
+
+    class _FakeModel:
+        def preprocess_inputs(self, input_dict, **kwargs):
+            events.append(f"preprocess {int(input_dict['input'])}")
+            return input_dict["input"], input_dict["labels"], {}, {}
+
+    def forward_backward_microbatch(*, inputs, labels, model_kwargs, loss_kwargs):
+        loss = (parameter * inputs).sum()
+        loss.backward()
+        engine.loss_metrics = {}
+        return loss.detach()
+
+    def zero_grad(*, set_to_none):
+        events.append("zero_grad")
+        parameter.grad = None
+
+    recorded_gradients: list[torch.Tensor] = []
+    engine = object.__new__(TrainingEngine)
+    engine.model_parts = [_FakeModel()]
+    engine.max_num_documents = None
+    engine.parallelism_context = SimpleNamespace(
+        pp_enabled=False,
+        cp=1,
+        dp_enabled=False,
+        dp_replicate_enabled=False,
+        activate_spmd=contextlib.nullcontext,
+    )
+    engine.config = SimpleNamespace(
+        parallelism=SimpleNamespace(),
+        training=SimpleNamespace(
+            max_context_length=8,
+            num_tokens_per_microbatch_per_dp_rank=8,
+            preprocess_microbatch_groups_lazily=False,
+        ),
+    )
+    engine.preprocess_inputs_kwargs = {}
+    engine.ntokens_seen = 0
+    engine.num_completed_steps = 0
+    engine.local_loss_token_count = 0
+    engine.device = torch.device("cpu")
+    engine.garbage_collector = SimpleNamespace(
+        run=lambda step: events.append(f"gc {step}")
+    )
+    engine.optim = SimpleNamespace(
+        parameters=[parameter],
+        zero_grad=zero_grad,
+        step=lambda loss, *, current_step: (
+            recorded_gradients.append(parameter.grad.clone()),
+            torch.tensor(0.0),
+        )[1],
+    )
+    engine._accelerator_graph_per_microbatch_group_enabled = False
+    engine._step_started = False
+    engine._forward_backward_captures_whole_step = captures_whole_step
+    engine.sdc_replayer = None
+    engine._non_pp_forward_backward_microbatch = forward_backward_microbatch
+    engine._run_forward_backward = partial(
+        TrainingEngine._forward_backward_body,
+        engine,
+        defer_fsdp_gradient_reduction=False,
+    )
+    return engine, parameter, recorded_gradients
+
+
+def _microbatch(value: float, num_loss_tokens: int) -> _DictTrainingMicrobatch:
+    """A microbatch with one input value and ``num_loss_tokens`` labels."""
+    return _dict_microbatch(
+        {"input": torch.tensor([value]), "labels": torch.zeros(num_loss_tokens)}
+    )
+
+
+def test_streamed_forward_backward_calls_form_one_step() -> None:
+    events: list[str] = []
+    engine, parameter, recorded_gradients = _streaming_engine(events)
+
+    TrainingEngine.forward_backward(
+        engine, microbatch_groups=[[_microbatch(1.0, 3)], [_microbatch(2.0, 4)]]
+    )
+    TrainingEngine.forward_backward(
+        engine, microbatch_groups=[[_microbatch(3.0, 5)], [_microbatch(4.0, 6)]]
+    )
+    TrainingEngine.optim_step(engine)
+
+    # The step's first call zeroes the gradients; the second adds to them.
+    assert events == [
+        "gc 1",
+        "zero_grad",
+        "preprocess 1",
+        "preprocess 2",
+        "preprocess 3",
+        "preprocess 4",
+    ]
+    torch.testing.assert_close(engine.loss, torch.tensor(10.0))
+    # Summed gradient 1 + 2 + 3 + 4, divided once by the step's 3 + 4 + 5 + 6 loss tokens.
+    torch.testing.assert_close(recorded_gradients, [torch.tensor([10.0 / 18])])
+    assert engine.local_loss_token_count == 18
+    torch.testing.assert_close(engine.global_loss_token_count, torch.tensor(18))
+    assert not engine._step_started
+
+    # The call after optim_step starts the next step.
+    events.clear()
+    TrainingEngine.forward_backward(engine, microbatch_groups=[[_microbatch(5.0, 2)]])
+    assert events == ["gc 2", "zero_grad", "preprocess 5"]
+    assert engine.local_loss_token_count == 2
+    torch.testing.assert_close(engine.loss, torch.tensor(5.0))
+    torch.testing.assert_close(parameter.grad, torch.tensor([5.0]))
+
+
+@pytest.mark.parametrize("captures_whole_step", [False, True])
+def test_a_captured_step_takes_one_forward_backward_call(
+    captures_whole_step: bool,
+) -> None:
+    events: list[str] = []
+    engine, _, _ = _streaming_engine(events, captures_whole_step=captures_whole_step)
+    TrainingEngine.forward_backward(engine, microbatch_groups=[[_microbatch(1.0, 3)]])
+    events.clear()
+
+    if not captures_whole_step:
+        TrainingEngine.forward_backward(
+            engine, microbatch_groups=[[_microbatch(2.0, 4)]]
+        )
+        assert events == ["preprocess 2"]
+        return
+    # SDC replay and whole-step graphs see only one call's gradients.
+    with pytest.raises(ValueError, match="capture one forward_backward call"):
+        TrainingEngine.forward_backward(
+            engine, microbatch_groups=[[_microbatch(2.0, 4)]]
+        )
+    assert events == []
 
 
 def test_accelerator_graph_wrapper_returns_graph_owned_output():
@@ -682,6 +820,7 @@ def test_training_engine_configures_gradient_accumulation_accelerator_graph(
     assert wrap.call_args.kwargs["annotation_config"] == annotation_config
     accelerator_graph_forward_backward.assert_called_once()
     assert engine._forward_backward_accelerator_graph_enabled
+    assert engine._forward_backward_captures_whole_step
 
 
 def test_training_engine_replays_one_accelerator_graph_per_microbatch_group() -> None:
@@ -739,6 +878,7 @@ def test_training_engine_replays_one_accelerator_graph_per_microbatch_group() ->
     ]
     assert engine._accelerator_graph_per_microbatch_group_enabled
     assert engine._forward_backward_accelerator_graph_enabled
+    assert not engine._forward_backward_captures_whole_step
     wrap_group.assert_called_once()
     wrap_step.assert_not_called()
     assert [call.args[0] for call in group_runner.call_args_list] == [
@@ -790,6 +930,7 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
     eager_forward_backward.assert_called_once()
     wrap.assert_not_called()
     assert not engine._forward_backward_accelerator_graph_enabled
+    assert not engine._forward_backward_captures_whole_step
 
 
 def test_graph_training_engine_rejects_optimizer_accelerator_graph() -> None:
@@ -1134,6 +1275,8 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
     engine._accelerator_graph_per_microbatch_group_enabled = False
+    engine._step_started = False
+    engine._forward_backward_captures_whole_step = True
     engine.sdc_replayer = replayer
     engine.num_completed_steps = 0
     engine._preprocess_microbatch_groups = MagicMock(
@@ -1178,6 +1321,8 @@ def test_replay_failure_propagates_from_engine():
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
     engine._accelerator_graph_per_microbatch_group_enabled = False
+    engine._step_started = False
+    engine._forward_backward_captures_whole_step = True
     engine.sdc_replayer = SimpleNamespace(run_fwd_bwd=MagicMock(side_effect=mismatch))
     engine.num_completed_steps = 0
     engine._preprocess_microbatch_groups = MagicMock(

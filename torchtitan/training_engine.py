@@ -242,7 +242,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     checkpointer: BaseCheckpointManager
     pp_has_last_stage: bool
     max_num_documents: int | None
-    num_accumulation_steps: int
     num_completed_steps: int
     ntokens_seen: int
     sdc_replayer: SDCReplayer | None
@@ -256,6 +255,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     global_loss_token_count: torch.Tensor
     """The step's loss tokens over all DP ranks (int64), set on device by ``optim_step``."""
     _step_started: bool
+    _forward_backward_captures_whole_step: bool
+    """SDC replay or a whole-step graph: one ``forward_backward`` call per optimizer step."""
     device_memory_monitor: DeviceMemoryMonitor
     model_device_mem_stats: DeviceMemStats
     _run_forward_backward: _ForwardBackwardFn
@@ -278,13 +279,14 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.max_num_documents = max_num_documents
         self.output_dir = output_dir
         self.has_quantization = has_quantization(model_config)
-        self.num_accumulation_steps = 1
         self.num_completed_steps = 0
         self.ntokens_seen = 0
         self.local_loss_token_count = 0
         self.global_loss_token_count = torch.zeros((), dtype=torch.int64)
-        # Set by forward_backward and cleared by optim_step, so optim_step divides each step's gradients once.
+        # Set by forward_backward and cleared by optim_step: the step's first forward_backward call
+        # zeroes the gradients, and optim_step divides each step's gradients once.
         self._step_started = False
+        self._forward_backward_captures_whole_step = False
         self.sdc_replayer = None
         self._forward_backward_accelerator_graph_enabled = False
         self._accelerator_graph_per_microbatch_group_enabled = False
@@ -524,6 +526,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 modules=self.model_parts,
                 device=self.device,
             )
+        # SDC replays a step from "no gradients"; the whole-step graph below sets it too.
+        self._forward_backward_captures_whole_step = self.sdc_replayer is not None
 
         if self.parallelism_context.pp_enabled:
             self._pp_loss_sentinel_on_non_last_stage = torch.full(
@@ -609,6 +613,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self._run_forward_backward = run_forward_backward_groups
             return
 
+        self._forward_backward_captures_whole_step = True
         self._run_forward_backward = wrap_fwd_bwd_with_accelerator_graph(
             eager_forward_backward_fn,
             parameters=(
@@ -630,23 +635,31 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         *,
         microbatch_groups: list[list[TrainingMicrobatch]],
     ) -> ForwardBackwardResult:
-        """Run all microbatch groups for one optimizer update. Each loss is a sum
-        over its loss tokens; ``optim_step`` divides the gradients by their count.
+        """Run microbatch groups and add their gradients to this optimizer step's gradients.
+
+        The step's first call (the first after ``optim_step``) zeroes the gradients;
+        later calls add to them. Each loss is a sum over its loss tokens, and
+        ``optim_step`` divides the gradients by the step's count.
 
         Example:
-            result = engine.forward_backward(microbatch_groups=[[mb0], [mb1]])
-            # result.loss: this rank's summed loss; engine.local_loss_token_count:
-            # int(mb0.loss_token_count) + int(mb1.loss_token_count)
-            grad_norm = engine.optim_step()
+            engine.forward_backward(microbatch_groups=[[mb0], [mb1]])  # zeroes, then adds
+            engine.forward_backward(microbatch_groups=[[mb2]])  # adds to the same step
+            # engine.local_loss_token_count: the loss tokens of mb0, mb1 and mb2
+            grad_norm = engine.optim_step()  # divides by that count summed over DP ranks
         """
         if not microbatch_groups:
             raise ValueError("microbatch_groups must not be empty.")
-        self.num_accumulation_steps = len(microbatch_groups)
-        self.garbage_collector.run(self.num_completed_steps + 1)
-        self.optim.zero_grad(
-            set_to_none=not self._accelerator_graph_per_microbatch_group_enabled
-        )
-        self.local_loss_token_count = 0
+        if self._step_started and self._forward_backward_captures_whole_step:
+            raise ValueError(
+                "SDC replay and whole-step graphs capture one forward_backward call per "
+                "optimizer step: call optim_step before the next forward_backward."
+            )
+        if not self._step_started:
+            self.garbage_collector.run(self.num_completed_steps + 1)
+            self.optim.zero_grad(
+                set_to_none=not self._accelerator_graph_per_microbatch_group_enabled
+            )
+            self.local_loss_token_count = 0
         if self.config.training.preprocess_microbatch_groups_lazily:
             # _forward_backward_body preprocesses each group just before its forward/backward.
             step_inputs: list[Any] = microbatch_groups
@@ -662,7 +675,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         else:
             result = self._run_forward_backward(step_inputs)
 
-        self.loss = result.loss
+        self.loss = self.loss + result.loss if self._step_started else result.loss
         self._step_started = True
         return result
 
