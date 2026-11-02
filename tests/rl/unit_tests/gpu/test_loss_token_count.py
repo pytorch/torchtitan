@@ -10,12 +10,11 @@ Losses are sums. N is 509 here, not a power of two, so dividing by a wrong count
 gradients. FSDP 2 with the batcher's uneven per-rank loss tokens matches 1 GPU running both
 ranks' microbatches: optim_step sums the count over the DP ranks.
 
-    pytest tests/rl/unit_tests/gpu/test_gradient_accumulation.py -m multi_gpu    # 2 GPUs
+    pytest tests/rl/unit_tests/gpu/test_loss_token_count.py -m multi_gpu    # 2 GPUs
 """
 
 import dataclasses
 import os
-from functools import partial
 
 import numpy as np
 import pytest
@@ -59,13 +58,6 @@ def _trainer_config(parallelism: ParallelismConfig) -> Trainer.Config:
         seq_len=_NUM_TOKENS_PER_MICROBATCH,
         attn_backend="varlen",
     )
-    if parallelism.pipeline_parallel_degree > 1:
-        # Tied embeddings cannot be split across pipeline stages. Untied, the embedding needs its
-        # own init: the tied output layer initialized it.
-        trainer_model.enable_weight_tying = False
-        trainer_model.tok_embeddings.param_init = {
-            "weight": partial(torch.nn.init.normal_, std=0.02)
-        }
     config = rl_grpo_qwen3_0_6b_varlen_no_compile(seq_len=_NUM_TOKENS_PER_MICROBATCH)
     return dataclasses.replace(
         config.trainer,
@@ -110,26 +102,7 @@ def _training_sample_group(rng: np.random.Generator) -> TrainingSampleGroup:
     return TrainingSampleGroup(group_id=0, training_samples=samples, metrics=[])
 
 
-def _build_trainer(
-    rank: int,
-    world_size: int,
-    port: int,
-    parallelism: ParallelismConfig,
-    output_dir: str,
-) -> Trainer:
-    os.environ.update(
-        MASTER_ADDR="localhost",
-        MASTER_PORT=str(port),
-        RANK=str(rank),
-        LOCAL_RANK=str(rank),
-        WORLD_SIZE=str(world_size),
-    )
-    return Trainer(
-        _trainer_config(parallelism), max_num_documents=None, output_dir=output_dir
-    )
-
-
-def _pack_batch(*, dp_degree: int, num_pp_microbatches: int) -> TrainerStepBatch:
+def _pack_batch(*, dp_degree: int) -> TrainerStepBatch:
     batch, _ = (
         Batcher.Config()
         .build(
@@ -137,7 +110,7 @@ def _pack_batch(*, dp_degree: int, num_pp_microbatches: int) -> TrainerStepBatch
             max_context_length=_NUM_TOKENS_PER_MICROBATCH,
             num_prompts_per_train_step=1,
             dp_degree=dp_degree,
-            num_pp_microbatches=num_pp_microbatches,
+            num_pp_microbatches=1,
             pad_id=0,
             temperature=1.0,
         )
@@ -179,9 +152,18 @@ def _run_dp_ranks_on_one_or_two_gpus(
         if world_size == 1
         else ParallelismConfig(data_parallel_shard_degree=2)
     )
-    trainer = _build_trainer(rank, world_size, port, parallelism, output_dir)
+    os.environ.update(
+        MASTER_ADDR="localhost",
+        MASTER_PORT=str(port),
+        RANK=str(rank),
+        LOCAL_RANK=str(rank),
+        WORLD_SIZE=str(world_size),
+    )
+    trainer = Trainer(
+        _trainer_config(parallelism), max_num_documents=None, output_dir=output_dir
+    )
     model = trainer.engine.model_parts[0]
-    batch = _pack_batch(dp_degree=2, num_pp_microbatches=1)
+    batch = _pack_batch(dp_degree=2)
     columns = [
         [[row[dp_rank] for row in group] for group in batch.microbatch_groups]
         for dp_rank in range(2)
