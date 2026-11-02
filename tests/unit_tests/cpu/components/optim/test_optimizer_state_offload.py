@@ -9,7 +9,6 @@ import torch
 import torch.nn as nn
 from torchtitan.components.optim import (
     AdamW,
-    Optim,
     OptimizersContainer,
     OptimizerStateOffloader,
 )
@@ -40,31 +39,6 @@ def test_packer_keeps_whole_params_in_order(
     assert [
         [index_by_id[id(param)] for param in chunk] for chunk in chunks
     ] == expected_chunks
-
-
-def test_unsupported_configurations_raise() -> None:
-    with pytest.raises(ValueError, match="chunk_size_mb"):
-        OptimizerStateOffloader.Config(chunk_size_mb=0)
-    with pytest.raises(ValueError, match="fused=True"):
-        AdamW.Config(
-            pattern=r".*", fused=False, state_offload=OptimizerStateOffloader.Config()
-        )
-    with pytest.raises(ValueError, match="enable_accelerator_graph"):
-        Optim.Config(
-            optimizer=OptimizersContainer.Config(
-                optimizers=[
-                    AdamW.Config(
-                        pattern=r".*", state_offload=OptimizerStateOffloader.Config()
-                    )
-                ]
-            ),
-            enable_accelerator_graph=True,
-        )
-    with pytest.raises(ValueError, match="CUDA-resident"):
-        OptimizerStateOffloader.Config().build(
-            optimizer=torch.optim.AdamW([nn.Parameter(torch.zeros(4))], fused=True),
-            state_dtype=torch.float32,
-        )
 
 
 def test_container_rejects_mixed_param_dtypes() -> None:

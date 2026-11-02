@@ -11,6 +11,7 @@ the same tensors, only from a different storage location.
 """
 
 import os
+from unittest import mock
 
 import pytest
 import torch
@@ -28,6 +29,7 @@ from torch.testing._internal.distributed.checkpoint_utils import with_temp_dir
 from torchtitan.components.optim import (
     AdamW,
     LRSchedulersContainer,
+    offload as offload_module,
     OptimizersContainer,
     OptimizerStateOffloader,
 )
@@ -42,18 +44,20 @@ _MOMENT_KEYS = ("exp_avg", "exp_avg_sq")
 
 
 class _Model(nn.Module):
-    """Four small blocks, one wide block (an oversized chunk at 1 MiB), one unused block (no grad)."""
+    """Four small blocks, one wide block (an oversized chunk at 1 MiB), one unused block (no grad),
+    and a one-row block whose shard is empty on rank 1."""
 
     def __init__(self) -> None:
         super().__init__()
         self.blocks = nn.ModuleList([nn.Linear(_DIM, _DIM) for _ in range(4)])
         self.wide = nn.Linear(_DIM, 8 * _DIM, bias=False)
         self.unused = nn.Linear(_DIM, _DIM)
+        self.tiny = nn.Linear(_DIM, 1, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         for block in self.blocks:
             x = torch.tanh(block(x))
-        return self.wide(x)
+        return self.wide(x) + self.tiny(x)
 
 
 class TestOptimizerStateOffload(DTensorTestBase):
@@ -62,38 +66,37 @@ class TestOptimizerStateOffload(DTensorTestBase):
         return 2
 
     def _build(
-        self,
-        *,
-        offload: OptimizerStateOffloader.Config | None,
-        moment_dtype: str = "parameter",
-        seed: int = 0,
+        self, *, offload: bool, seed: int = 0
     ) -> tuple[_Model, OptimizersContainer]:
         torch.manual_seed(seed)
         model = _Model().cuda()
         mesh = self.build_device_mesh()
-        for module in (*model.blocks, model.wide, model.unused):
+        for module in (*model.blocks, model.wide, model.unused, model.tiny):
             fully_shard(module, mesh=mesh)
         fully_shard(model, mesh=mesh)
-        # optimizers[0] owns the biases, optimizers[1] the weights.
+        state_offload = OptimizerStateOffloader.Config() if offload else None
+        # optimizers[0] owns tiny (an empty slab on rank 1), [1] the biases, [2] the weights.
         config = OptimizersContainer.Config(
             optimizers=[
+                AdamW.Config(pattern=r"^tiny\.", state_offload=state_offload),
                 AdamW.Config(
                     pattern=r"\.bias$",
                     lr=1e-2,
                     weight_decay=0.0,
-                    moment_dtype=moment_dtype,
-                    state_offload=offload,
+                    state_offload=state_offload,
                 ),
                 AdamW.Config(
                     pattern=r".*",
                     lr=1e-3,
                     weight_decay=0.1,
-                    moment_dtype=moment_dtype,
-                    state_offload=offload,
+                    moment_dtype="bfloat16",
+                    state_offload=state_offload,
                 ),
             ],
         )
-        return model, config.build(model_parts=[model])
+        # 1 MiB chunks: the four 256x256 blocks pack several per chunk, the wide block is oversized.
+        with mock.patch.object(offload_module, "_CHUNK_SIZE_BYTES", 2**20):
+            return model, config.build(model_parts=[model])
 
     def _train(
         self, model: _Model, optimizers: OptimizersContainer, *, steps: int, seed: int
@@ -145,32 +148,23 @@ class TestOptimizerStateOffload(DTensorTestBase):
                 for key in _MOMENT_KEYS:
                     assert isinstance(state[key], DTensor)
                     assert state[key].device.type == "cpu"
-                    assert get_local_tensor(state[key]).is_pinned()
+                    # An empty shard has nothing to pin.
+                    local = get_local_tensor(state[key])
+                    assert local.is_pinned() or local.numel() == 0
                     assert state[key].placements == param.placements
                 assert state["step"].device.type == "cuda"
 
     @with_comms
-    def test_parity_with_resident_optimizer_fp32_moments(self) -> None:
-        self._check_parity_with_resident_optimizer("parameter")
-
-    @with_comms
-    def test_parity_with_resident_optimizer_bf16_moments(self) -> None:
-        self._check_parity_with_resident_optimizer("bfloat16")
-
-    def _check_parity_with_resident_optimizer(self, moment_dtype: str) -> None:
-        resident_model, resident = self._build(offload=None, moment_dtype=moment_dtype)
-        offloaded_model, offloaded = self._build(
-            offload=OptimizerStateOffloader.Config(chunk_size_mb=1),
-            moment_dtype=moment_dtype,
-        )
-        # 1 MiB chunks: the four 256x256 blocks pack several per chunk, the wide block is oversized.
-        assert len(offloaded.optimizers[1]._chunks) >= 3
+    def test_parity_with_resident_optimizer(self) -> None:
+        resident_model, resident = self._build(offload=False)
+        offloaded_model, offloaded = self._build(offload=True)
+        assert len(offloaded.optimizers[2]._chunks) >= 3
         self._train(resident_model, resident, steps=3, seed=1)
         self._train(offloaded_model, offloaded, steps=3, seed=1)
         self._assert_same(resident, offloaded)
         self._assert_cpu_canonical(offloaded)
-        expected_dtype = torch.bfloat16 if moment_dtype == "bfloat16" else torch.float32
-        for optimizer in offloaded.optimizers:
+        expected_dtypes = [torch.float32, torch.float32, torch.bfloat16]
+        for optimizer, expected_dtype in zip(offloaded.optimizers, expected_dtypes):
             for state in optimizer.state.values():
                 assert state["exp_avg"].dtype == expected_dtype
                 assert get_local_tensor(state["exp_avg"]).dtype == expected_dtype
@@ -178,13 +172,15 @@ class TestOptimizerStateOffload(DTensorTestBase):
         lr_schedulers = LRSchedulersContainer.Config().build(
             optimizers=offloaded, training_steps=3
         )
-        assert set(lr_schedulers.get_metrics()) == {"lr/AdamW/0", "lr/AdamW/1"}
+        assert set(lr_schedulers.get_metrics()) == {
+            "lr/AdamW/0",
+            "lr/AdamW/1",
+            "lr/AdamW/2",
+        }
 
     @with_comms
-    def test_staging_memory_is_bounded_by_two_chunks(self) -> None:
-        model, offloaded = self._build(
-            offload=OptimizerStateOffloader.Config(chunk_size_mb=1)
-        )
+    def test_slot_memory_is_bounded_by_two_chunks(self) -> None:
+        model, offloaded = self._build(offload=True)
         self._train(model, offloaded, steps=1, seed=3)
         params = list(model.parameters())
         model(torch.randn(8, _DIM, device="cuda")).square().mean().backward()
@@ -195,12 +191,15 @@ class TestOptimizerStateOffload(DTensorTestBase):
         offloaded.step()
         peak = torch.cuda.max_memory_allocated()
         after = torch.cuda.memory_allocated()
-        max_chunk_numel = max(
-            sum(get_local_tensor(p).numel() for p in chunk)
+        # The offloaders step one after another, so the largest pair of slots sets the peak.
+        two_slots = max(
+            2
+            * len(_MOMENT_KEYS)
+            * sum(get_local_tensor(p).numel() for p in chunk)
+            * offloader._slabs["exp_avg"].element_size()
             for offloader in offloaded.optimizers
             for chunk in offloader._chunks
         )
-        two_slots = 2 * len(_MOMENT_KEYS) * max_chunk_numel * 4
         assert peak - before <= two_slots + (1 << 20), (peak - before, two_slots)
         assert after - before <= 1 << 20
         offloaded.zero_grad()
@@ -214,9 +213,7 @@ class TestOptimizerStateOffload(DTensorTestBase):
         pre_step_checkpoint_dir = os.path.join(self.temp_dir, "before_first_step")
 
         # Saving before the first step works: state is allocated eagerly.
-        model_a, opt_a = self._build(
-            offload=OptimizerStateOffloader.Config(chunk_size_mb=1)
-        )
+        model_a, opt_a = self._build(offload=True)
         assert all(
             key.startswith(("state.", "param_groups.")) for key in opt_a.state_dict()
         )
@@ -243,7 +240,7 @@ class TestOptimizerStateOffload(DTensorTestBase):
         stager.close()
 
         # The checkpoint has the resident optimizer's keys and loads into it bitwise.
-        _, resident = self._build(offload=None)
+        _, resident = self._build(offload=False)
         resident_state_dict = resident.state_dict()
         assert set(resident_state_dict) == set(opt_a.state_dict())
         dcp.load(resident_state_dict, checkpoint_id=checkpoint_dir)
@@ -260,9 +257,7 @@ class TestOptimizerStateOffload(DTensorTestBase):
                         get_local_tensor(resident_optimizer.state[pr][key]).cpu(),
                     ), key
 
-        model_b, opt_b = self._build(
-            offload=OptimizerStateOffloader.Config(chunk_size_mb=1)
-        )
+        model_b, opt_b = self._build(offload=True)
         self._train(model_b, opt_b, steps=1, seed=99)  # diverge, then load over it
         slab_ptrs = {
             id(p): get_local_tensor(state["exp_avg"]).data_ptr()

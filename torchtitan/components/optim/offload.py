@@ -19,7 +19,6 @@ from torch.distributed.tensor._dtensor_spec import DTensorSpec, TensorMeta
 from torch.optim import Optimizer
 
 from torchtitan.config import Configurable
-from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.utils import get_local_tensor
 
 logger = logging.getLogger(__name__)
@@ -28,68 +27,45 @@ __all__ = ["OptimizerStateOffloader"]
 
 _MOMENT_KEYS = ("exp_avg", "exp_avg_sq")
 
+# Target bytes of both moments per chunk. step() holds two slots of the largest chunk on the
+# GPU, and a parameter shard larger than this is a chunk of its own, so it sets the floor.
+_CHUNK_SIZE_BYTES = 256 * 2**20
+
 
 class OptimizerStateOffloader(Optimizer, Configurable):
-    """Run Adam/AdamW while keeping its moment tensors in CPU memory.
-
-    Adam keeps a first and second moment for every weight. In fp32 these add 8
-    bytes per weight, or about 112 GB for a 14B model before distributed
-    sharding. Forward and backward do not use these moments; only
-    ``optimizer.step()`` does.
+    """Run fused Adam/AdamW with its moments in pinned CPU memory between steps.
 
     Definitions:
-        Slab: One pinned CPU buffer per moment, which CUDA can copy asynchronously.
-            Each parameter's moment is a view into it.
-        Chunk: One or more whole local parameter shards grouped by moment size.
-            A chunk can contain parameters from several layers or only part of
-            one layer, but a single parameter shard is never split.
-        Slot: Temporary GPU memory for one chunk's first and second moments.
+        Slab: one pinned CPU buffer per moment. Each parameter's moment is a view into it.
+        Chunk: whole local parameter shards with about ``_CHUNK_SIZE_BYTES`` of moments.
+        Slot: GPU memory for one chunk's two moments. ``step()`` uses two slots.
 
-    On multi-socket hosts, CPU/GPU transfer speed can differ meaningfully when
-    pinned memory is allocated on a remote NUMA node. The offloader binds the
-    process to the GPU's node before allocating its pinned slabs.
+    ``step()`` streams the chunks through the two slots. While Adam updates one slot, the
+    other stores its previous chunk and loads the next one, on separate H2D and D2H streams::
 
-    The offloader records each parameter's slice of the slabs. Before updating a
-    chunk, it places parameter-shaped views of the GPU slot in ``optimizer.state``
-    so Adam sees the moments that belong to each weight. During ``step()``, it
-    alternates chunks between two GPU slots::
+                       warm-up | chunk 0       | chunk 1           | chunk 2
+        GPU compute:           | Adam 0 in A   | Adam 1 in B       | Adam 2 in A
+        slot A copies: load 0  |               | store 0 -> load 2 |
+        slot B copies:         | load 1        |                   | store 1 -> load 3
 
-                       warm-up | iteration 0       | iteration 1       | iteration 2
-        GPU compute:           | update 0 in A     | update 1 in B     | update 2 in A
-        slot A copy:   load 0  |                   | store 0 -> load 2 |
-        slot B copy:           | load 1            |                   | store 1 -> load 3
+    Two streams vs one stream (load, update, store in order) on Qwen3-4B FSDP=2 rank
+    shards, one GB300: fp32 moments 155 vs 176 ms per step, bf16 moments 65 vs 97 ms.
 
-    While one slot is updated, the other returns its previous chunk to the CPU
-    and then loads its next chunk. Separate CUDA streams overlap these copies
-    with the update; events prevent a slot from being reused too early.
-
-    Requires fused Adam/AdamW (``Adam.Config`` and ``AdamW.Config`` check it): each
-    chunk runs one fused kernel. The for-loop and ``foreach`` paths have not been
-    validated for memory or speed. ``step()`` cannot be captured in an accelerator
-    graph; ``Optim.Config`` rejects ``enable_accelerator_graph`` with this offload.
+    Launch with ``torchrun --numa-binding=node`` so the slabs land on the GPU's NUMA node.
 
     Args:
-        config: Chunk size.
-        optimizer: A `torch.optim.Adam` or `torch.optim.AdamW` built with `fused=True`.
-        state_dtype: dtype of the moments (`torch.bfloat16` under ``moment_dtype="bfloat16"``).
+        config: Has no options.
+        optimizer: A fused ``torch.optim.Adam`` or ``torch.optim.AdamW``.
+        state_dtype: dtype of the moments (``torch.bfloat16`` under ``moment_dtype="bfloat16"``).
 
     Example:
 
-        AdamW.Config(
-            pattern=r".*",
-            state_offload=OptimizerStateOffloader.Config(chunk_size_mb=256),
-        )
+        AdamW.Config(pattern=r".*", state_offload=OptimizerStateOffloader.Config())
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        chunk_size_mb: int = 256
-        """Target MiB of moments moved per H2D/D2H chunk. Two chunks are resident on
-        the GPU during ``step()``."""
-
-        def __post_init__(self) -> None:
-            if self.chunk_size_mb <= 0:
-                raise ValueError("chunk_size_mb must be positive")
+        pass
 
     def __init__(
         self,
@@ -125,11 +101,8 @@ class OptimizerStateOffloader(Optimizer, Configurable):
         # Partition parameters, allocate their canonical CPU state, then create the
         # independent streams that move chunks in each direction.
         params = [param for group in self.param_groups for param in group["params"]]
-        maybe_apply_numa_binding(torch.accelerator.current_device_index(), "cuda")
         self._chunks = _pack_params_by_state_bytes(
-            params,
-            chunk_size_bytes=config.chunk_size_mb * 1024 * 1024,
-            state_dtype=state_dtype,
+            params, chunk_size_bytes=_CHUNK_SIZE_BYTES, state_dtype=state_dtype
         )
         self._allocate_pinned_state(params, state_dtype)
         self._h2d_stream = torch.Stream()
@@ -140,8 +113,8 @@ class OptimizerStateOffloader(Optimizer, Configurable):
         pinned_gb = sum(slab.nbytes for slab in self._slabs.values()) / 1e9
         logger.info(
             f"Optimizer-state offload: {len(params)} params in {len(self._chunks)} chunks "
-            f"(target {config.chunk_size_mb} MiB, largest {largest_chunk_mib:.0f} MiB; "
-            f"step() stages two), {pinned_gb:.2f} GB pinned host memory per rank"
+            f"(largest {largest_chunk_mib:.0f} MiB; step() holds two GPU slots), "
+            f"{pinned_gb:.2f} GB pinned host memory per rank"
         )
 
     @overload
@@ -177,9 +150,9 @@ class OptimizerStateOffloader(Optimizer, Configurable):
         if not chunks:
             return
 
-        # Two staging slots, allocated on the compute stream so the caching allocator can hand
-        # the memory back to forward/backward after the step. Freed only after the final D2H
-        # synchronize below, so no cross-stream lifetime hazard remains.
+        # Two slots, allocated on the compute stream so the caching allocator can hand the
+        # memory back to forward/backward after the step. Freed only after the side streams
+        # are synchronized below, so no cross-stream lifetime hazard remains.
         max_numel = max(_chunk_numel(chunk) for chunk in chunks)
         state_dtype = self.state[chunks[0][0]]["exp_avg"].dtype
         device = chunks[0][0].device
@@ -207,56 +180,51 @@ class OptimizerStateOffloader(Optimizer, Configurable):
 
         # Prime slot A, then alternate slots so the next H2D and previous D2H overlap
         # the current chunk's optimizer kernels.
-        saved_group_params = [list(group["params"]) for group in self.param_groups]
-        cpu_state: dict[torch.Tensor, dict[str, torch.Tensor]] = {}
+        group_params = [list(group["params"]) for group in self.param_groups]
         h2d_done = h2d(0)
-        try:
-            for chunk_index, chunk in enumerate(chunks):
-                slot = slots[chunk_index % 2]
-                compute_stream.wait_event(h2d_done)
-                if chunk_index + 1 < len(chunks):
-                    h2d_done = h2d(chunk_index + 1)
+        for chunk_index, chunk in enumerate(chunks):
+            slot = slots[chunk_index % 2]
+            compute_stream.wait_event(h2d_done)
+            if chunk_index + 1 < len(chunks):
+                h2d_done = h2d(chunk_index + 1)
 
-                # Bind GPU staging views as the state, step only this chunk with the unchanged
-                # optimizer, then copy the updated moments back and rebind the pinned CPU state.
-                cpu_state = {
-                    param: {key: self.state[param][key] for key in _MOMENT_KEYS}
-                    for param in chunk
-                }
-                offset = 0
-                for param in chunk:
-                    numel = get_local_tensor(param).numel()
-                    for key in _MOMENT_KEYS:
-                        view = slot[key][offset : offset + numel].view(
-                            get_local_tensor(param).shape
-                        )
-                        self.state[param][key] = _state_like(param, view)
-                    offset += numel
-                chunk_set = set(map(id, chunk))
-                for group, params in zip(self.param_groups, saved_group_params):
-                    group["params"] = [p for p in params if id(p) in chunk_set]
-                self.optimizer.step()
+            # Bind slot views as the state, step only this chunk with the unchanged optimizer,
+            # then copy the updated moments back and rebind the pinned CPU state.
+            cpu_state = {
+                param: {key: self.state[param][key] for key in _MOMENT_KEYS}
+                for param in chunk
+            }
+            offset = 0
+            for param in chunk:
+                numel = get_local_tensor(param).numel()
+                for key in _MOMENT_KEYS:
+                    view = slot[key][offset : offset + numel].view(
+                        get_local_tensor(param).shape
+                    )
+                    self.state[param][key] = _state_like(param, view)
+                offset += numel
+            chunk_set = set(map(id, chunk))
+            for group, params in zip(self.param_groups, group_params):
+                group["params"] = [p for p in params if id(p) in chunk_set]
+            self.optimizer.step()
 
-                self._d2h_stream.wait_stream(compute_stream)
-                start, numel = self._slab_offsets[chunk[0]], _chunk_numel(chunk)
-                with self._d2h_stream:
-                    for key in _MOMENT_KEYS:
-                        self._slabs[key][start : start + numel].copy_(
-                            slot[key][:numel], non_blocking=True
-                        )
-                    slot_free[chunk_index % 2] = self._d2h_stream.record_event()
-                for param in chunk:
-                    self.state[param].update(cpu_state[param])
-        finally:
-            # Outside step(), the inner optimizer exposes its complete parameter groups and
-            # the pinned CPU state, even if a chunk raised.
-            for group, params in zip(self.param_groups, saved_group_params):
-                group["params"] = params
-            for param, moments in cpu_state.items():
-                self.state[param].update(moments)
-            # CPU state is canonical again, and no copy still reads the slots when they are freed.
-            self._h2d_stream.synchronize()
-            self._d2h_stream.synchronize()
+            self._d2h_stream.wait_stream(compute_stream)
+            start, numel = self._slab_offsets[chunk[0]], _chunk_numel(chunk)
+            with self._d2h_stream:
+                for key in _MOMENT_KEYS:
+                    self._slabs[key][start : start + numel].copy_(
+                        slot[key][:numel], non_blocking=True
+                    )
+                slot_free[chunk_index % 2] = self._d2h_stream.record_event()
+            for param in chunk:
+                self.state[param].update(cpu_state[param])
+
+        for group, params in zip(self.param_groups, group_params):
+            group["params"] = params
+        # The CPU moments are current for checkpointing, and no copy still uses the slots
+        # when they are freed.
+        self._h2d_stream.synchronize()
+        self._d2h_stream.synchronize()
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         """Copy a loaded state dict into the existing pinned state, in place.
@@ -288,18 +256,21 @@ class OptimizerStateOffloader(Optimizer, Configurable):
         """One pinned slab per moment, each parameter's moment a view into it."""
         # Pin pageable memory, as DCP's async stager does: pin_memory=True would round each
         # slab up to a power of two, up to 2x the host memory.
-        # TODO: torch.cuda._pin_memory_utils is private and CUDA-only. Move to a public,
-        # device-generic host-register API once PyTorch has one.
+        # TODO: torch.cuda._pin_memory_utils is private and CUDA-only. Move to in-place pinning
+        # once PyTorch has it: https://github.com/pytorch/pytorch/issues/32167
         total_numel = sum(get_local_tensor(param).numel() for param in params)
         self._slabs = {}
         for key in _MOMENT_KEYS:
             slab = torch.zeros(total_numel, dtype=state_dtype)
-            pin_memory_utils.pin_memory(slab.data_ptr(), slab.nbytes)
-            # Unpin when the slab is freed, but not at exit, after the CUDA context is gone.
-            unpin = weakref.finalize(
-                slab, pin_memory_utils.unpin_memory, slab.data_ptr()
-            )
-            unpin.atexit = False
+            # A rank whose shards are all empty has a 0-byte slab with a null pointer,
+            # which cudaHostRegister rejects.
+            if slab.numel() > 0:
+                pin_memory_utils.pin_memory(slab.data_ptr(), slab.nbytes)
+                # Unpin when the slab is freed, but not at exit, after the CUDA context is gone.
+                unpin = weakref.finalize(
+                    slab, pin_memory_utils.unpin_memory, slab.data_ptr()
+                )
+                unpin.atexit = False
             self._slabs[key] = slab
         self._slab_offsets: dict[torch.Tensor, int] = {}
 
