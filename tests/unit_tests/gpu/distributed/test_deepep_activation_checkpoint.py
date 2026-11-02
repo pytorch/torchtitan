@@ -265,11 +265,8 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                     actual_loss, actual = _run_forward_backward(ac_model, x_TD)
 
                 reference_loss, reference_grads = _run_forward_backward(reference, x_TD)
-                # Moving the multiply across W2 changes BF16 rounding. Bound
-                # relative L2 error by two BF16 epsilons for loss and each grad;
-                # unlike elementwise relative error, this handles cancellation
-                # near zero. Checkpoint equivalence below stays bitwise exact
-                # when dispatch is deterministic.
+                # Compare the default pre-W2 router-score absorption path with
+                # the previous behavior, which applied router scores after W2.
                 bf16_rtol = 2 * torch.finfo(torch.bfloat16).eps
                 for value, reference_value in zip(
                     [expected_loss, *expected],
