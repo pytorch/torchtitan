@@ -197,16 +197,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                         "replay: replay reruns a checked step, which would preprocess its "
                         "microbatches again."
                     )
-            if (
-                isinstance(self.loss, ChunkedLossWrapper.Config)
-                and self.loss.skip_non_loss_tokens
-                and not self.training.disable_accelerator_graphs
-                and accelerator_graphs_supported()
-            ):
-                raise ValueError(
-                    "loss.skip_non_loss_tokens requires training.disable_accelerator_graphs=True: "
-                    "the lm_head's row count changes every microbatch."
-                )
             num_tokens = self.training.num_tokens_per_microbatch_per_dp_rank
             sequence_parallel_degree = (
                 self.parallelism.tensor_parallel_degree
@@ -366,6 +356,17 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     ) -> None:
         """Build the loss and model execution state."""
         self.loss_fn = self.config.loss.build()
+        if (
+            isinstance(self.loss_fn, ChunkedLossWrapper)
+            and self.loss_fn.skip_non_loss_tokens
+            and not self.config.training.disable_accelerator_graphs
+            and accelerator_graphs_supported()
+        ):
+            # TODO: keep the skip under graphs (graph the decoder only, or a fixed row budget).
+            logger.warning(
+                "loss.skip_non_loss_tokens is off: accelerator graphs need a fixed lm_head row count."
+            )
+            self.loss_fn.skip_non_loss_tokens = False
         if create_seed_checkpoint:
             init_device = "cpu"
             buffer_device = None

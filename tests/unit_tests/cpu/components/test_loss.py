@@ -1667,6 +1667,8 @@ class TestChunkedLossWrapper(unittest.TestCase):
         torch.manual_seed(42)
         T, D, V, num_chunks = 32, 8, 32, 4
         _model, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
+        # A traced graph needs a fixed lm_head row count.
+        chunked_loss.skip_non_loss_tokens = False
         hidden_states = torch.randn(T, D)
         labels = torch.randint(0, V, (T,))
         for tensor in (hidden_states, labels):

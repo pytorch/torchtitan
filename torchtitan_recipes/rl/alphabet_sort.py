@@ -152,7 +152,6 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
             ),
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
-                skip_non_loss_tokens=True,
                 loss_fn=GRPOLoss.Config(
                     global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
@@ -233,7 +232,6 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
             ),
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
-                skip_non_loss_tokens=True,
                 loss_fn=GRPOLoss.Config(
                     global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
@@ -369,7 +367,6 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
             ),
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
-                skip_non_loss_tokens=True,
                 loss_fn=GRPOLoss.Config(
                     global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
@@ -445,7 +442,6 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
             ),
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
-                skip_non_loss_tokens=True,
                 loss_fn=GRPOLoss.Config(
                     global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
@@ -519,7 +515,6 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
             ),
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
-                skip_non_loss_tokens=True,
                 loss_fn=GRPOLoss.Config(
                     global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
@@ -602,7 +597,6 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
             ),
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
-                skip_non_loss_tokens=True,
                 loss_fn=GRPOLoss.Config(
                     global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
@@ -716,7 +710,6 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
             debug=batch_invariant_config,
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
-                skip_non_loss_tokens=True,
                 loss_fn=GRPOLoss.Config(
                     global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
@@ -815,7 +808,6 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
             ),
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
-                skip_non_loss_tokens=True,
                 loss_fn=GRPOLoss.Config(
                     global_vocab_size=decoder_vocab_size(trainer_model)
                 ),

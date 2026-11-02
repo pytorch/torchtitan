@@ -655,11 +655,12 @@ class ChunkedLossWrapper(Loss[LossInput]):
         loss_fn: Loss.Config = field(default_factory=CrossEntropyLoss.Config)
         """Loss applied to each chunk's logits."""
 
-        skip_non_loss_tokens: bool = False
+        skip_non_loss_tokens: bool = True
         """Run the lm_head only on loss tokens: labels != ``IGNORE_INDEX``. The rest get zero
         grad, so ``loss_fn`` must read only loss tokens (no entropy or KL over all tokens).
-        Needs accelerator graphs off. With multiple outputs (MTP), a token stays if any
-        output's labels read it."""
+        With multiple outputs (MTP), a token stays if any output's labels read it.
+        ``TrainingEngine`` turns it off under accelerator graphs, which need a fixed row count;
+        code that traces or captures this wrapper directly must set it to False."""
 
     def __init__(self, config: Config):
         self.num_chunks = config.num_chunks

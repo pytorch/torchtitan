@@ -257,7 +257,6 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             ),
             loss=ChunkedLossWrapper.Config(
                 num_chunks=32,
-                skip_non_loss_tokens=True,
                 loss_fn=GRPOLoss.Config(
                     global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
@@ -403,7 +402,6 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             ),
             loss=ChunkedLossWrapper.Config(
                 num_chunks=32,
-                skip_non_loss_tokens=True,
                 loss_fn=GRPOLoss.Config(
                     global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
@@ -525,7 +523,6 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
             ),
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
-                skip_non_loss_tokens=True,
                 loss_fn=GRPOLoss.Config(
                     global_vocab_size=decoder_vocab_size(trainer_model)
                 ),

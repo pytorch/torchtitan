@@ -51,7 +51,8 @@ class DAPOLoss(Loss[torch.Tensor]):
     matches a single large batch. ``logits`` is the current-policy output passed to
     ``compute_logprobs``.
 
-    Every loss term and metric reads only ``loss_mask`` tokens, as
+    Every loss term and metric reads only tokens whose labels are not ``IGNORE_INDEX``
+    (``loss_mask`` with finite ``generator_logprobs``), as
     ``ChunkedLossWrapper.Config.skip_non_loss_tokens`` requires.
     """
 

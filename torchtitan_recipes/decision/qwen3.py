@@ -104,6 +104,8 @@ class AnswerTokenLoss(ChunkedLossWrapper):
         """Upper bound on supervised positions per microbatch."""
         num_chunks: int = 1
         """The gathered rows are few, so they are not chunked further."""
+        skip_non_loss_tokens: bool = False
+        """Off: this class gathers the supervised rows itself, with a static shape."""
 
     def __init__(self, config: Config):
         super().__init__(config)

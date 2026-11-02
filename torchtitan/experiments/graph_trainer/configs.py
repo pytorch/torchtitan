@@ -371,5 +371,6 @@ def to_graph_trainer_config(
         d["loss"] = ChunkedLossWrapperWithParamGrads.Config(
             **{f.name: getattr(loss_cfg, f.name) for f in fields(loss_cfg)}
         )
+        d["loss"].skip_non_loss_tokens = False
 
     return GraphTrainer.Config(**d)
