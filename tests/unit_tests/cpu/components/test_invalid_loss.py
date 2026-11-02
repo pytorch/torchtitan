@@ -40,7 +40,6 @@ class TestInvalidLoss(unittest.TestCase):
         ]
         trainer.max_num_documents = None
         trainer.preprocess_inputs_kwargs = {}
-        trainer._model_has_aux_loss = False
         trainer.config = MagicMock()
         trainer.config.training.disable_accelerator_graphs = True
         trainer.sdc_replayer = None

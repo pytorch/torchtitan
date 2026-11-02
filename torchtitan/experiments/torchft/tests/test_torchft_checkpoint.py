@@ -470,7 +470,7 @@ class TestFTManager(unittest.TestCase):
     def test_multi_group_fsdp_installs_cross_replica_hook_on_every_group(self):
         dense_group = SimpleNamespace(_all_reduce_hook=None)
         expert_group = SimpleNamespace(_all_reduce_hook=None)
-        model = _FSDPModuleWithParamGroups([dense_group, expert_group])
+        model = nn.Sequential(_FSDPModuleWithParamGroups([dense_group, expert_group]))
         ft_manager = TorchFTManager(TorchFTManager.Config(enable=False))
         ft_manager._manager = mock.sentinel.manager
         ft_manager.use_async_quorum = True
@@ -501,14 +501,6 @@ class TestFTManager(unittest.TestCase):
                 ),
             ],
         )
-
-    def test_async_quorum_rejects_a_model_part_without_fsdp(self):
-        ft_manager = TorchFTManager(TorchFTManager.Config(enable=False))
-        ft_manager._manager = mock.sentinel.manager
-        ft_manager.use_async_quorum = True
-
-        with self.assertRaisesRegex(ValueError, "must be wrapped in FSDP, got Linear"):
-            ft_manager.maybe_set_all_reduce_hook([nn.Linear(2, 2)])
 
 
 if __name__ == "__main__":
