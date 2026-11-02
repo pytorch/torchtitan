@@ -333,7 +333,8 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
             impl="fused",
         )
         update_gate = torch.sigmoid(b).unsqueeze(0)
-        # Decode metadata selects a different normalization reduction layout.
+        # Omit sequence metadata to keep the normalization layout identical
+        # across prefill and decode; recurrence still needs the boundaries.
         norm_cu_seqlens = None if is_in_batch_invariant_mode() else cu_seqlens
         query = l2norm(query, cu_seqlens=norm_cu_seqlens)
         key = l2norm(key, cu_seqlens=norm_cu_seqlens)
