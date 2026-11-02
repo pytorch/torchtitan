@@ -32,9 +32,9 @@ class BinaryActivationFn(Function[torch.Tensor], ABC):
     # (Qwen3.5).
     # Backward stacks the gate and up gradients into [..., 2, F]. Both limits at 0 make Inductor write
     # each gradient into its half, not one kernel that picks a half per element. Both are needed.
-    # TODO: keep the score gradient bitwise under a new expert row order without deterministic
-    # mode. With scores, these options make its per-row sum depend on the row's position, so a
-    # new order changes its bits; default options don't, at 1.6-1.8x this region's time.
+    # With scores, these options make the score gradient's per-row sum depend on the row's
+    # position, so a new row order changes its bits; deterministic mode is bitwise, and default
+    # options cost 1.6-1.8x this region's time.
     @local_compile(
         "fused_binary_activation",
         batch_invariant=True,
