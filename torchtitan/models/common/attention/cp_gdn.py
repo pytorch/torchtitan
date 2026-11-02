@@ -56,9 +56,7 @@ class UlyssesInnerGDN(Ulysses[LinearAttentionMetadata], InnerGDN):
 
     def forward(
         self,
-        query_TC: torch.Tensor,
-        key_TC: torch.Tensor,
-        value_TC: torch.Tensor,
+        mixed_qkv_TC: torch.Tensor,
         a_TH: torch.Tensor,
         b_TH: torch.Tensor,
         conv_q_weight_C1W: torch.Tensor,
@@ -71,6 +69,14 @@ class UlyssesInnerGDN(Ulysses[LinearAttentionMetadata], InnerGDN):
         value_head_dim: int,
         attention_metadata: LinearAttentionMetadata | None,
     ) -> torch.Tensor:
+        query_TC, key_TC, value_TC = mixed_qkv_TC.split(
+            [
+                conv_q_weight_C1W.shape[0],
+                conv_k_weight_C1W.shape[0],
+                conv_v_weight_C1W.shape[0],
+            ],
+            dim=-1,
+        )
         cp_group = spmd_mesh_group(MeshAxisName.CP)
         if cp_group is None:
             raise RuntimeError(
@@ -118,9 +124,9 @@ class UlyssesInnerGDN(Ulysses[LinearAttentionMetadata], InnerGDN):
             )
         )
         out_THV = super().forward(
-            q_THK.flatten(-2),
-            k_THK.flatten(-2),
-            v_THV.flatten(-2),
+            torch.cat(
+                [q_THK.flatten(-2), k_THK.flatten(-2), v_THV.flatten(-2)], dim=-1
+            ),
             a_TH1.squeeze(-1),
             b_TH1.squeeze(-1),
             *parameters,
@@ -169,9 +175,7 @@ class ContextParallelInnerGDN(
 
     def forward(
         self,
-        query_TC: torch.Tensor,
-        key_TC: torch.Tensor,
-        value_TC: torch.Tensor,
+        mixed_qkv_TC: torch.Tensor,
         a_TH: torch.Tensor,
         b_TH: torch.Tensor,
         conv_q_weight_C1W: torch.Tensor,
@@ -184,6 +188,14 @@ class ContextParallelInnerGDN(
         value_head_dim: int,
         attention_metadata: LinearAttentionMetadata | None,
     ) -> torch.Tensor:
+        query_TC, key_TC, value_TC = mixed_qkv_TC.split(
+            [
+                conv_q_weight_C1W.shape[0],
+                conv_k_weight_C1W.shape[0],
+                conv_v_weight_C1W.shape[0],
+            ],
+            dim=-1,
+        )
         if not isinstance(attention_metadata, ContextParallelLinearAttentionMetadata):
             raise ValueError(
                 "Gated DeltaNet context parallelism requires rank-local "

@@ -144,12 +144,8 @@ def _replace_vllm_layer_configs(model_config):
 
             vllm_inner_gdn_cfg = VLLMInnerGDN.Config(
                 layer_idx=layer_idx,
-                num_k_heads=(
-                    delta_net_cfg.in_proj_q.out_features // delta_net_cfg.key_head_dim
-                ),
-                num_v_heads=(
-                    delta_net_cfg.in_proj_v.out_features // delta_net_cfg.value_head_dim
-                ),
+                num_k_heads=delta_net_cfg.n_key_heads,
+                num_v_heads=delta_net_cfg.n_heads,
                 head_k_dim=delta_net_cfg.key_head_dim,
                 head_v_dim=delta_net_cfg.value_head_dim,
                 conv_kernel_size=delta_net_cfg.conv_kernel_size,

@@ -409,9 +409,7 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
 
     def forward(
         self,
-        query_TC: torch.Tensor,
-        key_TC: torch.Tensor,
-        value_TC: torch.Tensor,
+        mixed_qkv_TC: torch.Tensor,
         a_TH: torch.Tensor,
         b_TH: torch.Tensor,
         conv_q_weight_C1W: torch.Tensor,
@@ -428,7 +426,6 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
         del attention_metadata
         assert key_head_dim == self.head_k_dim
         assert value_head_dim == self.head_v_dim
-        mixed_qkv_TC = torch.cat([query_TC, key_TC, value_TC], dim=-1)
         conv_weight_CW = torch.cat(
             [conv_q_weight_C1W, conv_k_weight_C1W, conv_v_weight_C1W],
             dim=0,
@@ -458,8 +455,8 @@ def maybe_configure_gdn_hybrid_model(
         "GDN",
         (
             (
-                gdn_config.in_proj_q.out_features // gdn_config.key_head_dim,
-                gdn_config.in_proj_v.out_features // gdn_config.value_head_dim,
+                gdn_config.n_key_heads,
+                gdn_config.n_heads,
                 gdn_config.key_head_dim,
                 gdn_config.value_head_dim,
                 gdn_config.conv_kernel_size,

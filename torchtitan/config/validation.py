@@ -189,7 +189,7 @@ def validate_context_parallel(
             n_heads = attention.n_heads
             n_kv_heads = getattr(attention, "n_kv_heads", None) or n_heads
             if isinstance(attention, GDN.Config):
-                n_kv_heads = attention.in_proj_q.out_features // attention.key_head_dim
+                n_kv_heads = attention.n_key_heads
             for name, count in (("n_heads", n_heads), ("n_kv_heads", n_kv_heads)):
                 if count % head_shard_degree != 0:
                     raise ValueError(
