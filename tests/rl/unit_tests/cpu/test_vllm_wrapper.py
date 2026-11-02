@@ -27,7 +27,11 @@ from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_config
 from torchtitan.models.qwen3 import build_model_config as build_qwen3_config
 from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.rl.generator.vllm import model_wrapper, registry
-from torchtitan.rl.generator.vllm.attention.attention import VLLMInnerAttention
+from torchtitan.rl.generator.vllm.attention import attention as vllm_attention
+from torchtitan.rl.generator.vllm.attention.attention import (
+    _gather_paged_kv,
+    VLLMInnerAttention,
+)
 
 from torchtitan.rl.generator.vllm.attention.mla import (
     _VLLMKVBProj,
@@ -552,3 +556,103 @@ def test_vllm_native_mla_rejects_copied_decode_weights() -> None:
         VLLMNativeMLAAttention, "process_weights_after_loading", copy_decode_weights
     ), pytest.raises(AssertionError, match="must be a view of wkv_b.weight"):
         attention.process_weights_after_loading(torch.bfloat16)
+
+
+# --- Paged KV gather (_gather_paged_kv) ---
+
+
+def _paged_cache(num_blocks, page_size, num_kv_heads, head_dim):
+    """A cache shaped the way the impl sees it: K and V interleaved on content."""
+    cache = torch.randn(num_blocks, num_kv_heads, page_size, 2 * head_dim)
+    key, value = cache.transpose(1, 2).split(head_dim, dim=-1)
+    return key, value
+
+
+def _capturing(monkeypatch, value):
+    monkeypatch.setattr(vllm_attention, "_is_capturing", lambda: value)
+
+
+@pytest.mark.parametrize("capturing", [False, True])
+@pytest.mark.parametrize("page_size", [1, 16])
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        pytest.param([37, 16, 100, 5], id="ragged"),
+        pytest.param([16, 32, 48], id="exact-page-multiples"),
+        pytest.param([1], id="single-token"),
+    ],
+)
+def test_gather_paged_kv_reproduces_each_sequence(
+    monkeypatch, seq_lens, page_size, capturing
+):
+    # Each sequence's live context must come back verbatim, and the rows must
+    # land where cu_seqlens_k says they do, in both stride regimes.
+    _capturing(monkeypatch, capturing)
+    num_kv_heads, head_dim = 2, 8
+    max_pages = max((length + page_size - 1) // page_size for length in seq_lens)
+    num_seqs = len(seq_lens)
+    block_table = torch.randperm(num_seqs * max_pages).view(num_seqs, max_pages)
+    key_cache, value_cache = _paged_cache(
+        num_seqs * max_pages, page_size, num_kv_heads, head_dim
+    )
+    seqused_k = torch.tensor(seq_lens, dtype=torch.int32)
+
+    key, value, cu_seqlens_k = _gather_paged_kv(
+        key_cache, value_cache, block_table, seqused_k, max(seq_lens)
+    )
+
+    stride = max_pages * page_size if capturing else max(seq_lens)
+    assert key.shape[0] == num_seqs * stride
+    assert cu_seqlens_k.tolist() == [i * stride for i in range(num_seqs + 1)]
+
+    for seq, length in enumerate(seq_lens):
+        pages = block_table[seq, : (length + page_size - 1) // page_size]
+        expected = key_cache[pages].flatten(0, 1)[:length]
+        start = int(cu_seqlens_k[seq])
+        torch.testing.assert_close(key[start : start + length], expected)
+        expected_v = value_cache[pages].flatten(0, 1)[:length]
+        torch.testing.assert_close(value[start : start + length], expected_v)
+
+
+def test_gather_paged_kv_shape_is_fixed_while_capturing(monkeypatch):
+    # A CUDA graph replays with different context lengths in the same buffers,
+    # so under capture nothing about the gather's shape may depend on them.
+    _capturing(monkeypatch, True)
+    page_size, num_kv_heads, head_dim = 16, 2, 8
+    block_table = torch.arange(3 * 4).view(3, 4).to(torch.int32)
+    key_cache, value_cache = _paged_cache(12, page_size, num_kv_heads, head_dim)
+
+    shapes = set()
+    for seq_lens in ([1, 1, 1], [64, 64, 64], [5, 40, 63]):
+        key, _, cu_seqlens_k = _gather_paged_kv(
+            key_cache,
+            value_cache,
+            block_table,
+            torch.tensor(seq_lens, dtype=torch.int32),
+            max(seq_lens),
+        )
+        shapes.add((tuple(key.shape), tuple(cu_seqlens_k.tolist())))
+
+    assert len(shapes) == 1
+
+
+def test_gather_paged_kv_reads_a_strided_cache_view(monkeypatch):
+    # vLLM hands the impl non-contiguous views of one KV cache tensor; indexing
+    # them must not fall back to materializing the whole cache.
+    _capturing(monkeypatch, False)
+    page_size, num_kv_heads, head_dim = 16, 2, 8
+    key_cache, value_cache = _paged_cache(8, page_size, num_kv_heads, head_dim)
+    assert not key_cache.is_contiguous()
+    block_table = torch.arange(2 * 4).view(2, 4).to(torch.int32)
+    seq_lens = [40, 17]
+
+    key, _, _ = _gather_paged_kv(
+        key_cache,
+        value_cache,
+        block_table,
+        torch.tensor(seq_lens, dtype=torch.int32),
+        max(seq_lens),
+    )
+
+    pages = block_table[0, :3]
+    torch.testing.assert_close(key[: seq_lens[0]], key_cache[pages].flatten(0, 1)[:40])
