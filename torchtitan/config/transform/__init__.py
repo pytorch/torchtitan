@@ -12,7 +12,6 @@ from .base import convert_config_type, ModelConfigTransform
 from .batch_invariance import BatchInvariantFlexConverter
 from .context_parallel import ContextParallelTransform
 from .converter import ModelConfigConverter, validate_converter_compatibility
-from .freeze_moe_routing import FreezeMoERoutingTransform
 from .lm_head_fp32 import LMHeadFP32OutputConverter
 from .lora import LoRATransform
 from .quantization import (
@@ -35,7 +34,6 @@ __all__ = [
     "ContextParallelTransform",
     "TokenDispatcherTransform",
     "BatchInvariantFlexConverter",
-    "FreezeMoERoutingTransform",
     "LMHeadFP32OutputConverter",
     "LoRATransform",
     "MXFP8GroupedLinearConverter",

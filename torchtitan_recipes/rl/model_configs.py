@@ -7,16 +7,12 @@
 """Model config helpers shared by the RL recipes."""
 
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    FreezeMoERoutingTransform,
-    LMHeadFP32OutputConverter,
-    ModelConfigTransform,
-    transform_model_config_,
-)
+from torchtitan.config.transform import LMHeadFP32OutputConverter
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.moe import MoE
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 
 
@@ -27,8 +23,7 @@ def build_rl_model_configs(
     trainer_parallelism: ParallelismConfig,
     generator_parallelism: InferenceParallelismConfig,
     fp32_lm_head: bool = True,
-    # TODO: consider enabling router training, but with a lower lr
-    freeze_moe_routing: bool = True,
+    disable_moe_load_balancing: bool = True,
     **kwargs: Any,
 ) -> tuple[Decoder.Config, Decoder.Config]:
     """Build the ``(trainer, generator)`` model configs of an RL recipe.
@@ -38,10 +33,9 @@ def build_rl_model_configs(
     parallelism. Changes made to one afterwards must be made to the other.
 
     RL defaults, applied to both (pass False to skip one):
-        fp32_lm_head        lm_head -> HiMidLoLinear (fp32 logits)
-        freeze_moe_routing  frozen router gate and expert bias, no aux loss
-                            (FreezeMoERoutingTransform), so trainer and generator
-                            expert choices don't drift apart
+        fp32_lm_head                lm_head -> HiMidLoLinear (fp32 logits)
+        disable_moe_load_balancing  expert bias frozen as loaded, no router aux loss;
+                                    the router gate trains on the RL loss only
     Per-role transforms go through ``apply_transforms(config.generator, ...)``.
     """
     if fp32_lm_head:
@@ -55,12 +49,9 @@ def build_rl_model_configs(
             flavor, parallelism=generator_parallelism.to_training(), **kwargs
         ),
     )
-    transforms: list[ModelConfigTransform] = []
-    if freeze_moe_routing:
-        transforms.append(FreezeMoERoutingTransform())
-    # A transform may return a new root (e.g. LoRA), so keep what it returns.
-    trainer_model, generator_model = (
-        cast(Decoder.Config, transform_model_config_(model_config, transforms))
-        for model_config in model_configs
-    )
-    return trainer_model, generator_model
+    if disable_moe_load_balancing:
+        for model_config in model_configs:
+            for _fqn, moe_config, _parent, _attr in model_config.traverse(MoE.Config):
+                moe_config.freeze_expert_bias = True
+                moe_config.router.aux_loss = None
+    return model_configs
