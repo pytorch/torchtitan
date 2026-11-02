@@ -311,7 +311,7 @@ def log_trace_scalar(scalars: dict[str, float | int], *, stacklevel: int = 2) ->
 
         log_trace_scalar({"train.loss": 2.5, "train.tflops": 45.6})
     """
-    if _structured_logger_disabled() or torch.compiler.is_compiling():
+    if _structured_logger_disabled() or torch.compiler.is_dynamo_compiling():
         return
     step = get_step()
     bad_keys: list[str] = []
@@ -352,7 +352,7 @@ def log_trace_instant(event_type: str, *, stacklevel: int = 2) -> None:
 
         log_trace_instant("training_start")
     """
-    if torch.compiler.is_compiling() or _structured_logger_disabled():
+    if torch.compiler.is_dynamo_compiling() or _structured_logger_disabled():
         return
     _structured_logger.info(
         str(event_type),
@@ -412,7 +412,8 @@ class log_trace_span:  # noqa: N801
         self.end_type_name = self.base_name + "_end"
 
     def __enter__(self):
-        if torch.compiler.is_compiling() or _structured_logger_disabled():
+        # Not is_compiling(): it is True in every thread while any thread compiles.
+        if torch.compiler.is_dynamo_compiling() or _structured_logger_disabled():
             return self
 
         # Cache the asyncio task name so __exit__ emits the same one as
@@ -443,7 +444,7 @@ class log_trace_span:  # noqa: N801
         # ``_end``. The trailing ``_end`` carries elapsed-until-crash
         # and keeps pairing simple -- analysis tools don't have to
         # special-case exceptional spans.
-        if torch.compiler.is_compiling() or _structured_logger_disabled():
+        if torch.compiler.is_dynamo_compiling() or _structured_logger_disabled():
             return None
 
         end_time = timer()
