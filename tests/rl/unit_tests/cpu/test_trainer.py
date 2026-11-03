@@ -346,7 +346,7 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
             model_config=SimpleNamespace(mtp_layers=None),
             device=torch.device("cpu"),
             pp_has_last_stage=True,
-            _forward_backward_accelerator_graph_enabled=False,
+            uses_forward_backward_accelerator_graphs=False,
         )
         engine.forward_backward = MagicMock(
             return_value=ForwardBackwardResult(
@@ -543,7 +543,7 @@ def test_forward_backward_sends_the_step_first_group_alone_with_graphs(
         num_completed_steps=0,
         device=torch.device("cpu"),
         pp_has_last_stage=True,
-        _forward_backward_accelerator_graph_enabled=graphs_enabled,
+        uses_forward_backward_accelerator_graphs=graphs_enabled,
         step_started=step_started,
         forward_backward=forward_backward,
     )
@@ -638,7 +638,7 @@ def test_forward_backward_without_last_pipeline_stage_returns_no_metrics() -> No
         engine = SimpleNamespace(
             num_completed_steps=0,
             pp_has_last_stage=False,
-            _forward_backward_accelerator_graph_enabled=False,
+            uses_forward_backward_accelerator_graphs=False,
         )
         engine.forward_backward = MagicMock(
             return_value=ForwardBackwardResult(
