@@ -172,6 +172,24 @@ def qwen35_debugmodel_mm_ulysses_cp2() -> Trainer.Config:
     )
 
 
+def muse_glimmer_debugmodel_fsdp2_cp2_varlen_selective_gather() -> Trainer.Config:
+    """Muse Glimmer with selective sliding attention and all-gather full attention."""
+    from torchtitan.distributed.activation_remat import FullActivationRematConfig
+    from torchtitan.models.common.attention.cp_attention import (
+        SelectiveGatherKVSlidingWindowVarlenInnerAttention,
+    )
+
+    from tests.integration_tests.features import (
+        muse_glimmer_debugmodel_fsdp2_cp2_varlen,
+    )
+
+    config = muse_glimmer_debugmodel_fsdp2_cp2_varlen(
+        sliding_inner_attention=SelectiveGatherKVSlidingWindowVarlenInnerAttention
+    )
+    config.activation_remat = FullActivationRematConfig()
+    return config
+
+
 def build_h100_tests_list() -> list[IntegrationTestDefinition]:
     """
     Build the list of integration tests that need H100-class hardware.
@@ -179,6 +197,14 @@ def build_h100_tests_list() -> list[IntegrationTestDefinition]:
     Each entry names one configuration per run.
     """
     return [
+        IntegrationTestDefinition(
+            configs=[muse_glimmer_debugmodel_fsdp2_cp2_varlen_selective_gather],
+            test_descr="Muse Glimmer FSDP+CP with varlen selective gather",
+            test_name="fsdp+cp+varlen_selective_gather",
+            ngpu=4,
+            use_real_pg=True,
+            skip_rocm_test=True,
+        ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_fsdp_symm_mem],
             test_descr="FSDP symmetric memory",

@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
 from torchtitan.models.common.attention import Attention, LinearAttention
 
@@ -155,6 +155,7 @@ def validate_context_parallel(
     from torchtitan.models.common.attention.cp_attention import (
         AllGatherKVVarlen,
         CPInnerAttention,
+        SelectiveGatherKVSlidingWindowVarlenInnerAttention,
         Ulysses,
     )
     from torchtitan.models.common.attention.gdn import GDN
@@ -184,6 +185,7 @@ def validate_context_parallel(
         assert cp_inner_attention is not None and issubclass(
             cp_inner_attention, CPInnerAttention
         )
+        cp_inner_attention = cast(type[CPInnerAttention[Any, Any]], cp_inner_attention)
         if issubclass(cp_inner_attention, Ulysses):
             head_shard_degree = parallelism.tensor_parallel_degree * cp
             n_heads = attention.n_heads
@@ -210,7 +212,10 @@ def validate_context_parallel(
         if (
             isinstance(model, Decoder.Config)
             and model.first_full_attention is None
-            and not issubclass(cp_inner_attention, AllGatherKVVarlen)
+            and not issubclass(
+                cp_inner_attention,
+                (AllGatherKVVarlen, SelectiveGatherKVSlidingWindowVarlenInnerAttention),
+            )
         ):
             continue
         if issubclass(cp_inner_attention, Ulysses):

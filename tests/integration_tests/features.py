@@ -41,6 +41,7 @@ from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
 from torchtitan.models.base import BaseModel
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
+    InnerAttention,
     SlidingWindowVarlenInnerAttention,
     VarlenInnerAttention,
 )
@@ -766,8 +767,20 @@ def llama3_debugmodel_varlen_attn_fsdp4_sac() -> Trainer.Config:
     return config
 
 
-def muse_glimmer_debugmodel_fsdp2_cp2_varlen() -> Trainer.Config:
-    """Muse Glimmer varlen attention under FSDP and context parallelism."""
+def muse_glimmer_debugmodel_fsdp2_cp2_varlen(
+    *,
+    sliding_inner_attention: type[InnerAttention] = (
+        AllGatherKVSlidingWindowVarlenInnerAttention
+    ),
+) -> Trainer.Config:
+    """Muse Glimmer varlen attention under FSDP and context parallelism.
+
+    Args:
+        sliding_inner_attention: CP backend for the sliding-window layers.
+
+    Returns:
+        Training config with all-gather full attention.
+    """
     seq_len = 2048
     config = muse_glimmer_debugmodel(seq_len=seq_len)
     config.parallelism.data_parallel_shard_degree = 2
@@ -788,9 +801,7 @@ def muse_glimmer_debugmodel_fsdp2_cp2_varlen() -> Trainer.Config:
             ContextParallelTransform(
                 inner_attention_map={
                     VarlenInnerAttention: AllGatherKVVarlenInnerAttention,
-                    SlidingWindowVarlenInnerAttention: (
-                        AllGatherKVSlidingWindowVarlenInnerAttention
-                    ),
+                    SlidingWindowVarlenInnerAttention: sliding_inner_attention,
                 }
             )
         ],
