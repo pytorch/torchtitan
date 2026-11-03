@@ -146,10 +146,10 @@ class LocalTokenDispatcher(Module):
         # The scatter-add reads the expert outputs with bare ops.
         remat.recompute_needs_tensor(routed_output_RD)
         return score_and_scatter_add(
+            torch.zeros_like(x_TD),
             routed_output_RD,
             metadata.topk_scores_experts_sorted_N,
             metadata.token_indices_experts_sorted_N,
-            x_TD.shape[0],
         )
 
 
@@ -623,10 +623,10 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 routed_output_RD, spmd.current_mesh()
             )
         return score_and_scatter_add(
+            torch.zeros_like(x_TD),
             routed_output_RD,
             topk_scores_experts_sorted_N,
             token_indices_experts_sorted_N,
-            x_TD.shape[0],
         )
 
 
@@ -722,10 +722,10 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         )
 
         return score_and_scatter_add(
+            torch.zeros_like(x_TD),
             routed_output_RD,
             metadata.topk_scores_experts_sorted_N,
             metadata.token_indices_experts_sorted_N,
-            x_TD.shape[0],
         )
 
     def _permute(
