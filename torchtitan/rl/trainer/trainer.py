@@ -328,7 +328,7 @@ class Trainer(Configurable):
         # lock and has run its engine call.
         if (
             len(microbatch_groups) > 1
-            and engine._forward_backward_accelerator_graph_enabled
+            and engine.uses_forward_backward_accelerator_graphs
             and not engine.step_started
         ):
             engine_calls = [microbatch_groups[:1], microbatch_groups[1:]]

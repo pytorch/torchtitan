@@ -609,6 +609,11 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         """Whether a ``forward_backward`` call ran since the last ``optim_step``."""
         return self._step_started
 
+    @property
+    def uses_forward_backward_accelerator_graphs(self) -> bool:
+        """Whether ``forward_backward`` uses accelerator graphs."""
+        return self._forward_backward_accelerator_graph_enabled
+
     @sl.log_trace_span("forward_backward")
     def forward_backward(
         self,
