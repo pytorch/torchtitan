@@ -619,3 +619,37 @@ def test_wait_engine_loop_returns_once_every_rank_exits():
         await asyncio.wait_for(router.wait_engine_loop(), timeout=5)
 
     asyncio.run(_run())
+
+
+def test_max_concurrent_prefetches_staggers_weight_fetches():
+    async def _run():
+        actors = [_Actor(f"gen{i}", wait_prefetch=True) for i in range(3)]
+        router = InterGeneratorRouter(
+            InterGeneratorRouter.Config(
+                strategy=LeastLoadedRoutingStrategy.Config(),
+                hot_swap=True,
+                max_concurrent_prefetches=2,
+            ),
+            generators=[
+                ServiceHandle(all_ranks=actor, rank0=actor) for actor in actors
+            ],
+        )
+
+        pull_task = asyncio.create_task(router.pull_model_state_dict(policy_version=5))
+        await actors[0].prefetch_model_state_dict.started.wait()
+        await actors[1].prefetch_model_state_dict.started.wait()
+        await asyncio.sleep(0)
+        # Two fetch slots: the third generator waits for one to free up.
+        assert actors[2].prefetch_model_state_dict.calls == []
+
+        actors[0].prefetch_model_state_dict.release.set()
+        await actors[2].prefetch_model_state_dict.started.wait()
+        actors[1].prefetch_model_state_dict.release.set()
+        actors[2].prefetch_model_state_dict.release.set()
+        await pull_task
+
+        assert [actor.load_model_state_dict.calls for actor in actors] == [
+            [((5,), {})]
+        ] * 3
+
+    asyncio.run(_run())

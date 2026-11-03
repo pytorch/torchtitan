@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -19,6 +19,7 @@ import torch
 import torch.distributed as dist
 import torchstore as ts
 from torchstore import RankRole
+from torchstore.state_dict_utils import _state_dict_mapping_key, _state_dict_storage_key
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import Configurable, DebugConfig
@@ -36,6 +37,17 @@ from torchtitan.rl.rollout.types import Completion
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 
 logger = logging.getLogger(__name__)
+
+
+def _group_fqns_by_module(fqns: Iterable[str]) -> list[list[str]]:
+    """Group state-dict FQNs by top-level module, one group per ``layers.<i>``,
+    in first-seen order."""
+    groups: dict[str, list[str]] = {}
+    for fqn in fqns:
+        parts = fqn.split(".", 2)
+        module = ".".join(parts[:2]) if parts[0] == "layers" else parts[0]
+        groups.setdefault(module, []).append(fqn)
+    return list(groups.values())
 
 
 def _default_engine_config() -> GenerationEngine.Config:
@@ -143,6 +155,13 @@ class Generator(Configurable):
         """Controls how many `engine.step()` calls the `engine_loop` performs before processing a new decision.
         Every generation call is queued for execution by the `engine_loop`. A higher value enables buffering
         of more requests to avoid a prefill between every engine decode step, which is inefficient."""
+
+        fetch_weights_per_module: bool = False
+        """Fetch new weights from TorchStore with one request per top-level module
+        (each ``layers.<i>``, then the remaining modules) instead of one request for
+        the whole state dict. A single request makes the trainer-side storage volumes
+        serve a rank's whole shard at once; per-module requests bound that burst for
+        big models."""
 
         reset_kv_cache_on_model_state_dict_load: bool = False
         """Reset cached and running-request KV after each model state dict load.
@@ -444,12 +463,27 @@ class Generator(Configurable):
         """Fetch weights into pinned CPU memory without interrupting generation."""
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
-        await ts.get_state_dict(
-            "model_state_dict",
-            user_state_dict=self._prefetched_model_state_dict,
-            strict=False,
-            direct_rdma=False,
-        )
+        key = "model_state_dict"
+        buffers = self._prefetched_model_state_dict
+        if not self.config.fetch_weights_per_module:
+            await ts.get_state_dict(
+                key, user_state_dict=buffers, strict=False, direct_rdma=False
+            )
+            return
+        # Same reads as get_state_dict, written in place into the pinned buffers,
+        # but split into one request per module. Keys this rank has no buffer for
+        # are skipped.
+        client = await ts.client()
+        await client.get_layouts(buffers, key, strict=False)
+        stored_fqns = await client.get(_state_dict_mapping_key(key))
+        for module_fqns in _group_fqns_by_module(stored_fqns):
+            batch = {
+                _state_dict_storage_key(key, fqn): buffers[fqn]
+                for fqn in module_fqns
+                if fqn in buffers
+            }
+            if batch:
+                await client.get_batch(batch)
 
     async def close(self) -> None:
         """Stop the engine loop, which releases the dispatcher and the engine on exit."""
