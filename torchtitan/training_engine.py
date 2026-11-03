@@ -571,6 +571,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             name="forward_backward",
             **graph_kwargs,
         )
+        # TODO: with eval graphs, a later-segment length that still has warmup calls left
+        # keeps all_wrappers_warmed_up False. Then eval and training never capture: training
+        # stays eager and validation runs after every update. No config reaches it today
+        # (RL builds no validator; the core trainer sends a fixed group count per step).
         self._later_segment_graphs = defaultdict(
             partial(
                 wrap_with_accelerator_graph,

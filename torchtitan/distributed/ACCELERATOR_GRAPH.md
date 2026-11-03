@@ -24,9 +24,8 @@ Training capture requires `training.disable_accelerator_graphs=False`.
 
 | Setting | Captured work |
 | --- | --- |
-| `training.disable_accelerator_graphs=False` | Forward and backward, one graph replay per segment (below) |
+| `training.disable_accelerator_graphs=False` | Forward and backward, one graph replay per segment (below); one validation microbatch group, if validation is configured |
 | `optim.enable_accelerator_graph=True` | Gradient clipping, finite checks, and optimizer update |
-| `training.disable_accelerator_graphs=False` | One validation microbatch group, if validation is configured |
 
 An eval microbatch group contains one microbatch without PP. With PP, it contains
 the microbatches for one eval schedule call. A full validation pass runs the
@@ -38,7 +37,8 @@ A segment is the microbatch groups between two gradient reductions. With FSDP or
 each group reduces its gradients, so a segment is one group. With hybrid sharded data
 parallelism (HSDP) or `parallelism.fsdp_defer_gradient_reduction=True`, gradients are
 reduced once per `forward_backward` call, so a segment is the whole call. Eager
-training reduces at the same points, so a graph replay per segment matches it.
+training given the same calls reduces at the same points, so a graph replay per
+segment matches it bitwise.
 
 Training uses two kinds of graphs:
 - The first-segment graph runs the step's first segment. Gradients are `None` before
@@ -61,7 +61,10 @@ The number of calls per update and of groups per call can change between updates
 Every segment of one length must keep the same input structure, tensor shapes, dtypes,
 devices, and set of parameters receiving gradients. With HSDP or deferral, the step's
 first call is the first segment, so it must have the same number of groups in every
-update. The RL trainer sends each step's first group as its own call for this. Each
+update. The RL trainer sends each step's first group as its own call for this, only
+when graphs are on. So under HSDP or deferral, a step whose first call has several
+groups reduces one more time with graphs than without, and the two runs are not
+bitwise equal. Each
 later segment adds one graph launch, and each new segment length adds one graph with
 its own warmup calls. With `training.preprocess_microbatch_groups_lazily=True`, each
 segment is preprocessed just before its replay.
@@ -120,8 +123,10 @@ Step 3: Training capture/replay -> optimizer capture/replay -> eval if due
 Warmup counts wrapper calls, not training steps. With several segments per update,
 several training warmup calls can occur in one update. The capture gate keeps them
 eager until eval captures. Wrappers register on their first call.
-`all_wrappers_warmed_up` checks those registered wrappers, so a later-segment length
-that runs only once keeps eval capture waiting.
+`all_wrappers_warmed_up` checks those registered wrappers. So a later-segment length
+that still has warmup calls left (seen fewer than two times) keeps eval capture
+waiting, and with it all training capture: validation runs after every update and
+training stays eager.
 `capture_allowed` controls capture of wrappers that do not have a graph.
 It does not block replay of existing graphs.
 

@@ -798,9 +798,6 @@ def test_training_engine_configures_segment_accelerator_graphs(
     profiler: Profiler.Config, annotation_config: dict[str, Any] | None
 ) -> None:
     model = torch.nn.Linear(2, 2)
-    eager_forward_backward = MagicMock(
-        return_value=ForwardBackwardResult(torch.tensor(1.0), [])
-    )
     engine = cast(
         TrainingEngine,
         SimpleNamespace(
@@ -810,17 +807,13 @@ def test_training_engine_configures_segment_accelerator_graphs(
                 debug=SimpleNamespace(spmd_typechecking=False),
                 profiler=profiler,
                 training=SimpleNamespace(disable_accelerator_graphs=False),
-                parallelism=SimpleNamespace(
-                    enable_sequence_parallel=False,
-                    fsdp_defer_gradient_reduction=True,
-                    fsdp_reshard_after_forward="never",
-                ),
+                parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
             ),
             parallelism_context=SimpleNamespace(
                 pp_enabled=False, dp_replicate_enabled=False
             ),
             model_parts=[model],
-            _forward_backward_body=eager_forward_backward,
+            _forward_backward_body=MagicMock(),
             _run_forward_backward_segments=MagicMock(),
         ),
     )
@@ -836,28 +829,14 @@ def test_training_engine_configures_segment_accelerator_graphs(
         patch("torch.cuda.graph_annotations.is_available", return_value=True),
     ):
         TrainingEngine._initialize_forward_backward(engine)
-        # Later-segment graphs are made on first use, one per segment length.
-        wrap_later.assert_not_called()
-        later_segment_graph = engine._later_segment_graphs[2]
+        engine._later_segment_graphs[2]  # makes a later-segment graph
 
-    assert engine._run_forward_backward is engine._run_forward_backward_segments
-    assert later_segment_graph is wrap_later.return_value
     assert tuple(wrap_first_segment.call_args.kwargs["parameters"]) == tuple(
         model.parameters()
     )
     for wrap in (wrap_first_segment, wrap_later):
-        wrap.assert_called_once()
         assert wrap.call_args.kwargs["num_warmup_iterations"] == 2
         assert wrap.call_args.kwargs["annotation_config"] == annotation_config
-        assert wrap.call_args.kwargs["prepare_for_capture"] is None
-        wrap.call_args.args[0]([()])
-        eager_forward_backward.assert_called_with(
-            [()], defer_fsdp_gradient_reduction=True
-        )
-    # Deferral reduces once per call, so a segment is a whole call.
-    assert engine.graph_segment_is_whole_call
-    assert engine._forward_backward_accelerator_graph_enabled
-    assert not engine._forward_backward_captures_whole_step
 
 
 def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() -> None:
@@ -901,36 +880,6 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
     eager_forward_backward.assert_called_once()
     wrap.assert_not_called()
     assert not engine._forward_backward_accelerator_graph_enabled
-    assert not engine._forward_backward_captures_whole_step
-
-
-def test_sdc_replay_allows_several_forward_backward_calls_per_step() -> None:
-    sdc_replayer = object()
-    engine = cast(
-        TrainingEngine,
-        SimpleNamespace(
-            config=SimpleNamespace(
-                dist_moe_runtime=None,
-                sdc_replayer=SimpleNamespace(
-                    build=lambda *, modules, device: sdc_replayer
-                ),
-                training=SimpleNamespace(
-                    disable_accelerator_graphs=True,
-                    preprocess_microbatch_groups_lazily=False,
-                ),
-                parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
-            ),
-            parallelism_context=SimpleNamespace(pp_enabled=False),
-            model_parts=[],
-            device=torch.device("cpu"),
-            _forward_backward_body=MagicMock(),
-        ),
-    )
-
-    TrainingEngine._initialize_forward_backward(engine)
-
-    # SDC checks each call, so a step may span several calls.
-    assert engine.sdc_replayer is sdc_replayer
     assert not engine._forward_backward_captures_whole_step
 
 

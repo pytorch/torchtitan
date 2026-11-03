@@ -315,9 +315,9 @@ class Trainer(Configurable):
                         f"{identity}, expected {expected}."
                     )
             self._num_rdma_batches_read += 1
-        # With graphs, HSDP or deferred reduction makes each engine call one graph segment, and
-        # the step's first segment replays one graph with a fixed group count. Sending the
-        # step's first group as its own call fixes that count at 1.
+        # Under HSDP or deferred reduction, gradients are reduced once per engine call, so with
+        # graphs the engine replays the step's first call as one graph with a fixed group count.
+        # Sending the step's first group as its own call fixes that count at 1.
         # `step_started` is current here. The controller sends the step's first call after
         # optim_step returns, and call k only after call k-2 returned. By then call k-1 holds the
         # lock and has run its engine call.
