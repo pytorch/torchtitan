@@ -25,6 +25,7 @@ from torchtitan.distributed.spmd_types import (
     spmd_mesh_size,
 )
 from torchtitan.models.base import BaseModel
+from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleList
 from torchtitan.models.common.attention import (
     VarlenAttentionMetadata,
@@ -140,7 +141,9 @@ class FluxModel(BaseModel):
         def get_parameter_counts(self, model: Module) -> tuple[int, int]:
             return get_parameter_counts(model)
 
-        def build_flops_estimator(self, model: Module, *, seq_len: int):
+        def build_flops_estimator(
+            self, model: Module, *, seq_len: int
+        ) -> FlopsEstimator:
             nparams = sum(p.numel() for p in model.parameters())
 
             # Base: 6 FLOPs per parameter per token (fwd + bwd for linear

@@ -28,7 +28,7 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.models.base.model import BaseModel
+from torchtitan.models.base.model import BaseModel, FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.attention import (
     create_attention_mask,
@@ -631,7 +631,9 @@ class HFTransformerModel(BaseModel):
         def get_parameter_counts(self, model: nn.Module) -> tuple[int, int]:
             return self._parameter_counts(model, include_embeddings=True)
 
-        def build_flops_estimator(self, model: nn.Module, *, seq_len: int):
+        def build_flops_estimator(
+            self, model: nn.Module, *, seq_len: int
+        ) -> FlopsEstimator:
             _, active_nparams = self._parameter_counts(model, include_embeddings=False)
 
             if all(
