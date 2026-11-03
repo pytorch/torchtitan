@@ -167,7 +167,7 @@ class RolloutSampleRecorder(Configurable):
             encoded["completion_token_ids"] = turn.completion_token_ids.tolist()
         if self._log_logprobs:
             encoded["completion_logprobs"] = turn.completion_logprobs.tolist()
-            # Written as null at k=0: every RolloutTurn field is encoded.
+            # Null at k=0, so every dump keeps one schema.
             topk_token_ids = turn.completion_topk_token_ids
             topk_logprobs = turn.completion_topk_logprobs
             encoded["completion_topk_token_ids"] = (

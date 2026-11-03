@@ -151,7 +151,8 @@ class ScoreCenteringLoss(Loss[torch.Tensor]):
         # TODO: score the label and the top-k ids in one compute_topk_logprobs call. In eager,
         # two calls save two [T, V_local] fp32 buffers for backward where DAPOLoss saves one
         # (16 -> 32 MiB at T=512, V=8K; the "loss" local compile region brings it back to 16).
-        # Kept apart so batch-invariant runs keep compute_logprobs' vocab gather.
+        # Kept apart: under TP the label's logprob comes from _LossParallelCrossEntropy, whose
+        # softplus form stays nonzero for confident tokens; the top-k path is logit - logsumexp.
         trainer_topk_logprobs = compute_topk_logprobs(
             logits,
             generator_topk_token_ids,
