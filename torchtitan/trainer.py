@@ -156,7 +156,6 @@ class Trainer(Configurable):
     @record
     def __init__(self, config: Config):
         self.config = config
-        config._reject_seed_checkpoint_without_save()
         config.model = copy.deepcopy(config.model)
         if config.override.imports:
             apply_overrides(config.override, config)
@@ -169,6 +168,9 @@ class Trainer(Configurable):
             activation_remat=config.activation_remat,
             max_num_documents=config.dataloader.max_num_documents,
         )
+        # After overrides. Recipes also assign create_seed_checkpoint after
+        # the config object is built, so __post_init__ has already run.
+        config._reject_seed_checkpoint_without_save()
 
         self.engine = self.engine_cls(
             config,
