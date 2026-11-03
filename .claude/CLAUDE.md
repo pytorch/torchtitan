@@ -67,10 +67,12 @@ to every PR; authors should apply them before asking for review.
    helpers. A PR with net LoC growth should be able to say why.
 
 3. **PyTorch-native, upstream first.** Core training infrastructure and
-   parallelism code must not depend on non-PyTorch libraries. Techniques with
-   moderate-to-large complexity belong upstream (pytorch/pytorch for
-   parallelisms, etc.). If torchtitan works around a PyTorch (or vLLM, Monarch,
-   DCP, ...) gap, or calls a private upstream API, say so in a `TODO` with an
+   parallelism code must not depend on non-PyTorch libraries. PyTorch libraries
+   include `pytorch/pytorch` and repos under the `meta-pytorch` GitHub
+   organization, such as `meta-pytorch/attention-gym`. Techniques with
+   moderate-to-large complexity belong upstream in `pytorch/pytorch` or a
+   suitable `meta-pytorch` repo. If torchtitan works around a PyTorch (or vLLM,
+   Monarch, DCP, ...) gap, or calls a private upstream API, say so in a `TODO` with an
    upstream issue link, and prefer fixing it upstream.
 
 4. **Reuse existing abstractions, but don't bend shared code for one consumer.**
