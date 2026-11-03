@@ -40,6 +40,7 @@ from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
+from torchtitan.observability import tensor_logger
 
 from .token_dispatcher import LocalTokenDispatcher
 
@@ -773,6 +774,7 @@ class MoE(FeedForward):
             )
         else:
             self.expert_bias_E = None
+        tensor_logger.register_fwd_bwd(self, "output")
 
     def forward(
         self,
@@ -825,7 +827,10 @@ class MoE(FeedForward):
             out_TD = remat.region(
                 torch.add, self.remat_region_name("shared_add"), recompute=False
             )(out_TD, shared_TD)
-        return self._maybe_all_reduce_moe_output_across_tp(out_TD)
+        # Log after the TP reduce: before it, out_TD can be a TP partial sum.
+        output_TD = self._maybe_all_reduce_moe_output_across_tp(out_TD)
+        tensor_logger.log_fwd_bwd(self, output=output_TD)
+        return output_TD
 
     def _maybe_shard_routed_branch_inputs_across_tp(
         self,

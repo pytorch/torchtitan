@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import copy
 import dataclasses
 import json
@@ -17,6 +18,13 @@ from typing import Any
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.pipelining.schedules import (
+    get_schedule_class,
+    Schedule1F1B,
+    ScheduleGPipe,
+    ScheduleInterleaved1F1B,
+    ScheduleLoopedBFS,
+)
 
 from torchtitan.components.checkpointer import DATALOADER
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
@@ -30,6 +38,7 @@ from torchtitan.models.base.model import BaseModel
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import ensure_pp_loss_visible, MetricsProcessor
+from torchtitan.observability.tensor_logger import TensorLogger
 from torchtitan.training_engine import TrainingEngine
 
 
@@ -61,6 +70,9 @@ class Trainer(Configurable):
         metrics: MetricsProcessor.Config = field(
             default_factory=MetricsProcessor.Config
         )
+        tensor_logger: TensorLogger.Config | None = None
+        """Per-layer statistics of tensors that model code logs with
+        ``torchtitan.observability.tensor_logger``. See its README."""
         tokenizer: BaseTokenizer.Config = field(
             default_factory=HuggingFaceTokenizer.Config
         )
@@ -98,6 +110,41 @@ class Trainer(Configurable):
                     "create_seed_checkpoint requires a checkpointer with "
                     "load_only=False."
                 )
+
+            if self.tensor_logger is not None:
+                if self.tensor_logger.log_freq % self.metrics.log_freq != 0:
+                    raise ValueError(
+                        f"tensor_logger.log_freq ({self.tensor_logger.log_freq}) must be "
+                        f"a multiple of metrics.log_freq ({self.metrics.log_freq}), so "
+                        "every recorded step is published."
+                    )
+                if self.sdc_replayer is not None:
+                    raise ValueError(
+                        "tensor_logger does not support sdc_replayer: the replay reruns "
+                        "forward and backward and would record each tensor again."
+                    )
+                parallelism = self.parallelism
+                if parallelism.pipeline_parallel_degree > 1 and (
+                    parallelism.pipeline_parallel_schedule_csv
+                    or get_schedule_class(parallelism.pipeline_parallel_schedule)
+                    not in (
+                        Schedule1F1B,
+                        ScheduleGPipe,
+                        ScheduleInterleaved1F1B,
+                        ScheduleLoopedBFS,
+                    )
+                ):
+                    # TODO: support schedules with split backward (see
+                    # `_splits_backward` in distributed/pipeline_parallel.py). Their
+                    # weight-gradient pass fires a hook on a linear output a second
+                    # time; an identity autograd.Function fires once.
+                    raise ValueError(
+                        "tensor_logger supports the pipeline schedules that run one "
+                        "full backward per microbatch (1F1B, GPipe, Interleaved1F1B, "
+                        "LoopedBFS) without a schedule CSV, got schedule "
+                        f"{parallelism.pipeline_parallel_schedule!r} and CSV "
+                        f"{parallelism.pipeline_parallel_schedule_csv!r}."
+                    )
 
         def to_dict(self) -> dict[str, Any]:
             d = {}
@@ -140,6 +187,7 @@ class Trainer(Configurable):
     dataloader: BaseDataLoader
     validator: BaseValidator
     metrics_processor: MetricsProcessor
+    tensor_logger: TensorLogger | None
     gradient_accumulation_steps: int
     num_pp_microbatches: int
 
@@ -147,6 +195,7 @@ class Trainer(Configurable):
     @record
     def __init__(self, config: Config):
         self.config = config
+        self.tensor_logger = None
         config.model = copy.deepcopy(config.model)
         if config.override.imports:
             apply_overrides(config.override, config)
@@ -277,6 +326,18 @@ class Trainer(Configurable):
                 pp_has_last_stage=pp_has_last_stage,
             )
 
+        # Built last: the logger is process-global, and a failure earlier in
+        # __init__ must not leave it set.
+        if config.tensor_logger is not None:
+            self.tensor_logger = config.tensor_logger.build(
+                model_parts=engine.model_parts,
+                device=engine.device,
+                accelerator_graph_enabled=engine._forward_backward_accelerator_graph_enabled,
+                pp_schedule=(
+                    engine.pp_schedule if parallelism_context.pp_enabled else None
+                ),
+            )
+
         logger.info(
             "Trainer is initialized with "
             f"{num_tokens_per_dp_rank} tokens per DP rank, "
@@ -378,11 +439,16 @@ class Trainer(Configurable):
         global_routing_token_counts = global_token_counts[num_loss_objectives:].reshape(
             local_routing_token_counts.shape
         )
-        forward_backward_result = engine.forward_backward(
-            microbatch_groups=microbatch_groups,
-            global_loss_token_counts=global_loss_token_counts,
-            global_routing_token_counts=global_routing_token_counts,
-        )
+        with (
+            self.tensor_logger.maybe_record(current_step)
+            if self.tensor_logger is not None
+            else contextlib.nullcontext()
+        ):
+            forward_backward_result = engine.forward_backward(
+                microbatch_groups=microbatch_groups,
+                global_loss_token_counts=global_loss_token_counts,
+                global_routing_token_counts=global_routing_token_counts,
+            )
         global_main_loss_token_count = (
             global_loss_token_counts
             if global_loss_token_counts.ndim == 0
@@ -442,6 +508,7 @@ class Trainer(Configurable):
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
             **collect_aux_loss_metrics(parallelism_context),
+            **(self.tensor_logger.collect() if self.tensor_logger is not None else {}),
         }
         self.metrics_processor.log(
             engine.num_completed_steps,
@@ -519,6 +586,8 @@ class Trainer(Configurable):
         return self.engine.num_completed_steps < self.config.training.steps
 
     def close(self) -> None:
+        if self.tensor_logger is not None:
+            self.tensor_logger.close()
         if hasattr(self, "dataloader") and self.dataloader:
             self.dataloader.close()
         if hasattr(self, "engine"):

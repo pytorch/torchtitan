@@ -163,6 +163,7 @@ the [model guide](torchtitan/models/README.md).
 
 **Debugging and observability**
 - [Metrics](torchtitan/observability/METRICS.md): loss, memory, throughput, TFLOPs, and MFU in TensorBoard or W&B
+- [Tensor logger](torchtitan/observability/tensor_logger/README.md): per-layer activation and gradient statistics
 - [Profiling and memory snapshots](torchtitan/observability/README.md)
 - [Flight Recorder and other debugging tools](docs/debugging.md)
 - Fake-backend dry runs of large layouts on one GPU

@@ -26,6 +26,7 @@ from torchtitan.models.llama3 import build_model_config
 from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_config,
 )
+from torchtitan.observability.tensor_logger import TensorLogger
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
 
@@ -171,6 +172,22 @@ def test_ft_accepts_eager_validation():
     config.training.disable_accelerator_graphs = True
     config.validator = Validator.Config(steps=1)
     config.__post_init__()
+
+
+def test_ft_rejects_tensor_logger():
+    parallelism = ParallelismConfig()
+    config = ft.FaultTolerantTrainer.Config(
+        model=build_model_config(
+            "debugmodel", seq_len=2048, attn_backend="flex", parallelism=parallelism
+        ),
+        tokenizer=None,
+        loss=CrossEntropyLoss.Config(),
+        parallelism=parallelism,
+    )
+    config.tensor_logger = TensorLogger.Config(log_freq=10)
+    # FaultTolerantTrainer never builds the logger, so the field would be ignored.
+    with pytest.raises(ValueError, match="not supported with FaultTolerantTrainer"):
+        config.__post_init__()
 
 
 def test_ft_rejects_accelerator_graphed_fsdp_gradient_accumulation(monkeypatch) -> None:

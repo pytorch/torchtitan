@@ -58,6 +58,7 @@ from torchtitan.models.common.multimodal import (
     scatter_vision_embeds,
 )
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
+from torchtitan.observability import tensor_logger
 
 from .rope import MRoPE
 from .state_dict_adapter import Qwen35StateDictAdapter
@@ -600,6 +601,8 @@ class Qwen35Model(MultimodalModel):
         inputs_embeds = (
             self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
         )
+        if self.tok_embeddings is not None:
+            tensor_logger.log_fwd(self.tok_embeddings, output=inputs_embeds)
         if self.vision_encoder is None:
             return inputs_embeds
 
@@ -730,6 +733,7 @@ class Qwen35Model(MultimodalModel):
                 padding_mask=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
             )
+            tensor_logger.log_fwd_bwd(layer, output=x)
 
         x = self.norm(x) if self.norm is not None else x
         if self._skip_lm_head:

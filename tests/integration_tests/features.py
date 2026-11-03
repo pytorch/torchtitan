@@ -10,12 +10,15 @@ Each configuration function is selected by module and name in the launched
 training process, so it must stay importable from this module.
 """
 
+import functools
 import logging
+import math
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass, fields, replace
 from typing import Any, cast
 
+import spmd_types as spmd
 import torch
 import torch.distributed as dist
 from renderers import Message, Qwen3RendererConfig
@@ -52,6 +55,7 @@ from torchtitan.models.common.attention.cp_attention import (
     UlyssesVarlenInnerAttention,
 )
 from torchtitan.models.muse_glimmer import build_model_config
+from torchtitan.observability import tensor_logger
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import TrainingEngine
@@ -155,6 +159,174 @@ class SDCReplayMismatchTrainer(Trainer):
         raise AssertionError("Expected SDC replay to detect the injected mismatch.")
 
 
+_PROBE_NUMEL = 64
+
+
+class _ProbeCotangents(torch.autograd.Function):
+    """Identity on ``output``; gives ``probe_ones`` gradient 1 and ``probe_rank``
+    gradient ``rank + 1``.
+
+    Saves nothing for backward, so torch_remat replays of the hook add no saved
+    tensors.
+    """
+
+    @staticmethod
+    def forward(
+        ctx, output, probe_ones, probe_rank, rank_value: float
+    ):  # pyrefly: ignore[bad-override]
+        ctx.rank_value = rank_value
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):  # pyrefly: ignore[bad-override]
+        return (
+            grad_output,
+            grad_output.new_ones(_PROBE_NUMEL),
+            grad_output.new_full((_PROBE_NUMEL,), ctx.rank_value),
+            None,
+        )
+
+
+def _log_probe_tensors(
+    module: torch.nn.Module,
+    args: tuple[Any, ...],
+    output: torch.Tensor,
+    *,
+    rank_value: float,
+) -> torch.Tensor:
+    with spmd.no_typecheck():
+        # Built from `output`, so their gradients lie on the path from the loss to
+        # the parameters. Multiplying by 0 keeps the model's gradients unchanged.
+        first_values = output.reshape(-1)[:_PROBE_NUMEL]
+        probe_ones = first_values * 0 + 1
+        probe_rank = first_values * 0 + rank_value
+        probe_tokens = output[..., 0] * 0 + 1
+        tensor_logger.log_fwd_bwd(module, probe_ones=probe_ones, probe_rank=probe_rank)
+        tensor_logger.log_fwd(module, probe_tokens=probe_tokens)
+        return _ProbeCotangents.apply(output, probe_ones, probe_rank, rank_value)
+
+
+class TensorLoggerSanityProbe(tensor_logger.TensorLogger):
+    """Test-only: log known tensors; ``collect()`` raises if any statistic is wrong.
+
+    At every block's ``attention_norm`` (any path ending in ``.attention_norm``)
+    it logs, per forward call:
+
+        probe_ones    64 ones                      gradient 1
+        probe_rank    64 copies of global_rank + 1 gradient global_rank + 1
+        probe_tokens  one 1 per local token        forward only
+
+    It also checks that every row the model logged was observed once per call
+    by each rank that owns it.
+
+    Example: PP 4 Interleaved1F1B, 8 microbatches of 2048 tokens; layer 0 on rank 0:
+        layers.0.attention_norm.probe_rank.fwd: numel 512, observation_count 8,
+            abs_mean 1, abs_max 1
+        layers.0.attention_norm.probe_tokens.fwd: numel 16384
+        layers.0.attention.xq.bwd.observation_count: 8
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(tensor_logger.TensorLogger.Config):
+        calls_per_step: int
+        """Forward calls per matching module and owning rank in one step:
+        gradient accumulation steps x pipeline microbatches."""
+
+        tokens_per_call: int
+        """Tokens one matching module sees per call on one rank: the microbatch
+        size divided by the CP degree, and by the TP degree with sequence parallel."""
+
+    def __init__(self, config: Config, *, model_parts: list[torch.nn.Module], **kwargs):
+        hook = functools.partial(
+            _log_probe_tensors, rank_value=float(dist.get_rank() + 1)
+        )
+        for model_part in model_parts:
+            for path, module in model_part.named_modules():
+                if path.endswith(".attention_norm"):
+                    tensor_logger.register_fwd_bwd(module, "probe_ones", "probe_rank")
+                    tensor_logger.register_fwd(module, "probe_tokens")
+                    module.register_forward_hook(hook)
+        super().__init__(config, model_parts=model_parts, **kwargs)
+        # Read row ownership from the run (pipeline stages own different
+        # layers), through a different path than the logger's packed reduce.
+        local_rows = {
+            self.row_names[row]
+            for rows in self._rows_by_module.values()
+            for row in rows.values()
+        }
+        rows_by_rank: list[Any] = [None] * dist.get_world_size()
+        dist.all_gather_object(rows_by_rank, local_rows)
+        self._owner_ranks = {
+            row_name: [
+                rank for rank, rows in enumerate(rows_by_rank) if row_name in rows
+            ]
+            for row_name in self.row_names
+        }
+
+    def collect(self) -> dict[str, float]:
+        metrics = super().collect()
+        if not metrics:
+            return metrics
+        expected = self._expected_metrics()
+        # Every registered row: each owner observes each call once.
+        for row_name, owners in self._owner_ranks.items():
+            expected.setdefault(
+                f"tensor_logger/{row_name}.observation_count",
+                len(owners) * self.config.calls_per_step,
+            )
+        wrong = {
+            name: (metrics.get(name), value)
+            for name, value in expected.items()
+            if metrics.get(name) != value
+        }
+        assert not wrong, f"Tensor logger probe mismatch (got, expected): {wrong}"
+        return metrics
+
+    def _expected_metrics(self) -> dict[str, float]:
+        """Expected fields of the probe rows. Each owner logs ``values[i]`` in every
+        element of every call, so means are plain means over the owners."""
+        calls = self.config.calls_per_step
+        expected = {}
+        probe_suffix = ".probe_ones.fwd"
+        for row_name in self.row_names:
+            if not row_name.endswith(probe_suffix):
+                continue
+            path = row_name.removesuffix(probe_suffix)
+            owners = self._owner_ranks[row_name]
+            observation_count = len(owners) * calls
+            rank_values = [rank + 1 for rank in owners]
+            for name, values, numel_per_call, directions in (
+                ("probe_ones", [1] * len(owners), _PROBE_NUMEL, ("fwd", "bwd")),
+                ("probe_rank", rank_values, _PROBE_NUMEL, ("fwd", "bwd")),
+                (
+                    "probe_tokens",
+                    [1] * len(owners),
+                    self.config.tokens_per_call,
+                    ("fwd",),
+                ),
+            ):
+                square_mean = sum(v**2 for v in values) / len(values)
+                fields = {
+                    "numel": numel_per_call * observation_count,
+                    "observation_count": observation_count,
+                    "nonfinite_count": 0,
+                    "zero_frac": 0.0,
+                    "abs_mean": sum(values) / len(values),
+                    "rms": math.sqrt(square_mean),
+                    "kurtosis": sum(v**4 for v in values)
+                    / len(values)
+                    / square_mean**2
+                    - 3,
+                    "abs_max": max(values),
+                }
+                for direction in directions:
+                    for field_name, value in fields.items():
+                        expected[
+                            f"tensor_logger/{path}.{name}.{direction}.{field_name}"
+                        ] = value
+        return expected
+
+
 def deepseek_v3_debugmodel_sdc_replay_mismatch() -> Trainer.Config:
     base_config = deepseek_v3_debugmodel(
         seq_len=2048,
@@ -220,6 +392,8 @@ def llama3_debugmodel_tp2_no_sp() -> Trainer.Config:
         ),
     )
     _set_spmd_typechecking(config, typechecking=True)
+    # The logging callsites must run under SPMD type checking.
+    config.tensor_logger = tensor_logger.TensorLogger.Config(log_freq=2)
     return config
 
 
@@ -405,13 +579,21 @@ def llama3_debugmodel_fsdp2_tp2_pp2() -> Trainer.Config:
 
 
 def llama3_debugmodel_pp4_interleaved_1f1b() -> Trainer.Config:
-    """PP-only; see ``llama3_debugmodel_pp2_1f1b`` for why type checking is off."""
+    """PP-only; see ``llama3_debugmodel_pp2_1f1b`` for why type checking is off.
+
+    The tensor logger sanity probe checks exact statistics on every step: which
+    stage owns each row, the row order across ranks, and that pipeline metadata
+    inference on step 1 records nothing.
+    """
     config = llama3_debugmodel(seq_len=2048)
     config.parallelism.pipeline_parallel_degree = 4
     config.parallelism.num_pp_microbatches = 8
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.debug.deterministic = True
     config.debug.seed = 42
+    config.tensor_logger = TensorLoggerSanityProbe.Config(
+        log_freq=1, calls_per_step=8, tokens_per_call=2048
+    )
     return config
 
 

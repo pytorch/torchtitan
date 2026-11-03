@@ -57,6 +57,7 @@ from torchtitan.models.muse_spark.vision_encoder import (
     MuseSparkNaViTAdapter,
     NaViTEncoder,
 )
+from torchtitan.observability import tensor_logger
 
 # Shape suffix legend:
 # T = token or patch rows, D = model dimension, N = query heads, K = KV heads,
@@ -120,6 +121,7 @@ class MuseSparkAttention(GQAttention):
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         query_TNH, key_TKH, value_TKH = self.qkv_linear(x_TD)
+        tensor_logger.log_fwd_bwd(self, xq=query_TNH, xk=key_TKH, xv=value_TKH)
         output_gate_TO = None
         if self.output_gate is not None:
             output_gate_TO = self.output_gate(x_TD)
@@ -140,6 +142,7 @@ class MuseSparkAttention(GQAttention):
             enable_gqa=self.enable_gqa,
         )
         remat.recompute_needs_tensor(output_TNH)
+        tensor_logger.log_fwd_bwd(self, head_out=output_TNH)
         if output_gate_TO is not None:
             remat.recompute_needs_tensor(output_gate_TO)
         output_TO = self._flatten_attention_output(output_TNH, output_gate_TO)
@@ -850,6 +853,7 @@ class MuseSparkModel(MultimodalModel):
         del waveform_lengths
         if self.tok_embeddings is not None:
             hidden_TD = self.tok_embeddings(tokens)
+            tensor_logger.log_fwd(self.tok_embeddings, output=hidden_TD)
             with spmd_local_context("dp"):
                 hidden_TD = self._prepare_multimodal_embeds(
                     hidden_TD,
@@ -885,6 +889,7 @@ class MuseSparkModel(MultimodalModel):
                 padding_mask=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
             )
+            tensor_logger.log_fwd_bwd(layer, output=hidden_TD)
 
         if self.norm is not None:
             final_norm_input_dtype = (

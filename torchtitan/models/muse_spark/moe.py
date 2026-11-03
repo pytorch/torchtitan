@@ -20,6 +20,7 @@ from torchtitan.models.common.moe.token_dispatcher import (
 )
 
 from torchtitan.models.muse_spark.model import MuseSparkRMSNorm
+from torchtitan.observability import tensor_logger
 
 
 # Shape suffix legend:
@@ -140,7 +141,9 @@ class MuseSparkMoE(MoE):
         output_TD = self.unpooler(out_TC)
         # Replicated unpooler weights produce a token shard, not a row-linear partial.
         output_TD = self._maybe_zero_fill_routed_output_to_tp_partial(output_TD)
-        return self._maybe_all_reduce_moe_output_across_tp(output_TD)
+        output_TD = self._maybe_all_reduce_moe_output_across_tp(output_TD)
+        tensor_logger.log_fwd_bwd(self, output=output_TD)
+        return output_TD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         super()._init_self_buffers(buffer_device=buffer_device)

@@ -47,6 +47,7 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
+from torchtitan.observability import tensor_logger
 from torchtitan.tools.utils import round_up
 
 if TYPE_CHECKING:
@@ -254,6 +255,8 @@ class GQAttention(Attention):
         # Scaling factor (needed when head_dim differs from dim // n_heads)
         self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
 
+        tensor_logger.register_fwd_bwd(self, "xq", "xk", "xv", "head_out")
+
     def forward(
         self,
         x_TD: torch.Tensor,
@@ -262,6 +265,7 @@ class GQAttention(Attention):
     ) -> torch.Tensor:
         # The projection's linear declares its own remat regions.
         xq_THK, xk_THK, xv_THV = self.qkv_linear(x_TD)
+        tensor_logger.log_fwd_bwd(self, xq=xq_THK, xk=xk_THK, xv=xv_THV)
 
         # Optional QK normalization (before RoPE, per Qwen3)
         if self.q_norm is not None or self.k_norm is not None:
@@ -290,6 +294,7 @@ class GQAttention(Attention):
         )
         remat.recompute_needs_tensor(out_THV)
         out_THV = out_THV.contiguous()
+        tensor_logger.log_fwd_bwd(self, head_out=out_THV)
         out_TD = out_THV.view(out_THV.shape[0], -1)
         return self.wo(out_TD)
 

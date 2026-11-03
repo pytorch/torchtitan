@@ -21,6 +21,7 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import Linear
+from torchtitan.observability import tensor_logger
 
 
 class SigmoidGatedFeedForward(DenseFeedForward):
@@ -69,7 +70,9 @@ class SigmoidGatedFeedForward(DenseFeedForward):
         # w13, gate, and w2 declare their own remat regions.
         gate_up_T2F, gate_out_T1 = self._gather_shared_input_and_compute_projections(x)
         remat.recompute_needs_tensor(gate_up_T2F)
-        out_TD = self.w2(self.activation_fn(gate_up_T2F))
+        act_out_TF = self.activation_fn(gate_up_T2F)
+        tensor_logger.log_fwd_bwd(self, act_out=act_out_TF)
+        out_TD = self.w2(act_out_TF)
         remat.recompute_needs_tensor(out_TD, gate_out_T1)
         return sigmoid_gate(gate_out_T1, out_TD)
 

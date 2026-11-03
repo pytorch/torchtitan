@@ -36,6 +36,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
+from torchtitan.observability import tensor_logger
 from torchtitan.observability.logging import warn_once
 
 __all__ = ["Decoder", "TransformerBlock"]
@@ -242,6 +243,13 @@ class Decoder(BaseModel):
         for i, layer_config in enumerate(config.layers):
             self.layers[str(i)] = layer_config.build()
 
+        # Rows live on the modules, so a pipeline stage owns only its own rows.
+        # Forward only: multimodal models keep the embedding output Replicate
+        # across TP, and the gradient of a Replicate tensor is a partial sum.
+        tensor_logger.register_fwd(self.tok_embeddings, "output")
+        for layer in self.layers.values():
+            tensor_logger.register_fwd_bwd(layer, "output")
+
         self.norm = config.norm.build()
         self.lm_head = config.lm_head.build()
 
@@ -317,6 +325,8 @@ class Decoder(BaseModel):
         # attention_metadata slot and break the maskless SDPA backend).
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
+        if self.tok_embeddings is not None:
+            tensor_logger.log_fwd(self.tok_embeddings, output=h)
 
         with spmd.no_typecheck():
             aux_loss_denominator = (
@@ -335,6 +345,7 @@ class Decoder(BaseModel):
                 padding_mask=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
             )
+            tensor_logger.log_fwd_bwd(layer, output=h)
 
         h = self.norm(h) if self.norm is not None else h
 

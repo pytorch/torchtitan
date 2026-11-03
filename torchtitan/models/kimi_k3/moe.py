@@ -14,6 +14,7 @@ import torch_remat as remat
 from torchtitan.models.common import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.observability import tensor_logger
 
 # Shape suffixes:
 # T = packed tokens, D = model dimension, E = experts,
@@ -98,4 +99,6 @@ class KimiLatentMoE(MoE):
             out_TD = remat.region(
                 torch.add, self.remat_region_name("shared_add"), recompute=False
             )(out_TD, shared_TD)
-        return self._maybe_all_reduce_moe_output_across_tp(out_TD)
+        output_TD = self._maybe_all_reduce_moe_output_across_tp(out_TD)
+        tensor_logger.log_fwd_bwd(self, output=output_TD)
+        return output_TD

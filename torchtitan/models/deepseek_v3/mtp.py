@@ -35,6 +35,7 @@ from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.observability import tensor_logger
 
 
 def roll_mtp_sequence(
@@ -380,6 +381,7 @@ class MTPDecoder(Decoder):
         # Keep this aligned with Decoder.forward(), but preserve the pre-norm
         # hidden state because MTP consumes the last decoder-layer output.
         h = self.tok_embeddings(main_tokens)
+        tensor_logger.log_fwd(self.tok_embeddings, output=h)
         if (
             aux_loss_denominators is not None
             and aux_loss_denominators.numel() != len(self.mtp_layers) + 1
@@ -402,6 +404,7 @@ class MTPDecoder(Decoder):
                 padding_mask=padding_mask,
                 aux_loss_denominator=main_aux_loss_denominator,
             )
+            tensor_logger.log_fwd_bwd(layer, output=h)
 
         prev_depth_hidden = h
         h = self.norm(h) if self.norm is not None else h

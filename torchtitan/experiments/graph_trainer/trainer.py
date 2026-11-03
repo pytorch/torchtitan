@@ -418,6 +418,11 @@ class GraphTrainer(Trainer):
 
         def __post_init__(self) -> None:
             Trainer.Config.__post_init__(self)
+            if self.tensor_logger is not None:
+                # TODO: bind the traced GraphPP forward and backward graphs to the
+                # tensor logger buffers. Every GraphTrainer mode runs the GraphPP
+                # runtime, which omits forward rows today.
+                raise ValueError("tensor_logger is not supported with GraphTrainer.")
             if self.training.accelerator_graph_per_microbatch_group:
                 raise ValueError(
                     "Per-group CUDA graphs are not supported with GraphTrainer."

@@ -53,6 +53,7 @@ from torchtitan.models.common.multimodal import (
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
+from torchtitan.observability import tensor_logger
 
 from .attention import KimiMLAAttention
 from .moe import KimiLatentMoE
@@ -395,6 +396,7 @@ class KimiK3Model(MultimodalModel):
         vision_bank_indices_T: torch.Tensor | None = None,
     ) -> torch.Tensor:
         embeddings_TD = self.tok_embeddings(tokens)
+        tensor_logger.log_fwd(self.tok_embeddings, output=embeddings_TD)
         if (pixel_values is None) != (grid_thw is None):
             raise ValueError(
                 "pixel_values and grid_thw must either both be provided or "
@@ -510,6 +512,7 @@ class KimiK3Model(MultimodalModel):
                 padding_mask=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
             )
+            tensor_logger.log_fwd_bwd(block, output=h_TD)
 
         if self.output_res_proj is None:
             return h_TD, block_residual_TND
