@@ -245,7 +245,6 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_context_length,
-                max_context_length=max_context_length,
             ),
             parallelism=trainer_parallelism,
             activation_remat=FullActivationRematConfig(),
@@ -389,7 +388,6 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_context_length,
-                max_context_length=max_context_length,
             ),
             parallelism=trainer_parallelism,
             activation_remat=FullActivationRematConfig(),
@@ -509,7 +507,6 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_context_length,
-                max_context_length=max_context_length,
             ),
             parallelism=trainer_parallelism,
             activation_remat=FullActivationRematConfig(),

@@ -226,7 +226,7 @@ class Trainer(Configurable):
             dp_world_size=dp_degree,
             dp_rank=dp_rank,
             tokenizer=self.tokenizer,
-            max_context_length=config.training.max_context_length,
+            max_context_length=config.model.max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
         )
 
@@ -284,7 +284,7 @@ class Trainer(Configurable):
                 parallelism_context=parallelism_context,
                 loss_fn=engine.loss_fn,
                 metrics_processor=self.metrics_processor,
-                seq_len=config.training.max_context_length,
+                seq_len=config.model.max_context_length,
                 num_tokens_per_microbatch=num_tokens_per_microbatch,
                 pp_schedule=pp_schedule,
                 pp_has_first_stage=pp_has_first_stage,
@@ -296,7 +296,7 @@ class Trainer(Configurable):
             f"{num_tokens_per_dp_rank} tokens per DP rank, "
             f"{num_tokens_per_train_step} tokens per train step, "
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
-            f"maximum context length {config.training.max_context_length}, "
+            f"maximum context length {config.model.max_context_length}, "
             f"total steps {config.training.steps} "
             f"(warmup {config.optim.lr_scheduler.warmup_steps})"
         )

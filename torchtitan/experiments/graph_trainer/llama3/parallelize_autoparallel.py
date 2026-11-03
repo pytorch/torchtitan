@@ -88,7 +88,7 @@ def parallelize_autoparallel_llama(
                 dtype=torch.int32,
                 device=torch.device(device_type),
             )
-            % training.max_context_length
+            % model.config.max_context_length
         )
         return tokens, positions
 

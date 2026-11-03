@@ -318,11 +318,10 @@ class FluxModel(BaseModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Encode a raw image-text batch and prepare flow-matching inputs."""
-        del max_num_documents, max_context_length
+        del max_num_documents
         if input_dict.pop("loss_kwargs", None):
             raise ValueError("Flux does not support per-microbatch loss arguments.")
         autoencoder = cast(AutoEncoder | None, kwargs["autoencoder"])

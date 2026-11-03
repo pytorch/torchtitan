@@ -228,7 +228,7 @@ def _precompile_aot_fx_trace(
     if isinstance(model_config, Decoder.Config) and model_config.layers:
         positions = (
             torch.arange(num_tokens, dtype=torch.int32, device=dummy_inputs.device)
-            % config.training.max_context_length
+            % model_config.max_context_length
         )
         extra_kwargs["positions"] = positions
         extra_kwargs["padding_mask"] = torch.zeros(

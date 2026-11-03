@@ -153,7 +153,6 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -232,7 +231,6 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -333,7 +331,7 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     )
     config.trainer.model, config.generator.model = _qwen3_rl_model_configs(
         "0.6B",
-        seq_len=config.trainer.training.max_context_length,
+        seq_len=config.trainer.model.max_context_length,
         attn_backend="flex",
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
@@ -400,7 +398,6 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -474,7 +471,6 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -546,7 +542,6 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -627,7 +622,6 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -738,7 +732,6 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -836,7 +829,6 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -885,7 +877,7 @@ def rl_grpo_qwen3_5_9b_varlen_batch_invariant() -> Controller.Config:
     )
     config.trainer.model, config.generator.model = _qwen3_5_rl_model_configs(
         "9B",
-        seq_len=config.trainer.training.max_context_length,
+        seq_len=config.trainer.model.max_context_length,
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
     )
@@ -945,6 +937,9 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
                     for optimizer in config.trainer.optim.optimizer.optimizers
                 ],
             ),
+        ),
+        training=dataclasses.replace(
+            config.trainer.training, num_tokens_per_microbatch_per_dp_rank=seq_len
         ),
         activation_remat=FullActivationRematConfig(),
         parallelism=trainer_parallelism,

@@ -43,8 +43,6 @@ def test_training_token_counts_are_positive() -> None:
         TrainingConfig(num_tokens_per_microbatch_per_dp_rank=0)
     with pytest.raises(ValueError, match="must be -1 or greater than 0"):
         TrainingConfig(num_tokens_per_train_step=0)
-    with pytest.raises(ValueError, match="must be greater than 0"):
-        TrainingConfig(max_context_length=0)
 
 
 def test_per_group_accelerator_graph_config_restrictions() -> None:

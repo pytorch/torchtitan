@@ -120,7 +120,6 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10000,
             disable_accelerator_graphs=True,
         ),

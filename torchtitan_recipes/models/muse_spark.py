@@ -390,7 +390,6 @@ def _muse_spark_816b_a42b(
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
             num_tokens_per_train_step=32 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=120,
             disable_accelerator_graphs=True,
         ),
@@ -777,7 +776,6 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
     config.training = TrainingConfig(
         num_tokens_per_microbatch_per_dp_rank=seq_len,
         num_tokens_per_train_step=seq_len,
-        max_context_length=seq_len,
         steps=1000,
         disable_accelerator_graphs=False,
     )

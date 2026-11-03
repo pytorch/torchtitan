@@ -184,7 +184,6 @@ def _qwen3_4b_dapo_math_config(
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
-                max_context_length=max_total_tokens,
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -337,7 +336,6 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
-                max_context_length=max_total_tokens,
             ),
             parallelism=trainer_parallelism,
             # Factor EP=16 keeps the worst case (every token routed to one rank)
@@ -485,7 +483,6 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
                 # Pack several rollouts per microbatch (a multiple of
                 # max_total_tokens).
                 num_tokens_per_microbatch_per_dp_rank=4 * max_total_tokens,
-                max_context_length=max_total_tokens,
             ),
             dist_moe_runtime=DistMoeRuntime.Config(scratch_capacity_factor=4.0),
             parallelism=trainer_parallelism,

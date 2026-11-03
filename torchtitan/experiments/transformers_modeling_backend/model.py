@@ -517,6 +517,8 @@ class HFTransformerModel(BaseModel):
                 if key == "num_experts" and hasattr(self, "n_routed_experts"):
                     self.n_routed_experts = value
 
+            self.max_context_length = max_context_length
+            # Aliases HF's max_position_embeddings.
             self.max_seq_len = max_context_length
             self.deterministic = deterministic
 
@@ -1234,11 +1236,10 @@ class HFTransformerModel(BaseModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Build the attention mask (when positions are present), CP-shard, return."""
-        del max_num_documents, max_context_length, global_routing_token_counts
+        del max_num_documents, global_routing_token_counts
         # Function-local import avoids a circular import.
         from torchtitan.distributed import context_parallel
         from torchtitan.distributed.spmd_types import annotate_input_spmd_types

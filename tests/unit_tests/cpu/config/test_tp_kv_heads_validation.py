@@ -51,7 +51,6 @@ def _validate(config: "Llama3Model.Config", tp: int) -> None:
         config,
         parallelism=ParallelismConfig(tensor_parallel_degree=tp),
         training=TrainingConfig(
-            max_context_length=config.max_context_length,
             disable_accelerator_graphs=True,
         ),
         debug=DebugConfig(),

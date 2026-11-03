@@ -133,7 +133,6 @@ def kimi_k3_debugmodel(
         precision=PrecisionConfig(dtype="bfloat16"),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
             disable_accelerator_graphs=True,
         ),

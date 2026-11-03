@@ -61,7 +61,7 @@ def test_build_model_config_returns_model_config() -> None:
 
 
 def test_optimizer_hook_is_owned_by_model_class() -> None:
-    model = FakeModel.Config().build()
+    model = FakeModel.Config(max_context_length=8).build()
     model_parts = [model]
     optimizers = OptimizersContainer.Config(
         optimizers=[
