@@ -107,6 +107,11 @@ if [[ "${GPU_ARCH_TYPE}" != "rocm" ]]; then
   # The H100 CI image provides the pinned hybrid-ep installer used by the
   # existing HybridEP workflow.
   bash /install_deepep.sh
+  if ! CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 python -m pytest \
+    tests/unit_tests/gpu/distributed/test_deepep_activation_checkpoint.py \
+    -v -k HybridEP; then
+    STATUS=1
+  fi
   if ! CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests \
     --test_suite h100 \
     --execution_mode real_pg \

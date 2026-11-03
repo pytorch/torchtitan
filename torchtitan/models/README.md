@@ -2,6 +2,8 @@ This note outlines the process of adding a new model in the `torchtitan` repo. I
 
 For offline explorations, we recommend the same steps, unless otherwise noted.
 
+For MoE models, see the [expert-parallel backend selection guide](common/moe/README.md).
+
 ## Adding the model
 
 Please refer to the [Llama 3 folder](llama3) as an example.

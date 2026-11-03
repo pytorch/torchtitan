@@ -406,6 +406,11 @@ run_h100_tests() {
   fi
 
   install_hybrid_ep
+  if ! CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 python -m pytest \
+    tests/unit_tests/gpu/distributed/test_deepep_activation_checkpoint.py \
+    -v -k HybridEP; then
+    status=1
+  fi
   if ! python -m tests.integration_tests.run_tests \
     --test_suite h100 \
     --execution_mode real_pg \
