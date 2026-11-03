@@ -302,8 +302,10 @@ class TestHybridEPActivationCheckpointing(_EPActivationCheckpointing):
         env.start()
         self.addCleanup(env.stop)
 
-    def _check_hybridep_activation_checkpointing(self, ac_configs, *, num_replays):
-        for capacity_factor in (None, 1.0):
+    def _check_hybridep_activation_checkpointing(
+        self, ac_configs, *, num_replays, capture=False
+    ):
+        for capacity_factor in (1.0,) if capture else (None, 1.0):
             with self.subTest(capacity_factor=capacity_factor):
                 self._check_ep_activation_checkpointing(
                     ac_configs,
@@ -319,17 +321,22 @@ class TestHybridEPActivationCheckpointing(_EPActivationCheckpointing):
                     dispatch_method="dispatch_with_permute",
                     combine_method="combine_with_unpermute",
                     exact=True,
+                    capture=capture,
                 )
 
     @with_comms
     def test_dispatch_and_combine_are_saved_not_replayed(self):
-        self._check_hybridep_activation_checkpointing(
-            (
-                DefaultActivationRematConfig(),
-                ActivationRematConfig(save_regions=["*ep_communication"]),
-            ),
-            num_replays=0,
-        )
+        # Copying saved tensors must not release the CPU ID owning the handle.
+        with remat.saved_tensors_hooks(
+            lambda tensor: tensor.detach().clone(), lambda tensor: tensor
+        ):
+            self._check_hybridep_activation_checkpointing(
+                (
+                    DefaultActivationRematConfig(),
+                    ActivationRematConfig(save_regions=["*ep_communication"]),
+                ),
+                num_replays=0,
+            )
 
     @with_comms
     def test_region_ac_replay_is_exact(self):
@@ -340,19 +347,8 @@ class TestHybridEPActivationCheckpointing(_EPActivationCheckpointing):
 
     @with_comms
     def test_saved_communication_is_graph_capturable(self):
-        self._check_ep_activation_checkpointing(
+        self._check_hybridep_activation_checkpointing(
             (DefaultActivationRematConfig(),),
             num_replays=0,
-            dispatcher_config=HybridEPTokenDispatcher.Config(
-                num_experts=4 * self.world_size,
-                top_k=_TOP_K,
-                hidden_dim=_MODEL_DIM,
-                num_max_tokens_per_rank=_NUM_TOKENS,
-                non_blocking_capacity_factor=1.0,
-            ),
-            buffer_type=deep_ep.HybridEPBuffer,
-            dispatch_method="dispatch_with_permute",
-            combine_method="combine_with_unpermute",
-            exact=True,
             capture=True,
         )

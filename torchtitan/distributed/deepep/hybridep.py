@@ -27,7 +27,6 @@ from typing import Any, cast
 import torch
 import torch.distributed as dist
 import torch_remat as remat
-from torch._library.opaque_object import CustomClassBase, register_opaque_type
 
 logger = logging.getLogger(__name__)
 
@@ -37,53 +36,13 @@ _buffer: Any = None  # Global buffer instance
 _over_budget: torch.Tensor | None = None
 
 
-class DispatchHandle(CustomClassBase):
-    """Opaque wrapper for HybridEP dispatch handle.
-
-    Backward ops pass this handle through the torch.compile graph. Forward
-    regions use a CPU tensor ID because torch_remat cannot return opaque objects.
-    """
-
-    def __init__(self, value=None):
-        self.value = value
-
-    def __eq__(self, other):
-        if not isinstance(other, DispatchHandle):
-            return False
-        return self.value is other.value
-
-    def __hash__(self):
-        if self.value is None:
-            return 0
-        try:
-            return hash(self.value)
-        except TypeError:
-            return id(self.value)
-
-    def __fx_repr__(self):
-        return "DispatchHandle()", {"DispatchHandle": DispatchHandle}
-
-
-register_opaque_type(DispatchHandle, typ="reference")
-
 # The pinned torch_remat release accepts only tensor outputs; direct opaque
 # outputs require an upstream release. Use CPU tensor IDs as in the DeepEP
 # adapter to retain handles without device-to-host synchronization.
 # TODO: Remove this cache once opaque output support is released:
 # https://github.com/meta-pytorch/remat/issues/10
-_handle_cache: dict[int, DispatchHandle] = {}
+_handle_cache: dict[int, Any] = {}
 _handle_counter: int = 0
-
-
-@torch.library.custom_op("hybridep::get_handle", mutates_args=(), device_types="cpu")
-def _get_handle(handle_id: torch.Tensor) -> DispatchHandle:
-    """Resolve the CPU ID behind an op boundary so autograd stays traceable."""
-    return _handle_cache[cast(int, handle_id.item())]
-
-
-@_get_handle.register_fake
-def _get_handle_fake(handle_id: torch.Tensor) -> DispatchHandle:
-    return DispatchHandle()
 
 
 @dataclass
@@ -217,7 +176,7 @@ def _dispatch_impl(
     _handle_counter += 1
     handle_key = _handle_counter
     handle_id = torch.tensor([handle_key], dtype=torch.int64, device="cpu")
-    _handle_cache[handle_key] = DispatchHandle(value=handle)
+    _handle_cache[handle_key] = handle
     weakref.finalize(handle_id, lambda: _handle_cache.pop(handle_key, None))
     return hidden, scores, tokens_per_expert, handle_id
 
@@ -266,7 +225,7 @@ def _combine_impl(
         raise RuntimeError("HybridEP buffer not initialized.")
 
     handle = _handle_cache[cast(int, handle_id.item())]
-    combined, _ = _buffer.combine_with_unpermute(hidden=x, handle=handle.value)
+    combined, _ = _buffer.combine_with_unpermute(hidden=x, handle=handle)
     return combined
 
 
@@ -289,7 +248,7 @@ def _combine_fake(
 @torch.library.custom_op("hybridep::dispatch_bwd", mutates_args=(), device_types="cuda")
 def _dispatch_bwd_impl(
     grad_combined: torch.Tensor,
-    handle: DispatchHandle,
+    handle_id: torch.Tensor,
     num_permuted_tokens: int,
     pad_multiple: int | None = None,
 ) -> torch.Tensor:
@@ -298,10 +257,11 @@ def _dispatch_bwd_impl(
     if _buffer is None:
         raise RuntimeError("HybridEP buffer not initialized.")
 
+    handle = _handle_cache[cast(int, handle_id.item())]
     grad_x, _, _, _, _ = _buffer.dispatch_with_permute(
         hidden=grad_combined,
         scaling_factor=None,
-        handle=handle.value,
+        handle=handle,
         num_permuted_tokens=num_permuted_tokens,
         pad_multiple=pad_multiple,
     )
@@ -311,7 +271,7 @@ def _dispatch_bwd_impl(
 @_dispatch_bwd_impl.register_fake
 def _dispatch_bwd_fake(
     grad_combined: torch.Tensor,
-    handle: DispatchHandle,
+    handle_id: torch.Tensor,
     num_permuted_tokens: int,
     pad_multiple: int | None = None,
 ) -> torch.Tensor:
@@ -323,7 +283,7 @@ def _dispatch_bwd_fake(
 def _combine_bwd_impl(
     grad_hidden: torch.Tensor,
     grad_scores: torch.Tensor,
-    handle: DispatchHandle,
+    handle_id: torch.Tensor,
     num_tokens: int,
     num_experts: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -332,10 +292,11 @@ def _combine_bwd_impl(
     if _buffer is None:
         raise RuntimeError("HybridEP buffer not initialized.")
 
+    handle = _handle_cache[cast(int, handle_id.item())]
     grad_x, grad_probs_dense = _buffer.combine_with_unpermute(
         hidden=grad_hidden,
         probs=grad_scores if grad_scores.numel() > 0 else None,
-        handle=handle.value,
+        handle=handle,
     )
     if grad_probs_dense is None:
         grad_probs_dense = torch.empty(
@@ -348,7 +309,7 @@ def _combine_bwd_impl(
 def _combine_bwd_fake(
     grad_hidden: torch.Tensor,
     grad_scores: torch.Tensor,
-    handle: DispatchHandle,
+    handle_id: torch.Tensor,
     num_tokens: int,
     num_experts: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -373,7 +334,7 @@ def _dispatch_backward(ctx, grad_hidden, grad_scores, grad_tpe, grad_handle):
     num_tokens = topk_idx.shape[0]
 
     grad_x, grad_probs_dense = torch.ops.hybridep.combine_bwd(
-        grad_hidden, grad_scores, ctx.dispatch_handle, num_tokens, ctx.num_experts
+        grad_hidden, grad_scores, ctx.handle_id, num_tokens, ctx.num_experts
     )
     grad_x = grad_x.to(ctx.input_dtype)
 
@@ -391,7 +352,9 @@ def _dispatch_setup_context(ctx, inputs, output):
     """Save context for dispatch backward."""
     x, topk_idx, _, num_experts, _, _, _, _, _ = inputs
     _, _, _, handle_id = output
-    ctx.dispatch_handle = torch.ops.hybridep.get_handle(handle_id)
+    # The original CPU ID owns the cache entry. Keep it as context metadata;
+    # saved-tensor hooks may copy it and release the original object too early.
+    ctx.handle_id = handle_id
     ctx.input_dtype = x.dtype
     ctx.num_experts = num_experts
     ctx.save_for_backward(topk_idx)
@@ -400,16 +363,16 @@ def _dispatch_setup_context(ctx, inputs, output):
 def _combine_backward(ctx, grad_combined):
     """Backward: scatter gradients via dispatch_bwd op."""
     grad_x = torch.ops.hybridep.dispatch_bwd(
-        grad_combined, ctx.dispatch_handle, ctx.num_permuted_tokens, ctx.pad_multiple
+        grad_combined, ctx.handle_id, ctx.num_permuted_tokens, ctx.pad_multiple
     )
-    # Gradients for: x, handle, num_tokens, pad_multiple
+    # Gradients for: x, handle_id, num_tokens, pad_multiple
     return grad_x, None, None, None
 
 
 def _combine_setup_context(ctx, inputs, output):
     """Save context for combine backward."""
     x, handle_id, _num_tokens, pad_multiple = inputs
-    ctx.dispatch_handle = torch.ops.hybridep.get_handle(handle_id)
+    ctx.handle_id = handle_id
     ctx.num_permuted_tokens = x.shape[0]
     ctx.pad_multiple = pad_multiple
 
@@ -637,5 +600,4 @@ __all__ = [
     "check_hybridep_over_budget",
     "reset_hybridep_over_budget",
     "DispatchState",
-    "DispatchHandle",
 ]
