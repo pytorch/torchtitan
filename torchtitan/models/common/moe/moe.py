@@ -158,11 +158,11 @@ class RoutedExperts(Module):
             hidden_RF = self.activation_fn(gate_up_R2F, offsets=offsets_E)
             if isinstance(metadata, DeepEPDispatchMetadata):
                 routed_scores_R = metadata.routed_scores_R
-                # Absorb the router scores into W2's input, in float32; the bare
-                # multiply reads the dispatch region's scores, so pin them.
+                # Preserve the original score precision when scaling W2's input.
+                # The multiply reads the dispatch region's scores, so pin them.
                 remat.recompute_needs_tensor(routed_scores_R)
-                hidden_RF = (hidden_RF * routed_scores_R.reshape(-1, 1)).to(
-                    hidden_RF.dtype
+                hidden_RF = hidden_RF * routed_scores_R.to(hidden_RF.dtype).reshape(
+                    -1, 1
                 )
             routed_output_RD = self.w2(hidden_RF, offsets_E)
             # A real dtype cast and the output postprocess read the w2 output with
