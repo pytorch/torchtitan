@@ -76,9 +76,13 @@ training tasks (see [Datasets](#datasets)), then:
 ```bash
 python -m torchtitan.rl.train \
   --module torchtitan_recipes.rl.verifiers_terminal_bench \
-  --config rl_grpo_qwen35_9b_terminal_bench \
-  --hf_assets_path /path/to/Qwen3.5-9B
+  --config rl_grpo_qwen35_9b_terminal_bench
 ```
+
+The 9B recipe sets `hf_assets_path` to `./assets/hf/Qwen3.5-9B`, and the 35B
+recipe sets `./assets/hf/Qwen3.5-35B-A3B`. Change that assignment in
+`torchtitan_recipes/rl/verifiers_terminal_bench.py` to use another directory.
+There is no CLI flag for the path.
 
 | Config | Model | GPUs |
 | --- | --- | --- |

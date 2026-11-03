@@ -15,22 +15,20 @@ import torch
 from torch.cuda._graph_annotations import _is_tools_id_unavailable
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from torchtitan.distributed.cuda_graph import (
-    cuda_graph_teardown,
-    get_cuda_graph_annotations,
+from torchtitan.distributed.accelerator_graph import (
+    accelerator_graph_teardown,
+    get_accelerator_graph_annotations,
 )
 from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
     annotate_module_fqns,
 )
+from torchtitan.experiments.graph_trainer.cuda_graph import construct_cuda_graph_passes
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
 )
-from torchtitan.experiments.graph_trainer.passes import (
-    apply_graph_passes,
-    construct_default_graph_passes,
-)
+from torchtitan.experiments.graph_trainer.passes import apply_graph_passes
 from torchtitan.observability.profiler import _EXPORT_SUPPORTS_ANNOTATIONS, Profiler
 
 
@@ -90,8 +88,8 @@ class TestKernelAnnotationsE2E(TestCase):
         self.assertIn("norm", fqns_in_graph)
         self.assertIn("ffn", fqns_in_graph)
 
-        # Apply passes (annotation + CUDA graph).
-        passes = construct_default_graph_passes(traced)
+        # Apply the opt-in passes explicitly.
+        passes = construct_cuda_graph_passes(traced)
         traced.gm = apply_graph_passes(traced.gm, traced.example_inputs, passes)
 
         # Run: warmup + capture + replay.
@@ -99,7 +97,7 @@ class TestKernelAnnotationsE2E(TestCase):
         run_traced(traced, module=model)(x, labels)  # replay
 
         # Check annotations were captured.
-        annotations = get_cuda_graph_annotations()
+        annotations = get_accelerator_graph_annotations()
         self.assertGreater(len(annotations), 0, "No annotations captured")
 
         all_fqns = set()
@@ -168,7 +166,7 @@ class TestKernelAnnotationsE2E(TestCase):
 
         # Cleanup.
         os.unlink(trace_path)
-        cuda_graph_teardown()
+        accelerator_graph_teardown()
 
 
 class TestTraceAnnotationExport(TestCase):
@@ -187,7 +185,7 @@ class TestTraceAnnotationExport(TestCase):
             tempfile.TemporaryDirectory() as tmp,
             patch("torch.distributed.get_rank", return_value=0),
             patch(
-                "torchtitan.observability.profiler.get_cuda_graph_annotations",
+                "torchtitan.observability.profiler.get_accelerator_graph_annotations",
                 return_value=self.ANNOTATIONS,
             ),
             patch(

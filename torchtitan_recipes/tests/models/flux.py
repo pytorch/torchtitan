@@ -25,7 +25,7 @@ from torchtitan.components.optim import (
 )
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.activation_remat import FullActivationRematConfig
 
 from torchtitan.models.flux import build_model_config
 from torchtitan.models.flux.data import (
@@ -97,7 +97,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
             num_tokens_per_microbatch_per_dp_rank=2048,
             max_context_length=_flux_seq_len(img_size, max_t5_encoding_len),
             steps=10,
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         dataloader=GrainDataLoader.Config(
             dataset=training_dataset,
@@ -105,7 +105,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
             streaming_shuffle_buffer_size=128,
         ),
         parallelism=parallelism,
-        activation_checkpoint=FullAC.Config(),
+        activation_remat=FullActivationRematConfig(),
         checkpointer=None,
         validator=None,
         inference=Inference(
@@ -177,11 +177,11 @@ def flux_debugmodel_hsdp2x2_cp2_validation() -> FluxTrainer.Config:
         save_img_folder="img",
     )
     config.checkpointer = CheckpointManager.Config()
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
 def flux_debugmodel_compile() -> FluxTrainer.Config:
     config = flux_debugmodel_test()
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config

@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Unit tests for `torchtitan.rl.observability.rollout_recorder`."""
+"""Unit tests for `torchtitan.rl.rollout.recorder`."""
 
 from __future__ import annotations
 
@@ -14,12 +14,12 @@ import json
 import numpy as np
 import pytest
 
-from torchtitan.rl.observability.rollout_recorder import (
+from torchtitan.rl.rollout import Rollout, RolloutGroup, RolloutStatus, RolloutTurn
+
+from torchtitan.rl.rollout.recorder import (
     KeepExtremeRewardsFilter,
     RolloutSampleRecorder,
 )
-
-from torchtitan.rl.rollout import Rollout, RolloutGroup, RolloutStatus, RolloutTurn
 from torchtitan.rl.rollout.types import RolloutTurnID
 
 

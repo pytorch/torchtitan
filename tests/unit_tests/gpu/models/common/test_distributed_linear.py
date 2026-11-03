@@ -6,7 +6,7 @@
 
 """Numerical parity for the fused TP+SP linear primitives.
 
-These test the autograd Functions in ``torchtitan/models/common/async_linear.py``
+These test the autograd Functions in ``torchtitan/models/common/linear/async_linear.py``
 directly, against a single-device reference built from the unsharded weights. No
 model, no DTensor -- just the collective + GEMM math and its gradients.
 
@@ -28,7 +28,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 
-from torchtitan.models.common.async_linear import (
+from torchtitan.models.common.linear.async_linear import (
     AsyncAllGatherLinear,
     AsyncLinearReduceScatter,
 )

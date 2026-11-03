@@ -24,7 +24,7 @@ from torchtitan.models.common.decoder_sharding import (
 def mla_attention_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """MLA attention boundary: ``x`` in and out in the residual layout.
 
-    ``Attention.forward`` explicitly gathers x once for all MLA branches. This
+    ``DeepSeekMLAAttention.forward`` explicitly gathers x once for all MLA branches. This
     config only declares its external input and output layout contracts.
     """
     layout = residual_activation_placement(enable_sp=enable_sp)

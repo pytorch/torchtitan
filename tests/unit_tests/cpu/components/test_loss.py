@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
+import itertools
 import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -24,21 +26,24 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.components.loss import (
     _LossParallelCrossEntropy,
-    BaseLoss,
     ChunkedLossWrapper,
     compute_logprobs,
     cross_entropy_loss,
     CrossEntropyLoss,
     GradAccumulator,
     IGNORE_INDEX,
+    Loss,
 )
+from torchtitan.config import ParallelismConfig
+from torchtitan.config.transform import LoRATransform, transform_model_config_
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.deepseek_v3.mtp import (
     get_mtp_token_counts,
+    MTPCrossEntropyLoss,
     MTPDecoder,
-    MTPLoss,
     roll_mtp_sequence,
 )
+from torchtitan.models.llama3 import build_model_config
 
 
 class TestLoss(unittest.TestCase):
@@ -61,6 +66,43 @@ class TestLoss(unittest.TestCase):
 
         torch.testing.assert_close(logprobs, expected_logprobs)
         torch.testing.assert_close(entropy, expected_entropy)
+
+    def test_compute_logprobs_entropy_with_masked_logits(self):
+        for dtype in (torch.float32, torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                logits = torch.tensor(
+                    [[0.0, 1.0, -torch.inf], [0.0, -torch.inf, -torch.inf]],
+                    dtype=dtype,
+                    requires_grad=True,
+                )
+                labels = torch.tensor([0, IGNORE_INDEX])
+                logprobs, entropy = compute_logprobs(
+                    logits, labels, vocab_parallel_group=None, return_entropy=True
+                )
+                expected_entropy = torch.distributions.Categorical(
+                    logits=logits.detach().double()
+                ).entropy()
+
+                torch.testing.assert_close(
+                    entropy.double(), expected_entropy, rtol=1e-6, atol=1e-7
+                )
+                torch.testing.assert_close(
+                    logprobs, -F.cross_entropy(logits.float(), labels, reduction="none")
+                )
+                self.assertFalse(entropy.requires_grad)
+
+    def test_compute_logprobs_entropy_preserves_invalid_distributions(self):
+        logits = torch.tensor(
+            [[-torch.inf, -torch.inf], [torch.inf, 0.0], [torch.nan, 0.0]]
+        )
+        _, entropy = compute_logprobs(
+            logits,
+            torch.zeros(3, dtype=torch.long),
+            vocab_parallel_group=None,
+            return_entropy=True,
+        )
+
+        self.assertTrue(torch.isnan(entropy).all())
 
     def test_roll_mtp_sequence_respects_packed_document_boundaries(self):
         tokens = torch.tensor([10, 11, 12, 20, 21, 22, 23, 24])
@@ -124,11 +166,12 @@ class TestLoss(unittest.TestCase):
             [False, False, False, False, False, False, True, True]
         )
         model = _FakeMTPDecoder(skip_lm_head=True, num_mtp_layers=2)
+        routing_token_counts = torch.tensor([6, 4, 2])  # one per depth
         with patch(
             "torchtitan.models.deepseek_v3.mtp.annotate_input_spmd_types",
             side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
         ):
-            input_tokens, loss_labels, extra_kwargs = model.preprocess_inputs(
+            input_tokens, loss_labels, extra_kwargs, _ = model.preprocess_inputs(
                 {
                     "input": tokens,
                     "labels": labels,
@@ -139,8 +182,10 @@ class TestLoss(unittest.TestCase):
                 parallelism=SimpleNamespace(),
                 max_num_documents=2,
                 max_context_length=8,
+                global_routing_token_counts=routing_token_counts,
             )
 
+        assert extra_kwargs["aux_loss_denominators"] is routing_token_counts
         assert isinstance(input_tokens, tuple)
         assert isinstance(loss_labels, tuple)
         torch.testing.assert_close(input_tokens[0], tokens)
@@ -204,16 +249,16 @@ class TestLoss(unittest.TestCase):
         torch.testing.assert_close(loss_token_counts, torch.tensor([2, 2]))
         torch.testing.assert_close(routing_token_counts, torch.tensor([4, 3]))
 
-    def test_mtp_loss_rejects_plain_tensor(self):
-        loss_fn = MTPLoss(MTPLoss.Config(global_vocab_size=16))
+    def test_mtp_cross_entropy_loss_rejects_plain_tensor(self):
+        loss_fn = MTPCrossEntropyLoss(MTPCrossEntropyLoss.Config(global_vocab_size=16))
         pred = torch.zeros(1, 4, 16)
         labels = torch.zeros(1, 4, dtype=torch.long)
 
         with self.assertRaisesRegex(ValueError, "expects prediction and labels tuples"):
             loss_fn(pred, labels)
 
-    def test_mtp_loss_uses_each_depth_target_count(self):
-        loss_fn = MTPLoss(MTPLoss.Config(mtp_scale=0.3))
+    def test_mtp_cross_entropy_loss_uses_each_depth_target_count(self):
+        loss_fn = MTPCrossEntropyLoss(MTPCrossEntropyLoss.Config(mtp_scale=0.3))
         logits = tuple(torch.zeros(4, 4, requires_grad=True) for _ in range(3))
         labels = (
             torch.zeros(4, dtype=torch.long),
@@ -230,8 +275,8 @@ class TestLoss(unittest.TestCase):
         torch.testing.assert_close(logits[1].grad[0, 0], torch.tensor(-0.15 * 0.75 / 3))
         torch.testing.assert_close(logits[2].grad[0, 0], torch.tensor(-0.15 * 0.75 / 2))
 
-    def test_mtp_loss_without_counts_returns_unnormalized_sum(self):
-        loss_fn = MTPLoss(MTPLoss.Config(mtp_scale=0.3))
+    def test_mtp_cross_entropy_loss_without_counts_returns_unnormalized_sum(self):
+        loss_fn = MTPCrossEntropyLoss(MTPCrossEntropyLoss.Config(mtp_scale=0.3))
         logits = tuple(torch.zeros(4, 4) for _ in range(2))
         labels = tuple(torch.zeros(4, dtype=torch.long) for _ in range(2))
 
@@ -420,8 +465,9 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
     @with_comms
     def test_loss_parallel_cross_entropy_parity(self):
         """
-        Tests loss-parallel cross-entropy loss bitwise parity, with torch.distributed.tensor.parallel.loss_parallel().
+        Tests loss-parallel cross-entropy loss parity with torch.distributed.tensor.parallel.loss_parallel().
         Tests even/uneven vocab sharding, TP, DP+TP, and IGNORE_INDEX labels.
+        Not bitwise: the NLL is computed as softplus(logsumexp_{j != t} - z_t).
 
         Runs _LossParallelCrossEntropy under typing checking: logits S(1)@TP, labels I@TP -> I@TP.
         """
@@ -447,29 +493,17 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                 ):
                     # Build global test data once, then let DTensor derive the
                     # exact local shards for TP-only and DP+TP placements.
-                    generator = torch.Generator(device=self.device_type).manual_seed(
-                        seed
-                    )
-                    global_logits = torch.randn(
-                        T,
-                        vocab_size,
-                        device=self.device_type,
-                        generator=generator,
+                    # Sample on CPU and move to the test device: not every
+                    # accelerator registers a device-side torch.Generator.
+                    generator = torch.Generator().manual_seed(seed)
+                    global_logits = torch.randn(T, vocab_size, generator=generator).to(
+                        self.device_type
                     )
                     global_labels = torch.randint(
-                        0,
-                        vocab_size,
-                        (T,),
-                        device=self.device_type,
-                        dtype=torch.long,
-                        generator=generator,
-                    )
+                        0, vocab_size, (T,), dtype=torch.long, generator=generator
+                    ).to(self.device_type)
                     if ignore:
-                        mask = torch.rand(
-                            T,
-                            device=self.device_type,
-                            generator=generator,
-                        )
+                        mask = torch.rand(T, generator=generator).to(self.device_type)
                         global_labels[mask < 0.3] = IGNORE_INDEX
                     # distribute as DTensor; loss_parallel wrapper takes DTensors.
                     logits_dtensor = distribute_tensor(
@@ -520,9 +554,9 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         spmd.get_axis_local_type(local_loss, tp_group), spmd.I
                     )
 
-                    # Loss and local-shard gradients must be bitwise-equivalent
-                    # to torch.distributed.tensor.parallel.loss_parallel().
-                    self.assertTrue(torch.equal(local_loss, wrapper_loss.to_local()))
+                    # Loss and local-shard gradients must match
+                    # torch.distributed.tensor.parallel.loss_parallel().
+                    torch.testing.assert_close(local_loss, wrapper_loss.to_local())
 
                     # compare grad_logits; easier to wrap DTensor -> full_tensor for check.
                     with loss_parallel():
@@ -535,12 +569,186 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         shape=torch.Size((T, vocab_size)),
                         stride=(vocab_size, 1),
                     )
-                    self.assertTrue(
-                        torch.equal(
-                            local_grad_dtensor.full_tensor(),
-                            logits_dtensor.grad.full_tensor(),
-                        )
+                    torch.testing.assert_close(
+                        local_grad_dtensor.full_tensor(),
+                        logits_dtensor.grad.full_tensor(),
                     )
+
+    @with_comms
+    def test_loss_parallel_cross_entropy_confident_targets(self):
+        """
+        Confident targets keep their loss and target gradient.
+
+        With logsumexp-based CE, fp32 rounds p_t to exactly 1 once the margin
+        z_t - logsumexp_{j != t}(z_j) exceeds ~16.6, so the loss and the target
+        gradient become exactly 0 while the non-target gradients stay nonzero.
+        Targets sit in different TP shards; the reference is computed in fp64.
+        """
+        T, vocab_size = 6, 1003
+        mesh = init_device_mesh(self.device_type, (4,), mesh_dim_names=("tp",))
+        tp_group = mesh.get_group("tp")
+
+        generator = torch.Generator().manual_seed(0)
+        global_logits = 0.1 * torch.randn(T, vocab_size, generator=generator)
+        global_labels = torch.tensor([3, 260, 510, 777, 1002, 40])
+        # Margins of roughly 23, 43, 63, and 73 (past the fp32 rounding point),
+        # then one moderate and one ordinary row.
+        target_logits = torch.tensor([30.0, 50.0, 70.0, 80.0, 10.0, 0.0])
+        global_logits[torch.arange(T), global_labels] = target_logits
+        global_logits = global_logits.to(self.device_type)
+        global_labels = global_labels.to(self.device_type)
+
+        logits_fp64 = global_logits.double()
+        target_fp64 = logits_fp64.gather(-1, global_labels.unsqueeze(-1))
+        non_target = logits_fp64.scatter(-1, global_labels.unsqueeze(-1), -torch.inf)
+        expected_nll = F.softplus(
+            torch.logsumexp(non_target, dim=-1, keepdim=True) - target_fp64
+        )
+        expected_grad = torch.exp(logits_fp64 - target_fp64 - expected_nll)
+        expected_grad.scatter_(
+            -1, global_labels.unsqueeze(-1), torch.expm1(-expected_nll)
+        )
+        expected_nll = expected_nll.squeeze(-1).float()
+        expected_grad = expected_grad.float()
+
+        for reduction in ("none", "sum"):
+            with self.subTest(reduction=reduction):
+                local_logits = (
+                    distribute_tensor(global_logits, mesh, (Shard(1),))
+                    .to_local()
+                    .detach()
+                    .requires_grad_(True)
+                )
+                local_labels = distribute_tensor(
+                    global_labels, mesh, (Replicate(),)
+                ).to_local()
+                nll = _LossParallelCrossEntropy.apply(
+                    local_logits, local_labels, tp_group, vocab_size, reduction
+                )
+                nll.sum().backward()
+                grad = DTensor.from_local(
+                    local_logits.grad,
+                    mesh,
+                    (Shard(1),),
+                    shape=torch.Size((T, vocab_size)),
+                    stride=(vocab_size, 1),
+                ).full_tensor()
+
+                if reduction == "none":
+                    self.assertTrue(torch.all(nll[:4] > 0))
+                    torch.testing.assert_close(nll, expected_nll, rtol=1e-5, atol=0)
+                else:
+                    torch.testing.assert_close(
+                        nll, expected_nll.sum(), rtol=1e-5, atol=0
+                    )
+                target_grad = grad.gather(-1, global_labels.unsqueeze(-1))
+                self.assertTrue(torch.all(target_grad < 0))
+                torch.testing.assert_close(grad, expected_grad, rtol=1e-4, atol=0)
+                # The target gradient balances the non-target gradients.
+                torch.testing.assert_close(
+                    grad.sum(-1, keepdim=True) - target_grad,
+                    -target_grad,
+                    rtol=1e-4,
+                    atol=0,
+                )
+
+    @with_comms
+    def test_loss_parallel_cross_entropy_ignored_rows_and_inputs(self):
+        """
+        Ignored rows give zero loss and zero (never NaN) gradient even when the
+        logit at the fallback label 0 is -inf, and the input logits are not
+        modified (the loss saves its gradient in a fresh buffer).
+        """
+        T, vocab_size = 5, 1003
+        mesh = init_device_mesh(self.device_type, (4,), mesh_dim_names=("tp",))
+        tp_group = mesh.get_group("tp")
+
+        generator = torch.Generator().manual_seed(0)
+        global_logits = torch.randn(T, vocab_size, generator=generator)
+        global_logits[1:3, 0] = -torch.inf
+        global_labels = torch.tensor([3, IGNORE_INDEX, IGNORE_INDEX, 777, 1002])
+        global_logits = global_logits.to(self.device_type)
+        global_labels = global_labels.to(self.device_type)
+
+        local_logits = (
+            distribute_tensor(global_logits, mesh, (Shard(1),))
+            .to_local()
+            .detach()
+            .requires_grad_(True)
+        )
+        local_labels = distribute_tensor(global_labels, mesh, (Replicate(),)).to_local()
+        logits_before = local_logits.detach().clone()
+
+        nll = _LossParallelCrossEntropy.apply(
+            local_logits, local_labels, tp_group, vocab_size, "none"
+        )
+        self.assertTrue(torch.equal(local_logits.detach(), logits_before))
+        self.assertTrue(torch.all(nll[1:3] == 0))
+        self.assertTrue(torch.all(torch.isfinite(nll)))
+
+        nll.sum().backward()
+        self.assertTrue(torch.all(torch.isfinite(local_logits.grad)))
+        self.assertTrue(torch.all(local_logits.grad[1:3] == 0))
+
+    @with_comms
+    def test_loss_parallel_cross_entropy_compiled(self):
+        """
+        The local_compile("loss") region traces _LossParallelCrossEntropy with
+        fullgraph=True. Forward and backward under torch.compile must match
+        eager, including uneven vocab sharding, IGNORE_INDEX rows, confident
+        targets and bf16 logits (cross_entropy_loss passes them without an
+        upcast). This runs aot_eager so the CPU suite needs no compiler.
+        """
+        T, vocab_size = 24, 1003
+        mesh = init_device_mesh(self.device_type, (4,), mesh_dim_names=("tp",))
+        tp_group = mesh.get_group("tp")
+
+        generator = torch.Generator().manual_seed(0)
+        global_logits = 3 * torch.randn(T, vocab_size, generator=generator)
+        global_labels = torch.randint(0, vocab_size, (T,), generator=generator)
+        global_labels[::5] = IGNORE_INDEX
+        # Confident targets: half the valid rows sit well above their row max.
+        rows = torch.arange(T)
+        confident = (global_labels != IGNORE_INDEX) & (rows % 2 == 0)
+        global_logits[rows[confident], global_labels[confident]] = (
+            global_logits[rows[confident]].max(dim=-1).values + 25.0
+        )
+        global_logits = global_logits.to(self.device_type)
+        global_labels = global_labels.to(self.device_type)
+        local_labels = distribute_tensor(global_labels, mesh, (Replicate(),)).to_local()
+        weights = torch.rand(T, device=self.device_type)
+
+        def ce(logits, labels, reduction):
+            return _LossParallelCrossEntropy.apply(
+                logits, labels, tp_group, vocab_size, reduction
+            )
+
+        compiled_ce = torch.compile(ce, fullgraph=True, backend="aot_eager")
+        for dtype, reduction in itertools.product(
+            (torch.float32, torch.bfloat16), ("none", "sum")
+        ):
+            with self.subTest(dtype=dtype, reduction=reduction):
+                results = []
+                for fn in (ce, compiled_ce):
+                    local_logits = (
+                        distribute_tensor(global_logits.to(dtype), mesh, (Shard(1),))
+                        .to_local()
+                        .detach()
+                        .requires_grad_(True)
+                    )
+                    out = fn(local_logits, local_labels, reduction)
+                    if reduction == "none":
+                        (out * weights).sum().backward()
+                    else:
+                        out.backward()
+                    results.append((out.detach(), local_logits.grad))
+                (eager_out, eager_grad), (compiled_out, compiled_grad) = results
+                torch.testing.assert_close(compiled_out, eager_out)
+                torch.testing.assert_close(compiled_grad, eager_grad)
+                self.assertTrue(torch.all(torch.isfinite(compiled_grad)))
+                self.assertTrue(
+                    torch.all(compiled_grad[local_labels == IGNORE_INDEX] == 0)
+                )
 
     @with_comms
     def test_vocab_parallel_policy_stats_parity(self):
@@ -570,23 +778,15 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                     dtype=dtype,
                     ignore=ignore,
                 ):
-                    generator = torch.Generator(device=self.device_type).manual_seed(
-                        1729 + vocab_size
-                    )
+                    # Sample on CPU and move to the test device: not every
+                    # accelerator registers a device-side torch.Generator.
+                    generator = torch.Generator().manual_seed(1729 + vocab_size)
                     global_logits = torch.randn(
-                        T,
-                        vocab_size,
-                        device=self.device_type,
-                        dtype=dtype,
-                        generator=generator,
-                    )
+                        T, vocab_size, dtype=dtype, generator=generator
+                    ).to(self.device_type)
                     global_labels = torch.randint(
-                        0,
-                        vocab_size,
-                        (T,),
-                        device=self.device_type,
-                        generator=generator,
-                    )
+                        0, vocab_size, (T,), generator=generator
+                    ).to(self.device_type)
                     if ignore:
                         global_labels[[1, 17]] = IGNORE_INDEX
                     # Exercise masked logits without allowing 0 * -inf to
@@ -739,18 +939,18 @@ class _FakeMTPDecoder(MTPDecoder):
         return {}
 
 
-class _WeightedTwoOutputLoss(BaseLoss):
+class _WeightedTwoOutputLoss(Loss[tuple[torch.Tensor, ...]]):
     """Two-output objective used to exercise generic chunked-loss plumbing."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseLoss.Config):
+    class Config(Loss.Config):
         pass
 
     auxiliary_weight = 0.25
 
     def __init__(self, config: Config):
         del config
-        self.fn = cross_entropy_loss
+        self._loss_fn = cross_entropy_loss
 
     def __call__(
         self,
@@ -762,9 +962,9 @@ class _WeightedTwoOutputLoss(BaseLoss):
         del loss_inputs
         if not isinstance(pred, tuple) or not isinstance(labels, tuple):
             raise ValueError("Expected prediction and labels tuples.")
-        loss = self.fn(pred[0], labels[0]) + self.auxiliary_weight * self.fn(
-            pred[1], labels[1]
-        )
+        loss = self._loss_fn(
+            pred[0], labels[0]
+        ) + self.auxiliary_weight * self._loss_fn(pred[1], labels[1])
         if global_loss_token_counts is not None:
             loss = loss / global_loss_token_counts
         return loss, {}
@@ -883,6 +1083,167 @@ class TestChunkedLossWrapper(unittest.TestCase):
             model_chunked.output.weight.grad, model_ref.output.weight.grad
         )
 
+    def test_frozen_features_accumulate_head_gradients(self):
+        """Head-only training matches cross entropy across chunks and microbatches."""
+        for num_chunks in (1, 2, 4):
+            with self.subTest(num_chunks=num_chunks):
+                torch.manual_seed(42)
+                head = nn.Linear(5, 17)
+                reference_head = nn.Linear(5, 17)
+                reference_head.load_state_dict(head.state_dict())
+                chunked_loss = ChunkedLossWrapper(
+                    ChunkedLossWrapper.Config(num_chunks=num_chunks)
+                )
+                chunked_loss.set_lm_head(head)
+                for _ in range(2):
+                    hidden_TD = torch.randn(8, 5)
+                    labels = torch.randint(0, 17, (8,))
+                    labels[1] = IGNORE_INDEX
+                    token_count = (labels != IGNORE_INDEX).sum()
+                    reference_loss = (
+                        F.cross_entropy(
+                            reference_head(hidden_TD), labels, reduction="sum"
+                        )
+                        / token_count
+                    )
+
+                    loss, _ = chunked_loss(hidden_TD, labels, token_count)
+                    loss.backward()
+                    reference_loss.backward()
+
+                    torch.testing.assert_close(loss, reference_loss)
+                    self.assertIsNone(hidden_TD.grad)
+                    for actual, expected in zip(
+                        head.parameters(), reference_head.parameters(), strict=True
+                    ):
+                        torch.testing.assert_close(actual.grad, expected.grad)
+
+    def test_lora_head_only_matches_cross_entropy(self):
+        """The in-tree lm_head LoRA config preserves loss and adapter gradients."""
+        torch.manual_seed(42)
+        model_config = build_model_config(
+            "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
+        )
+        model_config = transform_model_config_(
+            model_config, [LoRATransform(rank=2, alpha=4.0, target_modules=["lm_head"])]
+        )
+        model = model_config.build()
+        model.init_states()
+        model._skip_lm_head = True
+        # A nonzero B matrix exercises gradients for both adapter matrices.
+        with torch.no_grad():
+            model.lm_head.lora_b.weight.normal_(std=0.02)
+        reference_head = copy.deepcopy(model.lm_head)
+        trainable_names = {
+            name for name, param in model.named_parameters() if param.requires_grad
+        }
+        self.assertEqual(
+            trainable_names, {"lm_head.lora_a.weight", "lm_head.lora_b.weight"}
+        )
+
+        for num_chunks in (1, 2, 4):
+            with self.subTest(num_chunks=num_chunks):
+                model.zero_grad(set_to_none=True)
+                reference_head.zero_grad(set_to_none=True)
+                chunked_loss = ChunkedLossWrapper(
+                    ChunkedLossWrapper.Config(num_chunks=num_chunks)
+                )
+                chunked_loss.set_lm_head(model.lm_head)
+                for _ in range(2):
+                    tokens = torch.randint(0, model_config.vocab_size, (8,))
+                    positions = torch.arange(8)
+                    hidden_TD = model(
+                        tokens,
+                        positions=positions,
+                        attention_metadata=model._get_attention_metadata(positions),
+                    )
+                    self.assertFalse(hidden_TD.requires_grad)
+                    labels = torch.randint(0, model_config.vocab_size, (8,))
+                    labels[0] = IGNORE_INDEX
+                    token_count = (labels != IGNORE_INDEX).sum()
+                    reference_loss = (
+                        F.cross_entropy(
+                            reference_head(hidden_TD), labels, reduction="sum"
+                        )
+                        / token_count
+                    )
+
+                    loss, _ = chunked_loss(hidden_TD, labels, token_count)
+                    loss.backward()
+                    reference_loss.backward()
+
+                    torch.testing.assert_close(loss, reference_loss)
+                    for name, parameter in model.named_parameters():
+                        if name in trainable_names:
+                            torch.testing.assert_close(
+                                parameter.grad,
+                                reference_head.get_parameter(
+                                    name.removeprefix("lm_head.")
+                                ).grad,
+                            )
+                        else:
+                            self.assertIsNone(parameter.grad)
+
+    def test_detached_chunk_loss_with_trainable_features_raises(self):
+        """A detached chunk must not silently shift later decoder gradients."""
+        for detached_chunk in (0, 1, 2):
+            for constant_loss in (False, True):
+                with self.subTest(
+                    detached_chunk=detached_chunk, constant_loss=constant_loss
+                ):
+                    torch.manual_seed(42)
+                    _, chunked_loss = self._make_model_and_loss(5, 17, 3)
+                    inner_loss = chunked_loss.loss_fn
+                    chunk_index = 0
+
+                    def loss_fn(*args, **kwargs):
+                        nonlocal chunk_index
+                        loss, metrics = inner_loss(*args, **kwargs)
+                        if chunk_index == detached_chunk:
+                            loss = (
+                                loss.new_zeros(()) if constant_loss else loss.detach()
+                            )
+                        chunk_index += 1
+                        return loss, metrics
+
+                    chunked_loss.loss_fn = loss_fn
+                    hidden_TD = torch.randn(6, 5, requires_grad=True)
+                    labels = torch.randint(0, 17, (6,))
+
+                    with self.assertRaisesRegex(RuntimeError, "does not require grad"):
+                        chunked_loss(hidden_TD, labels)
+                    self.assertIsNone(hidden_TD.grad)
+
+    def test_no_grad_leaves_head_and_features_unchanged(self):
+        """Validation leaves frozen decoder outputs and the head without gradients."""
+        head = nn.Linear(5, 17)
+        chunked_loss = ChunkedLossWrapper(ChunkedLossWrapper.Config(num_chunks=2))
+        chunked_loss.set_lm_head(head)
+        hidden = torch.randn(8, 5)
+        labels = torch.randint(0, 17, (8,))
+
+        with torch.no_grad():
+            loss, _ = chunked_loss(hidden, labels)
+
+        self.assertFalse(loss.requires_grad)
+        self.assertIsNone(hidden.grad)
+        for parameter in head.parameters():
+            self.assertIsNone(parameter.grad)
+
+    def test_fully_frozen_model_returns_detached_loss(self):
+        """Frozen features and head keep the forward-only loss contract."""
+        head = nn.Linear(5, 17).requires_grad_(False)
+        chunked_loss = ChunkedLossWrapper(ChunkedLossWrapper.Config(num_chunks=2))
+        chunked_loss.set_lm_head(head)
+        hidden = torch.randn(8, 5)
+        labels = torch.randint(0, 17, (8,))
+
+        loss, _ = chunked_loss(hidden, labels)
+
+        self.assertFalse(loss.requires_grad)
+        for parameter in head.parameters():
+            self.assertIsNone(parameter.grad)
+
     def test_weighted_multi_output_matches_full_objective(self):
         torch.manual_seed(42)
         T, D, V, num_chunks = 24, 5, 17, 3
@@ -965,11 +1326,11 @@ class TestChunkedLossWrapper(unittest.TestCase):
         model_ref, _ = self._make_model_and_loss(dim, vocab_size, num_chunks)
         model_chunked, _ = self._make_model_and_loss(dim, vocab_size, num_chunks)
         model_chunked.output.load_state_dict(model_ref.output.state_dict())
-        loss_config = MTPLoss.Config(
+        loss_config = MTPCrossEntropyLoss.Config(
             mtp_scale=0.3,
             global_vocab_size=vocab_size,
         )
-        full_loss = MTPLoss(loss_config)
+        full_loss = MTPCrossEntropyLoss(loss_config)
         chunked_loss = ChunkedLossWrapper(
             ChunkedLossWrapper.Config(
                 num_chunks=num_chunks,

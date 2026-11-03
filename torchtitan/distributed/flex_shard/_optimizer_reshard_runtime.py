@@ -192,7 +192,7 @@ class _BufferSlot:
     ) -> tuple[Tensor, Tensor]:
         to_compute = plan.storage_to_compute_schedule
         to_storage = plan.compute_to_storage_schedule
-        reserved = self.buffers[(plan.device, plan.dtype)]
+        reserved = self.buffers[(plan.device, plan.compute_dtype)]
         return (
             _reserved_view(
                 reserved.storage_exchange,
@@ -305,7 +305,9 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
     updates its runtime-owned input in place, and ``finalize`` consumes a
     runtime-owned result before reuse. Callbacks run under the stream selected
     by the runtime and must not retain tensors, synchronize, or call
-    ``Tensor.record_stream()``. Local-only buckets are prefetch barriers, so
+    ``Tensor.record_stream()``. The exception: a callback may synchronize when
+    the compute buffers live on the host, because the runtime's CPU streams are
+    no-ops and the gloo collectives already block the host. Local-only buckets are prefetch barriers, so
     no later redistributed ``prepare`` runs before an intervening local bucket.
 
     Any exception is fatal: parameters or optimizer state may already be
@@ -365,10 +367,13 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
             redistributed_index += 1
             to_compute = plan.storage_to_compute_schedule
             to_storage = plan.compute_to_storage_schedule
-            plan_requirements = requirements.setdefault(
+            wire_requirements = requirements.setdefault(
+                (plan.device, plan.compute_dtype), _BufferRequirements()
+            )
+            storage_requirements = requirements.setdefault(
                 (plan.device, plan.dtype), _BufferRequirements()
             )
-            plan_requirements.include_communication(
+            wire_requirements.include_communication(
                 storage_exchange_numel=max(
                     to_compute.input_buffer_numel,
                     to_storage.output_buffer_numel,
@@ -381,12 +386,12 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
             participant = plan.group.local_participant
             for redistribution_plan in plan.redistribution_plans:
                 storage_partition = redistribution_plan.storage_partition(participant)
-                plan_requirements.include_storage_scratch(
+                storage_requirements.include_storage_scratch(
                     math.prod(storage_partition.tensor_shape)
                 )
                 compute_partition = redistribution_plan.compute_partition(participant)
                 if compute_numel := math.prod(compute_partition.tensor_shape):
-                    plan_requirements.include_compute_scratch(compute_numel)
+                    wire_requirements.include_compute_scratch(compute_numel)
             for item in plan.unredistributed_items:
                 _include_compute_scratch_requirement(
                     requirements,
@@ -718,7 +723,7 @@ def _compute_redistributed(
         received_spans = to_compute.output_spans_by_parameter[index]
         compute_tensor = slot.compute_buffer(
             partition.tensor_shape,
-            dtype=plan.dtype,
+            dtype=plan.compute_dtype,
             device=plan.device,
         )
         compute_views = tuple(

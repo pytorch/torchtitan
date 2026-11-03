@@ -38,7 +38,7 @@
 </text>
 <rect x="160" y="510" width="350" height="72" rx="12" fill="#fce8e6" stroke="#d93025" stroke-width="2"/>
 <text x="335" y="542" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="500" text-anchor="middle">
-<tspan x="335" dy="0">VLLMGenerator actors</tspan>
+<tspan x="335" dy="0">Generator actors</tspan>
 <tspan x="335" dy="18">Model inference</tspan>
 </text>
 <rect x="680" y="430" width="570" height="240" rx="18" fill="#ffffff" stroke="#9334e6" stroke-width="3"/>

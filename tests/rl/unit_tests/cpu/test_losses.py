@@ -6,7 +6,7 @@
 
 import torch
 
-from torchtitan.rl.losses.dapo import _normalize, DAPOLoss
+from torchtitan.rl.trainer.losses.dapo import _normalize, DAPOLoss
 
 
 def test_loss_normalization_uses_mutable_tensor_denominator() -> None:
@@ -36,9 +36,9 @@ def test_dapo_loss_matches_vllm_tempered_logprobs_bitwise() -> None:
     )
 
     _, metrics = DAPOLoss.Config().build()(
-        logits,
-        labels,
-        torch.tensor(64),
+        pred=logits,
+        labels=labels,
+        global_loss_token_counts=torch.tensor(64),
         generator_logprobs=generator_logprobs,
         temperature=temperature,
         advantages=torch.ones(64),

@@ -4,12 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
+from torch import nn
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -18,49 +21,53 @@ from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.base.model import BaseModel
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.attention import (
+    Attention,
     AttentionMetadata,
     AttentionMetadataMap,
-    BaseAttention,
     InnerAttention,
+    SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.common.rope import RoPE
+from torchtitan.observability.logging import warn_once
 
 __all__ = ["Decoder", "TransformerBlock"]
 
+logger = logging.getLogger(__name__)
+
 
 # TODO: we can unify the TransformerBlock impl across all models when
-# there is no special logic for each model, including
-# ffn vs. moe naming and creation, etc.
+# there is no special logic for each model.
 class TransformerBlock(Module):
     """Base class for all language model transformer blocks.
 
     All language model TransformerBlocks share:
     - Attention module (from ``attention.build()``)
-    - FFN or MoE (from ``feed_forward.build()`` / ``moe.build()``)
-    - Two RMSNorms (``attention_norm``, ``ffn_norm``)
-    - Forward: ``x + attn(norm(x), ...); x + ffn(norm(x))``
+    - Dense or MoE feed-forward module (from ``feed_forward.build()``)
+    - Two normalization modules (``attention_norm``, ``ffn_norm``)
 
     Forward accepts ``aux_loss_denominator``. Dense blocks ignore it; MoE
     blocks pass it to routers configured with an auxiliary loss.
 
-    Children implement ``__init__`` and ``forward``.
+    Children implement ``__init__``, ``forward``, and residual connections.
     """
 
-    attention: BaseAttention
+    attention: Attention
+    feed_forward: FeedForward
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        attention: BaseAttention.Config  # required, no default
-        feed_forward: FeedForward.Config | None = None
-        moe: MoE.Config | None = None
-        attention_norm: RMSNorm.Config
-        ffn_norm: RMSNorm.Config
+        attention: Attention.Config  # required, no default
+        feed_forward: FeedForward.Config
+        attention_norm: Module.Config
+        ffn_norm: Module.Config
 
 
 class Decoder(BaseModel):
@@ -69,6 +76,8 @@ class Decoder(BaseModel):
     Provides shared ``__init__``, ``forward``, ``init_states``, and
     ``_get_attention_metadata`` (flex/varlen dispatch) used by most models.
     """
+
+    layers: ModuleDict[TransformerBlock]
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config):
@@ -87,45 +96,50 @@ class Decoder(BaseModel):
         # itself is handled by ``Decoder.__init__`` / ``Decoder.init_states``.
         enable_weight_tying: bool = False
 
-        @property
-        def first_base_attention(self) -> BaseAttention.Config | None:
-            """First ``BaseAttention`` config, else ``None``.
+        def __post_init__(self) -> None:
+            sliding_window_sizes: dict[type[InnerAttention], int] = {}
+            for layer_config in self.layers:
+                for _, attention, _, _ in layer_config.traverse(Attention.Config):
+                    config = attention.inner_attention
+                    if not isinstance(
+                        config,
+                        (
+                            SlidingWindowFlexInnerAttention.Config,
+                            SlidingWindowVarlenInnerAttention.Config,
+                        ),
+                    ):
+                        continue
+                    backend = config._owner
+                    assert backend is not None and issubclass(backend, InnerAttention)
+                    window_size = sliding_window_sizes.setdefault(
+                        backend, config.sliding_window_size
+                    )
+                    if window_size != config.sliding_window_size:
+                        raise ValueError(
+                            f"{backend.__name__} layers must use the same "
+                            "sliding_window_size because they share attention metadata."
+                        )
 
-            Hybrid models do not carry a ``BaseAttention`` config on every
-            layer, so callers needing its metadata look up the first such layer
-            rather than assuming ``layers[0]``.
-            """
+        @property
+        def first_full_attention(self) -> Attention.Config | None:
+            """First full-attention config, including causal attention, else None."""
             return next(
                 (
                     layer.attention
                     for layer in self.layers
-                    if layer.attention is not None
+                    if layer.attention.inner_attention.is_full_attention
                 ),
                 None,
             )
 
         @property
-        def base_attention_backends(self) -> tuple[Module.Config, ...]:
-            """Inner backend configs for all ``BaseAttention`` layers."""
-            return tuple(
-                layer.attention.inner_attention
-                for layer in self.layers
-                if layer.attention is not None
-            )
-
-        @property
-        def first_base_attention_backend(self) -> Module.Config | None:
-            """Inner backend config of the first ``BaseAttention`` layer."""
-            return next(iter(self.base_attention_backends), None)
-
-        @property
-        def first_feed_forward(self) -> FeedForward.Config | None:
+        def first_feed_forward(self) -> DenseFeedForward.Config | None:
             """First dense feed-forward config, else None."""
             return next(
                 (
                     layer.feed_forward
                     for layer in self.layers
-                    if layer.feed_forward is not None
+                    if isinstance(layer.feed_forward, DenseFeedForward.Config)
                 ),
                 None,
             )
@@ -134,7 +148,7 @@ class Decoder(BaseModel):
         def first_moe(self) -> MoE.Config | None:
             """First mixture-of-experts config, else None."""
             return next(
-                (layer.moe for layer in self.layers if layer.moe is not None),
+                (config for _, config, _, _ in self.traverse(MoE.Config)),
                 None,
             )
 
@@ -143,6 +157,14 @@ class Decoder(BaseModel):
     # TODO(#ISSUE): Remove after fixing PP backward to skip non-tensor
     # inputs (bool kwargs cause 'has no attribute requires_grad' errors).
     _skip_lm_head: bool = False
+
+    # FSDP's per-parameter dtype override (``param_dtype_override_fn``); None casts every
+    # parameter to ``training.mixed_precision_param``. The generator sets it.
+    # TODO: remove once parameters carry a per-FQN dtype, so FSDP keeps A_log/dt_bias
+    # in float32 without a model attribute.
+    _fsdp_param_dtype_override_fn: Callable[
+        [nn.Parameter], torch.dtype | None
+    ] | None = None
 
     def _apply_fsdp(
         self,
@@ -172,13 +194,14 @@ class Decoder(BaseModel):
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
             symm_mem_scope=parallelism.fsdp_symm_mem_scope,
+            param_dtype_override_fn=self._fsdp_param_dtype_override_fn,
         )
 
     def __init__(self, config: Config):
         from torchtitan.distributed.spmd_types import spmd_mesh_size, spmd_sparse_mesh
 
         tp = spmd_mesh_size("tp")
-        attention = config.first_base_attention
+        attention = config.first_full_attention
         if tp > 1 and attention is not None:
             num_heads = attention.n_heads
             num_kv_heads = getattr(attention, "n_kv_heads", None) or num_heads
@@ -226,6 +249,8 @@ class Decoder(BaseModel):
         if self.enable_weight_tying:
             self.tok_embeddings.weight = self.lm_head.weight
 
+        self._tie_rope_caches()
+
     def init_states(
         self,
         *,
@@ -239,6 +264,43 @@ class Decoder(BaseModel):
             assert self.tok_embeddings is not None and self.lm_head is not None
             self.tok_embeddings.weight = self.lm_head.weight
         super().init_states(buffer_device=buffer_device)
+        # ``to_empty()`` and ``RoPE._init_self_buffers()`` give every layer its
+        # own cache again; point identical RoPEs back at one tensor.
+        self._tie_rope_caches()
+
+    def _tie_rope_caches(self) -> None:
+        """Share one cache tensor across RoPE modules with equal configs.
+
+        Every attention layer builds its own ``(max_context_length, ...)`` fp32
+        RoPE cache, identical across layers with the same config; at long
+        context these add up to GiBs per rank. The cache is a non-persistent,
+        read-only buffer, so sharing it does not change numerics or checkpoints.
+
+        Sharing only holds after ``init_states``: any later ``_apply`` (e.g.
+        ``model.to(...)``) gives every RoPE its own copy again. That costs
+        memory but not correctness.
+        """
+        # TODO: this lowers steady-state memory only. ``to_empty()`` and each
+        # ``RoPE._init_self_buffers()`` still materialize one cache per RoPE
+        # before they are tied here. If init-time peak memory becomes a problem,
+        # have ``_init_self_buffers`` reuse a cache already built for an equal
+        # config during the same ``init_states`` pass.
+        representatives: list[RoPE] = []
+        for module in self.modules():
+            if not isinstance(module, RoPE):
+                continue
+            rep = next(
+                (
+                    r
+                    for r in representatives
+                    if type(r) is type(module) and r.config == module.config
+                ),
+                None,
+            )
+            if rep is None:
+                representatives.append(module)
+            else:
+                module.cache = rep.cache
 
     def forward(
         self,
@@ -264,9 +326,7 @@ class Decoder(BaseModel):
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
-                else attention_metadata.get(
-                    cast(TransformerBlock, layer).attention.attention_metadata_key
-                )
+                else attention_metadata.get(type(layer.attention.inner_attention))
             )
             h = layer(
                 h,
@@ -294,14 +354,17 @@ class Decoder(BaseModel):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[
         torch.Tensor | tuple[torch.Tensor, ...],
         torch.Tensor | tuple[torch.Tensor, ...],
         dict[str, Any],
+        dict[str, Any],
     ]:
         """Build masks (flex/varlen), CP-shard, SPMD-wrap, and return the batch."""
         del kwargs
+        loss_kwargs = input_dict.pop("loss_kwargs", {})
         positions = input_dict.get("positions", None)
         padding_mask = input_dict.get("padding_mask", None)
         if positions is not None:
@@ -314,6 +377,8 @@ class Decoder(BaseModel):
             input_dict["attention_metadata"] = attention_metadata
 
         input_shardings = decoder_input_sharding()
+        input_shardings.update(dict.fromkeys(loss_kwargs, input_shardings["labels"]))
+        input_dict.update(loss_kwargs)
         if parallelism_context.cp_enabled:
             input_dict = self._cp_shard(
                 input_dict,
@@ -325,11 +390,12 @@ class Decoder(BaseModel):
             parallelism_context, input_dict, input_shardings
         )
 
+        loss_kwargs = {name: input_dict.pop(name) for name in loss_kwargs}
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
         if next(self.config.traverse(AuxLoss.Config), None) is not None:
-            input_dict["aux_loss_denominators"] = None
-        return inputs, labels, input_dict
+            input_dict["aux_loss_denominators"] = global_routing_token_counts
+        return inputs, labels, input_dict, loss_kwargs
 
     def _cp_shard(
         self,
@@ -340,45 +406,36 @@ class Decoder(BaseModel):
     ) -> dict[str, Any]:
         """Prepare attention metadata and shard model inputs for CP."""
         from torchtitan.distributed import context_parallel
-        from torchtitan.models.common.attention.cp_attention import (
-            canonicalize_cp_inner_attention,
-            CPInnerAttention,
-        )
+        from torchtitan.models.common.attention.cp_attention import CPInnerAttention
 
         attention_metadata = input_dict.get("attention_metadata")
         load_balancer_config = parallelism.context_parallel_load_balancer
-        selected_attention_metadata = None
-        if load_balancer_config is not None and attention_metadata is not None:
-            first_base_attention = self.config.first_base_attention
-            assert first_base_attention is not None
-            first_cp_inner_attention = first_base_attention.inner_attention._owner
-            assert first_cp_inner_attention is not None and issubclass(
-                first_cp_inner_attention, CPInnerAttention
-            )
-            # One permutation is shared across layers. Prefer full-attention
-            # metadata, falling back to the first quadratic inner attention
-            # for models containing only sliding-window attention.
-            full_cp_inner_attention = canonicalize_cp_inner_attention(
-                first_cp_inner_attention
-            )
-            selected_attention_metadata = attention_metadata.get(
-                full_cp_inner_attention
-            )
-            if selected_attention_metadata is None:
-                selected_attention_metadata = attention_metadata.get(
-                    first_cp_inner_attention
+        load_balancer = None
+        if load_balancer_config is not None:
+            # All PP stages retain the full model config and share one permutation.
+            attention = self.config.first_full_attention
+            if attention is None:
+                warn_once(
+                    logger,
+                    "Ignoring context_parallel_load_balancer because the model "
+                    "has no full attention. Using contiguous CP sharding.",
                 )
-        load_balancer = (
-            # TODO: `attention_metadata` alone cannot determine the load-balancing strategy.
-            load_balancer_config.build(
-                seq_len=context_parallel.get_cp_input_seq_len(
-                    input_dict, input_shardings=input_shardings
-                ),
-                attention_metadata=selected_attention_metadata,
-            )
-            if load_balancer_config is not None
-            else None
-        )
+            else:
+                selected_attention_metadata = None
+                if attention_metadata is not None:
+                    cp_inner_attention = attention.inner_attention._owner
+                    assert cp_inner_attention is not None and issubclass(
+                        cp_inner_attention, CPInnerAttention
+                    )
+                    selected_attention_metadata = attention_metadata.get(
+                        cp_inner_attention
+                    )
+                load_balancer = load_balancer_config.build(
+                    seq_len=context_parallel.get_cp_input_seq_len(
+                        input_dict, input_shardings=input_shardings
+                    ),
+                    attention_metadata=selected_attention_metadata,
+                )
         permutation = (
             load_balancer.generate_permutation() if load_balancer is not None else None
         )
@@ -410,7 +467,8 @@ class Decoder(BaseModel):
     ) -> AttentionMetadataMap:
         attention_metadata: dict[type[InnerAttention], AttentionMetadata] = {}
         for layer_config in self.config.layers:
-            for _, config, _, _ in layer_config.traverse(InnerAttention.Config):
+            for _, attention, _, _ in layer_config.traverse(Attention.Config):
+                config = attention.inner_attention
                 backend = config._owner
                 assert backend is not None and issubclass(backend, InnerAttention)
                 if backend in attention_metadata:

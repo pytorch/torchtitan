@@ -38,6 +38,12 @@ jobs:
           enable-cache: true
 
       - name: Run B200 integration tests
+        env:
+          # Keep the historical default value (before 2026/09/23).
+          # The default was 1 before 2026/09/23 and was changed to
+          # 0 but was changed again to 1 on 2026/10/20.
+          # Set to 1 to avoid another breakage in the future.
+          TRITON_DEFAULT_FP_FUSION: "1"
         run: |
           set -eux
 
@@ -78,6 +84,7 @@ jobs:
             tests/unit_tests/cpu/models/common/test_dist_moe.py \
             tests/unit_tests/gpu/models/common/test_dist_moe.py \
             tests/unit_tests/gpu/quantization/test_mxfp8_fsdp.py \
+            tests/unit_tests/gpu/models/kimi_k3/test_kimi_k3.py::TestKimiK3::test_attention_gym_kda_kernel_matches_recurrent_reference \
             -v
 
           mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"

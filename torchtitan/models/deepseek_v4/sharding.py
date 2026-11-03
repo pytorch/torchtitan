@@ -20,7 +20,7 @@ from torchtitan.models.common.decoder_sharding import (
     residual_activation_placement,
     token_id_placement,
 )
-from torchtitan.models.common.moe_sharding import router_sharding_config
+from torchtitan.models.common.moe.sharding import router_sharding_config
 
 _dense_param_rep = dense_param_placement(tp=spmd.R)
 _attn_sink_placement = dense_param_placement(tp=spmd.S(0))

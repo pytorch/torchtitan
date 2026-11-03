@@ -8,22 +8,28 @@ from unittest import mock
 
 import pytest
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.tensor import Shard
 
+from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.config.parallelism import FSDPSymmMemScope
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     enable_fsdp_symm_mem,
     linear_param_shard_placements,
 )
+from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.models.common.decoder import TransformerBlock
+from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe import MoE
+from torchtitan.models.llama3.flavors import build_model_config
 
 
 class _FSDPModule(nn.Module):
-    def __init__(self, *, moe_enabled: bool) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.moe_enabled = moe_enabled
         self.force_sum_enabled = False
         self.symm_mem_enabled = False
 
@@ -32,6 +38,14 @@ class _FSDPModule(nn.Module):
 
     def set_symm_mem_for_comm(self) -> None:
         self.symm_mem_enabled = True
+
+
+class _FSDPTransformerBlock(_FSDPModule, TransformerBlock):
+    pass
+
+
+class _FSDPOutOfTreeBlock(_FSDPModule):
+    pass
 
 
 def test_apply_fsdp_to_decoder_forwards_param_dtype_override_fn() -> None:
@@ -60,6 +74,74 @@ def test_apply_fsdp_to_decoder_forwards_param_dtype_override_fn() -> None:
     assert mp_policy.param_dtype_override_fn is param_dtype_override_fn
 
 
+@pytest.mark.parametrize("keep_dtype", [True, False])
+@mock.patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
+def test_decoder_fsdp_param_dtype_override_fn_keeps_float32_param(
+    keep_dtype: bool,
+) -> None:
+    # As the RL generator does: a bf16 model with one frozen float32 parameter.
+    dist.init_process_group("gloo", store=dist.HashStore(), rank=0, world_size=1)
+    try:
+        parallelism = ParallelismConfig()
+        model = build_model_config("debugmodel", parallelism=parallelism).build()
+        model.to(torch.bfloat16)
+        model.norm.weight.data = model.norm.weight.data.float()
+        model.norm.weight.requires_grad_(False)
+        if keep_dtype:
+            model._fsdp_param_dtype_override_fn = lambda param: param.dtype
+        model._apply_fsdp(
+            parallelism_context=ParallelismContext(
+                dp_replicate=1,
+                dp_shard=1,
+                cp=1,
+                tp=1,
+                pp=1,
+                ep=1,
+                world_size=1,
+                enable_sequence_parallel=False,
+            ),
+            training=TrainingConfig(),
+            parallelism=parallelism,
+        )
+        model.norm.unshard()
+        assert model.norm.weight.dtype == (
+            torch.float32 if keep_dtype else torch.bfloat16
+        )
+        assert model.lm_head.weight.dtype == torch.bfloat16
+    finally:
+        dist.destroy_process_group()
+
+
+def test_apply_fsdp_to_decoder_shards_an_moe_held_as_mlp() -> None:
+    model = nn.Module()
+    model.enable_weight_tying = False
+    model.tok_embeddings = None
+    model.norm = None
+    model.lm_head = None
+    moe = MoE.__new__(MoE)
+    nn.Module.__init__(moe)
+    moe.num_experts = 2
+    moe.routed_experts = nn.Linear(4, 2, bias=False)
+    block = nn.Module()
+    block.mlp = moe
+    model.layers = nn.ModuleDict({"0": block})
+    dp_mesh = mock.MagicMock(mesh_dim_names=("dp_shard",))
+    dp_mesh["dp_shard"].size.return_value = 2
+
+    with mock.patch("torchtitan.distributed.fsdp.fully_shard") as fully_shard:
+        apply_fsdp_to_decoder(
+            model,
+            dp_mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            pp_enabled=False,
+        )
+
+    block_call = next(c for c in fully_shard.call_args_list if c.args[0] is block)
+    shard_placement_fn = block_call.kwargs["shard_placement_fn"]
+    assert shard_placement_fn(moe.routed_experts.weight) == Shard(0)
+
+
 def test_stacked_linear_shard_placements_use_num_linears() -> None:
     module = nn.Module()
     stacked = Linear.Config(
@@ -82,6 +164,7 @@ def test_stacked_linear_shard_placements_use_num_linears() -> None:
     }
 
 
+@pytest.mark.parametrize("block_cls", [_FSDPTransformerBlock, _FSDPOutOfTreeBlock])
 @pytest.mark.parametrize(
     ("scope", "dense_enabled", "sparse_enabled"),
     [
@@ -91,13 +174,20 @@ def test_stacked_linear_shard_placements_use_num_linears() -> None:
     ],
 )
 def test_enable_fsdp_symm_mem_scope(
-    scope: FSDPSymmMemScope, dense_enabled: bool, sparse_enabled: bool
+    scope: FSDPSymmMemScope, dense_enabled: bool, sparse_enabled: bool, block_cls: type
 ) -> None:
     model = nn.Module()
-    dense = _FSDPModule(moe_enabled=False)
-    sparse = _FSDPModule(moe_enabled=True)
+    dense = block_cls()
+    dense.feed_forward = DenseFeedForward.__new__(DenseFeedForward)
+    nn.Module.__init__(dense.feed_forward)
+    sparse = block_cls()
+    moe = MoE.__new__(MoE)
+    nn.Module.__init__(moe)
+    sparse.feed_forward = moe
     model.add_module("dense", dense)
     model.add_module("sparse", sparse)
+    other = _FSDPModule()
+    model.add_module("other", other)
 
     with mock.patch("torchtitan.distributed.fsdp.FSDPModule", _FSDPModule):
         enable_fsdp_symm_mem(model, scope)
@@ -106,3 +196,5 @@ def test_enable_fsdp_symm_mem_scope(
     assert dense.symm_mem_enabled == dense_enabled
     assert sparse.force_sum_enabled == sparse_enabled
     assert sparse.symm_mem_enabled == sparse_enabled
+    assert other.force_sum_enabled == dense_enabled
+    assert other.symm_mem_enabled == dense_enabled

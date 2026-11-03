@@ -24,7 +24,10 @@ from torchtitan.components.optim import (
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.activation_remat import (
+    DefaultActivationRematConfig,
+    FullActivationRematConfig,
+)
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
@@ -52,7 +55,7 @@ def qwen36_debugmodel(
 ) -> Trainer.Config:
     parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, parallelism=parallelism
+        "debugmodel", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -87,7 +90,7 @@ def qwen36_debugmodel(
             steps=10,
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 
@@ -101,7 +104,7 @@ def qwen36_debugmodel_varlen_attn(
         attn_backend="varlen",
         parallelism=config.parallelism,
     )
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -143,11 +146,11 @@ def qwen36_debugmodel_moe(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
             steps=10,
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 
@@ -156,7 +159,9 @@ def qwen36_27b(seq_len: int | None = None) -> Trainer.Config:
         data_parallel_shard_degree=-1,
         tensor_parallel_degree=4,
     )
-    model_config = build_model_config("27B", seq_len=seq_len, parallelism=parallelism)
+    model_config = build_model_config(
+        "27B", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -184,7 +189,7 @@ def qwen36_27b(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
+        activation_remat=FullActivationRematConfig(),
     )
 
 
@@ -195,7 +200,7 @@ def qwen36_35b_a3b(seq_len: int | None = None) -> Trainer.Config:
         expert_parallel_degree=8,
     )
     model_config = build_model_config(
-        "35B-A3B", seq_len=seq_len, parallelism=parallelism
+        "35B-A3B", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -221,9 +226,9 @@ def qwen36_35b_a3b(seq_len: int | None = None) -> Trainer.Config:
             num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
             steps=1000,
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
+        activation_remat=FullActivationRematConfig(),
     )

@@ -207,8 +207,17 @@ def _find_fsdp_unshard_outputs(
             continue
         last_all_gather = _find_last_all_gather_in_chain(user)
         if last_all_gather is None:
-            continue
-        output = _unshard_output_from_all_gather(last_all_gather)
+            if user.meta.get("autograd_backward", False) or not fsdp_param_fqns(user):
+                continue
+            # FSDP1 will not have all-gather, but we want to extract cast and quantization
+            # chains to do them once during unshard.
+            output = _find_last_non_view_node_in_chain(
+                _find_last_user_in_wait_chain(user)
+            )
+            if output is param_placeholder:
+                continue
+        else:
+            output = _unshard_output_from_all_gather(last_all_gather)
         if output not in seen:
             seen.add(output)
             outputs.append(output)

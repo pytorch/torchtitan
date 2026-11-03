@@ -304,7 +304,7 @@ def register_aux_loss_zero_hook(
     into the ``group_acc`` registers and zeroes the instances.
 
     Same pattern as ``register_moe_load_balancing_hook``
-    (:func:`torchtitan.models.common.moe.register_moe_load_balancing_hook`).
+    (:func:`torchtitan.models.common.moe.moe.register_moe_load_balancing_hook`).
     """
     optimizers.register_step_pre_hook(
         lambda *args, **kwargs: _zero_aux_losses(model_parts)

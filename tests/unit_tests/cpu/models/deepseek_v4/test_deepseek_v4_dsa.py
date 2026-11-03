@@ -88,7 +88,7 @@ class TestDSVPackedDocuments(unittest.TestCase):
             "torchtitan.models.common.decoder.annotate_input_spmd_types",
             side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
         ):
-            _, _, kwargs = model.preprocess_inputs(
+            _, _, kwargs, _ = model.preprocess_inputs(
                 input_dict,
                 parallelism_context=SimpleNamespace(
                     cp_enabled=False, activate_spmd=contextlib.nullcontext

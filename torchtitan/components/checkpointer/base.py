@@ -24,7 +24,7 @@ import torch.nn as nn
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
 
-from torchtitan.config import Configurable, Function
+from torchtitan.config import CallableFunction, Configurable
 from torchtitan.models.base.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools import filesystem
@@ -324,14 +324,30 @@ class BaseCheckpointManager(Configurable, ABC):
                         step,
                     )
 
+            # Explicit load_step and initial_load_path are only checked to be
+            # directories above; automatic selection already filtered on this.
+            if not from_hf and not self._is_resumable_checkpoint(checkpoint_id):
+                raise ValueError(
+                    f"Checkpoint {checkpoint_id} is not a complete checkpoint: it "
+                    "has no completed checkpoint metadata, so its save never "
+                    "finished, or it is a Hugging Face checkpoint. Load a full "
+                    "checkpoint instead, or set checkpointer.initial_load_in_hf "
+                    "to load Hugging Face weights."
+                )
+
             logger.info("Loading the checkpoint from %s.", checkpoint_id)
             begin = time.monotonic()
+            states = self._states_to_load(model_only)
             self._load_checkpoint(
-                self._states_to_load(model_only),
+                states,
                 checkpoint_id,
                 from_hf=from_hf,
                 from_quantized=from_quantized,
             )
+            # Reseed EMA from the just-loaded weights if it wasn't itself
+            # restored (excluded, or a model_only load).
+            if EMA in self.states and EMA not in states:
+                self.states[EMA].load_state_dict({})
             GarbageCollector.collect("GC collection for checkpoint loading.")
             logger.info(
                 "Finished loading the checkpoint in %.2f seconds.",
@@ -452,7 +468,8 @@ class BaseCheckpointManager(Configurable, ABC):
 
     @abstractmethod
     def _is_resumable_checkpoint(self, checkpoint_dir: str) -> bool:
-        """Whether automatic loading may select ``checkpoint_dir``."""
+        """Whether ``checkpoint_dir`` is a completed checkpoint in this manager's
+        native format, which every non-Hugging Face load requires."""
 
     def _find_load_step(self, folder: str = "", max_step: int | None = None) -> int:
         """The highest step in ``folder`` that can actually be loaded.
@@ -575,7 +592,7 @@ class BaseCheckpointManager(Configurable, ABC):
         keep_latest_k: int = 10
         """Number of recent checkpoints to retain, or zero to retain all."""
 
-        purge_exempt: Function.Config | None = None
+        purge_exempt: CallableFunction.Config | None = None
         """Optional predicate that exempts checkpoint steps from purging."""
 
         load_step: int = -1

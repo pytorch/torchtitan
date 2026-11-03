@@ -202,7 +202,8 @@ def extract_scalar_from_tensorboard(
 
     log_print(f"Loading TensorBoard events from: {event_dir}")
 
-    event_acc = EventAccumulator(event_dir)
+    # Numerical comparisons need every step, not a reservoir sample of scalars.
+    event_acc = EventAccumulator(event_dir, size_guidance={"scalars": 0})
     event_acc.Reload()
 
     available_tags = event_acc.Tags().get("scalars", [])

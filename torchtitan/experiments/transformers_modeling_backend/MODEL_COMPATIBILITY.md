@@ -73,7 +73,7 @@ diff.
 ### DeepSeek-V3 (deepseek_v3)
 - **Router:** sigmoid with e_score_correction_bias, group routing — supported
 - **Experts:** fused gate_up_proj, SwiGLU — fully supported
-- **Shared experts:** additive (FeedForward) — supported
+- **Shared experts:** additive (DenseFeedForward) — supported
 - **Attention:** MLA (q_lora_rank, kv_lora_rank) — supported via ShardingConfig TP plan
 - **Differences from Titan:** dispatcher precision only
 
