@@ -302,8 +302,8 @@ class TestAuxLossDenominators(_AuxLossTestCase):
 
     def test_microbatches_weigh_their_share_of_routed_tokens(self):
         """Two microbatches with 16 routed tokens each and 4 and 12 loss tokens:
-        dividing by R / N = 32 / 16, then by N = 16, gives each microbatch the
-        weight 1 / R = 1 / 32 of a division by the step's routed tokens (routed
+        dividing by R / N = 32 / 16, then by N = 16, gives each microbatch weight
+        1 / R = 1 / 32, the same as dividing by the step's 32 routed tokens (routed
         share 0.5 / 0.5). Every scale is a power of two, so the match is bitwise."""
         coeff, num_tokens, num_experts, top_k = 0.1, 16, 8, 2
         loss_token_counts = (4, 12)
