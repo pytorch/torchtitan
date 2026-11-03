@@ -95,28 +95,32 @@ def cross_entropy_and_logsumexp(
     labels: torch.Tensor,
     *,
     global_vocab_size: int | None = None,
-    reduction: Literal["sum", "none"] = "sum",
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Summed cross-entropy and per-token logsumexp over ``pred[T, V]``.
+
+    Returns ``(ce, lse)``: ``ce`` is the CE summed over valid tokens, and
+    ``lse[T]`` is ``logsumexp`` over the full vocabulary, 0 for
+    ``IGNORE_INDEX`` labels. Both share one logsumexp; under TP the lse comes
+    from the vocab-parallel CE's existing all-reduces.
+    """
     if spmd_mesh_size("tp") > 1:
+        if global_vocab_size is None:
+            raise ValueError(
+                "global_vocab_size is required for vocab-parallel cross-entropy"
+            )
         return _LossParallelCrossEntropy.apply(
             pred,
             labels,
             current_spmd_mesh().get_group("tp"),  # pyrefly: ignore[missing-attribute]
             global_vocab_size,
-            reduction,
+            "sum",
             True,  # return_lse; apply() is positional-only under spmd typechecking
         )
     logits = pred.float()
     valid = labels != IGNORE_INDEX
     lse = torch.logsumexp(logits, dim=-1)
     target = logits.gather(-1, torch.where(valid, labels, 0).unsqueeze(-1)).squeeze(-1)
-    match reduction:
-        case "none":
-            return torch.where(valid, lse - target, 0), torch.where(valid, lse, 0)
-        case "sum":
-            return torch.where(valid, lse - target, 0).sum(), torch.where(valid, lse, 0)
-        case _:
-            raise ValueError(f"Unsupported cross-entropy reduction: {reduction}")
+    return torch.where(valid, lse - target, 0).sum(), torch.where(valid, lse, 0)
 
 
 # Target probability at and above which the target gradient is -p_non_target.

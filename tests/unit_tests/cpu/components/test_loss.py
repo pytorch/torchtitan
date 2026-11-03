@@ -421,13 +421,9 @@ class TestLoss(unittest.TestCase):
             labels != IGNORE_INDEX, torch.logsumexp(pred.double(), dim=-1), 0
         )
 
-        for reduction in ("sum", "none"):
-            with self.subTest(reduction=reduction):
-                ce, lse = cross_entropy_and_logsumexp(pred, labels, reduction=reduction)
-                torch.testing.assert_close(
-                    ce, cross_entropy_loss(pred, labels, reduction=reduction)
-                )
-                torch.testing.assert_close(lse, expected_lse.float())
+        ce, lse = cross_entropy_and_logsumexp(pred, labels)
+        torch.testing.assert_close(ce, cross_entropy_loss(pred, labels))
+        torch.testing.assert_close(lse, expected_lse.float())
 
 
 class TestGradAccumulator(unittest.TestCase):
@@ -623,36 +619,28 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
 
         local_labels = distribute_tensor(labels, mesh, (Replicate(),)).to_local()
         spmd.assert_type(local_labels, {tp_group: spmd.I})
-        for reduction in ("sum", "none"):
-            with self.subTest(reduction=reduction):
-                local_logits = (
-                    distribute_tensor(logits, mesh, (Shard(1),))
-                    .to_local()
-                    .requires_grad_(True)
+        local_logits = (
+            distribute_tensor(logits, mesh, (Shard(1),)).to_local().requires_grad_(True)
+        )
+        spmd.assert_type(local_logits, {tp_group: spmd.S(1)})
+        with set_current_spmd_mesh(mesh):
+            with typecheck(strict_mode="strict"):
+                ce, lse = cross_entropy_and_logsumexp(
+                    local_logits, local_labels, global_vocab_size=vocab_size
                 )
-                spmd.assert_type(local_logits, {tp_group: spmd.S(1)})
-                with set_current_spmd_mesh(mesh):
-                    with typecheck(strict_mode="strict"):
-                        ce, lse = cross_entropy_and_logsumexp(
-                            local_logits,
-                            local_labels,
-                            global_vocab_size=vocab_size,
-                            reduction=reduction,
-                        )
-                        expected_ce = cross_entropy_loss(
-                            local_logits.detach(),
-                            local_labels,
-                            global_vocab_size=vocab_size,
-                            reduction=reduction,
-                        )
-                self.assertTrue(torch.equal(ce, expected_ce))
-                torch.testing.assert_close(lse, ref_lse.detach().float())
+                expected_ce = cross_entropy_loss(
+                    local_logits.detach(), local_labels, global_vocab_size=vocab_size
+                )
+            with self.assertRaisesRegex(ValueError, "global_vocab_size is required"):
+                cross_entropy_and_logsumexp(local_logits, local_labels)
+        self.assertTrue(torch.equal(ce, expected_ce))
+        torch.testing.assert_close(lse, ref_lse.detach().float())
 
-                (ce.sum() + lse.square().sum()).backward()
-                # Uneven sharding: ceil(1003 / 4) = 251 columns per rank, 250 on the last.
-                start = self.rank * 251
-                ref_grad = ref_logits.grad[:, start : start + local_logits.shape[1]]
-                torch.testing.assert_close(local_logits.grad, ref_grad.float())
+        (ce + lse.square().sum()).backward()
+        # Uneven sharding: ceil(1003 / 4) = 251 columns per rank, 250 on the last.
+        start = self.rank * 251
+        ref_grad = ref_logits.grad[:, start : start + local_logits.shape[1]]
+        torch.testing.assert_close(local_logits.grad, ref_grad.float())
 
     @with_comms
     def test_loss_parallel_cross_entropy_confident_targets(self):
