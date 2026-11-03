@@ -501,9 +501,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 permuted_indices,
                 num_global_tokens_per_local_expert_e,
             ) = self._permute(
-                routed_input_RD,
-                num_global_tokens_per_local_expert_E,
-                ep_size,
+                routed_input_RD, num_global_tokens_per_local_expert_E, ep_size
             )
 
         return (
@@ -707,11 +705,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             routed_input_RD,
             permuted_indices,
             num_tokens_per_local_expert_padded_e,
-        ) = self._permute(
-            routed_input_ND,
-            num_local_tokens_per_expert_E,
-            ep_size=1,
-        )
+        ) = self._permute(routed_input_ND, num_local_tokens_per_expert_E, ep_size=1)
 
         metadata = AllToAllDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
@@ -824,8 +818,8 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
 
     Dispatch replay follows the ``ep_communication`` policy. A replay must receive
     rows in the forward's order, so ``init_buffer`` makes the buffer deterministic
-    when dispatch is replayed (a sort per dispatch). Combine is never replayed with
-    absorbed scores; otherwise it follows the same policy.
+    when dispatch is replayed (a sort per dispatch). Combine is a pure reduction
+    and is never replayed.
     """
 
     @dataclass(kw_only=True, slots=True)

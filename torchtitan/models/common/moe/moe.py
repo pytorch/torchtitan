@@ -147,6 +147,14 @@ class RoutedExperts(Module):
             remat.recompute_needs_tensor(gate_up_R2F)
             hidden_RF = self.activation_fn(gate_up_R2F, offsets=offsets_E)
             if isinstance(metadata, DeepEPDispatchMetadata):
+                if (
+                    getattr(self.w2, "bias", None) is not None
+                    or self.output_postprocess is not None
+                ):
+                    raise ValueError(
+                        "DeepEP router-score absorption requires a bias-free W2 "
+                        "and no output_postprocess"
+                    )
                 routed_scores_R = metadata.routed_scores_R
                 # Absorb the router scores into W2's input, in float32; the bare
                 # multiply reads the dispatch region's scores, so pin them.
