@@ -222,6 +222,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     raise ValueError(
                         "SDC replay requires debug.deterministic_warn_only=False."
                     )
+                # TODO: lift this in its own PR, with a green CI run of
+                # llama3_debugmodel_sdc_replay_accelerator_graph at num_replays > 1.
                 if (
                     not self.training.disable_accelerator_graphs
                     and accelerator_graphs_supported()

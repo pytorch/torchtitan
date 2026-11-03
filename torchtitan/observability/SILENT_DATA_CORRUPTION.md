@@ -68,9 +68,10 @@ snapshotted nor included in the replay signature.
 Per-microbatch-group accelerator graphs
 (`training.accelerator_graph_per_microbatch_group=True`) do not support replay.
 
-Accelerator graphs currently require `sdc_replayer.num_replays=1`. Additional replays
-would require restoring graph-owned gradient and optional-buffer storage
-without changing its captured addresses.
+Accelerator graphs currently require `sdc_replayer.num_replays=1`. With more
+replays, a graph replay is checked against an eager first execution, and no CI
+config has checked that yet. Also, a forward that replaces a registered buffer
+would keep writing to the buffer its graph captured, not the restored one.
 
 Replay currently uses the existing XOR-based `torch.hash_tensor` mode. This
 checksum is order-insensitive, so permutations and some repeated-value
