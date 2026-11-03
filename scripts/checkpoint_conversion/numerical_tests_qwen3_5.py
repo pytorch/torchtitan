@@ -81,48 +81,6 @@ def top_k_match(logits_a, logits_b, k=5):
 # ============================================================
 
 
-def _mrope_positions_for_forward(
-    mrope_builder,
-    tokens,
-    grid_thw,
-    *,
-    image_token_id,
-    video_token_id,
-):
-    """Return MRoPE positions at the rank Qwen3.5 MRoPE indexes.
-
-    The collator wants a 1-D token row and returns ``(num_tokens, 3)``.
-    ``MRoPE._reshape_cache`` takes that rank (``ndim == 2``, last dim 3).
-    A rank-3 ``(1, S, 3)`` tensor is not the MRoPE path. HF ``input_ids``
-    arrive as ``(1, S)``; drop a leading batch of 1 before the call.
-
-    Args:
-        mrope_builder: Stand-in with ``spatial_merge_size`` and ``patch_order``.
-        tokens: Token ids, ``(num_tokens,)`` or ``(1, num_tokens)``.
-        grid_thw: Image grid ``(num_images, 3)``, or None when unused.
-        image_token_id: Placeholder id for image spans.
-        video_token_id: Placeholder id for video spans.
-
-    Returns:
-        ``(num_tokens, 3)`` temporal, height, and width position ids.
-    """
-    if tokens.ndim == 2 and tokens.shape[0] == 1:
-        tokens = tokens.squeeze(0)
-    if tokens.ndim != 1:
-        raise ValueError(
-            f"MRoPE tokens must be a 1-D row, got shape {tuple(tokens.shape)}."
-        )
-    return MultiModalCollator._build_mrope_positions(
-        mrope_builder,  # pyrefly: ignore [bad-argument-type]
-        tokens,
-        grid_thw,
-        None,
-        None,
-        image_token_id=image_token_id,
-        video_token_id=video_token_id,
-    )
-
-
 def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
     """Build paired HF / TT inputs from random images.
 
@@ -198,23 +156,21 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
             temporal_patch_size,
             merge_size,
         )
-        # positions=None inside the helper: one document. vision_to_patches
-        # returns grid_thw of shape (3,); the collator wants (num_images, 3).
-        mrope_positions = _mrope_positions_for_forward(
-            mrope_builder,
-            hf_in["input_ids"],
-            grid_thw.unsqueeze(0),
+        # One document. vision_to_patches returns patches (N, P) and grid_thw
+        # (3,). The packed forward wants tokens (S,), those patches, grid
+        # (num_images, 3), and MRoPE positions (S, 3).
+        input_ids_S = hf_in["input_ids"].squeeze(0)
+        grid_thw_13 = grid_thw.unsqueeze(0)
+        mrope_positions = MultiModalCollator._build_mrope_positions(
+            mrope_builder,  # pyrefly: ignore [bad-argument-type]
+            input_ids_S,
+            grid_thw_13,
+            None,
+            None,
             image_token_id=image_token_id,
             video_token_id=video_token_id,
         )
-        tt_inputs.append(
-            (
-                hf_in["input_ids"],
-                patches.unsqueeze(0),
-                grid_thw.unsqueeze(0),
-                mrope_positions,
-            )
-        )
+        tt_inputs.append((input_ids_S, patches, grid_thw_13, mrope_positions))
 
         # --- Compare pixel values in image space ---
         # Reshape patches back to image space for pixel-level comparison.
@@ -336,11 +292,16 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
             super().__init__()
             self.is_causal = is_causal
 
-        def forward(self, q_BLHK, k_BLHK, v_BLHV, **kwargs):
+        def forward(self, q_THK, k_THK, v_THV, **kwargs):
             if self.is_causal and kwargs.get("attention_metadata") is not None:
                 raise ValueError(
                     "The checkpoint SDPA reference requires a single document."
                 )
+            # Packed Q/K/V are (num_tokens, num_heads, head_dim). SDPA wants
+            # (batch, heads, seq, dim). One batch matches FlexInnerAttention.
+            q_1HTK = q_THK.transpose(0, 1).unsqueeze(0)
+            k_1HTK = k_THK.transpose(0, 1).unsqueeze(0)
+            v_1HTV = v_THV.transpose(0, 1).unsqueeze(0)
             backend_context = (
                 sdpa_kernel(
                     [
@@ -354,15 +315,15 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
                 else nullcontext()
             )
             with backend_context:
-                out_BHLV = F.scaled_dot_product_attention(
-                    q_BLHK.transpose(1, 2),
-                    k_BLHK.transpose(1, 2),
-                    v_BLHV.transpose(1, 2),
+                out_1HTV = F.scaled_dot_product_attention(
+                    q_1HTK,
+                    k_1HTK,
+                    v_1HTV,
                     is_causal=self.is_causal,
                     scale=kwargs.get("scale"),
                     enable_gqa=kwargs.get("enable_gqa", False),
                 )
-            return out_BHLV.transpose(1, 2)
+            return out_1HTV.squeeze(0).transpose(0, 1)
 
     # Replace FlexInnerAttention with SDPA for single-process inference
     # (unfused FlexInnerAttention without torch.compile has poor fp16 numerics).
@@ -384,7 +345,8 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
             positions=mrope_positions.to(device),
             special_tokens=special_tokens,
         )
-        outputs.append(logits[:, -1:, :].cpu())
+        # lm_head returns (num_tokens, vocab). Match HF's (1, 1, vocab).
+        outputs.append(logits[-1:].unsqueeze(0).cpu())
         print(f"  TT  {i + 1}/{len(tt_inputs)}")
 
     del model
