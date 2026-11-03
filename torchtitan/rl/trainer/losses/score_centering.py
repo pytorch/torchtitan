@@ -24,13 +24,12 @@ _MIN_TAIL_MASS = 1e-6
 class ScoreCenteringLoss(Loss[torch.Tensor]):
     """REINFORCE loss with score centering (https://arxiv.org/abs/2609.20807).
 
-    Score centering stops the generator's small errors from steering the trainer.
-
-    The generator (e.g. vLLM) samples tokens, and the trainer learns from them. Their
-    probabilities differ a little: quantization, kernels, stale weights. Give every token the
-    same advantage, 1, so the reward says nothing. A correct loss then leaves the trainer as it
-    is. Below: one position, a 3-token vocab, and the trainer after one SGD step on its logits
-    (lr = 1) with the gradient averaged over the generator's samples. One # is 0.05.
+    Score centering stops the generator's small errors from steering the trainer. The generator
+    (e.g. vLLM) samples tokens, and the trainer learns from them. Their probs differ a little:
+    quantization, kernels, stale weights. If every token gets advantage 1, the reward says nothing,
+    so a correct loss leaves the trainer as it is. The picture shows one position with 3 tokens.
+    Each "after one step" row is the trainer after one SGD step on its logits (lr = 1), using the
+    gradient averaged over the generator's samples. One # is 0.05.
 
                             token 0              token 1              token 2
         generator           ####           0.20  ############## 0.70  ## 0.10
@@ -41,65 +40,81 @@ class ScoreCenteringLoss(Loss[torch.Tensor]):
           masked IS         #############  0.67  #####          0.23  ## 0.10
           this loss         ############   0.60  ######         0.30  ## 0.10
 
-    - At advantage 1, plain REINFORCE moves the trainer toward the generator (a negative
-      advantage pushes it away). The paper calls this "drift" (Eq. 3). Each weight sync feeds
-      it back into the generator, so it compounds.
-    - Importance sampling (IS) weights each sampled token by `ratio`, its trainer prob over its
-      generator prob. On average, each token is then trained as if its probability were its
-      generator prob times its weight. Exact IS gives the trainer's probs, so nothing moves.
-    - Large ratios make exact IS noisy, so the weight is capped (`max_ratio=2`: token 0 gets 2
-      for its ratio 3) or masked (`ratio_band=(0.5, 5)`: token 1 gets 0 for its ratio 0.43).
-      Both still move the trainer: the cap trains token 0 as if its probability were 0.2 * 2 = 0.4.
-    - This loss adds a `correction` that cancels the move, in both modes.
+    - Plain REINFORCE moves the trainer toward the generator at advantage 1 (a negative advantage
+      pushes it away): the paper's "drift" (Eq. 3). Each weight sync copies the moved trainer into
+      the generator, so the drift compounds.
+    - Importance sampling (IS) weights each token by its trainer prob over its generator prob. That
+      alone would move nothing, but large weights are noisy. So they are capped (truncated IS,
+      `max_ratio`) or masked (`ratio_band`), and the trainer moves again.
 
-    The loss at one position, as code. The generator also sends its top-k: its k most likely
-    tokens and their logprobs. The "tail" is every other token. `weight(r)` is
-    `min(r, max_ratio)` (truncated IS, the default), or `r if lo <= r <= hi else 0` when
-    `ratio_band=(lo, hi)` is set (masked IS).
+    Here is how this loss cancels that move, on the picture's numbers. The generator sampled
+    token 0, the advantage is 1, and max_ratio=2 caps the weight so a rare token cannot dominate:
 
-        ratio        = exp(trainer_logprobs - generator_logprobs)       # the sampled token
-        topk_ratio   = trainer_topk_probs / generator_topk_probs        # each top-k token
-        rho          = (1 - generator_topk_mass) / (1 - trainer_topk_mass)   # tail mass ratio
-        token_weight = weight(ratio)                                    # no gradient
-        weighted_generator_topk_probs = generator_topk_probs * weight(topk_ratio)
-        alpha        = rho * weight(1 / rho)                            # the tail's weight
+        ratio = exp(trainer_logprobs - generator_logprobs) = 0.6 / 0.2 = 3
+        token_weight = min(ratio, max_ratio) = min(3, 2) = 2                # no gradient
+
+    On average, IS trains each token as if its prob were its generator prob times its weight.
+    The generator sends probs only for its top-k (its k most likely tokens, here 0 and 1). For them:
+
+        topk_ratio = trainer_topk_probs / generator_topk_probs = [0.6 / 0.2, 0.3 / 0.7] = [3, 3/7]
+        weighted_generator_topk_probs = generator_topk_probs * min(topk_ratio, max_ratio)
+                                      = [0.2 * min(3, 2), 0.7 * min(3/7, 2)] = [0.4, 0.3]
+
+    The generator sends no probs for the tail, every token outside the top-k (here token 2). So
+    the loss assumes the generator's tail is the trainer's, scaled by `rho`. Each tail token then
+    has ratio `1 / rho`, and IS trains it as if its prob were `alpha` times its trainer prob:
+
+        rho = (1 - generator_topk_mass) / (1 - trainer_topk_mass) = 0.1 / 0.1 = 1
+        alpha = rho * min(1 / rho, max_ratio) = min(1, max_ratio * rho) = 1
+
+    With exact weights, IS would train every token at its trainer prob. So `coefficients` is each
+    top-k token's gap from that: the prob IS trains it at, minus `alpha` times its trainer prob
+    (`alpha` is 1 here, and the tail case below shows its role). Token 0's gap is 0.4 - 0.6:
+
         coefficients = weighted_generator_topk_probs - alpha * trainer_topk_probs  # no gradient
-        correction   = sum(coefficients * trainer_topk_logprobs)
-        token_loss   = -advantages * (token_weight * trainer_logprobs - correction)
-        loss         = sum(token_loss) / global_loss_token_counts
+                     = [0.4, 0.3] - 1 * [0.6, 0.3] = [-0.2, 0.0]
 
-    In the picture, the top-k is tokens 0 and 1, and both tails are 0.1, so rho = 1, alpha = 1:
+    `correction` weighs each top-k logprob by its gap. Its gradient on the logits equals the
+    average step of truncated IS alone, [-0.08, +0.06, +0.02]: the logit step behind the
+    picture's "truncated IS" row. The loss subtracts it, so the average step is 0 ("this loss"):
 
-        max_ratio=2:         coefficients = [0.2 * 2, 0.7 * (3/7)] - [0.6, 0.3] = [-0.2, 0.0]
-        ratio_band=(0.5, 5): coefficients = [0.2 * 3, 0.7 * 0]     - [0.6, 0.3] = [0.0, -0.3]
+        correction = sum(coefficients * trainer_topk_logprobs) = -0.2 * log(0.6) = 0.10
+        token_loss = -advantages * (token_weight * trainer_logprobs - correction)
+                   = -1 * (2 * log(0.6) - 0.10) = 1.12
 
-    A capped tail, with max_ratio=2: trainer_topk_probs = [0.5, 0.3] (tail 0.2) and
-    generator_topk_probs = [0.3, 0.68] (tail 0.02). The tail gets weight 2 for its ratio 10, so
-    at advantage 1, IS alone lowers the tail's logit. The correction can only use the top-k
-    logprobs, and lowering them raises the tail. So tokens 0 and 1 get nonzero coefficients.
+    With `ratio_band=(0.5, 5)` (masked IS), a weight is the ratio inside the band and 0 outside.
+    So token 0 keeps its weight 3, and token 1 (ratio 3/7) is trained as if its prob were 0:
 
-        rho = 0.02 / 0.2 = 0.1,  alpha = 0.1 * weight(10) = 0.2
-        weighted_generator_topk_probs = [0.5, 0.3]   # ratios 1.67 and 0.44: exact weights
+        token_weight = (ratio if lo <= ratio <= hi else 0) = 3
+        weighted_generator_topk_probs = [0.2 * 3, 0.7 * 0] = [0.6, 0.0]
+        coefficients = [0.6, 0.0] - 1 * [0.6, 0.3] = [0.0, -0.3]  # alpha = 1: tail ratio 1 in band
+        correction = -0.3 * log(0.3) = 0.36
+        token_loss = -1 * (3 * log(0.6) - 0.36) = 1.89
+
+    `alpha` matters when the tail's own weight is capped or masked. Say the trainer's top-k probs
+    are [0.5, 0.3] (tail 0.2) and the generator's [0.3, 0.68] (tail 0.02). The top-k weights are
+    exact, but the tail gets weight 2 for its ratio 10, so at advantage 1 IS alone pushes the tail
+    down. To raise it, the correction must lower both top-k logprobs, so both get coefficients:
+
+        weighted_generator_topk_probs = trainer_topk_probs = [0.5, 0.3]   # ratios 1.67, 0.44 < 2
+        rho = 0.02 / 0.2 = 0.1,  alpha = min(1, 2 * 0.1) = 0.2
         coefficients = [0.5, 0.3] - 0.2 * [0.5, 0.3] = [0.4, 0.24]
 
-    Why it cancels (Eq. numbers as in the arXiv PDF). For token v, `trainer_probs[v]` and
-    `generator_probs[v]` are the two models' probs, `ratio[v]` is trainer over generator, and
-    `score[v]` is `grad(log trainer_probs[v])`. At one position, with every advantage 1, the
-    weighted update averages over the generator's samples to
+    Why it cancels (Eq. numbers as in the arXiv PDF). At advantage 1, the IS update averages over
+    the generator's samples to the drift on the first line below, where `score[v]` is
+    `grad(log trainer_probs[v])` and `weight(ratio[v])` is token v's weight:
 
         expected_weighted_score = sum_v generator_probs[v] * weight(ratio[v]) * score[v]
+                                = sum_{v in top-k} coefficients[v] * score[v] = grad(correction)
 
-    - The generator sends no tail probs. The tail model (Eq. 7) assumes its tail is a scaled
-      copy of the trainer's: `generator_probs[v] = rho * trainer_probs[v]` outside the top-k.
-      Then every tail ratio is `1 / rho`, and each tail term is
-      `alpha * trainer_probs[v] * score[v]`.
-    - `sum_v trainer_probs[v] * score[v]` is `grad(1) = 0`. So the tail terms sum to
-      `-alpha * sum_{v in top-k} trainer_probs[v] * score[v]`, and `expected_weighted_score`
-      is `grad(correction)` (Eq. 10).
-    - So under the tail model, for any advantages, `-grad(token_loss)` at sampled token y averages
-      to `covariance(advantages, token_weight * score[y])`, the reward's signal (Eq. 5, 12).
-    - With no capped or masked top-k or tail ratio, `coefficients` is 0. So a generator that
-      matches the trainer gives plain REINFORCE.
+    The second line holds because the tail model (Eq. 7) makes each tail term
+    `alpha * trainer_probs[v] * score[v]`. Since `sum_v trainer_probs[v] * score[v] = grad(1) = 0`,
+    the tail's sum becomes the `- alpha * trainer_topk_probs` term in `coefficients` (Eq. 10).
+
+    So if the generator's tail is a scaled copy of the trainer's, `-grad(token_loss)` averages, for
+    any advantages, to `covariance(advantages, token_weight * score[y])` over the sampled token y:
+    only the reward's signal is left (Eq. 5, 12). If no weight is capped or masked, `coefficients`
+    is 0, so a generator that matches the trainer gives plain REINFORCE.
     """
 
     @dataclass(kw_only=True, slots=True)
