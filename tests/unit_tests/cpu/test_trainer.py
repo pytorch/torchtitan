@@ -518,8 +518,11 @@ def _streaming_engine(
     parameter = torch.nn.Parameter(torch.ones(1))
 
     class _FakeModel:
-        def preprocess_inputs(self, input_dict, **kwargs):
-            events.append(f"preprocess {int(input_dict['input'])}")
+        def preprocess_inputs(self, input_dict, *, aux_loss_denominators, **kwargs):
+            events.append(
+                f"preprocess {int(input_dict['input'])} "
+                f"aux {float(aux_loss_denominators)}"
+            )
             return input_dict["input"], input_dict["labels"], {}, {}
 
     def forward_backward_microbatch(*, inputs, labels, model_kwargs, loss_kwargs):
@@ -599,18 +602,19 @@ def test_streamed_forward_backward_calls_form_one_step() -> None:
     TrainingEngine.forward_backward(
         engine,
         microbatch_groups=[[_microbatch(3.0, 5)], [_microbatch(4.0, 6)]],
-        aux_loss_denominators=torch.tensor([1.0]),
+        aux_loss_denominators=torch.tensor([2.0]),
     )
     TrainingEngine.optim_step(engine)
 
-    # The step's first call zeroes the gradients; the second adds to them.
+    # The step's first call zeroes the gradients; the second adds to them. Each call's
+    # microbatches get that call's auxiliary-loss denominators.
     assert events == [
         "gc 1",
         "zero_grad",
-        "preprocess 1",
-        "preprocess 2",
-        "preprocess 3",
-        "preprocess 4",
+        "preprocess 1 aux 1.0",
+        "preprocess 2 aux 1.0",
+        "preprocess 3 aux 2.0",
+        "preprocess 4 aux 2.0",
     ]
     torch.testing.assert_close(engine.loss, torch.tensor(10.0))
     # Summed gradient 1 + 2 + 3 + 4, divided once by the step's 3 + 4 + 5 + 6 loss tokens.
@@ -626,7 +630,7 @@ def test_streamed_forward_backward_calls_form_one_step() -> None:
         microbatch_groups=[[_microbatch(5.0, 2)]],
         aux_loss_denominators=torch.tensor([1.0]),
     )
-    assert events == ["gc 2", "zero_grad", "preprocess 5"]
+    assert events == ["gc 2", "zero_grad", "preprocess 5 aux 1.0"]
     assert engine.local_loss_token_count == 2
     torch.testing.assert_close(engine.loss, torch.tensor(5.0))
     torch.testing.assert_close(parameter.grad, torch.tensor([5.0]))
@@ -651,7 +655,7 @@ def test_a_captured_step_takes_one_forward_backward_call(
             microbatch_groups=[[_microbatch(2.0, 4)]],
             aux_loss_denominators=torch.tensor([1.0]),
         )
-        assert events == ["preprocess 2"]
+        assert events == ["preprocess 2 aux 1.0"]
         return
     # SDC replay and whole-step graphs see only one call's gradients.
     with pytest.raises(ValueError, match="capture one forward_backward call"):

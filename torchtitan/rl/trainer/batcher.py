@@ -243,7 +243,9 @@ class Batcher(Configurable):
                 Needs: no SDC replay and no whole-step accelerator graph (config check; both capture
                 one call per step).
         Either way each loss returns a sum, and the trainer divides the gradients by the step's
-        loss-token count before clipping.
+        loss-token count before clipping. Streamed batches divide their auxiliary losses by the
+        routed tokens per loss token of the batches sent so far: exact for the step's last batch,
+        an estimate for earlier ones.
         """
         training_sample_builder: TrainingSampleBuilder.Config = field(
             default_factory=TrainingSampleBuilder.Config

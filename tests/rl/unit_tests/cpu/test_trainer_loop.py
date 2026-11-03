@@ -63,6 +63,7 @@ def _controller(
     async def forward_backward(microbatch_groups, aux_loss_denominators):
         events.append(f"fwd_bwd {version + 1}")
         controller.forward_backward_calls.append(microbatch_groups)
+        controller.aux_loss_denominators_by_call.append(aux_loss_denominators)
         return _RankValues({"loss/mean": 1.0})
 
     async def optim_step(**kwargs):
@@ -94,6 +95,7 @@ def _controller(
         )
     )
     controller.forward_backward_calls = []
+    controller.aux_loss_denominators_by_call = []
     controller.start_step = 0
     controller._trainer_policy_version = 0
     trainer = SimpleNamespace(
@@ -134,11 +136,13 @@ def _controller(
     return controller
 
 
-def _batch(*, num_loss_tokens: int = 1, ends_step: bool = True) -> SimpleNamespace:
+def _batch(
+    *, num_loss_tokens: int = 1, num_routed_tokens: int = 1, ends_step: bool = True
+) -> SimpleNamespace:
     return SimpleNamespace(
         microbatch_groups=[],
         num_loss_tokens=num_loss_tokens,
-        routing_token_counts=torch.tensor([1]),
+        routing_token_counts=torch.tensor([num_routed_tokens]),
         group_ids=[],
         min_policy_versions=[0],
         metrics=[],
@@ -244,17 +248,23 @@ def test_streamed_step_trains_each_batch_then_divides_its_metrics_once() -> None
     controller = _controller(events)
     queue: asyncio.Queue = asyncio.Queue()
     for batch in (
-        _batch(num_loss_tokens=3, ends_step=False),
-        _batch(num_loss_tokens=4, ends_step=False),
-        _batch(num_loss_tokens=5),
+        _batch(num_loss_tokens=3, num_routed_tokens=12, ends_step=False),
+        _batch(num_loss_tokens=5, num_routed_tokens=4, ends_step=False),
+        _batch(num_loss_tokens=4, num_routed_tokens=8),
     ):
         queue.put_nowait(batch)
 
     asyncio.run(controller._trainer_loop(queue, num_training_steps=1))
 
-    # One call per batch, then one optimizer step for the step's 3 + 4 + 5 loss tokens.
+    # One call per batch, then one optimizer step for the step's 3 + 5 + 4 loss tokens.
     assert events[:4] == ["fwd_bwd 1", "fwd_bwd 1", "fwd_bwd 1", "optim 1"]
     assert len(controller.forward_backward_calls) == 3
+    # Each call's aux losses divide by the routed tokens per loss token sent so far:
+    # 12 / 3, (12 + 4) / (3 + 5), and the step's (12 + 4 + 8) / 12 for the last call.
+    torch.testing.assert_close(
+        controller.aux_loss_denominators_by_call,
+        [torch.tensor([4.0]), torch.tensor([2.0]), torch.tensor([2.0])],
+    )
     # Each fake batch returns a summed loss of 1.0: 3.0 over 12 loss tokens.
     assert controller.logged_metrics[0]["loss/mean"].value.value == 0.25
 

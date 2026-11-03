@@ -270,9 +270,9 @@ class Trainer(Configurable):
                 `[num_groups][num_microbatches_per_group][dp_degree]` grid. Under PP, each group runs
                 as one pipeline step. `RDMAMicrobatch`es when `rdma_min_tensor_bytes` is set,
                 read a few ahead of training.
-            aux_loss_denominators: The step's routed tokens per loss token over every DP rank,
-                one per routing depth (`aux_loss.aux_loss_denominators`), computed by the
-                controller.
+            aux_loss_denominators: The routed tokens per loss token over every DP rank of the
+                step's batches sent so far, this one included, one per routing depth
+                (`aux_loss.aux_loss_denominators`), computed by the controller.
 
         Returns:
             dict[str, float] | None: Globally-reduced metrics, or ``None`` on

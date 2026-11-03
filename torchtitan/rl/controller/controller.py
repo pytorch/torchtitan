@@ -1180,23 +1180,30 @@ class Controller(Configurable):
                             # arrive. Calls finish in order, so wait for the one before the last.
                             # asyncio.wait returns without raising, so the group raises a failed call once.
                             await asyncio.wait([forward_backward_tasks[-2]])
+                        # The auxiliary losses divide by R / N, the routed tokens per loss token of the
+                        # step's batches sent so far, this one included. Exact for the step's last call.
+                        # An estimate for earlier calls, which can't see the step's later batches: with
+                        # long prompts and short responses (R / N about 5), the step's total auxiliary
+                        # weight can be 0.78-1.23 instead of 1.
+                        sent_batches = [*step_batches, packed]
+                        call_aux_loss_denominators = aux_loss_denominators(
+                            sum(batch.routing_token_counts for batch in sent_batches),
+                            torch.tensor(
+                                sum(batch.num_loss_tokens for batch in sent_batches)
+                            ),
+                        )
                         # TODO: the step's first call's first read is never hidden (~0.5 GB/s per rank, 4 ranks
                         # over TCP). Sending its RDMAMicrobatches during the previous optim_step would hide it.
                         sent_s = time.perf_counter()
                         # `.call` sends now, so each rank gets its calls in order.
                         # Send each DP rank only its column of the grid.
-                        # The auxiliary losses divide by the batch's routed tokens per loss token.
-                        batch_aux_loss_denominators = aux_loss_denominators(
-                            packed.routing_token_counts,
-                            torch.tensor(packed.num_loss_tokens),
-                        )
                         calls_by_dp_rank = [
                             trainer_at_dp_rank.forward_backward.call(
                                 [
                                     [row[dp_rank] for row in group]
                                     for group in packed.microbatch_groups
                                 ],
-                                batch_aux_loss_denominators,
+                                call_aux_loss_denominators,
                             )
                             for dp_rank, trainer_at_dp_rank in enumerate(
                                 self.trainer.by_dp_rank
