@@ -252,6 +252,7 @@ def test_modality_router_weights_counts_and_image_bias_updates(monkeypatch):
         seq_len=8,
         attention_backend="reference",
         vision_enabled=True,
+        num_draft_layers=3,
     )
     with torch.device("meta"):
         model = config.build()
@@ -323,5 +324,22 @@ def test_modality_router_weights_counts_and_image_bias_updates(monkeypatch):
     )
     assert router.image_tokens_per_expert_E.sum() == 0
     assert router.tokens_per_expert_E.sum() == 0
+    draft_moe = model.drafter.layers["0"].feed_forward
+    with torch.no_grad():
+        draft_moe.router.gate.weight.zero_()
+        draft_moe.expert_bias_E.zero_()
+        draft_moe.expert_bias_E[:2] = 3
+    draft_moe.router(x, draft_moe.expert_bias_E)
+    previous_draft = draft_moe.expert_bias_E.clone()
+    draft_optimizers = OptimizersContainer.Config(
+        optimizers=[AdamW.Config(pattern=r".*", fused=False, lr=0.0)]
+    ).build(model_parts=[model.drafter])
+    type(model.drafter)._register_optimizer_hooks(
+        draft_optimizers, [model.drafter], context
+    )
+    draft_optimizers.step()
+    draft_delta = torch.tensor([-1, -1, 1, 1]).float() * draft_moe.load_balance_coeff
+    torch.testing.assert_close(draft_moe.expert_bias_E, previous_draft + draft_delta)
+    assert draft_moe.router.tokens_per_expert_E.sum() == 0
     assert auxiliary.instance_acc == 0
     assert AuxLoss.group_acc[(auxiliary.reduce_mesh, auxiliary.metric_name)] == 2.5

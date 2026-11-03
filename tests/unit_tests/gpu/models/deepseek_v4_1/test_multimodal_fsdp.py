@@ -6,7 +6,8 @@
 
 """FSDP training and HF conversion when only one rank has an image.
 
-T: text tokens, P: image patches, F: flattened patch features.
+T: text tokens, P: image patches, F: flattened patch features, B: draft blocks,
+S: draft positions, D: hidden width, V: vocabulary.
 """
 
 from pathlib import Path
@@ -67,6 +68,7 @@ class TestDeepSeekV41MultimodalFSDP(DTensorTestBase):
             parallelism=parallelism,
             seq_len=32,
             vision_enabled=True,
+            num_draft_layers=3,
             indexer_loss_coeff=0.0,
         )
         with torch.device("meta"):
@@ -97,16 +99,17 @@ class TestDeepSeekV41MultimodalFSDP(DTensorTestBase):
         ).build(model_parts=[model])
         type(model)._register_optimizer_hooks(optimizers, [model], context)
 
-        def forward():
+        def forward(*, return_draft_context=False):
             return (
                 model(
                     tokens_T,
                     token_types=types_T,
                     pixel_values=pixels_PF,
                     grid_hw=((6, 6),),
+                    return_draft_context=return_draft_context,
                 )
                 if self.rank == 1
-                else model(tokens_T)
+                else model(tokens_T, return_draft_context=return_draft_context)
             )
 
         losses = []
@@ -165,3 +168,83 @@ class TestDeepSeekV41MultimodalFSDP(DTensorTestBase):
             model.lm_head.weight.zero_()
             set_model_state_dict(model, restored)
             torch.testing.assert_close(forward(), expected_TV, rtol=0, atol=0)
+            _, context_TD = forward(return_draft_context=True)
+            anchors_B = torch.tensor([5, 10], device=self.device_type)
+            draft_ids_BS = torch.full(
+                (2, 5), model.drafter.config.noise_token_id, device=self.device_type
+            )
+            draft_ids_BS[:, 0] = tokens_T[anchors_B]
+            embedding_weight_VD = model.tok_embeddings.weight
+            output_weight_VD = model.lm_head.weight
+            if isinstance(embedding_weight_VD, DTensor):
+                embedding_weight_VD = embedding_weight_VD.full_tensor()
+            if isinstance(output_weight_VD, DTensor):
+                output_weight_VD = output_weight_VD.full_tensor()
+            embeddings_TD = F.embedding(
+                draft_ids_BS.flatten(), embedding_weight_VD.to(torch.bfloat16)
+            )
+            # FSDP can release an all-gather view after the next backward.
+            output_weight_VD = output_weight_VD.detach().clone().to(torch.bfloat16)
+        optimizers.zero_grad()
+        model.drafter.train()
+        draft_optimizers = OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=0.002)]
+        ).build(model_parts=[model.drafter])
+        type(model.drafter)._register_optimizer_hooks(
+            draft_optimizers, [model.drafter], context
+        )
+        previous_BS = torch.arange(10, device=self.device_type).view(2, 5)
+        main_positions_T = torch.arange(18, device=self.device_type)
+        draft_losses = []
+        for _ in range(10):
+            draft_optimizers.zero_grad()
+            with context.activate_spmd():
+                logits_BSV, confidence_BS = model.forward_draft(
+                    context_TD,
+                    embeddings_TD,
+                    previous_BS,
+                    anchors_B,
+                    main_positions_T=main_positions_T,
+                    output_weight_VD=output_weight_VD,
+                )
+                draft_loss = F.cross_entropy(
+                    logits_BSV.float().flatten(0, 1), (previous_BS + 1).flatten()
+                ) + F.binary_cross_entropy_with_logits(
+                    confidence_BS, torch.full_like(confidence_BS, 0.5)
+                )
+                draft_loss.backward()
+                for parameter in (
+                    model.drafter.layers["0"].main_proj.weight,
+                    model.drafter.layers["2"].markov_head.embed.weight,
+                    model.drafter.layers["2"].confidence_head.proj.weight,
+                ):
+                    assert parameter.grad is not None
+                    gradient = parameter.grad
+                    if isinstance(gradient, DTensor):
+                        gradient = gradient.full_tensor()
+                    assert torch.isfinite(gradient).all()
+                    assert gradient.float().norm() > 0
+                draft_optimizers.step()
+                for layer in model.drafter.layers.values():
+                    moe = layer.feed_forward
+                    assert torch.count_nonzero(moe.router.tokens_per_expert_E) == 0
+                    biases = [torch.empty_like(moe.expert_bias_E) for _ in range(2)]
+                    torch.distributed.all_gather(biases, moe.expert_bias_E)
+                    torch.testing.assert_close(biases[0], biases[1], rtol=0, atol=0)
+            draft_losses.append(draft_loss.item())
+        assert draft_losses[-1] < draft_losses[0]
+        with context.activate_spmd(), torch.no_grad():
+            for name, parameter in model.named_parameters():
+                if not name.startswith("drafter."):
+                    assert parameter.grad is None, name
+                    original = native[name]
+                    torch.testing.assert_close(
+                        parameter.full_tensor()
+                        if isinstance(parameter, DTensor)
+                        else parameter,
+                        original.full_tensor()
+                        if isinstance(original, DTensor)
+                        else original,
+                        rtol=0,
+                        atol=0,
+                    )

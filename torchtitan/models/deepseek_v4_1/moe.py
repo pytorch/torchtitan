@@ -155,11 +155,12 @@ class ModalityMoE(MoE):
 
 
 def update_image_expert_bias(model_parts, parallelism_context):
-    """Reduce visual counts on the same axes as the shared text balancing hook."""
+    """Reduce backbone visual counts on the shared text-balancing meshes."""
     moes = [
         moe
         for part in model_parts
-        for moe in part.modules()
+        for layer in part.layers.values()
+        for moe in layer.modules()
         if isinstance(moe, ModalityMoE) and not moe.freeze_expert_bias
     ]
     if not moes:

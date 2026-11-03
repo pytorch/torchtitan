@@ -70,6 +70,34 @@ only for vision-enabled models. Distributed HF conversion keeps both stacked
 ViT projections on each rank and gathers the three marker rows before splitting
 them into the released checkpoint names.
 
+## DSpark
+
+Set `num_draft_layers=3` to build the auxiliary decoder. Its three blocks predict
+a five-position draft together, attending the preceding main-model context and
+the complete draft block. A low-rank Markov head corrects the token logits; the
+FP32 confidence head reads the residual before the drafter's final norm.
+
+```text
+three backbone residuals -> main projection -> draft blocks -> token logits
+noise-token embeddings ----------------------^                    ^
+previous tokens -> Markov embedding -> Markov correction ----------+
+                                     +-> confidence head
+```
+
+`model(tokens, return_draft_context=True)` returns logits and the concatenated
+backbone features. `model.forward_draft(...)` accepts those features, draft
+embeddings, teacher-forced previous tokens, block anchors, and a frozen output
+projection. Gradients stop at the backbone features, draft embeddings, and
+shared output weight. The caller owns the auxiliary loss and serving schedule;
+the standard text-training recipe does not invoke the drafter.
+The supplied frozen projection must stay materialized through auxiliary
+backward; a retained FSDP all-gather view needs an owned copy. Input projection
+and final heads execute inside their owning drafter blocks so FSDP gathers
+their parameters before use.
+Default rematerialization also checkpoints the drafter blocks. Build its
+optimizer separately to register the drafter's expert-balancing update and
+counter reset at each auxiliary optimizer step.
+
 ## Validation
 
 ```bash
