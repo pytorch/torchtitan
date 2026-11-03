@@ -20,6 +20,7 @@ import torch
 import torch.distributed as dist
 from renderers import Message, Qwen3RendererConfig
 from torch.distributed.tensor import DTensor
+
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import (
     FirstFitPackingConfig,
@@ -52,6 +53,7 @@ from torchtitan.models.common.attention.cp_attention import (
     UlyssesVarlenInnerAttention,
 )
 from torchtitan.models.muse_glimmer import build_model_config
+from torchtitan.observability.metrics import TensorBoardLogger
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import TrainingEngine
@@ -191,7 +193,7 @@ def llama3_debugmodel_default() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
     config.profiler.enable_profiling = True
-    config.metrics.enable_tensorboard = True
+    config.metrics.loggers = [TensorBoardLogger.Config()]
     return config
 
 

@@ -39,6 +39,8 @@ from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
 from torchtitan.models.qwen3 import build_model_config
+
+from torchtitan.observability.metrics import WandBLogger
 from torchtitan.rl.controller.controller import (
     AsyncLoopConfig,
     Controller,
@@ -127,7 +129,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
         ),
         rollouter=_search_r1_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -272,7 +274,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
         ),
         rollouter=_search_r1_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -405,7 +407,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
                 import_path="torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer"
             )
         ),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
