@@ -9,6 +9,7 @@ import unittest
 import torch
 
 from torchtitan.models.common.activation import SwiGLU
+from torchtitan.tools.utils import device_type
 from torchtitan_recipes.overrides.fused_swiglu import (
     fused_swiglu,
     FusedSwiGLU,
@@ -16,6 +17,12 @@ from torchtitan_recipes.overrides.fused_swiglu import (
     silu_and_mul_forward_kernel,
     silu_and_mul_op,
 )
+
+
+_DEVICE = torch.accelerator.current_accelerator()
+# The ops register for torchtitan's detected device type, which can differ from
+# torch.accelerator (e.g. MPS), so skip unless the two agree.
+_HAS_OP_DEVICE = _DEVICE is not None and _DEVICE.type == device_type
 
 
 class TestFusedSwiGLUOverride(unittest.TestCase):
@@ -27,16 +34,16 @@ class TestFusedSwiGLUOverride(unittest.TestCase):
         self.assertIsInstance(replacement, FusedSwiGLU.Config)
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+@unittest.skipUnless(_HAS_OP_DEVICE, f"requires a {device_type} accelerator")
 class TestFusedSwiGLUNumerics(unittest.TestCase):
     def test_matches_reference_forward_and_backward(self):
         torch.manual_seed(0)
         reference = SwiGLU.Config().build()
         fused = FusedSwiGLU.Config().build()
-        gate = torch.randn(8, 32, device="cuda")
-        up = torch.randn(8, 32, device="cuda")
+        gate = torch.randn(8, 32, device=_DEVICE)
+        up = torch.randn(8, 32, device=_DEVICE)
         gate_up = torch.stack((gate, up), dim=1)
-        offsets = torch.tensor([3, 5, 6, 8], device="cuda", dtype=torch.int32)
+        offsets = torch.tensor([3, 5, 6, 8], device=_DEVICE, dtype=torch.int32)
         gate_up_reference = gate_up.detach().clone().requires_grad_()
         gate_up_fused = gate_up.detach().clone().requires_grad_()
 
@@ -49,13 +56,13 @@ class TestFusedSwiGLUNumerics(unittest.TestCase):
         torch.testing.assert_close(gate_up_fused.grad, gate_up_reference.grad)
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+@unittest.skipUnless(_HAS_OP_DEVICE, f"requires a {device_type} accelerator")
 class TestFusedSwiGLUOverrideKernels(unittest.TestCase):
     def test_silu_and_mul_custom_op_matches_reference_with_offsets(self):
-        gate = torch.randn(3, 2, device="cuda")
-        up = torch.randn(3, 2, device="cuda")
+        gate = torch.randn(3, 2, device=_DEVICE)
+        up = torch.randn(3, 2, device=_DEVICE)
         gate_up = torch.stack((gate, up), dim=1).requires_grad_()
-        offsets = torch.tensor([1, 2], device="cuda", dtype=torch.int32)
+        offsets = torch.tensor([1, 2], device=_DEVICE, dtype=torch.int32)
 
         out = silu_and_mul_op(gate_up, offsets)
         out[:2].sum().backward()
@@ -70,8 +77,8 @@ class TestFusedSwiGLUOverrideKernels(unittest.TestCase):
         torch.testing.assert_close(gate_up.grad[:2], ref_gate_up.grad[:2])
 
     def test_silu_and_mul_custom_op_matches_reference_without_offsets(self):
-        gate = torch.randn(3, 2, device="cuda")
-        up = torch.randn(3, 2, device="cuda")
+        gate = torch.randn(3, 2, device=_DEVICE)
+        up = torch.randn(3, 2, device=_DEVICE)
         gate_up = torch.stack((gate, up), dim=1).requires_grad_()
 
         out = silu_and_mul_op(gate_up)
@@ -93,7 +100,7 @@ class TestFusedSwiGLUOverrideKernels(unittest.TestCase):
                 [2.0, -3.0],
                 [4.0, 5.0],
             ],
-            device="cuda",
+            device=_DEVICE,
             requires_grad=True,
         )
         up = torch.tensor(
@@ -102,10 +109,10 @@ class TestFusedSwiGLUOverrideKernels(unittest.TestCase):
                 [5.0, 7.0],
                 [11.0, 13.0],
             ],
-            device="cuda",
+            device=_DEVICE,
             requires_grad=True,
         )
-        offsets = torch.tensor([1, 2], device="cuda", dtype=torch.int32)
+        offsets = torch.tensor([1, 2], device=_DEVICE, dtype=torch.int32)
         gate_up = torch.stack((gate, up), dim=1).detach()
 
         out = silu_and_mul_forward_kernel(gate_up, offsets)
@@ -118,7 +125,7 @@ class TestFusedSwiGLUOverrideKernels(unittest.TestCase):
                 [23.0, 29.0],
                 [31.0, 37.0],
             ],
-            device="cuda",
+            device=_DEVICE,
         )
         grad_gate_up = silu_and_mul_backward_kernel(grad_out, gate_up, offsets)
         expected[:2].backward(grad_out[:2])
@@ -132,33 +139,33 @@ class TestFusedSwiGLUOverrideKernels(unittest.TestCase):
         row_stride = 8192
         storage_numel = row * row_stride + 2
         required_bytes = storage_numel * 2 + 512 * 1024**2
-        free_bytes, _ = torch.cuda.mem_get_info()
+        free_bytes, _ = torch.accelerator.get_memory_info()
         if free_bytes < required_bytes:
             self.skipTest(
-                f"need at least {required_bytes} free CUDA bytes, got {free_bytes}"
+                f"need at least {required_bytes} free device bytes, got {free_bytes}"
             )
 
-        storage = torch.empty(storage_numel, device="cuda", dtype=torch.bfloat16)
+        storage = torch.empty(storage_numel, device=_DEVICE, dtype=torch.bfloat16)
         # gate at storage[r * row_stride], up at storage[r * row_stride + 1].
         gate_up = torch.as_strided(storage, (row + 1, 2, 1), (row_stride, 1, 2))
         gate_up[row, 0] = 1.0
         gate_up[row, 1] = 2.0
-        offsets = torch.tensor([row + 1], device="cuda", dtype=torch.int32)
+        offsets = torch.tensor([row + 1], device=_DEVICE, dtype=torch.int32)
 
         out = silu_and_mul_forward_kernel(gate_up, offsets)
         grad_out = torch.zeros_like(out)
         grad_out[row] = 3.0
         grad_gate_up = silu_and_mul_backward_kernel(grad_out, gate_up, offsets)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         ref_gate = torch.tensor(
-            [1.0], device="cuda", dtype=torch.bfloat16, requires_grad=True
+            [1.0], device=_DEVICE, dtype=torch.bfloat16, requires_grad=True
         )
         ref_up = torch.tensor(
-            [2.0], device="cuda", dtype=torch.bfloat16, requires_grad=True
+            [2.0], device=_DEVICE, dtype=torch.bfloat16, requires_grad=True
         )
         expected = torch.nn.functional.silu(ref_gate) * ref_up
-        expected.backward(torch.tensor([3.0], device="cuda", dtype=torch.bfloat16))
+        expected.backward(torch.tensor([3.0], device=_DEVICE, dtype=torch.bfloat16))
         assert ref_gate.grad is not None
         assert ref_up.grad is not None
         torch.testing.assert_close(out[row], expected.detach())

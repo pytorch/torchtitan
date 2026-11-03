@@ -14,6 +14,7 @@ from torch import nn
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.base.module import ModuleList
 from torchtitan.models.common.attention import (
@@ -25,6 +26,7 @@ from torchtitan.models.common.flops import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
 )
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.deepseek_v3.mtp import (
     apply_fsdp_to_mtp_decoder,
     roll_mtp_sequence,
@@ -34,7 +36,7 @@ from .mhc import HcHead, HcPost, HcPre
 from .state_dict_adapter import DeepSeekV4StateDictAdapter
 
 if TYPE_CHECKING:
-    from .attention import Attention
+    from .attention import DeepSeekV4Attention
     from .mtp import MTPBlock
 
 
@@ -43,7 +45,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        attention: "Attention.Config"  # pyrefly: ignore [bad-override]
+        attention: "DeepSeekV4Attention.Config"  # pyrefly: ignore [bad-override]
         hc_attn_pre: HcPre.Config
         hc_ffn_pre: HcPre.Config
         hc_post: HcPost.Config
@@ -55,15 +57,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         self.attention = cfg.attention.build()
         self.attention_norm = cfg.attention_norm.build()
         self.ffn_norm = cfg.ffn_norm.build()
-        if cfg.moe is not None:
-            assert cfg.moe is not None
-            self.moe = cfg.moe.build()
-            self.moe_enabled = True
-        else:
-            assert cfg.feed_forward is not None
-            self.moe = None
-            self.feed_forward = cfg.feed_forward.build()
-            self.moe_enabled = False
+        self.feed_forward = cfg.feed_forward.build()
 
         self.hc_attn_pre = cfg.hc_attn_pre.build()
         self.hc_ffn_pre = cfg.hc_ffn_pre.build()
@@ -105,18 +99,17 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         x = self.hc_post(x, residual, post, comb)
         residual = x
         x, post, comb = self.hc_ffn_pre(x)
-        if self.moe_enabled:
-            assert self.moe is not None
+        if isinstance(self.feed_forward, MoE):
             ffn_input = self.ffn_norm(x)
-            if getattr(self.moe.router, "hash", False):
-                x = self.moe(
+            if getattr(self.feed_forward.router, "hash", False):
+                x = self.feed_forward(
                     ffn_input,
                     padding_mask_T=padding_mask,
                     aux_loss_denominator=aux_loss_denominator,
                     input_ids_T=input_ids_T,
                 )
             else:
-                x = self.moe(
+                x = self.feed_forward(
                     ffn_input,
                     padding_mask_T=padding_mask,
                     aux_loss_denominator=aux_loss_denominator,
@@ -133,6 +126,8 @@ class DeepSeekV4Model(Decoder):
     state_dict_adapter_cls = DeepSeekV4StateDictAdapter
 
     """DeepSeek V4 decoder model with HC branches and sparse attention."""
+
+    mtp_layers: "ModuleList[MTPBlock]"
 
     @classmethod
     def _register_optimizer_hooks(
@@ -179,12 +174,15 @@ class DeepSeekV4Model(Decoder):
     class Config(Decoder.Config):
         dim: int
         vocab_size: int
-        local_compile_regions: list[str] = field(
-            default_factory=lambda: [
-                "loss",
-                "fused_binary_activation",
-                "fp32_to_bf16_split",
-            ]
+        local_compile: LocalCompileConfig = field(
+            default_factory=lambda: LocalCompileConfig(
+                regions=[
+                    "loss",
+                    "fused_binary_activation",
+                    "fp32_to_bf16_split",
+                    "rope",
+                ]
+            )
         )
         hc_mult: int = 4
         n_mtp_layers: int = 0
@@ -309,9 +307,7 @@ class DeepSeekV4Model(Decoder):
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
-                else attention_metadata.get(
-                    cast(TransformerBlock, layer).attention.attention_metadata_key
-                )
+                else attention_metadata.get(type(layer.attention.inner_attention))
             )
             h = layer(
                 h,
@@ -366,9 +362,7 @@ class DeepSeekV4Model(Decoder):
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
-                else attention_metadata.get(
-                    cast(TransformerBlock, mtp_block).attention.attention_metadata_key
-                )
+                else attention_metadata.get(type(mtp_block.attention.inner_attention))
             )
             with spmd.no_typecheck():
                 aux_loss_denominator = (

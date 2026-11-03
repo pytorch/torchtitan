@@ -51,7 +51,7 @@ def test_policy_loss_vocab_size_matches_model_and_mode(module_name, factory_name
 
     from torchtitan.components.loss import ChunkedLossWrapper
     from torchtitan.models.common.config_utils import decoder_vocab_size
-    from torchtitan.rl.losses import DAPOLoss, GRPOLoss
+    from torchtitan.rl.trainer.losses import DAPOLoss, GRPOLoss
 
     factory = getattr(importlib.import_module(module_name), factory_name)
     config = factory()
@@ -75,5 +75,5 @@ def test_batch_invariant_configs_disable_local_compile(module_name, factory_name
     factory = getattr(importlib.import_module(module_name), factory_name)
     config = factory()
 
-    assert config.trainer.model.local_compile_regions == []
-    assert config.generator.model.local_compile_regions == []
+    assert config.trainer.model.local_compile.regions == []
+    assert config.generator.model.local_compile.regions == []

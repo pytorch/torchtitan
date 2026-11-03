@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 import torch_remat as remat
 
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.attention import (
     FlexAttentionMetadata,
     VarlenAttentionMetadata,
@@ -21,6 +22,7 @@ from torchtitan.models.common.flops import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
 )
+from torchtitan.models.common.moe import MoE
 from .state_dict_adapter import Qwen3StateDictAdapter
 
 
@@ -44,13 +46,7 @@ class Qwen3TransformerBlock(TransformerBlock):
 
         self.attention = config.attention.build()
 
-        self.moe_enabled = config.moe is not None
-        if self.moe_enabled:
-            assert config.moe is not None
-            self.moe = config.moe.build()
-        else:
-            assert config.feed_forward is not None
-            self.feed_forward = config.feed_forward.build()
+        self.feed_forward = config.feed_forward.build()
 
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
@@ -69,8 +65,8 @@ class Qwen3TransformerBlock(TransformerBlock):
         remat.recompute_needs_tensor(attn_out)
         x = x + attn_out
 
-        if self.moe_enabled:
-            ffn_out = self.moe(
+        if isinstance(self.feed_forward, MoE):
+            ffn_out = self.feed_forward(
                 self.ffn_norm(x),
                 padding_mask_T=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
@@ -108,13 +104,15 @@ class Qwen3Model(Decoder):
     class Config(Decoder.Config):
         dim: int = 1024
         vocab_size: int = 151936
-        local_compile_regions: list[str] = field(
-            default_factory=lambda: [
-                "loss",
-                "fused_binary_activation",
-                "cos_sin_rope",
-                "fp32_to_bf16_split",
-            ]
+        local_compile: LocalCompileConfig = field(
+            default_factory=lambda: LocalCompileConfig(
+                regions=[
+                    "loss",
+                    "fused_binary_activation",
+                    "rope",
+                    "fp32_to_bf16_split",
+                ]
+            )
         )
 
         def get_nparams_and_flops(

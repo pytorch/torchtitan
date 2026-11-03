@@ -19,7 +19,7 @@ from torchtitan.components.optim import (
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import MXFP8LinearConverter
-from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.flux import build_model_config
 from torchtitan.models.flux.data import DATASETS, FluxCollator, FluxSampleProcessor
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
@@ -79,14 +79,14 @@ def _flux_recipe(flavor: str, *, max_t5_encoding_len: int) -> FluxTrainer.Config
             ),
             max_context_length=_flux_seq_len(img_size, max_t5_encoding_len),
             steps=30000,
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         dataloader=GrainDataLoader.Config(
             dataset=_flux_dataset("cc12m-wds", img_size=img_size),
             collator=FluxCollator.Config(),
             streaming_shuffle_buffer_size=128,
         ),
-        activation_checkpoint=FullAC.Config(),
+        activation_remat=FullActivationRematConfig(),
         checkpointer=None,
         validator=None,
     )

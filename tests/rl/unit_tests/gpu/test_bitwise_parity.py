@@ -62,8 +62,8 @@ from torchtitan.distributed.batch_invariant import (
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.observability.logging import init_logger
-from torchtitan.rl.controller import Controller
-from torchtitan.rl.model.vllm_registry import (
+from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
@@ -142,8 +142,8 @@ def build_trainer_model(
         parallelism_context=parallelism_context,
         training=trainer_config.training,
         parallelism=parallelism,
-        local_compile_regions=model_config.local_compile_regions,
-        ac_config=trainer_config.activation_checkpoint,
+        local_compile=model_config.local_compile,
+        activation_remat=trainer_config.activation_remat,
         dump_folder=config.dump_folder,
     )
     with parallelism_context.activate_spmd():
@@ -172,11 +172,11 @@ def build_trainer_model(
     return model, device, parallelism_context
 
 
-# TODO: directly testing against VLLMGenerator with debug model to avoid OOM
+# TODO: directly testing against Generator with debug model to avoid OOM
 def _set_generator_determinism(debug) -> None:
     """Apply deterministic flags for the generator side.
 
-    Mirrors VLLMGenerator._set_determinism() — the generator doesn't use
+    Mirrors Generator._set_determinism() — the generator doesn't use
     torchtitan's ParallelismContext, so we apply the flags directly.
     """
     if debug.deterministic:
@@ -195,10 +195,10 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     """Create a vLLM LLMEngine with torchtitan model from the RL config."""
     gen_config = config.generator
 
-    attention_backend = gen_config.model.first_base_attention_backend
+    attention_backend = gen_config.model.first_full_attention.inner_attention
     use_flex = isinstance(attention_backend, FlexInnerAttention.Config)
 
-    # Mirror the production VLLMGenerator so the test exercises the same
+    # Mirror the production Generator so the test exercises the same
     # batch-invariant path (v2 runner is required for the logprob-kernel patch).
     os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
     if use_flex:
@@ -209,8 +209,8 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         if gen_config.debug.batch_invariant:
             set_batch_invariance(True)
             # The v2 logprob Triton kernel bypasses the aten overrides. Apply the
-            # same generator-side patch the production VLLMGenerator does.
-            from torchtitan.rl.model.batch_invariance import (
+            # same generator-side patch the production Generator does.
+            from torchtitan.rl.generator.vllm.batch_invariance import (
                 force_logprobs_fn_for_batch_invariance,
             )
 
@@ -233,7 +233,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         worker_cls=TORCHTITAN_WORKER_CLS,
         distributed_executor_backend="external_launcher",
         gpu_memory_utilization=gen_config.gpu_memory_limit,
-        enforce_eager=gen_config.cuda_graph.mode == "NONE",
+        enforce_eager=gen_config.engine.cuda_graph.mode == "NONE",
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
         attention_config=AttentionConfig(backend=backend_enum),
         disable_log_stats=True,
@@ -257,7 +257,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     max_num_seqs = min((rollout_concurrency + gen_dp - 1) // gen_dp, 512)
     engine_kwargs["max_num_seqs"] = max_num_seqs
     expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
-    vllm_compilation_config = gen_config.cuda_graph.get_vllm_compilation_config(
+    vllm_compilation_config = gen_config.engine.cuda_graph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
         expert_sequence_parallel_size=expert_sequence_parallel_size,
         enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,
@@ -275,9 +275,10 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
 
     wrapper = engine.model_executor.driver_worker.get_model()
     trainer_sd = trainer_model.state_dict()
-    # As a weight sync: fill the pinned CPU copy, then load it with load_state_dict.
+    # As a model state dict load: fill the pinned CPU copy, then load it with load_state_dict.
     vllm_sd = wrapper._prefetched_model_state_dict
 
+    trainer_buffers = {name for name, _ in trainer_model.named_buffers()}
     missing = []
     for name, vparam in vllm_sd.items():
         tparam = trainer_sd.get(name)
@@ -285,6 +286,12 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
             missing.append(name)
             continue
         full = tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
+        # Weight sync over RDMA copies bytes, so the receive dtype is what the trainer sends:
+        # parameters in the generator dtype, buffers in their own.
+        sent_dtype = (
+            full.dtype if name in trainer_buffers else engine.model_config.dtype
+        )
+        assert vparam.dtype == sent_dtype, (name, vparam.dtype, sent_dtype)
         with torch.inference_mode():
             if isinstance(vparam, DTensor):
                 vparam.copy_(

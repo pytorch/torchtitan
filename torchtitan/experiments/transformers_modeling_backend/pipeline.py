@@ -24,7 +24,8 @@ from torchtitan.components.loss import LossFunction
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.activation_remat import ActivationRematConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.pipeline_parallel import (
     _build_get_mesh_callback,
     _build_pipeline_schedule,
@@ -296,8 +297,8 @@ def pipeline_hf_transformers(
     *,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
-    local_compile_regions: list[str],
-    ac_config: ActivationCheckpointingConfig,
+    local_compile: LocalCompileConfig,
+    activation_remat: ActivationRematConfig | None,
     dump_folder: str,
     device: torch.device,
     model_config: BaseModel.Config,
@@ -323,7 +324,6 @@ def pipeline_hf_transformers(
 
     # Calculate number of virtual stages
     if layers_per_stage is not None:
-
         # Calculate number of virtual stages needed (using ceiling division)
         # This allows for unequal distribution where stages can differ by at most 1 layer
         num_virtual_stages = math.ceil(
@@ -390,8 +390,8 @@ def pipeline_hf_transformers(
             parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
-            local_compile_regions=local_compile_regions,
-            ac_config=ac_config,
+            local_compile=local_compile,
+            activation_remat=activation_remat,
             dump_folder=dump_folder,
         )
         model_parts[i] = m

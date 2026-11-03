@@ -13,7 +13,7 @@ from typing import NamedTuple
 
 from datasets import load_dataset
 
-from torchtitan.rl.components.data import RLDataset
+from torchtitan.rl.rollout.data import RLDataset
 
 
 class _Author(NamedTuple):

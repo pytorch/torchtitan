@@ -139,8 +139,11 @@ class HcPost(Module):
         Returns:
             Hidden states of shape ``[T, hc_mult, D]``.
         """
+        # y[j] = post[j] * x + sum_i comb[i, j] * residual[i]: sum over the
+        # residual's branch axis (dim 1 of the [T, hc_mult, hc_mult, D] product;
+        # dim 2 in the reference's [B, S, hc_mult, hc_mult, D] layout).
         y = post.unsqueeze(-1) * x.unsqueeze(-2) + torch.sum(
-            comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2
+            comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=1
         )
         return y.type_as(x)
 

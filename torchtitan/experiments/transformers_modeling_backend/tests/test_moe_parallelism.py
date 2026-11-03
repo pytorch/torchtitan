@@ -455,6 +455,62 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Activation remat at the HF boundary
+# ---------------------------------------------------------------------------
+
+
+class TestNativeMoeActivationRemat(unittest.TestCase):
+    """The swapped-in Titan MoE under the default remat policy."""
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_saved_moe_output_reaches_hf_residual_add(self):
+        """HF's bare residual add reads the MoE output during checkpoint replay.
+
+        DeepSeek-V3's shared experts make the MoE output the saved
+        ``shared_add`` region's output (with EP it is the saved ``combine``
+        region's), and the default policy recomputes the routed ``w13``, so
+        replay re-runs HF's residual add. Gradients must match no
+        checkpointing.
+        """
+        import copy
+
+        from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
+        from torchtitan.experiments.transformers_modeling_backend.module_conversion import (
+            convert_hf_to_module,
+        )
+        from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
+            build_and_swap_native_moe,
+            probe_native_moe_params,
+        )
+
+        torch.manual_seed(0)
+        model, config = _create_tiny_deepseek_v3_model(num_hidden_layers=2)
+        _prepare_layers(model)
+        probe_native_moe_params(model.model, config)
+        build_and_swap_native_moe(model.model, _FakeParallelismContext())
+        convert_hf_to_module(model)
+        model.cuda()
+        ref_model = copy.deepcopy(model)
+        DefaultActivationRematConfig().apply(model.model)
+
+        input_ids = torch.randint(0, config.vocab_size, (1, 32), device="cuda")
+        losses = []
+        for m in (ref_model, model):
+            loss = m(input_ids).logits.float().square().mean()
+            loss.backward()
+            losses.append(loss.detach())
+
+        torch.testing.assert_close(losses[1], losses[0], rtol=0, atol=0)
+        ref_grads = dict(ref_model.named_parameters())
+        for name, param in model.named_parameters():
+            ref_grad = ref_grads[name].grad
+            if ref_grad is None:
+                self.assertIsNone(param.grad, name)
+                continue
+            torch.testing.assert_close(param.grad, ref_grad, rtol=0, atol=0, msg=name)
+
+
+# ---------------------------------------------------------------------------
 # Load balancing contract
 # ---------------------------------------------------------------------------
 

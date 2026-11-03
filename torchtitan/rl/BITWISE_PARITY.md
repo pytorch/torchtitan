@@ -23,8 +23,8 @@ deterministic=True)` on both the trainer and generator configs. The shared
 toggle is `set_batch_invariance()` in `torchtitan/distributed/batch_invariant.py`, called
 from:
 
-- `torchtitan/rl/trainer.py` (trainer)
-- `torchtitan/rl/generator.py` (generator)
+- `torchtitan/rl/trainer/trainer.py` (trainer)
+- `torchtitan/rl/generator/generator.py` (generator)
 - `torchtitan/rl/generate.py` (standalone generation)
 
 ## Sources of non-batch-invariance
@@ -55,7 +55,7 @@ same accumulation order. Three groups of fixes make that hold.
   `torch.backends.cuda.matmul.allow_tf32 = False`,
   `torch.backends.cudnn.allow_tf32 = False`).
 
-**Generator-only patches** (`torchtitan/rl/model/batch_invariance.py`) --
+**Generator-only patches** (`torchtitan/rl/generator/vllm/batch_invariance.py`) --
 the generator runs the same model inside vLLM, whose fused kernels must be routed
 back to the trainer's ops:
 

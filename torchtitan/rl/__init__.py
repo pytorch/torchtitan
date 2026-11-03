@@ -8,5 +8,5 @@
 
 Importing this package has no side effects. Entry points
 (``torchtitan.rl.train``, ``torchtitan.rl.generate``) apply the RL process
-environment defaults from ``torchtitan.rl._runtime`` before importing torch.
+environment defaults from ``torchtitan.rl._env`` before importing torch.
 """

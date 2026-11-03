@@ -302,11 +302,11 @@ class EMA(OptimizersContainer):
 
         self._post_init(all_params)
 
-        self._offload_stream: torch.cuda.Stream | None = None
+        self._offload_stream: torch.Stream | None = None
         self._offload_pool: torch.Tensor | None = None
-        self._pending_event: torch.cuda.Event | None = None
+        self._pending_event: torch.Event | None = None
         if self.offload_to_cpu:
-            self._offload_stream = torch.cuda.Stream()
+            self._offload_stream = torch.Stream()
 
     def zero_grad(self, *args, **kwargs) -> None:
         pass  # never called by the training loop; no-op for safety
@@ -438,6 +438,8 @@ class EMA(OptimizersContainer):
             device_mesh=p.device_mesh,
             placements=p.placements,
             run_check=False,
+            shape=p.shape,
+            stride=p.stride(),
         )
 
     def _scratch_chunks(
@@ -492,9 +494,9 @@ class EMA(OptimizersContainer):
     ) -> None:
         stream = self._offload_stream
         assert stream is not None
-        stream.wait_stream(torch.cuda.current_stream())
-        params_read = torch.cuda.Event()
-        with torch.cuda.stream(stream):
+        stream.wait_stream(torch.accelerator.current_stream())
+        params_read = torch.Event()
+        with stream:
             chunks = list(self._scratch_chunks(params, ema_params))
             for index, (chunk_p, chunk_e, scratch) in enumerate(chunks):
                 torch._foreach_copy_(scratch, chunk_e, non_blocking=True)  # H2D
@@ -503,12 +505,12 @@ class EMA(OptimizersContainer):
                     # Every read of the live params is now enqueued.
                     params_read.record(stream)
                 torch._foreach_copy_(chunk_e, scratch, non_blocking=True)  # D2H
-            self._pending_event = torch.cuda.Event()
+            self._pending_event = torch.Event()
             self._pending_event.record(stream)
         # Hold the compute stream until those reads complete, so the next
         # iteration's optimizer.step() cannot overwrite the params mid-read.
         # The trailing D2H still overlaps with compute.
-        torch.cuda.current_stream().wait_event(params_read)
+        torch.accelerator.current_stream().wait_event(params_read)
 
     # --- checkpointing ---
 

@@ -1,33 +1,27 @@
 # This is a CODEOWNERS file.
 # Each line is a file pattern followed by one or more owners.
-# The last matching pattern takes precedence. Keep recipes, tests and scripts
-# owned by the same people as the torchtitan/ code they exercise.
+# The last matching pattern takes precedence.
+#
+# Branch protection requires one approval from a code owner of every changed
+# file. Core owners are listed on every line, so they can approve anything; area
+# owners can approve PRs that only touch their area. Keep both groups small;
+# other area experts are auto-requested as non-blocking reviewers via
+# .github/area_reviewers.yml.
+#
+# Every path must have an owner: the Claude review bot can submit formal
+# approvals, and an ownerless path would let a bot approval alone satisfy branch
+# protection.
+
+* @tianyu-l @fegin @wwwjn @shuhuayu @acisseJZhong @felipemello1
 
 
-# These owners will be the default owners for everything in
-# the repo. Unless a later match takes precedence,
-# they will be requested for review when someone opens a pull request.
-* @tianyu-l @fegin @wwwjn @wconstab
+# Graph trainer: core owners or graph trainer owners.
+/torchtitan/experiments/graph_trainer/ @tianyu-l @fegin @wwwjn @shuhuayu @acisseJZhong @felipemello1 @SherlockNoMad @aditvenk @sanketpurandare
+/torchtitan_recipes/graph_trainer/ @tianyu-l @fegin @wwwjn @shuhuayu @acisseJZhong @felipemello1 @SherlockNoMad @aditvenk @sanketpurandare
+/torchtitan_recipes/tests/graph_trainer/ @tianyu-l @fegin @wwwjn @shuhuayu @acisseJZhong @felipemello1 @SherlockNoMad @aditvenk @sanketpurandare
 
 
-# RL
-/torchtitan/rl/ @felipemello1 @wwwjn @pzhan9 @tianyu-l
-/torchtitan_recipes/rl/ @felipemello1 @wwwjn @pzhan9 @tianyu-l
-/torchtitan_recipes/tests/rl/ @felipemello1 @wwwjn @pzhan9 @tianyu-l
-/tests/rl/ @felipemello1 @wwwjn @pzhan9 @tianyu-l
-/tests/integration_tests/rl.py @felipemello1 @wwwjn @pzhan9 @tianyu-l
-/scripts/rl/ @felipemello1 @wwwjn @pzhan9 @tianyu-l
-/scripts/install_rl_env.sh @felipemello1 @wwwjn @pzhan9 @tianyu-l
-
-
-# Exclude the experiments, and the recipes that belong to them, by adding
-# patterns without owners
-/torchtitan/experiments/
-/torchtitan_recipes/torchft/
-/torchtitan_recipes/tests/torchft/
-/torchtitan_recipes/tests/transformers_modeling_backend.py
-
-
-/torchtitan/experiments/graph_trainer/ @SherlockNoMad @aditvenk @sanketpurandare @IvanKobzarev @tianyu-l
-/torchtitan_recipes/graph_trainer/ @SherlockNoMad @aditvenk @sanketpurandare @IvanKobzarev @tianyu-l
-/torchtitan_recipes/tests/graph_trainer/ @SherlockNoMad @aditvenk @sanketpurandare @IvanKobzarev @tianyu-l
+# TorchFT: core owners or the TorchFT owner.
+/torchtitan/experiments/torchft/ @tianyu-l @fegin @wwwjn @shuhuayu @acisseJZhong @felipemello1 @d4l3k
+/torchtitan_recipes/torchft/ @tianyu-l @fegin @wwwjn @shuhuayu @acisseJZhong @felipemello1 @d4l3k
+/torchtitan_recipes/tests/torchft/ @tianyu-l @fegin @wwwjn @shuhuayu @acisseJZhong @felipemello1 @d4l3k

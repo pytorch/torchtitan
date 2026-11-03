@@ -15,12 +15,12 @@ from torchtitan_recipes.tests.graph_trainer.deepseek_v3 import (
     graph_trainer_deepseek_v3_debugmodel,
 )
 from torchtitan_recipes.tests.graph_trainer.llama3 import (
-    graph_trainer_llama3_debugmodel_sdpa,
+    graph_trainer_llama3_debugmodel_varlen,
 )
 
 
 def llama3_precompile_fsdp_tp() -> GraphTrainer.Config:
-    config = graph_trainer_llama3_debugmodel_sdpa()
+    config = graph_trainer_llama3_debugmodel_varlen()
     config.compile.precompile_artifact_dir = os.environ[
         "TORCHTITAN_PRECOMPILE_ARTIFACT_DIR"
     ]

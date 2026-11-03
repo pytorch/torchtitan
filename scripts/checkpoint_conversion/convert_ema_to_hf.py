@@ -195,7 +195,7 @@ def convert_ema_to_hf(
     storage_writer = HuggingFaceStorageWriter(
         path=output_dir,
         save_distributed=True,
-        fqn_to_index_mapping=sd_adapter.fqn_to_index_mapping,
+        fqn_to_index_mapping=sd_adapter.fqn_to_index_mapping_for_save(hf_state_dict),
         enable_consolidation=True,
         thread_count_consolidation=5,
     )

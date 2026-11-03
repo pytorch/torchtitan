@@ -1,0 +1,73 @@
+name: Request area reviewers
+
+# Requests reviews from the area points of contact in .github/area_reviewers.yml.
+# pull_request_target runs this workflow from the base branch with a write token;
+# it must never check out or execute code from the PR. It only reads the PR's file
+# list through the API.
+on:
+  pull_request_target:
+    types: [opened, ready_for_review, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  request-reviewers:
+    if: github.repository == 'pytorch/torchtitan' && !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the area map from the base branch
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/area_reviewers.yml
+          sparse-checkout-cone-mode: false
+
+      - name: Convert the area map to JSON
+        run: yq -o=json .github/area_reviewers.yml > "$RUNNER_TEMP/area_reviewers.json"
+
+      - name: Request reviewers
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const config = JSON.parse(
+              fs.readFileSync(`${process.env.RUNNER_TEMP}/area_reviewers.json`, 'utf8'));
+            const pr = context.payload.pull_request;
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              ...context.repo, pull_number: pr.number, per_page: 100,
+            });
+            const paths = files.flatMap(f => [f.filename, f.previous_filename].filter(Boolean));
+
+            // Areas ordered by how many changed files they match.
+            const areas = config.areas
+              .map(a => ({...a, hits: paths.filter(p => a.paths.some(prefix => p.startsWith(prefix))).length}))
+              .filter(a => a.hits > 0)
+              .sort((a, b) => b.hits - a.hits);
+
+            const skip = new Set([pr.user.login, ...pr.requested_reviewers.map(r => r.login)]);
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
+              ...context.repo, pull_number: pr.number, per_page: 100,
+            });
+            reviews.forEach(r => r.user && skip.add(r.user.login));
+
+            const candidates = [];
+            for (const area of areas) {
+              for (const login of area.reviewers) {
+                if (!skip.has(login) && !candidates.includes(login)) candidates.push(login);
+              }
+            }
+            const chosen = candidates.slice(0, config.max_reviewers);
+            core.info(`Matched areas: ${areas.map(a => `${a.name}(${a.hits})`).join(', ') || 'none'}`);
+
+            // Request one at a time: a single non-collaborator fails the whole call.
+            for (const login of chosen) {
+              try {
+                await github.rest.pulls.requestReviewers({
+                  ...context.repo, pull_number: pr.number, reviewers: [login],
+                });
+                core.info(`Requested review from ${login}`);
+              } catch (err) {
+                core.warning(`Could not request review from ${login}: ${err.message}`);
+              }
+            }

@@ -11,7 +11,7 @@ import spmd_types as spmd
 import torch
 
 from torchtitan.models.common.activation import Sigmoid
-from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
+from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.deepseek_v4.moe import DeepSeekV4Router
 
 

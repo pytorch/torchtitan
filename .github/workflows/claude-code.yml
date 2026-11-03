@@ -16,4 +16,54 @@ jobs:
       id-token: write
     secrets: inherit
     with:
-      additional_claude_args: '--allowedTools Skill'
+      # The AWS session and Claude's GitHub App token expire 1h after job start;
+      # stay a few minutes under 60.
+      timeout_minutes: 55
+      # Opt into Fable with "fable" in the comment (e.g. "@claude fable review").
+      # Branch on event_name so an issue/PR body mentioning "fable" doesn't affect
+      # an unrelated @claude comment.
+      model: ${{ ((github.event_name == 'issue_comment' && contains(github.event.comment.body, 'fable')) || (github.event_name == 'issues' && contains(github.event.issue.body, 'fable'))) && 'global.anthropic.claude-fable-5' || 'global.anthropic.claude-opus-5-5' }}
+      # Keep the comment text out of claude_args: only these hardcoded effort values
+      # can reach the CLI. "effort=max" wins if multiple values appear.
+      # gh commands are read-only except `gh pr review`. The pending-review tools
+      # (GitHub's MCP server) post the body, verdict and inline comments as one
+      # review; `gh pr review` and the inline-comment tool are the fallback. Other
+      # GitHub MCP tools (e.g. merge) are not allowed, nor is `gh api`, which can
+      # write anything.
+      additional_claude_args: >-
+        --allowedTools "Skill,Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh pr review:*),mcp__github_inline_comment__create_inline_comment,mcp__github__create_pending_pull_request_review,mcp__github__add_comment_to_pending_review,mcp__github__submit_pending_pull_request_review,mcp__github__delete_pending_pull_request_review" --effort
+        ${{
+          ((github.event_name == 'issue_comment' && contains(github.event.comment.body, 'effort=max')) ||
+           (github.event_name == 'issues' && contains(github.event.issue.body, 'effort=max'))) && 'max' ||
+          ((github.event_name == 'issue_comment' && contains(github.event.comment.body, 'effort=low')) ||
+           (github.event_name == 'issues' && contains(github.event.issue.body, 'effort=low'))) && 'low' ||
+          'high'
+        }}
+      settings: |
+        {
+          "alwaysThinkingEnabled": true,
+          "env": {
+            "API_TIMEOUT_MS": "180000",
+            "CLAUDE_CODE_MAX_RETRIES": "2"
+          }
+        }
+      # These logs are public and may include assistant messages and tool output.
+      show_full_output: true
+      upload_execution_log: true
+      append_system_prompt: |
+        When asked to review a PR (including "review again", "review my review", or
+        a question about a PR), always use the /pr-review skill first. It contains
+        torchtitan's review values, workflow, output format, and how to post the
+        review as a single PR review with inline comments.
+
+        After posting a PR review, your tracking comment is one line: the verdict
+        and a link to the review. For other requests, lead the tracking comment
+        with a one-sentence answer and put long details in a GitHub collapsible
+        section. Don't include task checklists.
+
+        ## Reading other issues and PRs
+        To read an issue or PR other than the one you were invoked on, use
+        `gh issue view <number-or-url>` or `gh pr view <number-or-url>`, adding
+        `--json title,body,comments` to include its conversation. Use `gh pr diff`
+        for diffs and `gh pr list --search` to find related open PRs. `gh api`,
+        curl and WebFetch are blocked.

@@ -55,25 +55,29 @@ class TestEMADTensorRewrap(DTensorTestBase):
             model_parts=[torch.nn.Linear(2, 2)]
         )
 
-    def _sharded_param(self):
+    def _sharded_param(self, num_rows=4):
         mesh = self.build_device_mesh()
-        global_tensor = torch.arange(4 * 8, dtype=torch.float32).reshape(4, 8)
+        global_tensor = torch.arange(num_rows * 8, dtype=torch.float32).reshape(
+            num_rows, 8
+        )
         return distribute_tensor(global_tensor, mesh, [Shard(0)]), global_tensor
 
     @with_comms
     def test_rewrap_restores_the_global_shape(self):
-        param, global_tensor = self._sharded_param()
-        self.assertEqual(param.to_local().shape, (2, 8))  # genuinely sharded
+        for num_rows, local_rows in ((4, (2, 2)), (5, (3, 2)), (1, (1, 0))):
+            with self.subTest(num_rows=num_rows):
+                param, global_tensor = self._sharded_param(num_rows)
+                self.assertEqual(param.to_local().shape, (local_rows[self.rank], 8))
 
-        ema = self._ema()
-        local = param.to_local().clone()
-        rewrapped = ema._materialize_dtensor(param, local)
+                ema = self._ema()
+                local = param.to_local().clone()
+                rewrapped = ema._materialize_dtensor(param, local)
 
-        self.assertIsInstance(rewrapped, DTensor)
-        self.assertEqual(rewrapped.shape, global_tensor.shape)
-        self.assertEqual(rewrapped.placements, param.placements)
-        self.assertEqual(rewrapped.device_mesh, param.device_mesh)
-        torch.testing.assert_close(rewrapped.to_local(), local)
+                self.assertIsInstance(rewrapped, DTensor)
+                self.assertEqual(rewrapped.shape, global_tensor.shape)
+                self.assertEqual(rewrapped.placements, param.placements)
+                self.assertEqual(rewrapped.device_mesh, param.device_mesh)
+                torch.testing.assert_close(rewrapped.to_local(), local)
 
     @with_comms
     def test_rewrap_is_not_a_no_op_on_a_sharded_param(self):
