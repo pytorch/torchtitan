@@ -165,7 +165,19 @@ class _DocumentAwareConcatThenSplitIterator(grain.DatasetIterator):
             )
             input_parts.append(np.asarray(sequence.input_ids[token_slice]))
             label_parts.append(np.asarray(sequence.labels[token_slice]))
-            position_parts.append(np.arange(num_segment_tokens, dtype=np.int64))
+            # Continue the in-window offset. A new row does not restart at 0,
+            # and a slice that crosses the window wraps.
+            if source_positions is None:
+                position_base = self._remainder_offset % self._max_context_length
+            else:
+                position_base = (
+                    int(source_positions[self._remainder_offset])
+                    % self._max_context_length
+                )
+            position_parts.append(
+                (np.arange(num_segment_tokens, dtype=np.int64) + position_base)
+                % self._max_context_length
+            )
             # Keep padding from an upstream packer marked as padding.
             mask_parts.append(
                 np.zeros(num_segment_tokens, dtype=np.bool_)
@@ -394,19 +406,17 @@ def _packing_output_to_text_sequence(
     *,
     max_context_length: int,
 ) -> TextSequence:
-    """Finalize packed text by masking padding and canonicalizing positions."""
+    """Finalize packed text by masking padding and keeping packed positions."""
     segment_ids = np.asarray(packing_output["input_ids_segment_ids"])
     padding_mask = np.asarray(packing_output["padding_mask"], dtype=np.bool_).copy()
     padding_mask[segment_ids == 0] = True
     labels = np.asarray(packing_output["labels"]).copy()
     labels[padding_mask] = IGNORE_INDEX
 
-    # A zero starts a document. For [0, 1, 2, 0, 1], segment_starts is
-    # [0, 0, 0, 3, 3], so subtracting it restores [0, 1, 2, 0, 1].
-    boundaries = np.asarray(packing_output["positions"]) == 0
-    token_indices = np.arange(len(boundaries), dtype=np.int64)
-    segment_starts = np.maximum.accumulate(np.where(boundaries, token_indices, 0))
-    positions = token_indices - segment_starts
+    # Packed positions already restart at each document and every
+    # max_context_length tokens. A row may start mid-window (for example at
+    # 3, not 0), so do not renumber real tokens from the row start.
+    positions = np.asarray(packing_output["positions"]).copy()
 
     packing_padding = segment_ids == 0
     if np.any(packing_padding):
