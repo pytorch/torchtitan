@@ -628,8 +628,9 @@ class ChunkedLossWrapper(Loss[LossInput]):
         The lm_head's FSDP reshard-after-forward and reshard-after-backward are
         temporarily disabled during the chunked loop so that the weight stays
         unsharded across all outputs and chunks (avoiding repeated all-gathers).
-        The final chunk uses the caller's head synchronization policy. With
-        pending microbatch gradients, the decoder backward's group hooks or
+        Pipeline schedules own head reduction and parameter residency. Outside
+        pipeline schedules, the final chunk uses the caller's synchronization
+        policy. With pending microbatch gradients, the decoder's group hooks or
         root callback reduce the head instead, keeping each group's gradients
         together. Inner backwards preserve the decoder's prefetch and
         finalization state. Frozen decoders finish through the head backward
@@ -781,7 +782,7 @@ class ChunkedLossWrapper(Loss[LossInput]):
             ) as fsdp:
                 for chunk_index in range(num_chunks):
                     if chunk_index == num_chunks - 1:
-                        fsdp.before_last_backward()
+                        fsdp.before_last_forward()
 
                     h_chunks = tuple(
                         chunks[chunk_index] for chunks in hidden_state_chunks_per_output

@@ -25,9 +25,7 @@ def test_swiglu_matches_reference_formula_and_gradients():
     gate_ref = gate.detach().clone().requires_grad_()
     up_ref = up.detach().clone().requires_grad_()
 
-    out = ClampedSwiGLU.Config(swiglu_limit=2.0).build()(
-        torch.stack([gate, up], dim=-2)
-    )
+    out = ClampedSwiGLU.Config(limit=2.0).build()(torch.stack([gate, up], dim=-2))
     out_ref = _reference_swiglu(gate_ref, up_ref, limit=2.0)
 
     assert torch.equal(out, out_ref)
@@ -43,10 +41,10 @@ def test_swiglu_matches_reference_formula_and_gradients():
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("swiglu_alpha", 0.0),
-        ("swiglu_alpha", float("inf")),
-        ("swiglu_limit", 0.0),
-        ("swiglu_limit", float("nan")),
+        ("alpha", 0.0),
+        ("alpha", float("inf")),
+        ("limit", 0.0),
+        ("limit", float("nan")),
     ],
 )
 def test_clamped_swiglu_rejects_invalid_policy(field: str, value: float) -> None:

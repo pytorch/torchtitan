@@ -517,7 +517,7 @@ def _build_pipeline_schedule(
     # Chunked partial backwards preserve deferred-reduction policies during
     # metadata inference, leaving unsharded gradients outside param.grad.
     # TODO: Move this reset into PipelineStage's metadata cleanup.
-    # https://github.com/pytorch/torchtitan/pull/5563#discussion_r4404643236
+    # https://github.com/pytorch/pytorch/issues/203178
     for stage in stages:
         if isinstance(stage.submod, FSDPModule):
             schedule.register_post_metadata_inference_cleanup(

@@ -559,6 +559,7 @@ class TestCheckpointManager(unittest.TestCase):
     ):
         initial_load_path = os.path.join(self.base_temp_dir, "initial", "step-100")
         os.makedirs(initial_load_path, exist_ok=True)
+        open(os.path.join(initial_load_path, ".metadata"), "w").close()
 
         cfg = self.trainer_config.checkpointer
         cfg.initial_load_path = initial_load_path
@@ -696,6 +697,78 @@ class TestCheckpointManager(unittest.TestCase):
         manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch.object(dist_checkpoint, "load")
+    def test_explicit_load_step_rejects_non_resumable_checkpoint(
+        self, mock_load, mock_rank
+    ):
+        # An interrupted save leaves step-N with no .metadata, and a final HF
+        # export has only the safetensors index. Neither can be read by
+        # dcp.load, so reject them before opening the checkpoint.
+        cfg = self.trainer_config.checkpointer
+        cfg.folder = "checkpoints"
+        step_dir = os.path.join(self.test_folder, "checkpoints", "step-5")
+        for marker in (None, "model.safetensors.index.json"):
+            with self.subTest(marker=marker):
+                shutil.rmtree(step_dir, ignore_errors=True)
+                os.makedirs(step_dir)
+                if marker is not None:
+                    open(os.path.join(step_dir, marker), "w").close()
+                manager = CheckpointManager(
+                    model_parts=self.model_parts,
+                    optimizers=self.optimizers,
+                    lr_schedulers=self.lr_schedulers,
+                    ema=self.ema,
+                    extra_states=self.states,
+                    config=cfg,
+                    sd_adapter=None,
+                    base_folder=self.trainer_config.dump_folder,
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError, "step-5 is not a complete checkpoint"
+                ):
+                    manager.load(step=5)
+
+                mock_load.assert_not_called()
+                manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch.object(dist_checkpoint, "load")
+    def test_initial_load_path_rejects_non_resumable_checkpoint(
+        self, mock_load, mock_rank
+    ):
+        # Same rule for a native initial load: an unfinished save, or an HF
+        # checkpoint without initial_load_in_hf, must not reach dcp.load.
+        initial_load_path = os.path.join(self.base_temp_dir, "initial", "step-100")
+        cfg = self.trainer_config.checkpointer
+        cfg.initial_load_path = initial_load_path
+        cfg.initial_load_model_only = True
+        for marker in (None, "model.safetensors.index.json"):
+            with self.subTest(marker=marker):
+                shutil.rmtree(initial_load_path, ignore_errors=True)
+                os.makedirs(initial_load_path)
+                if marker is not None:
+                    open(os.path.join(initial_load_path, marker), "w").close()
+                manager = CheckpointManager(
+                    model_parts=self.model_parts,
+                    optimizers=self.optimizers,
+                    lr_schedulers=self.lr_schedulers,
+                    ema=self.ema,
+                    extra_states=self.states,
+                    config=cfg,
+                    sd_adapter=None,
+                    base_folder=self.trainer_config.dump_folder,
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError, "step-100 is not a complete checkpoint"
+                ):
+                    manager.load(step=-1)
+
+                mock_load.assert_not_called()
+                manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch.object(dist_checkpoint, "save")
     @mock.patch.object(dist_checkpoint, "load")
     def test_interval_respects_interval(self, mock_load, mock_save, mock_rank):
@@ -734,6 +807,67 @@ class TestCheckpointManager(unittest.TestCase):
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch.object(dist_checkpoint, "save")
     @mock.patch.object(dist_checkpoint, "load")
+    def test_auto_resume_skips_final_model_only_export(
+        self, mock_load, mock_save, mock_rank
+    ):
+        # Regression for #5054: the final model-only save cannot restore the
+        # training state, so rerunning with more steps must resume from the
+        # newest full checkpoint instead of failing on the export.
+        mock_save.side_effect = self.fake_save
+        mock_load.side_effect = self.fake_load
+        cfg = self.trainer_config.checkpointer
+        cfg.interval = 2
+        cfg.keep_latest_k = 0
+        cfg.last_save_model_only = True
+        manager = CheckpointManager(
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            ema=self.ema,
+            extra_states=self.states,
+            config=self.trainer_config.checkpointer,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+        manager.save(curr_step=2)
+        manager.save(curr_step=3, last_step=True)
+        self.assertEqual(["exports", "step-2"], sorted(os.listdir(self.test_folder)))
+        self.assertEqual(
+            ["step-3"], os.listdir(os.path.join(self.test_folder, "exports"))
+        )
+
+        self.assertTrue(manager.load())
+        _, kwargs = mock_load.call_args
+        self.assertEqual(
+            os.path.join(self.test_folder, "step-2"), kwargs.get("checkpoint_id")
+        )
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch.object(dist_checkpoint, "save")
+    def test_seed_checkpoint_stays_at_step_zero(self, mock_save, mock_rank):
+        # create_seed_checkpoint saves through the last-step path at step 0, and
+        # load() restores step-0 as the model-only seed. Moving it under
+        # exports/ would make every seeded run silently start from scratch.
+        mock_save.side_effect = self.fake_save
+        self.trainer_config.checkpointer.last_save_model_only = True
+        manager = CheckpointManager(
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            ema=self.ema,
+            extra_states=self.states,
+            config=self.trainer_config.checkpointer,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+        manager.save(curr_step=0, last_step=True)
+        self.assertEqual(["step-0"], os.listdir(self.test_folder))
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch.object(dist_checkpoint, "save")
+    @mock.patch.object(dist_checkpoint, "load")
     def test_last_save_model_only_and_initial_load_model_only(
         self, mock_load, mock_save, mock_rank
     ):
@@ -752,9 +886,9 @@ class TestCheckpointManager(unittest.TestCase):
             base_folder=self.trainer_config.dump_folder,
         )
         manager1.save(curr_step=1, last_step=True)
-        path1 = os.path.join(self.test_folder, "step-1")
+        path1 = os.path.join(self.test_folder, "exports", "step-1")
         self.assertTrue(os.path.isdir(path1))
-        # Phase 2: initial load from step-1
+        # Phase 2: initial load from the export
         cfg = self.trainer_config.checkpointer
         cfg.last_save_model_only = False
         cfg.initial_load_model_only = True

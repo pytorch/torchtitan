@@ -17,6 +17,7 @@ import asyncio
 import concurrent.futures
 import contextvars
 import gc
+import logging
 import threading
 import weakref
 from collections.abc import Callable
@@ -1184,9 +1185,9 @@ def test_follower_applies_broadcast_decisions_on_the_engine_thread(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("peer_rejects", [False, True])
-def test_drain_task_resolves_peer_results_on_the_engine_thread(
-    engine_thread, monkeypatch, peer_rejects
+@pytest.mark.parametrize("peer_result", ["finished", "rejected", "unknown"])
+def test_drain_task_handles_peer_results_on_the_engine_thread(
+    engine_thread, monkeypatch, caplog, peer_result
 ) -> None:
     peer_results: asyncio.Queue = asyncio.Queue()
     recv_threads: list[threading.Thread] = []
@@ -1205,13 +1206,14 @@ def test_drain_task_resolves_peer_results_on_the_engine_thread(
         dispatcher._rank0_dp_router.reserve("busy", routing_session_id="busy")
         engine_loop = engine_thread(engine, request_dispatcher=dispatcher)
         peer_requests: list[str] = []
+        broadcast_actions: list[LoopAction] = []
 
         def broadcast_object_list(container, **kwargs):
             # Stand-in for DP rank 1, which meets rank 0 at every decision broadcast: it sends
             # back the finished (or rejected) requests it took at the previous one,
             # then takes its share of this one.
             if peer_requests:
-                if peer_rejects:
+                if peer_result == "rejected":
                     results = _RejectedRequests(
                         requests=[
                             (request_id, ValueError(f"{request_id} rejected"))
@@ -1221,7 +1223,10 @@ def test_drain_task_resolves_peer_results_on_the_engine_thread(
                 else:
                     results = _FinishedRequests(
                         requests=[
-                            _finished(request_id) for request_id in peer_requests
+                            _finished(
+                                "unknown" if peer_result == "unknown" else request_id
+                            )
+                            for request_id in peer_requests
                         ],
                         # The peer installed a newer version before they finished.
                         policy_version=5,
@@ -1231,13 +1236,12 @@ def test_drain_task_resolves_peer_results_on_the_engine_thread(
                     peer_results.put_nowait, results
                 )
             decision = container[0]
-            if (
-                isinstance(decision, LoopDecision)
-                and decision.action is LoopAction.STEP
-            ):
-                peer_requests.extend(
-                    r.request_id for r in decision.requests_per_dp_rank[1]
-                )
+            if isinstance(decision, LoopDecision):
+                broadcast_actions.append(decision.action)
+                if decision.action is LoopAction.STEP:
+                    peer_requests.extend(
+                        r.request_id for r in decision.requests_per_dp_rank[1]
+                    )
 
         monkeypatch.setattr(
             engine_loop_module.dist, "broadcast_object_list", broadcast_object_list
@@ -1245,9 +1249,25 @@ def test_drain_task_resolves_peer_results_on_the_engine_thread(
         engine_loop.policy_version = 3  # rank 0 stamps it at admission
         engine_loop.start()
 
-        if peer_rejects:
+        if peer_result == "rejected":
             with pytest.raises(ValueError, match="r0 rejected"):
                 await asyncio.wait_for(_generate(engine_loop, "r0"), _TIMEOUT_S)
+        elif peer_result == "unknown":
+            generation = _generate(engine_loop, "r0")
+            with pytest.raises(KeyError, match="unknown"):
+                await asyncio.wait_for(generation, _TIMEOUT_S)
+            with pytest.raises(KeyError, match="unknown"):
+                await asyncio.wait_for(engine_loop.wait(), _TIMEOUT_S)
+            assert broadcast_actions[-1] is LoopAction.CLOSE
+            assert any(
+                record.name == "torchtitan.rl.generator.dispatcher"
+                and record.levelno == logging.ERROR
+                for record in caplog.records
+            )
+            with pytest.raises(
+                RuntimeError, match="generator is closed; cannot call generate"
+            ):
+                await engine_loop.generate(_request("r1"), metrics_prefix="generator")
         else:
             completion = await asyncio.wait_for(
                 _generate(engine_loop, "r0"), _TIMEOUT_S
@@ -1257,8 +1277,9 @@ def test_drain_task_resolves_peer_results_on_the_engine_thread(
                 3,
                 5,
             )
-        # Either way the peer's result frees its DP rank: only the "busy" reservation is left.
-        assert dispatcher._rank0_dp_router._reservations == {"busy": 0}
+        # A valid peer result frees its DP rank: only the "busy" reservation is left.
+        if peer_result != "unknown":
+            assert dispatcher._rank0_dp_router._reservations == {"busy": 0}
         assert engine.threads == set()  # rank 0's own DP replica served nothing
         assert set(recv_threads) == {engine_loop.engine_thread.thread}
 

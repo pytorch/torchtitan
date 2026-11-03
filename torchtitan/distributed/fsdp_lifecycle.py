@@ -26,14 +26,14 @@ class _GroupPolicy(NamedTuple):
 
 
 class _PartialBackwardHooks(NamedTuple):
-    before_last_backward: Callable[[], None]
+    before_last_forward: Callable[[], None]
     after_forward: Callable[[Any], Any]
 
 
 def complete_fsdp_grouped_forward(module: FSDPModule, output: Any) -> Any:
     """Finish a partial FSDP grouped forward, retaining its output hooks."""
-    # TODO: Replace with public grouped-forward completion, including repeated
-    # standalone calls. https://github.com/pytorch/pytorch/issues/183702
+    # TODO: Use public partial-group forward completion for repeated standalone
+    # calls. https://github.com/pytorch/pytorch/issues/203176
     state = module._get_fsdp_state()
     if state._modules_to_run_forward:
         output = state._post_forward(cast(nn.Module, module), None, output)
@@ -48,14 +48,15 @@ def fsdp_partial_backwards(
     """Keep one module unsharded across partial backwards, preserving policy.
 
     Only ``module`` runs in the inner forwards and backwards. Call
-    ``before_last_backward`` before its last forward and ``after_forward``
+    ``before_last_forward`` before its last forward and ``after_forward``
     on each output. An outer backward, when present, follows all inner passes
     and owns root finalization. Without an outer backward, the caller's
     finalization mode remains in effect.
 
     The final inner backward uses the caller's reduction policy unless pending
     full or HSDP partial gradients must coalesce with the outer backward.
-    Manual finalization retains full gradients for deferred replica reduction.
+    Manual finalization owns all reductions, including the first inner pass,
+    and leaves parameter residency to the schedule.
     Forward-only calls complete the same scope without running backward.
     """
     if not isinstance(module, FSDPModule):
@@ -63,7 +64,8 @@ def fsdp_partial_backwards(
         return
 
     # TODO: Use scoped partial backward and value-based policy restoration.
-    # https://github.com/pytorch/torchtitan/pull/5563#issuecomment-6477676301
+    # https://github.com/pytorch/pytorch/issues/203176
+    # https://github.com/pytorch/pytorch/issues/203177
     # The public sync setter also overwrites the separate HSDP all-reduce policy.
     state = module._get_fsdp_state()
     state._lazy_init()
@@ -83,15 +85,9 @@ def fsdp_partial_backwards(
         for owner in states
         for group in owner._fsdp_param_groups
     ]
+    manual_finalization = state_ctx.manual_backward_finalization
     defer_reduction = (
-        (
-            state_ctx.manual_backward_finalization
-            and any(
-                not policy.all_reduce_grads
-                for policy in policies
-                if policy.group in module_groups
-            )
-        )
+        manual_finalization
         or outer_backward_follows
         and any(
             policy.group._post_backward_pending
@@ -100,7 +96,7 @@ def fsdp_partial_backwards(
         )
     )
 
-    def before_last_backward() -> None:
+    def before_last_forward() -> None:
         if not defer_reduction:
             for policy in policies:
                 if policy.group in module_groups:
@@ -127,7 +123,7 @@ def fsdp_partial_backwards(
         # next FSDP module when CUDA graph capture follows the warmup.
         with spmd.no_typecheck():
             module.unshard()
-        yield _PartialBackwardHooks(before_last_backward, after_forward)
+        yield _PartialBackwardHooks(before_last_forward, after_forward)
     finally:
         state_ctx.is_last_backward = is_last_backward
         state._auto_reshard_after_forward = auto_reshard_after_forward
@@ -139,7 +135,8 @@ def fsdp_partial_backwards(
             group.all_reduce_grads = policy.all_reduce_grads
         for policy in policies:
             if policy.group in module_groups and (
-                policy.reshard_after_backward or not run_backward
+                not run_backward
+                or (not manual_finalization and policy.reshard_after_backward)
             ):
                 # Reshard releases weights; the autograd leaf retains gradients
                 # until outer backward or caller finalization reduces them.

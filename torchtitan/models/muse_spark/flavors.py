@@ -647,7 +647,7 @@ def muse_spark_navit_encoder_config(
             rope_theta=rope_theta,
             sharding_config=vision_rope_freq_sharding_config(),
         ),
-        conv1=Linear.Config(
+        conv1_linear=Linear.Config(
             in_features=patch_input_dim,
             out_features=latent_dim,
             bias=False,

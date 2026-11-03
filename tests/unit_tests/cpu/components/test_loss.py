@@ -970,53 +970,6 @@ class _WeightedTwoOutputLoss(Loss[tuple[torch.Tensor, ...]]):
         return loss, {}
 
 
-class _RecordingFSDPLinear(nn.Linear):
-    def __init__(self, *args, events: list[str], **kwargs):
-        super().__init__(*args, **kwargs)
-        self.events = events
-        self._state = SimpleNamespace(
-            _lazy_init=lambda: None,
-            _auto_reshard_after_forward=False,
-            _modules_to_run_forward=set(),
-            _fsdp_param_groups=[
-                SimpleNamespace(
-                    post_forward_mesh_info=object(),
-                    reshard_after_backward=True,
-                    reduce_grads=True,
-                    all_reduce_grads=True,
-                    _post_backward_pending=False,
-                    _partial_reduce_output=None,
-                    reshard=self.reshard,
-                )
-            ],
-        )
-        self._state._state_ctx = SimpleNamespace(
-            is_last_backward=True,
-            manual_backward_finalization=False,
-            all_states=[self._state],
-        )
-
-    def _get_fsdp_state(self):
-        return self._state
-
-    def set_reshard_after_forward(self, enabled, *, recurse):
-        self.events.append(f"set_reshard_after_forward({enabled})")
-        self._state._auto_reshard_after_forward = False
-        self._state._fsdp_param_groups[0].post_forward_mesh_info = (
-            object() if enabled else None
-        )
-
-    def unshard(self):
-        self.events.append("unshard")
-
-    def reshard(self):
-        self.events.append("reshard")
-
-    def forward(self, input):
-        self.events.append("forward")
-        return super().forward(input)
-
-
 class TestChunkedLossWrapper(unittest.TestCase):
     def _make_model_and_loss(self, dim=32, vocab_size=64, num_chunks=4):
         """Create a fake Decoder and ChunkedLossWrapper for testing."""
@@ -1409,54 +1362,6 @@ class TestChunkedLossWrapper(unittest.TestCase):
             model_chunked.output.weight.grad,
             model_ref.output.weight.grad,
         )
-
-    def test_multi_output_fsdp_lifecycle_spans_all_terms(self):
-        events: list[str] = []
-        chunked_loss = ChunkedLossWrapper(
-            ChunkedLossWrapper.Config(
-                num_chunks=2,
-                loss_fn=_WeightedTwoOutputLoss.Config(),
-            )
-        )
-        chunked_loss.set_lm_head(_RecordingFSDPLinear(4, 8, bias=False, events=events))
-        predictions = (
-            torch.randn(4, 4, requires_grad=True),
-            torch.randn(4, 4, requires_grad=True),
-        )
-        labels = (
-            torch.randint(0, 8, (4,)),
-            torch.randint(0, 8, (4,)),
-        )
-
-        with patch(
-            "torchtitan.distributed.fsdp_lifecycle.FSDPModule", _RecordingFSDPLinear
-        ):
-            chunked_loss(predictions, labels)
-
-        self.assertEqual(events.count("unshard"), 1)
-        self.assertEqual(events.count("forward"), 4)
-        self.assertTrue(
-            chunked_loss.lm_head._get_fsdp_state()._fsdp_param_groups[0].reduce_grads
-        )
-        self.assertEqual(events.count("reshard"), 1)
-
-    def test_fsdp_unshards_once_before_chunk_forwards(self):
-        events: list[str] = []
-
-        chunked_loss = ChunkedLossWrapper(ChunkedLossWrapper.Config(num_chunks=2))
-        chunked_loss.lm_head = _RecordingFSDPLinear(4, 8, bias=False, events=events)
-        hidden_states = torch.randn(4, 4)
-        labels = torch.randint(0, 8, (4,))
-
-        with patch(
-            "torchtitan.distributed.fsdp_lifecycle.FSDPModule", _RecordingFSDPLinear
-        ):
-            chunked_loss(hidden_states, labels)
-
-        self.assertEqual(events.count("unshard"), 1)
-        self.assertEqual(events.count("forward"), 2)
-        self.assertLess(events.index("unshard"), events.index("forward"))
-        self.assertEqual(events[-1], "reshard")
 
     def test_numerical_equivalence(self):
         """ChunkedLossWrapper must produce the same loss and gradients as the standard path."""

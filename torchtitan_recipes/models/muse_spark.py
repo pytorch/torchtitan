@@ -479,8 +479,8 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
         scratch_capacity_factor=32.0,
         vmm_capacity_factor=None,
         expert_activation=ClampedSwiGLU.Config(
-            swiglu_alpha=1.702,
-            swiglu_limit=7.0,
+            alpha=1.702,
+            limit=7.0,
         ),
         remat_save_regions=remat_save_regions,
     )

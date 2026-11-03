@@ -103,12 +103,24 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
         source inside this call (TP rounding, CUDA-graph capture size, DP
         equalization). The model turns the count into a padding mask, which keeps
         those rows off Dist-MoE's network; graph replay reads the value published
-        for the real step.
+        for the real step. Linear attention (GDN/KDA) builders then learn whether
+        the step replays a packed FULL graph.
         """
         self.get_model().set_num_valid_tokens(num_tokens)
-        return super()._determine_batch_execution_and_padding(
+        result = super()._determine_batch_execution_and_padding(
             num_tokens, *args, **kwargs
         )
+        # TODO: drop once vLLM passes the dispatched (cudagraph_mode, batch_descriptor)
+        # to AttentionMetadataBuilder.build.
+        cudagraph_mode, batch_descriptor = result[:2]
+        replays_packed_graph = (
+            cudagraph_mode == CUDAGraphMode.FULL and not batch_descriptor.uniform
+        )
+        for group in self._attn_group_iterator():
+            if group.backend is TorchTitanLinearAttentionBackend:
+                for builder in group.metadata_builders:
+                    builder.replays_packed_graph = replays_packed_graph
+        return result
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size

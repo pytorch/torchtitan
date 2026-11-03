@@ -32,6 +32,7 @@ for MoE models. Generator sequence parallelism was disabled.
 |---|---|
 | Llama 3 | ✅ Supported |
 | Muse Glimmer | ✅ Supported |
+| Muse Spark | ✅ Supported (text only) |
 | Qwen 3 | ✅ Supported |
 | Qwen 3.5/3.6/3.8 | ✅ Supported (text only) |
 | GPT-OSS | ✅ Supported |
