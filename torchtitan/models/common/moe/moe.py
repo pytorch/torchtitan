@@ -331,9 +331,9 @@ class TokenChoiceTopKRouter(Module):
 
     # options: Inductor's batch_invariant fixes each reduction's launch config, so a token's
     # scores don't depend on the batch size (otherwise the 1-token graph picks another config
-    # and rounds differently). Cost on GB300: up to 4 us per call at 1-64 tokens (Qwen3.5
-    # router 15 -> 19 us at 64), none from 4k tokens. recompile_limit=16: DeepSeek-V4's hash
-    # and top-k layers share this frame, 2 graphs per shape (default 8).
+    # and rounds differently). Cost on GB300: a few us per call at decode sizes, none from 4k
+    # tokens. recompile_limit=16: DeepSeek-V4's hash and top-k layers share this frame, 2 graphs
+    # per shape (default 8).
     @local_compile(
         "moe_router_topk",
         batch_invariant=True,
@@ -354,10 +354,10 @@ class TokenChoiceTopKRouter(Module):
             eager    this region                                      eager
 
         Outside the region:
-        - gate: compiled, autograd rounds ``HiMidLoLinear``'s fp32 weight grad to bf16 when the
-          weight is bf16 with an fp32 ``grad_dtype``, as under FSDP2
-          (https://github.com/pytorch/pytorch/pull/197381). Traced, its default
-          ``inplace_wgrad_accum=True`` raises.
+        - gate: traced, its default ``inplace_wgrad_accum=True`` raises. With it off, a compiled
+          region rounds the fp32 weight grad of a bf16 weight to bf16 when ``grad_dtype`` is fp32
+          or None, as FSDP2 sets with an fp32 reduce dtype
+          (https://github.com/pytorch/pytorch/pull/197381).
         - counts, aux loss, ``QuantileBalancedTopKRouter``'s histogram: they update buffers.
           Remat's eager replay re-runs this region, so an update here would need a
           ``remat.is_recomputing()`` guard, and that guard makes Dynamo compile a second graph
