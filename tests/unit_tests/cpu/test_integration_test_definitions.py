@@ -44,7 +44,7 @@ def test_hf_checkpoint_load_path_comes_from_test_config(monkeypatch) -> None:
     config = llama3_debugmodel_hf_checkpoint_load()
 
     assert config.checkpointer.initial_load_path == (
-        f"{test_output_dir}/hf_checkpoint/step-10/"
+        f"{test_output_dir}/hf_checkpoint/exports/step-10/"
     )
 
 

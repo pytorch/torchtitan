@@ -217,6 +217,7 @@ class BaseCheckpointManager(Configurable, ABC):
     initial_load_model_only: bool
     initial_load_in_hf: bool
     initial_load_in_hf_quantized: bool
+    last_save_model_only: bool
     sd_adapter: BaseStateDictAdapter | None
     purge_exempt: Callable[[int], bool] | None = None
     purge_thread: threading.Thread | None
@@ -324,6 +325,17 @@ class BaseCheckpointManager(Configurable, ABC):
                         step,
                     )
 
+            # Explicit load_step and initial_load_path are only checked to be
+            # directories above; automatic selection already filtered on this.
+            if not from_hf and not self._is_resumable_checkpoint(checkpoint_id):
+                raise ValueError(
+                    f"Checkpoint {checkpoint_id} is not a complete checkpoint: it "
+                    "has no completed checkpoint metadata, so its save never "
+                    "finished, or it is a Hugging Face checkpoint. Load a full "
+                    "checkpoint instead, or set checkpointer.initial_load_in_hf "
+                    "to load Hugging Face weights."
+                )
+
             logger.info("Loading the checkpoint from %s.", checkpoint_id)
             begin = time.monotonic()
             states = self._states_to_load(model_only)
@@ -393,6 +405,20 @@ class BaseCheckpointManager(Configurable, ABC):
         folder = folder or self.folder
         return filesystem.join(folder, f"step-{step}")
 
+    def _create_last_step_id(self, step: int) -> str:
+        """Path for the final save of a training run.
+
+        A model-only final save is an export that cannot restore the training
+        state, so it goes to ``exports/step-N``, where automatic loading never
+        looks. Step 0 is the seed checkpoint (``create_seed_checkpoint``), which
+        ``load()`` restores as model-only, so it stays at ``step-0``.
+        """
+        if self.last_save_model_only and step > 0:
+            return self._create_checkpoint_id(
+                step, folder=filesystem.join(self.folder, "exports")
+            )
+        return self._create_checkpoint_id(step)
+
     @abstractmethod
     def _load_checkpoint(
         self,
@@ -452,12 +478,16 @@ class BaseCheckpointManager(Configurable, ABC):
         """Whether ``checkpoint_dir`` holds a completed checkpointer.
 
         This includes model-only exports that retention must preserve even
-        when they cannot restore the full training state.
+        when they cannot restore the full training state. Final model-only
+        saves go under ``exports/``, which retention does not scan, so the
+        only model-only ``step-N`` it sees are seed checkpoints (step 0)
+        and exports left by older TorchTitan versions.
         """
 
     @abstractmethod
     def _is_resumable_checkpoint(self, checkpoint_dir: str) -> bool:
-        """Whether automatic loading may select ``checkpoint_dir``."""
+        """Whether ``checkpoint_dir`` is a completed checkpoint in this manager's
+        native format, which every non-Hugging Face load requires."""
 
     def _find_load_step(self, folder: str = "", max_step: int | None = None) -> int:
         """The highest step in ``folder`` that can actually be loaded.

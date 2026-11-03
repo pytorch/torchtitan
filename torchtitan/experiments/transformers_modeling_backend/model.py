@@ -268,6 +268,12 @@ class HFTransformerModel(BaseModel):
         label2id: dict | None = field(init=False, default=None)
         problem_type: str | None = field(init=False, default=None)
 
+        def __post_init__(self, **kwargs) -> None:
+            # Configurable.Config.__post_init__ is ahead of PretrainedConfig
+            # in the MRO and takes no extra arguments. HF passes leftover
+            # kwargs, including attn_implementation, to self.__post_init__.
+            PretrainedConfig.__post_init__(self, **kwargs)
+
         def __init__(
             self,
             model_config,

@@ -41,7 +41,12 @@ def inference(config: FluxTrainer.Config):
 
     if config.checkpointer is None:
         raise ValueError("Flux inference requires a checkpointer configuration.")
-    trainer.engine.load_checkpoint()
+    if not trainer.engine.load_checkpoint():
+        raise ValueError(
+            "Flux inference found no checkpoint to load. Set "
+            "checkpointer.initial_load_path to the trained export, e.g. "
+            "<dump_folder>/checkpoint/exports/step-<N>."
+        )
 
     # Build tokenizers from the config
     tokenizer = config.tokenizer.build()
