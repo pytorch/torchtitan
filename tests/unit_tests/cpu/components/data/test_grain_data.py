@@ -2102,6 +2102,84 @@ def test_concat_then_split_resets_positions_between_documents():
     assert sequence.positions.tolist() == [0, 1, 0, 1, 2, 3, 0, 1, 2, 0]
 
 
+def test_concat_then_split_keeps_positions_when_row_starts_mid_window():
+    # One input token shifts the concat boundary, so the second row of 8
+    # begins at in-window offset 3 (max_context_length=4), not at 0.
+    documents = SingleDatasetConfig(
+        source=RowsSourceConfig(
+            rows=(
+                {"tokens": [10, 11]},
+                {"tokens": list(range(20, 36))},
+            )
+        ),
+        processor=RowToTokens.Config(),
+    )
+    context = replace(
+        CONTEXT,
+        max_context_length=4,
+        num_tokens_per_microbatch=8,
+        max_num_documents=None,
+    )
+    rows = list(
+        ConcatThenSplitPackingConfig(dataset=documents).build(
+            context=context,
+            dataset_iteration_policy=dataset_iteration_policy(
+                shuffle=False,
+                repeat=False,
+            ),
+        )
+    )
+
+    assert len(rows) == 2
+    assert rows[0].padding_mask is not None and not rows[0].padding_mask.any()
+    assert rows[1].padding_mask is not None and not rows[1].padding_mask.any()
+    assert rows[0].input_ids.tolist() == [10, 20, 21, 22, 23, 24, 25, 26]
+    assert rows[1].input_ids.tolist() == [27, 28, 29, 30, 31, 32, 33, 34]
+    # This row already starts at 0, so its positions stay put.
+    assert rows[0].positions.tolist() == [0, 0, 1, 2, 3, 0, 1, 2]
+    # The leading 3 is the offset inside the context window, not a new document.
+    assert rows[1].positions.tolist() == [3, 0, 1, 2, 3, 0, 1, 2]
+
+
+def test_document_cap_keeps_positions_when_row_starts_mid_window():
+    # max_num_documents=2 puts a 2-token document and the start of the next
+    # document in one row. The row fills 2 tokens into that window, so the
+    # next row must continue at offset 2 and wrap at max_context_length.
+    documents = SingleDatasetConfig(
+        source=RowsSourceConfig(
+            rows=(
+                {"tokens": [10, 11, 12]},
+                {"tokens": list(range(20, 27))},
+            )
+        ),
+        processor=RowToTokens.Config(),
+    )
+    context = replace(
+        CONTEXT,
+        max_context_length=4,
+        num_tokens_per_microbatch=4,
+        max_num_documents=2,
+    )
+    rows = list(
+        ConcatThenSplitPackingConfig(dataset=documents).build(
+            context=context,
+            dataset_iteration_policy=dataset_iteration_policy(
+                shuffle=False,
+                repeat=False,
+            ),
+        )
+    )
+
+    assert len(rows) == 2
+    assert rows[0].padding_mask is not None and not rows[0].padding_mask.any()
+    assert rows[1].padding_mask is not None and not rows[1].padding_mask.any()
+    assert rows[0].input_ids.tolist() == [10, 11, 20, 21]
+    assert rows[1].input_ids.tolist() == [22, 23, 24, 25]
+    # This row already starts at 0.
+    assert rows[0].positions.tolist() == [0, 1, 0, 1]
+    assert rows[1].positions.tolist() == [2, 3, 0, 1]
+
+
 @pytest.fixture
 def finite_rows_loader():
     # Direct trainer rows survive SingleDatasetConfig -> GrainDataLoader unchanged.
