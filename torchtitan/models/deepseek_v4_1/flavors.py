@@ -347,12 +347,11 @@ def _make_config(
     vision_attention_backend,
     attention_backend,
 ):
-    if (
-        parallelism.tensor_parallel_degree > 1
-        or parallelism.expert_parallel_degree > 1
-        or parallelism.pipeline_parallel_degree > 1
-    ):
-        raise ValueError("V4.1 currently supports FSDP with TP=EP=PP=1.")
+    if num_draft_layers and parallelism.tensor_parallel_degree > 1:
+        raise ValueError(
+            "DSpark currently requires tensor_parallel_degree=1; "
+            "set num_draft_layers=0 for backbone tensor parallelism."
+        )
     enable_sp = parallelism.enable_sequence_parallel
     enable_ep = parallelism.expert_parallel_degree > 1
     if parallelism.context_parallel_degree > 1:

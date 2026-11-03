@@ -207,6 +207,7 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
     h100_tests = build_h100_tests_list()
     assert {test.test_name for test in h100_tests} == {
         "deepseek_v3_fsdp+hybridep",
+        "deepseek_v4_1_flash_fsdp2_tp2_pp2_ep2",
         "dist_gemm",
         "fsdp_symm_mem",
         "kimi_k3_mm_allgather_kv_cp",
@@ -222,6 +223,7 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
 
 def test_b200_tests_are_registered_in_separate_suite() -> None:
     assert {test.test_name for test in build_b200_tests_list()} == {
+        "deepseek_v4_1_flash_fsdp2_tp2_pp2_ep2_numerics",
         "kimi_k3_fsdp2_tp2_ep2_pp2_vpp4",
         "kimi_k3_mm",
         "kimi_k3_mm_muon",

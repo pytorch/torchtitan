@@ -37,6 +37,9 @@ from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_mtp,
 )
+from torchtitan_recipes.tests.models.deepseek_v4_1 import (
+    deepseek_v4_1_debugmodel_tp2_ep2,
+)
 from torchtitan_recipes.tests.models.gpt_oss import (
     gpt_oss_debugmodel,
     gpt_oss_debugmodel_flex,
@@ -746,6 +749,14 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             use_real_pg=True,
         ),
         # Integration Test Cases for Qwen3 dense and MoE model
+        IntegrationTestDefinition(
+            configs=[deepseek_v4_1_debugmodel_tp2_ep2],
+            test_descr="DeepSeek V4.1 Flash TP and EP with SPMD type checking",
+            test_name="deepseek_v4_1_flash_tp2_ep2",
+            ngpu=2,
+            skip_rocm_test=True,
+            use_real_pg=True,
+        ),
         IntegrationTestDefinition(
             configs=[qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8],
             test_descr="Qwen3 MoE FSDP+TP+CP+EP (param groups)",

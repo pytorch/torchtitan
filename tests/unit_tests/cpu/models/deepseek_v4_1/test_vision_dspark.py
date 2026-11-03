@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.models.deepseek_v4_1 import build_model_config
+
 from torchtitan.models.deepseek_v4_1.state_dict_adapter import (
     DeepSeekV41StateDictAdapter,
 )
@@ -289,3 +290,19 @@ def test_drafter_rejects_owned_backbone_projections(model, component):
     )
     with pytest.raises(ValueError, match="frozen backbone"):
         replace(model.config.drafter, **{component: value})
+
+
+@pytest.mark.parametrize("enable_sequence_parallel", [False, True])
+def test_dspark_rejects_tensor_parallel_configuration(enable_sequence_parallel):
+    with pytest.raises(ValueError, match="DSpark currently requires"):
+        build_model_config(
+            "debugmodel",
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=2,
+                expert_parallel_degree=2,
+                enable_sequence_parallel=enable_sequence_parallel,
+            ),
+            seq_len=32,
+            num_draft_layers=3,
+        )
