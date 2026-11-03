@@ -40,6 +40,8 @@ def _replace_routed_experts(
                 "Dist-MoE requires an unmodified RoutedExperts.Config source; "
                 f"got {type(source).__qualname__} at {fqn!r}"
             )
+        if source.compute_dtype != "bfloat16":
+            raise ValueError("Dist-MoE requires bfloat16 expert compute_dtype.")
         if (
             type(source.w13) is not GroupedLinear.Config
             or type(source.w2) is not GroupedLinear.Config

@@ -149,6 +149,35 @@ class TestLinear(unittest.TestCase):
 
 
 class TestGroupedLinear(unittest.TestCase):
+    def test_grouped_gemm_preserves_operand_dtype_and_matches_dense_gradients(self):
+        for dtype in (torch.float32, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                grouped = GroupedLinear.Config(
+                    group_size=2,
+                    in_features=8,
+                    out_features=8,
+                ).build()
+                with torch.no_grad():
+                    grouped.weight.normal_(std=0.1)
+                input = torch.randn(7, 8, dtype=dtype, requires_grad=True)
+                ref_input = input.detach().clone().requires_grad_()
+                ref_weight = grouped.weight.detach().clone().requires_grad_()
+                output = grouped(input, torch.tensor([3, 7], dtype=torch.int32))
+                expected = torch.cat(
+                    (
+                        F.linear(ref_input[:3], ref_weight[0].to(dtype)),
+                        F.linear(ref_input[3:], ref_weight[1].to(dtype)),
+                    )
+                )
+                self.assertEqual(output.dtype, dtype)
+                torch.testing.assert_close(output, expected, rtol=0, atol=0)
+                output.float().square().mean().backward()
+                expected.float().square().mean().backward()
+                torch.testing.assert_close(input.grad, ref_input.grad, rtol=0, atol=0)
+                torch.testing.assert_close(
+                    grouped.weight.grad, ref_weight.grad, rtol=0, atol=0
+                )
+
     def test_num_linears_preserves_projection_axis_without_copy(self):
         """Multiple projections retain a zero-copy logical output axis."""
         grouped = GroupedLinear.Config(

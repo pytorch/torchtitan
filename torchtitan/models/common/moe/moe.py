@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import cast, Protocol
+from typing import cast, Literal, Protocol
 
 import spmd_types as spmd
 
@@ -17,6 +17,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch_remat as remat
 from torch.optim import Optimizer
+
+from torchtitan.config import TORCH_DTYPE_MAP
 
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.local_compile import local_compile
@@ -68,6 +70,8 @@ class RoutedExperts(Module):
         token_dispatcher: LocalTokenDispatcher.Config
         activation_fn: BinaryActivationFn.Config = field(default_factory=SwiGLU.Config)
         output_postprocess: Module.Config | None = None
+        compute_dtype: Literal["bfloat16", "float32"] = "bfloat16"
+        """Operand dtype for grouped expert GEMMs; FP32 supports reference comparisons."""
 
         def __post_init__(self) -> None:
             if self.w13.group_size != self.w2.group_size:
@@ -85,12 +89,15 @@ class RoutedExperts(Module):
                 raise ValueError("w13 output and w2 input dimensions must match")
             if self.w2.num_linears != 1:
                 raise ValueError("w2 must contain one down projection")
+            if self.compute_dtype not in ("bfloat16", "float32"):
+                raise ValueError("Expert compute_dtype must be bfloat16 or float32.")
 
     def __init__(self, config: Config):
         super().__init__()
         self.w13 = config.w13.build()
         self.w2 = config.w2.build()
         self.activation_fn = config.activation_fn.build()
+        self.compute_dtype = TORCH_DTYPE_MAP[config.compute_dtype]
         self.output_postprocess = (
             config.output_postprocess.build()
             if config.output_postprocess is not None
@@ -141,9 +148,9 @@ class RoutedExperts(Module):
 
         with maybe_set_sparse_mesh():
             # w13 and w2 declare their own remat regions (<fqn>.grouped_mm).
-            # The bf16 cast reads the dispatched tokens with bare ops.
+            # The dtype cast reads the dispatched tokens with bare ops.
             remat.recompute_needs_tensor(routed_input_RD)
-            gate_up_R2F = self.w13(routed_input_RD.bfloat16(), offsets_E)
+            gate_up_R2F = self.w13(routed_input_RD.to(self.compute_dtype), offsets_E)
             remat.recompute_needs_tensor(gate_up_R2F)
             hidden_RF = self.activation_fn(gate_up_R2F, offsets=offsets_E)
             routed_output_RD = self.w2(hidden_RF, offsets_E)
