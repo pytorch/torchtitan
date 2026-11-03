@@ -65,11 +65,14 @@ def _replace_vllm_layer_configs(model_config):
     # Defer imports until vLLM constructs the model, after the generator has set
     # that environment. Import the GDN adapter only for hybrid models so other
     # models do not acquire its vLLM-specific dependencies.
-    from torchtitan.rl.generator.vllm.attention import (
+    from torchtitan.rl.generator.vllm.attention.attention import (
         get_attention_dimensions,
         VLLMInnerAttention,
     )
-    from torchtitan.rl.generator.vllm.mla import VLLMMLAAttention, VLLMMLAInnerAttention
+    from torchtitan.rl.generator.vllm.attention.mla import (
+        VLLMMLAAttention,
+        VLLMMLAInnerAttention,
+    )
 
     new_layers = []
     for layer_idx, layer_cfg in enumerate(model_config.layers):
@@ -140,7 +143,7 @@ def _replace_vllm_layer_configs(model_config):
 
         elif isinstance(attention_cfg, GDN.Config):
             delta_net_cfg = attention_cfg
-            from torchtitan.rl.generator.vllm.gdn import VLLMInnerGDN
+            from torchtitan.rl.generator.vllm.attention.gdn import VLLMInnerGDN
 
             vllm_inner_gdn_cfg = VLLMInnerGDN.Config(
                 layer_idx=layer_idx,
@@ -161,7 +164,7 @@ def _replace_vllm_layer_configs(model_config):
 
         elif isinstance(attention_cfg, KDA.Config):
             kda_cfg = attention_cfg
-            from torchtitan.rl.generator.vllm.kda import VLLMInnerKDA
+            from torchtitan.rl.generator.vllm.attention.kda import VLLMInnerKDA
 
             vllm_inner_kda_cfg = VLLMInnerKDA.Config(
                 num_heads=kda_cfg.n_heads,

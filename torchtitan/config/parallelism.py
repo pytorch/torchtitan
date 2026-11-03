@@ -191,6 +191,12 @@ class ParallelismConfig:
     """
 
     def __post_init__(self):
+        layers_per_stage = self.pipeline_parallel_layers_per_stage
+        if layers_per_stage is not None and layers_per_stage < 1:
+            raise ValueError(
+                "parallelism.pipeline_parallel_layers_per_stage must be positive "
+                f"when set; got {layers_per_stage}."
+            )
         if (
             self.pipeline_parallel_module_fqns_per_model_part is not None
             and self.pipeline_parallel_layers_per_stage is not None

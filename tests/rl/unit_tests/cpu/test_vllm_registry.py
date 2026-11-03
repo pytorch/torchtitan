@@ -21,7 +21,8 @@ from torchtitan.models.deepseek_v3 import build_model_config as build_dsv3_confi
 from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_config
 from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
-from torchtitan.rl.generator.vllm import gdn, kda, registry
+from torchtitan.rl.generator.vllm import registry
+from torchtitan.rl.generator.vllm.attention import gdn, kda
 from torchtitan.rl.generator.vllm.registry import model_config_to_hf_config_dict
 
 from transformers import GenerationConfig, PretrainedConfig
@@ -48,7 +49,7 @@ def test_hf_config_adds_no_stop_token():
 
 def test_hf_config_uses_full_attention_after_sliding_attention(monkeypatch):
     from torchtitan.models.llama3 import build_model_config as build_llama3_config
-    from torchtitan.rl.generator.vllm import attention
+    from torchtitan.rl.generator.vllm.attention import attention
 
     config = build_llama3_config("debugmodel", parallelism=ParallelismConfig())
     config.layers[
