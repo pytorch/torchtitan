@@ -326,6 +326,24 @@ class TestChatDatasetPrefixValidation(unittest.TestCase):
             processor(_load_dataset()[0], np.random.default_rng(0))
 
 
+class TestHuggingFaceTokenizerChatTemplateTokens(unittest.TestCase):
+    """Asset chat templates must receive bos_token and eos_token."""
+
+    def test_apply_chat_template_includes_bos_and_eos_once(self):
+        tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
+        rendered = tokenizer.apply_chat_template(
+            [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "yo"},
+            ]
+        )
+        self.assertIn("<|begin_of_text|>", rendered)
+        self.assertIn("<|end_of_text|>", rendered)
+        # ChatProcessor encodes the rendered string with add_bos=True.
+        tokens = tokenizer.encode(rendered, add_bos=True, add_eos=False)
+        self.assertEqual(tokens.count(tokenizer.bos_id), 1)
+
+
 class TestHFBackendTokenizerChatLabels(unittest.TestCase):
     """HFBackendTokenizer chat samples get one BOS and supervise only the answer."""
 
