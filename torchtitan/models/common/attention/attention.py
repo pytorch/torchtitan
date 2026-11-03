@@ -393,6 +393,8 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
             names, applied via ``sdpa_kernel(..., set_priority=True)``.
             Names keep the config plain data: ``SDPBackend`` is a pybind11
             enum, which ``pprint`` (``--print-config``) cannot format.
+            Deterministic mode skips cuDNN, whose backward is not
+            deterministic.
         """
 
         @property
@@ -506,7 +508,23 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
 
         attn_dtype = _varlen_attn_dtype(v_THV.dtype)
 
-        with sdpa_kernel(self.sdpa_backends, set_priority=True):
+        sdpa_backends = self.sdpa_backends
+        if torch.are_deterministic_algorithms_enabled():
+            # TODO: Remove once the cuDNN varlen backward honors
+            # use_deterministic_algorithms (upstream issue not filed yet). It
+            # neither raises nor runs deterministically, so repeated runs differ.
+            sdpa_backends = [
+                backend
+                for backend in sdpa_backends
+                if backend != SDPBackend.CUDNN_ATTENTION
+            ]
+            if not sdpa_backends:
+                raise ValueError(
+                    "Deterministic mode needs a varlen backend other than cuDNN. "
+                    'Add "FLASH_ATTENTION" to sdpa_backends.'
+                )
+
+        with sdpa_kernel(sdpa_backends, set_priority=True):
             result = varlen_attn_fn(
                 q_THK.to(attn_dtype),
                 k_THK.to(attn_dtype),
