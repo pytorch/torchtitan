@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 import torch_remat as remat
@@ -21,7 +22,7 @@ class GptOssGroupedLinear(GroupedLinear):
 
     @dataclass(kw_only=True, slots=True)
     class Config(GroupedLinear.Config):
-        pass
+        bias: ClassVar[bool] = True
 
     def __init__(self, config: Config):
         super().__init__(config)
