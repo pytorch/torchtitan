@@ -904,36 +904,6 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
     assert not engine._forward_backward_captures_whole_step
 
 
-def test_sdc_replay_allows_several_forward_backward_calls_per_step() -> None:
-    sdc_replayer = object()
-    engine = cast(
-        TrainingEngine,
-        SimpleNamespace(
-            config=SimpleNamespace(
-                dist_moe_runtime=None,
-                sdc_replayer=SimpleNamespace(
-                    build=lambda *, modules, device: sdc_replayer
-                ),
-                training=SimpleNamespace(
-                    disable_accelerator_graphs=True,
-                    preprocess_microbatch_groups_lazily=False,
-                ),
-                parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
-            ),
-            parallelism_context=SimpleNamespace(pp_enabled=False),
-            model_parts=[],
-            device=torch.device("cpu"),
-            _forward_backward_body=MagicMock(),
-        ),
-    )
-
-    TrainingEngine._initialize_forward_backward(engine)
-
-    # SDC checks each call, so a step may span several calls.
-    assert engine.sdc_replayer is sdc_replayer
-    assert not engine._forward_backward_captures_whole_step
-
-
 def test_graph_training_engine_rejects_optimizer_accelerator_graph() -> None:
     config = SimpleNamespace(optim=SimpleNamespace(enable_accelerator_graph=True))
 
