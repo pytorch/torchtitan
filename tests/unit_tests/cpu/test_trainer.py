@@ -1277,8 +1277,9 @@ def test_trainer_accumulates_reused_accelerator_graph_losses():
     assert trainer.num_completed_steps == 2
 
 
+@pytest.mark.parametrize("has_aux_loss", [True, False])
 def test_step_aux_loss_denominators_sum_counts_over_dp_in_one_all_reduce(
-    monkeypatch,
+    monkeypatch, has_aux_loss: bool
 ) -> None:
     all_reduced: list[torch.Tensor] = []
 
@@ -1290,12 +1291,16 @@ def test_step_aux_loss_denominators_sum_counts_over_dp_in_one_all_reduce(
     monkeypatch.setattr(
         "torchtitan.training_engine.dist_utils.dist_sum_tensor", dist_sum_tensor
     )
+    aux_loss_configs = [("router.aux_loss", AuxLoss.Config(coeff=1.0))] * has_aux_loss
     engine = cast(
         TrainingEngine,
         SimpleNamespace(
             device=torch.device("cpu"),
             parallelism_context=SimpleNamespace(
                 dp_enabled=True, get_mesh=lambda name: name
+            ),
+            model_config=SimpleNamespace(
+                traverse=lambda config_type: iter(aux_loss_configs)
             ),
         ),
     )
@@ -1309,9 +1314,14 @@ def test_step_aux_loss_denominators_sum_counts_over_dp_in_one_all_reduce(
         ],
     )
 
-    # One all-reduce of [loss tokens, routed tokens]; then 16 routed per 8 loss tokens.
-    torch.testing.assert_close(all_reduced, [torch.tensor([2, 8])])
-    torch.testing.assert_close(denominators, torch.tensor([2.0]))
+    if has_aux_loss:
+        # One all-reduce of [loss tokens, routed tokens]; then 16 routed per 8 loss tokens.
+        torch.testing.assert_close(all_reduced, [torch.tensor([2, 8])])
+        torch.testing.assert_close(denominators, torch.tensor([2.0]))
+    else:
+        # No auxiliary loss reads D: no collective, and this rank's 8 / 2.
+        assert all_reduced == []
+        torch.testing.assert_close(denominators, torch.tensor([4.0]))
 
 
 @pytest.mark.parametrize("disable_accelerator_graphs", [False, True])

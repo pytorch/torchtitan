@@ -39,7 +39,7 @@ from torchtitan.distributed.pipeline_parallel import (
     prepare_pipeline_schedule_for_accelerator_graph,
 )
 from torchtitan.models.base import BaseModel
-from torchtitan.models.common.aux_loss import aux_loss_denominators
+from torchtitan.models.common.aux_loss import aux_loss_denominators, AuxLoss
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import (
     build_device_memory_monitor,
@@ -938,6 +938,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             rank 0: routing_token_counts [8], loss_token_count 2
             rank 1: routing_token_counts [8], loss_token_count 6
             -> tensor([2.0]) on both ranks: 16 routed tokens per 8 loss tokens
+            -> without an auxiliary loss, rank 0 gets tensor([4.0]) and no all-reduce runs
         """
         # [N, R_0, ..., R_d]: the loss tokens, then the routed tokens of every depth.
         local_counts = torch.stack(
@@ -954,7 +955,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         ).sum(dim=0)
         # non_blocking: a pageable copy would wait for the previous step's update.
         counts = local_counts.to(self.device, non_blocking=True)
-        if self.parallelism_context.dp_enabled:
+        # Only an auxiliary loss reads D. A model without one skips the all-reduce, so dense
+        # models run one collective per step (optim_step's), and get this rank's ratio.
+        if (
+            self.parallelism_context.dp_enabled
+            and next(self.model_config.traverse(AuxLoss.Config), None) is not None
+        ):
             counts = dist_utils.dist_sum_tensor(
                 counts, self.parallelism_context.get_mesh("dp")
             )
