@@ -17,64 +17,105 @@ from torchtitan.components.loss import compute_logprobs, compute_topk_logprobs, 
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.rl.trainer.losses.dapo import MAX_LOG_RATIO, normalize
 
-# Floor for the probability mass outside the top-k: `1 - sum_H` can round to <= 0 in fp32.
+# Floor for each tail mass (the probability outside the top-k): it can round to <= 0 in fp32.
 _MIN_TAIL_MASS = 1e-6
 
 
 class ScoreCenteringLoss(Loss[torch.Tensor]):
     """REINFORCE loss with score centering (https://arxiv.org/abs/2609.20807).
 
-    When the generator's distribution `q` differs from the trainer's `p` (quantization,
-    kernels, staleness), the expected policy gradient at each position splits (Eq. 3):
+    Score centering stops the generator's small errors from steering the trainer.
 
-        E_q[A * grad log p_y] = drift + signal
-        drift  = E_q[A] * sum_v q_v grad log p_v    # pulls p toward q; no reward information
-        signal = Cov_q(A, grad log p_y)
+    The generator (e.g. vLLM) samples tokens, and the trainer learns from them. Their
+    probabilities differ a little: quantization, kernels, stale weights. Give every token the
+    same advantage, 1, so the reward says nothing. A correct loss then leaves the trainer as it
+    is. Below: one position, a 3-token vocab, and the trainer after one SGD step on its logits
+    (lr = 1) with the gradient averaged over the generator's samples. One # is 0.05.
 
-    Each weight sync feeds the drift back into the generator, so it compounds. Score
-    centering subtracts the expected score `sum_v q_v w(p_v / q_v) grad log p_v` (`w` is the
-    token weight below) from each token's weighted score, which cancels the drift. The sum
-    runs over the generator's top-k tokens `H`; outside `H`, `q` is modeled as `p` rescaled
-    to the generator's tail mass (Eq. 7-12). The token weight `w(r)` is one of:
+                            token 0              token 1              token 2
+        generator           ####           0.20  ############## 0.70  ## 0.10
+        trainer, before     ############   0.60  ######         0.30  ## 0.10
+        after one step:
+          plain REINFORCE   ########       0.42  #########      0.47  ## 0.11
+          truncated IS      ###########    0.57  #######        0.33  ## 0.10
+          masked IS         #############  0.67  #####          0.23  ## 0.10
+          this loss         ############   0.60  ######         0.30  ## 0.10
 
-        max_ratio=C            w(r) = min(r, C)                    truncated IS (default)
-        ratio_band=(lo, hi)    w(r) = r if lo <= r <= hi else 0    masked IS
+    - At advantage 1, plain REINFORCE moves the trainer toward the generator (a negative
+      advantage pushes it away). The paper calls this "drift" (Eq. 3). Each weight sync feeds
+      it back into the generator, so it compounds.
+    - Importance sampling (IS) weights each sampled token by `ratio`, its trainer prob over its
+      generator prob. On average, each token is then trained as if its probability were its
+      generator prob times its weight. Exact IS gives the trainer's probs, so nothing moves.
+    - Large ratios make exact IS noisy, so the weight is capped (`max_ratio=2`: token 0 gets 2
+      for its ratio 3) or masked (`ratio_band=(0.5, 5)`: token 1 gets 0 for its ratio 0.43).
+      Both still move the trainer: the cap trains token 0 as if its probability were 0.2 * 2 = 0.4.
+    - This loss adds a `correction` that cancels the move, in both modes.
 
-    and enters as:
+    The loss at one position, as code. The generator also sends its top-k: its k most likely
+    tokens and their logprobs. The "tail" is every other token. `weight(r)` is
+    `min(r, max_ratio)` (truncated IS, the default), or `r if lo <= r <= hi else 0` when
+    `ratio_band=(lo, hi)` is set (masked IS).
 
-        rho        = (1 - sum_H q) / (1 - sum_H p)
-        alpha      = rho * w(1 / rho)                    # weight of the modeled tail
-        token_loss = -A * (detach(w(p_y / q_y)) * log p_y
-                           - sum_H detach(q_v * w(p_v / q_v) - alpha * p_v) * log p_v)
-        loss       = sum(token_loss) / global_loss_token_counts
+        ratio        = exp(trainer_logprobs - generator_logprobs)       # the sampled token
+        topk_ratio   = trainer_topk_probs / generator_topk_probs        # each top-k token
+        rho          = (1 - generator_topk_mass) / (1 - trainer_topk_mass)   # tail mass ratio
+        token_weight = weight(ratio)                                    # no gradient
+        weighted_generator_topk_probs = generator_topk_probs * weight(topk_ratio)
+        alpha        = rho * weight(1 / rho)                            # the tail's weight
+        coefficients = weighted_generator_topk_probs - alpha * trainer_topk_probs  # no gradient
+        correction   = sum(coefficients * trainer_topk_logprobs)
+        token_loss   = -advantages * (token_weight * trainer_logprobs - correction)
+        loss         = sum(token_loss) / global_loss_token_counts
 
-    When `p == q`, every weight is 1 and the correction is 0: plain REINFORCE. Where the weight
-    is exact (`w(r) = r`), `q_v * w(p_v / q_v) = p_v`: importance sampling alone cancels the
-    drift there. Truncation and masking bring part of it back, and the correction cancels that
-    part. So it is 0 unless a top-k ratio or the tail ratio is truncated or masked.
+    In the picture, the top-k is tokens 0 and 1, and both tails are 0.1, so rho = 1, alpha = 1:
 
-    Example (one position, k=2, max_ratio=2):
+        max_ratio=2:         coefficients = [0.2 * 2, 0.7 * (3/7)] - [0.6, 0.3] = [-0.2, 0.0]
+        ratio_band=(0.5, 5): coefficients = [0.2 * 3, 0.7 * 0]     - [0.6, 0.3] = [0.0, -0.3]
 
-        q_topk = [0.1, 0.7],  p_topk = [0.5, 0.3]   # tails 0.2 and 0.2: rho = 1, alpha = 1
-        q_topk * w(p_topk / q_topk) = [0.2, 0.3]     # token 0's ratio 5 is truncated to 2
-        coefficients = [0.2, 0.3] - alpha * p_topk = [-0.3, 0.0]
-        # At A = 1, truncated IS alone weights token 0 by 0.2 where exact IS gives 0.5. So its
-        # expected gradient has an extra -0.3 * grad log p_0, which lowers p_0 toward q_0 = 0.1.
-        # The correction adds +0.3 * grad log p_0, so the net drift is 0.
+    A capped tail, with max_ratio=2: trainer_topk_probs = [0.5, 0.3] (tail 0.2) and
+    generator_topk_probs = [0.3, 0.68] (tail 0.02). The tail gets weight 2 for its ratio 10, so
+    at advantage 1, IS alone lowers the tail's logit. The correction can only use the top-k
+    logprobs, and lowering them raises the tail. So tokens 0 and 1 get nonzero coefficients.
+
+        rho = 0.02 / 0.2 = 0.1,  alpha = 0.1 * weight(10) = 0.2
+        weighted_generator_topk_probs = [0.5, 0.3]   # ratios 1.67 and 0.44: exact weights
+        coefficients = [0.5, 0.3] - 0.2 * [0.5, 0.3] = [0.4, 0.24]
+
+    Why it cancels (Eq. numbers as in the arXiv PDF). For token v, `trainer_probs[v]` and
+    `generator_probs[v]` are the two models' probs, `ratio[v]` is trainer over generator, and
+    `score[v]` is `grad(log trainer_probs[v])`. At one position, with every advantage 1, the
+    weighted update averages over the generator's samples to
+
+        expected_weighted_score = sum_v generator_probs[v] * weight(ratio[v]) * score[v]
+
+    - The generator sends no tail probs. The tail model (Eq. 7) assumes its tail is a scaled
+      copy of the trainer's: `generator_probs[v] = rho * trainer_probs[v]` outside the top-k.
+      Then every tail ratio is `1 / rho`, and each tail term is
+      `alpha * trainer_probs[v] * score[v]`.
+    - `sum_v trainer_probs[v] * score[v]` is `grad(1) = 0`. So the tail terms sum to
+      `-alpha * sum_{v in top-k} trainer_probs[v] * score[v]`, and `expected_weighted_score`
+      is `grad(correction)` (Eq. 10).
+    - So under the tail model, for any advantages, `-grad(token_loss)` at sampled token y averages
+      to `covariance(advantages, token_weight * score[y])`, the reward's signal (Eq. 5, 12).
+    - With no capped or masked top-k or tail ratio, `coefficients` is 0. So a generator that
+      matches the trainer gives plain REINFORCE.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Loss.Config):
         max_ratio: float = 2.0
-        """Truncated IS (the paper's TIS+SC): each token is weighted by `min(p / q, max_ratio)`.
-        Must be >= 1. 2.0 is the paper's TIS cap (App. A.3). Unused when `ratio_band` is set."""
+        """Truncated IS (the paper's TIS+SC): `weight(r) = min(r, max_ratio)`, where `r` is a
+        token's trainer prob over its generator prob. Must be >= 1. 2.0 is the paper's TIS cap
+        (App. A.3). Unused when `ratio_band` is set."""
 
         ratio_band: tuple[float, float] | None = None
-        """Masked IS, used instead of `max_ratio` when set: absolute bounds `(lo, hi)` on the ratio
-        `r = p / q` (unlike `DAPOLoss.ratio_clip_*`, which are offsets from 1). A token with
-        `lo <= r <= hi` is weighted by `r`, otherwise by 0; the same rule masks each top-k entry
-        and the modeled tail, whose ratio is `(1 - sum_H p) / (1 - sum_H q)`. Requires
-        `lo <= 1 <= hi`, so a generator that matches the trainer stays plain REINFORCE.
+        """Masked IS, used instead of `max_ratio` when set:
+        `weight(r) = r if lo <= r <= hi else 0`. `(lo, hi)` are absolute bounds on the ratio
+        (unlike `DAPOLoss.ratio_clip_*`, which are offsets from 1). The same rule applies to the
+        sampled token's `ratio`, to each top-k token's `topk_ratio` and to the tail's ratio
+        `1 / rho`. Requires `0 < lo <= 1 <= hi`. With `lo <= 1 <= hi`, a generator that matches
+        the trainer stays plain REINFORCE.
         Example: `(0.5, 5.0)`, the paper's masked-IS band (App. A.3)."""
 
         global_vocab_size: int | None = None
@@ -156,7 +197,7 @@ class ScoreCenteringLoss(Loss[torch.Tensor]):
         )
         effective_loss_mask = loss_mask & torch.isfinite(generator_logprobs)
 
-        # The ratio weights and the correction coefficients are constants in the gradient.
+        # `token_weight` and `coefficients` are constants: no gradient flows through them.
         with torch.no_grad():
             masked_log_ratio = torch.where(
                 effective_loss_mask, trainer_logprobs - generator_logprobs, 0.0
@@ -177,25 +218,27 @@ class ScoreCenteringLoss(Loss[torch.Tensor]):
                     masked_log_ratio <= log_high
                 )
                 token_weight = torch.where(token_in_band, ratio, 0.0)
-                # q * w(p / q) = p inside the band and 0 outside, without dividing by q.
+                # generator_topk_probs * weight(topk_ratio), without dividing by a generator prob:
+                # trainer_topk_probs inside the band, 0 outside.
                 topk_log_ratio = trainer_topk_logprobs - generator_topk_logprobs
                 weighted_generator_topk_probs = torch.where(
                     (topk_log_ratio >= log_low) & (topk_log_ratio <= log_high),
                     trainer_topk_probs,
                     0.0,
                 )
-                # rho * w(1 / rho): 1 if the tail ratio p_tail / q_tail = 1 / rho is in the band.
+                # alpha = rho * weight(1 / rho): 1 if the tail ratio 1 / rho is in the band, else 0.
                 tail_log_ratio = -rho.log()
                 alpha = ((tail_log_ratio >= log_low) & (tail_log_ratio <= log_high)).to(
                     rho.dtype
                 )
             else:
                 token_weight = torch.clamp(ratio, max=self.max_ratio)
-                # q * min(p / q, C) = min(p, C * q), which stays finite when q underflows.
+                # generator_topk_probs * min(topk_ratio, max_ratio), without the division, so it
+                # stays finite when a generator prob underflows to 0.
                 weighted_generator_topk_probs = torch.minimum(
                     trainer_topk_probs, self.max_ratio * generator_topk_probs
                 )
-                # rho * min(1 / rho, C) = min(1, C * rho)
+                # alpha = rho * min(1 / rho, max_ratio) = min(1, max_ratio * rho)
                 alpha = torch.clamp(self.max_ratio * rho, max=1.0)
             coefficients = (
                 weighted_generator_topk_probs - alpha.unsqueeze(-1) * trainer_topk_probs
@@ -224,7 +267,8 @@ class ScoreCenteringLoss(Loss[torch.Tensor]):
                 "loss/ratio_mean": normalize(
                     (ratio * effective_loss_mask).sum(), global_loss_token_counts
                 ),
-                # Mean of log p - log q over loss tokens: the k1 estimate of -KL(q || p).
+                # Mean of masked_log_ratio over loss tokens (not clamped, unlike `ratio`): the k1
+                # estimate of -KL(generator || trainer).
                 "bit_wise/logprob_diff/mean": normalize(
                     masked_log_ratio.float().sum(), global_loss_token_counts
                 ),
@@ -238,7 +282,8 @@ class ScoreCenteringLoss(Loss[torch.Tensor]):
                     (token_entropy * effective_loss_mask).sum(),
                     global_loss_token_counts,
                 ),
-                # Share of q (and p) inside the generator's top-k; the paper sees > 99.9% at k=128.
+                # Generator and trainer prob mass in the top-k. At k=128 the paper sees > 99.9%
+                # for the generator in most settings (App. A.4).
                 "score_centering/generator_topk_mass/mean": normalize(
                     torch.where(effective_loss_mask, generator_topk_mass, 0.0).sum(),
                     global_loss_token_counts,
@@ -247,14 +292,14 @@ class ScoreCenteringLoss(Loss[torch.Tensor]):
                     torch.where(effective_loss_mask, trainer_topk_mass, 0.0).sum(),
                     global_loss_token_counts,
                 ),
-                # sum_H |q * w - alpha * p|: 0 when trainer and generator agree, or when no
-                # top-k or tail ratio is truncated or masked.
+                # sum(|coefficients|): 0 when no top-k ratio and no tail ratio is capped or
+                # masked, e.g. when the generator matches the trainer.
                 "score_centering/coefficient_l1/mean": normalize(
                     coefficients.abs().sum(-1).sum(), global_loss_token_counts
                 ),
-                # L1 norm of the correction's logit gradient: sum_H |c - p * sum_H c| +
-                # (1 - sum_H p) * |sum_H c|. Unlike coefficient_l1, it stays ~0 when an
-                # all-or-none tail flips at a near-deterministic position.
+                # L1 norm of the correction's logit gradient (topk_logit_grad, tail_logit_grad).
+                # Unlike coefficient_l1, it stays ~0 when the masked tail's alpha flips between
+                # 0 and 1 at a position whose top-k holds almost all of the trainer's mass.
                 "score_centering/logit_correction_l1/mean": normalize(
                     logit_correction_l1.sum(), global_loss_token_counts
                 ),
