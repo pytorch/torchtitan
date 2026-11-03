@@ -445,7 +445,8 @@ class HuggingFaceTokenizer(BaseTokenizer):
 
         Args:
             text (str): The text to encode
-            add_bos (bool): Whether to add BOS token
+            add_bos (bool): Whether to add a BOS token. Skipped if text
+                already starts with bos_token.
             add_eos (bool): Whether to add EOS token
 
         Returns:

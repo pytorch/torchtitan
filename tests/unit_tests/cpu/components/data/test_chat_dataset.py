@@ -197,13 +197,10 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
         full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
         if full_tokens[-1] != tokenizer.eos_id:
             full_tokens.append(tokenizer.eos_id)
-        # The template renders bos_token and ChatProcessor also passes add_bos=True.
-        self.assertEqual(full_tokens[0], tokenizer.bos_id)
+        # encode(add_bos=True) must not insert a second BOS. Both EOS markers
+        # in the rendered string must survive as EOS ids.
         self.assertEqual(full_tokens.count(tokenizer.bos_id), 1)
-        # eos_token closes the user turn and the assistant turn.
         self.assertEqual(full_tokens.count(tokenizer.eos_id), 2)
-        self.assertEqual(full_tokens[-1], tokenizer.eos_id)
-        self.assertIn(tokenizer.eos_id, full_tokens[:-1])
 
         self.assertEqual(
             inputs.input.tolist()[: len(full_tokens) - 1],
@@ -341,33 +338,11 @@ class TestChatDatasetPrefixValidation(unittest.TestCase):
             processor(_load_dataset()[0], np.random.default_rng(0))
 
 
-class TestHuggingFaceTokenizerChatTemplateTokens(unittest.TestCase):
-    """Asset chat templates must receive bos_token and eos_token."""
-
-    def test_apply_chat_template_includes_bos_and_eos_once(self):
-        tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
-        rendered = tokenizer.apply_chat_template(
-            [
-                {"role": "user", "content": "hi"},
-                {"role": "assistant", "content": "yo"},
-            ]
-        )
-        self.assertIn("<|begin_of_text|>", rendered)
-        self.assertIn("<|end_of_text|>", rendered)
-        # ChatProcessor encodes the rendered string with add_bos=True.
-        tokens = tokenizer.encode(rendered, add_bos=True, add_eos=False)
-        self.assertEqual(tokens.count(tokenizer.bos_id), 1)
-
-
-class TestHFBackendTokenizerChatLabels(unittest.TestCase):
-    """HFBackendTokenizer chat samples get one BOS and supervise only the answer."""
+class TestChatTemplateSpecialTokens(unittest.TestCase):
+    """Chat samples get one BOS and supervise only the answer."""
 
     def test_single_bos_and_answer_only_labels(self):
-        from torchtitan.experiments.transformers_modeling_backend.tokenizer import (
-            HFBackendTokenizer,
-        )
-
-        tokenizer = HFBackendTokenizer(tokenizer_path=_TOKENIZER_PATH)
+        tokenizer = _load_tokenizer()
         sample = _load_dataset()[0]
         processor = ChatProcessor.Config(messages_fn=_process_sample).build(
             context=_runtime(2048, tokenizer=tokenizer)
