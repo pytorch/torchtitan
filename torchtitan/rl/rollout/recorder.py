@@ -167,7 +167,13 @@ class RolloutSampleRecorder(Configurable):
             encoded["completion_token_ids"] = turn.completion_token_ids.tolist()
         if self._log_logprobs:
             encoded["completion_logprobs"] = turn.completion_logprobs.tolist()
-            for key in ("completion_topk_token_ids", "completion_topk_logprobs"):
-                rows = getattr(turn, key)
-                encoded[key] = None if rows is None else rows.tolist()
+            # Written as null at k=0: every RolloutTurn field is encoded.
+            topk_token_ids = turn.completion_topk_token_ids
+            topk_logprobs = turn.completion_topk_logprobs
+            encoded["completion_topk_token_ids"] = (
+                None if topk_token_ids is None else topk_token_ids.tolist()
+            )
+            encoded["completion_topk_logprobs"] = (
+                None if topk_logprobs is None else topk_logprobs.tolist()
+            )
         return encoded

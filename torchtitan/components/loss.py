@@ -508,18 +508,28 @@ def compute_topk_logprobs(
 
     Like `compute_logprobs`, but for k token ids per position. A `vocab_parallel_group`
     means `logits` hold this rank's vocab shard; the result is exact and identical on every
-    rank of the group, without gathering the vocab.
+    rank of the group, without gathering the vocab. Batch-invariant mode gathers the vocab,
+    as `compute_logprobs` does, so the result matches the vLLM generator's top-k bitwise.
 
     Example:
 
         logits = log([[0.5, 0.3, 0.2]]);  token_ids = [[2, 0]]  ->  log([[0.2, 0.5]])
     """
     token_ids = token_ids.long()
-    if vocab_parallel_group is None:
-        return torch.log_softmax(logits.float(), dim=-1).gather(-1, token_ids)
-    return _VocabParallelTopKLogprobs.apply(
-        logits, token_ids, vocab_parallel_group, global_vocab_size
-    )
+    if vocab_parallel_group is not None:
+        if global_vocab_size is None:
+            raise ValueError(
+                "global_vocab_size is required for vocab-parallel top-k logprobs"
+            )
+        if not is_in_batch_invariant_mode():
+            return _VocabParallelTopKLogprobs.apply(
+                logits, token_ids, vocab_parallel_group, global_vocab_size
+            )
+        # dst=I, as in compute_logprobs: backward slices the grad back to this rank's shard.
+        logits = spmd.redistribute(
+            logits, vocab_parallel_group, src=spmd.S(-1), dst=spmd.I
+        )
+    return torch.log_softmax(logits.float(), dim=-1).gather(-1, token_ids)
 
 
 class _VocabParallelTopKLogprobs(torch.autograd.Function):

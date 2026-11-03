@@ -46,6 +46,20 @@ def test_batch_invariance_gathers_vocab_shards(monkeypatch):
     torch.testing.assert_close(logprobs, expected_logprobs)
     torch.testing.assert_close(entropy, expected_entropy)
 
+    # The top-k path gathers too, so it matches the generator's full-vocab logprobs bitwise.
+    topk_token_ids = torch.tensor([[3, 0], [1, 2]])
+    topk_logprobs = loss_module.compute_topk_logprobs(
+        local_logits,
+        topk_token_ids,
+        vocab_parallel_group=tp_group,
+        global_vocab_size=full_logits.shape[-1],
+    )
+    assert len(calls) == 2
+    assert torch.equal(
+        topk_logprobs,
+        torch.log_softmax(full_logits, dim=-1).gather(-1, topk_token_ids),
+    )
+
 
 def test_vocab_parallel_policy_stats_require_global_vocab_size(monkeypatch):
     monkeypatch.setattr(loss_module, "is_in_batch_invariant_mode", lambda: False)

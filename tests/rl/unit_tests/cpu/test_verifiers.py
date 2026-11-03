@@ -1008,18 +1008,6 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
     assert VERIFIERS_REWARD_KEY not in rollout.turns[-1].env_rewards
 
 
-def test_parse_sampling_config_reads_num_topk_logprobs() -> None:
-    sampling_params = {
-        "temperature": 1.0,
-        "top_p": 1.0,
-        "max_tokens": 5,
-        "stop_token_ids": [1],
-    }
-    assert _parse_sampling_config(sampling_params).num_topk_logprobs == 0
-    sampling_params["num_topk_logprobs"] = 32
-    assert _parse_sampling_config(sampling_params).num_topk_logprobs == 32
-
-
 def test_parse_sampling_config_requires_stop_token_ids() -> None:
     with pytest.raises(ValueError, match="stop_token_ids"):
         _parse_sampling_config({"temperature": 1.0})

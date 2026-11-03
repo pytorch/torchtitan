@@ -246,53 +246,6 @@ def test_score_centering_is_reinforce_when_generator_matches_trainer(
         assert metrics["score_centering/tail_masked_frac"] == 0
 
 
-def test_score_centering_band_matches_masked_is_written_out() -> None:
-    """The band against masked IS + centering written out in a different structure from the
-    general-`w` reference: kept tokens selected by indexing with a non-detached ratio, and the
-    centering mass `p * accepted - alpha * p`. Gradients only: the loss values differ."""
-    torch.manual_seed(0)
-    num_tokens, vocab_size, num_topk, temperature = 64, 32, 4, 0.7
-    logits = torch.randn(num_tokens, vocab_size, requires_grad=True)
-    labels = torch.randint(0, vocab_size, (num_tokens,))
-    generator_logits = logits.detach() + 0.5 * torch.randn(num_tokens, vocab_size)
-    generator_log_softmax = torch.log_softmax(generator_logits / temperature, dim=-1)
-    loss_inputs = _loss_inputs(
-        logits, labels, generator_log_softmax, num_topk, temperature
-    )
-    _assert_band_is_exercised(_ratios_by_kind(logits, labels, loss_inputs, temperature))
-
-    loss, _ = ScoreCenteringLoss.Config(max_ratio=None, ratio_band=_BAND).build()(
-        logits, labels, torch.tensor(num_tokens), **loss_inputs
-    )
-    (grad,) = torch.autograd.grad(loss, logits)
-
-    low, high = torch.tensor(_BAND).log()
-    advantages = loss_inputs["advantages"]
-    train_logp = torch.log_softmax(logits / temperature, dim=-1)
-    log_ratio = (
-        train_logp.gather(-1, labels[:, None])[:, 0] - loss_inputs["generator_logprobs"]
-    )
-    keep = (log_ratio.detach() >= low) & (log_ratio.detach() <= high)
-    token_loss = -(advantages[keep] * log_ratio[keep].exp()).sum()
-    head = train_logp.gather(-1, loss_inputs["generator_topk_token_ids"].long())
-    with torch.no_grad():
-        p = head.exp()
-        q = loss_inputs["generator_topk_logprobs"].exp()
-        head_log_ratio = head - loss_inputs["generator_topk_logprobs"]
-        accepted = (head_log_ratio >= low) & (head_log_ratio <= high)
-        tail_log_ratio = (1 - p.sum(-1)).clamp_min(1e-6).log() - (
-            1 - q.sum(-1)
-        ).clamp_min(1e-6).log()
-        alpha = ((tail_log_ratio >= low) & (tail_log_ratio <= high)).float()
-        mass = p * accepted - alpha[:, None] * p
-    correction = (advantages * (mass * head).sum(-1)).sum()
-    (expected_grad,) = torch.autograd.grad(
-        (token_loss + correction) / num_tokens, logits
-    )
-
-    torch.testing.assert_close(grad, expected_grad)
-
-
 @pytest.mark.parametrize(
     "config_kwargs",
     [

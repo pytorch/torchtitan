@@ -500,6 +500,16 @@ def _finished_request(request_output: RequestOutput) -> FinishedRequest:
         # logprobs=k > 0: each token holds k + 1 entries, [sampled, top-1, ..., top-k].
         # k is per request (validation asks for 0), so read it from the layout.
         row_width = len(token_logprobs) // num_tokens
+        # A different layout would shift every row silently, so check the sampled column.
+        sampled_token_ids = flat_logprobs.token_ids[::row_width]
+        if len(token_logprobs) != num_tokens * row_width or sampled_token_ids != list(
+            completion_output.token_ids
+        ):
+            raise RuntimeError(
+                f"vLLM logprobs of request {request_output.request_id} are not "
+                f"[sampled, top-1, ..., top-k] rows: {len(token_logprobs)} entries for "
+                f"{num_tokens} tokens"
+            )
         topk_token_ids = np.asarray(flat_logprobs.token_ids, dtype=np.int32).reshape(
             num_tokens, row_width
         )[:, 1:]

@@ -31,7 +31,10 @@ from torchtitan.models.common.attention import (
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+from torchtitan.models.common.decoder_sharding import (
+    decoder_input_sharding,
+    loss_kwarg_sharding,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -300,7 +303,9 @@ class MTPDecoder(Decoder):
             input_shardings[f"mtp_input_tokens_{depth}"] = input_shardings["input"]
             input_shardings[f"mtp_labels_{depth}"] = input_shardings["labels"]
             input_shardings[f"mtp_input_valid_mask_{depth}"] = input_shardings["input"]
-        input_shardings.update(dict.fromkeys(loss_kwargs, input_shardings["labels"]))
+        input_shardings.update(
+            loss_kwarg_sharding(loss_kwargs, input_shardings["labels"])
+        )
         input_dict.update(loss_kwargs)
 
         if positions is not None:

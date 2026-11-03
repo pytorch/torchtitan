@@ -51,6 +51,10 @@ class SamplingConfig:
                 f"top_p must be 1.0, got {self.top_p}: the trainer computes logprobs "
                 "over the full vocabulary."
             )
+        if self.num_topk_logprobs < 0:
+            raise ValueError(
+                f"num_topk_logprobs must be >= 0, got {self.num_topk_logprobs}."
+            )
 
 
 @dataclass(kw_only=True, slots=True)

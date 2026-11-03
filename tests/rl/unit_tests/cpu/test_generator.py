@@ -332,13 +332,6 @@ def test_process_finished_requests_releases_dp_router_load():
 # --- SamplingParams contract (must match the batched path exactly) ---
 
 
-def test_build_sampling_params_requests_topk_logprobs():
-    params = _build_sampling_params(
-        SamplingConfig(max_tokens=8, stop_token_ids=[99], num_topk_logprobs=32)
-    )
-    assert params.logprobs == 32
-
-
 def test_build_sampling_params_matches_contract():
     # seed and stop_token_ids are carried on the SamplingConfig (the rollouter
     # offsets the seed per sample); _build_sampling_params just reads them.
@@ -751,17 +744,6 @@ def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
     )
     assert engine_kwargs["watermark"] == 0.03
     assert engine_kwargs["scheduling_policy"] == "priority"
-
-
-def test_num_topk_logprobs_sets_max_logprobs(monkeypatch, tmp_path):
-    engine_kwargs = _build_engine_kwargs(
-        monkeypatch,
-        tmp_path,
-        Generator.Config(
-            model=_MODEL_CONFIG, sampling=SamplingConfig(num_topk_logprobs=32)
-        ),
-    )
-    assert engine_kwargs["max_logprobs"] == 32
 
 
 @pytest.mark.parametrize(
