@@ -577,13 +577,21 @@ def llama3_debugmodel_fsdp2_tp2_pp2() -> Trainer.Config:
 
 
 def llama3_debugmodel_pp4_interleaved_1f1b() -> Trainer.Config:
-    """PP-only; see ``llama3_debugmodel_pp2_1f1b`` for why type checking is off."""
+    """PP-only; see ``llama3_debugmodel_pp2_1f1b`` for why type checking is off.
+
+    The tensor logger sanity probe checks exact statistics on every step: which
+    stage owns each row, the row order across ranks, and that pipeline metadata
+    inference on step 1 records nothing.
+    """
     config = llama3_debugmodel(seq_len=2048)
     config.parallelism.pipeline_parallel_degree = 4
     config.parallelism.num_pp_microbatches = 8
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.debug.deterministic = True
     config.debug.seed = 42
+    config.tensor_logger = TensorLoggerSanityProbe.Config(
+        log_freq=1, calls_per_step=8, tokens_per_call=2048
+    )
     return config
 
 
