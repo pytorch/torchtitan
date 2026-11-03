@@ -59,6 +59,11 @@ def swap_token_dispatcher(routed_experts_config, pad_multiple: int) -> None:
     if isinstance(dispatcher, AllToAllTokenDispatcher.Config) and not isinstance(
         dispatcher, TorchAOTokenDispatcher.Config
     ):
+        if dispatcher.non_blocking_capacity_factor is not None:
+            raise ValueError(
+                "Quantized grouped GEMMs need TorchAOTokenDispatcher, which does not "
+                "support non_blocking_capacity_factor. Set it to None."
+            )
         routed_experts_config.token_dispatcher = TorchAOTokenDispatcher.Config(
             num_experts=dispatcher.num_experts,
             top_k=dispatcher.top_k,

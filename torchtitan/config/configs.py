@@ -64,9 +64,9 @@ class TrainingConfig:
     """
     Disable accelerator graph capture and replay for the forward and backward
     pass. Accelerator graphs require fixed-shape inputs and no CPU<->GPU synchronization during
-    the captured region. Expert parallelism is supported only with HybridEP
-    when ``non_blocking_capacity_factor`` is set. Other EP backends synchronize
-    with the host during dispatch. For pipeline parallelism, TorchTitan
+    the captured region. Expert parallelism is supported only with the HybridEP
+    or AllToAll token dispatcher when its ``non_blocking_capacity_factor`` is set.
+    Other EP backends synchronize with the host during dispatch. For pipeline parallelism, TorchTitan
     configures the schedule-derived directed-edge process groups required by
     looped and split-backward schedule replay. Accelerator graphs are
     independent of ``torch.compile(mode="reduce-overhead")``, which performs its

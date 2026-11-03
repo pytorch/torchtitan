@@ -40,6 +40,7 @@ def validate_model_training_config(
     from torchtitan.models.common.decoder import Decoder
     from torchtitan.models.common.moe import MoE
     from torchtitan.models.common.moe.token_dispatcher import (
+        AllToAllTokenDispatcher,
         DeepEPTokenDispatcher,
         HybridEPTokenDispatcher,
         LocalTokenDispatcher,
@@ -111,7 +112,13 @@ def validate_model_training_config(
                 LocalTokenDispatcher.Config
             ):
                 if (
-                    isinstance(dispatcher_config, HybridEPTokenDispatcher.Config)
+                    isinstance(
+                        dispatcher_config,
+                        (
+                            HybridEPTokenDispatcher.Config,
+                            AllToAllTokenDispatcher.Config,
+                        ),
+                    )
                     and dispatcher_config.non_blocking_capacity_factor is not None
                 ):
                     continue
@@ -119,7 +126,7 @@ def validate_model_training_config(
                 raise ValueError(
                     "Accelerator graphs support only expert parallel token dispatcher "
                     "configurations without CPU synchronization. "
-                    "Set HybridEP non_blocking_capacity_factor, or set "
+                    "Set the HybridEP or AllToAll non_blocking_capacity_factor, or set "
                     "training.disable_accelerator_graphs. Unsupported token "
                     f"dispatcher: {type(dispatcher_config).__qualname__}."
                 )

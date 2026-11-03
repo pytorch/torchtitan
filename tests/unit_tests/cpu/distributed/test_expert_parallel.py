@@ -4,16 +4,29 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import math
 import unittest
 
 import spmd_types as spmd
 import torch
-from torch._subclasses.fake_tensor import FakeTensorMode
+import torch.distributed as dist
+from torch._subclasses.fake_tensor import DataDependentOutputException, FakeTensorMode
+from torch.distributed.device_mesh import init_device_mesh
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
+from torch.testing._internal.distributed.fake_pg import FakeStore
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.moe.sharding import expert_param_placement_sparse
-from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import (
+    AllToAllCapacityDispatchMetadata,
+    AllToAllTokenDispatcher,
+    LocalTokenDispatcher,
+)
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.trainer import Trainer
 
@@ -276,6 +289,182 @@ class TestPermute(unittest.TestCase):
             set(permuted_indices.tolist()),
             set(range(total)),
         )
+
+
+_NUM_EXPERTS = 8
+_TOP_K = 3
+_NUM_TOKENS = 16
+_DIM = 4
+
+
+def _scale_by_expert(
+    routed_RD: torch.Tensor, num_tokens_per_expert_e: torch.Tensor, first_expert: int
+) -> torch.Tensor:
+    """Scale each row by its global expert ID + 1, and set the padding rows to NaN."""
+    offsets_e = num_tokens_per_expert_e.cumsum(0)
+    rows_R = torch.arange(routed_RD.shape[0])
+    expert_R = torch.searchsorted(offsets_e, rows_R, right=True)
+    out_RD = routed_RD * (first_expert + expert_R + 1).to(routed_RD.dtype)[:, None]
+    return torch.where((rows_R < offsets_e[-1])[:, None], out_RD, float("nan"))
+
+
+def _forward_backward(dispatcher, x_TD, scores_TK, ids_TK, first_expert, grad_TD):
+    x_TD = x_TD.detach().requires_grad_()
+    scores_TK = scores_TK.detach().requires_grad_()
+    routing_map_TE = torch.zeros(
+        x_TD.shape[0], _NUM_EXPERTS, dtype=torch.bool
+    ).scatter_(1, ids_TK, True)
+    routed_RD, num_tokens_per_expert_e, metadata = dispatcher.dispatch(
+        x_TD, scores_TK, ids_TK, routing_map_TE
+    )
+    out_TD = dispatcher.combine(
+        _scale_by_expert(routed_RD, num_tokens_per_expert_e, first_expert),
+        metadata,
+        x_TD,
+    )
+    out_TD.backward(grad_TD)
+    return out_TD.detach(), x_TD.grad, scores_TK.grad, metadata, num_tokens_per_expert_e
+
+
+def _kept_routes(ids_TK: torch.Tensor, ep_size: int, capacity: int) -> torch.Tensor:
+    """The routes that fit: the first ``capacity`` routes to each EP rank, by expert."""
+    order_N = torch.argsort(ids_TK.view(-1), stable=True)
+    rank_N = ids_TK.view(-1)[order_N] // (_NUM_EXPERTS // ep_size)
+    kept_N = torch.zeros(order_N.numel(), dtype=torch.bool)
+    for rank in range(ep_size):
+        kept_N[order_N[rank_N == rank][:capacity]] = True
+    return kept_N.view_as(ids_TK)
+
+
+class TestAllToAllCapacityDispatch(DTensorTestBase):
+    """AllToAllTokenDispatcher with ``non_blocking_capacity_factor``, on 4 CPU ranks.
+
+    Stand-in experts scale each row by its global expert ID + 1, so every rank can
+    compute the expected result with LocalTokenDispatcher over all experts.
+    """
+
+    @property
+    def world_size(self) -> int:
+        return 4
+
+    def _routing(self):
+        """Per-rank tokens and top-k routing that favors experts 0-2."""
+        generator = torch.Generator().manual_seed(self.rank)
+        x_TD = torch.randn(_NUM_TOKENS, _DIM, generator=generator)
+        weights_E = torch.ones(_NUM_EXPERTS)
+        weights_E[:3] = 100.0
+        ids_TK = torch.stack(
+            [
+                torch.multinomial(weights_E, _TOP_K, generator=generator)
+                for _ in range(_NUM_TOKENS)
+            ]
+        )
+        scores_TK = torch.rand(_NUM_TOKENS, _TOP_K, generator=generator)
+        grad_TD = torch.randn(_NUM_TOKENS, _DIM, generator=generator)
+        return x_TD, scores_TK, ids_TK, grad_TD
+
+    def _dispatch_and_reference(self, capacity_factor: float, dtype: torch.dtype):
+        mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("ep",))
+        set_spmd_meshes(dense_mesh=mesh, sparse_mesh=mesh, dense_sp_enabled=False)
+        x_TD, scores_TK, ids_TK, grad_TD = self._routing()
+        x_TD, grad_TD = x_TD.to(dtype), grad_TD.to(dtype)
+        num_local_experts = _NUM_EXPERTS // self.world_size
+        dispatcher = AllToAllTokenDispatcher.Config(
+            num_experts=_NUM_EXPERTS,
+            top_k=_TOP_K,
+            non_blocking_capacity_factor=capacity_factor,
+        ).build()
+        with set_current_spmd_mesh(mesh):
+            actual = _forward_backward(
+                dispatcher,
+                x_TD,
+                scores_TK,
+                ids_TK,
+                self.rank * num_local_experts,
+                grad_TD,
+            )
+        capacity = math.ceil(
+            _NUM_TOKENS * min(num_local_experts, _TOP_K) * capacity_factor
+        )
+        kept_TK = _kept_routes(ids_TK, self.world_size, capacity)
+        local = LocalTokenDispatcher.Config(
+            num_experts=_NUM_EXPERTS, top_k=_TOP_K
+        ).build()
+        expected = _forward_backward(
+            local,
+            x_TD,
+            torch.where(kept_TK, scores_TK, 0),
+            ids_TK,
+            0,
+            grad_TD,
+        )
+        return actual, expected, kept_TK
+
+    @with_comms
+    def test_full_capacity_matches_local_dispatch(self):
+        for dtype in (torch.float32, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                actual, expected, kept_TK = self._dispatch_and_reference(1.0, dtype)
+                self.assertTrue(kept_TK.all())
+                self.assertIsInstance(actual[3], AllToAllCapacityDispatchMetadata)
+                for got, want in zip(actual[:3], expected[:3]):
+                    torch.testing.assert_close(got, want, rtol=0, atol=0)
+
+    @with_comms
+    def test_drops_routes_past_capacity(self):
+        actual, expected, kept_TK = self._dispatch_and_reference(0.25, torch.float32)
+        # The routing favors EP ranks 0 and 1, so every rank drops some routes.
+        self.assertFalse(kept_TK.all())
+        out_TD, x_grad_TD, scores_grad_TK, _, num_tokens_per_expert_e = actual
+        # The grouped GEMM must not read past the received rows.
+        num_received_rows = self.world_size * math.ceil(
+            _NUM_TOKENS * min(_NUM_EXPERTS // self.world_size, _TOP_K) * 0.25
+        )
+        self.assertLessEqual(int(num_tokens_per_expert_e.sum()), num_received_rows)
+        torch.testing.assert_close(out_TD, expected[0], rtol=0, atol=0)
+        torch.testing.assert_close(x_grad_TD, expected[1], rtol=0, atol=0)
+        # A dropped route gets no score gradient.
+        torch.testing.assert_close(
+            scores_grad_TK, torch.where(kept_TK, expected[2], 0), rtol=0, atol=0
+        )
+
+
+class TestAllToAllCapacityNoHostSync(unittest.TestCase):
+    """Fake tensors hold no data, so a host read of a tensor value raises."""
+
+    def setUp(self):
+        dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=4)
+        self.addCleanup(dist.destroy_process_group)
+
+    def _dispatch_fake(self, capacity_factor: float | None) -> torch.Size:
+        # Only set the current mesh: a registered mesh would outlive the fake
+        # process group and break later tests in this process.
+        mesh = init_device_mesh("cpu", (4,), mesh_dim_names=("ep",))
+        dispatcher = AllToAllTokenDispatcher.Config(
+            num_experts=_NUM_EXPERTS,
+            top_k=_TOP_K,
+            non_blocking_capacity_factor=capacity_factor,
+        ).build()
+        with FakeTensorMode(), set_current_spmd_mesh(mesh):
+            x_TD = torch.randn(_NUM_TOKENS, _DIM, requires_grad=True)
+            scores_TK = torch.rand(_NUM_TOKENS, _TOP_K, requires_grad=True)
+            ids_TK = torch.randint(0, _NUM_EXPERTS, (_NUM_TOKENS, _TOP_K))
+            routing_map_TE = torch.zeros(
+                _NUM_TOKENS, _NUM_EXPERTS, dtype=torch.bool
+            ).scatter_(1, ids_TK, True)
+            routed_RD, _, metadata = dispatcher.dispatch(
+                x_TD, scores_TK, ids_TK, routing_map_TE
+            )
+            dispatcher.combine(routed_RD * 2, metadata, x_TD).sum().backward()
+        return routed_RD.shape
+
+    def test_only_capacity_dispatch_needs_no_host_sync(self):
+        # 4 ranks, each with C = 16 tokens * min(2 local experts, top_k 3) * factor.
+        self.assertEqual(self._dispatch_fake(1.0), (4 * 32, _DIM))
+        self.assertEqual(self._dispatch_fake(0.25), (4 * 8, _DIM))
+        # The dynamic path reads the token counts on the host.
+        with self.assertRaises(DataDependentOutputException):
+            self._dispatch_fake(None)
 
 
 if __name__ == "__main__":

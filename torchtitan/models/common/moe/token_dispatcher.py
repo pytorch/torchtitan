@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -34,6 +35,21 @@ class AllToAllDispatchMetadata(LocalDispatchMetadata):
     permuted_indices: torch.Tensor  # for _unpermute
     input_splits: list[int]
     output_splits: list[int]
+
+
+@dataclass(frozen=True, kw_only=True)
+class AllToAllCapacityDispatchMetadata(LocalDispatchMetadata):
+    """Metadata of a fixed-capacity AllToAllTokenDispatcher.dispatch() for combine().
+
+    ``token_indices_experts_sorted_N`` and ``topk_scores_experts_sorted_N`` are in
+    send-slot order, so they have length S. Shape letters of the fixed-capacity
+    path: C = ``capacity`` slots per pair of EP ranks, P = EP ranks,
+    S = P * C send or receive slots, e = local experts.
+    """
+
+    valid_S: torch.Tensor  # noqa: N815
+    unpermute_indices_S: torch.Tensor  # noqa: N815
+    capacity: int
 
 
 class LocalTokenDispatcher(Module):
@@ -236,10 +252,43 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseEPTokenDispatcher.Config):
-        pass
+        """Config for the all-to-all token dispatcher.
+
+        Args:
+            non_blocking_capacity_factor: Enable fixed-capacity dispatch with no
+                device-to-host sync, with a given capacity factor in (0, 1].
+
+                Each rank sends ``C = ceil(T * min(num_local_experts, top_k) *
+                capacity_factor)`` rows to every EP rank, so every dispatch and
+                combine shape depends only on ``T`` and the config. ``ep_size * C``
+                is the receive capacity that HybridEP sizes with the same factor.
+                Each (source, destination) pair of EP ranks has ``C`` slots, while
+                HybridEP budgets each destination's total. When more than ``C``
+                routes go from one rank to another, the routes to the highest
+                local experts of the destination are dropped first: those tokens
+                get no output from those experts.
+
+                - None = dynamic splits (default). The dispatch copies the token
+                  counts to the host for the variable-size all-to-all. No token
+                  dropping.
+                - 1.0 = worst-case sizing: no drops, ``ep_size * C`` rows on each
+                  rank.
+                - < 1.0 = fewer padding rows; routes can drop when routing is
+                  not balanced.
+        """
+
+        non_blocking_capacity_factor: float | None = None
+
+        def __post_init__(self) -> None:
+            factor = self.non_blocking_capacity_factor
+            if factor is not None and not 0 < factor <= 1:
+                raise ValueError(
+                    f"non_blocking_capacity_factor must be in (0, 1], got {factor}."
+                )
 
     def __init__(self, config: Config):
         super().__init__(config)
+        self.non_blocking_capacity_factor = config.non_blocking_capacity_factor
 
     def _token_count_exchange(
         self,
@@ -392,6 +441,14 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             )
 
         num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
+        if self.non_blocking_capacity_factor is not None:
+            return self._capacity_dispatch(
+                x_TD,
+                topk_scores_TK,
+                topk_expert_ids_TK,
+                num_local_tokens_per_expert_E,
+                self.non_blocking_capacity_factor,
+            )
         (
             routed_input_RD,
             num_global_tokens_per_local_expert_e,
@@ -514,6 +571,138 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             output_splits,
         )
 
+    def _capacity_dispatch(
+        self,
+        x_TD: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
+        capacity_factor: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, AllToAllCapacityDispatchMetadata]:
+        """Dispatch a fixed ``capacity`` rows to every EP rank, with no host sync."""
+        ep_group = _ep_process_group()
+        assert ep_group is not None
+        capacity = math.ceil(
+            x_TD.shape[0]
+            * min(self.num_experts // ep_group.size(), self.top_k)
+            * capacity_factor
+        )
+        (
+            routed_input_RD,
+            num_global_tokens_per_local_expert_e,
+            token_indices_S,
+            topk_scores_S,
+            valid_S,
+            unpermute_indices_S,
+        ) = remat.region(
+            self._dispatch_with_capacity,
+            self.remat_region_name("dispatch"),
+            recompute=self.remat_should_recompute("dispatch"),
+        )(
+            x_TD,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            num_local_tokens_per_expert_E,
+            capacity,
+        )
+        # MoE.forward reads the counts with bare ops.
+        remat.recompute_needs_tensor(num_global_tokens_per_local_expert_e)
+        metadata = AllToAllCapacityDispatchMetadata(
+            token_indices_experts_sorted_N=token_indices_S,
+            topk_scores_experts_sorted_N=topk_scores_S,
+            valid_S=valid_S,
+            unpermute_indices_S=unpermute_indices_S,
+            capacity=capacity,
+        )
+        return routed_input_RD, num_global_tokens_per_local_expert_e, metadata
+
+    def _dispatch_with_capacity(
+        self,
+        x_TD: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
+        capacity: int,
+    ) -> tuple[torch.Tensor, ...]:
+        """Fill the send slots, exchange counts and slots, and sort to expert-major order.
+
+        Runs as the single ``<fqn>.dispatch`` remat region. Send slot ``(p, c)``
+        holds kept route ``c`` of the routes to EP rank ``p``, in expert-sorted
+        order. The receiver sorts its ``(source, c)`` slots to expert-major order
+        with the padding rows last, so the grouped GEMM offsets end before them.
+        """
+        (
+            routed_input_ND,
+            token_indices_experts_sorted_N,
+            topk_scores_experts_sorted_N,
+        ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
+
+        with maybe_set_sparse_mesh():
+            ep_group = spmd_mesh_group(MeshAxisName.EP)
+            assert ep_group is not None
+            ep_size = ep_group.size()
+            num_local_experts = self.num_experts // ep_size
+            device = x_TD.device
+            slot_C = torch.arange(capacity, device=device)
+
+            with torch.no_grad():
+                counts_Pe = num_local_tokens_per_expert_E.view(ep_size, -1)
+                kept_cumsum_Pe = counts_Pe.cumsum(dim=1).clamp(max=capacity)
+                kept_Pe = torch.diff(
+                    kept_cumsum_Pe, dim=1, prepend=kept_cumsum_Pe.new_zeros(ep_size, 1)
+                )
+                rank_counts_P = counts_Pe.sum(dim=1)
+                rank_starts_P = rank_counts_P.cumsum(dim=0) - rank_counts_P
+                valid_S = (slot_C < kept_cumsum_Pe[:, -1:]).view(-1)
+                # Padding slots read the last route; valid_S masks them below.
+                route_S = (
+                    (rank_starts_P[:, None] + slot_C)
+                    .clamp(max=routed_input_ND.shape[0] - 1)
+                    .view(-1)
+                )
+            token_indices_S = token_indices_experts_sorted_N[route_S]
+            topk_scores_S = topk_scores_experts_sorted_N[route_S]
+            # torch.where also drops the gradient that padding rows get from the
+            # grouped GEMM.
+            send_SD = torch.where(valid_S[:, None], routed_input_ND[route_S], 0)
+            if spmd.is_type_checking():
+                kept_Pe = spmd.reinterpret_mesh(kept_Pe, spmd.current_mesh())
+                send_SD = spmd.reinterpret_mesh(send_SD, spmd.current_mesh())
+
+            with torch.no_grad():
+                received_counts_Pe = torch.ops._c10d_functional.wait_tensor(
+                    self._token_count_exchange(kept_Pe.reshape(-1), ep_group, ep_size)
+                ).view(ep_size, num_local_experts)
+            splits = [capacity] * ep_size
+            received_SD = self._dispatch_token_exchange(
+                send_SD, ep_group, splits, splits
+            )
+
+            with torch.no_grad():
+                received_cumsum_Pe = received_counts_Pe.cumsum(dim=1)
+                # The local expert of each received slot; num_local_experts marks
+                # a padding slot.
+                expert_PC = (
+                    slot_C[None, :, None] >= received_cumsum_Pe[:, None, :]
+                ).sum(dim=-1)
+                source_P = torch.arange(ep_size, device=device)
+                key_S = (
+                    (expert_PC * ep_size + source_P[:, None]) * capacity + slot_C
+                ).view(-1)
+                permute_indices_S = torch.argsort(key_S)
+                unpermute_indices_S = torch.empty_like(permute_indices_S).scatter_(
+                    0, permute_indices_S, torch.arange(key_S.numel(), device=device)
+                )
+
+        return (
+            received_SD[permute_indices_S],
+            received_counts_Pe.sum(dim=0),
+            token_indices_S,
+            topk_scores_S,
+            valid_S,
+            unpermute_indices_S,
+        )
+
     def _permute(
         self,
         routed_input_RD,
@@ -598,6 +787,21 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 x_TD,
             )
 
+        if isinstance(metadata, AllToAllCapacityDispatchMetadata):
+            return remat.region(
+                self._combine_with_capacity,
+                self.remat_region_name("combine"),
+                recompute=self.remat_should_recompute("combine"),
+            )(
+                routed_output_RD,
+                metadata.topk_scores_experts_sorted_N,
+                metadata.token_indices_experts_sorted_N,
+                metadata.valid_S,
+                metadata.unpermute_indices_S,
+                metadata.capacity,
+                x_TD,
+            )
+
         out_TD = remat.region(
             self._combine,
             self.remat_region_name("combine"),
@@ -649,6 +853,36 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             x_TD,
         )
 
+    def _combine_with_capacity(
+        self,
+        routed_output_RD: torch.Tensor,
+        topk_scores_S: torch.Tensor,
+        token_indices_S: torch.Tensor,
+        valid_S: torch.Tensor,
+        unpermute_indices_S: torch.Tensor,
+        capacity: int,
+        x_TD: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return the slots to their source ranks, then score and scatter-add.
+
+        Runs as the single ``<fqn>.combine`` remat region.
+        """
+        with maybe_set_sparse_mesh():
+            ep_group = spmd_mesh_group(MeshAxisName.EP)
+            assert ep_group is not None
+            splits = [capacity] * ep_group.size()
+            returned_SD = self._combine_token_exchange(
+                routed_output_RD[unpermute_indices_S], ep_group, splits, splits
+            )
+        if spmd.is_type_checking():  # dense mesh reinterpret
+            returned_SD = spmd.reinterpret_mesh(returned_SD, spmd.current_mesh())
+        # Rows past the last grouped GEMM offset are undefined, so select, not
+        # multiply.
+        returned_SD = torch.where(valid_S[:, None], returned_SD, 0)
+        return self._score_and_scatter_add(
+            returned_SD, topk_scores_S, token_indices_S, x_TD
+        )
+
 
 class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
     """Token dispatcher with token group padding for quantized grouped GEMMs.
@@ -668,6 +902,14 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
     @dataclass(kw_only=True, slots=True)
     class Config(AllToAllTokenDispatcher.Config):
         pad_multiple: int
+
+        def __post_init__(self) -> None:
+            # The padded permute has its own variable-size layout.
+            if self.non_blocking_capacity_factor is not None:
+                raise ValueError(
+                    "TorchAOTokenDispatcher does not support "
+                    "non_blocking_capacity_factor. Set it to None."
+                )
 
     def __init__(self, config: Config):
         super().__init__(config)

@@ -14,7 +14,10 @@ from torchtitan.components.validator import Validator
 from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
-from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import (
+    AllToAllTokenDispatcher,
+    HybridEPTokenDispatcher,
+)
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.training_engine import TrainingEngine
 from torchtitan_recipes.tests.models.deepseek_v3 import (
@@ -153,8 +156,19 @@ def test_accelerator_graphs_reject_synchronizing_ep_dispatcher() -> None:
         config.__post_init__()
 
 
-def test_accelerator_graphs_allow_nonblocking_hybrid_ep() -> None:
-    config = deepseek_v3_debugmodel_hybridep()
+def _deepseek_v3_debugmodel_nonblocking_all_to_all():
+    config = deepseek_v3_debugmodel()
+    for _, dispatcher, _, _ in config.model.traverse(AllToAllTokenDispatcher.Config):
+        dispatcher.non_blocking_capacity_factor = 1.0
+    return config
+
+
+@pytest.mark.parametrize(
+    "make_config",
+    [deepseek_v3_debugmodel_hybridep, _deepseek_v3_debugmodel_nonblocking_all_to_all],
+)
+def test_accelerator_graphs_allow_nonblocking_ep(make_config) -> None:
+    config = make_config()
     config.parallelism.expert_parallel_degree = 2
 
     with _accelerator_graphs_supported(True):
