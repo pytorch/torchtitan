@@ -72,7 +72,11 @@ class _Case:
 
 _CASES = {
     "fsdp": _Case(1, ParallelismConfig(), _FSDP_CALLS, sdc_replay=True),
-    # SDC replay preprocesses up front, so lazy preprocessing runs without it.
+    # A checked call preprocesses up front, so lazy preprocessing runs without SDC replay.
+    # RL's layout: one-group segments, each read just before its replay.
+    "fsdp_lazy": _Case(
+        1, ParallelismConfig(), _FSDP_CALLS, sdc_replay=False, preprocess_lazily=True
+    ),
     "deferral_lazy": _Case(
         1,
         ParallelismConfig(fsdp_defer_gradient_reduction=True),

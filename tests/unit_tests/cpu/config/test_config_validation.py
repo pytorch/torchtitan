@@ -45,16 +45,6 @@ def test_training_token_counts_are_positive() -> None:
         TrainingConfig(max_context_length=0)
 
 
-def test_lazy_preprocessing_allows_accelerator_graphs_and_sdc_replay() -> None:
-    # Graphs preprocess each segment before its replay; a checked call preprocesses once,
-    # before its replays.
-    TrainingEngine.Config(
-        training=TrainingConfig(preprocess_microbatch_groups_lazily=True),
-        sdc_replayer=SDCReplayer.Config(),
-        debug=DebugConfig(deterministic=True),
-    )
-
-
 def test_graph_trainer_rejects_lazy_preprocessing() -> None:
     config = llama3_debugmodel(attn_backend="flex")
     with pytest.raises(ValueError, match="lazily is not supported with GraphTrainer"):
