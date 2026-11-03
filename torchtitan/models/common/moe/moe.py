@@ -355,8 +355,9 @@ class TokenChoiceTopKRouter(Module):
         Outside the region:
         - gate: traced, its default ``inplace_wgrad_accum=True`` raises. With it off, a compiled
           region rounds the fp32 weight grad of a bf16 weight to bf16 when ``grad_dtype`` is fp32
-          or None, as FSDP2 sets with an fp32 reduce dtype
-          (https://github.com/pytorch/pytorch/pull/197381).
+          or None, as FSDP2 sets with an fp32 reduce dtype.
+          TODO: try the gate in this region (``inplace_wgrad_accum=False``) once
+          https://github.com/pytorch/pytorch/pull/197381 lands.
         - counts, aux loss, ``QuantileBalancedTopKRouter``'s histogram: they update buffers.
           Remat's eager replay re-runs this region, so an update here would need a
           ``remat.is_recomputing()`` guard, and that guard makes Dynamo compile a second graph
