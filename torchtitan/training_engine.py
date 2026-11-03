@@ -206,6 +206,18 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     raise ValueError(
                         "SDC replay requires debug.deterministic_warn_only=False."
                     )
+                # TODO: lift this in its own PR, with a green CI run of
+                # llama3_debugmodel_sdc_replay_accelerator_graph at num_replays > 1.
+                if (
+                    not self.training.disable_accelerator_graphs
+                    and accelerator_graphs_supported()
+                    and self.sdc_replayer.num_replays > 1
+                ):
+                    raise ValueError(
+                        "SDC replay supports at most one replay when accelerator graphs "
+                        "are enabled: set sdc_replayer.num_replays=1 or "
+                        "training.disable_accelerator_graphs=True."
+                    )
 
     config: Config
     device: torch.device

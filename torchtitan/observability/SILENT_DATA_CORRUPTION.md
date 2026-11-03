@@ -65,9 +65,10 @@ snapshotted nor included in the replay signature.
 
 ## Limitations
 
-With accelerator graphs and `num_replays > 1`, forward must not assign or replace
-registered buffers; in-place buffer updates are fine. Restore puts the old buffer
-back, while a replay keeps writing to the tensor it captured.
+Accelerator graphs currently require `sdc_replayer.num_replays=1`. With more
+replays, a graph replay is checked against an eager first execution, and no CI
+config has checked that yet. Also, a forward that replaces a registered buffer
+would keep writing to the buffer its graph captured, not the restored one.
 
 Replay currently uses the existing XOR-based `torch.hash_tensor` mode. This
 checksum is order-insensitive, so permutations and some repeated-value
