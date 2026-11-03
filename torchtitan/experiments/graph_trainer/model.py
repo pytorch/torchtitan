@@ -10,7 +10,7 @@ from typing import Any
 
 import torch
 
-from torchtitan.config import TrainingConfig
+from torchtitan.config import PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_remat import ActivationRematConfig
@@ -33,6 +33,7 @@ class GraphTrainerModel:
         self,
         *,
         parallelism_context: ParallelismContext,
+        precision: PrecisionConfig,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
         compile_config: GraphTrainerCompileConfig,
@@ -57,7 +58,7 @@ class GraphTrainerModel:
         model = apply_simple_fsdp(
             self,
             parallelism_context=parallelism_context,
-            training=training,
+            precision=precision,
         )
         maybe_apply_ep_overlap_eager_chunking(model, compile_config)
         return apply_compile(

@@ -16,7 +16,7 @@ from torchstore import RankRole
 from torchtitan.components.data.types import (
     TrainingMicrobatch as CoreTrainingMicrobatch,
 )
-from torchtitan.config import Configurable, DebugConfig, TrainingConfig
+from torchtitan.config import Configurable, DebugConfig, PrecisionConfig, TrainingConfig
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.rl.actors.monarch.trainer import TrainerActor
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
@@ -150,6 +150,7 @@ def test_rl_trainer_validates_model_training_config_before_initialization(
         with pytest.raises(ValidationReachedError):
             Trainer(
                 config,
+                precision=PrecisionConfig(),
                 max_num_documents=None,
                 output_dir=str(tmp_path),
             )

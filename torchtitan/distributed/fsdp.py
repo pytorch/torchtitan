@@ -249,7 +249,7 @@ def apply_fsdp_to_multimodal_encoder(
     ``apply_fsdp_to_decoder`` so the encoder is already sharded.
 
     ``cpu_offload`` must match what the caller passes to ``apply_fsdp_to_decoder``.
-    Under ``training.enable_cpu_offload`` the trainer materializes the whole model
+    Under ``parallelism.fsdp_enable_cpu_offloading`` the trainer materializes the whole model
     on CPU, so an encoder sharded without ``CPUOffloadPolicy`` keeps CPU
     parameters while FSDP produces CUDA gradients for them, and backward dies with
     "attempting to assign a gradient with device type 'cuda' to a tensor with

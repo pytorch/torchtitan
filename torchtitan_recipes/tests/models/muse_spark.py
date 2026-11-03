@@ -23,7 +23,7 @@ from torchtitan.components.optim import (
     Optim,
     OptimizersContainer,
 )
-from torchtitan.config import OverrideConfig, TrainingConfig
+from torchtitan.config import OverrideConfig, PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
@@ -127,13 +127,13 @@ def muse_spark_debugmodel(
             ),
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
+        precision=PrecisionConfig(
+            dtype="float32", param_dtype="bfloat16", reduce_dtype="float32"
+        ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
             max_context_length=model_config.max_context_length,
             steps=10,
-            dtype="float32",
-            mixed_precision_param="bfloat16",
-            mixed_precision_reduce="float32",
             disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
@@ -288,10 +288,10 @@ def muse_spark_debugmodel_ultradata_lora_sft() -> Trainer.Config:
         num_tokens_per_train_step=65_536,
         max_context_length=32_768,
         steps=10,
-        dtype="bfloat16",
-        mixed_precision_param="bfloat16",
-        mixed_precision_reduce="float32",
         disable_accelerator_graphs=True,
+    )
+    config.precision = PrecisionConfig(
+        dtype="bfloat16", param_dtype="bfloat16", reduce_dtype="float32"
     )
     config.parallelism = ParallelismConfig(
         data_parallel_replicate_degree=1,

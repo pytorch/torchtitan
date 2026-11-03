@@ -103,7 +103,12 @@ import torch  # noqa: F401
 
 from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.config import apply_overrides, Configurable, OverrideConfig
+from torchtitan.config import (
+    apply_overrides,
+    Configurable,
+    OverrideConfig,
+    PrecisionConfig,
+)
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.system import ActorSystem, TrainerHandle
 from torchtitan.rl.controller.metrics import (
@@ -285,6 +290,9 @@ class Controller(Configurable):
         trainer: Trainer.Config
         """Trainer config. Controls the trainer model, optimizer, training, parallelism."""
 
+        precision: PrecisionConfig = field(default_factory=PrecisionConfig)
+        """Parameter, compute, and gradient-reduction dtypes of the trainer model."""
+
         # TODO: put generator, num generators and generator router in a separate config
         generator: Generator.Config
         """Generator actor configuration (generator model, vLLM engine, sampling)."""
@@ -364,6 +372,11 @@ class Controller(Configurable):
                     "(weights are synced from the trainer via TorchStore). "
                     "Set generator.checkpointer=None."
                 )
+            if (
+                self.trainer.dist_moe_runtime is not None
+                and self.precision.param_dtype != "bfloat16"
+            ):
+                raise ValueError("Dist-MoE requires precision.param_dtype='bfloat16'")
             if self.trainer.training.num_tokens_per_train_step != -1:
                 warnings.warn(
                     "trainer.training.num_tokens_per_train_step is ignored by "
@@ -417,16 +430,16 @@ class Controller(Configurable):
                 # generator, via FSDP mixed precision. The trainer always wraps
                 # the model in FSDP (even at data_parallel_shard_degree=1, where
                 # FSDP acts purely as a mixed-precision boundary), so
-                # mixed_precision_param == "bfloat16" casts the fp32 master
+                # param_dtype == "bfloat16" casts the fp32 master
                 # weights to bf16 for the forward before any matmul.
-                if self.trainer.training.mixed_precision_param != "bfloat16":
+                if self.precision.param_dtype != "bfloat16":
                     raise ValueError(
                         "batch_invariant requires the trainer forward to compute "
                         "in bfloat16 to match the generator. Set "
-                        "training.mixed_precision_param='bfloat16' (fp32 master "
+                        "precision.param_dtype='bfloat16' (fp32 master "
                         "weights, bf16-cast forward via FSDP mixed precision). "
-                        "Got mixed_precision_param="
-                        f"{self.trainer.training.mixed_precision_param!r}."
+                        "Got param_dtype="
+                        f"{self.precision.param_dtype!r}."
                     )
                 if self.generator.model_dtype != "bfloat16":
                     raise ValueError(
@@ -629,6 +642,7 @@ class Controller(Configurable):
             self.trainer = await actor_system.spawn_trainer(
                 config.trainer,
                 dp_degree=self.trainer_dp_degree,
+                precision=config.precision,
                 hf_assets_path=config.hf_assets_path,
                 generator_dtype=config.generator.model_dtype,
                 max_num_documents=config.async_loop.batcher.max_num_documents,

@@ -19,7 +19,7 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torchstore import RankRole
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
-from torchtitan.config import Configurable, TORCH_DTYPE_MAP
+from torchtitan.config import Configurable, PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import maybe_apply_numa_binding, utils as dist_utils
 from torchtitan.models.base.model import BaseModel
@@ -75,6 +75,8 @@ class Trainer(Configurable):
 
     Args:
         config: Trainer.Config with all model/optimizer/parallelism settings.
+        precision: Parameter, compute, and gradient-reduction dtypes, from
+            ``Controller.Config.precision``.
         max_num_documents: Fixed varlen metadata capacity configured by the batcher.
         hf_assets_path: Path to HF assets folder for checkpoint loading.
             Shared with the generator (both load from the same HF checkpoint).
@@ -93,6 +95,7 @@ class Trainer(Configurable):
         self,
         config: Config,
         *,
+        precision: PrecisionConfig,
         max_num_documents: int | None,
         hf_assets_path: str = "",
         generator_dtype: str = "",
@@ -122,6 +125,7 @@ class Trainer(Configurable):
         self.engine = TrainingEngine(
             config,
             model_config=config.model,
+            precision=precision,
             max_num_documents=max_num_documents,
             output_dir=output_dir,
         )
@@ -130,7 +134,7 @@ class Trainer(Configurable):
         maybe_apply_numa_binding(engine.device.index, engine.device.type)
 
         # Only cast when the generator and training dtypes differ.
-        training_dtype = TORCH_DTYPE_MAP[config.training.dtype]
+        training_dtype = TORCH_DTYPE_MAP[precision.dtype]
         gen_dtype = TORCH_DTYPE_MAP[generator_dtype] if generator_dtype else None
         self._transfer_dtype = gen_dtype if gen_dtype != training_dtype else None
 

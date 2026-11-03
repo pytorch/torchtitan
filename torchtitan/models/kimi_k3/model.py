@@ -14,7 +14,7 @@ import torch
 import torch_remat as remat
 from torch import nn
 
-from torchtitan.config import TrainingConfig
+from torchtitan.config import PrecisionConfig
 from torchtitan.config.function import Function
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
@@ -293,7 +293,7 @@ class KimiK3Model(MultimodalModel):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
         local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
@@ -310,7 +310,7 @@ class KimiK3Model(MultimodalModel):
                     activation_remat.apply(self.vision_encoder)
             self._apply_fsdp(
                 parallelism_context=parallelism_context,
-                training=training,
+                precision=precision,
                 parallelism=parallelism,
             )
         return self

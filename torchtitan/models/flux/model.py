@@ -14,7 +14,7 @@ import torch
 import torch_remat as remat
 from torch import nn, Tensor
 
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import context_parallel
 from torchtitan.distributed.activation_remat import ActivationRematConfig
@@ -236,7 +236,7 @@ class FluxModel(BaseModel):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
         local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
@@ -267,7 +267,7 @@ class FluxModel(BaseModel):
 
             self._apply_fsdp(
                 parallelism_context=parallelism_context,
-                training=training,
+                precision=precision,
                 parallelism=parallelism,
             )
         return self
@@ -276,7 +276,7 @@ class FluxModel(BaseModel):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
         from torch.distributed.fsdp import (
@@ -295,13 +295,13 @@ class FluxModel(BaseModel):
         fsdp_config: dict[str, Any] = {
             "mesh": dp_mesh,
             "mp_policy": MixedPrecisionPolicy(
-                param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-                reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+                param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
+                reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
             ),
         }
         if dp_mesh_dims is not None:
             fsdp_config["dp_mesh_dims"] = dp_mesh_dims
-        if training.enable_cpu_offload:
+        if parallelism.fsdp_enable_cpu_offloading:
             fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
         for module in (self.img_in, self.time_in, self.vector_in, self.txt_in):

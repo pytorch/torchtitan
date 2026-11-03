@@ -23,7 +23,12 @@ from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhauste
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validator import BaseValidator, Validator
-from torchtitan.config import apply_overrides, Configurable, OverrideConfig
+from torchtitan.config import (
+    apply_overrides,
+    Configurable,
+    OverrideConfig,
+    PrecisionConfig,
+)
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.base.model import BaseModel
@@ -51,6 +56,9 @@ class Trainer(Configurable):
 
         model: BaseModel.Config
 
+        precision: PrecisionConfig = field(default_factory=PrecisionConfig)
+        """Parameter, compute, and gradient-reduction dtypes of the model."""
+
         hf_assets_path: str = "./tests/assets/tokenizer"
         """
         Path to HF assets folder. This folder contains local copies of Hugging Face assets,
@@ -77,6 +85,11 @@ class Trainer(Configurable):
 
         def __post_init__(self):
             TrainingEngine.Config.__post_init__(self)
+            if (
+                self.dist_moe_runtime is not None
+                and self.precision.param_dtype != "bfloat16"
+            ):
+                raise ValueError("Dist-MoE requires precision.param_dtype='bfloat16'")
             if self.debug.batch_invariant:
                 raise ValueError(
                     "Batch-invariant mode is not needed in supervised learning."
@@ -155,6 +168,7 @@ class Trainer(Configurable):
         self.engine = self.engine_cls(
             config,
             model_config=model_config,
+            precision=config.precision,
             max_num_documents=config.dataloader.max_num_documents,
             output_dir=config.dump_folder,
         )

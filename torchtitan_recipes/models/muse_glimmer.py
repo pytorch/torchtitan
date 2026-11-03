@@ -89,9 +89,9 @@ def muse_glimmer_30b(
 def muse_glimmer_30b_bf16_optimizer_states() -> Trainer.Config:
     """Use BF16 optimizer states with FP32 parameters and reduction."""
     config = muse_glimmer_30b()
-    config.training.dtype = "float32"
-    config.training.mixed_precision_param = "bfloat16"
-    config.training.mixed_precision_reduce = "float32"
+    config.precision.dtype = "float32"
+    config.precision.param_dtype = "bfloat16"
+    config.precision.reduce_dtype = "float32"
     config.optim.optimizer = OptimizersContainer.Config(
         optimizers=[AdamW.Config(pattern=r".*", moment_dtype="bfloat16")]
     )
