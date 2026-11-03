@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -24,7 +25,7 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import DebugConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
-from torchtitan.rl.generator.engine import GenerationEngine
+from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import (
     EngineRequest,
@@ -127,6 +128,7 @@ class VLLMEngine(GenerationEngine):
         dist_moe_runtime: DistMoeRuntime.Config | None,
         debug: DebugConfig,
         reset_kv_cache_on_model_state_dict_load: bool,
+        model_state_dict_load_mode: ModelStateDictLoadMode,
         rank: int,
         generator_name: str,
         output_dir: str,
@@ -149,6 +151,7 @@ class VLLMEngine(GenerationEngine):
             checkpointer=checkpointer,
             dist_moe_runtime=dist_moe_runtime,
             batch_invariant=debug.batch_invariant,
+            model_state_dict_load_mode=model_state_dict_load_mode,
         )
         engine_args = self._build_engine_args(
             model,
@@ -192,6 +195,7 @@ class VLLMEngine(GenerationEngine):
         checkpointer: CheckpointManager.Config | None,
         dist_moe_runtime: DistMoeRuntime.Config | None,
         batch_invariant: bool,
+        model_state_dict_load_mode: ModelStateDictLoadMode,
     ) -> None:
         """Process-wide vLLM setup before the engine build: register the TorchTitan model
         and config parser with vLLM, and select vLLM's model runner."""
@@ -200,6 +204,7 @@ class VLLMEngine(GenerationEngine):
             parallelism=parallelism,
             checkpointer_config=checkpointer,
             dist_moe_runtime=dist_moe_runtime,
+            model_state_dict_load_mode=model_state_dict_load_mode,
         )
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         if batch_invariant:
@@ -330,9 +335,10 @@ class VLLMEngine(GenerationEngine):
         return self._session_kv_holder is not None
 
     @property
-    def prefetched_model_state_dict(self) -> dict[str, torch.Tensor]:
+    def prefetched_model_state_dict(self) -> dict[str, torch.Tensor] | None:
         """The pinned CPU buffers a model state dict is prefetched into, and loaded from by
-        ``load_prefetched_model_state_dict``. Safe to fill from any thread while no load runs."""
+        a model state dict load. Safe to fill from any thread while no load runs. None with
+        ``model_state_dict_load_mode="gpu_fetch"``."""
         return self._get_model()._prefetched_model_state_dict
 
     def add_requests(
@@ -402,11 +408,12 @@ class VLLMEngine(GenerationEngine):
                 self._session_kv_holder.num_evicted,
             )
 
-    def load_prefetched_model_state_dict(self) -> None:
-        """Copy the prefetched model state dict from pinned CPU memory into the model, and
+    def load_model_state_dict(
+        self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
+    ) -> None:
+        """Fetch the model state dict into the model's weights one FSDP group at a time, and
         reset the KV cache when configured."""
-        model = self._get_model()
-        model.load_state_dict(model._prefetched_model_state_dict)
+        self._get_model().load_model_state_dict(fetch)
         if self._reset_kv_cache_on_model_state_dict_load:
             # Always reset running requests too: the only reason to reset is a strict
             # recompute under the new weights. Keeping running requests' KV while hiding

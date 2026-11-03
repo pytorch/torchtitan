@@ -155,33 +155,28 @@ def test_initialize_torchstore_client_uses_requester_index():
             await generator.initialize_torchstore_client(requester_index=3)
 
         client.assert_awaited_once_with(role=RankRole.REQUESTER, group=3)
+        assert generator._torchstore_loop is asyncio.get_running_loop()
 
     asyncio.run(main())
 
 
 def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
     async def main():
-        staging_state_dict = {"weight": "old"}
+        staging_state_dict = {"weight": torch.zeros(2)}
         generator = Generator.__new__(Generator)
+        generator.config = SimpleNamespace(model_state_dict_load_mode="cpu_prefetch")
         generator._prefetched_model_state_dict = staging_state_dict
 
         def fill_state_dict(*args, **kwargs):
             assert kwargs["user_state_dict"] is staging_state_dict
-            staging_state_dict["weight"] = "fetched"
-            return {"weight": "fetched"}
-
-        load_state_dict = Mock()
-        engine = _vllm_engine(
-            model=SimpleNamespace(
-                load_state_dict=load_state_dict,
-                _prefetched_model_state_dict=staging_state_dict,
-            )
-        )
+            staging_state_dict["weight"].fill_(1)
+            return staging_state_dict
 
         get_state_dict = AsyncMock(side_effect=fill_state_dict)
         with patch.object(generator_module.ts, "get_state_dict", get_state_dict):
             await generator.prefetch_model_state_dict()
-        engine.load_prefetched_model_state_dict()
+        weights = {"weight": torch.zeros(2)}
+        assert generator._copy_prefetched_model_state_dict(weights) == weights.keys()
 
         assert generator._prefetched_model_state_dict is staging_state_dict
         get_state_dict.assert_awaited_once_with(
@@ -190,7 +185,7 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
             strict=False,
             direct_rdma=False,
         )
-        load_state_dict.assert_called_once_with({"weight": "fetched"})
+        assert torch.equal(weights["weight"], torch.ones(2))
 
     asyncio.run(main())
 
@@ -508,33 +503,16 @@ def test_shutdown_closes_the_renderer():
     engine._engine.renderer.shutdown.assert_called_once_with()
 
 
-def test_prefetched_model_state_dict_is_the_buffers_the_load_reads():
-    # The generator prefetches into this dict, so it must be the one the load copies from.
-    buffers = {"weight": torch.zeros(1)}
-    loaded = []
-    engine = _vllm_engine(
-        model=SimpleNamespace(
-            load_state_dict=loaded.append, _prefetched_model_state_dict=buffers
-        )
-    )
-
-    assert engine.prefetched_model_state_dict is buffers
-    engine.load_prefetched_model_state_dict()
-    assert loaded == [buffers]
-
-
 @pytest.mark.parametrize("reset_kv_cache", [False, True])
 def test_reset_kv_cache_on_model_state_dict_load_controls_cache_reset(
     reset_kv_cache: bool,
 ):
-    model = SimpleNamespace(
-        load_state_dict=lambda state_dict: None, _prefetched_model_state_dict={}
-    )
+    model = SimpleNamespace(load_model_state_dict=lambda fetch: None)
     engine = _vllm_engine(
         reset_kv_cache_on_model_state_dict_load=reset_kv_cache, model=model
     )
 
-    engine.load_prefetched_model_state_dict()
+    engine.load_model_state_dict(lambda state_dict: state_dict.keys())
 
     expected = [((), {"reset_running_requests": True})] if reset_kv_cache else []
     assert cast(_FakeLLMEngine, engine._engine).reset_prefix_cache_calls == expected
@@ -635,6 +613,7 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_p
             dist_moe_runtime=None,
             debug=DebugConfig(),
             reset_kv_cache_on_model_state_dict_load=True,
+            model_state_dict_load_mode="cpu_prefetch",
             rank=0,
             generator_name="generator",
             output_dir=str(tmp_path),
@@ -682,6 +661,7 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dic
         dist_moe_runtime=None,
         debug=config.debug,
         reset_kv_cache_on_model_state_dict_load=False,
+        model_state_dict_load_mode="cpu_prefetch",
         rank=0,
         generator_name="generator",
         output_dir=str(tmp_path),
@@ -949,6 +929,7 @@ def test_vllm_uneven_decode_tp_padding():
         config.generator.model,
         parallelism=config.generator.parallelism,
         checkpointer_config=None,
+        model_state_dict_load_mode="cpu_prefetch",
     )
 
     engine = build_inference_engine(config)
