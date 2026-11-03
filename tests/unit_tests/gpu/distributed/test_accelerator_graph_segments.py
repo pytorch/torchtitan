@@ -62,15 +62,14 @@ class _Case:
     calls_per_step: list[list[int]]
     sdc_replay_steps: int | None
     """SDC replay checks every call of this many first steps (-1: all), with one replay each.
-    A replay can capture a graph too, from the restored state."""
+    The first-segment graph can capture in a checked call; later-segment graphs don't."""
     preprocess_lazily: bool = False
 
 
 _CASES = {
     "one_call": _Case(1, ParallelismConfig(), _ONE_CALL, sdc_replay_steps=-1),
-    # Steps 1-2 are checked, so they preprocess up front; steps 3-6 preprocess lazily.
-    # In step 1, later segments warm up with capture blocked: the first-segment graph
-    # captures in step 2.
+    # Steps 1-2 are checked, so they preprocess up front and their later segments don't
+    # capture. Steps 3-6 preprocess lazily; the 1-group later-segment graph captures in step 4.
     "fsdp": _Case(
         1, ParallelismConfig(), _FSDP_CALLS, sdc_replay_steps=2, preprocess_lazily=True
     ),
@@ -86,14 +85,14 @@ _CASES = {
         2,
         ParallelismConfig(data_parallel_shard_degree=2),
         _FSDP_CALLS,
-        sdc_replay_steps=-1,
+        sdc_replay_steps=2,
     ),
     # The replica all-reduce in each whole-call segment.
     "dp_replicate_2": _Case(
         2,
         ParallelismConfig(data_parallel_replicate_degree=2),
         _WHOLE_CALL_CALLS,
-        sdc_replay_steps=-1,
+        sdc_replay_steps=2,
     ),
 }
 
