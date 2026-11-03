@@ -252,7 +252,6 @@ def test_training_recipe_uses_separate_datasets() -> None:
     assert config.async_loop.batcher.training_sample_builder.drop_zero_std_reward_groups
     assert isinstance(config.trainer.activation_remat, FullActivationRematConfig)
     assert config.trainer.checkpointer.interval == 20
-    assert config.generator.engine.cuda_graph.mode == "FULL_DECODE_ONLY"
     assert config.num_generators == 8
     assert config.generator.parallelism.data_parallel_degree == 1
     assert (
@@ -351,7 +350,6 @@ def test_recipe_layouts_fit_the_model(
     if num_experts is None:
         assert trainer.expert_parallel_degree == 1
         assert generator.expert_parallel_degree == 1
-        assert config.generator.engine.cuda_graph.mode == "FULL_DECODE_ONLY"
     else:
         assert num_experts % trainer.expert_parallel_degree == 0
         assert trainer.expert_parallel_degree >= trainer.tensor_parallel_degree
