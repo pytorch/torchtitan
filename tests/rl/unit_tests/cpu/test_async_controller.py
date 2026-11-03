@@ -64,14 +64,13 @@ def test_controller_config_maybe_log(tmp_path, caplog) -> None:
         None,
         "aux_loss",
         "mtp",
-        "per_group_accelerator_graphs",
         "accelerator_graphs",
         "sdc_replay",
         "deferred_reduction",
         "rdma",
     ],
 )
-def test_stream_microbatches_config_check(setting: str | None) -> None:
+def test_stream_microbatches_accepts_trainer_settings(setting: str | None) -> None:
     from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_moe_debug_varlen
 
     config = rl_grpo_qwen3_moe_debug_varlen()
@@ -81,9 +80,6 @@ def test_stream_microbatches_config_check(setting: str | None) -> None:
         moe.router.aux_loss = MicrobatchWiseLoadBalanceLoss.Config(coeff=0.01)
     elif setting == "mtp":
         batcher = dataclasses.replace(batcher, num_mtp_layers=1)
-    elif setting == "per_group_accelerator_graphs":
-        config.trainer.training.disable_accelerator_graphs = False
-        config.trainer.training.accelerator_graph_per_microbatch_group = True
     elif setting == "accelerator_graphs":
         config.trainer.training.disable_accelerator_graphs = False
     elif setting == "sdc_replay":
@@ -95,12 +91,8 @@ def test_stream_microbatches_config_check(setting: str | None) -> None:
         config.trainer.training.preprocess_microbatch_groups_lazily = True
     config.async_loop = dataclasses.replace(config.async_loop, batcher=batcher)
 
-    # replace() reruns __post_init__.
-    if setting != "accelerator_graphs":
-        dataclasses.replace(config)
-        return
-    with pytest.raises(ValueError, match="stream_microbatches needs"):
-        dataclasses.replace(config)
+    # replace() reruns __post_init__; every setting streams.
+    dataclasses.replace(config)
 
 
 def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:

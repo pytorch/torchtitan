@@ -237,7 +237,6 @@ class Batcher(Configurable):
                 keeping at least `dp_degree * num_pp_microbatches` samples for the step's last batch,
                 which has the rest. Samples are packed in arrival order, so the microbatches depend on
                 which groups finish first.
-                Needs: no whole-step accelerator graph (config check; it captures one call per step).
         Either way each loss returns a sum, and the trainer divides the gradients by the step's
         loss-token count before clipping.
         """

@@ -65,9 +65,6 @@ snapshotted nor included in the replay signature.
 
 ## Limitations
 
-Per-microbatch-group accelerator graphs
-(`training.accelerator_graph_per_microbatch_group=True`) do not support replay.
-
 Replay currently uses the existing XOR-based `torch.hash_tensor` mode. This
 checksum is order-insensitive, so permutations and some repeated-value
 corruptions can collide today.

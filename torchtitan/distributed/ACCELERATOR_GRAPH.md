@@ -24,8 +24,7 @@ Training capture requires `training.disable_accelerator_graphs=False`.
 
 | Setting | Captured work |
 | --- | --- |
-| `training.accelerator_graph_per_microbatch_group=False` | Forward and backward for all microbatch groups in one optimizer update |
-| `training.accelerator_graph_per_microbatch_group=True` | Forward and backward for one microbatch group, replayed for each group |
+| `training.disable_accelerator_graphs=False` | Forward and backward, one graph replay per segment (below) |
 | `optim.enable_accelerator_graph=True` | Gradient clipping, finite checks, and optimizer update |
 | `training.disable_accelerator_graphs=False` | One validation microbatch group, if validation is configured |
 
@@ -33,16 +32,39 @@ An eval microbatch group contains one microbatch without PP. With PP, it contain
 the microbatches for one eval schedule call. A full validation pass runs the
 configured number of groups and reports one validation loss.
 
-With `accelerator_graph_per_microbatch_group=False`, one graph captures all microbatch
-groups. Each replay runs all groups for one update. The number of groups and their
-input structure must stay fixed across updates.
+### Segments
 
-With `accelerator_graph_per_microbatch_group=True`, one graph captures one microbatch
-group. Each group replays that graph. Groups must have the same input structure,
-tensor shapes, dtypes, devices, and set of parameters receiving gradients. The
-number of groups can change between updates. Each group reduces gradients
-separately. With hybrid sharded data parallelism (HSDP), this can change results
-because eager accumulation reduces replicas once per update.
+A segment is the microbatch groups between two gradient reductions. With FSDP or PP,
+each group reduces its gradients, so a segment is one group. With hybrid sharded data
+parallelism (HSDP) or `parallelism.fsdp_defer_gradient_reduction=True`, gradients are
+reduced once per `forward_backward` call, so a segment is the whole call. Eager
+training reduces at the same points, so a graph replay per segment matches it.
+
+Training uses two kinds of graphs:
+- The first-segment graph runs the step's first segment. Gradients are `None` before
+  it, so autograd allocates them in the graph pool (see `_AcceleratorGraphGradientState`
+  below).
+- A later-segment graph runs every other segment of the step and adds into those
+  gradients. There is one per segment length, made on its first call.
+
+```text
+FSDP, calls [g0, g1, g2] then [g3]:  first([g0]) later_1([g1]) later_1([g2]) later_1([g3])
+HSDP, calls [g0] then [g1, g2]:      first([g0]) later_2([g1, g2])
+```
+
+A later-segment graph records adds into the gradient addresses that the first-segment
+graph's replays put back. So a later-segment graph captures only after the
+first-segment graph has captured. Until then its calls are warmup calls with capture
+blocked.
+
+The number of calls per update and of groups per call can change between updates.
+Every segment of one length must keep the same input structure, tensor shapes, dtypes,
+devices, and set of parameters receiving gradients. With HSDP or deferral, the step's
+first call is the first segment, so it must have the same number of groups in every
+update. The RL trainer sends each step's first group as its own call for this. Each
+later segment adds one graph launch, and each new segment length adds one graph with
+its own warmup calls. With `training.preprocess_microbatch_groups_lazily=True`, each
+segment is preprocessed just before its replay.
 
 Training and validation use the same capture flag. Disabling training capture
 also disables validation capture.
@@ -95,10 +117,11 @@ Step 2: Training warmup 2 -> optimizer warmup 2 -> eval capture/replay
 Step 3: Training capture/replay -> optimizer capture/replay -> eval if due
 ```
 
-Warmup counts wrapper calls, not training steps. With capture per microbatch
-group, several training warmup calls can occur in one update. The capture gate
-keeps later groups eager until eval captures. Wrappers register on their first
-call. `all_wrappers_warmed_up` checks those registered wrappers.
+Warmup counts wrapper calls, not training steps. With several segments per update,
+several training warmup calls can occur in one update. The capture gate keeps them
+eager until eval captures. Wrappers register on their first call.
+`all_wrappers_warmed_up` checks those registered wrappers, so a later-segment length
+that runs only once keeps eval capture waiting.
 `capture_allowed` controls capture of wrappers that do not have a graph.
 It does not block replay of existing graphs.
 
@@ -174,8 +197,7 @@ Eval temporary                                                      [==========]
 Shared range        [forward temp]  [backward temp]                  [eval temp]
 ```
 
-Capture per microbatch group uses this approach. It clears gradients with
-`set_to_none=False` once per update and accumulates them across group replays.
+Training graphs do not use this approach: the first-segment graph uses the state below.
 
 Using `set_to_none=True` without saving and restoring gradient references fails.
 Replay does not repeat autograd's assignment to `param.grad`. After that reference
@@ -183,7 +205,7 @@ is cleared, the optimizer sees `param.grad is None` and skips the parameter upda
 
 ### With `_AcceleratorGraphGradientState`
 
-Capturing all microbatch groups together uses `_AcceleratorGraphGradientState` to save and
+The first-segment graph uses `_AcceleratorGraphGradientState` to save and
 restore gradient references. Before training capture,
 `zero_grad(set_to_none=True)` releases eager gradient buffers. Parameter gradients
 are absent when the first forward starts. Autograd creates them during backward

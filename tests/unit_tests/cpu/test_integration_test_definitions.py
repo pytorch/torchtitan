@@ -26,7 +26,7 @@ from tests.integration_tests.features import (
     build_features_test_list,
     llama3_debugmodel_default,
     llama3_debugmodel_hf_checkpoint_load,
-    muse_glimmer_debugmodel_fsdp2_per_group_accelerator_graph,
+    muse_glimmer_debugmodel_fsdp2_segment_accelerator_graphs,
 )
 from tests.integration_tests.flux import build_flux_test_list
 from tests.integration_tests.h100 import build_h100_tests_list
@@ -171,16 +171,16 @@ def test_varlen_cp_combinations_require_real_collectives(
     config.__post_init__()
 
 
-def test_per_group_accelerator_graph_integration_supports_fake_pg() -> None:
+def test_segment_accelerator_graph_integration_supports_fake_pg() -> None:
     tests_by_name = {test.test_name: test for test in build_features_test_list()}
-    test = tests_by_name["fsdp_per_group_accelerator_graph"]
+    test = tests_by_name["fsdp_segment_accelerator_graphs"]
     config = test.configs[0]()
 
-    assert test.configs == [muse_glimmer_debugmodel_fsdp2_per_group_accelerator_graph]
+    assert test.configs == [muse_glimmer_debugmodel_fsdp2_segment_accelerator_graphs]
     assert not test.use_real_pg
     assert test.ngpu == 2
     assert config.parallelism.data_parallel_shard_degree == 2
-    assert config.training.accelerator_graph_per_microbatch_group
+    assert not config.training.disable_accelerator_graphs
     assert config.training.steps == 10
     assert config.training.num_tokens_per_train_step == (
         3 * test.ngpu * config.training.num_tokens_per_microbatch_per_dp_rank
