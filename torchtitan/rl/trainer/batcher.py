@@ -83,6 +83,7 @@ class TrainerStepBatch:
         #                         [[TrainingMicrobatch(input=[20])]]]
         # The second microbatch contains one real row and one pad row.
         # num_loss_tokens = the microbatches' loss tokens, over every DP rank
+        # routing_token_counts = their non-padding tokens, one per routing depth
     """
 
     # [num_groups][num_microbatches_per_group][dp_degree]; under PP, each group runs as one
@@ -91,6 +92,7 @@ class TrainerStepBatch:
         list[list[list[TrainingMicrobatch]]] | list[list[list[RDMAMicrobatch]]]
     )
     num_loss_tokens: int
+    routing_token_counts: torch.Tensor
     metrics: list[m.Metric]
     group_ids: list[int]
     """Every consumed rollout group, including metric-only groups."""
@@ -459,6 +461,13 @@ class Batcher(Configurable):
             for rank_microbatches in microbatches
             for microbatch in rank_microbatches
         )
+        routing_token_counts = torch.stack(
+            [
+                microbatch.routing_token_counts
+                for rank_microbatches in microbatches
+                for microbatch in rank_microbatches
+            ]
+        ).sum(dim=0)
         num_response_tokens = sum(
             int(microbatch.loss_mask.sum().item())
             for rank_microbatches in microbatches
@@ -471,10 +480,11 @@ class Batcher(Configurable):
                 for start in range(0, len(microbatches), num_pp_microbatches)
             ],
             num_loss_tokens=num_loss_tokens,
+            routing_token_counts=routing_token_counts,
             metrics=[
                 *metrics,
-                # Keep this response-level metric exact without adding a second
-                # token-count field to TrainerStepBatch.
+                # Keep this response-level metric exact without adding a
+                # response-token count field to TrainerStepBatch.
                 m.Metric(
                     "loss/generator_logprob_nan_frac",
                     m.NoReduce(

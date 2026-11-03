@@ -256,6 +256,7 @@ class Trainer(Configurable):
         microbatch_groups: (
             list[list[TrainingMicrobatch]] | list[list[RDMAMicrobatch]]
         ),
+        aux_loss_denominators: torch.Tensor,
     ) -> dict[str, float] | None:
         """Run one optimizer step's forward/backward microbatches.
 
@@ -264,6 +265,9 @@ class Trainer(Configurable):
                 `[num_groups][num_microbatches_per_group][dp_degree]` grid. Under PP, each group runs
                 as one pipeline step. `RDMAMicrobatch`es when `rdma_min_tensor_bytes` is set,
                 read a few ahead of training.
+            aux_loss_denominators: The step's routed tokens per loss token over every DP rank,
+                one per routing depth (`aux_loss.aux_loss_denominators`), computed by the
+                controller.
 
         Returns:
             dict[str, float] | None: Globally-reduced metrics, or ``None`` on
@@ -312,7 +316,10 @@ class Trainer(Configurable):
             # and broadcast it, to cut the trainer's reads by cp * tp. Needs a per-replica group.
             # The controller rejects RDMA with PP, so every group holds one microbatch.
             microbatch_groups = RDMAMicrobatchPrefetcher(microbatches)
-        result = engine.forward_backward(microbatch_groups=microbatch_groups)
+        result = engine.forward_backward(
+            microbatch_groups=microbatch_groups,
+            aux_loss_denominators=aux_loss_denominators,
+        )
         if not engine.pp_has_last_stage:
             return None
         microbatch_metrics: list[dict[str, float]] = []

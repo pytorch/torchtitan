@@ -250,6 +250,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
                         )
                     ]
                 ],
+                # Every token is routed and is a loss token.
+                aux_loss_denominators=torch.tensor([1.0]),
             )
             _divide_gradients_by_num_tokens(model)
             optimizer.step()
@@ -303,10 +305,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
         }
         if next(self.model_config.traverse(AuxLoss.Config), None) is not None:
             extra_kwargs["aux_loss_denominators"] = aux_loss_denominators(
-                torch.tensor([NUM_TOKENS]),
-                torch.tensor(NUM_TOKENS),
-                device=torch.device("cuda"),
-            )
+                torch.tensor([NUM_TOKENS]), torch.tensor(NUM_TOKENS)
+            ).cuda()
         maybe_register_blockmask_pytree_node()
 
         # Step 1: Trace the graph

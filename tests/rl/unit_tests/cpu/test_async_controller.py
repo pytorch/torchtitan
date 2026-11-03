@@ -184,6 +184,10 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     assert batch.num_loss_tokens == sum(
         int(microbatch.loss_token_count) for microbatch in microbatches
     )
+    torch.testing.assert_close(
+        batch.routing_token_counts,
+        sum(microbatch.routing_token_counts for microbatch in microbatches),
+    )
     assert batch.group_ids == [0, 1]
 
 
@@ -198,6 +202,7 @@ def test_batcher_prepares_per_depth_mtp_routing_token_counts() -> None:
     # One loss-token count (the main objective's); routing counts per depth.
     assert microbatch.loss_token_count.shape == ()
     assert microbatch.routing_token_counts.shape == (3,)
+    assert batch.routing_token_counts.shape == (3,)
 
 
 def test_batcher_warns_after_each_batch_of_untrainable_groups(

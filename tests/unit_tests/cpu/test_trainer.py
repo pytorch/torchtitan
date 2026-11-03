@@ -124,6 +124,9 @@ def _training_loop(trainer: TrainingEngine) -> SimpleNamespace:
         trainer._sum_loss_token_count = partial(
             TrainingEngine._sum_loss_token_count, trainer
         )
+        trainer.step_aux_loss_denominators = partial(
+            TrainingEngine.step_aux_loss_denominators, trainer
+        )
     if not hasattr(trainer.config, "model"):
         trainer.config.model = SimpleNamespace(traverse=lambda _: iter(()))
 
@@ -302,6 +305,7 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs(
             ntokens_seen=0,
             local_loss_token_count=0,
             device=torch.device("cpu"),
+            _aux_loss_denominators=torch.tensor([1.0]),
         ),
     )
     microbatches = [
@@ -464,6 +468,7 @@ def test_forward_backward_runs_whole_accumulation(
     result = TrainingEngine.forward_backward(
         engine,
         microbatch_groups=[[microbatch] for microbatch in microbatches],
+        aux_loss_denominators=torch.tensor([2.0]),
     )
 
     torch.testing.assert_close(result.loss, torch.tensor(3.0))
@@ -490,9 +495,9 @@ def test_forward_backward_runs_whole_accumulation(
     for inputs, labels, model_kwargs in captured["fwd_bwd_args"]:
         assert inputs == "INPUTS"
         assert model_kwargs["positions"] == 1
-        # One routed token per loss token in each microbatch.
+        # Every microbatch gets the call's denominators.
         torch.testing.assert_close(
-            model_kwargs["aux_loss_denominators"], torch.tensor([1.0])
+            model_kwargs["aux_loss_denominators"], torch.tensor([2.0])
         )
         assert labels.numel() == 7
     assert captured["preprocess_kwargs"] == {
@@ -968,9 +973,11 @@ def no_registered_aux_losses():
 def test_trainer_accumulates_reused_accelerator_graph_losses():
     graph_loss = torch.tensor(0.0)
     loss_values = iter((1.0, 2.0, 3.0, 4.0, 5.0, 6.0))
+    passed_aux_loss_denominators: list[torch.Tensor] = []
 
-    def forward_backward(*, microbatch_groups):
+    def forward_backward(*, microbatch_groups, aux_loss_denominators):
         assert len(microbatch_groups) == 3
+        passed_aux_loss_denominators.append(aux_loss_denominators)
         trainer.local_loss_token_count = sum(
             int(microbatch.loss_token_count)
             for microbatch_group in microbatch_groups
@@ -1025,10 +1032,15 @@ def test_trainer_accumulates_reused_accelerator_graph_losses():
             ntokens_seen=3,
         ),
     )
-    data_iterator = iter([_batch() for _ in range(3)])
+    # 4 routed tokens each; 2, 1 and 0 of them are loss tokens.
+    data_iterator = iter(
+        [_batch(torch.tensor(count), torch.tensor([4])) for count in (2, 1, 0)]
+    )
 
     Trainer.train_step(_training_loop(trainer), data_iterator)
 
+    # One denominator for the step: 12 routed tokens per 3 loss tokens.
+    torch.testing.assert_close(passed_aux_loss_denominators, [torch.tensor([4.0])])
     # The summed loss 1 + 2 + 3 over the step's 3 loss tokens.
     metrics_processor.log.assert_called_once_with(
         1,
@@ -1053,6 +1065,43 @@ def test_trainer_accumulates_reused_accelerator_graph_losses():
     # A step in the middle of a window does not start a new one.
     metrics_processor.reset.assert_not_called()
     assert trainer.num_completed_steps == 2
+
+
+def test_step_aux_loss_denominators_sum_counts_over_dp_in_one_all_reduce(
+    monkeypatch,
+) -> None:
+    all_reduced: list[torch.Tensor] = []
+
+    def dist_sum_tensor(counts, mesh):
+        all_reduced.append(counts.clone())
+        # The other DP rank has 6 loss tokens and 8 routed tokens.
+        return counts + torch.tensor([6, 8])
+
+    monkeypatch.setattr(
+        "torchtitan.training_engine.dist_utils.dist_sum_tensor", dist_sum_tensor
+    )
+    engine = cast(
+        TrainingEngine,
+        SimpleNamespace(
+            device=torch.device("cpu"),
+            parallelism_context=SimpleNamespace(
+                dp_enabled=True, get_mesh=lambda name: name
+            ),
+        ),
+    )
+
+    # This rank: 4 routed tokens per microbatch, 2 and 0 of them loss tokens.
+    denominators = TrainingEngine.step_aux_loss_denominators(
+        engine,
+        [
+            [_batch(torch.tensor(2), torch.tensor([4]))],
+            [_batch(torch.tensor(0), torch.tensor([4]))],
+        ],
+    )
+
+    # One all-reduce of [loss tokens, routed tokens]; then 16 routed per 8 loss tokens.
+    torch.testing.assert_close(all_reduced, [torch.tensor([2, 8])])
+    torch.testing.assert_close(denominators, torch.tensor([2.0]))
 
 
 @pytest.mark.parametrize("disable_accelerator_graphs", [False, True])
@@ -1146,6 +1195,7 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     TrainingEngine.forward_backward(
         engine,
         microbatch_groups=[[_batch()], [_batch()]],
+        aux_loss_denominators=torch.tensor([1.0]),
     )
 
     replayer.run_fwd_bwd.assert_called_once()
@@ -1189,6 +1239,7 @@ def test_replay_failure_propagates_from_engine():
         TrainingEngine.forward_backward(
             engine,
             microbatch_groups=[[_batch()]],
+            aux_loss_denominators=torch.tensor([1.0]),
         )
 
 

@@ -87,6 +87,8 @@ def _measure_step(
                 )
             ]
         ],
+        # Every token is routed and is a loss token.
+        aux_loss_denominators=torch.tensor([1.0]),
     )
     torch.cuda.synchronize()
 

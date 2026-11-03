@@ -284,6 +284,7 @@ def test_forward_backward_preprocesses_every_group() -> None:
     result = TrainingEngine.forward_backward(
         engine,
         microbatch_groups=microbatch_groups,
+        aux_loss_denominators=torch.tensor([1.0]),
     )
 
     torch.testing.assert_close(result.loss, torch.tensor(1.0))
@@ -407,10 +408,12 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
         )
 
         result = await Trainer.forward_backward(
-            trainer, [[microbatch] for microbatch in microbatches]
+            trainer, [[microbatch] for microbatch in microbatches], torch.tensor([1.0])
         )
 
-        engine.forward_backward.assert_called_once_with(microbatch_groups=ANY)
+        engine.forward_backward.assert_called_once_with(
+            microbatch_groups=ANY, aux_loss_denominators=ANY
+        )
         # RDMAMicrobatches are read through the prefetcher; by value, the column is passed as is.
         groups = engine.forward_backward.call_args.kwargs["microbatch_groups"]
         assert isinstance(groups, RDMAMicrobatchPrefetcher) == rdma
@@ -449,7 +452,7 @@ def test_forward_backward_rejects_a_misplaced_rdma_microbatch(
     )
 
     with pytest.raises(ValueError, match=r"expected \(0, 1, 0\)"):
-        asyncio.run(Trainer.forward_backward(trainer, [[wrong]]))
+        asyncio.run(Trainer.forward_backward(trainer, [[wrong]], torch.tensor([1.0])))
     wrong.read.assert_not_called()
 
 
@@ -487,10 +490,15 @@ def test_forward_backward_without_last_pipeline_stage_returns_no_metrics() -> No
             for group in range(2)
         ]
 
-        result = await Trainer.forward_backward(trainer, microbatch_groups)
+        aux_loss_denominators = torch.tensor([2.0])
+
+        result = await Trainer.forward_backward(
+            trainer, microbatch_groups, aux_loss_denominators
+        )
 
         engine.forward_backward.assert_called_once_with(
-            microbatch_groups=microbatch_groups
+            microbatch_groups=microbatch_groups,
+            aux_loss_denominators=aux_loss_denominators,
         )
         assert trainer._step_num_tokens_per_dp_rank == (
             4 * trainer.config.training.num_tokens_per_microbatch_per_dp_rank

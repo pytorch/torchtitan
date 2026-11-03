@@ -6,10 +6,10 @@
 
 """Auxiliary-loss gradient injection and distributed metric collection.
 
-Normalization: every auxiliary loss is divided by its microbatch's routed
-tokens per loss token (``aux_loss_denominators``), and the training engine
-later divides every gradient by the step's loss-token count. Each microbatch's
-mean auxiliary loss is then weighted by its share of the step's loss tokens.
+Normalization: every auxiliary loss is divided by the step's routed tokens
+per loss token (``aux_loss_denominators``), and the training engine later
+divides every gradient by the step's loss-token count. Each microbatch's mean
+auxiliary loss is then weighted by its share of the step's routed tokens.
 The per-step metric is the mean over loss instances (layers) of that weighted
 value, summed over data-parallel ranks and pipeline stages.
 
@@ -51,24 +51,22 @@ __all__ = [
 
 
 def aux_loss_denominators(
-    routing_token_counts: torch.Tensor,
-    loss_token_count: torch.Tensor,
-    *,
-    device: torch.device,
+    routing_token_counts: torch.Tensor, loss_token_count: torch.Tensor
 ) -> torch.Tensor:
-    """Return one microbatch's auxiliary-loss denominators: routed tokens per loss token,
-    one per routing depth, as fp32 on ``device``.
+    """Return a step's auxiliary-loss denominators: its routed tokens per loss token,
+    one per routing depth, as fp32 on the counts' device.
 
-    The engine divides every gradient by the step's loss-token count N afterwards, so a
-    microbatch with R routed and N_mb loss tokens weights its mean auxiliary loss by N_mb / N.
+    The engine divides every gradient by the step's N loss tokens afterwards, so a
+    microbatch with R_mb routed tokens weights its mean auxiliary loss by R_mb / R.
 
     Example:
-        aux_loss_denominators(torch.tensor([8, 6]), torch.tensor(4), device=device)
-        # -> tensor([2.0, 1.5]); a microbatch with no loss tokens gets inf (weight 0)
+        aux_loss_denominators(torch.tensor([8, 6]), torch.tensor(4))  # -> tensor([2.0, 1.5])
+        aux_loss_denominators(torch.tensor([0]), torch.tensor(0))  # -> tensor([1.0])
     """
-    # non_blocking: a pageable copy would wait for the previous group's backward.
-    return (routing_token_counts.clamp_min(1).to(torch.float32) / loss_token_count).to(
-        device, non_blocking=True
+    # Both counts clamp to 1, as main clamped the routed count: a step with no loss tokens
+    # keeps its routed-token weights, and an all-padding microbatch adds a zero loss.
+    return routing_token_counts.clamp_min(1).to(torch.float32) / (
+        loss_token_count.clamp_min(1)
     )
 
 
@@ -104,7 +102,7 @@ class AuxLoss(Module):
     rolls these into the ``group_acc`` registers, which
     ``collect_aux_loss_metrics`` reduces for logging.
 
-    The owning model block passes its microbatch's denominator (from
+    The owning model block passes the step's denominator (from
     ``aux_loss_denominators``) to ``inject`` on every forward.
     Metric accumulation happens in the forward inside ``inject()``, which
     wraps it in a retained ``torch_remat`` region (``recompute=False``) so
@@ -222,9 +220,8 @@ class AuxLoss(Module):
         Args:
             raw_sum: Unnormalized per-microbatch loss value (differentiable).
             carrier: The tensor whose backward path carries the gradient.
-            denominator: This microbatch's routed tokens per loss token for the
-                owning block (``aux_loss_denominators``); inf when the
-                microbatch has no loss tokens, so it adds nothing.
+            denominator: The step's routed tokens per loss token for the
+                owning block (``aux_loss_denominators``).
 
         Returns:
             ``carrier`` unchanged (identity forward).
@@ -245,8 +242,8 @@ class AuxLoss(Module):
         denominator: torch.Tensor,
     ) -> torch.Tensor:
         """Accumulate this microbatch's metric value and inject the gradient."""
-        # Scaling the loss is local arithmetic on a per-microbatch scalar.
-        # The denominator is computed outside the model forward, so it carries
+        # Scaling the loss is local arithmetic on a per-step scalar. The
+        # denominator is computed outside the model forward, so it carries
         # no mesh annotation for the ambient one. The loss's own type varies
         # with the layout (TP is Invariant with EP token sharding, Replicate
         # without), so no single restated type fits; the injection itself still
