@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Generic, Literal, TypeAlias, TypeVar
 
@@ -15,6 +15,7 @@ import torch.distributed as dist
 import torch.distributed._functional_collectives as funcol
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.config import Function
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
@@ -668,6 +669,50 @@ class GradAccumulator:
         self._next_idx += 1
 
 
+def combine_loss_metrics(
+    metrics_list: Iterable[dict[str, torch.Tensor]],
+    *,
+    mesh: DeviceMesh | None = None,
+) -> dict[str, torch.Tensor]:
+    """Combine per-chunk or per-microbatch loss metrics into one dict.
+
+    The key suffix picks the reduction: ``/mean``, ``/frac`` (or ``_mean``,
+    ``_frac``) are summed, ``/max`` and ``/min`` take the max and min. Mean
+    and fraction metrics are expected to already be normalized by the global
+    valid-token count, so their sum is the global mean.
+
+    Args:
+        metrics_list: Metric dicts to combine on this rank.
+        mesh: If given, the combined metrics are also reduced across it (e.g.
+            the trainer's loss mesh). Leave ``None`` inside the training step,
+            where no collectives may run.
+    """
+    reduced: dict[str, torch.Tensor] = {}
+    reduce_ops: dict[str, str] = {}
+    for metrics in metrics_list:
+        for key, value in metrics.items():
+            match key.split("/")[-1].split("_")[-1]:
+                case "mean" | "frac":
+                    reduce, reduce_ops[key] = torch.add, dist.ReduceOp.SUM.name
+                case "max":
+                    reduce, reduce_ops[key] = torch.maximum, dist.ReduceOp.MAX.name
+                case "min":
+                    reduce, reduce_ops[key] = torch.minimum, dist.ReduceOp.MIN.name
+                case _:
+                    raise ValueError(
+                        f"Do not know how to reduce metric '{key}'. Use a /mean, "
+                        "/frac, /max, or /min (or _mean, _frac) suffix."
+                    )
+            reduced[key] = value if key not in reduced else reduce(reduced[key], value)
+    if mesh is not None:
+        # Sorted so every rank issues the collectives in the same order.
+        for key in sorted(reduced):
+            reduced[key] = funcol.wait_tensor(
+                funcol.all_reduce(reduced[key], reduceOp=reduce_ops[key], group=mesh)
+            )
+    return reduced
+
+
 class ChunkedLossWrapper(Loss[LossInput]):
     """Chunked loss wrapper that splits the sequence dimension to reduce peak memory.
 
@@ -835,7 +880,7 @@ class ChunkedLossWrapper(Loss[LossInput]):
                     src=spmd.R,
                     dst={"dp": spmd.P, "cp": spmd.P, "tp": spmd.I},
                 )
-            metrics: dict[str, torch.Tensor] = {}
+            chunk_metrics_list: list[dict[str, torch.Tensor]] = []
 
             fsdp_enabled = isinstance(lm_head, FSDPModule)
             # Disable FSDP reshard on lm_head to keep its weight unsharded across
@@ -888,7 +933,7 @@ class ChunkedLossWrapper(Loss[LossInput]):
                 )
                 # Free logits before backward.
                 del logits
-                metrics = self._combine_chunk_metrics(metrics, chunk_metrics)
+                chunk_metrics_list.append(chunk_metrics)
                 total_loss = total_loss + chunk_loss.detach()
 
                 if run_backward:
@@ -902,6 +947,7 @@ class ChunkedLossWrapper(Loss[LossInput]):
                                 grad_accumulator.add(h_chunk.grad)
                                 h_chunk.grad = None
 
+            metrics = combine_loss_metrics(chunk_metrics_list)
             if fsdp_enabled:
                 lm_head.set_reshard_after_forward(True)
                 lm_head.set_reshard_after_backward(True)
@@ -921,35 +967,6 @@ class ChunkedLossWrapper(Loss[LossInput]):
                 total_loss,
             )
         return loss, metrics
-
-    @staticmethod
-    def _combine_chunk_metrics(
-        current: dict[str, torch.Tensor],
-        values: dict[str, torch.Tensor],
-    ) -> dict[str, torch.Tensor]:
-        """Combine metrics from one sequence chunk into the local accumulator.
-
-        Mean/fraction metrics are expected to already be normalized by the
-        global valid-token count, so summing chunk contributions gives the
-        global mean for this rank's microbatch contribution. The trainer still
-        performs the cross-rank loss-mesh reduction on the returned metrics.
-        """
-        for key, value in values.items():
-            previous = current.get(key)
-            if previous is None:
-                current[key] = value
-            elif key.endswith(("/mean", "/frac", "_mean", "_frac")):
-                current[key] = previous + value
-            elif key.endswith("/max"):
-                current[key] = torch.maximum(previous, value)
-            elif key.endswith("/min"):
-                current[key] = torch.minimum(previous, value)
-            else:
-                raise ValueError(
-                    f"Do not know how to reduce metric '{key}'. "
-                    "Use a /mean, /frac, _mean, _frac, /max, or /min suffix."
-                )
-        return current
 
     def _gradient_backprop(
         self,

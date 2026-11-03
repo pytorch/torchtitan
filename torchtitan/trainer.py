@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import time
-from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
@@ -22,6 +21,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpointer import DATALOADER
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
+from torchtitan.components.loss import combine_loss_metrics
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validator import BaseValidator, Validator
 from torchtitan.config import apply_overrides, Configurable, OverrideConfig
@@ -407,28 +407,24 @@ class Trainer(Configurable):
                 {"global_valid_tokens": int(global_main_loss_token_count)}
             )
 
-            # /mean loss metrics are pre-normalized by the global token count, so
-            # their sum over microbatches and loss-mesh ranks is the global mean.
-            # Under PP, ranks without the last stage have none.
-            values_by_key: dict[str, list[torch.Tensor]] = defaultdict(list)
-            for group_metrics in forward_backward_result.loss_metrics:
-                for microbatch_metrics in group_metrics:
-                    for key, value in microbatch_metrics.items():
-                        values_by_key[key].append(value)
-            local_loss_metrics: dict[str, torch.Tensor] = {}
-            for key, values in sorted(values_by_key.items()):
-                if key.endswith("/mean"):
-                    local_loss_metrics[key] = torch.stack(values).sum()
-                elif key.endswith("/max"):
-                    local_loss_metrics[key] = torch.stack(values).amax()
-                else:
-                    raise ValueError(
-                        f"Do not know how to reduce loss metric '{key}'. "
-                        "Use a /mean or /max suffix."
-                    )
+            # Combine loss metrics over microbatches and loss-mesh ranks; under PP,
+            # ranks without the last stage have none.
+            # TODO(#4202): migrate loss-metric collection to the distributed
+            # tensor logging framework once it lands.
+            loss_mesh = parallelism_context.get_optional_mesh("loss")
+            loss_metrics = {
+                key: float(value.item())
+                for key, value in combine_loss_metrics(
+                    (
+                        microbatch_metrics
+                        for group_metrics in forward_backward_result.loss_metrics
+                        for microbatch_metrics in group_metrics
+                    ),
+                    mesh=loss_mesh,
+                ).items()
+            }
 
             if parallelism_context.dp_cp_enabled:
-                loss_mesh = parallelism_context.get_optional_mesh("loss")
 
                 # For global_avg_loss, we want the average loss across all ranks:
                 # accumulated_loss = local_loss_sum / global_valid_tokens
@@ -456,21 +452,9 @@ class Trainer(Configurable):
                         loss_mesh,
                     ),
                 )
-                loss_metrics = {
-                    key: (
-                        dist_utils.dist_max
-                        if key.endswith("/max")
-                        else dist_utils.dist_sum
-                    )(value, loss_mesh)
-                    for key, value in local_loss_metrics.items()
-                }
             else:
                 global_avg_loss = global_max_loss = float(accumulated_loss.item())
                 global_ntokens_seen = engine.ntokens_seen
-                loss_metrics = {
-                    key: float(value.item())
-                    for key, value in local_loss_metrics.items()
-                }
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
