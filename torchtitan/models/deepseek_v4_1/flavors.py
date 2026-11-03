@@ -23,6 +23,7 @@ from torchtitan.models.common import (
     RowParallelLinear,
     SqrtSoftplus,
 )
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_shared_expert_ffn_config,
@@ -39,9 +40,20 @@ from torchtitan.models.common.decoder_sharding import (
     rowwise_sharding_config,
     token_embedding_sharding_config,
 )
-from torchtitan.models.common.moe.sharding import (
-    router_gate_sharding_config,
-    router_sharding_config,
+from torchtitan.models.common.feed_forward import DenseFeedForward
+from torchtitan.models.common.moe.sharding import router_gate_sharding_config
+from torchtitan.models.common.vision_encoder import (
+    InvariantRowParallelLinear,
+    VisionAttention,
+)
+from torchtitan.models.common.vision_encoder_sharding import (
+    invariant_norm_sharding_config,
+    multimodal_token_embedding_sharding_config,
+    vision_attention_sharding_config,
+    vision_colwise_sharding_config,
+    vision_inner_attention_sharding_config,
+    vision_invariant_linear_sharding_config,
+    vision_rowwise_sharding_config,
 )
 from torchtitan.models.deepseek_v4.compressor import SparseIndexerLoss
 from torchtitan.models.deepseek_v4.mhc import HcPost
@@ -62,6 +74,7 @@ from .engram import (
 from .mhc import HcCoefficients
 from .model import DeepSeekV41Model, DeepSeekV41TransformerBlock
 from .moe import Float32LimitedSwiGLU, ModalityMoE, ModalityRouter
+from .reference_attention import ReferenceFlexInnerAttention
 from .sharding import (
     compressor_sharding_config,
     csa2_inner_sharding_config,
@@ -69,8 +82,10 @@ from .sharding import (
     hc_coefficients_sharding_config,
     indexer_sharding_config,
     modality_moe_sharding_config,
+    modality_router_sharding_config,
     shared_attention_sharding_config,
 )
+from .vision import Aligner, VisionEncoder, VisionTransformerBlock
 
 _LINEAR_INIT = {
     "weight": partial(nn.init.trunc_normal_, std=0.02),
@@ -104,6 +119,116 @@ def _norm_config(dim, eps, *, sharding=None):
     )
 
 
+def _vision_configs(*, dim, released, attention_backend):
+    vision_dim, heads, num_layers, intermediate, patch = (
+        (1024, 16, 32, 2816, 14) if released else (64, 4, 2, 128, 2)
+    )
+
+    def linear(in_features, out_features, *, sharding, bias=True):
+        return Linear.Config(
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            param_init=_LINEAR_INIT,
+            sharding_config=sharding,
+        )
+
+    norm = _norm_config(vision_dim, 1e-6, sharding=invariant_norm_sharding_config())
+    blocks = []
+    for _ in range(num_layers):
+        gate_up_sharding = vision_colwise_sharding_config()
+        gate_up_sharding.state_shardings["weight"] = spmd.SpmdType(
+            {"dp": spmd.R, "cp": spmd.I, "tp": spmd.S(1)}
+        )
+        gate_up_sharding.out_src_shardings = spmd.SpmdType(
+            {"dp": spmd.V, "cp": spmd.I, "tp": spmd.S(2)}
+        )
+        gate_up_sharding.local_spmd = True
+        blocks.append(
+            VisionTransformerBlock.Config(
+                norm1=replace(norm),
+                norm2=replace(norm),
+                attn=VisionAttention.Config(
+                    dim=vision_dim,
+                    num_heads=heads,
+                    wq=linear(
+                        vision_dim,
+                        vision_dim,
+                        sharding=vision_colwise_sharding_config(input_tp=spmd.R),
+                    ),
+                    wk=linear(
+                        vision_dim,
+                        vision_dim,
+                        sharding=vision_colwise_sharding_config(input_tp=spmd.R),
+                    ),
+                    wv=linear(
+                        vision_dim,
+                        vision_dim,
+                        sharding=vision_colwise_sharding_config(input_tp=spmd.R),
+                    ),
+                    proj=InvariantRowParallelLinear.Config(
+                        in_features=vision_dim,
+                        out_features=vision_dim,
+                        bias=True,
+                        param_init=_LINEAR_INIT,
+                        sharding_config=vision_rowwise_sharding_config(),
+                    ),
+                    inner_attention=(
+                        FlexInnerAttention
+                        if attention_backend == "flex"
+                        else ReferenceFlexInnerAttention
+                    ).Config(sharding_config=vision_inner_attention_sharding_config()),
+                    sharding_config=vision_attention_sharding_config(
+                        rope_cache_dp=spmd.V
+                    ),
+                ),
+                mlp=DenseFeedForward.Config(
+                    w13=Linear.Config(
+                        in_features=vision_dim,
+                        out_features=intermediate,
+                        num_linears=2,
+                        bias=False,
+                        param_init=_LINEAR_INIT,
+                        sharding_config=gate_up_sharding,
+                    ),
+                    w2=InvariantRowParallelLinear.Config(
+                        in_features=intermediate,
+                        out_features=vision_dim,
+                        bias=False,
+                        param_init=_LINEAR_INIT,
+                        sharding_config=vision_rowwise_sharding_config(),
+                    ),
+                ),
+            )
+        )
+    vision = VisionEncoder.Config(
+        dim=vision_dim,
+        num_heads=heads,
+        rope_theta=10000.0,
+        patch_embed=linear(
+            3 * patch**2,
+            vision_dim,
+            sharding=vision_invariant_linear_sharding_config(),
+        ),
+        layers=blocks,
+        norm=norm,
+    )
+    aligner = Aligner.Config(
+        downsample_ratio=3,
+        w1=linear(
+            9 * vision_dim, dim, sharding=vision_invariant_linear_sharding_config()
+        ),
+        w2=linear(dim, dim, sharding=vision_invariant_linear_sharding_config()),
+    )
+    image_embeddings = Embedding.Config(
+        num_embeddings=3,
+        embedding_dim=dim,
+        param_init={"weight": partial(nn.init.normal_, std=0.02)},
+        sharding_config=replicated_state_sharding_config("weight"),
+    )
+    return vision, aligner, image_embeddings
+
+
 def _make_config(
     *,
     seq_len,
@@ -112,6 +237,8 @@ def _make_config(
     tokenizer_path,
     quantize,
     indexer_loss_coeff,
+    vision_enabled,
+    vision_attention_backend,
     attention_backend,
 ):
     if (
@@ -313,7 +440,7 @@ def _make_config(
             score_func=SqrtSoftplus.Config(),
             route_norm=True,
             route_scale=1.5,
-            sharding_config=router_sharding_config(),
+            sharding_config=modality_router_sharding_config(),
         )
         expert_init: dict[str, Callable] = {
             "w1_EFD": _LINEAR_INIT["weight"],
@@ -397,6 +524,13 @@ def _make_config(
                 engram=engram,
             )
         )
+    vision, aligner, image_embeddings = (
+        _vision_configs(
+            dim=dim, released=released, attention_backend=vision_attention_backend
+        )
+        if vision_enabled
+        else (None, None, None)
+    )
     return DeepSeekV41Model.Config(
         dim=dim,
         vocab_size=vocab_size,
@@ -409,11 +543,16 @@ def _make_config(
         index_source_layers=index_sources,
         engram_layer_ids=engram_layers,
         engram_hash=hash_config,
+        vision=vision,
+        aligner=aligner,
+        image_embeddings=image_embeddings,
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init={"weight": partial(nn.init.normal_, std=1.0)},
-            sharding_config=token_embedding_sharding_config(enable_sp=enable_sp),
+            sharding_config=multimodal_token_embedding_sharding_config()
+            if vision_enabled
+            else token_embedding_sharding_config(enable_sp=enable_sp),
         ),
         norm=_norm_config(
             dim,
@@ -452,6 +591,8 @@ def build_model_config(
     tokenizer_path: str | None = None,
     quantize: bool = True,
     indexer_loss_coeff: float = 0.01,
+    vision_enabled: bool | None = None,
+    vision_attention_backend: str = "flex",
     attention_backend: str = "fused",
 ):
     if flavor not in MODEL_FLAVORS:
@@ -464,6 +605,8 @@ def build_model_config(
         raise ValueError(f"seq_len must be in [1, {max_context_length}].")
     if indexer_loss_coeff < 0:
         raise ValueError("indexer_loss_coeff must be nonnegative.")
+    if vision_attention_backend not in ("flex", "reference"):
+        raise ValueError("vision_attention_backend must be flex or reference.")
     if attention_backend not in ("fused", "reference"):
         raise ValueError("attention_backend must be fused or reference.")
     config = factory(
@@ -472,6 +615,10 @@ def build_model_config(
         tokenizer_path=tokenizer_path,
         quantize=quantize,
         indexer_loss_coeff=indexer_loss_coeff,
+        vision_enabled=flavor == "deepseek_v4_1_flash"
+        if vision_enabled is None
+        else vision_enabled,
+        vision_attention_backend=vision_attention_backend,
         attention_backend=attention_backend,
     )
     return config

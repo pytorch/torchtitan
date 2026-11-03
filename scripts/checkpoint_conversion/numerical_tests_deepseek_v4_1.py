@@ -9,8 +9,8 @@
 The author provides inference kernels, not a training reference. This harness
 executes the unchanged Python model with independent PyTorch implementations
 of those kernels. Dense math uses FP32 on both sides; activation quantization
-and the quantized Engram table remain enabled. It checks text logits, per-block outputs, and text backbone and sliding-window
-block gradients.
+and the quantized Engram table remain enabled. It checks text/image logits, per-block outputs, vision gradients, and text
+backbone and sliding-window block gradients.
 """
 
 import argparse
@@ -19,7 +19,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import torch
@@ -158,6 +158,8 @@ def compare(reference_dir, *, seq_len):
         parallelism=ParallelismConfig(),
         seq_len=seq_len,
         indexer_loss_coeff=0.0,
+        vision_enabled=True,
+        vision_attention_backend="reference",
         attention_backend="reference",
     )
     for layer in config.layers:
@@ -214,7 +216,7 @@ def compare(reference_dir, *, seq_len):
         engram_n_heads=2,
         engram_head_dim=32,
         engram_compressed_vocab_size=config.vocab_size,
-        vision_n_layers=0,
+        vision_n_layers=2,
         vision_dim=64,
         vision_n_heads=4,
         vision_inter_dim=128,
@@ -245,12 +247,6 @@ def compare(reference_dir, *, seq_len):
         original_forward = embedding.forward
         embedding.forward = lambda ids, read=original_forward: read(ids).float()
     weights = adapter.to_hf(native.state_dict())
-    # The text-only author config omits the released image-routing bias buffers.
-    weights = {
-        key: value
-        for key, value in weights.items()
-        if not key.endswith(".ffn.gate.bias_vl")
-    }
     for layer_id in config.engram_layer_ids:
         weights[f"layers.{layer_id}.engram.embed.scale"] = torch.ones_like(
             reference.layers[layer_id].engram.embed.scale
@@ -365,6 +361,31 @@ def compare(reference_dir, *, seq_len):
             (native_shared[name] - reference_shared[name]).abs().max().item()
         )
     torch.testing.assert_close(actual, expected.squeeze(0), rtol=1e-4, atol=2e-5)
+    patches = torch.randn(36, 12, requires_grad=True)
+    reference_patches = patches.detach().clone().requires_grad_()
+    encoded = native.vision(patches, grid_hw=((6, 6),))
+    reference_encoded = reference.vision(reference_patches, 6, 6)
+    aligned = native.aligner(encoded, grid_hw=((6, 6),))
+    reference_aligned = reference.aligner(reference_encoded, 6, 6)
+    torch.testing.assert_close(encoded, reference_encoded, rtol=2e-4, atol=2e-6)
+    torch.testing.assert_close(aligned, reference_aligned, rtol=2e-4, atol=2e-6)
+    (encoded.square().mean() + aligned.square().mean()).backward()
+    (reference_encoded.square().mean() + reference_aligned.square().mean()).backward()
+    torch.testing.assert_close(
+        patches.grad, reference_patches.grad, rtol=2e-4, atol=2e-6
+    )
+    types = torch.tensor([-1, -1, 0, 1, 1, 2, 1, 1, 2, 3] + [-1] * (seq_len - 10))
+    image = SimpleNamespace(
+        start=2, types=types[2:10], patches=patches.detach(), n_vit_h=6, n_vit_w=6
+    )
+    with torch.no_grad():
+        image_actual = native(
+            tokens, token_types=types, pixel_values=patches.detach(), grid_hw=((6, 6),)
+        )
+        _, image_expected, _ = reference(
+            tokens[None], images=[[image]], token_types=types[None]
+        )
+    torch.testing.assert_close(image_actual, image_expected[0], rtol=2e-4, atol=2e-5)
     # A standalone SWA block also tests arbitrary incoming mHC coefficients.
     block = native.layers["0"]
     h = torch.randn(seq_len, config.hc_mult, config.dim, requires_grad=True)
@@ -529,6 +550,12 @@ def compare(reference_dir, *, seq_len):
         "block_max_abs_error": errors,
         "first_block_component_max_abs_error": component_errors,
         "shared_kv_index_selection_max_abs_error": shared_errors,
+        "vision_max_abs_error": (encoded - reference_encoded).abs().max().item(),
+        "aligner_max_abs_error": (aligned - reference_aligned).abs().max().item(),
+        "image_logit_max_abs_error": (image_actual - image_expected[0])
+        .abs()
+        .max()
+        .item(),
         "logit_max_abs_error": (actual - expected.squeeze(0)).abs().max().item(),
         "reference_to_native_probability_kl": F.kl_div(
             actual.double().log_softmax(-1),
@@ -583,10 +610,7 @@ def compare_checkpoint_manifest(index_path):
     expected = {
         key
         for key in manifest
-        if not key.endswith(".scale")
-        and not key.startswith(
-            ("vision.", "aligner.", "mtp.", "image_start", "image_end", "image_newline")
-        )
+        if not key.endswith(".scale") and not key.startswith(("mtp.",))
     }
     if keys != expected:
         raise AssertionError(

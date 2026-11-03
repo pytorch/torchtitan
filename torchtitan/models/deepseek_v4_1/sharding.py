@@ -16,7 +16,10 @@ from torchtitan.models.common.decoder_sharding import (
     residual_activation_placement,
     token_id_placement,
 )
-from torchtitan.models.common.moe.sharding import moe_sharding_config
+from torchtitan.models.common.moe.sharding import (
+    moe_sharding_config,
+    router_sharding_config,
+)
 from torchtitan.models.deepseek_v4.sharding import hc_pre_sharding_config
 
 
@@ -133,8 +136,19 @@ def indexer_sharding_config():
     )
 
 
+def modality_router_sharding_config():
+    config = router_sharding_config()
+    assert config.in_src_shardings is not None
+    config.state_shardings["image_tokens_per_expert_E"] = config.state_shardings[
+        "tokens_per_expert_E"
+    ]
+    config.in_src_shardings["image_mask_T"] = token_id_placement(enable_sp=True)
+    return config
+
+
 def modality_moe_sharding_config(*, enable_sp: bool):
     config = moe_sharding_config(enable_sp=enable_sp)
     assert config.in_src_shardings is not None
     config.state_shardings["expert_bias_vl_E"] = dense_param_placement(tp=spmd.R)
+    config.in_src_shardings["image_mask_T"] = token_id_placement()
     return config
