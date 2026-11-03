@@ -36,6 +36,9 @@ _CHUNK_SIZE_BYTES = 256 * 2**20
 class OptimizerStateOffloader(Optimizer, Configurable):
     """Run fused Adam/AdamW with its moments in pinned CPU memory between steps.
 
+    Use it when Adam's moments decide whether training fits, for example when a run needs full
+    activation checkpointing only to make room for the moments that appear at the first step.
+
     Definitions:
         Slab: one pinned CPU buffer per moment. Each parameter's moment is a view into it.
         Chunk: whole local parameter shards with about ``_CHUNK_SIZE_BYTES`` of moments.
