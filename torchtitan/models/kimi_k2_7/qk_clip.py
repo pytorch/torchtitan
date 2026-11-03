@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -12,6 +13,7 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch_remat as remat
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torch.distributed.tensor import DTensor, Replicate
 from torch.nn.attention.flex_attention import AuxRequest
 
@@ -81,6 +83,8 @@ def _scale_mla_heads(
     ``remaining_scale_exponent`` leaves the remaining rows unchanged.
     """
     num_heads = scales_H.numel()
+    # TODO: under TP each rank records only its own heads, so this raises at the
+    # first clip. Reject QK clip with TP > 1 at config time until it is supported.
     if weight.ndim != 2 or weight.shape[0] != num_heads * rows_per_head:
         raise ValueError("QK clip scales do not match the MLA weight shape.")
 
@@ -131,7 +135,7 @@ def _clip_mla_weights(
 def qk_clip(
     model_parts: list[nn.Module],
     *,
-    reduction_mesh: DeviceMesh,
+    reduction_mesh: DeviceMesh | None,
 ) -> None:
     """Apply the Kimi K2 QK clipping update with the report defaults."""
     threshold = 100.0
@@ -158,7 +162,7 @@ def qk_clip(
     ]
     num_heads_per_layer = [logits.numel() for logits in layer_max_logits_H]
     max_logits_H = torch.cat(layer_max_logits_H)
-    if reduction_mesh.size() > 1:
+    if reduction_mesh is not None:
         dist.all_reduce(
             max_logits_H,
             op=dist.ReduceOp.MAX,
@@ -183,7 +187,10 @@ def register_qk_clip_hook(
     parallelism_context: ParallelismContext,
 ) -> None:
     """Apply QK clipping after each ordinary optimizer step."""
-    reduction_mesh = parallelism_context.get_mesh("loss")
+    # Ranks that hold this rank's layers but see other tokens (dp * cp).
+    # None when dp * cp == 1 (for example PP-only or one GPU): nothing to reduce.
+    # PP stages are never reduced together: each stage clips only the layers it holds.
+    reduction_mesh = parallelism_context.get_optional_mesh("loss")
 
     def _qk_clip_hook(
         _optimizer: torch.optim.Optimizer,
@@ -198,7 +205,29 @@ def register_qk_clip_hook(
     optimizers.register_step_post_hook(_qk_clip_hook)
 
 
+def register_qk_clip_shape_inference_cleanup(
+    pp_schedule: _PipelineSchedule,
+    model_parts: Sequence[nn.Module],
+) -> None:
+    """Drop the maxima recorded by the PP schedule's shape-inference forward.
+
+    The schedule's first step, and the first step after each validation, runs
+    one extra forward per stage to learn tensor shapes. Stages after the first
+    run it on uninitialized memory, so a maximum recorded there is garbage: a
+    NaN one would turn that head's query and key weights into NaN.
+    """
+
+    def _clear_max_logits() -> None:
+        for model_part in model_parts:
+            for module in model_part.modules():
+                if isinstance(module, QKClipFlexInnerAttention):
+                    module.max_attention_logits_H.clear()
+
+    pp_schedule.register_post_metadata_inference_cleanup(_clear_max_logits)
+
+
 __all__ = [
     "QKClipFlexInnerAttention",
     "register_qk_clip_hook",
+    "register_qk_clip_shape_inference_cleanup",
 ]
