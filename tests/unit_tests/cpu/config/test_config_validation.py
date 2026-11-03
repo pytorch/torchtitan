@@ -9,6 +9,7 @@ from unittest import mock
 
 import pytest
 
+from torchtitan.components.checkpointer.dcp import CheckpointManager
 from torchtitan.components.validator import Validator
 from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
@@ -112,6 +113,25 @@ def test_graph_trainer_rejects_per_group_accelerator_graphs() -> None:
                 disable_accelerator_graphs=True,
             ),
         )
+
+
+def test_seed_checkpoint_requires_a_saving_checkpointer() -> None:
+    config = llama3_debugmodel()
+    config.create_seed_checkpoint = True
+    config.checkpointer = None
+    with pytest.raises(
+        ValueError, match="create_seed_checkpoint requires a checkpointer"
+    ):
+        config.__post_init__()
+
+    config.checkpointer = CheckpointManager.Config(load_only=True)
+    with pytest.raises(
+        ValueError, match="create_seed_checkpoint requires a checkpointer"
+    ):
+        config.__post_init__()
+
+    config.checkpointer = CheckpointManager.Config()
+    config.__post_init__()
 
 
 def test_accelerator_graphs_allow_pipeline_validation() -> None:

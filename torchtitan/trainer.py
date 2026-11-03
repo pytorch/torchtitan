@@ -91,6 +91,13 @@ class Trainer(Configurable):
                     activation_remat=self.activation_remat,
                     max_num_documents=self.dataloader.max_num_documents,
                 )
+            if self.create_seed_checkpoint and (
+                self.checkpointer is None or self.checkpointer.load_only
+            ):
+                raise ValueError(
+                    "create_seed_checkpoint requires a checkpointer with "
+                    "load_only=False."
+                )
 
         def to_dict(self) -> dict[str, Any]:
             d = {}
@@ -144,14 +151,6 @@ class Trainer(Configurable):
         if config.override.imports:
             apply_overrides(config.override, config)
         model_config = config.model
-        validate_model_training_config(
-            model_config,
-            parallelism=config.parallelism,
-            training=config.training,
-            debug=config.debug,
-            activation_remat=config.activation_remat,
-            max_num_documents=config.dataloader.max_num_documents,
-        )
 
         self.engine = self.engine_cls(
             config,
