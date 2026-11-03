@@ -349,11 +349,6 @@ class CrossEntropyLoss(Loss[torch.Tensor]):
         """Z-loss weight ``w``: adds ``w * sum(logsumexp(logits)**2)`` to the summed CE before token normalization. ``None`` disables it."""
 
     def __init__(self, config: Config):
-        self._loss_fn: LossFunction = (
-            cross_entropy_loss
-            if config.z_loss_weight is None
-            else cross_entropy_and_logsumexp
-        )
         self.global_vocab_size = config.global_vocab_size
         self.z_loss_weight = config.z_loss_weight
 
@@ -365,12 +360,19 @@ class CrossEntropyLoss(Loss[torch.Tensor]):
         **kwargs: Any,
     ) -> LossResult:
         del kwargs
-        if self.z_loss_weight is not None:
-            ce, lse = self._loss_fn(
+        metrics: dict[str, torch.Tensor] = {}
+        if self.z_loss_weight is None:
+            ce = cross_entropy_loss(
                 pred, labels, global_vocab_size=self.global_vocab_size
             )
+            loss = ce
         else:
-            ce = self._loss_fn(pred, labels, global_vocab_size=self.global_vocab_size)
+            ce, lse = cross_entropy_and_logsumexp(
+                pred, labels, global_vocab_size=self.global_vocab_size
+            )
+            z = lse.square().sum()
+            loss = ce + self.z_loss_weight * z
+            metrics = {"ce_loss/mean": ce.detach(), "z_loss/mean": z.detach()}
 
         # loss: V->P, annotate global_loss_token_counts
         if current_spmd_mesh() is not None:
@@ -381,27 +383,9 @@ class CrossEntropyLoss(Loss[torch.Tensor]):
                     {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
                 )
 
-        if self.z_loss_weight is not None:
-            z = lse.pow(2).sum()
-            metrics = (
-                {
-                    "z/mean": z.detach() / global_loss_token_counts,
-                    "ce/mean": ce.detach() / global_loss_token_counts,
-                }
-                if global_loss_token_counts is not None
-                else {
-                    "z/mean": z.detach(),
-                    "ce/mean": ce.detach(),
-                }
-            )
-            loss = ce + self.z_loss_weight * z
-        else:
-            loss = ce
-            metrics = {}
-
         if global_loss_token_counts is not None:
             loss = loss / global_loss_token_counts
-
+            metrics = {k: v / global_loss_token_counts for k, v in metrics.items()}
         return loss, metrics
 
 
