@@ -33,7 +33,7 @@ from torchtitan.models.common.attn_gym import (
     recurrent_kda_decode,
 )
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.rl.generator.vllm.linear_attention import (
+from torchtitan.rl.generator.vllm.attention.linear_attention import (
     configure_hybrid_state,
     LinearAttentionExecutionPath,
     TorchTitanLinearAttentionBackend,

@@ -24,7 +24,7 @@ from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.attention import InnerAttention, MLAAttention
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.linear import Linear
-from torchtitan.rl.generator.vllm.attention import (
+from torchtitan.rl.generator.vllm.attention.attention import (
     _exclude_vllm_attn_scales_from_state_dict,
     VLLMInnerAttention,
 )
