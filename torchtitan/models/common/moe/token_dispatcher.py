@@ -931,14 +931,13 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         metadata: DeepEPDispatchMetadata,
         x_TD: torch.Tensor,
     ) -> torch.Tensor:
-        """Combine tokens via DeepEP and wait for completion."""
+        """Combine scored tokens via DeepEP and wait for completion."""
         del x_TD
         from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
 
         combined_TD = remat.region(
             combine_tokens,
             self.remat_region_name("ep_communication.combine"),
-            # This pure reduction reads the w2 output only during forward.
             recompute=False,
         )(routed_output_RD, metadata.state)
         sync_combine()
