@@ -82,9 +82,8 @@ class BaseModel(Module, ABC):
         calls this through the ``BaseModel`` interface. There is no meaningful default;
         every model used by the training engine must implement it.
 
-        ``aux_loss_denominators``: the step's routed tokens per loss token, one per
-        routing depth (``aux_loss.aux_loss_denominators``); a streamed call uses those of the
-        step's samples sent so far. Models with an aux loss return it as the
+        ``aux_loss_denominators``: routed tokens per loss token, one per routing depth
+        (``aux_loss.aux_loss_denominators``); models with an aux loss return it as the
         ``aux_loss_denominators`` model kwarg.
         """
         raise NotImplementedError(
