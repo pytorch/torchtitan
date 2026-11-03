@@ -149,8 +149,8 @@ class _AddOneW13(nn.Module):
 
 
 class _SelectGate(nn.Module):
-    def forward(self, gate_up_R2D, *, offsets):
-        del offsets
+    def forward(self, gate_up_R2D, *, offsets, scores):
+        del offsets, scores
         return gate_up_R2D[:, 0]
 
 

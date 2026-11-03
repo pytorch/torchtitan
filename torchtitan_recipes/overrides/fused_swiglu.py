@@ -324,13 +324,25 @@ class FusedSwiGLU(BinaryActivationFn):
         pass
 
     def __call__(
-        self, gate_up: torch.Tensor, *, offsets: torch.Tensor | None = None
+        self,
+        gate_up: torch.Tensor,
+        *,
+        offsets: torch.Tensor | None = None,
+        scores: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Eager: the compiler can't fuse into the Triton op, so the base's compiled
         # region would only add graphs.
         if offsets is not None:
-            return silu_and_mul_op(gate_up, offsets)
-        return _silu_and_mul_dense(gate_up)
+            hidden = silu_and_mul_op(gate_up, offsets)
+        else:
+            hidden = _silu_and_mul_dense(gate_up)
+        if scores is None:
+            return hidden
+        # The Triton kernels take no scores, so a separate multiply in hidden's dtype
+        # applies them: one more pass over hidden, and the scores round to that dtype.
+        # TODO: drop this override from the DeepEP recipes. Compiled SwiGLU with scores
+        # is faster. Needs an RL run.
+        return hidden * scores.to(hidden.dtype).unsqueeze(-1)
 
     def _activation_fn(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
         # Only satisfies the abstract base: the __call__ above never calls it.

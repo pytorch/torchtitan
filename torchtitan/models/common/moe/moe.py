@@ -155,15 +155,16 @@ class RoutedExperts(Module):
             remat.recompute_needs_tensor(routed_input_RD)
             gate_up_R2F = self.w13(routed_input_RD.bfloat16(), offsets_E)
             remat.recompute_needs_tensor(gate_up_R2F)
-            hidden_RF = self.activation_fn(gate_up_R2F, offsets=offsets_E)
+            routed_scores_R = None
             if isinstance(metadata, DeepEPDispatchMetadata):
+                # DeepEP's combine only sums: scale W2's input instead (Config rejects a
+                # w2 bias and an output postprocess, so this equals scaling W2's output).
+                # The activation reads the dispatch region's scores, so pin them.
                 routed_scores_R = metadata.routed_scores_R
-                # Preserve the original score precision when scaling W2's input.
-                # The multiply reads the dispatch region's scores, so pin them.
                 remat.recompute_needs_tensor(routed_scores_R)
-                hidden_RF = hidden_RF * routed_scores_R.to(hidden_RF.dtype).reshape(
-                    -1, 1
-                )
+            hidden_RF = self.activation_fn(
+                gate_up_R2F, offsets=offsets_E, scores=routed_scores_R
+            )
             routed_output_RD = self.w2(hidden_RF, offsets_E)
             # A real dtype cast and the output postprocess read the w2 output with
             # bare ops, so pin it only then. In the common bf16 case without a

@@ -44,16 +44,26 @@ class TestFusedSwiGLUNumerics(unittest.TestCase):
         up = torch.randn(8, 32, device=_DEVICE)
         gate_up = torch.stack((gate, up), dim=1)
         offsets = torch.tensor([3, 5, 6, 8], device=_DEVICE, dtype=torch.int32)
-        gate_up_reference = gate_up.detach().clone().requires_grad_()
-        gate_up_fused = gate_up.detach().clone().requires_grad_()
+        for scores in (None, torch.rand(8, device=_DEVICE)):
+            with self.subTest(scores=scores is not None):
+                gate_up_reference = gate_up.detach().clone().requires_grad_()
+                gate_up_fused = gate_up.detach().clone().requires_grad_()
+                scores_reference = scores_fused = None
+                if scores is not None:
+                    scores_reference = scores.clone().requires_grad_()
+                    scores_fused = scores.clone().requires_grad_()
 
-        out_reference = reference(gate_up_reference, offsets=offsets)
-        out_fused = fused(gate_up_fused, offsets=offsets)
-        torch.testing.assert_close(out_fused, out_reference)
+                out_reference = reference(
+                    gate_up_reference, offsets=offsets, scores=scores_reference
+                )
+                out_fused = fused(gate_up_fused, offsets=offsets, scores=scores_fused)
+                torch.testing.assert_close(out_fused, out_reference)
 
-        out_reference.sum().backward()
-        out_fused.sum().backward()
-        torch.testing.assert_close(gate_up_fused.grad, gate_up_reference.grad)
+                out_reference.sum().backward()
+                out_fused.sum().backward()
+                torch.testing.assert_close(gate_up_fused.grad, gate_up_reference.grad)
+                if scores is not None:
+                    torch.testing.assert_close(scores_fused.grad, scores_reference.grad)
 
 
 @unittest.skipUnless(_HAS_OP_DEVICE, f"requires a {device_type} accelerator")
