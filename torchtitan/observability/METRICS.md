@@ -27,9 +27,8 @@ tensorboard --logdir=./outputs/tb
 
 Weights and Biases will automatically send metrics to a remote server if you login with `wandb login`
 
-Add `WandBLogger.Config()` to `metrics.loggers` in your recipe. Set its
-`project` field to select the W&B project; `WANDB_PROJECT` takes precedence
-when set.
+Add `WandBLogger.Config()` to `metrics.loggers` in your recipe. Set
+`WANDB_PROJECT` to select the W&B project; the default is `torchtitan`.
 
 For an example you can inspect the Llama 3 [recipe](../../torchtitan_recipes/models/llama3.py)
 
@@ -51,7 +50,7 @@ from torchtitan.observability.metrics import (
 )
 
 metrics = MetricsProcessor.Config(
-    loggers=[WandBLogger.Config(project="experiment"), TensorBoardLogger.Config()],
+    loggers=[WandBLogger.Config(), TensorBoardLogger.Config()],
 )
 ```
 
@@ -68,6 +67,5 @@ Their constructors receive their own config and the runtime arguments
 when an exporter must only run on the metrics rank.
 
 The RL metrics processor accepts the same `loggers` list, builds it on the
-controller, and retains its own aggregation and console filters. RL recipes
-select `WandBLogger.Config(project="titan_rl")` without changing environment
-variables.
+controller, and retains its own aggregation and console filters. RL uses the
+same W&B project default without changing environment variables.

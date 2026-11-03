@@ -69,7 +69,9 @@ class LRSchedulersContainer(Stateful, Configurable):
     number of schedulers between save and load).
 
     Args:
+        config (Config): Warmup, decay, and schedule horizon settings.
         optimizers (OptimizersContainer): The corresponding optimizers for the lr_schedulers.
+        training_steps (int): Training horizon used when config.total_steps is unset.
     """
 
     @dataclass(kw_only=True, slots=True)

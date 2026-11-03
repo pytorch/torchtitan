@@ -121,9 +121,7 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         # needs gpt-oss special tokens absent here, so use the qwen3 renderer
         # like the other debug configs.
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(
-            loggers=[WandBLogger.Config(project="titan_rl")]
-        ),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -227,9 +225,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
         # needs gpt-oss special tokens absent here, so use the qwen3 renderer
         # like the other debug configs.
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(
-            loggers=[WandBLogger.Config(project="titan_rl")]
-        ),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -319,9 +315,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(
-            loggers=[WandBLogger.Config(project="titan_rl")]
-        ),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -477,9 +471,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(
-            loggers=[WandBLogger.Config(project="titan_rl")]
-        ),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -558,9 +550,7 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(
-            loggers=[WandBLogger.Config(project="titan_rl")]
-        ),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -694,9 +684,7 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(
-            loggers=[WandBLogger.Config(project="titan_rl")]
-        ),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -810,9 +798,7 @@ def rl_grpo_deepseek_v3_debug_varlen(*, seq_len: int = 2048) -> Controller.Confi
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(
-            loggers=[WandBLogger.Config(project="titan_rl")]
-        ),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(

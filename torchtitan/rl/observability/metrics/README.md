@@ -147,13 +147,13 @@ metrics_processor.log(step=step, metrics=val_metrics, is_validation=True)
 from torchtitan.observability.metrics import TensorBoardLogger, WandBLogger
 
 config.metrics.loggers = [
-    WandBLogger.Config(project="titan_rl"),
+    WandBLogger.Config(),
     TensorBoardLogger.Config(),
 ]
 ```
 
-`WANDB_PROJECT` takes precedence over `WandBLogger.Config.project`. Logger
-construction does not change the environment. See
+`WANDB_PROJECT` selects the W&B project; the default is `torchtitan` for both
+supervised and RL runs. Logger construction does not change the environment. See
 [metric exporter configuration](../../../observability/METRICS.md#configure-metric-exporters)
 for custom exporters.
 

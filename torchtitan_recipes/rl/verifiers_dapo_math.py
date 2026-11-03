@@ -144,7 +144,7 @@ def _qwen3_4b_verifiers_config(
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=True)),
         num_generators=6,
         metrics=MetricsProcessor.Config(
-            loggers=[WandBLogger.Config(project="titan_rl")],
+            loggers=[WandBLogger.Config()],
             console_log_keys_validation=[
                 "validation_reward/_mean",
                 "validation_reward/_max",

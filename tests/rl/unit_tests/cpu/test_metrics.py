@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 from dataclasses import dataclass
 from unittest.mock import MagicMock
 
@@ -638,9 +637,7 @@ class TestMetricsProcessorBuild:
 
     def test_wandb_without_log_dir_raises(self) -> None:
         with pytest.raises(ValueError, match="log_dir is required"):
-            m.MetricsProcessor.Config(
-                loggers=[WandBLogger.Config(project="titan_rl")]
-            ).build()
+            m.MetricsProcessor.Config(loggers=[WandBLogger.Config()]).build()
 
     def test_tensorboard_without_log_dir_raises(self) -> None:
         with pytest.raises(ValueError, match="log_dir is required"):
@@ -655,22 +652,13 @@ class TestMetricsProcessorBuild:
         assert isinstance(logger_inst._backends[0], TensorBoardLogger)
         logger_inst.close()
 
-    def test_tensorboard_only_does_not_set_wandb_project_env(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        monkeypatch.delenv("WANDB_PROJECT", raising=False)
-        m.MetricsProcessor.Config(loggers=[TensorBoardLogger.Config()]).build(
-            log_dir=str(tmp_path)
-        ).close()
-        assert os.environ.get("WANDB_PROJECT") is None
-
     def test_wandb_and_tensorboard_create_both(self, tmp_path, monkeypatch) -> None:
         fake_wandb = MagicMock()
         fake_wandb.init = MagicMock()
         monkeypatch.setitem(__import__("sys").modules, "wandb", fake_wandb)
 
         logger_inst = m.MetricsProcessor.Config(
-            loggers=[WandBLogger.Config(project="titan_rl"), TensorBoardLogger.Config()]
+            loggers=[WandBLogger.Config(), TensorBoardLogger.Config()]
         ).build(log_dir=str(tmp_path))
         backend_types = [type(b).__name__ for b in logger_inst._backends]
         assert "WandBLogger" in backend_types
@@ -695,9 +683,7 @@ class TestMetricsProcessorBuild:
         config_dict = {"job": "rl-debug"}
         log_dir = str(tmp_path / "wandb_dir")
 
-        logger_inst = m.MetricsProcessor.Config(
-            loggers=[WandBLogger.Config(project="titan_rl")]
-        ).build(
+        logger_inst = m.MetricsProcessor.Config(loggers=[WandBLogger.Config()]).build(
             log_dir=log_dir,
             job_config=config_dict,
         )
@@ -732,24 +718,8 @@ class TestMetricsProcessorBuild:
         assert cfg.console_log_keys_train == [r"^loss/mean$"]
         assert cfg.console_log_keys_validation == [r"^validation/reward$"]
 
-    def test_wandb_project_default_titan_rl(self, tmp_path, monkeypatch) -> None:
-        """The RL recipe default selects the titan_rl project without an env var."""
-        monkeypatch.delenv("WANDB_PROJECT", raising=False)
-
-        captured = {}
-        fake_wandb = MagicMock()
-        fake_wandb.init = MagicMock(
-            side_effect=lambda **kwargs: captured.update(kwargs)
-        )
-        monkeypatch.setitem(__import__("sys").modules, "wandb", fake_wandb)
-
-        m.MetricsProcessor.Config(
-            loggers=[WandBLogger.Config(project="titan_rl")]
-        ).build(log_dir=str(tmp_path))
-        assert captured.get("project") == "titan_rl"
-
     def test_wandb_project_env_var_wins(self, tmp_path, monkeypatch) -> None:
-        """WANDB_PROJECT takes precedence over the logger config."""
+        """WANDB_PROJECT takes precedence over the shared default."""
         monkeypatch.setenv("WANDB_PROJECT", "my-other-project")
 
         captured = {}
@@ -759,15 +729,13 @@ class TestMetricsProcessorBuild:
         )
         monkeypatch.setitem(__import__("sys").modules, "wandb", fake_wandb)
 
-        m.MetricsProcessor.Config(
-            loggers=[WandBLogger.Config(project="titan_rl")]
-        ).build(log_dir=str(tmp_path))
+        m.MetricsProcessor.Config(loggers=[WandBLogger.Config()]).build(
+            log_dir=str(tmp_path)
+        )
         assert captured.get("project") == "my-other-project"
 
-    def test_wandb_project_config_overrides_default(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        """The logger config selects the project when WANDB_PROJECT is unset."""
+    def test_wandb_project_defaults_to_torchtitan(self, tmp_path, monkeypatch) -> None:
+        """W&B uses the shared project when WANDB_PROJECT is unset."""
         monkeypatch.delenv("WANDB_PROJECT", raising=False)
 
         captured = {}
@@ -777,10 +745,10 @@ class TestMetricsProcessorBuild:
         )
         monkeypatch.setitem(__import__("sys").modules, "wandb", fake_wandb)
 
-        m.MetricsProcessor.Config(
-            loggers=[WandBLogger.Config(project="custom_project")]
-        ).build(log_dir=str(tmp_path))
-        assert captured.get("project") == "custom_project"
+        m.MetricsProcessor.Config(loggers=[WandBLogger.Config()]).build(
+            log_dir=str(tmp_path)
+        )
+        assert captured.get("project") == "torchtitan"
 
 
 # ---------------------------------------------------------------------------
