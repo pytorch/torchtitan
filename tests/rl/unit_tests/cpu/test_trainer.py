@@ -650,13 +650,12 @@ def test_forward_backward_sends_the_step_first_group_alone_to_whole_call_graphs(
             )
         )
 
-    # The first prefetcher is made on arrival, the second after the first engine call, so a
-    # split call's reads don't overlap.
-    assert events == [
-        event
-        for engine_call in expected_engine_calls
-        for event in (["prefetcher", engine_call] if rdma else [engine_call])
-    ]
+    # Every engine call's prefetcher is made on arrival, so its reads start before any engine call.
+    assert (
+        events
+        == (["prefetcher"] * len(expected_engine_calls) if rdma else [])
+        + expected_engine_calls
+    )
     # Both engine calls' loss metrics come back, one per microbatch.
     assert metrics["loss/mean"] == 3.0
     if rdma:

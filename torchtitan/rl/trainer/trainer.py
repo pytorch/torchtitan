@@ -318,9 +318,9 @@ class Trainer(Configurable):
         # With graphs, HSDP or deferred reduction makes each engine call one graph segment, and
         # the step's first segment replays one graph with a fixed group count. Sending the
         # step's first group as its own call fixes that count at 1.
-        # `step_started` is already current on arrival. The controller sends the step's first call
-        # after optim_step returns. It sends a later call after the call before the previous one
-        # returned, and by then the previous call has taken the lock and run its engine call.
+        # `step_started` is current here. The controller sends the step's first call after
+        # optim_step returns, and call k only after call k-2 returned. By then call k-1 holds the
+        # lock and has run its engine call.
         if (
             len(microbatch_groups) > 1
             and engine.graph_segment_is_whole_call
@@ -329,20 +329,21 @@ class Trainer(Configurable):
             engine_calls = [microbatch_groups[:1], microbatch_groups[1:]]
         else:
             engine_calls = [microbatch_groups]
-        # One per engine call.
-        prefetchers: list[RDMAMicrobatchPrefetcher] = []
-        if uses_rdma:
-            # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per
-            # replica and broadcast it, to cut the trainer's reads by cp * tp. Needs a
-            # per-replica group.
-            # The controller rejects RDMA with PP, so every group holds one microbatch.
-            # The first engine call's reads start now, while the previous call may still run on
-            # the GPU.
-            prefetchers.append(
+        # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
+        # and broadcast it, to cut the trainer's reads by cp * tp. Needs a per-replica group.
+        # One per engine call. Their first reads start now, while the previous call may still run
+        # on the GPU. A split first call's two prefetchers share the link for their first reads.
+        # The controller rejects RDMA with PP, so every group holds one microbatch.
+        prefetchers = (
+            [
                 RDMAMicrobatchPrefetcher(
-                    [microbatch for group in engine_calls[0] for microbatch in group]
+                    [microbatch for group in call_groups for microbatch in group]
                 )
-            )
+                for call_groups in engine_calls
+            ]
+            if uses_rdma
+            else []
+        )
         try:
             # One call at a time, so every rank issues its metric collectives in the same order.
             async with self._forward_backward_lock:
@@ -350,18 +351,6 @@ class Trainer(Configurable):
                 forward_backward_start = time.perf_counter()
                 loss_metrics_by_group: list[list[dict[str, torch.Tensor]]] = []
                 for call_index, call_groups in enumerate(engine_calls):
-                    if uses_rdma and call_index > 0:
-                        # Made after the first engine call, so a split call's two prefetchers
-                        # don't read at the same time.
-                        prefetchers.append(
-                            RDMAMicrobatchPrefetcher(
-                                [
-                                    microbatch
-                                    for group in call_groups
-                                    for microbatch in group
-                                ]
-                            )
-                        )
                     result = engine.forward_backward(
                         microbatch_groups=(
                             prefetchers[call_index] if uses_rdma else call_groups
@@ -509,8 +498,11 @@ class Trainer(Configurable):
         - The staging stream waits for the last optimizer step before copying, and
           forward/backward does not mutate persistent model state.
         - The CUDA-event wait and the TorchStore put run together in an
-          `asyncio.to_thread` worker, so they progress while a synchronous
-          forward/backward blocks this actor's event loop.
+          `asyncio.to_thread` worker, so they progress while forward/backward
+          launches its GPU work and blocks this actor's event loop.
+        - forward_backward frees the event loop while it waits for the GPU, so this
+          push can also start then. That is safe: it issues no collectives, and its
+          copies run on the staging stream.
         - The controller awaits this push before the next optimizer step mutates
           the model, and awaits the generators' pull of it before the next push
           reuses the staging buffers and TorchStore key.
