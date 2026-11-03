@@ -452,7 +452,7 @@ class Generator(Configurable):
             # before pulling; a pull overlapping a push would leave these buffers
             # permanently stale, since later deltas apply on top of them.
             await ts.get_state_dict_delta(
-                "model_state_dict", self._prefetched_model_state_dict
+                "model_state_dict", self._prefetched_model_state_dict, strict=False
             )
             return
         await ts.get_state_dict(
