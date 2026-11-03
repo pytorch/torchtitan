@@ -13,7 +13,7 @@ from torch import nn
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.flops import (
-    active_parameter_flops_per_unit,
+    active_parameter_flops_per_token,
     get_parameter_counts,
 )
 from torchtitan.training_engine import TrainingEngine
@@ -56,10 +56,10 @@ def test_parameter_counts_include_embeddings_and_deduplicate_tied_weights():
     model.embedding = nn.Embedding(8, 4)
     model.lm_head = nn.Linear(4, 8, bias=False)
     assert get_parameter_counts(model) == (64, 64)
-    assert active_parameter_flops_per_unit(model) == 6 * 32
+    assert active_parameter_flops_per_token(model) == 6 * 32
     model.embedding.weight = model.lm_head.weight
     assert get_parameter_counts(model) == (32, 32)
-    assert active_parameter_flops_per_unit(model) == 6 * 32
+    assert active_parameter_flops_per_token(model) == 6 * 32
 
 
 @pytest.mark.parametrize("family", ["deepseek_v3", "kimi_k2_7"])
@@ -75,8 +75,8 @@ def test_mtp_counts_attention_and_repeated_output_projection(family):
     inputs = {"input": torch.empty(128)}
     base_flops = base_config.build_flops_estimator(base_model, seq_len=128)(inputs)
     flops = config.build_flops_estimator(model, seq_len=128)(inputs)
-    mtp_parameter_flops = active_parameter_flops_per_unit(model.mtp_layers)
-    repeated_head_flops = 2 * active_parameter_flops_per_unit(model.lm_head)
+    mtp_parameter_flops = active_parameter_flops_per_token(model.mtp_layers)
+    repeated_head_flops = 2 * active_parameter_flops_per_token(model.lm_head)
     mtp_attention_flops = sum(
         layer.attention.flops_per_token(128) for layer in config.mtp_layers
     )
@@ -142,9 +142,9 @@ def test_spark_audio_uses_each_stage_token_count():
     expected = 0
     for stage in model.audio_encoder.layers.values():
         num_tokens //= stage.patchifier.patch_size
-        expected += num_tokens * active_parameter_flops_per_unit(stage)
+        expected += num_tokens * active_parameter_flops_per_token(stage)
     expected += num_tokens * sum(
-        active_parameter_flops_per_unit(module)
+        active_parameter_flops_per_token(module)
         for module in (
             model.audio_encoder.norm,
             model.audio_encoder.o_proj,

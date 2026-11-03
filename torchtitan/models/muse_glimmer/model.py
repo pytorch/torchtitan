@@ -330,7 +330,7 @@ class MuseGlimmerModel(MultimodalModel):
             model: Module,
             *,
             seq_len: int,
-            excluded_modules: tuple[Module | None, ...] = (),
+            excluded_submodules: tuple[Module | None, ...] = (),
         ) -> FlopsEstimator:
             model = cast(MuseGlimmerModel, model)
             vision_outputs = (
@@ -341,7 +341,7 @@ class MuseGlimmerModel(MultimodalModel):
             base_estimate = super(MuseGlimmerModel.Config, self).build_flops_estimator(
                 model,
                 seq_len=seq_len,
-                excluded_modules=(*vision_outputs, *excluded_modules),
+                excluded_submodules=(*vision_outputs, *excluded_submodules),
             )
             vision_estimate = (
                 self.vision_encoder.build_output_flops_estimator(vision_outputs)

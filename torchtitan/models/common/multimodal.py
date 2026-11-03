@@ -42,7 +42,7 @@ class MultimodalModel(Decoder):
             model: Module,
             *,
             seq_len: int,
-            excluded_modules: tuple[Module | None, ...] = (),
+            excluded_submodules: tuple[Module | None, ...] = (),
         ) -> FlopsEstimator:
             model = cast(MultimodalModel, model)
             encoder_modules = []
@@ -60,9 +60,9 @@ class MultimodalModel(Decoder):
             ).build_flops_estimator(
                 model,
                 seq_len=seq_len,
-                excluded_modules=(
+                excluded_submodules=(
                     *encoder_modules,
-                    *excluded_modules,
+                    *excluded_submodules,
                 ),
             )
             return lambda input_dict: decoder_estimate(input_dict) + sum(

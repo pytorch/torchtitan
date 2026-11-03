@@ -16,6 +16,8 @@ The folder should be organized as follows
   - The model class should contain a nested `Config` dataclass (inheriting from the base model's `Config`) that holds all architecture hyperparameters.
     - `get_parameter_counts()` reports total and active model size, and
       `build_flops_estimator()` estimates work for each raw CPU microbatch.
+      `Decoder` subclasses inherit both methods; a new `BaseModel` family
+      implements them.
   - `__init__()` consumes the `Config` to build the model.
   - Parameter initialization is handled by the `param_init` system on each module's `Config`. Set `param_init` (a `dict[str, Callable]` mapping parameter names to init functions) on every sub-config in the model flavor builder. `init_states()` auto-recurses into all submodules, so manual recursive calls are not needed. Override `_init_self_buffers()` for device-aware buffer initialization (e.g., RoPE, MoE).
   - List parameters whose numerics need master precision (e.g. ones the HF checkpoint stores in float32) in `preserve_dtype_params` on their module's `Config`; FSDP mixed precision, checkpoint export and RL weight sync never lower their precision. Default it on the component's `Config` when the component always needs it (e.g. GDN `A_log`), or set it in the flavor builder for one instance of a generic module (e.g. Qwen3.5's GDN `GatedRMSNorm`).
@@ -83,7 +85,9 @@ shapes without device-to-host synchronization or retaining model modules.
 Native decoders use `Attention.Config.flops_per_token(seq_len)`. Multimodal models
 share encoder composition through `multimodal_encoder_fqns`. Muse overrides the
 estimator to add output-module work using encoder-owned output-token counts.
-`ForwardBackwardResult.num_flops` reports work for the optimizer update.
+`ForwardBackwardResult.num_flops` reports unreduced work for this DP rank's raw
+microbatches, covering the full logical model and replicated across CP ranks.
+Trainers average it over the loss mesh.
 
 `Config.get_parameter_counts(model)` reports unique total and architecturally
 active parameters, including embeddings and encoders and weighting routed experts

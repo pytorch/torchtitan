@@ -496,9 +496,9 @@ class MuseSparkModel(MultimodalModel):
             model: Module,
             *,
             seq_len: int,
-            excluded_modules: tuple[Module | None, ...] = (),
+            excluded_submodules: tuple[Module | None, ...] = (),
         ) -> FlopsEstimator:
-            from torchtitan.models.common.flops import active_parameter_flops_per_unit
+            from torchtitan.models.common.flops import active_parameter_flops_per_token
 
             model = cast(MuseSparkModel, model)
             vision_outputs = (
@@ -509,7 +509,7 @@ class MuseSparkModel(MultimodalModel):
             base_estimate = super(MuseSparkModel.Config, self).build_flops_estimator(
                 model,
                 seq_len=seq_len,
-                excluded_modules=(*vision_outputs, *excluded_modules),
+                excluded_submodules=(*vision_outputs, *excluded_submodules),
             )
             vision_estimate = (
                 self.vision_encoder.build_output_flops_estimator(vision_outputs)
@@ -518,7 +518,7 @@ class MuseSparkModel(MultimodalModel):
             )
             audio_config = self.audio_encoder
             audio_output_flops = (
-                active_parameter_flops_per_unit(model.perception_emb_norm)
+                active_parameter_flops_per_token(model.perception_emb_norm)
                 if model.perception_emb_norm is not None
                 else 0
             )

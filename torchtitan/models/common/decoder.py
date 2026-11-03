@@ -30,6 +30,10 @@ from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
+from torchtitan.models.common.flops import (
+    active_parameter_flops_per_token,
+    get_parameter_counts,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -149,11 +153,8 @@ class Decoder(BaseModel):
                 None,
             )
 
-        @staticmethod
-        def get_parameter_counts(model: Module) -> tuple[int, int]:
+        def get_parameter_counts(self, model: Module) -> tuple[int, int]:
             """Return total and architecturally active native decoder parameters."""
-            from torchtitan.models.common.flops import get_parameter_counts
-
             return get_parameter_counts(model)
 
         def build_flops_estimator(
@@ -161,12 +162,10 @@ class Decoder(BaseModel):
             model: Module,
             *,
             seq_len: int,
-            excluded_modules: tuple[Module | None, ...] = (),
+            excluded_submodules: tuple[Module | None, ...] = (),
         ) -> FlopsEstimator:
-            from torchtitan.models.common.flops import active_parameter_flops_per_unit
-
-            parameter_flops = active_parameter_flops_per_unit(
-                model, excluded_modules=excluded_modules
+            parameter_flops = active_parameter_flops_per_token(
+                model, excluded_submodules=excluded_submodules
             )
             attention_flops = sum(
                 attention.flops_per_token(seq_len)

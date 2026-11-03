@@ -110,11 +110,10 @@ class BaseModel(Module, ABC):
         An empty ``regions`` list runs named regions eagerly.
         """
 
-        @staticmethod
-        def get_parameter_counts(model: Module) -> tuple[int, int]:
-            """Return unique total and active parameters for a dense model."""
-            num_parameters = sum(param.numel() for param in model.parameters())
-            return num_parameters, num_parameters
+        @abstractmethod
+        def get_parameter_counts(self, model: Module) -> tuple[int, int]:
+            """Return unique total and architecturally active parameter counts."""
+            raise NotImplementedError
 
         @abstractmethod
         def build_flops_estimator(

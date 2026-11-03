@@ -207,10 +207,10 @@ class MTPDecoder(Decoder):
             model: Module,
             *,
             seq_len: int,
-            excluded_modules: tuple[Module | None, ...] = (),
+            excluded_submodules: tuple[Module | None, ...] = (),
         ) -> FlopsEstimator:
             decoder_estimate = super(MTPDecoder.Config, self).build_flops_estimator(
-                model, seq_len=seq_len, excluded_modules=excluded_modules
+                model, seq_len=seq_len, excluded_submodules=excluded_submodules
             )
             model = cast(MTPDecoder, model)
             repeated_head_flops_per_token = (

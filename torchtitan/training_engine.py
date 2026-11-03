@@ -72,7 +72,11 @@ class ForwardBackwardResult(NamedTuple):
     """Loss metrics, one list per microbatch group with one dict per
     microbatch. Under PP, they are empty on ranks without the last stage."""
     num_flops: int = 0
-    """Logical model-wide FLOPs for the raw microbatches in this invocation."""
+    """FLOPs of this DP rank's raw microbatches, before any reduction.
+
+    Counts the whole logical model, not this rank's TP/PP/EP shard, and is
+    identical across CP ranks. Trainers average it over the loss mesh.
+    """
 
 
 _ForwardBackwardFn: TypeAlias = Callable[

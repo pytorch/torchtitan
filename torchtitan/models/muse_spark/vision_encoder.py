@@ -155,33 +155,33 @@ class NaViTEncoder(Module):
         grid_sample_mode: str = "bilinear"
         pos_emb_grid_order: str = "raster"
 
-        def get_num_output_tokens(self, input_dict) -> int:
-            factor = self.downsample_factor
-            return sum(
-                temporal * (height // factor) * (width // factor)
-                for temporal, height, width in get_packed_vision_grids(input_dict)
-            )
-
         def build_output_flops_estimator(
             self, output_modules: tuple[Module | None, ...]
         ) -> FlopsEstimator:
             """Count modules applied once per encoded visual token."""
-            from torchtitan.models.common.flops import active_parameter_flops_per_unit
+            from torchtitan.models.common.flops import active_parameter_flops_per_token
 
             flops_per_token = sum(
-                active_parameter_flops_per_unit(module)
+                active_parameter_flops_per_token(module)
                 for module in output_modules
                 if module is not None
             )
-            return lambda input_dict: (
-                self.get_num_output_tokens(input_dict) * flops_per_token
-            )
+
+            def estimate(input_dict):
+                factor = self.downsample_factor
+                num_tokens = sum(
+                    temporal * (height // factor) * (width // factor)
+                    for temporal, height, width in get_packed_vision_grids(input_dict)
+                )
+                return num_tokens * flops_per_token
+
+            return estimate
 
         def build_flops_estimator(self, encoder) -> FlopsEstimator:
-            from torchtitan.models.common.flops import active_parameter_flops_per_unit
+            from torchtitan.models.common.flops import active_parameter_flops_per_token
 
             input_patch_flops = sum(
-                active_parameter_flops_per_unit(module)
+                active_parameter_flops_per_token(module)
                 for module in (
                     encoder.conv1_linear,
                     encoder.ln_pre,

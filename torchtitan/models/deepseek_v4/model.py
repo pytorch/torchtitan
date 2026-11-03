@@ -193,12 +193,12 @@ class DeepSeekV4Model(Decoder):
             model: Module,
             *,
             seq_len: int,
-            excluded_modules: tuple[Module | None, ...] = (),
+            excluded_submodules: tuple[Module | None, ...] = (),
         ) -> FlopsEstimator:
             decoder_estimate = super(
                 DeepSeekV4Model.Config, self
             ).build_flops_estimator(
-                model, seq_len=seq_len, excluded_modules=excluded_modules
+                model, seq_len=seq_len, excluded_submodules=excluded_submodules
             )
             model = cast(DeepSeekV4Model, model)
             repeated_mtp_flops_per_token = 6 * (

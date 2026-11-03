@@ -20,7 +20,7 @@ from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module
 from torchtitan.models.common import Linear
 
-from torchtitan.models.common.flops import active_parameter_flops_per_unit
+from torchtitan.models.common.flops import active_parameter_flops_per_token
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
 from torchtitan.models.common.vision_encoder import get_packed_vision_grids
 from torchtitan.models.kimi_k2_7.vision_encoder import MoonViTEncoder
@@ -64,7 +64,7 @@ class KimiK3VisionEncoder(MoonViTEncoder):
             encoder: "KimiK3VisionEncoder",
         ) -> FlopsEstimator:
             input_patch_flops = sum(
-                active_parameter_flops_per_unit(module)
+                active_parameter_flops_per_token(module)
                 for module in (
                     encoder.patch_embed,
                     encoder.layers,
@@ -72,7 +72,7 @@ class KimiK3VisionEncoder(MoonViTEncoder):
                 )
             )
             output_token_flops = sum(
-                active_parameter_flops_per_unit(module)
+                active_parameter_flops_per_token(module)
                 for module in (
                     encoder.projector.linear_1,
                     encoder.projector.linear_2,

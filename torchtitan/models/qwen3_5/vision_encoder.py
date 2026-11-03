@@ -24,7 +24,7 @@ from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common import Linear
 
-from torchtitan.models.common.flops import active_parameter_flops_per_unit
+from torchtitan.models.common.flops import active_parameter_flops_per_token
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
 from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.models.common.vision_encoder import (
@@ -336,7 +336,7 @@ class Qwen35VisionEncoder(Module):
             encoder: "Qwen35VisionEncoder",
         ) -> FlopsEstimator:
             input_patch_flops = sum(
-                active_parameter_flops_per_unit(module)
+                active_parameter_flops_per_token(module)
                 for module in (
                     encoder.patch_embed,
                     encoder.layers,
@@ -344,7 +344,7 @@ class Qwen35VisionEncoder(Module):
                 )
             )
             output_token_flops = sum(
-                active_parameter_flops_per_unit(module)
+                active_parameter_flops_per_token(module)
                 for module in (
                     encoder.merger.linear_fc1,
                     encoder.merger.linear_fc2,

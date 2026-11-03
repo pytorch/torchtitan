@@ -30,7 +30,10 @@ from torchtitan.models.common.attention import (
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
-from torchtitan.models.common.flops import quadratic_attention_flops_per_token
+from torchtitan.models.common.flops import (
+    get_parameter_counts,
+    quadratic_attention_flops_per_token,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.flux.autoencoder import AutoEncoder
 from torchtitan.models.flux.hf_embedder import FluxEmbedder
@@ -133,6 +136,9 @@ class FluxModel(BaseModel):
         final_layer_config: LastLayer.Config
         double_blocks: list[DoubleStreamBlock.Config]
         single_blocks: list[SingleStreamBlock.Config]
+
+        def get_parameter_counts(self, model: Module) -> tuple[int, int]:
+            return get_parameter_counts(model)
 
         def build_flops_estimator(self, model: Module, *, seq_len: int):
             nparams = sum(p.numel() for p in model.parameters())

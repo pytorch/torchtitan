@@ -120,35 +120,35 @@ def get_parameter_counts(model: nn.Module) -> tuple[int, int]:
     return num_parameters, usage_weighted_nparams.numerator
 
 
-def active_parameter_flops_per_unit(
-    model: nn.Module,
+def active_parameter_flops_per_token(
+    module: nn.Module,
     *,
-    excluded_modules: Iterable[nn.Module | None] = (),
+    excluded_submodules: Iterable[nn.Module | None] = (),
 ) -> int:
-    """Return parameter-based training FLOPs per workload unit.
+    """Return parameter-based training FLOPs per token.
 
     Embedding tables are excluded unless their parameter is shared with the
     output head. Explicitly excluded subtrees are also assigned zero cost.
     """
-    parameters = list(model.parameters())
-    parameter_weights = _get_active_parameter_weights(model, parameters)
+    parameters = list(module.parameters())
+    parameter_weights = _get_active_parameter_weights(module, parameters)
 
-    lm_head = getattr(model, "lm_head", None)
+    lm_head = getattr(module, "lm_head", None)
     lm_head_parameter_ids = (
         {id(param) for param in lm_head.parameters()}
         if isinstance(lm_head, nn.Module)
         else set()
     )
-    for module in model.modules():
-        if isinstance(module, nn.Embedding):
-            for param in module.parameters(recurse=False):
+    for submodule in module.modules():
+        if isinstance(submodule, nn.Embedding):
+            for param in submodule.parameters(recurse=False):
                 if id(param) not in lm_head_parameter_ids:
                     parameter_weights[id(param)] = Fraction(0)
 
-    for excluded_module in excluded_modules:
-        if excluded_module is None:
+    for excluded_submodule in excluded_submodules:
+        if excluded_submodule is None:
             continue
-        for param in excluded_module.parameters():
+        for param in excluded_submodule.parameters():
             parameter_weights[id(param)] = Fraction(0)
 
     usage_weighted_nparams = sum(
