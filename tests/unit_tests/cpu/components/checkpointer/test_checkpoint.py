@@ -8,6 +8,8 @@ import json
 import os
 import queue as queue_lib
 import shutil
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -188,6 +190,16 @@ class TestCheckpointManager(unittest.TestCase):
         manager.close()
 
         self.assertEqual(calls, ["staging", "saving", "close"])
+
+    def test_optimizer_and_checkpointer_import_order(self):
+        for statement in (
+            "from torchtitan.components.optim import LRSchedulersContainer; "
+            "from torchtitan.components.checkpointer import CheckpointManager",
+            "from torchtitan.components.checkpointer import CheckpointManager; "
+            "from torchtitan.components.optim import LRSchedulersContainer",
+        ):
+            with self.subTest(statement=statement):
+                subprocess.run([sys.executable, "-c", statement], check=True)
 
     def test_purge_exempt_is_built_from_config(self):
         self.trainer_config.checkpointer.purge_exempt = CallableFunction.Config(
@@ -1266,6 +1278,13 @@ class TestCheckpointManager(unittest.TestCase):
 
 
 class TestConfigPostInit(unittest.TestCase):
+    def test_valid_default_config(self):
+        """Verify that default values pass initialization."""
+        try:
+            CheckpointManager.Config()
+        except Exception as e:
+            self.fail(f"Default Config raised {type(e).__name__} unexpectedly!")
+
     def test_sanity_and_range_checks(self):
         """Test basic field validation like empty strings and negative numbers."""
         # Folder cannot be empty
