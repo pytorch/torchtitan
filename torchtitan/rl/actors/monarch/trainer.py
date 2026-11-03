@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import torch
 from monarch.actor import Actor, concurrent_endpoint
 
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
@@ -49,8 +50,9 @@ class _TrainerActorEndpoints:
         microbatch_groups: (
             list[list[TrainingMicrobatch]] | list[list[RDMAMicrobatch]]
         ),
+        aux_loss_denominators: torch.Tensor,
     ) -> dict[str, float] | None:
-        return await super().forward_backward(microbatch_groups)
+        return await super().forward_backward(microbatch_groups, aux_loss_denominators)
 
     @concurrent_endpoint
     async def optim_step(

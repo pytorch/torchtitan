@@ -253,9 +253,10 @@ objective's target tokens and the routed tokens of every depth
 `(main, depth 1, ..., depth N)`. The engine divides the step's gradients by the
 main target-token count, so every depth is divided by the same count, as the
 DeepSeek-V3 report divides every depth by the input length T (eq. 24). Each MoE
-auxiliary loss is divided by its microbatch's routed tokens (for the block that
-owns it) per main target token, so each microbatch's mean auxiliary loss is
-weighted by its share of the step's target tokens.
+auxiliary loss is divided by the step's routed tokens (for the block that owns
+it) per main target token, so each microbatch's mean auxiliary loss is weighted
+by its share of the step's routed tokens. This keeps instruction-style label
+masking independent from MoE routing.
 
 ### 4.4 Loss Parallel
 

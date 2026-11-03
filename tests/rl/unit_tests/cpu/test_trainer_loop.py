@@ -15,6 +15,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from torchtitan.rl.actors.system import TrainerHandle
 from torchtitan.rl.controller.controller import Controller
@@ -59,7 +60,7 @@ def _controller(
     """A controller with only the state `_trainer_loop` reads; each actor call appends to `events`."""
     version = 0
 
-    async def forward_backward(microbatch_groups):
+    async def forward_backward(microbatch_groups, aux_loss_denominators):
         events.append(f"fwd_bwd {version + 1}")
         controller.forward_backward_calls.append(microbatch_groups)
         return _RankValues({"loss/mean": 1.0})
@@ -137,6 +138,7 @@ def _batch(*, num_loss_tokens: int = 1, ends_step: bool = True) -> SimpleNamespa
     return SimpleNamespace(
         microbatch_groups=[],
         num_loss_tokens=num_loss_tokens,
+        routing_token_counts=torch.tensor([1]),
         group_ids=[],
         min_policy_versions=[0],
         metrics=[],

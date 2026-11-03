@@ -259,6 +259,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     global_loss_token_count: torch.Tensor
     """The step's loss tokens over the ranks whose gradients it sums (int64), set on
     device by ``optim_step``. A CPU zero before the first step."""
+    _aux_loss_denominators: torch.Tensor
+    """The current ``forward_backward`` call's ``aux_loss_denominators``, on device."""
     _step_started: bool
     _forward_backward_captures_whole_step: bool
     """SDC replay or a whole-step graph: one ``forward_backward`` call per optimizer step."""
@@ -639,16 +641,21 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self,
         *,
         microbatch_groups: list[list[TrainingMicrobatch]],
+        aux_loss_denominators: torch.Tensor,
     ) -> ForwardBackwardResult:
         """Run microbatch groups and add their gradients to this optimizer step's gradients.
 
         The step's first call (the first after ``optim_step``) zeroes the gradients;
         later calls add to them. Each loss is a sum over its loss tokens, and
         ``optim_step`` divides the gradients by the step's count.
+        ``aux_loss_denominators`` (``aux_loss.aux_loss_denominators``) divides this
+        call's auxiliary losses.
 
-        Example:
-            engine.forward_backward(microbatch_groups=[[mb0], [mb1]])  # zeroes, then adds
-            engine.forward_backward(microbatch_groups=[[mb2]])  # adds to the same step
+        Example, with d01 and d012 the R / N of mb0-mb1 and of mb0-mb2:
+            engine.forward_backward(microbatch_groups=[[mb0], [mb1]], aux_loss_denominators=d01)
+            # zeroes, then adds
+            engine.forward_backward(microbatch_groups=[[mb2]], aux_loss_denominators=d012)
+            # adds to the same step
             # engine.local_loss_token_count: the loss tokens of mb0, mb1 and mb2
             grad_norm = engine.optim_step()  # divides by that count summed over DP ranks
         """
@@ -665,6 +672,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 set_to_none=not self._accelerator_graph_per_microbatch_group_enabled
             )
             self.local_loss_token_count = 0
+        # non_blocking: a pageable copy would wait for the work queued before this call.
+        self._aux_loss_denominators = aux_loss_denominators.to(
+            self.device, non_blocking=True
+        )
         if self.config.training.preprocess_microbatch_groups_lazily:
             # _forward_backward_body preprocesses each group just before its forward/backward.
             step_inputs: list[Any] = microbatch_groups
@@ -713,11 +724,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                         parallelism=self.config.parallelism,
                         max_num_documents=self.max_num_documents,
                         max_context_length=self.config.training.max_context_length,
-                        aux_loss_denominators=aux_loss_denominators(
-                            microbatch.routing_token_counts,
-                            microbatch.loss_token_count,
-                            device=self.device,
-                        ),
+                        aux_loss_denominators=self._aux_loss_denominators,
                         **self.preprocess_inputs_kwargs,
                     )
                 )
@@ -899,8 +906,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self.device, non_blocking=True
         )
         self.global_loss_token_count = self._sum_loss_token_count(local_count)
-        # A step with no loss tokens has all-zero gradients; dividing by 1 keeps them zero. The
-        # update still runs, so AdamW's momentum and weight decay still move the weights.
+        # A step with no loss tokens has no loss gradients; dividing by 1 keeps the auxiliary-loss
+        # gradients as they are. The update still runs, so AdamW's momentum and weight decay still
+        # move the weights.
         divisor = self.global_loss_token_count.clamp_min(1).to(torch.float32)
         gradients_by_device: dict[torch.device, list[torch.Tensor]] = {}
         for parameter in self.optim.parameters:
@@ -917,6 +925,37 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.num_completed_steps = current_step
         self._step_started = False
         return grad_norm
+
+    def step_aux_loss_denominators(
+        self, microbatch_groups: list[list[TrainingMicrobatch]]
+    ) -> torch.Tensor:
+        """Return ``aux_loss_denominators`` for a step made of ``microbatch_groups``
+        on every data-parallel rank: one all-reduce of the token counts.
+
+        Example, 2 DP ranks with one microbatch each:
+            rank 0: routing_token_counts [8], loss_token_count 2
+            rank 1: routing_token_counts [8], loss_token_count 6
+            -> tensor([2.0]) on both ranks: 16 routed tokens per 8 loss tokens
+        """
+        # [N, R_0, ..., R_d]: the loss tokens, then the routed tokens of every depth.
+        local_counts = torch.stack(
+            [
+                torch.cat(
+                    (
+                        microbatch.loss_token_count.reshape(1),
+                        microbatch.routing_token_counts.reshape(-1),
+                    )
+                )
+                for microbatch_group in microbatch_groups
+                for microbatch in microbatch_group
+            ]
+        ).sum(dim=0)
+        counts = local_counts.to(self.device)
+        if self.parallelism_context.dp_enabled:
+            counts = dist_utils.dist_sum_tensor(
+                counts, self.parallelism_context.get_mesh("dp")
+            )
+        return aux_loss_denominators(counts[1:], counts[0])
 
     def _sum_loss_token_count(self, loss_token_count: torch.Tensor) -> torch.Tensor:
         """Sum this rank's loss-token count over the ranks whose gradients the step sums."""

@@ -34,7 +34,6 @@ from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
     PagedStashRunner,
 )
 from torchtitan.models.base import BaseModel
-from torchtitan.models.common.aux_loss import aux_loss_denominators
 from torchtitan.models.common.linear import Linear
 from torchtitan.observability import structured_logger as sl
 from torchtitan.trainer import Trainer
@@ -271,11 +270,7 @@ class GraphTrainingEngine(TrainingEngine):
                         parallelism=self.config.parallelism,
                         max_num_documents=self.max_num_documents,
                         max_context_length=self.config.training.max_context_length,
-                        aux_loss_denominators=aux_loss_denominators(
-                            microbatch.routing_token_counts,
-                            microbatch.loss_token_count,
-                            device=self.device,
-                        ),
+                        aux_loss_denominators=self._aux_loss_denominators,
                         **self.preprocess_inputs_kwargs,
                     )
                     self.ntokens_seen += (

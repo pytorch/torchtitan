@@ -83,6 +83,7 @@ class TrainerStepBatch:
         #                         [[TrainingMicrobatch(input=[20])]]]
         # The second microbatch contains one real row and one pad row.
         # num_loss_tokens = the microbatches' loss tokens, over every DP rank
+        # routing_token_counts = their non-padding tokens, one per routing depth
     """
 
     # [num_groups][num_microbatches_per_group][dp_degree]; under PP, each group runs as one
@@ -92,6 +93,8 @@ class TrainerStepBatch:
     )
     # Loss tokens over this batch's microbatches.
     num_loss_tokens: int
+    # Non-padding tokens over this batch's microbatches, one per routing depth.
+    routing_token_counts: torch.Tensor
     # The step's metrics, group ids and policy versions; empty on a streamed step's earlier batches.
     metrics: list[m.Metric]
     group_ids: list[int]
@@ -555,6 +558,13 @@ class Batcher(Configurable):
             for rank_microbatches in microbatches
             for microbatch in rank_microbatches
         )
+        routing_token_counts = torch.stack(
+            [
+                microbatch.routing_token_counts
+                for rank_microbatches in microbatches
+                for microbatch in rank_microbatches
+            ]
+        ).sum(dim=0)
         num_pp_microbatches = self._num_pp_microbatches
         microbatch_groups = [
             microbatches[start : start + num_pp_microbatches]
@@ -566,6 +576,7 @@ class Batcher(Configurable):
             return TrainerStepBatch(
                 microbatch_groups=microbatch_groups,
                 num_loss_tokens=num_loss_tokens,
+                routing_token_counts=routing_token_counts,
                 metrics=[],
                 group_ids=[],
                 min_policy_versions=[],
@@ -583,10 +594,11 @@ class Batcher(Configurable):
         return TrainerStepBatch(
             microbatch_groups=microbatch_groups,
             num_loss_tokens=num_loss_tokens,
+            routing_token_counts=routing_token_counts,
             metrics=[
                 *metrics,
-                # Keep this response-level metric exact without adding a second
-                # token-count field to TrainerStepBatch.
+                # Keep this response-level metric exact without adding a
+                # response-token count field to TrainerStepBatch.
                 m.Metric(
                     "loss/generator_logprob_nan_frac",
                     m.NoReduce(

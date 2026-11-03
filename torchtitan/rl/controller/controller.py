@@ -103,11 +103,12 @@ from typing import Any
 
 # PYTORCH_CUDA_ALLOC_CONF is set in torchtitan/rl/__init__.py (before torch is imported)
 # and in train.py; see the note there.
-import torch  # noqa: F401
+import torch
 
 from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import apply_overrides, Configurable, OverrideConfig
+from torchtitan.models.common.aux_loss import aux_loss_denominators
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.system import ActorSystem, TrainerHandle
 from torchtitan.rl.controller.metrics import (
@@ -1184,12 +1185,18 @@ class Controller(Configurable):
                         sent_s = time.perf_counter()
                         # `.call` sends now, so each rank gets its calls in order.
                         # Send each DP rank only its column of the grid.
+                        # The auxiliary losses divide by the batch's routed tokens per loss token.
+                        batch_aux_loss_denominators = aux_loss_denominators(
+                            packed.routing_token_counts,
+                            torch.tensor(packed.num_loss_tokens),
+                        )
                         calls_by_dp_rank = [
                             trainer_at_dp_rank.forward_backward.call(
                                 [
                                     [row[dp_rank] for row in group]
                                     for group in packed.microbatch_groups
                                 ],
+                                batch_aux_loss_denominators,
                             )
                             for dp_rank, trainer_at_dp_rank in enumerate(
                                 self.trainer.by_dp_rank

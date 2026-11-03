@@ -342,7 +342,8 @@ class Trainer(Configurable):
                     microbatch_group.append(next(data_iterator))
             microbatch_groups.append(microbatch_group)
         forward_backward_result = engine.forward_backward(
-            microbatch_groups=microbatch_groups
+            microbatch_groups=microbatch_groups,
+            aux_loss_denominators=engine.step_aux_loss_denominators(microbatch_groups),
         )
         sl.log_trace_scalar({"local_valid_tokens": engine.local_loss_token_count})
 
