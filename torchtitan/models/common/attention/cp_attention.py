@@ -196,6 +196,8 @@ class AllGatherKVFlex(CPInnerAttention[FlexAttentionMetadata, FlexAttentionMetad
             BLOCK_SIZE=block_mask.BLOCK_SIZE,
             # Preserve whether the global mask stores full blocks separately.
             separate_full_blocks=block_mask.full_kv_num_blocks is not None,
+            # Preserve the dQ write-order metadata of the deterministic FLASH backward.
+            compute_dq_write_order=block_mask.dq_write_order is not None,
         )
 
 
