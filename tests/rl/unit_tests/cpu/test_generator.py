@@ -164,6 +164,7 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
         staging_state_dict = {"weight": "old"}
         generator = Generator.__new__(Generator)
         generator._prefetched_model_state_dict = staging_state_dict
+        generator._pull_model_state_dict_delta = False
 
         def fill_state_dict(*args, **kwargs):
             assert kwargs["user_state_dict"] is staging_state_dict

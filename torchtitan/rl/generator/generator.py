@@ -190,6 +190,7 @@ class Generator(Configurable):
         model_path: str,
         max_num_seqs: int,
         output_dir: str,
+        pull_model_state_dict_delta: bool,
         rank: int | None = None,
         generator_name: str = "generator",
         open_result_channel: Callable[[], tuple[Any, Any]] | None = None,
@@ -273,6 +274,7 @@ class Generator(Configurable):
             )
 
         self._prefetched_model_state_dict = engine.prefetched_model_state_dict
+        self._pull_model_state_dict_delta = pull_model_state_dict_delta
 
         broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
         # The engine loop owns the engine from here on and releases it on exit, so this
@@ -444,6 +446,15 @@ class Generator(Configurable):
         """Fetch weights into pinned CPU memory without interrupting generation."""
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
+        if self._pull_model_state_dict_delta:
+            # The prefetch buffers keep the previous version between pulls, so
+            # only changed elements are read. The controller finishes each push
+            # before pulling; a pull overlapping a push would leave these buffers
+            # permanently stale, since later deltas apply on top of them.
+            await ts.get_state_dict_delta(
+                "model_state_dict", self._prefetched_model_state_dict, strict=False
+            )
+            return
         await ts.get_state_dict(
             "model_state_dict",
             user_state_dict=self._prefetched_model_state_dict,

@@ -302,6 +302,21 @@ class Controller(Configurable):
         )
         """Generator routing strategy configuration."""
 
+        model_state_dict_delta_max_fraction: float | None = None
+        """Send generators only the elements of the model state dict that changed
+        since the previous version; None pulls the full state dict every version.
+
+        The trainer still publishes the full model state dict every version, plus
+        one fixed-size row per tensor shard holding up to this fraction, in (0, 1],
+        of the shard's elements. A generator that holds the previous version
+        scatters those rows and reads in full only the tensors whose rows
+        overflowed. Rows cost ``fraction * (wire dtype size + 4)`` bytes per
+        element on every pull, so set it just above the typical changed fraction
+        of a step. The trainer keeps one more CPU copy of its model state dict
+        shards, in the transfer dtype, to diff against.
+
+        TODO: log the changed fraction per version so users can pick a value."""
+
         actor_system: ActorSystem.Config = field(
             default_factory=_default_actor_system_config
         )
@@ -341,6 +356,12 @@ class Controller(Configurable):
                     "The trainer and generator must use the same model class, got "
                     f"{trainer_model_cls.__qualname__} and "
                     f"{generator_model_cls.__qualname__}."
+                )
+            max_fraction = self.model_state_dict_delta_max_fraction
+            if max_fraction is not None and not 0 < max_fraction <= 1:
+                raise ValueError(
+                    "model_state_dict_delta_max_fraction must be in (0, 1], got "
+                    f"{max_fraction}"
                 )
             if self.num_generators < 1:
                 raise ValueError(
@@ -624,6 +645,7 @@ class Controller(Configurable):
                 generator_dtype=config.generator.model_dtype,
                 max_num_documents=config.async_loop.batcher.max_num_documents,
                 output_dir=config.dump_folder,
+                model_state_dict_delta_max_fraction=config.model_state_dict_delta_max_fraction,
             )
             # TODO: torch.compile with aot_eager backend (inductor crashes the vLLM engine on the shared model path).
             self.generator_router = await actor_system.spawn_generator_router(
@@ -632,6 +654,9 @@ class Controller(Configurable):
                 model_path=config.hf_assets_path,
                 max_num_seqs=max_num_seqs,
                 output_dir=config.dump_folder,
+                pull_model_state_dict_delta=(
+                    config.model_state_dict_delta_max_fraction is not None
+                ),
             )
             self.batcher = await actor_system.spawn_batcher(
                 async_loop.batcher,

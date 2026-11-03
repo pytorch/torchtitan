@@ -24,12 +24,14 @@ class _GeneratorActorEndpoints:
         model_path: str,
         max_num_seqs: int,
         output_dir: str,
+        pull_model_state_dict_delta: bool,
     ) -> None:
         super().__init__(
             config,
             model_path=model_path,
             max_num_seqs=max_num_seqs,
             output_dir=output_dir,
+            pull_model_state_dict_delta=pull_model_state_dict_delta,
             rank=current_rank().rank,
             generator_name=context().actor_instance.actor_id.actor_name,
             open_result_channel=Channel.open,

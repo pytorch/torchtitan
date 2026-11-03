@@ -97,6 +97,7 @@ class Trainer(Configurable):
         hf_assets_path: str = "",
         generator_dtype: str = "",
         output_dir: str,
+        model_state_dict_delta_max_fraction: float | None,
     ):
         init_logger()
         # Quiet torchstore's per-op transport-resolve INFO spam (very noisy in CI).
@@ -150,6 +151,16 @@ class Trainer(Configurable):
         )
 
         engine.load_checkpoint()
+        # Keeps the previous version in host memory, not accelerator memory.
+        self._model_state_dict_delta = None
+        if model_state_dict_delta_max_fraction is not None:
+            model_state_dict = self._model_state_dict()
+            self._model_state_dict_delta = ts.StateDictDelta(
+                model_state_dict,
+                max_fraction=model_state_dict_delta_max_fraction,
+                transfer_dtype=self._transfer_dtype,
+                preserve_dtype_keys=self._model_buffer_names(model_state_dict),
+            )
         if engine.device.type == "cpu":
             self._push_model_state_dict_stream = None
         else:
@@ -440,18 +451,9 @@ class Trainer(Configurable):
           the model, and awaits the generators' pull of it before the next push
           overwrites the TorchStore key.
         """
-        model_state_dict = self._model_state_dict()
-        await asyncio.to_thread(
-            self._put_model_state_dict,
-            model_state_dict,
-            self._model_buffer_names(model_state_dict),
-        )
+        await asyncio.to_thread(self._put_model_state_dict, self._model_state_dict())
 
-    def _put_model_state_dict(
-        self,
-        model_state_dict: dict[str, torch.Tensor],
-        buffer_names: frozenset[str],
-    ) -> None:
+    def _put_model_state_dict(self, model_state_dict: dict[str, torch.Tensor]) -> None:
         """Publish without blocking the actor event loop."""
         # The current stream is thread-local; set it in this worker so TorchStore
         # copies wait on the optimizer step rather than on later default-stream
@@ -460,6 +462,12 @@ class Trainer(Configurable):
         with stream if stream is not None else nullcontext():
             if stream is not None:
                 stream.synchronize()
+            delta = self._model_state_dict_delta
+            if delta is not None:
+                asyncio.run(
+                    ts.put_state_dict_delta(delta, model_state_dict, "model_state_dict")
+                )
+                return
             asyncio.run(
                 ts.put_state_dict(
                     model_state_dict,
@@ -467,7 +475,7 @@ class Trainer(Configurable):
                     direct_rdma=False,
                     transfer_dtype=self._transfer_dtype,
                     # Buffers keep their registered dtype when weights are cast.
-                    preserve_dtype_keys=buffer_names,
+                    preserve_dtype_keys=self._model_buffer_names(model_state_dict),
                 )
             )
 
