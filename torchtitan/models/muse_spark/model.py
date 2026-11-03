@@ -220,8 +220,11 @@ class MuseSparkRMSNorm(RMSNorm):
             return None
         return self.weight + self.gain_center
 
-    # Limit 16, not the default 8: all residual-stream norms share this region and use 12 graphs.
-    @local_compile("muse_spark_rmsnorm", batch_invariant=False, recompile_limit=16)
+    # Limit 32, not the default 8: all residual-stream norms share this region. Pretraining uses 12
+    # graphs (weight or none, 8192- or 4096-wide weight, FSDP-wrapped or plain). An RL trainer adds a
+    # no_grad log-prob pass and micro-batches of varying token counts: 22 graphs measured on Muse Spark
+    # with the dapo_math recipe's LoRA setup, so 16 fails the first training step (fullgraph=True).
+    @local_compile("muse_spark_rmsnorm", batch_invariant=False, recompile_limit=32)
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         input_dtype = input.dtype
         effective_weight_D = self._get_effective_weight()
