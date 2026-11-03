@@ -123,19 +123,24 @@ class ActorSystem(Configurable, abc.ABC):
 
     @abc.abstractmethod
     async def stop_rollout_workers(self) -> None:
-        """Stop the rollout worker pool, if any."""
+        """Stop the rollout worker pool, if any. Forget the pool before awaiting its
+        stop so that ``stop`` never stops it a second time after a cancel."""
 
     @abc.abstractmethod
     async def initialize_torchstore(self) -> None:
-        """Initialize TorchStore, with its storage colocated with the trainer, and the
-        TorchStore client of every trainer and generator actor.
+        """Initialize TorchStore on the control plane this actor system runs, with its
+        storage colocated with the trainer, and the TorchStore client of every trainer
+        and generator actor with what ``ts.initialize`` returns.
 
         TODO: move to a model state dict transport, which owns its placement.
         """
 
     @abc.abstractmethod
     async def stop(self) -> None:
-        """Stop every process ``provision`` reserved, best-effort."""
+        """Best-effort and unbounded: stop every process ``provision`` reserved, a rollout worker pool
+        whose stop never started, and any TorchStore service ``initialize_torchstore`` started. A first
+        cancel inside lets the others stop and then raises, a second ends the stops, and the service
+        shuts down either way. A KeyboardInterrupt can leave processes and the service running."""
 
     @abc.abstractmethod
     def shutdown(self) -> None:

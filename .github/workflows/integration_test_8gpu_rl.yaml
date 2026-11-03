@@ -99,3 +99,62 @@ jobs:
         python -m tests.integration_tests.run_tests \
           "$RUNNER_TEMP/artifacts-to-be-uploaded/integration" --ngpu 8 \
           --test_suite rl --hf_assets_path "$MODEL_PATH"
+
+  # Step 3: The RL loss guard and one integration entry on TorchStore's service
+  # control plane, in a container of their own
+  build-test-service:
+    needs: set-matrix
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/torchtitan-ubuntu-22.04-clang12:rl-${{ needs.set-matrix.outputs.docker-hash }}
+      repository: pytorch/torchtitan
+      timeout: 60
+      script: |
+        set -eux
+
+        # The generic Linux job chooses to use base env, not the one setup by the image
+        CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
+        conda activate "${CONDA_ENV}"
+
+        # Log CUDA driver version for debugging.
+        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
+        echo "CUDA driver version: ${DRIVER_VERSION}"
+
+        pip config --user set global.progress_bar off
+
+        python -m pip install uv
+
+        # 1. Install the CUDA nightlies and RL extras, as the build-test job does.
+        bash scripts/install_rl_env.sh --skip-base --flash-attn none --nvcc
+
+        # 2. Make the checkout importable for subprocesses spawned by the test.
+        export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+
+        # 3. Download HF model checkpoint for tests
+        MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
+
+        sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
+        sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/artifacts-to-be-uploaded"
+
+        # The RL loss guard on TorchStore's service control plane asserts against the
+        # Monarch guard's golden because the configs they train differ only in the
+        # control plane. It runs first in a clean container, as that guard does.
+        python scripts/rl/loss_compare.py \
+          --hf-assets-path "$MODEL_PATH" \
+          --dump-folder "$RUNNER_TEMP/artifacts-to-be-uploaded/rl_loss_guard_service" \
+          --module torchtitan_recipes.tests.rl.alphabet_sort \
+          --config rl_grpo_qwen3_0_6b_varlen_batch_invariant_service \
+          --import-result tests/assets/losses/rl_grpo_cuda.txt \
+          --assert-equal
+
+        # An integration entry on the service control plane with three generators and
+        # an FSDP trainer, a layout the guard does not run.
+        python -m tests.integration_tests.run_tests \
+          "$RUNNER_TEMP/artifacts-to-be-uploaded/integration_service" --ngpu 8 \
+          --test_suite rl_service --hf_assets_path "$MODEL_PATH"

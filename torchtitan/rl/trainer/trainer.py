@@ -527,6 +527,12 @@ class Trainer(Configurable):
             staging_state_dict[name] = staging_tensor
         return staging_state_dict
 
-    async def initialize_torchstore_client(self) -> None:
-        """Initialize this process as a TorchStore routing publisher."""
-        await ts.client(role=RankRole.PUBLISHER)
+    async def initialize_torchstore_client(
+        self, *, address: "ts.ControlPlaneAddress | None"
+    ) -> None:
+        """Initialize this process as a TorchStore routing publisher.
+
+        Args:
+            address: What ``ts.initialize`` returned (None with the Monarch control plane).
+        """
+        await ts.client(role=RankRole.PUBLISHER, address=address)

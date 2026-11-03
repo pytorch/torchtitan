@@ -20,6 +20,7 @@ from torchtitan_recipes.tests.rl.alphabet_sort import (
     rl_grpo_deepseek_v3_debug,
     rl_grpo_fsdp2_gen_tp2_compile,
     rl_grpo_fsdp2_gen_tp2_no_compile,
+    rl_grpo_fsdp2_gen_tp2_no_compile_service,
     rl_grpo_kimi_k3_debug_batch_invariant,
     rl_grpo_moe_debug_dist_moe_tp2_ep4,
     rl_grpo_moe_debug_tp4_ep4,
@@ -108,6 +109,22 @@ def build_rl_test_list() -> list[IntegrationTestDefinition]:
             configs=[rl_grpo_qwen3_5_debug_tp2_batch_invariant],
             test_descr="RL GRPO Qwen3.5 hybrid GDN TP=2 batch-invariant",
             test_name="rl_grpo_qwen3_5_debug_tp2_batch_invariant",
+            ngpu=8,
+        ),
+    ]
+
+
+def build_rl_service_test_list() -> list[IntegrationTestDefinition]:
+    """Build the RL integration tests on TorchStore's service control plane, which CI
+    runs in a job of their own after the guard on that control plane."""
+    return [
+        _rl_test(
+            configs=[rl_grpo_fsdp2_gen_tp2_no_compile_service],
+            test_descr=(
+                "RL GRPO trainer FSDP=2 + gen TP=2 no compile, "
+                "TorchStore service control plane"
+            ),
+            test_name="rl_grpo_fsdp2_gen_tp2_no_compile_service",
             ngpu=8,
         ),
     ]
