@@ -316,7 +316,19 @@ class Controller(Configurable):
 
         override: OverrideConfig = field(default_factory=OverrideConfig)
         """Registered overrides applied to this whole config tree, including the
-        trainer and generator models, when the controller is constructed."""
+        trainer and generator models, by ``resolve_overrides``: when the
+        controller is constructed, and by the launcher's submit command before
+        it plans the job."""
+
+        def resolve_overrides(self) -> None:
+            """Apply ``override`` to this config in place. Call it once, before
+            reading the config, wherever the run is planned or built."""
+            # Copy each model so overrides never write through a model config the
+            # recipe shares between the trainer and generator.
+            self.trainer.model = copy.deepcopy(self.trainer.model)
+            self.generator.model = copy.deepcopy(self.generator.model)
+            if self.override.imports:
+                apply_overrides(self.override, self)
 
         def maybe_log(self) -> None:
             debug = self.trainer.debug
@@ -430,12 +442,7 @@ class Controller(Configurable):
 
     def __init__(self, config: Config):
         self.config = config
-        # Copy each model so overrides never write through a model config the
-        # recipe shares between the trainer and generator.
-        config.trainer.model = copy.deepcopy(config.trainer.model)
-        config.generator.model = copy.deepcopy(config.generator.model)
-        if config.override.imports:
-            apply_overrides(config.override, config)
+        config.resolve_overrides()
         config.maybe_log()
         self.actor_system: ActorSystem | None = None
         self.trainer: TrainerHandle | None = None
@@ -555,8 +562,16 @@ class Controller(Configurable):
 
         return release_session
 
+    async def _build_actor_system(self) -> ActorSystem:
+        """Build the actor system ``setup_async`` spawns the services through.
+
+        Subclasses override it to build the actor system differently, e.g. on
+        hosts a launcher allocated (``MonarchControllerWithLauncher``).
+        """
+        return self.config.actor_system.build()
+
     @sl.log_trace_span("setup_async")
-    async def setup_async(self, *, actor_system: ActorSystem | None = None):
+    async def setup_async(self):
         """Spawn the services through the actor system and initialize weights.
 
         Kept separate from ``__init__`` because provisioning processes, spawning
@@ -567,11 +582,6 @@ class Controller(Configurable):
         Provisions and spawns the trainer, generators, router, batcher and rollout
         workers through the actor system, and synchronizes initial weights from
         trainer to generator. Must be called before :meth:`run`.
-
-        Args:
-            actor_system: An actor system the launcher built, e.g. a
-                ``MonarchActorSystem`` on hosts it allocated; None builds
-                ``config.actor_system``.
         """
         # Peak concurrent rollout sequences (groups * num_samples_per_prompt, or the validation pass); sizes max_num_seqs below.
         async_loop = self.config.async_loop
@@ -609,8 +619,7 @@ class Controller(Configurable):
         )
 
         with sl.log_trace_span("mesh_spawn"):
-            if actor_system is None:
-                actor_system = config.actor_system.build()
+            actor_system = await self._build_actor_system()
             self.actor_system = actor_system
             await actor_system.provision(
                 trainer_parallelism=config.trainer.parallelism,

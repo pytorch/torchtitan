@@ -12,6 +12,7 @@ Each function returns a complete ``Controller.Config``, discoverable by
 """
 
 import dataclasses
+from typing import TYPE_CHECKING
 
 from renderers import GptOssRendererConfig, Qwen3RendererConfig
 
@@ -60,6 +61,9 @@ from torchtitan.rl.trainer.losses import GRPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
+
+if TYPE_CHECKING:
+    from torchtitan.rl.actors.monarch.launcher.base import MonarchControllerWithLauncher
 
 _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
 
@@ -249,6 +253,40 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
                 max_tokens=100,
             ),
         ),
+    )
+
+
+def rl_grpo_qwen3_0_6b_flex_slurm() -> "MonarchControllerWithLauncher.Config":
+    """Example of running ``rl_grpo_qwen3_0_6b_flex`` on SLURM with
+    ``SlurmLauncher``, with the cluster's default account and partition. The
+    Launchers section of ``torchtitan/rl/actors/monarch/README.md`` uses it as its
+    example, so keep it.
+
+    Layout with ``gpus_per_node = 4`` (2 nodes)::
+
+        node | mesh    | roles                          | GPUs
+        -----+---------+--------------------------------+-----
+        0    | trainer | trainer (TP=2 x FSDP=2)        | 4
+        1    | node_0  | generator_0..3 (1 GPU each)    | 4
+    """
+    # Imported lazily so this module loads without Monarch.
+    from torchtitan.rl.actors.monarch.launcher.base import MonarchControllerWithLauncher
+    from torchtitan.rl.actors.monarch.launcher.slurm import SlurmLauncher
+
+    # Set to your nodes' GPU count; the trainer and generator sizes follow it.
+    gpus_per_node = 4
+    config = rl_grpo_qwen3_0_6b_flex()
+    # Qwen3's model configs don't depend on the TP or FSDP degree, so changing
+    # them here needs no model config rebuild.
+    trainer_parallelism = config.trainer.parallelism
+    # Fill node 0: the trainer's world size is TP x FSDP.
+    trainer_parallelism.data_parallel_shard_degree = (
+        gpus_per_node // trainer_parallelism.tensor_parallel_degree
+    )
+    config.generator.parallelism.tensor_parallel_degree = 1
+    config.num_generators = gpus_per_node
+    return MonarchControllerWithLauncher.Config.from_controller_config(
+        config, launcher=SlurmLauncher.Config(gpus_per_node=gpus_per_node)
     )
 
 
