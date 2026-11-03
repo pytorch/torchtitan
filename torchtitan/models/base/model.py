@@ -83,8 +83,9 @@ class BaseModel(Module, ABC):
         every model used by the training engine must implement it.
 
         ``aux_loss_denominators``: the step's routed tokens per loss token, one per
-        routing depth (``aux_loss.aux_loss_denominators``); models with an aux loss return it
-        as the ``aux_loss_denominators`` model kwarg.
+        routing depth (``aux_loss.aux_loss_denominators``); a streamed call uses those of the
+        step's samples sent so far. Models with an aux loss return it as the
+        ``aux_loss_denominators`` model kwarg.
         """
         raise NotImplementedError(
             f"{type(self).__name__} must implement preprocess_inputs()."

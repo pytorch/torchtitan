@@ -7,9 +7,11 @@
 """Auxiliary-loss gradient injection and distributed metric collection.
 
 Normalization: every auxiliary loss is divided by the step's routed tokens
-per loss token (``aux_loss_denominators``), and the training engine later
+per loss token (``aux_loss_denominators``; a streamed ``forward_backward`` call
+uses those of the step's samples sent so far), and the training engine later
 divides every gradient by the step's loss-token count. Each microbatch's mean
-auxiliary loss is then weighted by its share of the step's routed tokens.
+auxiliary loss is then weighted by its share of the step's routed tokens
+(an estimate for a streamed step's earlier calls).
 The per-step metric is the mean over loss instances (layers) of that weighted
 value, summed over data-parallel ranks and pipeline stages.
 
@@ -104,7 +106,8 @@ class AuxLoss(Module):
     ``collect_aux_loss_metrics`` reduces for logging.
 
     The owning model block passes the step's denominator (from
-    ``aux_loss_denominators``) to ``inject`` on every forward.
+    ``aux_loss_denominators``; a streamed call uses the step's samples sent so
+    far) to ``inject`` on every forward.
     Metric accumulation happens in the forward inside ``inject()``, which
     wraps it in a retained ``torch_remat`` region (``recompute=False``) so
     ``torch_remat``-based checkpointing never re-runs the accumulation.
@@ -222,7 +225,8 @@ class AuxLoss(Module):
             raw_sum: Unnormalized per-microbatch loss value (differentiable).
             carrier: The tensor whose backward path carries the gradient.
             denominator: The step's routed tokens per loss token for the
-                owning block (``aux_loss_denominators``).
+                owning block (``aux_loss_denominators``); a streamed call uses
+                the step's samples sent so far.
 
         Returns:
             ``carrier`` unchanged (identity forward).
