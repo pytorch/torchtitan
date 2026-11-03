@@ -38,7 +38,8 @@ each group reduces its gradients, so a segment is one group. With hybrid sharded
 parallelism (HSDP) or `parallelism.fsdp_defer_gradient_reduction=True`, gradients are
 reduced once per `forward_backward` call, so a segment is the whole call. Eager
 training given the same calls reduces at the same points, so a graph replay per
-segment matches it bitwise.
+segment computes the same reductions. The GPU test (`test_segment_graphs.py`) checks
+graphs vs eager bitwise for FSDP (1 and 2 GPUs), HSDP 2x1 and deferral, on one node.
 
 Training uses two kinds of graphs:
 - The first-segment graph runs the step's first segment. Gradients are `None` before
