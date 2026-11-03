@@ -186,9 +186,24 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
         labels = inputs.labels
 
         full_text = tokenizer.apply_chat_template(messages).rstrip("\n")
+        question = sample["question"]
+        answer = sample["answer"]
+        self.assertEqual(
+            full_text,
+            "<|begin_of_text|>user\n"
+            f"{question}<|end_of_text|>assistant\n"
+            f"{answer}<|end_of_text|>",
+        )
         full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
         if full_tokens[-1] != tokenizer.eos_id:
             full_tokens.append(tokenizer.eos_id)
+        # The template renders bos_token and ChatProcessor also passes add_bos=True.
+        self.assertEqual(full_tokens[0], tokenizer.bos_id)
+        self.assertEqual(full_tokens.count(tokenizer.bos_id), 1)
+        # eos_token closes the user turn and the assistant turn.
+        self.assertEqual(full_tokens.count(tokenizer.eos_id), 2)
+        self.assertEqual(full_tokens[-1], tokenizer.eos_id)
+        self.assertIn(tokenizer.eos_id, full_tokens[:-1])
 
         self.assertEqual(
             inputs.input.tolist()[: len(full_tokens) - 1],
