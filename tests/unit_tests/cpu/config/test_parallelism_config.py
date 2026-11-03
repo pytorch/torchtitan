@@ -56,6 +56,26 @@ def test_parallelism_config_rejects_unknown_schedule_when_pp_disabled() -> None:
         )
 
 
+def test_parallelism_config_accepts_unset_layers_per_stage() -> None:
+    assert ParallelismConfig().pipeline_parallel_layers_per_stage is None
+
+
+def test_parallelism_config_accepts_positive_layers_per_stage() -> None:
+    config = ParallelismConfig(pipeline_parallel_layers_per_stage=2)
+    assert config.pipeline_parallel_layers_per_stage == 2
+
+
+@pytest.mark.parametrize("layers_per_stage", [0, -1])
+def test_parallelism_config_rejects_non_positive_layers_per_stage(
+    layers_per_stage: int,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=rf"pipeline_parallel_layers_per_stage must be positive.*{layers_per_stage}",
+    ):
+        ParallelismConfig(pipeline_parallel_layers_per_stage=layers_per_stage)
+
+
 def test_parallelism_config_disables_fsdp_symm_mem_by_default() -> None:
     assert ParallelismConfig().fsdp_symm_mem_scope is None
 
