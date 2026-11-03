@@ -49,10 +49,17 @@ _ONE_CALL = [[3]] * 5
 # The first call's 2 groups replay the first-segment graph; each later group replays the
 # 1-group later-segment graph.
 _FSDP_CALLS = [[2, 1], [2, 3], [2], [2, 1, 2], [2, 2], [2, 1]]
-# Under HSDP or deferral, a later segment is a whole call. Later calls of 1, 2 and 3 groups
-# each warm up twice, capture after the first-segment graph has (step 3 without SDC replay),
-# then replay.
-_WHOLE_CALL_CALLS = [[2, 1, 2], [2, 2, 3], [2, 1, 3], [2, 2, 1], [2, 3], [2, 1, 2, 3]]
+# Under HSDP or deferral, a later segment is a whole call. Without SDC replay, the
+# first-segment graph captures in step 3. The 1-group later graph is called 3 times before
+# that, so the capture-order rule must hold it back. Each length then captures and replays.
+_WHOLE_CALL_CALLS = [
+    [2, 1, 1, 2],
+    [2, 1, 3],
+    [2, 2, 1],
+    [2, 3, 2],
+    [2, 3],
+    [2, 2, 1, 3],
+]
 
 
 @dataclasses.dataclass(frozen=True)
