@@ -81,6 +81,48 @@ def top_k_match(logits_a, logits_b, k=5):
 # ============================================================
 
 
+def _mrope_positions_for_forward(
+    mrope_builder,
+    tokens,
+    grid_thw,
+    *,
+    image_token_id,
+    video_token_id,
+):
+    """Return MRoPE positions at the rank Qwen3.5 MRoPE indexes.
+
+    The collator wants a 1-D token row and returns ``(num_tokens, 3)``.
+    ``MRoPE._reshape_cache`` takes that rank (``ndim == 2``, last dim 3).
+    A rank-3 ``(1, S, 3)`` tensor is not the MRoPE path. HF ``input_ids``
+    arrive as ``(1, S)``; drop a leading batch of 1 before the call.
+
+    Args:
+        mrope_builder: Stand-in with ``spatial_merge_size`` and ``patch_order``.
+        tokens: Token ids, ``(num_tokens,)`` or ``(1, num_tokens)``.
+        grid_thw: Image grid ``(num_images, 3)``, or None when unused.
+        image_token_id: Placeholder id for image spans.
+        video_token_id: Placeholder id for video spans.
+
+    Returns:
+        ``(num_tokens, 3)`` temporal, height, and width position ids.
+    """
+    if tokens.ndim == 2 and tokens.shape[0] == 1:
+        tokens = tokens.squeeze(0)
+    if tokens.ndim != 1:
+        raise ValueError(
+            f"MRoPE tokens must be a 1-D row, got shape {tuple(tokens.shape)}."
+        )
+    return MultiModalCollator._build_mrope_positions(
+        mrope_builder,  # pyrefly: ignore [bad-argument-type]
+        tokens,
+        grid_thw,
+        None,
+        None,
+        image_token_id=image_token_id,
+        video_token_id=video_token_id,
+    )
+
+
 def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
     """Build paired HF / TT inputs from random images.
 
@@ -108,9 +150,12 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
         QWEN3_5_SPECIAL_TOKENS["video_token"]
     )
     special_tokens = {"image_id": image_token_id, "video_id": video_token_id}
-    # Reuse the collator's MRoPE builder (only needs spatial_merge_size) so the
-    # 3D position IDs match the training path exactly.
-    mrope_builder = types.SimpleNamespace(spatial_merge_size=merge_size)
+    # The collator reads patch_order before building ids. Training defaults it
+    # to "block", which is the layout vision_to_patches uses here.
+    mrope_builder = types.SimpleNamespace(
+        spatial_merge_size=merge_size,
+        patch_order="block",
+    )
 
     hf_inputs, tt_inputs, pixel_comparisons = [], [], []
 
@@ -153,13 +198,12 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
             temporal_patch_size,
             merge_size,
         )
-        # 3D MRoPE positions (1, S, 3); positions=None → single document.
-        mrope_positions = MultiModalCollator._build_mrope_positions(
-            mrope_builder,  # pyrefly: ignore [bad-argument-type]
+        # positions=None inside the helper: one document. vision_to_patches
+        # returns grid_thw of shape (3,); the collator wants (num_images, 3).
+        mrope_positions = _mrope_positions_for_forward(
+            mrope_builder,
             hf_in["input_ids"],
             grid_thw.unsqueeze(0),
-            None,
-            None,
             image_token_id=image_token_id,
             video_token_id=video_token_id,
         )
