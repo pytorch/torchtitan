@@ -11,12 +11,8 @@ from unittest import mock
 
 import pytest
 
-from torchtitan.config import (
-    ConfigLoader,
-    Configurable,
-    OverrideConfig,
-    ParallelismConfig,
-)
+from torchtitan.config import ConfigLoader, Configurable, OverrideConfig
+from torchtitan.config.parallelism import ParallelismConfig
 
 
 def _noop_post_init() -> None:

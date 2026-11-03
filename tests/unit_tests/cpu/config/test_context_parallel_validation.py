@@ -122,7 +122,7 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
                     config.__post_init__()
 
     def test_hybrid_linear_attention_requires_cp_transform(self):
-        from torchtitan.config import ParallelismConfig
+        from torchtitan.config.parallelism import ParallelismConfig
         from torchtitan.config.validation import validate_context_parallel
         from torchtitan.models.common.attention.cp_attention import (
             AllGatherKVFlexInnerAttention,

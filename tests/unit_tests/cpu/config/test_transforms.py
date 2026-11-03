@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 
 import spmd_types as spmd
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     AsyncTensorParallelTransform,
