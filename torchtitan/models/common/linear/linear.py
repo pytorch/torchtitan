@@ -452,7 +452,7 @@ class GroupedLinear(Module):
         """Execute ``input_RI @ weight_EOI.transpose(-2, -1)`` by expert."""
         return torch._grouped_mm(
             input_RI,
-            weight_EOI.bfloat16().transpose(-2, -1),
+            weight_EOI.to(input_RI.dtype).transpose(-2, -1),
             offs=offsets_E,
         )
 
