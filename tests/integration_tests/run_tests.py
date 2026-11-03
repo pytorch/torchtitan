@@ -403,7 +403,12 @@ def _filter_tests(
             and not test_flavor.use_real_pg
         ):
             continue
-        if test_flavor.test_name in exclude_set:
+        if test_flavor.disabled or test_flavor.test_name in exclude_set:
+            continue
+        if (
+            getattr(args, "gpu_arch_type", "cuda") == "rocm"
+            and test_flavor.skip_rocm_test
+        ):
             continue
         section = skips.get((args.test_suite, test_flavor.test_name))
         if section is not None:
@@ -523,7 +528,7 @@ def run_tests(
         )
 
     if not ran_any_test:
-        available_tests = [t.test_name for t in test_list]
+        available_tests = [t.test_name for t in test_list if not t.disabled]
         if hasattr(args, "test_suite"):
             logger.warning(
                 f"No tests were run for --test_name '{args.test_name}' in test suite '{args.test_suite}'.\n"
