@@ -346,7 +346,7 @@ class CrossEntropyLoss(Loss[torch.Tensor]):
         global_vocab_size: int | None = None
         """Full vocabulary size, needed for spmd_types loss-parallel CE."""
         z_loss_weight: float | None = None
-        """Optional z-loss weight for regularization (ignored)."""
+        """Z-loss weight ``w``: adds ``w * sum(logsumexp(logits)**2)`` to the summed CE before token normalization. ``None`` disables it."""
 
     def __init__(self, config: Config):
         self._loss_fn: LossFunction = (
