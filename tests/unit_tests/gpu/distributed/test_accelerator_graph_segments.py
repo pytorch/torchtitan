@@ -4,14 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Accelerator graphs give the same results as eager for any number of forward_backward calls per step.
+"""Accelerator graphs give the same results as eager for several forward_backward calls per step.
 
-A segment is the microbatch groups between two gradient reductions: one group with plain FSDP,
-the whole call with HSDP or deferred reduction. The step's first call replays the
-first-segment graph, which allocates the gradients. Each segment of a later call replays a
-graph per segment length, which adds into them. Each case runs the same calls with and
-without graphs, then compares the gradients the optimizer sees, the loss, the grad norm and
-the final weights with torch.equal.
+A segment is the microbatch groups that one graph replay runs. The step's first call is one
+segment: it replays the first-segment graph, which allocates the gradients. A later call
+splits at each gradient reduction (each group with plain FSDP, the whole call with HSDP or
+deferred reduction), and each piece replays the later-segment graph of its length, which adds
+into them. Each case runs the same calls with and without graphs, then compares the gradients
+the optimizer sees, the loss, the grad norm and the final weights with torch.equal.
 
 Calls per step, e.g. [2, 3] = a call with 2 groups, then a call with 3. The step's first call
 has the same group count every step. Step 4 has a microbatch with half its loss tokens
@@ -60,36 +60,40 @@ class _Case:
     world_size: int
     parallelism: ParallelismConfig
     calls_per_step: list[list[int]]
-    sdc_replay: bool
-    """Check every call with 2 replays. Replays capture graphs too, from the restored state."""
+    sdc_replay_steps: int | None
+    """SDC replay checks every call of this many first steps (-1: all), with one replay each.
+    A replay can capture a graph too, from the restored state."""
     preprocess_lazily: bool = False
 
 
 _CASES = {
-    "one_call": _Case(1, ParallelismConfig(), _ONE_CALL, sdc_replay=True),
-    "fsdp": _Case(1, ParallelismConfig(), _FSDP_CALLS, sdc_replay=True),
-    # A checked call preprocesses up front, so lazy preprocessing runs without SDC replay.
-    # Later segments warm up with capture blocked until the first-segment graph captures.
-    "fsdp_lazy": _Case(
-        1, ParallelismConfig(), _FSDP_CALLS, sdc_replay=False, preprocess_lazily=True
+    "one_call": _Case(1, ParallelismConfig(), _ONE_CALL, sdc_replay_steps=-1),
+    # Steps 1-2 are checked, so they preprocess up front; steps 3-6 preprocess lazily.
+    # In step 1, later segments warm up with capture blocked: the first-segment graph
+    # captures in step 2.
+    "fsdp": _Case(
+        1, ParallelismConfig(), _FSDP_CALLS, sdc_replay_steps=2, preprocess_lazily=True
     ),
     "deferral_lazy": _Case(
         1,
         ParallelismConfig(fsdp_defer_gradient_reduction=True),
         _WHOLE_CALL_CALLS,
-        sdc_replay=False,
+        sdc_replay_steps=None,
         preprocess_lazily=True,
     ),
     # A real reduce-scatter in each segment.
     "dp_shard_2": _Case(
-        2, ParallelismConfig(data_parallel_shard_degree=2), _FSDP_CALLS, sdc_replay=True
+        2,
+        ParallelismConfig(data_parallel_shard_degree=2),
+        _FSDP_CALLS,
+        sdc_replay_steps=-1,
     ),
     # The replica all-reduce in each whole-call segment.
     "dp_replicate_2": _Case(
         2,
         ParallelismConfig(data_parallel_replicate_degree=2),
         _WHOLE_CALL_CALLS,
-        sdc_replay=True,
+        sdc_replay_steps=-1,
     ),
 }
 
@@ -108,7 +112,9 @@ def _engine_config(case: _Case, *, graphs: bool) -> TrainingEngine.Config:
             preprocess_microbatch_groups_lazily=case.preprocess_lazily,
         ),
         sdc_replayer=(
-            SDCReplayer.Config(num_steps=-1, num_replays=2) if case.sdc_replay else None
+            None
+            if case.sdc_replay_steps is None
+            else SDCReplayer.Config(num_steps=case.sdc_replay_steps)
         ),
         # The same weights in every run; SDC replay needs deterministic kernels.
         debug=dataclasses.replace(config.debug, seed=0, deterministic=True),
