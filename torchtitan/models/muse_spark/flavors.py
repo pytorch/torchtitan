@@ -677,7 +677,6 @@ def muse_spark_navit_encoder_config(
     pos_emb_grid_w: int = 32,
     use_rope: bool = True,
     rope_theta: float = 10000.0,
-    grid_sample_mode: str = "bilinear",
 ) -> NaViTEncoder.Config:
     head_dim = latent_dim // num_heads
     output_dim = latent_dim * downsample_factor**2
@@ -732,7 +731,6 @@ def muse_spark_navit_encoder_config(
             sharding_config=invariant_norm_sharding_config(),
         ),
         use_rope=use_rope,
-        grid_sample_mode=grid_sample_mode,
         pos_emb_grid_order="legacy_spark",
         param_init=_VISION_POSITION_INIT,
         sharding_config=navit_encoder_sharding_config(),
