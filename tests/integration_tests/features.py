@@ -262,7 +262,7 @@ def llama3_debugmodel_hf_checkpoint_load() -> Trainer.Config:
     )
     config.checkpointer.initial_load_path = os.path.join(
         test_output_dir,
-        "hf_checkpoint/step-10/",
+        "hf_checkpoint/exports/step-10/",
     )
     config.checkpointer.initial_load_model_only = True
     config.checkpointer.initial_load_in_hf = True
