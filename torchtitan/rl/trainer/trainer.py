@@ -317,12 +317,13 @@ class Trainer(Configurable):
                         f"{identity}, expected {expected}."
                     )
             self._num_rdma_batches_read += 1
-        # Under HSDP or deferred reduction, gradients are reduced once per engine call, so with
-        # graphs the engine replays the step's first call as one graph with a fixed group count.
-        # Sending the step's first group as its own call fixes that count at 1.
+        # With graphs, the engine replays the step's first call as one graph, so that call needs
+        # the same group count every step. Packing changes a step's group count, so the step's
+        # first group goes in its own call. That adds a gradient reduction per step only under
+        # HSDP or deferred reduction, which reduce once per call.
         if (
             len(microbatch_groups) > 1
-            and engine.graph_segment_is_whole_call
+            and engine._forward_backward_accelerator_graph_enabled
             and not engine.step_started
         ):
             engine_calls = [microbatch_groups[:1], microbatch_groups[1:]]

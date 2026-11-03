@@ -346,7 +346,7 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
             model_config=SimpleNamespace(mtp_layers=None),
             device=torch.device("cpu"),
             pp_has_last_stage=True,
-            graph_segment_is_whole_call=False,
+            _forward_backward_accelerator_graph_enabled=False,
         )
         engine.forward_backward = MagicMock(
             return_value=ForwardBackwardResult(
@@ -501,17 +501,17 @@ def test_streamed_forward_backward_calls_add_up_the_step_tokens_and_read_time() 
 
 
 @pytest.mark.parametrize(
-    ("graph_segment_is_whole_call", "step_started", "expected_engine_calls"),
+    ("graphs_enabled", "step_started", "expected_engine_calls"),
     [
-        # HSDP or deferral with graphs: the step's first group is its own engine call.
+        # With graphs, the step's first group is its own engine call.
         (True, False, [[0], [1, 2]]),
         (True, True, [[0, 1, 2]]),
         (False, False, [[0, 1, 2]]),
     ],
 )
 @pytest.mark.parametrize("rdma", [False, True])
-def test_forward_backward_sends_the_step_first_group_alone_to_whole_call_graphs(
-    graph_segment_is_whole_call: bool,
+def test_forward_backward_sends_the_step_first_group_alone_with_graphs(
+    graphs_enabled: bool,
     step_started: bool,
     expected_engine_calls: list[list[int]],
     rdma: bool,
@@ -543,7 +543,7 @@ def test_forward_backward_sends_the_step_first_group_alone_to_whole_call_graphs(
         num_completed_steps=0,
         device=torch.device("cpu"),
         pp_has_last_stage=True,
-        graph_segment_is_whole_call=graph_segment_is_whole_call,
+        _forward_backward_accelerator_graph_enabled=graphs_enabled,
         step_started=step_started,
         forward_backward=forward_backward,
     )
@@ -638,7 +638,7 @@ def test_forward_backward_without_last_pipeline_stage_returns_no_metrics() -> No
         engine = SimpleNamespace(
             num_completed_steps=0,
             pp_has_last_stage=False,
-            graph_segment_is_whole_call=False,
+            _forward_backward_accelerator_graph_enabled=False,
         )
         engine.forward_backward = MagicMock(
             return_value=ForwardBackwardResult(

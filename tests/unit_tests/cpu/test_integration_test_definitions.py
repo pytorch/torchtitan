@@ -26,7 +26,7 @@ from tests.integration_tests.features import (
     build_features_test_list,
     llama3_debugmodel_default,
     llama3_debugmodel_hf_checkpoint_load,
-    muse_glimmer_debugmodel_fsdp2_segment_accelerator_graphs,
+    muse_glimmer_debugmodel_fsdp2_accumulation_accelerator_graph,
 )
 from tests.integration_tests.flux import build_flux_test_list
 from tests.integration_tests.h100 import build_h100_tests_list
@@ -171,12 +171,14 @@ def test_varlen_cp_combinations_require_real_collectives(
     config.__post_init__()
 
 
-def test_segment_accelerator_graph_integration_supports_fake_pg() -> None:
+def test_accumulation_accelerator_graph_integration_supports_fake_pg() -> None:
     tests_by_name = {test.test_name: test for test in build_features_test_list()}
-    test = tests_by_name["fsdp_segment_accelerator_graphs"]
+    test = tests_by_name["fsdp_accumulation_accelerator_graph"]
     config = test.configs[0]()
 
-    assert test.configs == [muse_glimmer_debugmodel_fsdp2_segment_accelerator_graphs]
+    assert test.configs == [
+        muse_glimmer_debugmodel_fsdp2_accumulation_accelerator_graph
+    ]
     assert not test.use_real_pg
     assert test.ngpu == 2
     assert config.parallelism.data_parallel_shard_degree == 2
