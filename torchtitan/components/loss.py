@@ -673,6 +673,32 @@ class GradAccumulator:
         self._next_idx += 1
 
 
+def loss_metric_reduce_op(
+    key: str,
+) -> tuple[str, Callable[[torch.Tensor, torch.Tensor], torch.Tensor]]:
+    """Return ``(reduce_op_name, local_reduce_fn)`` for loss metric ``key``.
+
+    ``reduce_op_name`` names the ``dist.ReduceOp`` for the cross-rank
+    reduction and ``local_reduce_fn`` combines two values on one rank. The
+    key suffix picks them: ``/mean``, ``/frac`` (or ``_mean``, ``_frac``)
+    are summed, ``/max`` and ``/min`` take the max and min. Mean and fraction
+    metrics are expected to be normalized by the global valid-token count, so
+    their sum is the global value.
+    """
+    match key.split("/")[-1].split("_")[-1]:
+        case "mean" | "frac":
+            return dist.ReduceOp.SUM.name, torch.add
+        case "max":
+            return dist.ReduceOp.MAX.name, torch.maximum
+        case "min":
+            return dist.ReduceOp.MIN.name, torch.minimum
+        case _:
+            raise ValueError(
+                f"Do not know how to reduce metric '{key}'. Use a /mean, "
+                "/frac, /max, or /min (or _mean, _frac) suffix."
+            )
+
+
 def combine_loss_metrics(
     metrics_list: Iterable[dict[str, torch.Tensor]],
     *,
@@ -680,10 +706,7 @@ def combine_loss_metrics(
 ) -> dict[str, torch.Tensor]:
     """Combine per-chunk or per-microbatch loss metrics into one dict.
 
-    The key suffix picks the reduction: ``/mean``, ``/frac`` (or ``_mean``,
-    ``_frac``) are summed, ``/max`` and ``/min`` take the max and min. Mean
-    and fraction metrics are expected to already be normalized by the global
-    valid-token count, so their sum is the global mean.
+    Each key is reduced with ``loss_metric_reduce_op(key)``.
 
     Args:
         metrics_list: Metric dicts to combine on this rank.
@@ -692,27 +715,17 @@ def combine_loss_metrics(
             where no collectives may run.
     """
     reduced: dict[str, torch.Tensor] = {}
-    reduce_ops: dict[str, str] = {}
     for metrics in metrics_list:
         for key, value in metrics.items():
-            match key.split("/")[-1].split("_")[-1]:
-                case "mean" | "frac":
-                    reduce, reduce_ops[key] = torch.add, dist.ReduceOp.SUM.name
-                case "max":
-                    reduce, reduce_ops[key] = torch.maximum, dist.ReduceOp.MAX.name
-                case "min":
-                    reduce, reduce_ops[key] = torch.minimum, dist.ReduceOp.MIN.name
-                case _:
-                    raise ValueError(
-                        f"Do not know how to reduce metric '{key}'. Use a /mean, "
-                        "/frac, /max, or /min (or _mean, _frac) suffix."
-                    )
+            _, reduce = loss_metric_reduce_op(key)
             reduced[key] = value if key not in reduced else reduce(reduced[key], value)
     if mesh is not None:
         # Sorted so every rank issues the collectives in the same order.
         for key in sorted(reduced):
             reduced[key] = funcol.wait_tensor(
-                funcol.all_reduce(reduced[key], reduceOp=reduce_ops[key], group=mesh)
+                funcol.all_reduce(
+                    reduced[key], reduceOp=loss_metric_reduce_op(key)[0], group=mesh
+                )
             )
     return reduced
 
