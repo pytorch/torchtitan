@@ -139,8 +139,8 @@ def _make_stub_rl_trainer():
         renderer = SimpleNamespace(
             build=lambda *, tokenizer: SimpleNamespace(get_stop_token_ids=lambda: [])
         )
-        # __init__ copies each role's model, reads generator.sampling (a dataclass,
-        # for replace) + generator.debug.seed, and applies the (empty) override.
+        # __init__ reads generator.sampling (a dataclass, for replace) and
+        # generator.debug.seed; resolve_overrides is stubbed below.
         trainer = SimpleNamespace(model=None)
         generator = SimpleNamespace(
             model=None, sampling=SamplingConfig(), debug=SimpleNamespace(seed=None)
@@ -150,6 +150,9 @@ def _make_stub_rl_trainer():
 
         def to_dict(self):
             return {}
+
+        def resolve_overrides(self) -> None:
+            pass
 
         def maybe_log(self) -> None:
             pass
@@ -511,7 +514,7 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
         events.append(
             f"gpu meshes {trainer_world_size}+"
             f"{kwargs['num_generators']}x{per_generator_world_size} "
-            f"on {kwargs['host_meshes']} with {kwargs['generator_env']}"
+            f"on {kwargs['host_meshes']}"
         )
         return "trainer_mesh", ["generator_mesh_0", "generator_mesh_1"]
 
@@ -535,9 +538,7 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
     monkeypatch.setattr(
         monarch_system, "setup_torch_elastic_env", setup_torch_elastic_env
     )
-    actor_system = MonarchActorSystem.Config().build(
-        host_meshes="host_meshes", generator_env={"KEY": "value"}
-    )
+    actor_system = MonarchActorSystem.Config().build(host_meshes="host_meshes")
 
     asyncio.run(
         actor_system.provision(
@@ -548,7 +549,7 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
     )
 
     assert events == [
-        "gpu meshes 2+2x2 on host_meshes with {'KEY': 'value'}",
+        "gpu meshes 2+2x2 on host_meshes",
         "cpu procs 1 for router on None",
         "cpu procs 1 for batcher on the batcher's host in host_meshes",
         "torch elastic trainer_mesh",

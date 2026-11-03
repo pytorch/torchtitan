@@ -110,6 +110,13 @@ class HostMeshes:
     gpus_per_node: int
 
 
+def generator_role_names(num_generators: int) -> list[str]:
+    """Generator mesh and actor names: ``generator``, or ``generator_<i>`` for several."""
+    if num_generators == 1:
+        return ["generator"]
+    return [f"generator_{i}" for i in range(num_generators)]
+
+
 def compute_trainer_world_size(p: ParallelismConfig) -> int:
     """Compute world size from all parallel dimensions."""
     dp_shard = max(p.data_parallel_shard_degree, 1)
@@ -205,7 +212,6 @@ def spawn_proc_mesh(
     host_meshes: HostMeshes | None = None,
     *,
     num_generators: int = 1,
-    generator_env: dict[str, str] | None = None,
 ) -> tuple[ProcMesh, list[ProcMesh]]:
     """Spawn the trainer and generator proc meshes.
 
@@ -226,7 +232,7 @@ def spawn_proc_mesh(
     total_gpus = trainer_world_size + total_generator_gpus
     # Role tags for host memory metrics; the procs' children inherit them.
     trainer_env = {RL_ROLE_ENV: "trainer"}
-    generator_env = {**(generator_env or {}), RL_ROLE_ENV: "generator"}
+    generator_env = {RL_ROLE_ENV: "generator"}
     logger.info(
         f"{num_generators} generator(s) * {per_generator_world_size} GPUs + "
         f"{trainer_world_size} trainer GPUs = {total_gpus} total"
