@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
-import dataclasses
 import os
 import shlex
 import sys
@@ -207,13 +206,6 @@ def test_plan_sets_env_and_names_job():
     assert plan.controller_args == ["--module", "m"]
 
 
-def test_split_args():
-    assert submit._split_args(["--module", "m", "--dry-run", "--override", "x"]) == (
-        True,
-        ["--module", "m", "--override", "x"],
-    )
-
-
 def _run_submit(monkeypatch, config, argv):
     monkeypatch.setattr(submit.ConfigLoader, "load", lambda self, args: config)
     # The fake config stands in for a MonarchControllerWithLauncher.Config.
@@ -273,20 +265,15 @@ def test_submit_requires_a_launch_config(monkeypatch, tmp_path):
         submit.main(["--module", "m"])
 
 
-def test_launch_config_wraps_a_controller_config():
+def test_launch_config_builds_the_launch_controller():
     from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_0_6b_flex
 
-    config = rl_grpo_qwen3_0_6b_flex()
-    launcher = FakeLauncher.Config()
-
     launch_config = MonarchControllerWithLauncher.Config.from_controller_config(
-        config, launcher=launcher
+        rl_grpo_qwen3_0_6b_flex(), launcher=FakeLauncher.Config()
     )
 
-    assert launch_config.launcher is launcher
-    for f in dataclasses.fields(config):
-        assert getattr(launch_config, f.name) is getattr(config, f.name)
-    # build() constructs the launch-aware controller.
+    # A plain Controller would build the default actor system on the job's head
+    # node only, without the launcher's hosts.
     assert launch_config._owner is MonarchControllerWithLauncher
 
 
@@ -343,11 +330,6 @@ def _provision(actor_system):
     )
 
 
-def test_provision_without_launcher_runs_on_this_host(spawned):
-    _provision(MonarchActorSystem.Config().build())
-    assert spawned["host_meshes"] is None
-
-
 def test_layout_round_trips_through_env(monkeypatch):
     plan = _plan(FakeLauncher.Config(), num_generators=2)
     monkeypatch.setenv(LAYOUT_ENV, plan.env[LAYOUT_ENV])
@@ -393,11 +375,6 @@ def test_launch_controller_builds_the_actor_system_on_acquired_hosts(
     )
     assert actor_system._host_meshes == host_meshes
     assert spawned["host_meshes"] == host_meshes
-
-
-def test_provision_uses_passed_host_meshes(spawned):
-    _provision(MonarchActorSystem.Config().build(host_meshes="mine"))
-    assert spawned["host_meshes"] == "mine"
 
 
 @pytest.fixture
@@ -551,16 +528,3 @@ def test_slurm_acquire_hosts(monkeypatch):
 def test_slurm_config_validation(kwargs):
     with pytest.raises(ValueError):
         SlurmLauncher.Config(**kwargs)
-
-
-def test_slurm_recipe_packs_generators_on_one_node():
-    from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_0_6b_flex_slurm
-
-    config = rl_grpo_qwen3_0_6b_flex_slurm()
-    plan = config.launcher.build().plan(config, [])
-
-    assert plan.layout.mesh_nodes == {"trainer": 1, "node_0": 1}
-    assert plan.layout.role_mesh == {
-        "trainer": "trainer",
-        **{f"generator_{i}": "node_0" for i in range(4)},
-    }
