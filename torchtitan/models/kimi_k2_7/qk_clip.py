@@ -12,7 +12,7 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch_remat as remat
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor import DTensor, Replicate
 from torch.nn.attention.flex_attention import AuxRequest
 
 from torchtitan.components.optim import OptimizersContainer
@@ -48,31 +48,16 @@ class QKClipFlexInnerAttention(FlexInnerAttention):
             self.max_attention_logits_H.append(max_scores_1HT.amax(dim=(0, 2)).detach())
 
 
-def _validate_head_sharding(weight: DTensor) -> None:
-    """Require MLA weights to be replicated or contiguously sharded on dim 0."""
-    for placement in weight.placements:
-        if type(placement) is Replicate:
-            continue
-        # ``_StridedShard`` subclasses ``Shard``, so an exact type check rejects
-        # it. TP produces it, and QK clipping supports only FSDP layouts: under
-        # TP, each rank records maxima for its local heads only.
-        if type(placement) is not Shard or placement.dim != 0:
-            raise ValueError(
-                "QK clipping requires MLA weights sharded only on tensor "
-                "dimension 0."
-            )
-
-
-def _replicated_scales(scales_H: torch.Tensor, weight: DTensor) -> DTensor:
-    """Represent per-head scales on the same distributed mesh as ``weight``.
+def _replicated_scales(row_scales_R1: torch.Tensor, weight: DTensor) -> DTensor:
+    """Represent per-row scales on the same distributed mesh as ``weight``.
 
     The MAX all-reduce already leaves identical scales on every rank.
     ``from_local`` records the scales as replicated without communication,
-    allowing DTensor dispatch to align them with sharded heads. Using
+    allowing DTensor dispatch to align them with the sharded rows. Using
     ``distribute_tensor`` would add an unnecessary broadcast.
     """
     return DTensor.from_local(
-        scales_H,
+        row_scales_R1,
         weight.device_mesh,
         tuple(Replicate() for _ in weight.placements),
         run_check=False,
@@ -98,11 +83,9 @@ def _scale_mla_heads(
     num_heads = scales_H.numel()
     if weight.ndim != 2 or weight.shape[0] != num_heads * rows_per_head:
         raise ValueError("QK clip scales do not match the MLA weight shape.")
-    _validate_head_sharding(weight)
 
-    # Scale rows, not a [num_heads, rows_per_head, in_features] view: Shard(0)
-    # can split a head across ranks when num_heads is not a multiple of the
-    # shard count, and DTensor cannot view such a tensor.
+    # One scale per row: Shard(0) can split a head across ranks when num_heads
+    # is not a multiple of the shard count.
     row_scales_R1 = torch.cat(
         [
             scales_H.pow(nope_scale_exponent)[:, None].expand(-1, nope_rows_per_head),
