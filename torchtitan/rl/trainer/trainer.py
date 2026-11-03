@@ -329,11 +329,11 @@ class Trainer(Configurable):
             engine_calls = [microbatch_groups[:1], microbatch_groups[1:]]
         else:
             engine_calls = [microbatch_groups]
-        # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
-        # and broadcast it, to cut the trainer's reads by cp * tp. Needs a per-replica group.
         # One per engine call. Their first reads start now, while the previous call may still run
         # on the GPU. A split first call's two prefetchers share the link for their first reads.
         # The controller rejects RDMA with PP, so every group holds one microbatch.
+        # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
+        # and broadcast it, to cut the trainer's reads by cp * tp. Needs a per-replica group.
         prefetchers = (
             [
                 RDMAMicrobatchPrefetcher(
@@ -350,12 +350,8 @@ class Trainer(Configurable):
                 # Busy time starts here: the wait for the lock is the previous call's busy time.
                 forward_backward_start = time.perf_counter()
                 loss_metrics_by_group: list[list[dict[str, torch.Tensor]]] = []
-                for call_index, call_groups in enumerate(engine_calls):
-                    result = engine.forward_backward(
-                        microbatch_groups=(
-                            prefetchers[call_index] if uses_rdma else call_groups
-                        )
-                    )
+                for call_inputs in prefetchers if uses_rdma else engine_calls:
+                    result = engine.forward_backward(microbatch_groups=call_inputs)
                     loss_metrics_by_group += result.loss_metrics
                 self._step_read_microbatches_s += sum(
                     prefetcher.read_s for prefetcher in prefetchers
