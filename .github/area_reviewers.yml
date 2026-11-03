@@ -4,7 +4,8 @@
 # area. Areas with their own code owners (graph_trainer, torchft) are not listed:
 # GitHub already requests code owners.
 #
-# A PR gets reviewers from the areas whose path prefixes match the most changed
+# Each changed file counts toward the area with its longest matching path prefix
+# (so rl_attention wins over rl). A PR gets reviewers from the areas with the most
 # files, at most `max_reviewers` in total. Order reviewers by priority within an
 # area. Seeded from Apr-Oct 2026 authorship, approvals and review cc's.
 
@@ -20,6 +21,11 @@ areas:
       - scripts/rl/
     reviewers: [felipemello1, pzhan9, wwwjn]
 
+  - name: rl_attention
+    paths:
+      - torchtitan/rl/generator/vllm/attention/
+    reviewers: [liangel-02, drisspg]
+
   - name: moe
     paths:
       - torchtitan/models/common/moe/
@@ -32,7 +38,7 @@ areas:
     paths:
       - torchtitan/models/common/attention/
       - torchtitan/models/common/attn_gym.py
-    reviewers: [acisseJZhong, drisspg]
+    reviewers: [acisseJZhong, drisspg, fegin, liangel-02]
 
   - name: linear
     paths:
@@ -43,7 +49,7 @@ areas:
     paths:
       - torchtitan/quantization/
       - torchtitan/config/transform/quantization.py
-    reviewers: [anijain2305, andrewor14]
+    reviewers: [anijain2305, andrewor14, vkuzo]
 
   - name: remat
     paths:
@@ -61,7 +67,7 @@ areas:
     paths:
       - torchtitan/distributed/context_parallel.py
       - torchtitan/config/transform/context_parallel.py
-    reviewers: [fegin, acisseJZhong]
+    reviewers: [fegin, acisseJZhong, liangel-02, drisspg]
 
   - name: fsdp
     paths:
@@ -76,11 +82,11 @@ areas:
       - torchtitan/models/base/sharding.py
     reviewers: [pianpwk]
 
-  - name: cuda_graph
+  - name: accelerator_graph
     paths:
       - torchtitan/distributed/accelerator_graph.py
       - torchtitan/distributed/ACCELERATOR_GRAPH.md
-    reviewers: [fegin]
+    reviewers: [fegin, sanketpurandare]
 
   - name: checkpoint
     paths:
