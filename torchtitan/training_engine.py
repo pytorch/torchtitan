@@ -80,6 +80,7 @@ class _ForwardBackwardFn(Protocol):
         preprocess_microbatch_groups_lazily: bool,
     ) -> ForwardBackwardResult:
         """Run the groups; with ``preprocess_microbatch_groups_lazily`` they are raw microbatches."""
+        ...
 
 
 class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Stateful):
