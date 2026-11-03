@@ -60,10 +60,16 @@ node.
 
 A later-segment graph records adds into the gradient addresses that the first-segment
 graph's replays put back. So a later-segment graph captures only after the
-first-segment graph has captured, and not inside a call that SDC replay checks: the
-re-run reads the call's input tensors again, while a capture makes them the graph's
-inputs, which the call's next replays overwrite. Until it can capture, its calls are
-warmup calls with capture blocked.
+first-segment graph has captured.
+
+A later-segment graph also does not capture inside a call that SDC replay checks. A
+capture keeps the call's input tensors as the graph's inputs. The call's next segments
+copy their inputs into those tensors, so an SDC re-run would read overwritten inputs.
+With `sdc_replayer.num_steps=-1`, every call is checked, so later-segment graphs never
+capture and those calls stay eager.
+
+Until it can capture, a later-segment graph's calls are warmup calls with capture
+blocked.
 
 A later call must add into the gradient tensors the first call allocated. If a later
 graph's capture gives a parameter a new gradient tensor (none before, or a replaced
