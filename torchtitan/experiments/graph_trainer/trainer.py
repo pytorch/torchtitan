@@ -295,7 +295,7 @@ class GraphTrainingEngine(TrainingEngine):
         microbatch_groups: list[tuple[Any, ...]],
         *,
         defer_fsdp_gradient_reduction: bool,
-        preprocess_microbatch_groups_lazily: bool,
+        preprocess_microbatch_groups_lazily: bool = False,
     ) -> ForwardBackwardResult:
         """Run microbatch groups through GraphRuntime."""
         assert not defer_fsdp_gradient_reduction
@@ -364,7 +364,7 @@ class GraphTrainingEngine(TrainingEngine):
         microbatch_groups: list[tuple[Any, ...]],
         *,
         defer_fsdp_gradient_reduction: bool,
-        preprocess_microbatch_groups_lazily: bool,
+        preprocess_microbatch_groups_lazily: bool = False,
     ) -> ForwardBackwardResult:
         """``_forward_backward_body`` under the paged stash runner.
 
