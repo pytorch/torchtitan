@@ -527,9 +527,10 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
     Eq. 17: ``L_bal = sum_i f_i * p_i``
 
     The returned value is ``T * L_bal`` (token-mode): Eqs 17-20 define a
-    per-token-normalized value. ``AuxLoss`` divides it by T / N_mb (routed
-    tokens per loss token) and the engine by the step's N loss tokens, so the
-    injected weight is ``coeff * L_bal * N_mb / N``.
+    per-token-normalized value. ``AuxLoss`` divides it by R / N (the step's
+    routed tokens per loss token) and the engine by the step's N loss tokens,
+    so the injected weight is ``coeff * L_bal * T / R``: the microbatch's share
+    of the step's routed tokens.
 
     The counts (Eq. 18) and normalized-score sums (Eq. 19) are sums over the
     folded token dim, hence Partial over the mesh axes that shard it (CP
