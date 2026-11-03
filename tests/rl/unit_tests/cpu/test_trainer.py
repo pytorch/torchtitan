@@ -7,7 +7,7 @@
 import asyncio
 import threading
 from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -347,8 +347,11 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
             device=torch.device("cpu"),
             pp_has_last_stage=True,
         )
-        engine.forward_backward = MagicMock(
-            return_value=ForwardBackwardResult(
+        trained_groups = []
+
+        def train(*, microbatch_groups):
+            trained_groups.append((type(microbatch_groups), list(microbatch_groups)))
+            return ForwardBackwardResult(
                 loss=torch.tensor(0.5),
                 loss_metrics=[
                     [
@@ -365,11 +368,13 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
                     ],
                 ],
             )
-        )
+
+        engine.forward_backward = MagicMock(side_effect=train)
         trainer.engine = engine
         trainer.config = Trainer.Config(model=MagicMock())
         trainer.dp_rank = 1
         trainer._num_rdma_batches_read = 0
+        trainer._forward_backward_lock = asyncio.Lock()
         trainer._step_forward_backward_s = 0.0
         trainer._step_num_tokens_per_dp_rank = 0
         trainer._step_read_microbatches_s = 0.0
@@ -411,15 +416,15 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
             else [batch, batch]
         )
 
-        result = await Trainer.forward_backward(
-            trainer, [[microbatch] for microbatch in microbatches]
-        )
+        with patch("torchtitan.rl.trainer.trainer.torch.accelerator.current_stream"):
+            result = await Trainer.forward_backward(
+                trainer, [[microbatch] for microbatch in microbatches]
+            )
 
-        engine.forward_backward.assert_called_once_with(microbatch_groups=ANY)
         # RDMAMicrobatches are read through the prefetcher; by value, the column is passed as is.
-        groups = engine.forward_backward.call_args.kwargs["microbatch_groups"]
-        assert isinstance(groups, RDMAMicrobatchPrefetcher) == rdma
-        assert list(groups) == [[batch], [batch]]
+        [(groups_type, groups)] = trained_groups
+        assert (groups_type is RDMAMicrobatchPrefetcher) == rdma
+        assert groups == [[batch], [batch]]
         assert trainer._step_num_tokens_per_dp_rank == (
             2 * trainer.config.training.num_tokens_per_microbatch_per_dp_rank
         )
@@ -450,6 +455,7 @@ def test_streamed_forward_backward_calls_add_up_the_step_tokens_and_read_time() 
         trainer.config = Trainer.Config(model=MagicMock())
         trainer.dp_rank = 0
         trainer._num_rdma_batches_read = 0
+        trainer._forward_backward_lock = asyncio.Lock()
         trainer._step_forward_backward_s = 0.0
         trainer._step_num_tokens_per_dp_rank = 0
         trainer._step_read_microbatches_s = 0.0
@@ -467,8 +473,8 @@ def test_streamed_forward_backward_calls_add_up_the_step_tokens_and_read_time() 
         # Each call's reads take 0.25 s.
         with patch(
             "torchtitan.rl.trainer.trainer.RDMAMicrobatchPrefetcher",
-            return_value=SimpleNamespace(read_s=0.25),
-        ):
+            return_value=SimpleNamespace(read_s=0.25, close=lambda: None),
+        ), patch("torchtitan.rl.trainer.trainer.torch.accelerator.current_stream"):
             for batch_index in range(2):
                 microbatch = MagicMock(
                     spec=RDMAMicrobatch,
@@ -491,6 +497,75 @@ def test_streamed_forward_backward_calls_add_up_the_step_tokens_and_read_time() 
             "timing/trainer/read_microbatches/max"
         ]
         assert read_s == 0.5
+
+    asyncio.run(run())
+
+
+def test_queued_forward_backward_reads_while_the_running_call_waits_for_the_gpu() -> None:
+    # Call 0 waits for a fake GPU that finishes only when the test says so. Call 1 arrives
+    # meanwhile, as the controller sends it, and must start its read before call 0 returns.
+    gpu_wait_started, gpu_done = threading.Event(), threading.Event()
+    read_started = [threading.Event(), threading.Event()]
+    trained_groups = []
+
+    def wait_for_gpu() -> None:
+        gpu_wait_started.set()
+        assert gpu_done.wait(timeout=5)
+
+    def rdma_microbatch(batch_index: int) -> RDMAMicrobatch:
+        async def read() -> int:
+            read_started[batch_index].set()
+            return batch_index
+
+        return MagicMock(
+            spec=RDMAMicrobatch,
+            read=read,
+            batch_index=batch_index,
+            dp_rank=0,
+            microbatch_index=0,
+        )
+
+    def train(*, microbatch_groups):
+        trained_groups.append(list(microbatch_groups))
+        return ForwardBackwardResult(
+            loss=torch.tensor(0.5), loss_metrics=[[{"loss/mean": torch.tensor(1.0)}]]
+        )
+
+    async def run() -> None:
+        trainer = object.__new__(Trainer)
+        trainer.engine = SimpleNamespace(
+            num_completed_steps=0,
+            device=torch.device("cpu"),
+            pp_has_last_stage=True,
+            forward_backward=MagicMock(side_effect=train),
+        )
+        trainer.config = Trainer.Config(model=MagicMock())
+        trainer.dp_rank = 0
+        trainer._num_rdma_batches_read = 0
+        trainer._forward_backward_lock = asyncio.Lock()
+        trainer._step_forward_backward_s = 0.0
+        trainer._step_num_tokens_per_dp_rank = 0
+        trainer._step_read_microbatches_s = 0.0
+        trainer._reduce_forward_backward_metrics = MagicMock(return_value={})
+
+        with patch(
+            "torchtitan.rl.trainer.trainer.torch.accelerator.current_stream",
+            return_value=SimpleNamespace(synchronize=wait_for_gpu),
+        ):
+            call_0 = asyncio.create_task(
+                Trainer.forward_backward(trainer, [[rdma_microbatch(0)]])
+            )
+            assert await asyncio.to_thread(gpu_wait_started.wait, 5)
+            call_1 = asyncio.create_task(
+                Trainer.forward_backward(trainer, [[rdma_microbatch(1)]])
+            )
+            assert await asyncio.to_thread(read_started[1].wait, 5)
+            assert not call_0.done()
+            gpu_done.set()
+            await asyncio.gather(call_0, call_1)
+
+        # Call 1's engine work runs after call 0's.
+        assert trained_groups == [[[0]], [[1]]]
 
     asyncio.run(run())
 
@@ -549,6 +624,7 @@ def test_forward_backward_without_last_pipeline_stage_returns_no_metrics() -> No
         trainer.config = Trainer.Config(model=MagicMock())
         engine.device = torch.device("cpu")
         trainer.dp_rank = 1
+        trainer._forward_backward_lock = asyncio.Lock()
         trainer._step_forward_backward_s = 0.0
         trainer._step_num_tokens_per_dp_rank = 0
         trainer._reduce_forward_backward_metrics = MagicMock()

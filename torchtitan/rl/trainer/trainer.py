@@ -179,6 +179,9 @@ class Trainer(Configurable):
             self.dp_rank = 0
         # Batches read over RDMA so far; the next batch's `batch_index` must equal it.
         self._num_rdma_batches_read = 0
+        # forward_backward calls run their engine work and metric collectives one at a time,
+        # in arrival order (asyncio.Lock wakes waiters first in, first out).
+        self._forward_backward_lock = asyncio.Lock()
         # This step's totals over its forward_backward calls; optim_step resets them.
         self._step_forward_backward_s = 0.0
         self._step_num_tokens_per_dp_rank = 0
@@ -287,7 +290,6 @@ class Trainer(Configurable):
             f"policy_version={self.policy_version}"
         )
         engine = self.engine
-        forward_backward_start = time.perf_counter()
         microbatches = [
             microbatch for group in microbatch_groups for microbatch in group
         ]
@@ -316,56 +318,68 @@ class Trainer(Configurable):
             # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
             # and broadcast it, to cut the trainer's reads by cp * tp. Needs a per-replica group.
             # The controller rejects RDMA with PP, so every group holds one microbatch.
-            # TODO: with stream_microbatches, each call's first read is not overlapped: this method
-            # never awaits, so a queued call starts reading only after the previous call returns.
-            # Start the reads when a call arrives.
+            # Its first reads start now, while the previous call may still run on the GPU.
             microbatch_groups = RDMAMicrobatchPrefetcher(microbatches)
-        result = engine.forward_backward(microbatch_groups=microbatch_groups)
-        if not engine.pp_has_last_stage:
-            # Ranks with the last stage wait for the GPU when they reduce the loss metrics below.
-            # Wait here too, so this call's busy time includes its GPU work.
-            torch.accelerator.current_stream(engine.device).synchronize()
-            self._step_forward_backward_s += (
-                time.perf_counter() - forward_backward_start
-            )
-            return None
-        microbatch_metrics: list[dict[str, float]] = []
-        for group_metrics in result.loss_metrics:
-            for loss_metrics in group_metrics:
-                microbatch_metrics.append(
-                    self._reduce_forward_backward_metrics(
-                        sum_reduced_metrics={
-                            key: value
-                            for key, value in loss_metrics.items()
-                            if not key.endswith("/max")
-                        },
-                        max_reduced_metrics={
-                            key: value
-                            for key, value in loss_metrics.items()
-                            if key.endswith("/max")
-                        },
+        try:
+            # One call at a time, so every rank issues its metric collectives in the same order.
+            async with self._forward_backward_lock:
+                # Busy time starts here: the wait for the lock is the previous call's busy time.
+                forward_backward_start = time.perf_counter()
+                result = engine.forward_backward(microbatch_groups=microbatch_groups)
+                # Wait for the GPU off the event loop, so a queued call can check its microbatches
+                # and start its reads meanwhile. The loss metrics below need the GPU results anyway.
+                await asyncio.to_thread(
+                    torch.accelerator.current_stream(engine.device).synchronize
+                )
+                if not engine.pp_has_last_stage:
+                    # Ranks without the last stage compute no loss metrics.
+                    self._step_forward_backward_s += (
+                        time.perf_counter() - forward_backward_start
                     )
-                )
+                    return None
+                microbatch_metrics: list[dict[str, float]] = []
+                for group_metrics in result.loss_metrics:
+                    for loss_metrics in group_metrics:
+                        microbatch_metrics.append(
+                            self._reduce_forward_backward_metrics(
+                                sum_reduced_metrics={
+                                    key: value
+                                    for key, value in loss_metrics.items()
+                                    if not key.endswith("/max")
+                                },
+                                max_reduced_metrics={
+                                    key: value
+                                    for key, value in loss_metrics.items()
+                                    if key.endswith("/max")
+                                },
+                            )
+                        )
 
-        metrics = combine_microbatch_metrics(microbatch_metrics)
-        if uses_rdma:
-            # The slowest rank's read time this step so far, hidden or not (max over the loss mesh).
-            # Each call reports the step's running total, so the controller's max over the step's calls
-            # (`combine_microbatch_metrics`) is the step total.
-            self._step_read_microbatches_s += microbatch_groups.read_s
-            read_microbatches_s = torch.tensor(
-                self._step_read_microbatches_s, device=engine.device
-            )
-            metrics.update(
-                self._reduce_forward_backward_metrics(
-                    sum_reduced_metrics={},
-                    max_reduced_metrics={
-                        "timing/trainer/read_microbatches/max": read_microbatches_s
-                    },
+                metrics = combine_microbatch_metrics(microbatch_metrics)
+                if uses_rdma:
+                    # The slowest rank's read time this step so far, hidden or not (max over the loss mesh).
+                    # Each call reports the step's running total, so the controller's max over the step's
+                    # calls (`combine_microbatch_metrics`) is the step total.
+                    self._step_read_microbatches_s += microbatch_groups.read_s
+                    read_microbatches_s = torch.tensor(
+                        self._step_read_microbatches_s, device=engine.device
+                    )
+                    metrics.update(
+                        self._reduce_forward_backward_metrics(
+                            sum_reduced_metrics={},
+                            max_reduced_metrics={
+                                "timing/trainer/read_microbatches/max": read_microbatches_s
+                            },
+                        )
+                    )
+                self._step_forward_backward_s += (
+                    time.perf_counter() - forward_backward_start
                 )
-            )
-        self._step_forward_backward_s += time.perf_counter() - forward_backward_start
-        return metrics
+                return metrics
+        finally:
+            if uses_rdma:
+                # Cancels the reads of a call that failed before its engine read them all.
+                microbatch_groups.close()
 
     @sl.log_trace_span("optim_step")
     async def optim_step(

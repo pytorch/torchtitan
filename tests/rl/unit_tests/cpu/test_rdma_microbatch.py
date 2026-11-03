@@ -288,6 +288,28 @@ def test_prefetcher_skips_queued_reads_when_training_stops() -> None:
     assert read_1_done.is_set() and 2 not in started
 
 
+def test_prefetcher_never_iterated_starts_reading_and_close_cancels_the_queued_reads() -> None:
+    started: list[int] = []
+    read_0_started, read_0_done = threading.Event(), threading.Event()
+
+    async def read_0() -> int:
+        read_0_started.set()
+        await asyncio.sleep(0.2)
+        read_0_done.set()
+        return 0
+
+    # As for a call that fails before its engine iterates the prefetcher.
+    prefetcher = RDMAMicrobatchPrefetcher(
+        [SimpleNamespace(read=read_0), _fake_rdma_microbatch(1, started)]
+    )
+
+    assert read_0_started.wait(timeout=5)
+    # Read 0 is running and read 1 is queued: closing waits for read 0 and cancels read 1.
+    prefetcher.close()
+
+    assert read_0_done.is_set() and started == []
+
+
 class _TrainerRank(Actor):
     """Reads its DP column of a batch, as a trainer rank does."""
 
