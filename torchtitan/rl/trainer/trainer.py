@@ -315,17 +315,62 @@ class Trainer(Configurable):
                         f"{identity}, expected {expected}."
                     )
             self._num_rdma_batches_read += 1
-            # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
-            # and broadcast it, to cut the trainer's reads by cp * tp. Needs a per-replica group.
+        # With graphs, HSDP or deferred reduction makes each engine call one graph segment, and
+        # the step's first segment replays one graph with a fixed group count. Sending the
+        # step's first group as its own call fixes that count at 1.
+        # `step_started` is already current on arrival. The controller sends the step's first call
+        # after optim_step returns. It sends a later call after the call before the previous one
+        # returned, and by then the previous call has taken the lock and run its engine call.
+        if (
+            len(microbatch_groups) > 1
+            and engine.graph_segment_is_whole_call
+            and not engine.step_started
+        ):
+            engine_calls = [microbatch_groups[:1], microbatch_groups[1:]]
+        else:
+            engine_calls = [microbatch_groups]
+        # One per engine call.
+        prefetchers: list[RDMAMicrobatchPrefetcher] = []
+        if uses_rdma:
+            # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per
+            # replica and broadcast it, to cut the trainer's reads by cp * tp. Needs a
+            # per-replica group.
             # The controller rejects RDMA with PP, so every group holds one microbatch.
-            # Its first reads start now, while the previous call may still run on the GPU.
-            microbatch_groups = RDMAMicrobatchPrefetcher(microbatches)
+            # The first engine call's reads start now, while the previous call may still run on
+            # the GPU.
+            prefetchers.append(
+                RDMAMicrobatchPrefetcher(
+                    [microbatch for group in engine_calls[0] for microbatch in group]
+                )
+            )
         try:
             # One call at a time, so every rank issues its metric collectives in the same order.
             async with self._forward_backward_lock:
                 # Busy time starts here: the wait for the lock is the previous call's busy time.
                 forward_backward_start = time.perf_counter()
-                result = engine.forward_backward(microbatch_groups=microbatch_groups)
+                loss_metrics_by_group: list[list[dict[str, torch.Tensor]]] = []
+                for call_index, call_groups in enumerate(engine_calls):
+                    if uses_rdma and call_index > 0:
+                        # Made after the first engine call, so a split call's two prefetchers
+                        # don't read at the same time.
+                        prefetchers.append(
+                            RDMAMicrobatchPrefetcher(
+                                [
+                                    microbatch
+                                    for group in call_groups
+                                    for microbatch in group
+                                ]
+                            )
+                        )
+                    result = engine.forward_backward(
+                        microbatch_groups=(
+                            prefetchers[call_index] if uses_rdma else call_groups
+                        )
+                    )
+                    loss_metrics_by_group += result.loss_metrics
+                self._step_read_microbatches_s += sum(
+                    prefetcher.read_s for prefetcher in prefetchers
+                )
                 # Wait for the GPU off the event loop, so a queued call can check its microbatches
                 # and start its reads meanwhile. The loss metrics below need the GPU results anyway.
                 await asyncio.to_thread(
@@ -338,7 +383,7 @@ class Trainer(Configurable):
                     )
                     return None
                 microbatch_metrics: list[dict[str, float]] = []
-                for group_metrics in result.loss_metrics:
+                for group_metrics in loss_metrics_by_group:
                     for loss_metrics in group_metrics:
                         microbatch_metrics.append(
                             self._reduce_forward_backward_metrics(
@@ -360,7 +405,6 @@ class Trainer(Configurable):
                     # The slowest rank's read time this step so far, hidden or not (max over the loss mesh).
                     # Each call reports the step's running total, so the controller's max over the step's
                     # calls (`combine_microbatch_metrics`) is the step total.
-                    self._step_read_microbatches_s += microbatch_groups.read_s
                     read_microbatches_s = torch.tensor(
                         self._step_read_microbatches_s, device=engine.device
                     )
@@ -377,9 +421,9 @@ class Trainer(Configurable):
                 )
                 return metrics
         finally:
-            if uses_rdma:
+            for prefetcher in prefetchers:
                 # Cancels the reads of a call that failed before its engine read them all.
-                microbatch_groups.close()
+                prefetcher.close()
 
     @sl.log_trace_span("optim_step")
     async def optim_step(

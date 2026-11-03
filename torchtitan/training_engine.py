@@ -5,11 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from collections.abc import Callable
+from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from functools import partial
-from typing import Any, cast, NamedTuple, TYPE_CHECKING, TypeAlias
+from typing import Any, cast, NamedTuple, Protocol, TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
@@ -25,9 +26,11 @@ from torchtitan.config.configs import CommConfig, DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.accelerator_graph import (
+    accelerator_graph_manager,
     accelerator_graph_teardown,
     accelerator_graphs_supported,
     NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
+    StructuredAcceleratorGraph,
     wrap_fwd_bwd_with_accelerator_graph,
     wrap_with_accelerator_graph,
 )
@@ -69,7 +72,14 @@ class ForwardBackwardResult(NamedTuple):
     microbatch. Under PP, they are empty on ranks without the last stage."""
 
 
-_ForwardBackwardFn: TypeAlias = Callable[[list[Any]], ForwardBackwardResult]
+class _ForwardBackwardFn(Protocol):
+    def __call__(
+        self,
+        microbatch_groups: list[Any],
+        *,
+        preprocess_microbatch_groups_lazily: bool,
+    ) -> ForwardBackwardResult:
+        """Run the groups; with ``preprocess_microbatch_groups_lazily`` they are raw microbatches."""
 
 
 class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Stateful):
@@ -95,7 +105,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             +-- _preprocess_microbatch_groups (unless lazy)
             |
             +-- _run_forward_backward =
-                _forward_backward_body (maybe_wrapped_with_accelerator_graph)
+                _forward_backward_body, or with accelerator graphs
+                _run_forward_backward_segments (one graph replay per segment)
                 |
                 +-- _preprocess_microbatch_group (if lazy)
                 |
@@ -173,33 +184,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 raise ValueError(
                     "The optimization accelerator graph requires accelerator graphs to be enabled."
                 )
-            if self.training.accelerator_graph_per_microbatch_group:
-                if self.training.disable_accelerator_graphs:
-                    raise ValueError(
-                        "Per-group accelerator graphs require accelerator graphs to be enabled."
-                    )
-                if self.sdc_replayer is not None:
-                    raise ValueError(
-                        "Per-group accelerator graphs do not support SDC replay."
-                    )
-                if self.parallelism.fsdp_defer_gradient_reduction:
-                    raise ValueError(
-                        "Per-group accelerator graphs require "
-                        "parallelism.fsdp_defer_gradient_reduction=False."
-                    )
-            if self.training.preprocess_microbatch_groups_lazily:
-                if not self.training.disable_accelerator_graphs:
-                    # TODO: with several smaller accelerator graphs, preprocess each group between replays.
-                    raise ValueError(
-                        "training.preprocess_microbatch_groups_lazily requires "
-                        "training.disable_accelerator_graphs=True."
-                    )
-                if self.sdc_replayer is not None:
-                    raise ValueError(
-                        "training.preprocess_microbatch_groups_lazily does not support SDC "
-                        "replay: replay reruns a checked step, which would preprocess its "
-                        "microbatches again."
-                    )
             num_tokens = self.training.num_tokens_per_microbatch_per_dp_rank
             sequence_parallel_degree = (
                 self.parallelism.tensor_parallel_degree
@@ -221,16 +205,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 if self.debug.deterministic_warn_only:
                     raise ValueError(
                         "SDC replay requires debug.deterministic_warn_only=False."
-                    )
-                if (
-                    not self.training.disable_accelerator_graphs
-                    and accelerator_graphs_supported()
-                    and self.sdc_replayer.num_replays > 1
-                ):
-                    raise ValueError(
-                        "SDC replay supports at most one replay when accelerator graphs "
-                        "are enabled: set sdc_replayer.num_replays=1 or "
-                        "training.disable_accelerator_graphs=True."
                     )
 
     config: Config
@@ -261,12 +235,18 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     device by ``optim_step``. A CPU zero before the first step."""
     _step_started: bool
     _forward_backward_captures_whole_step: bool
-    """SDC replay or a whole-step graph: one ``forward_backward`` call per optimizer step."""
+    """One ``forward_backward`` call per optimizer step: set by subclasses whose graph or
+    runtime covers the whole step (GraphTrainer)."""
     device_memory_monitor: DeviceMemoryMonitor
     model_device_mem_stats: DeviceMemStats
     _run_forward_backward: _ForwardBackwardFn
     _forward_backward_accelerator_graph_enabled: bool
-    _accelerator_graph_per_microbatch_group_enabled: bool
+    graph_segment_is_whole_call: bool
+    """With accelerator graphs, whether a segment (the microbatch groups between two
+    gradient reductions) is a whole ``forward_backward`` call, as under HSDP or deferred
+    gradient reduction. Then the step's first call must keep its group count across steps."""
+    _first_segment_graph: StructuredAcceleratorGraph
+    _later_segment_graphs: defaultdict[int, StructuredAcceleratorGraph]
     _dist_moe_runtime: "DistMoeRuntime | None"
 
     def __init__(
@@ -294,7 +274,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self._forward_backward_captures_whole_step = False
         self.sdc_replayer = None
         self._forward_backward_accelerator_graph_enabled = False
-        self._accelerator_graph_per_microbatch_group_enabled = False
+        self.graph_segment_is_whole_call = False
         self._dist_moe_runtime = None
         self.preprocess_inputs_kwargs: dict[str, Any] = {}
         self.loss_metrics = {}
@@ -531,8 +511,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 modules=self.model_parts,
                 device=self.device,
             )
-        # SDC replays a step from "no gradients"; the whole-step graph below sets it too.
-        self._forward_backward_captures_whole_step = self.sdc_replayer is not None
+        self._forward_backward_captures_whole_step = False
 
         if self.parallelism_context.pp_enabled:
             self._pp_loss_sentinel_on_non_last_stage = torch.full(
@@ -551,12 +530,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             and accelerator_graphs_supported()
         )
         if not self._forward_backward_accelerator_graph_enabled:
-            self._run_forward_backward = partial(
-                eager_forward_backward_fn,
-                preprocess_microbatch_groups_lazily=(
-                    self.config.training.preprocess_microbatch_groups_lazily
-                ),
-            )
             return
 
         def prepare_for_capture(microbatch_groups) -> None:
@@ -579,60 +552,44 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     loss_kwargs=loss_kwarg_mbs[0],
                 )
 
-        if self.config.training.accelerator_graph_per_microbatch_group:
-            graph_group_runner = wrap_with_accelerator_graph(
-                eager_forward_backward_fn,
-                num_warmup_iterations=NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
-                prepare_for_capture=prepare_for_capture
-                if self.parallelism_context.pp_enabled
-                else None,
-                name="forward_backward",
-                annotation_config=self.config.profiler.maybe_cuda_graph_annotation_config(),
-            )
-
-            # TODO: Use multiple accelerator graphs to support variable group counts
-            # without duplicating the gradient accumulation logic.
-            def run_forward_backward_groups(
-                microbatch_groups: list[tuple[Any, ...]],
-            ) -> ForwardBackwardResult:
-                accumulated_loss: torch.Tensor | None = None
-                loss_metrics: list[list[dict[str, torch.Tensor]]] = []
-                for microbatch_group in microbatch_groups:
-                    result = graph_group_runner([microbatch_group])
-                    group_loss = result.loss.clone()
-                    if accumulated_loss is None:
-                        accumulated_loss = group_loss
-                    else:
-                        accumulated_loss.add_(group_loss)
-                    loss_metrics.extend(
-                        [
-                            {key: value.clone() for key, value in metrics.items()}
-                            for metrics in group_metrics
-                        ]
-                        for group_metrics in result.loss_metrics
-                    )
-                assert accumulated_loss is not None
-                return ForwardBackwardResult(accumulated_loss, loss_metrics)
-
-            self._accelerator_graph_per_microbatch_group_enabled = True
-            self._run_forward_backward = run_forward_backward_groups
-            return
-
-        self._forward_backward_captures_whole_step = True
-        self._run_forward_backward = wrap_fwd_bwd_with_accelerator_graph(
+        graph_kwargs: dict[str, Any] = {
+            "num_warmup_iterations": NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
+            "prepare_for_capture": prepare_for_capture
+            if self.parallelism_context.pp_enabled
+            else None,
+            "annotation_config": self.config.profiler.maybe_cuda_graph_annotation_config(),
+        }
+        # The first-segment graph starts each step from None gradients and allocates them in the
+        # graph pool. Later-segment graphs add into them, one graph per segment length.
+        self._first_segment_graph = wrap_fwd_bwd_with_accelerator_graph(
             eager_forward_backward_fn,
             parameters=(
                 parameter
                 for model_part in self.model_parts
                 for parameter in model_part.parameters()
             ),
-            num_warmup_iterations=NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
-            prepare_for_capture=prepare_for_capture
-            if self.parallelism_context.pp_enabled
-            else None,
             name="forward_backward",
-            annotation_config=self.config.profiler.maybe_cuda_graph_annotation_config(),
+            **graph_kwargs,
         )
+        self._later_segment_graphs = defaultdict(
+            partial(
+                wrap_with_accelerator_graph,
+                eager_forward_backward_fn,
+                name="forward_backward_later_segment",
+                **graph_kwargs,
+            )
+        )
+        # HSDP all-reduces replicas, and deferral reduce-scatters, once per call.
+        self.graph_segment_is_whole_call = (
+            self.parallelism_context.dp_replicate_enabled
+            or self.config.parallelism.fsdp_defer_gradient_reduction
+        )
+        self._run_forward_backward = self._run_forward_backward_segments
+
+    @property
+    def step_started(self) -> bool:
+        """Whether a ``forward_backward`` call ran since the last ``optim_step``."""
+        return self._step_started
 
     @sl.log_trace_span("forward_backward")
     def forward_backward(
@@ -656,29 +613,41 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             raise ValueError("microbatch_groups must not be empty.")
         if self._step_started and self._forward_backward_captures_whole_step:
             raise ValueError(
-                "SDC replay and whole-step graphs capture one forward_backward call per "
-                "optimizer step: call optim_step before the next forward_backward."
+                "This engine runs each optimizer step in one forward_backward call: "
+                "call optim_step before the next forward_backward."
             )
         if not self._step_started:
             self.garbage_collector.run(self.num_completed_steps + 1)
-            self.optim.zero_grad(
-                set_to_none=not self._accelerator_graph_per_microbatch_group_enabled
-            )
+            # The first-segment graph needs None gradients: its capture allocates them,
+            # and its replays put them back.
+            self.optim.zero_grad(set_to_none=True)
             self.local_loss_token_count = 0
-        if self.config.training.preprocess_microbatch_groups_lazily:
+        # A checked call runs several times, so it preprocesses its groups once, up front.
+        preprocess_lazily = (
+            self.config.training.preprocess_microbatch_groups_lazily
+            and not (
+                self.sdc_replayer is not None and self.sdc_replayer.checks_current_step
+            )
+        )
+        if preprocess_lazily:
             # _forward_backward_body preprocesses each group just before its forward/backward.
             step_inputs: list[Any] = microbatch_groups
         else:
             step_inputs = self._preprocess_microbatch_groups(microbatch_groups)
 
+        run_forward_backward = partial(
+            self._run_forward_backward,
+            step_inputs,
+            preprocess_microbatch_groups_lazily=preprocess_lazily,
+        )
         if self.sdc_replayer is not None:
             result = self.sdc_replayer.run_fwd_bwd(
-                partial(self._run_forward_backward, step_inputs),
+                run_forward_backward,
                 step=self.num_completed_steps + 1,
                 get_loss=lambda result: result.loss,
             )
         else:
-            result = self._run_forward_backward(step_inputs)
+            result = run_forward_backward()
 
         self.loss = self.loss + result.loss if self._step_started else result.loss
         self._step_started = True
@@ -744,6 +713,65 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         )
         loss_kwarg_mbs = [loss_kwargs for *_, loss_kwargs in prepared_microbatches]
         return (arg_mbs, kwarg_mbs, target_mbs, loss_kwarg_mbs)
+
+    def _run_forward_backward_segments(
+        self,
+        microbatch_groups: list[Any],
+        *,
+        preprocess_microbatch_groups_lazily: bool,
+    ) -> ForwardBackwardResult:
+        """Replay one accelerator graph per segment: the microbatch groups between two
+        gradient reductions.
+
+        The step's first segment replays the first-segment graph, which allocates the
+        gradients. Each later segment replays the later-segment graph of its length, which
+        adds into them.
+
+        Example (one reduction per group, plain FSDP or PP):
+            step's first call [g0, g1, g2] -> first_segment_graph([g0]),
+                                              later_segment_graphs[1]([g1]), then ([g2])
+            next call [g3, g4]             -> later_segment_graphs[1]([g3]), then ([g4])
+        Example (one reduction per call, HSDP or deferral):
+            step's first call [g0]         -> first_segment_graph([g0])
+            next call [g1, g2]             -> later_segment_graphs[2]([g1, g2])
+        """
+        if self.graph_segment_is_whole_call:
+            segments: Iterable[list[Any]] = [microbatch_groups]
+        else:
+            # A generator: lazy preprocessing reads each group just before its replay.
+            segments = ([group] for group in microbatch_groups)
+        loss: torch.Tensor | None = None
+        loss_metrics: list[list[dict[str, torch.Tensor]]] = []
+        for segment_index, segment in enumerate(segments):
+            if preprocess_microbatch_groups_lazily:
+                # Preprocessing waits for the host, which capture does not allow.
+                segment = self._preprocess_microbatch_groups(segment)
+            if segment_index == 0 and not self._step_started:
+                result = self._first_segment_graph(segment)
+            elif self._first_segment_graph.captured:
+                result = self._later_segment_graphs[len(segment)](segment)
+            else:
+                # A later-segment graph records adds into the gradient addresses that the
+                # first-segment graph's replays put back, so it captures only after that graph.
+                # Until then it warms up on the graph stream.
+                capture_allowed = accelerator_graph_manager.capture_allowed
+                accelerator_graph_manager.capture_allowed = False
+                try:
+                    result = self._later_segment_graphs[len(segment)](segment)
+                finally:
+                    accelerator_graph_manager.capture_allowed = capture_allowed
+            # The next replay overwrites graph outputs.
+            segment_loss = result.loss.clone()
+            loss = segment_loss if loss is None else loss.add_(segment_loss)
+            loss_metrics.extend(
+                [
+                    {key: value.clone() for key, value in metrics.items()}
+                    for metrics in group
+                ]
+                for group in result.loss_metrics
+            )
+        assert loss is not None
+        return ForwardBackwardResult(loss, loss_metrics)
 
     def _forward_backward_body(
         self,
@@ -914,6 +942,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self.loss,
             current_step=current_step,
         )
+        if self.sdc_replayer is not None:
+            self.sdc_replayer.step_completed()
         self.num_completed_steps = current_step
         self._step_started = False
         return grad_norm

@@ -248,6 +248,7 @@ def test_schedule_checks_first_num_steps_and_rearms_on_reset(
         replayer.run_fwd_bwd(execute, step=index, get_loss=lambda loss: loss)
         # A checked step executes twice (reference plus one replay).
         checked.append(calls - calls_before == 2)
+        replayer.step_completed()
         assert replayer.steps_since_reset == index + 1
     assert checked == expected_checked
 
@@ -256,6 +257,63 @@ def test_schedule_checks_first_num_steps_and_rearms_on_reset(
     calls_before = calls
     replayer.run_fwd_bwd(execute, step=99, get_loss=lambda loss: loss)
     assert calls - calls_before == 2
+
+
+def test_schedule_checks_every_call_of_a_checked_step():
+    replayer = SDCReplayer(
+        SDCReplayer.Config(num_steps=1), modules=[], device=torch.device("cpu")
+    )
+    executions = []
+
+    def execute():
+        executions.append(replayer.steps_since_reset)
+        return torch.tensor(1.0)
+
+    # Step 1 has two calls, step 2 one.
+    replayer.run_fwd_bwd(execute, step=1, get_loss=lambda loss: loss)
+    replayer.run_fwd_bwd(execute, step=1, get_loss=lambda loss: loss)
+    replayer.step_completed()
+    replayer.run_fwd_bwd(execute, step=2, get_loss=lambda loss: loss)
+
+    # Both calls of step 1 run twice (checked); step 2's call runs once.
+    assert executions == [0, 0, 0, 0, 1]
+
+
+def test_call_with_pending_gradients_matches_unchecked_calls():
+    """A step's second call starts with the first call's gradients; replay restores them."""
+    torch.manual_seed(0)
+    model = torch.nn.Sequential(
+        torch.nn.Linear(16, 32), torch.nn.Tanh(), torch.nn.Linear(32, 1)
+    )
+    batches = [torch.randn(8, 16) for _ in range(3)]
+
+    def call(batch_list):
+        def execute():
+            total = torch.zeros(())
+            for batch in batch_list:
+                loss = model(batch).pow(2).sum()
+                loss.backward()
+                total = total + loss.detach()
+            return total
+
+        return execute
+
+    # Reference: two unchecked calls in one step.
+    call([batches[0]])()
+    call([batches[1], batches[2]])()
+    expected = [parameter.grad.clone() for parameter in model.parameters()]
+    model.zero_grad(set_to_none=True)
+
+    replayer = SDCReplayer(
+        SDCReplayer.Config(num_replays=2), modules=[model], device=torch.device("cpu")
+    )
+    replayer.run_fwd_bwd(call([batches[0]]), step=1, get_loss=lambda loss: loss)
+    replayer.run_fwd_bwd(
+        call([batches[1], batches[2]]), step=1, get_loss=lambda loss: loss
+    )
+
+    for parameter, gradient in zip(model.parameters(), expected, strict=True):
+        assert torch.equal(parameter.grad, gradient)
 
 
 def test_config_validation():

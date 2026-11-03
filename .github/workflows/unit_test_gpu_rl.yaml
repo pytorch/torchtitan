@@ -115,3 +115,4 @@ jobs:
           tests/rl/unit_tests/gpu/test_generator_uneven_decode.py -v
         # Spawns its own 2-GPU process groups.
         pytest tests/rl/unit_tests/gpu/test_loss_token_count.py -m multi_gpu -v
+        pytest tests/rl/unit_tests/gpu/test_segment_graphs.py -m multi_gpu -v

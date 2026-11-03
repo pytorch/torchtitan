@@ -493,10 +493,6 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     config.training.num_tokens_per_microbatch_per_dp_rank = seq_len
     config.training.num_tokens_per_train_step = global_batch_size * seq_len
     config.training.mixed_precision_reduce = "float32"
-    # Non-deferred reduction makes every outer-accumulation group identical.
-    # Capture one group and replay it instead of unrolling all eight groups into
-    # one graph; persistent sharded gradients accumulate across those replays.
-    config.training.accelerator_graph_per_microbatch_group = True
 
     p = config.parallelism
     p.data_parallel_replicate_degree = 1

@@ -28,7 +28,9 @@ config.sdc_replayer = SDCReplayer.Config(
 
 `num_steps` counts optimizer steps from trainer start and restarts after every
 checkpoint load, so the default checks the first step after every (re)start,
-where corruption from a bad restore or initialization is most likely.
+where corruption from a bad restore or initialization is most likely. Every
+`forward_backward` call of a checked step is checked, including a step that
+spans several calls.
 `num_replays` is the number of times the checked forward/backward is
 re-executed and compared against the initial reference execution; it must be
 at least one, and higher values catch intermittent corruption a single replay
@@ -39,18 +41,19 @@ Replay requires `debug.deterministic=True`,
 
 ## What is replayed
 
-The complete forward/backward work of a checked optimizer step is replayed.
-This includes every gradient accumulation step and every pipeline microbatch.
-State is restored before every execution. The reference and intermediate
-executions are discarded. Only the final execution's gradients, registered
-buffers, RNG advancement, and loss are committed.
+Each `forward_backward` call of a checked optimizer step is replayed on its
+own. A call includes every gradient accumulation step and every pipeline
+microbatch it was given. State is restored before every execution. The
+reference and intermediate executions are discarded. Only the final
+execution's gradients, registered buffers, RNG advancement, and loss are
+committed.
 
-Gradient values are never snapshotted. The checked forward/backward must
-begin with no pending gradients (`None` or zeros, the post-`zero_grad`
-state), and restore rebuilds that entry state directly: parameters that
-entered without a gradient return to `None`, and entry gradient tensors are
-zeroed in place, preserving their storage addresses for accelerator graphs, with no
-gradient-sized clone or copy kernels on checked steps.
+A call can start with gradients from the step's earlier calls. The snapshot
+copies them, and restore copies the values back in place, preserving their
+storage addresses for accelerator graphs. Parameters that entered without a
+gradient return to `None`. The step's first call starts with `None` gradients,
+so it copies nothing; each later checked call holds one copy of this rank's
+gradients while it runs.
 
 Eager execution, `torch.compile`, accelerator graphs, symmetric-memory FSDP,
 distributed GEMM, async TP, DeepEP v2, and HybridEP can
@@ -61,10 +64,6 @@ overwrite that state before reading it. Such scratch state is neither
 snapshotted nor included in the replay signature.
 
 ## Limitations
-
-Accelerator graphs currently require `sdc_replayer.num_replays=1`. Additional replays
-would require restoring graph-owned gradient and optional-buffer storage
-without changing its captured addresses.
 
 Replay currently uses the existing XOR-based `torch.hash_tensor` mode. This
 checksum is order-insensitive, so permutations and some repeated-value

@@ -295,9 +295,12 @@ class GraphTrainingEngine(TrainingEngine):
         microbatch_groups: list[tuple[Any, ...]],
         *,
         defer_fsdp_gradient_reduction: bool,
+        preprocess_microbatch_groups_lazily: bool = False,
     ) -> ForwardBackwardResult:
         """Run microbatch groups through GraphRuntime."""
         assert not defer_fsdp_gradient_reduction
+        # Config.__post_init__ rejects lazy preprocessing.
+        assert not preprocess_microbatch_groups_lazily
         accumulated_loss: torch.Tensor | None = None
         loss_metrics: list[list[dict[str, torch.Tensor]]] = []
         for inputs, model_kwargs, labels in microbatch_groups:
@@ -361,6 +364,7 @@ class GraphTrainingEngine(TrainingEngine):
         microbatch_groups: list[tuple[Any, ...]],
         *,
         defer_fsdp_gradient_reduction: bool,
+        preprocess_microbatch_groups_lazily: bool = False,
     ) -> ForwardBackwardResult:
         """``_forward_backward_body`` under the paged stash runner.
 
@@ -380,6 +384,7 @@ class GraphTrainingEngine(TrainingEngine):
                 self._forward_backward_body,
                 microbatch_groups,
                 defer_fsdp_gradient_reduction=defer_fsdp_gradient_reduction,
+                preprocess_microbatch_groups_lazily=preprocess_microbatch_groups_lazily,
             )
         )
 
@@ -417,10 +422,6 @@ class GraphTrainer(Trainer):
 
         def __post_init__(self) -> None:
             Trainer.Config.__post_init__(self)
-            if self.training.accelerator_graph_per_microbatch_group:
-                raise ValueError(
-                    "Per-group CUDA graphs are not supported with GraphTrainer."
-                )
             if self.training.preprocess_microbatch_groups_lazily:
                 raise ValueError(
                     "training.preprocess_microbatch_groups_lazily is not supported "
