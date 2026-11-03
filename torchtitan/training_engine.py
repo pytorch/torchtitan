@@ -816,7 +816,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                         "forward_backward call. With accelerator graphs, later calls must add "
                         "into the gradients that the step's first call allocated, or the next "
                         "zero_grad drops them. Give these parameters a gradient in the first "
-                        "call, or set training.disable_accelerator_graphs=True."
+                        "call and don't replace `.grad` in later calls, or set "
+                        "training.disable_accelerator_graphs=True."
                     )
             # The next replay overwrites graph outputs.
             segment_loss = result.loss.clone()
