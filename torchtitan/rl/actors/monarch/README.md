@@ -6,9 +6,9 @@ implements the framework-agnostic `ActorSystem` (`rl/actors/system.py`), which
 the controller builds from `Controller.Config.actor_system` (default
 `MonarchActorSystem.Config()`) and spawns every service through. A launcher that
 allocates its own hosts subclasses `Controller` and overrides
-`_build_actor_system` to build `MonarchActorSystem` with `host_meshes` (and
-optionally `generator_env`). To get hosts from a cluster scheduler, use a launch
-recipe (see [Launchers](#launchers)).
+`_build_actor_system` to build `MonarchActorSystem` with `host_meshes`. To get
+hosts from a cluster scheduler, use a launch recipe (see
+[Launchers](#launchers)).
 
 Each adapter is a thin Monarch `Actor` subclass of a service with no Monarch
 dependency of its own: it declares the service's methods as

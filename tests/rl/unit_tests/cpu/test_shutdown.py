@@ -474,7 +474,7 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
         events.append(
             f"gpu meshes {trainer_world_size}+"
             f"{kwargs['num_generators']}x{per_generator_world_size} "
-            f"on {kwargs['host_meshes']} with {kwargs['generator_env']}"
+            f"on {kwargs['host_meshes']}"
         )
         return "trainer_mesh", ["generator_mesh_0", "generator_mesh_1"]
 
@@ -490,9 +490,7 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
     monkeypatch.setattr(
         monarch_system, "setup_torch_elastic_env", setup_torch_elastic_env
     )
-    actor_system = MonarchActorSystem.Config().build(
-        host_meshes="host_meshes", generator_env={"KEY": "value"}
-    )
+    actor_system = MonarchActorSystem.Config().build(host_meshes="host_meshes")
 
     asyncio.run(
         actor_system.provision(
@@ -503,7 +501,7 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
     )
 
     assert events == [
-        "gpu meshes 2+2x2 on host_meshes with {'KEY': 'value'}",
+        "gpu meshes 2+2x2 on host_meshes",
         "cpu procs 1",
         "cpu procs 1",
         "torch elastic trainer_mesh",

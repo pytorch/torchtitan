@@ -49,9 +49,8 @@ class MonarchActorSystem(ActorSystem):
     The trainer and each generator get their own GPU proc mesh: on this host,
     partitioned with ``CUDA_VISIBLE_DEVICES``, or on the ``host_meshes`` a
     launcher passes in (e.g. ``MonarchControllerWithLauncher`` in
-    ``launcher/base.py``, with the hosts of a submitted job). ``generator_env``
-    adds environment variables to the generator procs. The router, the batcher and
-    the rollout worker pool get CPU procs on this host.
+    ``launcher/base.py``, with the hosts of a submitted job). The router, the
+    batcher and the rollout worker pool get CPU procs on this host.
 
     Example: a ``Controller`` subclass that allocated its hosts as
     ``self.host_meshes``::
@@ -69,11 +68,9 @@ class MonarchActorSystem(ActorSystem):
         config: Config,
         *,
         host_meshes: HostMeshes | None = None,
-        generator_env: dict[str, str] | None = None,
     ):
         self.config = config
         self._host_meshes = host_meshes
-        self._generator_env = generator_env
         self._trainer_mesh: ProcMesh | None = None
         self._generator_meshes: list[ProcMesh] = []
         self._router_mesh: ProcMesh | None = None
@@ -94,7 +91,6 @@ class MonarchActorSystem(ActorSystem):
             compute_generator_world_size(generator_parallelism),
             host_meshes=self._host_meshes,
             num_generators=num_generators,
-            generator_env=self._generator_env,
         )
         # One process, so the router is a singleton and every caller reaches
         # it with `call_one`. It gets its own mesh rather than sharing the
