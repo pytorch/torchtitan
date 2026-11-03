@@ -891,6 +891,7 @@ def test_later_segment_capture_rejects_a_new_gradient_tensor(
         SimpleNamespace(
             _step_started=True,
             _graph_segment_is_whole_call=False,
+            sdc_replayer=None,
             _first_segment_graph=SimpleNamespace(captured=True),
             _later_segment_graphs={
                 1: MagicMock(side_effect=later_segment, captured=False)
