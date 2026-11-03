@@ -54,6 +54,7 @@ from torchtitan.models.muse_spark.vision_encoder import (
     MuseSparkNaViTAdapter,
     NaViTEncoder,
 )
+from torchtitan.observability import tensor_logger
 from .state_dict_adapter import MuseGlimmerStateDictAdapter
 
 
@@ -121,6 +122,7 @@ class Attention(GQAttention):
 
         num_tokens = x_TD.shape[0]
         xq, xk, xv = self.qkv_linear(x_TD)
+        tensor_logger.log_fwd_bwd(self, xq=xq, xk=xk, xv=xv)
 
         # QK normalization before RoPE. Query is additionally scaled by a
         # tuned constant (k is only normalized).
@@ -148,6 +150,7 @@ class Attention(GQAttention):
         # The copy below reads the inner_attention output with bare ops.
         remat.recompute_needs_tensor(output)
         output = output.contiguous().view(num_tokens, -1)
+        tensor_logger.log_fwd_bwd(self, head_out=output)
 
         if self.o_gate is not None:
             gate = self.o_gate(x_TD)
@@ -589,6 +592,7 @@ class MuseGlimmerModel(MultimodalModel):
         # is already hidden states, so injection is skipped there.
         if self.tok_embeddings is not None:
             h_TD = self.tok_embeddings(tokens)
+            tensor_logger.log_fwd(self.tok_embeddings, output=h_TD)
             with spmd_local_context("dp"):
                 h_TD = self._prepare_multimodal_embeds(
                     h_TD,
@@ -610,6 +614,7 @@ class MuseGlimmerModel(MultimodalModel):
                 layer_attention_metadata,
                 positions,
             )
+            tensor_logger.log_fwd_bwd(layer, output=h_TD)
 
         h_TD = self.norm(h_TD) if self.norm is not None else h_TD
 

@@ -13,6 +13,7 @@ from torchtitan.models.base.module import Module
 
 from torchtitan.models.common.activation import BinaryActivationFn, SwiGLU
 from torchtitan.models.common.linear import Linear
+from torchtitan.observability import tensor_logger
 
 # Shape suffix legend:
 #   T = token dimensions, D = model dimension, F = feed-forward hidden dimension
@@ -67,9 +68,12 @@ class DenseFeedForward(FeedForward):
         self.w13 = config.w13.build()
         self.w2 = config.w2.build()
         self.activation_fn = config.activation_fn.build()
+        tensor_logger.register_fwd_bwd(self, "act_out")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # w13 and w2 declare their own remat regions.
         gate_up_T2F = self.w13(x)
         remat.recompute_needs_tensor(gate_up_T2F)
-        return self.w2(self.activation_fn(gate_up_T2F))
+        act_out_TF = self.activation_fn(gate_up_T2F)
+        tensor_logger.log_fwd_bwd(self, act_out=act_out_TF)
+        return self.w2(act_out_TF)

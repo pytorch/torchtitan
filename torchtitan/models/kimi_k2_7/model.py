@@ -42,6 +42,7 @@ from torchtitan.models.deepseek_v3.model import (
     get_deepseek_v3_nparams_and_flops as get_kimi_k2_7_nparams_and_flops,
 )
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder
+from torchtitan.observability import tensor_logger
 
 from .state_dict_adapter import KimiK25StateDictAdapter
 from .vision_encoder import KimiK25VisionEncoder
@@ -198,6 +199,8 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         inputs_embeds = (
             self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
         )
+        if self.tok_embeddings is not None:
+            tensor_logger.log_fwd(self.tok_embeddings, output=inputs_embeds)
 
         modalities = []
         if pixel_values is not None and grid_thw is not None:
@@ -320,6 +323,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
                 padding_mask=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
             )
+            tensor_logger.log_fwd_bwd(layer, output=x)
 
         x = self.norm(x) if self.norm is not None else x
         if self._skip_lm_head:

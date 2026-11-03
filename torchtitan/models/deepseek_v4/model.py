@@ -31,6 +31,7 @@ from torchtitan.models.deepseek_v3.mtp import (
     apply_fsdp_to_mtp_decoder,
     roll_mtp_sequence,
 )
+from torchtitan.observability import tensor_logger
 
 from .mhc import HcHead, HcPost, HcPre
 from .state_dict_adapter import DeepSeekV4StateDictAdapter
@@ -296,6 +297,8 @@ class DeepSeekV4Model(Decoder):
 
         input_ids_T = tokens.detach().long()
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
+        if self.tok_embeddings is not None:
+            tensor_logger.log_fwd(self.tok_embeddings, output=h)
         h = h.unsqueeze(1).repeat(1, self.hc_mult, 1)
 
         with spmd.no_typecheck():
@@ -317,6 +320,7 @@ class DeepSeekV4Model(Decoder):
                 padding_mask=padding_mask,
                 aux_loss_denominator=main_aux_loss_denominator,
             )
+            tensor_logger.log_fwd_bwd(layer, output=h)
 
         prev_hc_hidden = h
         main_hidden = self.hc_head(h)
