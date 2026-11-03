@@ -8,6 +8,7 @@ import unittest
 
 import spmd_types as spmd
 import torch
+from torch._subclasses.fake_tensor import FakeTensorMode
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.decoder_sharding import dense_param_placement
@@ -18,6 +19,24 @@ from torchtitan.trainer import Trainer
 
 
 class TestTokenDispatcherModule(unittest.TestCase):
+    def test_hybridep_backward_is_fake_tensor_traceable(self):
+        # Setup contexts must not read the CPU handle ID during AOT tracing.
+        from torchtitan.distributed.deepep import hybridep  # noqa: F401
+
+        with FakeTensorMode():
+            x_TD = torch.empty(64, 256, requires_grad=True)
+            expert_ids_TK = torch.empty(64, 2, dtype=torch.int64)
+            scores_TK = torch.empty(64, 2, requires_grad=True)
+            hidden_RD, scores_R, _, handle_id = torch.ops.hybridep.dispatch(
+                x_TD, expert_ids_TK, scores_TK, 8, 2, "ep", True, 1.0, None
+            )
+            out_TD = torch.ops.hybridep.combine(
+                hidden_RD * scores_R[:, None], handle_id, 64, None
+            )
+            out_TD.sum().backward()
+            self.assertEqual(x_TD.grad.shape, x_TD.shape)
+            self.assertEqual(scores_TK.grad.shape, scores_TK.shape)
+
     def test_dispatcher_has_no_checkpoint_state(self):
         dispatcher = AllToAllTokenDispatcher.Config(
             num_experts=2,
