@@ -165,9 +165,8 @@ class _Wrapper:
 
     load_model_state_dict = VLLMModelWrapper.load_model_state_dict
 
-    def __init__(self, model: nn.Module, model_dtype: torch.dtype = torch.float32):
+    def __init__(self, model: nn.Module):
         self.model = model
-        self._model_dtype = model_dtype
         self._fsdp_load_groups, self._buffer_keys = model_wrapper._fsdp_load_groups(
             model
         )
@@ -222,9 +221,9 @@ def test_load_model_state_dict_requires_every_param(tmp_path) -> None:
         dist.destroy_process_group()
 
 
-def test_load_model_state_dict_casts_float32_params(tmp_path) -> None:
-    """Fetch every parameter in the model dtype, as the trainer sends it, and cast
-    it into float32 parameters (the generator's GDN A_log and dt_bias)."""
+def test_load_model_state_dict_fetches_params_in_their_own_dtype(tmp_path) -> None:
+    """Fetch every parameter in its own dtype, as the trainer sends it: a float32
+    parameter (preserve_dtype_params, e.g. GDN A_log) next to bfloat16 ones."""
     dist.init_process_group(
         "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
     )
@@ -236,10 +235,8 @@ def test_load_model_state_dict_casts_float32_params(tmp_path) -> None:
         fully_shard(model.layer, mesh=mesh, reshard_after_forward=False)
         fully_shard(model, mesh=mesh, reshard_after_forward=False)
         model.set_keep_unsharded_storage(True)
-        new_state_dict = {
-            k: v.detach().to(torch.bfloat16) + 1 for k, v in model.state_dict().items()
-        }
-        wrapper = _Wrapper(model, model_dtype=torch.bfloat16)
+        new_state_dict = {k: v.detach() + 1 for k, v in model.state_dict().items()}
+        wrapper = _Wrapper(model)
         for module in model.modules():  # as after the initial load
             if isinstance(module, FSDPModule):
                 model_wrapper._unshard_and_free_sharded_params(module)
@@ -252,9 +249,9 @@ def test_load_model_state_dict_casts_float32_params(tmp_path) -> None:
 
         wrapper.load_model_state_dict(fetch)
 
-        assert fetched_dtypes == dict.fromkeys(new_state_dict, torch.bfloat16)
-        assert model.A_log.dtype == torch.float32
-        assert model.A_log.equal(new_state_dict["A_log"].full_tensor().float())
+        assert fetched_dtypes == {k: v.dtype for k, v in new_state_dict.items()}
+        assert fetched_dtypes["A_log"] == torch.float32
+        assert model.A_log.equal(new_state_dict["A_log"].full_tensor())
         assert model.layer.weight.equal(new_state_dict["layer.weight"].full_tensor())
     finally:
         dist.destroy_process_group()

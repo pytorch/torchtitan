@@ -5,14 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
-from torch import nn
 
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import ParallelismConfig
@@ -158,14 +156,6 @@ class Decoder(BaseModel):
     # inputs (bool kwargs cause 'has no attribute requires_grad' errors).
     _skip_lm_head: bool = False
 
-    # FSDP's per-parameter dtype override (``param_dtype_override_fn``); None casts every
-    # parameter to ``precision.param_dtype``. The generator sets it.
-    # TODO: remove once parameters carry a per-FQN dtype, so FSDP keeps A_log/dt_bias
-    # in float32 without a model attribute.
-    _fsdp_param_dtype_override_fn: Callable[
-        [nn.Parameter], torch.dtype | None
-    ] | None = None
-
     def _apply_fsdp(
         self,
         *,
@@ -194,7 +184,6 @@ class Decoder(BaseModel):
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
             symm_mem_scope=parallelism.fsdp_symm_mem_scope,
-            param_dtype_override_fn=self._fsdp_param_dtype_override_fn,
         )
 
     def __init__(self, config: Config):

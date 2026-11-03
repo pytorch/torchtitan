@@ -60,6 +60,7 @@ def test_vllm_uneven_decode_tp_padding():
     register_to_vllm(
         config.generator.model,
         parallelism=config.generator.parallelism,
+        precision=config.precision,
         checkpointer_config=None,
         model_state_dict_load_mode="cpu_prefetch",
     )

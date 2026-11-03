@@ -279,22 +279,20 @@ class FluxModel(BaseModel):
         precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
-        from torch.distributed.fsdp import (
-            CPUOffloadPolicy,
-            fully_shard,
-            MixedPrecisionPolicy,
-        )
+        from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
 
         from torchtitan.distributed.fsdp import (
             disable_fsdp_gradient_division,
             enable_fsdp_symm_mem,
+            mixed_precision_policy,
             resolve_fsdp_mesh,
         )
 
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
         fsdp_config: dict[str, Any] = {
             "mesh": dp_mesh,
-            "mp_policy": MixedPrecisionPolicy(
+            "mp_policy": mixed_precision_policy(
+                self,
                 param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
                 reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
             ),

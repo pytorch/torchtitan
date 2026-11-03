@@ -284,13 +284,14 @@ class HFTransformerModel(BaseModel):
             PretrainedConfig.__init__(
                 self, attn_implementation=_ATTN_IMPLEMENTATION, **kwargs
             )
-            # Set param_init and sharding_config before Module.Config.build()
-            # accesses them. PretrainedConfig.__getattribute__ doesn't
-            # recognize slots inherited from Module.Config.
+            # Set param_init, sharding_config and preserve_dtype_params before
+            # Module.Config.build() accesses them. PretrainedConfig.__getattribute__
+            # doesn't recognize slots inherited from Module.Config.
             self.param_init = (
                 None  # noqa: this sets Config.param_init, not Module._param_init
             )
             self.sharding_config = None
+            self.preserve_dtype_params = ()
             # HF modules run eager; the loss and the swapped-in TorchTitan MoE (SwiGLU) can compile.
             self.local_compile = LocalCompileConfig(
                 regions=["loss", "fused_binary_activation"]

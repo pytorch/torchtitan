@@ -34,7 +34,7 @@ import torchtitan.rl.generator.generator as generator_module
 import torchtitan.rl.generator.vllm.engine as vllm_engine_module
 from torchstore import RankRole
 from torchtitan.components.optim import AdamW
-from torchtitan.config import CommConfig, DebugConfig
+from torchtitan.config import CommConfig, DebugConfig, PrecisionConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.common.attention import VarlenInnerAttention
@@ -606,7 +606,7 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_p
             parallelism=_PARALLELISM,
             model_path="unused",
             max_num_seqs=8,
-            model_dtype="bfloat16",
+            precision=PrecisionConfig(),
             gpu_memory_limit=0.9,
             max_num_batched_tokens=None,
             checkpointer=None,
@@ -654,7 +654,7 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dic
         parallelism=config.parallelism,
         model_path="unused",
         max_num_seqs=8,
-        model_dtype=config.model_dtype,
+        precision=PrecisionConfig(),
         gpu_memory_limit=config.gpu_memory_limit,
         max_num_batched_tokens=config.max_num_batched_tokens,
         checkpointer=None,
@@ -928,6 +928,7 @@ def test_vllm_uneven_decode_tp_padding():
     register_to_vllm(
         config.generator.model,
         parallelism=config.generator.parallelism,
+        precision=config.precision,
         checkpointer_config=None,
         model_state_dict_load_mode="cpu_prefetch",
     )

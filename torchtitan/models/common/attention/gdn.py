@@ -568,6 +568,8 @@ class GDN(LinearAttention):
         # Query/key heads; n_heads counts value heads.
         n_key_heads: int
         conv_kernel_size: int = 4
+        # The gate reads A_log and dt_bias in float32.
+        preserve_dtype_params: tuple[str, ...] = ("A_log", "dt_bias")
 
         # Sub-module configs
         # One projection for q, k, v, z, a and b, with rows grouped by key head

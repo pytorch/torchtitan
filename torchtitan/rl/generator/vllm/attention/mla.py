@@ -28,6 +28,7 @@ from torchtitan.rl.generator.vllm.attention.attention import (
     _exclude_vllm_attn_scales_from_state_dict,
     VLLMInnerAttention,
 )
+from torchtitan.tools.utils import set_default_dtype
 
 # Shape suffixes:
 # T = packed token count (num_tokens)
@@ -116,22 +117,24 @@ class VLLMMLAInnerAttention(InnerAttention):
         self.num_heads = config.num_heads // tp_degree
         self.v_head_dim = config.v_head_dim
 
-        self.vllm_mla = _VLLMNativeMLAAttention(
-            num_heads=self.num_heads,
-            scale=config.scale,
-            qk_nope_head_dim=config.qk_nope_head_dim,
-            qk_rope_head_dim=config.qk_rope_head_dim,
-            v_head_dim=config.v_head_dim,
-            q_lora_rank=None,
-            kv_lora_rank=config.kv_lora_rank,
-            kv_b_proj=_VLLMKVBProj(kv_b_proj),
-            cache_config=vllm_config.cache_config,
-            quant_config=None,
-            prefix=(
-                f"model.layers.{next(VLLMInnerAttention._layer_counter)}"
-                ".attention.inner_attention"
-            ),
-        )
+        # Built in vLLM's model dtype; see VLLMInnerAttention.
+        with set_default_dtype(vllm_config.model_config.dtype):
+            self.vllm_mla = _VLLMNativeMLAAttention(
+                num_heads=self.num_heads,
+                scale=config.scale,
+                qk_nope_head_dim=config.qk_nope_head_dim,
+                qk_rope_head_dim=config.qk_rope_head_dim,
+                v_head_dim=config.v_head_dim,
+                q_lora_rank=None,
+                kv_lora_rank=config.kv_lora_rank,
+                kv_b_proj=_VLLMKVBProj(kv_b_proj),
+                cache_config=vllm_config.cache_config,
+                quant_config=None,
+                prefix=(
+                    f"model.layers.{next(VLLMInnerAttention._layer_counter)}"
+                    ".attention.inner_attention"
+                ),
+            )
         _exclude_vllm_attn_scales_from_state_dict(self.vllm_mla)
         # Non-persistent buffers still need device placement.
         self.vllm_mla._sharding_config = ShardingConfig(

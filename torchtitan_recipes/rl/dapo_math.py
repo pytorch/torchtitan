@@ -204,7 +204,6 @@ def _qwen3_4b_dapo_math_config(
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             checkpointer=None,
@@ -367,7 +366,6 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             # vLLM's profiling dummy batch can route every token to one expert.
@@ -508,7 +506,6 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             dist_moe_runtime=DistMoeRuntime.Config(

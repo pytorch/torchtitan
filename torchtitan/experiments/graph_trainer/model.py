@@ -41,6 +41,12 @@ class GraphTrainerModel:
         dump_folder: str,
     ):
         del activation_remat
+        # TODO: pass preserve_dtype_params to SimpleFSDP's mixed precision.
+        if any(self.named_preserve_dtype_params()):
+            raise ValueError(
+                "GraphTrainer's SimpleFSDP casts every parameter to "
+                "precision.param_dtype and does not support preserve_dtype_params."
+            )
         if (
             training.num_tokens_per_microbatch_per_dp_rank
             % parallelism_context.seq_len_divisor

@@ -17,6 +17,7 @@ import torch
 from batch_invariant_ops import enable_batch_invariant_mode
 from torchtitan.components.checkpointer import CheckpointManager
 
+from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.batch_invariant import (
     is_in_batch_invariant_mode,
@@ -309,6 +310,7 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
     registry.register_to_vllm(
         model_config,
         parallelism=registry.InferenceParallelismConfig(tensor_parallel_degree=1),
+        precision=PrecisionConfig(),
         checkpointer_config=CheckpointManager.Config(
             initial_load_in_hf=True, initial_load_path=model
         ),

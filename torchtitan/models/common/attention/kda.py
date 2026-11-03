@@ -123,8 +123,8 @@ class KDAKernel(Module):
 
         gate_1THK = bound_gate(
             raw_gate_1THK,
-            # TODO: The long-term solution is to specify mixed precision per FQN
-            # instead of per layer. https://github.com/pytorch/pytorch/issues/156784
+            # A no-op unless the master weights are bf16 (preserve_dtype_params
+            # keeps them out of FSDP's cast).
             A_log_H.float(),
             dt_bias_HK.float(),
             lower_bound=self.lower_bound,
@@ -317,6 +317,8 @@ class KDA(LinearAttention):
     class Config(LinearAttention.Config):
         head_dim: int
         conv_kernel_size: int
+        # The gate reads A_log and dt_bias in float32.
+        preserve_dtype_params: tuple[str, ...] = ("A_log", "dt_bias")
         q_proj: Linear.Config
         k_proj: Linear.Config
         v_proj: Linear.Config
