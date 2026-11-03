@@ -70,7 +70,7 @@ def deepseek_v4_1_debugmodel(
         debug=DebugConfig(
             seed=42,
             deterministic=True,
-            spmd_typechecking=True,
+            spmd_typechecking=parallelism.pipeline_parallel_degree == 1,
         ),
         parallelism=parallelism,
         profiler=Profiler.Config(enable_profiling=False),
@@ -82,7 +82,58 @@ def deepseek_v4_1_debugmodel(
     )
 
 
+def deepseek_v4_1_debugmodel_fsdp2_tp2_pp2_ep2(
+    *, attention_backend: str = "reference"
+) -> Trainer.Config:
+    config = deepseek_v4_1_debugmodel(
+        attention_backend=attention_backend,
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=2,
+            tensor_parallel_degree=2,
+            pipeline_parallel_degree=2,
+            pipeline_parallel_first_stage_less_layers=0,
+            pipeline_parallel_last_stage_less_layers=0,
+            pipeline_parallel_layers_per_stage=3,
+            pipeline_parallel_schedule="Interleaved1F1B",
+            num_pp_microbatches=4,
+            expert_parallel_degree=2,
+        ),
+    )
+    config.training.num_tokens_per_microbatch_per_dp_rank = 64
+    return config
+
+
+def deepseek_v4_1_debugmodel_fsdp2_tp2_pp2_ep2_fused() -> Trainer.Config:
+    return deepseek_v4_1_debugmodel_fsdp2_tp2_pp2_ep2(attention_backend="fused")
+
+
 def deepseek_v4_1_debugmodel_seed() -> Trainer.Config:
     config = deepseek_v4_1_debugmodel()
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    return config
+
+
+def deepseek_v4_1_debugmodel_tp2_ep2() -> Trainer.Config:
+    return deepseek_v4_1_debugmodel(
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=1,
+            tensor_parallel_degree=2,
+            expert_parallel_degree=2,
+        )
+    )
+
+
+def deepseek_v4_1_debugmodel_pp2() -> Trainer.Config:
+    config = deepseek_v4_1_debugmodel(
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=1,
+            pipeline_parallel_degree=2,
+            pipeline_parallel_first_stage_less_layers=0,
+            pipeline_parallel_last_stage_less_layers=0,
+            pipeline_parallel_layers_per_stage=3,
+            pipeline_parallel_schedule="Interleaved1F1B",
+            num_pp_microbatches=4,
+        )
+    )
+    config.training.num_tokens_per_microbatch_per_dp_rank = 64
     return config

@@ -13,6 +13,9 @@ training process, so it must stay importable from this module.
 from torchtitan.trainer import Trainer
 from torchtitan_recipes.tests import _set_spmd_typechecking
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel_hybridep
+from torchtitan_recipes.tests.models.deepseek_v4_1 import (
+    deepseek_v4_1_debugmodel_fsdp2_tp2_pp2_ep2,
+)
 from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel,
     llama3_debugmodel_dist_gemm,
@@ -179,6 +182,14 @@ def build_h100_tests_list() -> list[IntegrationTestDefinition]:
     Each entry names one configuration per run.
     """
     return [
+        IntegrationTestDefinition(
+            configs=[deepseek_v4_1_debugmodel_fsdp2_tp2_pp2_ep2],
+            test_descr="DeepSeek V4.1 Flash FSDP, TP, PP and EP shared-KV backward",
+            test_name="deepseek_v4_1_flash_fsdp2_tp2_pp2_ep2",
+            ngpu=8,
+            skip_rocm_test=True,
+            use_real_pg=True,
+        ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_fsdp_symm_mem],
             test_descr="FSDP symmetric memory",
