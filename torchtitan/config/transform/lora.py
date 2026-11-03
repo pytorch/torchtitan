@@ -220,9 +220,9 @@ class LoRATransform(ModelConfigTransform):
     expert, every expert has its own A and B. Shared-outer shares the factor on
     the model-dimension side across the experts of a projection (A of W13, B of
     W2) and keeps the other per expert: a token's low-rank path then reads and
-    writes the hidden stream through one matrix, as serving engines expect of
-    expert adapters, and the adapter volume no longer scales with the model
-    dimension per expert.
+    writes the hidden stream through one matrix, the layout SGLang's MoE LoRA
+    plans target and Megatron-Bridge trains, and the adapter volume no longer
+    scales with the model dimension per expert.
 
     This transform conflicts with itself because every application freezes all
     non-target configs. Applying multiple LoRA transforms would make freezing
