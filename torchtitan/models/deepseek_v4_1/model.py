@@ -7,11 +7,12 @@
 """V4.1 Flash training model with explicit cross-layer state.
 
 T: tokens, C: HC branches, D: model width, S: global KV tokens,
-K: selected keys, P: candidate keys, L: Engram layers, Q: hash columns.
+K: selected keys, P: candidate keys, L: Engram layers, Q: hash columns,
+F: concatenated backbone width.
 """
 
 from dataclasses import dataclass, field
-from typing import ClassVar
+from typing import ClassVar, TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
@@ -38,6 +39,9 @@ from .mhc import HcCoefficients, initial_pre_mix, mix_branches
 from .moe import ModalityMoE, update_image_expert_bias
 from .state_dict_adapter import DeepSeekV41StateDictAdapter
 from .vision import Aligner, rotary_cache, VisionEncoder
+
+if TYPE_CHECKING:
+    from .dspark import DSpark
 
 
 class DeepSeekV41TransformerBlock(TransformerBlock):
@@ -159,6 +163,7 @@ class DeepSeekV41Model(MultimodalModel):
         vision: VisionEncoder.Config | None = None
         aligner: Aligner.Config | None = None
         image_embeddings: Embedding.Config | None = None
+        drafter: "DSpark.Config | None" = None
         local_compile: LocalCompileConfig = field(
             default_factory=lambda: LocalCompileConfig(
                 regions=["loss", "fused_binary_activation", "rope"]
@@ -196,6 +201,7 @@ class DeepSeekV41Model(MultimodalModel):
                 modules_excluded_from_active_params=(
                     model.vision,
                     model.aligner,
+                    model.drafter,
                 ),
             )
             attention_flops = 0
@@ -228,9 +234,35 @@ class DeepSeekV41Model(MultimodalModel):
             if config.image_embeddings is not None
             else None
         )
+        self.drafter = config.drafter.build() if config.drafter is not None else None
         for module in self.modules():
             if isinstance(module, RMSNorm):
                 module.float()
+
+    def parallelize(
+        self,
+        *,
+        parallelism_context,
+        training,
+        parallelism,
+        local_compile,
+        activation_remat,
+        dump_folder,
+    ):
+        """Apply the selected remat policy to the backbone, vision and drafter."""
+        local_compile.apply()
+        with parallelism_context.activate_spmd():
+            self._parallelize(parallelism_context)
+            if activation_remat is not None:
+                for model in (self, self.vision, self.drafter):
+                    if model is not None:
+                        activation_remat.apply(model)
+            self._apply_fsdp(
+                parallelism_context=parallelism_context,
+                training=training,
+                parallelism=parallelism,
+            )
+        return self
 
     def _apply_fsdp(self, *, parallelism_context, training, parallelism):
         from torch.distributed.fsdp import (
@@ -247,12 +279,13 @@ class DeepSeekV41Model(MultimodalModel):
             resolve_fsdp_mesh,
         )
         from .attention import Compressor
+        from .dspark import ConfidenceHead
         from .moe import ModalityRouter
 
         fp32_parameter_ids = set()
         for module in self.modules():
             if (
-                isinstance(module, (RMSNorm, HcCoefficients))
+                isinstance(module, (RMSNorm, HcCoefficients, ConfidenceHead))
                 or isinstance(module, Compressor)
                 and module.ratio == 2
             ):
@@ -296,6 +329,13 @@ class DeepSeekV41Model(MultimodalModel):
                         else OffloadPolicy()
                     ),
                 )
+        if self.drafter is not None:
+            self.drafter._fsdp_param_dtype_override_fn = dtype_override
+            self.drafter._apply_fsdp(
+                parallelism_context=parallelism_context,
+                training=training,
+                parallelism=parallelism,
+            )
         Decoder._apply_fsdp(
             self,
             parallelism_context=parallelism_context,
@@ -309,6 +349,11 @@ class DeepSeekV41Model(MultimodalModel):
         from torchtitan.models.common.moe import register_moe_load_balancing_hook
 
         register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
+        drafters = [part.drafter for part in model_parts if part.drafter is not None]
+        if drafters:
+            type(drafters[0])._register_optimizer_hooks(
+                optimizers, drafters, parallelism_context
+            )
         if any(part.config.vision is not None for part in model_parts):
             optimizers.register_step_pre_hook(
                 lambda *args, **kwargs: update_image_expert_bias(
@@ -488,7 +533,14 @@ class DeepSeekV41Model(MultimodalModel):
         grid_hw=None,
         vision_rope_cache=None,
         vision_bank_indices=None,
+        return_draft_context=False,
     ):
+        if return_draft_context and (
+            self.tok_embeddings is None or self.norm is None or self.drafter is None
+        ):
+            raise ValueError(
+                "Draft-context capture requires a complete model with DSpark enabled."
+            )
         if positions is None:
             positions = torch.arange(tokens.size(0), device=tokens.device)
         image_mask_T = None if token_types is None else token_types >= 0
@@ -553,6 +605,7 @@ class DeepSeekV41Model(MultimodalModel):
             if attention_metadata is None
             else attention_metadata.get(CSA2InnerAttention)
         )
+        draft_context = []
         for layer_id, layer in self.layers.items():
             if layer.engram is not None:
                 assert engram_hashes is not None
@@ -561,6 +614,12 @@ class DeepSeekV41Model(MultimodalModel):
                 ]
             else:
                 layer_hashes_TQ = None
+            if (
+                return_draft_context
+                and self.drafter is not None
+                and int(layer_id) in self.drafter.config.target_layer_ids
+            ):
+                draft_context.append(h_TCD.mean(-2))
             (
                 h_TCD,
                 pre_mix,
@@ -587,4 +646,28 @@ class DeepSeekV41Model(MultimodalModel):
             )
         hidden_TD = rms_norm(self.norm, mix_branches(h_TCD, pre_mix))
         output = hidden_TD if self._skip_lm_head else self.lm_head(hidden_TD)
-        return output
+        return (
+            (output, torch.cat(draft_context, -1)) if return_draft_context else output
+        )
+
+    def forward_draft(
+        self,
+        main_features_TF,
+        draft_embeddings_TD,
+        previous_tokens_BS,
+        anchors_B,
+        *,
+        main_positions_T,
+        output_weight_VD,
+    ):
+        """Train the drafter using explicitly supplied frozen backbone projections."""
+        if self.drafter is None:
+            raise ValueError("Enable num_draft_layers=3 to use DSpark.")
+        return self.drafter(
+            main_features_TF,
+            draft_embeddings_TD,
+            previous_tokens_BS,
+            anchors_B,
+            main_positions_T=main_positions_T,
+            output_weight_VD=output_weight_VD,
+        )

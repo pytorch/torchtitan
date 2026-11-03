@@ -36,6 +36,24 @@ class DeepSeekV41StateDictAdapter(MoEStateDictAdapter):
             self._add_layer(f"layers.{layer_id}", f"layers.{layer_id}", layer)
         if model_config.vision is not None:
             self._add_vision(model_config.vision)
+        if model_config.drafter is not None:
+            for index, layer in enumerate(model_config.drafter.layers):
+                hf, native = f"mtp.{index}", f"drafter.layers.{index}"
+                self._add_layer(hf, native, layer)
+                for name in ("main_proj", "main_norm", "norm"):
+                    if getattr(layer, name) is not None:
+                        self.from_hf_map[
+                            f"{hf}.{name}.weight"
+                        ] = f"{native}.{name}.weight"
+                if layer.markov_head is not None:
+                    for name in ("embed", "head"):
+                        self.from_hf_map[
+                            f"{hf}.markov_head.{name}.weight"
+                        ] = f"{native}.markov_head.{name}.weight"
+                if layer.confidence_head is not None:
+                    self.from_hf_map[
+                        f"{hf}.confidence_head.proj.weight"
+                    ] = f"{native}.confidence_head.proj.weight"
         if self.fqn_to_index_mapping is not None:
             self.fqn_to_index_mapping = {
                 key: index
@@ -148,10 +166,10 @@ class DeepSeekV41StateDictAdapter(MoEStateDictAdapter):
                 output[key] = value
         for key, value in state_dict.items():
             if self._is_expert_weight_key(key):
-                match = re.match(r"(layers)\.(\d+)\.(.*)", key)
+                match = re.match(r"(layers|drafter\.layers)\.(\d+)\.(.*)", key)
                 assert match is not None
                 root, layer_id, tail = match.groups()
-                hf_root = root
+                hf_root = "layers" if root == "layers" else "mtp"
                 projection = {
                     "feed_forward.routed_experts.w1_EFD": "w1",
                     "feed_forward.routed_experts.w2.weight": "w2",
@@ -207,10 +225,10 @@ class DeepSeekV41StateDictAdapter(MoEStateDictAdapter):
                 raise ValueError(f"Unmapped V4.1 HF checkpoint key: {key}")
             native = self.from_hf_map[key]
             if ".ffn.experts." in key:
-                match = re.match(r"(layers)\.(\d+)\.ffn\.experts\.(\d+)\.", key)
+                match = re.match(r"(layers|mtp)\.(\d+)\.ffn\.experts\.(\d+)\.", key)
                 assert match is not None
                 root, layer_id, expert_id = match.groups()
-                native_root = root
+                native_root = "layers" if root == "layers" else "drafter.layers"
                 abstract = native.replace(
                     f"{native_root}.{layer_id}.", f"{native_root}.{{}}.", 1
                 )

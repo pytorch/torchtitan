@@ -9,6 +9,20 @@ parameter gradients, gradient presence, and shared KV/index state.
 
 The vision comparison also checks the ViT encoder, padded unshuffle aligner,
 image marker replacement, image logits, and visual parameter gradients.
+For the image arithmetic check, each author's attention quantizer receives the
+same activation as the native quantizer. All 34 independent quantizer results
+must agree bitwise, and incoming arithmetic must pass FP32 tolerances. The raw
+independently rounded image-logit error is reported separately. In this fixture,
+a `1.49e-8` attention difference straddles an E4M3 midpoint and propagates to a
+raw maximum logit error of `1.594e-3`; the common-input comparison is `3.58e-7`.
+The text and drafter comparisons retain independent quantization decisions.
+
+The drafter reference checks a five-position next-token cross entropy plus a
+confidence BCE objective. It compares all 102 logical HF gradient tensors,
+including six zero gradients for routed experts skipped by the author's loop.
+The maximum gradient error is `1.49e-8`; both objective values are
+`8.35378646850586`. The debug backbone has eight experts and the drafter has four,
+exercising the released model's differing backbone and drafter expert counts.
 
 CPU feature tests cover quantization rounding and STE gradients, single-pass
 mHC, bounded SwiGLU, causal Engram boundaries, hierarchical index selection,
@@ -32,6 +46,14 @@ identical image-balancing biases across ranks. It then exports the distributed
 state to HF, restores every tensor exactly, loads it into the model, and checks
 identical logits. This is a connectivity and checkpoint test; it does not claim
 reconstructed multimodal-gradient parity.
+The same test then trains the drafter for ten steps with its own optimizer and
+routing hooks, checks reconstructed draft projection and confidence gradients,
+and verifies that every frozen backbone parameter remains exactly unchanged.
+Enabling drafter rematerialization within this same FSDP2 run preserves all ten
+full-precision losses and global gradient norms on both ranks bitwise. All 69
+reconstructed native drafter parameter gradients are bitwise identical at every
+step, with maximum absolute error zero. The CPU rematerialization test also
+holds two distinct context tensors live through backward to check their lifetime.
 
 Real two-rank FSDP training with default rematerialization has loss identical to
 the single-rank baseline and reconstructed parameter-gradient maximum error
