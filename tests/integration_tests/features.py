@@ -183,7 +183,8 @@ def llama3_debugmodel_sdc_replay_accelerator_graph() -> Trainer.Config:
     config.debug.deterministic = True
     config.debug.seed = 42
     config.training.steps = 3
-    config.sdc_replayer = SDCReplayer.Config()
+    # Warmup is 2 calls, so the 2nd re-run captures and the 3rd restores and replays.
+    config.sdc_replayer = SDCReplayer.Config(num_replays=3)
     return config
 
 

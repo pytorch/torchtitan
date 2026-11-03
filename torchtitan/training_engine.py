@@ -5,11 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from functools import partial
-from typing import Any, cast, NamedTuple, TYPE_CHECKING, TypeAlias
+from typing import Any, cast, NamedTuple, Protocol, TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
@@ -69,7 +68,14 @@ class ForwardBackwardResult(NamedTuple):
     microbatch. Under PP, they are empty on ranks without the last stage."""
 
 
-_ForwardBackwardFn: TypeAlias = Callable[[list[Any]], ForwardBackwardResult]
+class _ForwardBackwardFn(Protocol):
+    def __call__(
+        self,
+        microbatch_groups: list[Any],
+        *,
+        preprocess_microbatch_groups_lazily: bool,
+    ) -> ForwardBackwardResult:
+        """Run the groups; with ``preprocess_microbatch_groups_lazily`` they are raw microbatches."""
 
 
 class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Stateful):
@@ -194,12 +200,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                         "training.preprocess_microbatch_groups_lazily requires "
                         "training.disable_accelerator_graphs=True."
                     )
-                if self.sdc_replayer is not None:
-                    raise ValueError(
-                        "training.preprocess_microbatch_groups_lazily does not support SDC "
-                        "replay: replay reruns a checked step, which would preprocess its "
-                        "microbatches again."
-                    )
             num_tokens = self.training.num_tokens_per_microbatch_per_dp_rank
             sequence_parallel_degree = (
                 self.parallelism.tensor_parallel_degree
@@ -221,16 +221,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 if self.debug.deterministic_warn_only:
                     raise ValueError(
                         "SDC replay requires debug.deterministic_warn_only=False."
-                    )
-                if (
-                    not self.training.disable_accelerator_graphs
-                    and accelerator_graphs_supported()
-                    and self.sdc_replayer.num_replays > 1
-                ):
-                    raise ValueError(
-                        "SDC replay supports at most one replay when accelerator graphs "
-                        "are enabled: set sdc_replayer.num_replays=1 or "
-                        "training.disable_accelerator_graphs=True."
                     )
 
     config: Config
@@ -261,7 +251,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     device by ``optim_step``. A CPU zero before the first step."""
     _step_started: bool
     _forward_backward_captures_whole_step: bool
-    """SDC replay or a whole-step graph: one ``forward_backward`` call per optimizer step."""
+    """A whole-step graph: one ``forward_backward`` call per optimizer step."""
     device_memory_monitor: DeviceMemoryMonitor
     model_device_mem_stats: DeviceMemStats
     _run_forward_backward: _ForwardBackwardFn
@@ -531,8 +521,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 modules=self.model_parts,
                 device=self.device,
             )
-        # SDC replays a step from "no gradients"; the whole-step graph below sets it too.
-        self._forward_backward_captures_whole_step = self.sdc_replayer is not None
+        self._forward_backward_captures_whole_step = False
 
         if self.parallelism_context.pp_enabled:
             self._pp_loss_sentinel_on_non_last_stage = torch.full(
@@ -551,12 +540,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             and accelerator_graphs_supported()
         )
         if not self._forward_backward_accelerator_graph_enabled:
-            self._run_forward_backward = partial(
-                eager_forward_backward_fn,
-                preprocess_microbatch_groups_lazily=(
-                    self.config.training.preprocess_microbatch_groups_lazily
-                ),
-            )
             return
 
         def prepare_for_capture(microbatch_groups) -> None:
@@ -594,11 +577,16 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             # without duplicating the gradient accumulation logic.
             def run_forward_backward_groups(
                 microbatch_groups: list[tuple[Any, ...]],
+                *,
+                preprocess_microbatch_groups_lazily: bool,
             ) -> ForwardBackwardResult:
                 accumulated_loss: torch.Tensor | None = None
                 loss_metrics: list[list[dict[str, torch.Tensor]]] = []
                 for microbatch_group in microbatch_groups:
-                    result = graph_group_runner([microbatch_group])
+                    result = graph_group_runner(
+                        [microbatch_group],
+                        preprocess_microbatch_groups_lazily=preprocess_microbatch_groups_lazily,
+                    )
                     group_loss = result.loss.clone()
                     if accumulated_loss is None:
                         accumulated_loss = group_loss
@@ -656,8 +644,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             raise ValueError("microbatch_groups must not be empty.")
         if self._step_started and self._forward_backward_captures_whole_step:
             raise ValueError(
-                "SDC replay and whole-step graphs capture one forward_backward call per "
-                "optimizer step: call optim_step before the next forward_backward."
+                "Whole-step graphs capture one forward_backward call per optimizer step: "
+                "call optim_step before the next forward_backward."
             )
         if not self._step_started:
             self.garbage_collector.run(self.num_completed_steps + 1)
@@ -665,20 +653,32 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 set_to_none=not self._accelerator_graph_per_microbatch_group_enabled
             )
             self.local_loss_token_count = 0
-        if self.config.training.preprocess_microbatch_groups_lazily:
+        # A checked call runs several times, so it preprocesses its groups once, up front.
+        preprocess_lazily = (
+            self.config.training.preprocess_microbatch_groups_lazily
+            and not (
+                self.sdc_replayer is not None and self.sdc_replayer.checks_current_step
+            )
+        )
+        if preprocess_lazily:
             # _forward_backward_body preprocesses each group just before its forward/backward.
             step_inputs: list[Any] = microbatch_groups
         else:
             step_inputs = self._preprocess_microbatch_groups(microbatch_groups)
 
+        run_forward_backward = partial(
+            self._run_forward_backward,
+            step_inputs,
+            preprocess_microbatch_groups_lazily=preprocess_lazily,
+        )
         if self.sdc_replayer is not None:
             result = self.sdc_replayer.run_fwd_bwd(
-                partial(self._run_forward_backward, step_inputs),
+                run_forward_backward,
                 step=self.num_completed_steps + 1,
                 get_loss=lambda result: result.loss,
             )
         else:
-            result = self._run_forward_backward(step_inputs)
+            result = run_forward_backward()
 
         self.loss = self.loss + result.loss if self._step_started else result.loss
         self._step_started = True
@@ -914,6 +914,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self.loss,
             current_step=current_step,
         )
+        if self.sdc_replayer is not None:
+            self.sdc_replayer.step_completed()
         self.num_completed_steps = current_step
         self._step_started = False
         return grad_norm

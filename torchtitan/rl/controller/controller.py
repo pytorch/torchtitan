@@ -378,17 +378,16 @@ class Controller(Configurable):
                 )
             if self.async_loop.batcher.stream_microbatches:
                 training = self.trainer.training
-                # SDC replay and whole-step graphs capture one forward_backward call per step.
+                # Whole-step graphs capture one forward_backward call per step.
                 # Stricter than the engine: it also rejects graphs the model can't capture.
-                if self.trainer.sdc_replayer is not None or not (
+                if not (
                     training.disable_accelerator_graphs
                     or training.accelerator_graph_per_microbatch_group
                 ):
                     raise ValueError(
-                        "async_loop.batcher.stream_microbatches needs trainer.sdc_replayer=None "
-                        "and trainer.training.disable_accelerator_graphs=True or "
+                        "async_loop.batcher.stream_microbatches needs "
+                        "trainer.training.disable_accelerator_graphs=True or "
                         "trainer.training.accelerator_graph_per_microbatch_group=True, got "
-                        f"sdc_replayer set={self.trainer.sdc_replayer is not None}, "
                         f"disable_accelerator_graphs={training.disable_accelerator_graphs}, "
                         "accelerator_graph_per_microbatch_group="
                         f"{training.accelerator_graph_per_microbatch_group}."

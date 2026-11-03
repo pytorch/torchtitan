@@ -81,14 +81,15 @@ def test_lazy_preprocessing_config_restrictions() -> None:
         TrainingEngine.Config(
             training=TrainingConfig(preprocess_microbatch_groups_lazily=True)
         )
-    with pytest.raises(ValueError, match="does not support SDC replay"):
-        TrainingEngine.Config(
-            training=TrainingConfig(
-                preprocess_microbatch_groups_lazily=True,
-                disable_accelerator_graphs=True,
-            ),
-            sdc_replayer=SDCReplayer.Config(),
-        )
+    # A checked call preprocesses once, before its replays.
+    TrainingEngine.Config(
+        training=TrainingConfig(
+            preprocess_microbatch_groups_lazily=True,
+            disable_accelerator_graphs=True,
+        ),
+        sdc_replayer=SDCReplayer.Config(),
+        debug=DebugConfig(deterministic=True),
+    )
 
     TrainingEngine.Config(
         training=TrainingConfig(
@@ -168,16 +169,12 @@ def test_sdc_replay_requires_strict_determinism() -> None:
         TrainingEngine.Config.__post_init__(config)
 
 
-def test_sdc_replay_count_respects_accelerator_graph_support() -> None:
+def test_sdc_replay_allows_several_replays_with_accelerator_graphs() -> None:
     config = llama3_debugmodel()
     config.debug.deterministic = True
-    config.sdc_replayer = SDCReplayer.Config(num_replays=2)
+    config.sdc_replayer = SDCReplayer.Config(num_replays=3)
 
-    with _accelerator_graphs_supported(True), pytest.raises(
-        ValueError, match="at most one replay"
-    ):
-        TrainingEngine.Config.__post_init__(config)
-    with _accelerator_graphs_supported(False):
+    with _accelerator_graphs_supported(True):
         TrainingEngine.Config.__post_init__(config)
 
 

@@ -25,7 +25,7 @@ from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.observability.profiler import CuspyProfilerConfig, Profiler
-from torchtitan.observability.sdc_replayer import SDCReplayMismatch
+from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
@@ -634,12 +634,49 @@ def test_a_captured_step_takes_one_forward_backward_call(
         )
         assert events == ["preprocess 2"]
         return
-    # SDC replay and whole-step graphs see only one call's gradients.
+    # A whole-step graph sees only one call's gradients.
     with pytest.raises(ValueError, match="capture one forward_backward call"):
         TrainingEngine.forward_backward(
             engine, microbatch_groups=[[_microbatch(2.0, 4)]]
         )
     assert events == []
+
+
+@pytest.mark.parametrize("preprocess_lazily", [False, True])
+def test_sdc_replay_checks_each_streamed_call(preprocess_lazily: bool) -> None:
+    """Every call of a checked step is replayed; the second starts with the first's gradients."""
+    events: list[str] = []
+    engine, parameter, recorded_gradients = _streaming_engine(events)
+    engine.config.training.preprocess_microbatch_groups_lazily = preprocess_lazily
+    module = torch.nn.Module()
+    module.weight = parameter
+    engine.sdc_replayer = SDCReplayer(
+        SDCReplayer.Config(num_steps=1, num_replays=2),
+        modules=[module],
+        device=torch.device("cpu"),
+    )
+
+    TrainingEngine.forward_backward(
+        engine, microbatch_groups=[[_microbatch(1.0, 3)], [_microbatch(2.0, 4)]]
+    )
+    TrainingEngine.forward_backward(
+        engine, microbatch_groups=[[_microbatch(3.0, 5)], [_microbatch(4.0, 6)]]
+    )
+    TrainingEngine.optim_step(engine)
+
+    # Each microbatch is preprocessed once, though each call runs 3 times.
+    assert events == [
+        "gc 1",
+        "zero_grad",
+        "preprocess 1",
+        "preprocess 2",
+        "preprocess 3",
+        "preprocess 4",
+    ]
+    assert engine.local_loss_token_count == 18
+    # The same gradient as unchecked calls: 1 + 2 + 3 + 4, divided by 3 + 4 + 5 + 6.
+    torch.testing.assert_close(recorded_gradients, [torch.tensor([10.0 / 18])])
+    assert not engine.sdc_replayer.checks_current_step
 
 
 def test_accelerator_graph_wrapper_returns_graph_owned_output():
@@ -827,8 +864,13 @@ def test_training_engine_replays_one_accelerator_graph_per_microbatch_group() ->
     graph_loss = torch.tensor(0.0)
     graph_metric = torch.tensor(0.0)
 
-    def run_group(microbatch_groups: list[tuple[int]]) -> ForwardBackwardResult:
+    def run_group(
+        microbatch_groups: list[tuple[int]],
+        *,
+        preprocess_microbatch_groups_lazily: bool,
+    ) -> ForwardBackwardResult:
         assert len(microbatch_groups) == 1
+        assert not preprocess_microbatch_groups_lazily
         graph_loss.fill_(microbatch_groups[0][0])
         graph_metric.fill_(microbatch_groups[0][0])
         return ForwardBackwardResult(graph_loss, [[{"group": graph_metric}]])
@@ -868,7 +910,9 @@ def test_training_engine_replays_one_accelerator_graph_per_microbatch_group() ->
         ),
     ):
         TrainingEngine._initialize_forward_backward(engine)
-        result = engine._run_forward_backward([(1,), (2,), (3,)])
+        result = engine._run_forward_backward(
+            [(1,), (2,), (3,)], preprocess_microbatch_groups_lazily=False
+        )
 
     torch.testing.assert_close(result.loss, torch.tensor(6.0))
     assert [metrics["group"].item() for [metrics] in result.loss_metrics] == [
@@ -933,7 +977,7 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
     assert not engine._forward_backward_captures_whole_step
 
 
-def test_sdc_replay_takes_one_forward_backward_call_per_step() -> None:
+def test_sdc_replay_allows_several_forward_backward_calls_per_step() -> None:
     sdc_replayer = object()
     engine = cast(
         TrainingEngine,
@@ -958,9 +1002,9 @@ def test_sdc_replay_takes_one_forward_backward_call_per_step() -> None:
 
     TrainingEngine._initialize_forward_backward(engine)
 
-    # SDC replays the step from no gradients, so a second call per step raises.
+    # SDC checks each call, so a step may span several calls.
     assert engine.sdc_replayer is sdc_replayer
-    assert engine._forward_backward_captures_whole_step
+    assert not engine._forward_backward_captures_whole_step
 
 
 def test_graph_training_engine_rejects_optimizer_accelerator_graph() -> None:
@@ -1088,6 +1132,7 @@ def _optim_step_engine(
         maybe_wait_for_staging=lambda: events.append("checkpoint")
     )
     engine.optim = optim
+    engine.sdc_replayer = None
     return engine, parameter
 
 
@@ -1527,10 +1572,8 @@ def test_accelerator_graph_accumulation_supports_eager_gradient_reduction() -> N
 
 
 @pytest.mark.parametrize("configured_defer", [False, True])
-@pytest.mark.parametrize("lazily", [False, True])
 def test_initialize_forward_backward_uses_eager_fsdp_reduction_config(
     configured_defer: bool,
-    lazily: bool,
 ) -> None:
     forward_backward_body = MagicMock(
         return_value=ForwardBackwardResult(torch.tensor(1.0), [])
@@ -1543,7 +1586,6 @@ def test_initialize_forward_backward_uses_eager_fsdp_reduction_config(
                 training=SimpleNamespace(
                     accelerator_graph_per_microbatch_group=False,
                     disable_accelerator_graphs=True,
-                    preprocess_microbatch_groups_lazily=lazily,
                 ),
                 parallelism=SimpleNamespace(
                     fsdp_defer_gradient_reduction=configured_defer,
@@ -1559,15 +1601,11 @@ def test_initialize_forward_backward_uses_eager_fsdp_reduction_config(
     )
 
     TrainingEngine._initialize_forward_backward(engine)
-    engine._run_forward_backward([(), ()])
+    engine._run_forward_backward([(), ()], preprocess_microbatch_groups_lazily=False)
 
     assert (
         forward_backward_body.call_args.kwargs["defer_fsdp_gradient_reduction"]
         is configured_defer
-    )
-    assert (
-        forward_backward_body.call_args.kwargs["preprocess_microbatch_groups_lazily"]
-        is lazily
     )
 
 

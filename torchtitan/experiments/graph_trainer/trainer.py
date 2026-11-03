@@ -295,9 +295,12 @@ class GraphTrainingEngine(TrainingEngine):
         microbatch_groups: list[tuple[Any, ...]],
         *,
         defer_fsdp_gradient_reduction: bool,
+        preprocess_microbatch_groups_lazily: bool,
     ) -> ForwardBackwardResult:
         """Run microbatch groups through GraphRuntime."""
         assert not defer_fsdp_gradient_reduction
+        # Config.__post_init__ rejects lazy preprocessing.
+        assert not preprocess_microbatch_groups_lazily
         accumulated_loss: torch.Tensor | None = None
         loss_metrics: list[list[dict[str, torch.Tensor]]] = []
         for inputs, model_kwargs, labels in microbatch_groups:
@@ -361,6 +364,7 @@ class GraphTrainingEngine(TrainingEngine):
         microbatch_groups: list[tuple[Any, ...]],
         *,
         defer_fsdp_gradient_reduction: bool,
+        preprocess_microbatch_groups_lazily: bool,
     ) -> ForwardBackwardResult:
         """``_forward_backward_body`` under the paged stash runner.
 
@@ -380,6 +384,7 @@ class GraphTrainingEngine(TrainingEngine):
                 self._forward_backward_body,
                 microbatch_groups,
                 defer_fsdp_gradient_reduction=defer_fsdp_gradient_reduction,
+                preprocess_microbatch_groups_lazily=preprocess_microbatch_groups_lazily,
             )
         )
 
