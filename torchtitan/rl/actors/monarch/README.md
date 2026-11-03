@@ -5,10 +5,10 @@ This package runs the standalone RL services on
 implements the framework-agnostic `ActorSystem` (`rl/actors/system.py`), which
 the controller builds from `Controller.Config.actor_system` (default
 `MonarchActorSystem.Config()`) and spawns every service through. A launcher that
-allocates its own hosts builds `MonarchActorSystem` with `host_meshes` (and
-optionally `generator_env`) and passes it to `Controller.setup_async(actor_system=...)`.
-To get hosts from a cluster scheduler, use a launch recipe (see
-[Launchers](#launchers)).
+allocates its own hosts subclasses `Controller` and overrides
+`_build_actor_system` to build `MonarchActorSystem` with `host_meshes` (and
+optionally `generator_env`). To get hosts from a cluster scheduler, use a launch
+recipe (see [Launchers](#launchers)).
 
 Each adapter is a thin Monarch `Actor` subclass of a service with no Monarch
 dependency of its own: it declares the service's methods as
@@ -26,19 +26,21 @@ dependency of its own: it declares the service's methods as
 | `rollout_worker.py` | `RolloutWorkerActor`, a rollout worker in the controller-host CPU pool. |
 | `provisioning.py` | Proc meshes: the trainer and generator GPU meshes (`spawn_proc_mesh`, `PerHostProvisioner`), CPU procs on the controller host (`spawn_cpu_procs`), and the Monarch client's `shutdown`. |
 | `torch_elastic.py` | Sets the torch-elastic env vars (`RANK`, `MASTER_PORT`, ...) on a proc mesh before `init_process_group`; rank 0 keeps its rendezvous store port open so no other socket takes it. |
-| `launcher/` | Scheduler launchers: `MonarchLauncher`, `MonarchLaunchConfig` and the shared layout planner (`base.py`), `SlurmLauncher` (`slurm.py`), the submit command (`submit.py`), and the job's controller entry point (`job.py`). |
+| `launcher/` | Scheduler launchers: `MonarchLauncher`, `MonarchControllerWithLauncher` and the shared layout planner (`base.py`), `SlurmLauncher` (`slurm.py`), and the submit command (`submit.py`). |
 
 ## Launchers
 
 A launcher gets the job's hosts from a cluster scheduler. A launch recipe returns
-a `MonarchLaunchConfig`: an RL recipe plus the launcher that runs it on one
-cluster, built with `MonarchLaunchConfig.from_controller_config(config,
+a `MonarchControllerWithLauncher.Config`: an RL recipe plus the launcher that
+runs it on one cluster, built with
+`MonarchControllerWithLauncher.Config.from_controller_config(config,
 launcher=...)`. `Controller.Config` itself has no launcher settings. Submit the
 launch recipe with `python -m torchtitan.rl.actors.monarch.launcher.submit`,
-which takes the same arguments as `torchtitan.rl.train`; the job runs
-`python -m torchtitan.rl.actors.monarch.launcher.job` with them, which attaches
-to the job's hosts and passes them to `MonarchActorSystem` as `host_meshes`. Add
-`--dry-run` to print the planned nodes, roles and settings without submitting.
+which takes the same arguments as `torchtitan.rl.train`. The job runs
+`python -m torchtitan.rl.train` with them, which builds a
+`MonarchControllerWithLauncher`: it attaches to the job's hosts and passes them
+to `MonarchActorSystem` as `host_meshes`. Add `--dry-run` to print the planned
+nodes, roles and settings without submitting.
 To support another scheduler, subclass `MonarchLauncher` (`launcher/base.py`) in
 your own package.
 

@@ -109,6 +109,13 @@ class HostMeshes:
     gpus_per_node: int
 
 
+def generator_role_names(num_generators: int) -> list[str]:
+    """Generator mesh and actor names: ``generator``, or ``generator_<i>`` for several."""
+    if num_generators == 1:
+        return ["generator"]
+    return [f"generator_{i}" for i in range(num_generators)]
+
+
 def compute_trainer_world_size(p: ParallelismConfig) -> int:
     """Compute world size from all parallel dimensions."""
     dp_shard = max(p.data_parallel_shard_degree, 1)

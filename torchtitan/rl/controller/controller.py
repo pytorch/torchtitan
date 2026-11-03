@@ -562,8 +562,16 @@ class Controller(Configurable):
 
         return release_session
 
+    async def _build_actor_system(self) -> ActorSystem:
+        """Build the actor system ``setup_async`` spawns the services through.
+
+        Subclasses override it to build the actor system differently, e.g. on
+        hosts a launcher allocated (``MonarchControllerWithLauncher``).
+        """
+        return self.config.actor_system.build()
+
     @sl.log_trace_span("setup_async")
-    async def setup_async(self, *, actor_system: ActorSystem | None = None):
+    async def setup_async(self):
         """Spawn the services through the actor system and initialize weights.
 
         Kept separate from ``__init__`` because provisioning processes, spawning
@@ -574,11 +582,6 @@ class Controller(Configurable):
         Provisions and spawns the trainer, generators, router, batcher and rollout
         workers through the actor system, and synchronizes initial weights from
         trainer to generator. Must be called before :meth:`run`.
-
-        Args:
-            actor_system: An actor system the launcher built, e.g. a
-                ``MonarchActorSystem`` on hosts it allocated; None builds
-                ``config.actor_system``.
         """
         # Peak concurrent rollout sequences (groups * num_samples_per_prompt, or the validation pass); sizes max_num_seqs below.
         async_loop = self.config.async_loop
@@ -616,8 +619,7 @@ class Controller(Configurable):
         )
 
         with sl.log_trace_span("mesh_spawn"):
-            if actor_system is None:
-                actor_system = config.actor_system.build()
+            actor_system = await self._build_actor_system()
             self.actor_system = actor_system
             await actor_system.provision(
                 trainer_parallelism=config.trainer.parallelism,

@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from monarch.actor import HostMesh
 
 from torchtitan.rl.actors.monarch.launcher.base import (
-    JOB_MODULE,
     LaunchPlan,
     Layout,
     MonarchLauncher,
@@ -54,8 +53,8 @@ _RESERVED_SBATCH_FLAGS = {
 
 class SlurmLauncher(MonarchLauncher):
     """Runs the job as one Monarch ``SlurmJob`` in batch mode. The controller
-    (``python -m torchtitan.rl.actors.monarch.launcher.job``) runs as the batch
-    script on SLURM's head node, the first node of the allocation.
+    (``python -m torchtitan.rl.train``) runs as the batch script on SLURM's head
+    node, the first node of the allocation.
 
     SlurmLauncher copies nothing to the nodes; every node uses the submit host's
     paths. Each node runs ``python_exe`` by its full path (by default the Python
@@ -141,7 +140,7 @@ class SlurmLauncher(MonarchLauncher):
             bind_to=self.config.bind_to,
         )
         client_script = shlex.join(
-            [python_exe, "-m", JOB_MODULE, *plan.controller_args]
+            [python_exe, "-m", "torchtitan.rl.train", *plan.controller_args]
         )
         logger.info(f"Submitting {plan.job_name}: {client_script}")
         with contextlib.chdir(state_dir):

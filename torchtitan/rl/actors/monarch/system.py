@@ -19,10 +19,10 @@ from monarch.actor import ProcMesh
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.rl.actors.monarch.batcher import BatcherActor
 from torchtitan.rl.actors.monarch.generator import GeneratorActor
-from torchtitan.rl.actors.monarch.launcher.base import generator_role_names
 from torchtitan.rl.actors.monarch.provisioning import (
     compute_generator_world_size,
     compute_trainer_world_size,
+    generator_role_names,
     HostMeshes,
     shutdown,
     spawn_cpu_procs,
@@ -48,14 +48,16 @@ class MonarchActorSystem(ActorSystem):
 
     The trainer and each generator get their own GPU proc mesh: on this host,
     partitioned with ``CUDA_VISIBLE_DEVICES``, or on the ``host_meshes`` a
-    launcher passes in. ``generator_env`` adds environment variables to the
-    generator procs. The router, the batcher and the rollout worker pool get CPU
-    procs on this host.
+    launcher passes in (e.g. ``MonarchControllerWithLauncher`` in
+    ``launcher/base.py``, with the hosts of a submitted job). ``generator_env``
+    adds environment variables to the generator procs. The router, the batcher and
+    the rollout worker pool get CPU procs on this host.
 
-    Example:
-        # A launcher that allocates its own hosts (e.g. from a Slurm job)
-        actor_system = config.actor_system.build(host_meshes=host_meshes)
-        await config.build().setup_async(actor_system=actor_system)
+    Example: a ``Controller`` subclass that allocated its hosts as
+    ``self.host_meshes``::
+
+        async def _build_actor_system(self) -> MonarchActorSystem:
+            return self.config.actor_system.build(host_meshes=self.host_meshes)
     """
 
     @dataclass(kw_only=True, slots=True)

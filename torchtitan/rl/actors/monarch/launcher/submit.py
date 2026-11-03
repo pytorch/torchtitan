@@ -4,13 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Submit a launch recipe (a ``MonarchLaunchConfig``) to its launcher's scheduler.
+"""Submit a launch recipe (a ``MonarchControllerWithLauncher.Config``) to its
+launcher's scheduler.
 
     python -m torchtitan.rl.actors.monarch.launcher.submit [--dry-run] \
         --module MODULE --config CONFIG [other torchtitan.rl.train options]
 
-The job runs ``python -m torchtitan.rl.actors.monarch.launcher.job`` with the same
-arguments. ``--dry-run`` prints the plan without submitting.
+The job runs ``python -m torchtitan.rl.train`` with the same arguments, which
+builds a ``MonarchControllerWithLauncher`` on the job's hosts. ``--dry-run``
+prints the plan without submitting.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from torchtitan.config import ConfigLoader
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.actors.monarch.launcher.base import (
     LaunchPlan,
-    MonarchLaunchConfig,
+    MonarchControllerWithLauncher,
     MonarchLauncher,
 )
 
@@ -59,11 +61,12 @@ def main(argv: list[str] | None = None) -> str | None:
     init_logger()
     dry_run, controller_args = _split_args(argv)
     config = ConfigLoader().load(controller_args)
-    if not isinstance(config, MonarchLaunchConfig):
+    if not isinstance(config, MonarchControllerWithLauncher.Config):
         raise ValueError(
-            f"Expected a MonarchLaunchConfig, got {type(config).__qualname__}. Run a "
-            "plain RL recipe with python -m torchtitan.rl.train, or wrap it with "
-            "MonarchLaunchConfig.from_controller_config."
+            "Expected a MonarchControllerWithLauncher.Config, got "
+            f"{type(config).__qualname__}. Run a plain RL recipe with python -m "
+            "torchtitan.rl.train, or wrap it with "
+            "MonarchControllerWithLauncher.Config.from_controller_config."
         )
     # Plan from the config the job will run, including the launcher settings.
     config.resolve_overrides()
