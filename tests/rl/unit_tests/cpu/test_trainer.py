@@ -7,7 +7,7 @@
 import asyncio
 import threading
 from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch, sentinel
 
 import pytest
 
@@ -55,17 +55,36 @@ def test_rl_trainer_uses_training_engine_config_defaults() -> None:
     assert not Trainer.Config(model=MagicMock()).training.disable_accelerator_graphs
 
 
-def test_initialize_torchstore_client_uses_publisher_role() -> None:
+@pytest.mark.parametrize("address", [None, sentinel.address], ids=["none", "sentinel"])
+def test_initialize_torchstore_client_uses_publisher_role(address: object) -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
-        with patch(
-            "torchtitan.rl.trainer.trainer.ts.client", new_callable=AsyncMock
-        ) as client:
-            await trainer.initialize_torchstore_client()
+        with patch("torchtitan.rl.trainer.trainer.ts", autospec=True) as torchstore:
+            await trainer.initialize_torchstore_client(address=address)
 
-        client.assert_awaited_once_with(role=RankRole.PUBLISHER)
+        torchstore.client.assert_awaited_once_with(
+            role=RankRole.PUBLISHER, address=address
+        )
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "args, error",
+    [((), "address"), ((None,), "positional")],
+    ids=["missing", "positional"],
+)
+def test_initialize_torchstore_client_takes_the_address_by_keyword(
+    args: tuple[object, ...], error: str
+) -> None:
+    # A caller that misses the forward fails at once instead of falling back to
+    # Monarch's coordinator lookup, and so does one that passes it positionally. Awaiting
+    # the call as callers do catches a wrapper that binds the arguments only when awaited.
+    # TorchStore is patched so a regression fails on the missing TypeError instead.
+    trainer = object.__new__(Trainer)
+    with patch("torchtitan.rl.trainer.trainer.ts", autospec=True):
+        with pytest.raises(TypeError, match=error):
+            asyncio.run(trainer.initialize_torchstore_client(*args))  # type: ignore[call-arg]
 
 
 def test_push_model_state_dict_reuses_final_dtype_cpu_staging_buffers() -> None:

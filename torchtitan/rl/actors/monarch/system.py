@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, get_args, Literal, TypeAlias
 
 import torchstore as ts
 from monarch.actor import ProcMesh
@@ -41,6 +41,9 @@ from torchtitan.rl.trainer.trainer import Trainer
 
 logger = logging.getLogger(__name__)
 
+_TorchStoreControlPlane: TypeAlias = Literal["monarch", "service"]
+_TORCHSTORE_CONTROL_PLANES = get_args(_TorchStoreControlPlane)
+
 
 class MonarchActorSystem(ActorSystem):
     """Runs the RL services as Monarch actors on proc meshes.
@@ -59,7 +62,20 @@ class MonarchActorSystem(ActorSystem):
 
     @dataclass(kw_only=True, slots=True)
     class Config(ActorSystem.Config):
-        pass
+        torchstore_control_plane: _TorchStoreControlPlane = "monarch"
+        """Where ranks exchange TorchStore's routing metadata: "monarch" (an actor found by
+        name) or "service" (a coordinator service in this process that ranks reach by its
+        address). CI runs the RL loss guard on both, bit for bit."""
+
+        def __post_init__(self) -> None:
+            # build() copies the config through __init__. So this also rejects a value
+            # assigned after construction before the actor system is built.
+            if self.torchstore_control_plane not in _TORCHSTORE_CONTROL_PLANES:
+                raise ValueError(
+                    "torchstore_control_plane must be one of: "
+                    f"{list(_TORCHSTORE_CONTROL_PLANES)} "
+                    f"(got {self.torchstore_control_plane!r})"
+                )
 
     def __init__(
         self,
@@ -78,6 +94,8 @@ class MonarchActorSystem(ActorSystem):
         self._rollout_worker_mesh: ProcMesh | None = None
         self._trainer: Any | None = None
         self._generators: list[ServiceHandle] = []
+        # Set while a TorchStore service that initialize_torchstore started runs here.
+        self._torchstore_address: ts.ControlPlaneAddress | None = None
 
     async def provision(
         self,
@@ -190,28 +208,32 @@ class MonarchActorSystem(ActorSystem):
             await worker_mesh.stop()
 
     async def initialize_torchstore(self) -> None:
-        # StorageVolumes are spawned on the trainer mesh so they are colocated
-        # with the weight source for faster data access in the non-RDMA path.
-        # https://github.com/meta-pytorch/torchstore
-        await ts.initialize(
+        # TorchStore spawns its StorageVolumes on the trainer mesh, beside the weight
+        # source, for faster access in the non-RDMA path. With its in-process volume
+        # servers, "service" instead reads only the mesh's size and each trainer rank
+        # serves its own volume. https://github.com/meta-pytorch/torchstore
+        address = await ts.initialize(
             mesh=self._trainer_mesh,
             strategy=ts.TorchStoreStrategy(),
             client_type=ts.ClientType.ROUTING,
+            control_plane=self.config.torchstore_control_plane,
         )
+        self._torchstore_address = address
         # TorchStore clients are cached per process. Initialize every actor
         # rank before the role-less state-dict APIs use that cache.
         assert self._trainer is not None, "spawn the trainer first"
         await asyncio.gather(
-            self._trainer.initialize_torchstore_client.call(),
+            self._trainer.initialize_torchstore_client.call(address=address),
             *(
                 generator.all_ranks.initialize_torchstore_client.call(
-                    requester_index=requester_index
+                    requester_index=requester_index, address=address
                 )
                 for requester_index, generator in enumerate(self._generators)
             ),
         )
 
     async def stop(self) -> None:
+        # The rollouter stops its worker pool unless a cancelled close skipped that.
         meshes = [
             mesh
             for mesh in (
@@ -219,17 +241,39 @@ class MonarchActorSystem(ActorSystem):
                 self._batcher_mesh,
                 self._trainer_mesh,
                 *self._generator_meshes,
+                self._rollout_worker_mesh,
             )
             if mesh is not None
         ]
         self._router_mesh, self._batcher_mesh = None, None
         self._trainer_mesh, self._generator_meshes = None, []
+        self._rollout_worker_mesh = None
         self._trainer, self._generators = None, []
-        for i, mesh in enumerate(meshes):
-            try:
-                await mesh.stop()
-            except Exception:
-                logger.exception("mesh.stop[%d] failed", i)
+        cancelled: asyncio.CancelledError | None = None
+        try:
+            for i, mesh in enumerate(meshes):
+                try:
+                    await mesh.stop()
+                except asyncio.CancelledError as error:
+                    # The later meshes still stop, and a second cancel ends the stops.
+                    if cancelled is not None:
+                        raise
+                    cancelled = error
+                except Exception:
+                    logger.exception("mesh.stop[%d] failed", i)
+        finally:
+            # The service runs in this process and listens until shut down, even when a
+            # cancellation ends the mesh stops. Monarch's control plane returns no
+            # address and has no shutdown (ts.shutdown() raises on it). Its volumes stop
+            # with the trainer mesh and its coordinator, an actor here, at process exit.
+            address, self._torchstore_address = self._torchstore_address, None
+            if address is not None:
+                try:
+                    await ts.shutdown()
+                except Exception:
+                    logger.exception("ts.shutdown failed")
+        if cancelled is not None:
+            raise cancelled
 
     def shutdown(self) -> None:
         shutdown()

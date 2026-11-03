@@ -415,13 +415,16 @@ class Generator(Configurable):
         """
         self._engine_loop.release_sessions(session_ids)
 
-    async def initialize_torchstore_client(self, requester_index: int) -> None:
+    async def initialize_torchstore_client(
+        self, requester_index: int, *, address: ts.ControlPlaneAddress | None
+    ) -> None:
         """Initialize this process as a TorchStore routing requester.
 
         Args:
             requester_index: Index used to namespace this generator mesh.
+            address: What ``ts.initialize`` returned (None with the Monarch control plane).
         """
-        await ts.client(role=RankRole.REQUESTER, group=requester_index)
+        await ts.client(role=RankRole.REQUESTER, group=requester_index, address=address)
 
     @sl.log_trace_span("load_model_state_dict")
     async def load_model_state_dict(self, version: int) -> None:

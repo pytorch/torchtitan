@@ -881,6 +881,23 @@ def rl_grpo_fsdp2_gen_tp2_no_compile() -> Controller.Config:
     )
 
 
+def _on_torchstore_service(config: Controller.Config) -> Controller.Config:
+    # Copies the default Monarch actor system's config, which the controller's default
+    # imports, with TorchStore's service control plane.
+    config.actor_system = dataclasses.replace(
+        config.actor_system, torchstore_control_plane="service"
+    )
+    return config
+
+
+def rl_grpo_fsdp2_gen_tp2_no_compile_service() -> Controller.Config:
+    return _on_torchstore_service(rl_grpo_fsdp2_gen_tp2_no_compile())
+
+
+def rl_grpo_qwen3_0_6b_varlen_batch_invariant_service() -> Controller.Config:
+    return _on_torchstore_service(rl_grpo_qwen3_0_6b_varlen_batch_invariant())
+
+
 def rl_grpo_cp2_fsdp2_gen_tp2() -> Controller.Config:
     config = rl_grpo_qwen3_0_6b_varlen_no_compile(seq_len=1024)
     config.num_generators = 2

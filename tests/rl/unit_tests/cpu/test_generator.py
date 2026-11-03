@@ -24,7 +24,7 @@ import tempfile
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, patch, sentinel
 
 import pytest
 import torch
@@ -147,16 +147,36 @@ def _vllm_engine(*, reset_kv_cache_on_model_state_dict_load=False, model=None):
     return engine
 
 
-def test_initialize_torchstore_client_uses_requester_index():
+@pytest.mark.parametrize("address", [None, sentinel.address], ids=["none", "sentinel"])
+def test_initialize_torchstore_client_uses_requester_index(address):
     async def main():
         generator = Generator.__new__(Generator)
-        client = AsyncMock()
-        with patch.object(generator_module.ts, "client", client):
-            await generator.initialize_torchstore_client(requester_index=3)
+        with patch.object(generator_module, "ts", autospec=True) as torchstore:
+            await generator.initialize_torchstore_client(
+                requester_index=3, address=address
+            )
 
-        client.assert_awaited_once_with(role=RankRole.REQUESTER, group=3)
+        torchstore.client.assert_awaited_once_with(
+            role=RankRole.REQUESTER, group=3, address=address
+        )
 
     asyncio.run(main())
+
+
+@pytest.mark.parametrize(
+    "args, error",
+    [((3,), "address"), ((3, None), "positional")],
+    ids=["missing", "positional"],
+)
+def test_initialize_torchstore_client_takes_the_address_by_keyword(args, error):
+    # A caller that misses the forward fails at once instead of falling back to
+    # Monarch's coordinator lookup, and so does one that passes it positionally. Awaiting
+    # the call as callers do catches a wrapper that binds the arguments only when awaited.
+    # TorchStore is patched so a regression fails on the missing TypeError instead.
+    generator = Generator.__new__(Generator)
+    with patch.object(generator_module, "ts", autospec=True):
+        with pytest.raises(TypeError, match=error):
+            asyncio.run(generator.initialize_torchstore_client(*args))  # type: ignore[call-arg]
 
 
 def test_prefetch_model_state_dict_updates_staging_buffers_in_place():

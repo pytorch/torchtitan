@@ -8,12 +8,17 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from monarch.actor import Actor, Channel, concurrent_endpoint, context, current_rank
 
 from torchtitan.rl.generator.generator import Generator
 
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.rollout.types import Completion
+
+if TYPE_CHECKING:
+    import torchstore as ts
 
 
 class _GeneratorActorEndpoints:
@@ -36,8 +41,10 @@ class _GeneratorActorEndpoints:
         )
 
     @concurrent_endpoint
-    async def initialize_torchstore_client(self, requester_index: int) -> None:
-        await super().initialize_torchstore_client(requester_index)
+    async def initialize_torchstore_client(
+        self, requester_index: int, *, address: ts.ControlPlaneAddress | None
+    ) -> None:
+        await super().initialize_torchstore_client(requester_index, address=address)
 
     @concurrent_endpoint
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:

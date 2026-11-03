@@ -465,45 +465,59 @@ class Controller(Configurable):
         )
 
     async def close(self):
-        """Best-effort: tear down actors, close metric backends, then stop the actor system."""
+        """Best-effort: tear down actors, stop the actor system, then close metric backends.
+
+        The stop has no bound. A first cancel in it ends close's wait for one mesh stop, which
+        runs on, and a second ends the stops. asyncio.wait_for on Python 3.11 cancels close once.
+        """
         logger.info("Closing: tearing down actors and process meshes.")
 
-        if self.trainer is not None:
-            try:
-                await self.trainer.all_ranks.close.call()
-            except Exception:
-                logger.exception("trainer.close failed")
-
+        # A dead rank fails its call, and a hung one holds close until a cancel ends that
+        # call. train.py runs close under asyncio.run, which makes only the run's first
+        # SIGINT (Ctrl-C or Monarch's fault hook) a cancel. A later one raises
+        # KeyboardInterrupt and can leave meshes, the service or metric backends running.
         try:
-            await self._rollouter.close()
-        except Exception:
-            logger.exception("rollouter.close failed")
+            if self.trainer is not None:
+                try:
+                    await self.trainer.all_ranks.close.call()
+                except Exception:
+                    logger.exception("trainer.close failed")
 
-        if self.generator_router is not None:
             try:
-                close_results = await self.generator_router.close_generators.call_one()
-                for idx, result in enumerate(close_results):
-                    if isinstance(result, BaseException):
-                        actor_name = (
-                            "generator"
-                            if len(close_results) == 1
-                            else f"generator[{idx}]"
-                        )
-                        logger.error(
-                            "%s.close failed",
-                            actor_name,
-                            exc_info=(type(result), result, result.__traceback__),
-                        )
+                await self._rollouter.close()
             except Exception:
-                logger.exception("generator_router.close_generators failed")
+                logger.exception("rollouter.close failed")
 
-        try:
-            self.metrics_processor.close()
-        except Exception:
-            logger.exception("metrics_processor close failed")
-
-        if self.actor_system is not None:
-            await self.actor_system.stop()
+            if self.generator_router is not None:
+                try:
+                    close_results = (
+                        await self.generator_router.close_generators.call_one()
+                    )
+                    for idx, result in enumerate(close_results):
+                        if isinstance(result, BaseException):
+                            actor_name = (
+                                "generator"
+                                if len(close_results) == 1
+                                else f"generator[{idx}]"
+                            )
+                            logger.error(
+                                "%s.close failed",
+                                actor_name,
+                                exc_info=(type(result), result, result.__traceback__),
+                            )
+                except Exception:
+                    logger.exception("generator_router.close_generators failed")
+        finally:
+            try:
+                if self.actor_system is not None:
+                    await self.actor_system.stop()
+            finally:
+                # After the stop: a cancel requested while a slow backend such as W&B
+                # finishes would otherwise end close's wait for the first mesh stop.
+                try:
+                    self.metrics_processor.close()
+                except Exception:
+                    logger.exception("metrics_processor close failed")
 
     def _get_rank_0_value(self, result):
         """Extract rank 0 result from a Monarch ValueMesh.
