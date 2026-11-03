@@ -8,6 +8,7 @@
 CPU meshes on the controller host, and the Monarch client's shutdown."""
 
 import logging
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -68,7 +69,7 @@ def _bootstrap_generator() -> None:
 
 
 class PerHostProvisioner:
-    """Allocates non-overlapping GPU ranges within a single host.
+    """Allocates non-overlapping GPUs within a single host.
 
     On the same host, the trainer and generator run on separate GPU
     meshes (e.g. GPUs 0-3 for training, GPUs 4-7 for generation). Each
@@ -77,8 +78,11 @@ class PerHostProvisioner:
     returned env vars are applied to the spawned process via ``bootstrap_command``.
     """
 
-    def __init__(self, total_gpus: int = 8):
+    def __init__(self, total_gpus: int = 8, *, gpu_ids: list[str] | None = None):
         self.total_gpus = total_gpus
+        self.gpu_ids = (
+            [str(gpu_id) for gpu_id in range(total_gpus)] if gpu_ids is None else gpu_ids
+        )
         self.next_gpu = 0
 
     @property
@@ -93,13 +97,32 @@ class PerHostProvisioner:
                 f"Requested {num_gpus} GPUs but only {self.available} "
                 f"available (total={self.total_gpus}, allocated={self.next_gpu})"
             )
-        gpu_ids = list(range(self.next_gpu, self.next_gpu + num_gpus))
+        gpu_ids = self.gpu_ids[self.next_gpu : self.next_gpu + num_gpus]
         self.next_gpu += num_gpus
 
-        env = {"CUDA_VISIBLE_DEVICES": ",".join(str(g) for g in gpu_ids)}
+        env = {"CUDA_VISIBLE_DEVICES": ",".join(gpu_ids)}
         if extra_env:
             env.update(extra_env)
         return env
+
+
+def _local_gpu_ids(total_gpus: int) -> list[str] | None:
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible_devices is None:
+        return None
+
+    gpu_ids = [gpu_id.strip() for gpu_id in visible_devices.split(",")]
+    if not all(gpu_ids) or len(set(gpu_ids)) != len(gpu_ids):
+        raise ValueError(
+            "CUDA_VISIBLE_DEVICES must contain distinct, nonempty GPU IDs; "
+            f"got {visible_devices!r}"
+        )
+    if len(gpu_ids) < total_gpus:
+        raise ValueError(
+            f"CUDA_VISIBLE_DEVICES lists {len(gpu_ids)} GPUs, but the trainer "
+            f"and generators need {total_gpus}: {visible_devices!r}"
+        )
+    return gpu_ids[:total_gpus]
 
 
 @dataclass
@@ -264,10 +287,11 @@ def spawn_proc_mesh(
             for gen_host_mesh in generator_host_meshes
         ]
     else:
-        # Single-node mode: partition GPUs on this_host() via
-        # CUDA_VISIBLE_DEVICES
+        # Single-node mode: partition the controller's visible GPUs between roles.
         host_mesh = this_host()
-        provisioner = PerHostProvisioner(total_gpus=total_gpus)
+        provisioner = PerHostProvisioner(
+            total_gpus=total_gpus, gpu_ids=_local_gpu_ids(total_gpus)
+        )
         trainer_mesh = host_mesh.spawn_procs(
             per_host={"gpus": trainer_world_size},
             bootstrap=_preimport_torch,
