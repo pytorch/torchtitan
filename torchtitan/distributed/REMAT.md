@@ -276,9 +276,9 @@ selection), while token-count accumulation and quantile-histogram
 observation explicitly ignore checkpoint replay. Both reuse the routing map
 built for dispatch and auxiliary loss. Kimi K2.7 QK-clipping statistics also
 ignore replay. Auxiliary-loss accumulation uses an always-retained region.
-With `moe_router_topk` on, `routing_decision` is a plain call inside the
-compiled region, so recompute replays selection too; selection is
-deterministic and updates no state.
+Replay picks the same experts only if the recomputed router input and gate
+GEMM are bitwise equal to the original forward's;
+`test_router_grads_match_without_remat_with_topk_region` guards this.
 
 The currently supported transformer blocks do not advance RNG state
 inside their forwards, so they do not require a `RecomputeStateHook`. Any future
