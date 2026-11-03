@@ -71,8 +71,9 @@ def _get_default_save_ops() -> set:
     """Return the operator save set used by graph-trainer SAC policies.
 
     Copied from the former operator-level ``SelectiveAC`` policy in
-    ``torchtitan/distributed/activation_checkpoint.py``, which now uses
-    torch_remat regions instead of an operator save set.
+    ``torchtitan/distributed/activation_checkpoint.py`` (now
+    ``activation_remat.py``), which uses torch_remat regions instead of an
+    operator save set.
     """
     compute_ops = [
         torch.ops.aten._scaled_dot_product_cudnn_attention.default,
@@ -361,7 +362,7 @@ def tag_sac_policy(
             node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
             continue
 
-        # NOTE: The eager SAC policy (activation_checkpoint.py) alternates
+        # NOTE: The former eager SAC policy alternated
         # mm ops between MUST_SAVE and PREFER_RECOMPUTE. We omit that here
         # because the alternating heuristic is arbitrary.
         node.meta["recompute"] = policy_fn(node)

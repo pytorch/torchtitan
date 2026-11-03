@@ -68,7 +68,7 @@ class TestFluxDataLoader(unittest.TestCase):
                 return torch.ones(tokens.shape[0], *self.output_shape)
 
         model = object.__new__(FluxModel)
-        inputs, target, model_kwargs = model.preprocess_inputs(
+        inputs, target, model_kwargs, _ = model.preprocess_inputs(
             {
                 "labels": torch.ones(2, 3, 16, 16),
                 "clip": torch.ones(2, 1, 4, dtype=torch.int64),

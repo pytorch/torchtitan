@@ -20,13 +20,16 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.distributed.activation_checkpoint import RegionAC, SelectiveAC
+from torchtitan.distributed.activation_remat import (
+    ActivationRematConfig,
+    DefaultActivationRematConfig,
+)
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.activation import SwiGLU
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.token_dispatcher import (
+from torchtitan.models.common.moe.token_dispatcher import (
     AllToAllTokenDispatcher,
     TorchAOTokenDispatcher,
 )
@@ -86,14 +89,14 @@ class _AllToAllBlock(Module):
             device=x_TD.device,
             dtype=x_TD.dtype,
         )
-        num_tokens_per_expert_E = torch.bincount(
-            expert_ids_TK.flatten(), minlength=self.num_experts
-        )
+        routing_map_TE = torch.zeros(
+            num_tokens, self.num_experts, dtype=torch.bool, device=x_TD.device
+        ).scatter_(1, expert_ids_TK, True)
         out_TD = self.routed_experts(
             x_TD,
             routing_scores_TK,
             expert_ids_TK,
-            num_tokens_per_expert_E,
+            routing_map_TE,
         )
         # The sum is a bare consumer of the routed-expert output.
         remat.recompute_needs_tensor(out_TD)
@@ -153,17 +156,17 @@ class TestAllToAllRematRegions(DTensorTestBase):
         )
 
         # dispatch holds the count exchange, its device-to-host sync, and the
-        # dispatch all-to-all; combine holds the combine all-to-all. SelectiveAC
-        # recomputes the routed-expert projections but must retain both
+        # dispatch all-to-all; combine holds the combine all-to-all. The default
+        # policy recomputes the routed-expert projections but must retain both
         # dispatcher regions under the same routed_experts prefix.
         dispatch = "routed_experts.token_dispatcher.dispatch"
         combine = "routed_experts.token_dispatcher.combine"
         for policy_config, expected_replay_collectives, expected_replay_syncs in (
-            (RegionAC.Config(save_regions=[]), 3, 1),
-            (RegionAC.Config(save_regions=[dispatch]), 1, 0),
-            (RegionAC.Config(save_regions=[combine]), 2, 1),
-            (RegionAC.Config(save_regions=[dispatch, combine]), 0, 0),
-            (SelectiveAC.Config(), 0, 0),
+            (ActivationRematConfig(save_regions=[]), 3, 1),
+            (ActivationRematConfig(save_regions=[dispatch]), 1, 0),
+            (ActivationRematConfig(save_regions=[combine]), 2, 1),
+            (ActivationRematConfig(save_regions=[dispatch, combine]), 0, 0),
+            (DefaultActivationRematConfig(), 0, 0),
         ):
             with (
                 self.subTest(policy_config=policy_config),
@@ -176,7 +179,7 @@ class TestAllToAllRematRegions(DTensorTestBase):
                     self.device_type
                 )
                 remat_model.load_state_dict(baseline.state_dict())
-                policy_config.build().apply(remat_model)
+                policy_config.apply(remat_model)
 
                 num_collectives = 0
                 num_syncs = 0
@@ -245,12 +248,12 @@ class TestAllToAllRematRegions(DTensorTestBase):
                 self.device_type, torch.bfloat16
             )
             remat_model.load_state_dict(baseline.state_dict())
-            RegionAC.Config(
+            ActivationRematConfig(
                 save_regions=[
                     "routed_experts.w2.grouped_mm",
                     "routed_experts.token_dispatcher.combine",
                 ]
-            ).build().apply(remat_model)
+            ).apply(remat_model)
             w2 = remat_model.layers["0"].routed_experts.w2
             w2_output_refs = []
             original_forward = GroupedLinear.forward
@@ -302,7 +305,7 @@ class TestAllToAllRematRegions(DTensorTestBase):
             model = _Model(_AllToAllBlock(self.world_size, dispatcher_config))
             model = model.to(self.device_type)
             if save_regions is not None:
-                RegionAC.Config(save_regions=save_regions).build().apply(model)
+                ActivationRematConfig(save_regions=save_regions).apply(model)
             return model
 
         padded_config = TorchAOTokenDispatcher.Config(

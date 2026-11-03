@@ -12,7 +12,7 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchtitan.models.common.linear as linear_module
+import torchtitan.models.common.linear.linear as linear_module
 import torchtitan.models.common.vision_encoder as vision_encoder_module
 from spmd_types.checker import typecheck
 from torch.distributed.device_mesh import init_device_mesh

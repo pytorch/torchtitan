@@ -11,7 +11,7 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 from tokenizers import AddedToken, Tokenizer
 from torchtitan.config import Configurable
@@ -287,7 +287,7 @@ class HuggingFaceTokenizer(BaseTokenizer):
         self, token_str: str, token_config: dict, token_id: int | None = None
     ) -> AddedToken:
         """
-        Process a special token and update BOS/EOS attributes if applicable.
+        Process a configured added token and update BOS/EOS attributes if applicable.
 
         Args:
             token_str: The token string content
@@ -343,12 +343,12 @@ class HuggingFaceTokenizer(BaseTokenizer):
 
     def _infer_special_tokens(self):
         """
-        Read special tokens from config and add them to the underlying tokenizer.
+        Read configured tokens and preserve their special-token flags.
         Store BOS/EOS tokens as class attributes since they are frequently used.
 
         This method handles multiple token configuration formats:
         1. Standard top-level keys (bos_token, eos_token, etc.)
-        2. added_tokens_decoder dictionary (used by models like Llama 3.1)
+        2. added_tokens_decoder dictionary (including non-special added tokens)
         """
         standard_keys = [
             "bos_token",
@@ -386,9 +386,10 @@ class HuggingFaceTokenizer(BaseTokenizer):
                 )
                 added_tokens_to_add.append(added_token)
 
-        # Update the underlying tokenizer with special tokens
+        # add_tokens keeps each AddedToken.special flag; add_special_tokens would
+        # set special=True on all of them.
         if added_tokens_to_add:
-            self.tokenizer.add_special_tokens(added_tokens_to_add)
+            self.tokenizer.add_tokens(added_tokens_to_add)
 
             # Update BOS/EOS token IDs after adding to tokenizer (in case they changed)
             if self.bos_token:
@@ -543,9 +544,20 @@ class MultiModalTokenizer(HuggingFaceTokenizer):
         """Token string for padding."""
 
     # Config field prefixes that are validated and exposed as token and ID attributes.
-    TOKEN_FIELDS = ("image", "video", "vision_start", "vision_end", "pad")
+    TOKEN_FIELDS: ClassVar[tuple[str, ...]] = (
+        "image",
+        "video",
+        "vision_start",
+        "vision_end",
+        "pad",
+    )
     # TOKEN_FIELDS subset whose occurrences as label targets do not contribute loss.
-    LOSS_MASK_TOKEN_FIELDS = ("image", "video", "vision_start", "vision_end")
+    LOSS_MASK_TOKEN_FIELDS: ClassVar[tuple[str, ...]] = (
+        "image",
+        "video",
+        "vision_start",
+        "vision_end",
+    )
 
     def __init__(self, config: Config, *, tokenizer_path: str):
         super().__init__(config, tokenizer_path=tokenizer_path)

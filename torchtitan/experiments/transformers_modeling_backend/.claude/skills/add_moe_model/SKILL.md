@@ -414,7 +414,7 @@ Numerical gap analysis for <model_name>
 
 6. **Revert ALL patches** — restore all core files:
    ```bash
-   git checkout torchtitan/models/common/token_dispatcher.py torchtitan/models/common/moe.py
+   git checkout torchtitan/models/common/moe/token_dispatcher.py torchtitan/models/common/moe/moe.py
    ```
    Verify with `git diff` that the revert is clean. The temporary patches
    are NOT part of the commit.
@@ -423,8 +423,8 @@ Numerical gap analysis for <model_name>
 
 Do NOT copy-paste patches from this document — the titan core code may
 have changed since these were written. Instead, read the current code in
-`torchtitan/models/common/token_dispatcher.py` and
-`torchtitan/models/common/moe.py`, understand the principle behind each
+`torchtitan/models/common/moe/token_dispatcher.py` and
+`torchtitan/models/common/moe/moe.py`, understand the principle behind each
 fix, and write a patch that applies cleanly to the current code.
 
 The three known differences and how to fix them:

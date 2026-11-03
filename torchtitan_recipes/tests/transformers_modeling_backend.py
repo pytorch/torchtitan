@@ -23,7 +23,7 @@ from torchtitan.components.optim import (
 )
 from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import SelectiveAC
+from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.distributed.context_parallel import PTRRFlexAttentionCPLoadBalancer
 from torchtitan.experiments.transformers_modeling_backend import build_model_config
 from torchtitan.experiments.transformers_modeling_backend.tokenizer import (
@@ -77,7 +77,7 @@ def transformers_modeling_backend_debugmodel(
             pipeline_parallel_schedule="1F1B",
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 
@@ -135,7 +135,7 @@ def transformers_modeling_backend_debugmodel_moe(
             pipeline_parallel_schedule="1F1B",
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 
@@ -199,7 +199,7 @@ def transformers_modeling_backend_sft_debugmodel(
             pipeline_parallel_schedule="1F1B",
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 
@@ -212,7 +212,7 @@ def transformers_backend_moe_fsdp_tp_ep_cp() -> Trainer.Config:
     config.parallelism.context_parallel_load_balancer = (
         PTRRFlexAttentionCPLoadBalancer.Config()
     )
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     config.training.steps = 2
     return config
 
@@ -225,7 +225,7 @@ def transformers_backend_dense_fsdp_tp_pp() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 2
     config.parallelism.pipeline_parallel_schedule = "1F1B"
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     config.training.steps = 2
     return config
 
@@ -241,7 +241,7 @@ def transformers_backend_dense_cp_pp() -> Trainer.Config:
         PTRRFlexAttentionCPLoadBalancer.Config()
     )
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     config.training.steps = 2
     return config
 

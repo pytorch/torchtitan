@@ -19,15 +19,15 @@ from torchtitan.distributed.spmd_types import (
     spmd_mesh_group,
     spmd_sparse_mesh,
 )
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import Linear
 
 
-class SigmoidGatedFeedForward(FeedForward):
+class SigmoidGatedFeedForward(DenseFeedForward):
     """Qwen3.5 shared FFN with a per-token sigmoid output gate."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(FeedForward.Config):
+    class Config(DenseFeedForward.Config):
         gate: Linear.Config
 
     def __init__(self, config: Config):

@@ -11,7 +11,9 @@ import tempfile
 import unittest
 
 from scripts.download_hf_assets import download_hf_assets
-from tokenizers import Tokenizer
+from tokenizers import AddedToken, Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import WhitespaceSplit
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
@@ -114,6 +116,44 @@ class TestTokenizerIntegration(unittest.TestCase):
             encoded = tok.encode("hello", add_bos=True, add_eos=True)
             self.assertEqual(encoded[0], tok.bos_id)
             self.assertEqual(encoded[-1], tok.eos_id)
+
+    def test_non_special_added_tokens_survive_decoding(self):
+        """Loading token metadata must not make ordinary added tokens special."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            backend = Tokenizer(
+                WordLevel({"[UNK]": 0, "hello": 1, "world": 2}, unk_token="[UNK]")
+            )
+            backend.pre_tokenizer = WhitespaceSplit()
+            backend.add_tokens([AddedToken("<domain>", special=False)])
+            backend.add_special_tokens([AddedToken("<eos>", special=True)])
+            backend.save(os.path.join(tmpdir, "tokenizer.json"))
+            with open(os.path.join(tmpdir, "tokenizer_config.json"), "w") as f:
+                json.dump(
+                    {
+                        "eos_token": "<eos>",
+                        "added_tokens_decoder": {
+                            str(backend.token_to_id(token)): {
+                                "content": token,
+                                "special": special,
+                            }
+                            for token, special in (
+                                ("<domain>", False),
+                                ("<eos>", True),
+                            )
+                        },
+                    },
+                    f,
+                )
+
+            tok = HuggingFaceTokenizer(tokenizer_path=tmpdir)
+            text = "hello <domain> world <eos>"
+            token_ids = backend.encode(text).ids
+            self.assertEqual(tok.encode(text, add_eos=False), token_ids)
+            self.assertEqual(tok.decode(token_ids), "hello <domain> world")
+            self.assertEqual(tok.decode(token_ids, skip_special_tokens=False), text)
+            added_tokens = tok.tokenizer.get_added_tokens_decoder()
+            self.assertFalse(added_tokens[tok.token_to_id("<domain>")].special)
+            self.assertTrue(added_tokens[tok.eos_id].special)
 
     def _compare_tokenizers(self, our_tokenizer, reference_tokenizer, test_repo_id):
         """
@@ -535,6 +575,36 @@ class TestHuggingFaceChatTemplateAutoLoad(unittest.TestCase):
             result = tok.apply_chat_template(SAMPLE_MESSAGES)
             # Should use the .jinja file (just outputs content), not the inline ChatML
             self.assertEqual(result, "Hello")
+
+    def test_hf_backend_renders_generation_tags(self):
+        """HF {% generation %} tags (e.g. SmolLM3-3B) render as if they were absent."""
+        from torchtitan.experiments.transformers_modeling_backend.tokenizer import (
+            HFBackendTokenizer,
+        )
+
+        def render(template):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                shutil.copytree(ASSETS_TOKENIZER, tmpdir, dirs_exist_ok=True)
+                with open(os.path.join(tmpdir, "chat_template.jinja"), "w") as f:
+                    f.write(template)
+                tok = HFBackendTokenizer(tokenizer_path=tmpdir)
+            return tok.apply_chat_template(SAMPLE_MESSAGES, add_generation_prompt=False)
+
+        tagged = (
+            "{% for msg in messages %}<|im_start|>{{ msg.role }}\n"
+            "{% if msg.role == 'assistant' %}"
+            "{%- generation %}{{ msg.content }}<|im_end|>\n{% endgeneration %}"
+            "{% else %}{{ msg.content }}<|im_end|>\n{% endif %}"
+            "{% endfor %}"
+        )
+        untagged = tagged.replace("{%- generation %}", "")
+        untagged = untagged.replace("{% endgeneration %}", "")
+        expected = (
+            "<|im_start|>user\nHello<|im_end|>\n"
+            "<|im_start|>assistant\nHi there<|im_end|>\n"
+        )
+        self.assertEqual(render(tagged), expected)
+        self.assertEqual(render(untagged), expected)
 
 
 instantiate_parametrized_tests(TestTokenizerIntegration)

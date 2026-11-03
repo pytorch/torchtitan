@@ -13,9 +13,81 @@ import torch.nn.functional as F
 from torchtitan.config import ParallelismConfig
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.muse_glimmer import build_model_config
+from torchtitan.models.muse_glimmer.state_dict_adapter import (
+    MuseGlimmerStateDictAdapter,
+)
+
+
+def cpu_flex_attention(q, k, v, **kwargs):
+    """Evaluate the FlexAttention block mask with CPU SDPA."""
+    indices = torch.arange(q.shape[-2], device=q.device)
+    mask = kwargs["block_mask"].mask_mod(
+        torch.tensor(0, device=q.device),
+        torch.tensor(0, device=q.device),
+        indices[:, None],
+        indices[None, :],
+    )
+    return (
+        F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=mask,
+            scale=kwargs["scale"],
+            enable_gqa=kwargs["enable_gqa"],
+        ),
+        SimpleNamespace(),
+    )
 
 
 class TestMuseGlimmerConditionalVision(unittest.TestCase):
+    def test_image_grid_rejects_mismatched_patch_count(self):
+        model = build_model_config(
+            "debugmodel_mm", seq_len=8, parallelism=ParallelismConfig()
+        ).build()
+        model.init_states()
+        assert model.vision_encoder is not None
+        for num_patches in (3, 5):
+            with self.subTest(num_patches=num_patches):
+                pixels = torch.randn(
+                    num_patches, model.vision_encoder.conv1_linear.in_features
+                )
+                with self.assertRaisesRegex(ValueError, "describes 4 patches"):
+                    model._get_vision_features(pixels, torch.tensor([[1, 2, 2]]))
+
+    def test_direct_forward_rejects_temporal_image_grid(self):
+        model = build_model_config(
+            "debugmodel_mm", seq_len=8, parallelism=ParallelismConfig()
+        ).build()
+        model.init_states()
+        assert model.vision_encoder is not None
+        pixels = torch.randn(8, model.vision_encoder.conv1_linear.in_features)
+        with self.assertRaisesRegex(ValueError, "grid_thw"):
+            model(
+                torch.zeros(4, dtype=torch.long),
+                pixel_values=pixels,
+                grid_thw=torch.tensor([[2, 2, 2]]),
+                vision_bank_indices_T=torch.zeros(4, dtype=torch.long),
+            )
+
+    def test_image_features_forward_and_backward(self):
+        model = build_model_config(
+            "debugmodel_mm", seq_len=8, parallelism=ParallelismConfig()
+        ).build()
+        model.init_states()
+        assert model.vision_encoder is not None
+        pixels = torch.randn(
+            4, model.vision_encoder.conv1_linear.in_features, requires_grad=True
+        )
+        grid = torch.tensor([[1, 2, 2]])
+        with patch.object(FlexInnerAttention, "compiled_flex_attn", cpu_flex_attention):
+            features = model._get_vision_features(pixels, grid)
+            features.sum().backward()
+        self.assertEqual(features.shape, (1, model.config.dim))
+        self.assertTrue(torch.isfinite(features).all())
+        self.assertIsNotNone(pixels.grad)
+        self.assertTrue(torch.isfinite(pixels.grad).all())
+
     def test_built_config_shards_owned_vision_modules(self):
         config = build_model_config(
             "debugmodel_mm",
@@ -30,23 +102,11 @@ class TestMuseGlimmerConditionalVision(unittest.TestCase):
         assert config.vision_adapter is not None
 
         self.assertIsNotNone(config.vision_encoder.sharding_config)
-        self.assertIsNotNone(config.vision_encoder.conv1.sharding_config)
+        self.assertIsNotNone(config.vision_encoder.conv1_linear.sharding_config)
         self.assertIsNotNone(config.vision_encoder.block.attn.wq.sharding_config)
         self.assertIsNotNone(config.vision_adapter.c_fc.sharding_config)
 
     def test_image_free_path_gives_all_vision_parameters_zero_gradients(self):
-        def cpu_flex_attention(q, k, v, **kwargs):
-            return (
-                F.scaled_dot_product_attention(
-                    q,
-                    k,
-                    v,
-                    scale=kwargs["scale"],
-                    enable_gqa=kwargs["enable_gqa"],
-                ),
-                SimpleNamespace(),
-            )
-
         model = build_model_config(
             "debugmodel_mm", seq_len=8, parallelism=ParallelismConfig()
         ).build()
@@ -54,6 +114,7 @@ class TestMuseGlimmerConditionalVision(unittest.TestCase):
         hidden_TD = torch.randn(4, model.config.dim, requires_grad=True)
         encoder_outputs = []
         assert model.vision_encoder is not None
+        assert model.vision_adapter is not None
         with patch.object(
             FlexInnerAttention,
             "compiled_flex_attn",
@@ -75,10 +136,11 @@ class TestMuseGlimmerConditionalVision(unittest.TestCase):
 
         torch.testing.assert_close(result_TD, hidden_TD, rtol=0, atol=0)
         self.assertEqual(len(encoder_outputs), 1)
-        self.assertEqual(encoder_outputs[0].shape, (1, model.vision_encoder.output_dim))
+        self.assertEqual(
+            encoder_outputs[0].shape, (1, model.vision_adapter.c_fc.in_features)
+        )
         self.assertTrue(encoder_outputs[0].requires_grad)
 
-        assert model.vision_adapter is not None
         assert model.vision_projection is not None
         assert model.perception_emb_norm is not None
         for module in (
@@ -90,6 +152,47 @@ class TestMuseGlimmerConditionalVision(unittest.TestCase):
             for parameter in module.parameters():
                 self.assertIsNotNone(parameter.grad)
                 torch.testing.assert_close(parameter.grad, torch.zeros_like(parameter))
+
+
+class TestMuseGlimmerStateDictAdapterRowPermute(unittest.TestCase):
+    def test_a_rank_wide_factor_permutes_like_its_projection(self):
+        """The q/k RoPE permute reorders rows only, so a LoRA factor with the projection's rows
+        and a rank-wide second dim must follow the weight's row order; sizing the k permute from
+        the model config instead of the tensor used to fail on such a factor."""
+        config = build_model_config(
+            "debugmodel", parallelism=ParallelismConfig(), seq_len=64
+        )
+        adapter = MuseGlimmerStateDictAdapter(config, None)
+        attention = config.layers[0].attention
+        rows = (attention.n_heads + 2 * attention.n_kv_heads) * attention.head_dim
+        rank = 4
+        factor = (
+            torch.arange(rows, dtype=torch.float32)[:, None]
+            .expand(rows, rank)
+            .contiguous()
+        )
+        weight = (
+            torch.arange(rows, dtype=torch.float32)[:, None]
+            .expand(rows, config.dim)
+            .contiguous()
+        )
+
+        exported = adapter.to_hf({"layers.0.attention.qkv_linear.wqkv.weight": factor})
+        reference = adapter.to_hf({"layers.0.attention.qkv_linear.wqkv.weight": weight})
+
+        self.assertEqual(
+            {name: tuple(tensor.shape) for name, tensor in exported.items()},
+            {
+                f"model.language_model.layers.0.self_attn.{proj}.weight": (out, rank)
+                for proj, out in (
+                    ("q_proj", attention.n_heads * attention.head_dim),
+                    ("k_proj", attention.n_kv_heads * attention.head_dim),
+                    ("v_proj", attention.n_kv_heads * attention.head_dim),
+                )
+            },
+        )
+        for name, tensor in exported.items():
+            torch.testing.assert_close(tensor[:, 0], reference[name][:, 0])
 
 
 if __name__ == "__main__":

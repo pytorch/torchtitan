@@ -57,7 +57,7 @@ _LAYER0_ANCHORS = (
     # single packed ``wqkv`` parameter.
     "layers.0.attention.qkv_linear.wqkv.weight",
     "layers.0.attention.wo.weight",
-    # FeedForward stores gate/up in one physical w13 parameter.
+    # DenseFeedForward stores gate/up in one physical w13 parameter.
     "layers.0.feed_forward.w13.weight",
     "layers.0.feed_forward.w2.weight",
     "layers.0.attention_norm.weight",

@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
-from torchtitan.rl._runtime import apply_env_defaults, RL_ENV_DEFAULTS
+from torchtitan.rl._env import apply_env_defaults, RL_ENV_DEFAULTS
 
 
 def test_apply_env_defaults() -> None:

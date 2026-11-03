@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-
-from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
 from torchtitan.rl.rollout import Rollout, RolloutGroup, RolloutStatus, RolloutTurn
 from torchtitan.rl.rollout.types import RolloutTurnID, split_prompt
+
+from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 
 _GROUP_ID = "step=1/group=0"
 
@@ -87,7 +87,7 @@ def test_single_turn_packs_one_training_sample() -> None:
 
 
 def test_packs_min_and_max_version_across_turns() -> None:
-    # Two turns sampled at different versions (a weight pull landed between them); the packed
+    # Two turns sampled at different versions (a model state dict load landed between them); the packed
     # training_sample records the min (oldest, turn-0) and max (newest, turn-1) version.
     rollout = _scored_rollout(
         [
@@ -310,7 +310,7 @@ def test_empty_completion_on_first_turn_is_skipped() -> None:
     assert rollout_to_training_samples(rollout) == []
 
 
-def test_group_filters_preserve_group_id_for_acknowledgement() -> None:
+def test_group_filters_preserve_group_id_for_commit() -> None:
     builder = TrainingSampleBuilder.Config().build()
 
     failed = builder.build_from_group(

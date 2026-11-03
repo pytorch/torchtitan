@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# Shape suffixes: T = packed tokens.
+
 import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
@@ -36,20 +38,20 @@ def flux_input_sharding() -> dict[str, SpmdType]:
 
 
 def flux_inner_attention_sharding_config() -> ShardingConfig:
-    """Local-SPMD attention kernel that gathers keys and values across CP."""
-    q_layout = flux_activation_placement(cp=spmd.S(1))
-    kv_src_layout = flux_activation_placement(cp=spmd.S(1))
-    kv_dst_layout = flux_activation_placement(cp=spmd.R)
+    """Packed attention with local queries and already gathered keys/values."""
+    q_layout = SpmdType(
+        {DP: spmd.V, CP: spmd.V},
+        partition_spec=spmd.PartitionSpec((DP, CP), None, None),
+    )
+    kv_layout = SpmdType(
+        {DP: spmd.V, CP: spmd.R},
+        partition_spec=spmd.PartitionSpec(DP, None, None),
+    )
     return ShardingConfig(
         in_src_shardings={
-            "q_BLHK": q_layout,
-            "k_BLHK": kv_src_layout,
-            "v_BLHV": kv_src_layout,
-        },
-        in_dst_shardings={
-            "q_BLHK": q_layout,
-            "k_BLHK": kv_dst_layout,
-            "v_BLHV": kv_dst_layout,
+            "q_THK": q_layout,
+            "k_THK": kv_layout,
+            "v_THV": kv_layout,
         },
         out_src_shardings=q_layout,
         local_spmd=True,

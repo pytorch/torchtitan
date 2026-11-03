@@ -166,8 +166,15 @@ class FluxStateDictAdapter(StateDictAdapter):
         new_weight = torch.cat([scale, shift], dim=0)
         return new_weight
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], *, to_quantized_layout: bool = False
+    ) -> dict[str, Any]:
         """Convert TorchTitan DCP state dict to HuggingFace safetensors format."""
+        if to_quantized_layout:
+            raise ValueError(
+                f"{type(self).__name__} does not support loading quantized "
+                "HF checkpoints."
+            )
         state_dict = self._native_fused_linears_to_hf(state_dict)
 
         to_hf_map_direct = {
@@ -244,8 +251,15 @@ class FluxStateDictAdapter(StateDictAdapter):
 
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], *, is_quantized_layout: bool = False
+    ) -> dict[str, Any]:
         """Convert HuggingFace safetensors state dict to TorchTitan DCP format."""
+        if is_quantized_layout:
+            raise ValueError(
+                f"{type(self).__name__} does not support loading quantized "
+                "HF checkpoints."
+            )
         state_dict = {}
 
         # Keeps track of HF fqn values to combine into one TT fqn later

@@ -8,7 +8,7 @@
 
 import pytest
 
-from torchtitan.rl.components.batcher import assign_sorted_bins_to_dp_ranks
+from torchtitan.rl.trainer.batcher import assign_sorted_bins_to_dp_ranks
 
 
 def test_single_pp_microbatch_preserves_global_zigzag() -> None:

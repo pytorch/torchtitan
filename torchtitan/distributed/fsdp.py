@@ -23,12 +23,14 @@ from torch.distributed.tensor import Shard
 from torchtitan.config.parallelism import FSDPSymmMemScope
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.linear import GroupedLinear
+from torchtitan.models.common.moe import MoE
 
 __all__ = [
     "apply_fsdp_to_decoder",
     "apply_fsdp_to_multimodal_encoder",
     "disable_fsdp_gradient_division",
     "enable_fsdp_symm_mem",
+    "post_validate_fsdp_for_accelerator_graph",
     "get_fsdp_reshard_after_forward_policy",
     "linear_param_shard_placements",
     "resolve_fsdp_mesh",
@@ -38,9 +40,49 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
+def post_validate_fsdp_for_accelerator_graph(model_parts: list[nn.Module]) -> None:
+    """Finish grouped forwards and release full parameters for pool reuse.
+
+    Eager and captured validation use the same cleanup. With ChunkedLossWrapper,
+    the model skips lm_head, then the loss calls it after the root forward.
+    A group containing norm and lm_head can still have norm pending. Validation
+    has no backward callback to clear this state.
+    """
+    # TODO: Use public FSDP APIs for grouped eval cleanup.
+    for model in model_parts:
+        for module in model.modules():
+            if not isinstance(module, FSDPModule):
+                continue
+            state = module._get_fsdp_state()
+            if state._modules_to_run_forward:
+                state._post_forward(module, None, None)
+                state._modules_to_run_forward.clear()
+            module.reshard()
+
+
+def _fsdp_unit_holds_only_embedding_weights(
+    fsdp_module: FSDPModule, model: nn.Module
+) -> bool:
+    """Whether every parameter managed by ``fsdp_module``'s FSDP unit is an
+    ``nn.Embedding`` weight in ``model``.
+
+    Reads the unit's own parameters rather than ``fsdp_module.parameters()``,
+    so modules grouped into the same ``fully_shard`` call are also covered.
+    """
+    # TODO: Use a public FSDP API to list the parameters of an FSDP unit.
+    unit_params = [
+        fsdp_param.sharded_param
+        for param_group in fsdp_module._get_fsdp_state()._fsdp_param_groups
+        for fsdp_param in param_group.fsdp_params
+    ]
+    embedding_weights = {
+        m.weight for m in model.modules() if isinstance(m, nn.Embedding)
+    }
+    return all(p in embedding_weights for p in unit_params)
+
+
 if TYPE_CHECKING:
     from torchtitan.models.common.decoder import Decoder
-    from torchtitan.models.common.moe import MoE
 
 
 _DENSE_STORAGE_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
@@ -156,7 +198,7 @@ def enable_fsdp_symm_mem(model: nn.Module, scope: FSDPSymmMemScope) -> None:
     for module in model.modules():
         if not isinstance(module, FSDPModule):
             continue
-        if scope == "dense" and getattr(module, "moe_enabled", False):
+        if scope == "dense" and any(isinstance(m, MoE) for m in module.children()):
             continue
         module.set_force_sum_reduction_for_comms(True)
         module.set_symm_mem_for_comm()
@@ -250,7 +292,7 @@ def apply_fsdp_to_decoder(
     Shared by all dense and MoE decoders (llama3, qwen3, deepseek_v3,
     gpt_oss, qwen3_vl, ...). The MoE handling is a strict superset of the dense
     case: a dense model leaves ``ep_degree=1`` / ``edp_mesh=None`` and has no
-    ``moe_enabled`` blocks, so every transformer block is sharded as a single
+    MoE blocks, so every transformer block is sharded as a single
     FSDP unit and the expert-parallel prefetching below is skipped.
 
     Args:
@@ -321,6 +363,15 @@ def apply_fsdp_to_decoder(
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward,
             )
+            # Embedding backward needs only grad_output and the token indices,
+            # not the weight, so skip the backward all-gather. The flag covers
+            # the whole FSDP unit, so only set it when the unit holds nothing
+            # but embedding weights (e.g. a learned norm weight inside
+            # tok_embeddings would be read after being freed).
+            if _fsdp_unit_holds_only_embedding_weights(
+                cast(FSDPModule, model.tok_embeddings), model
+            ):
+                model.tok_embeddings.set_unshard_in_backward(False)
         # As an optimization, do not reshard_after_forward the last layers
         # by default since FSDP would prefetch them immediately.
         if model.norm is not None and model.lm_head is not None:
@@ -342,9 +393,10 @@ def apply_fsdp_to_decoder(
         #   shard their output features when FSDP degree > num_experts
         # Dense blocks use the default mesh with only stacked-parameter
         # placement overrides.
-        if getattr(transformer_block, "moe_enabled", False):
-            assert hasattr(transformer_block, "moe")
-            moe = cast("MoE", transformer_block.moe)
+        moe = next(
+            (m for m in transformer_block.children() if isinstance(m, MoE)), None
+        )
+        if moe is not None:
             routed_experts = moe.routed_experts
             num_experts = moe.num_experts
 

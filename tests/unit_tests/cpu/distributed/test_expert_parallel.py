@@ -5,15 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-import unittest.mock
 
 import spmd_types as spmd
 import torch
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.models.common.moe_sharding import expert_param_placement_sparse
-from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
+from torchtitan.models.common.moe.sharding import expert_param_placement_sparse
+from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.trainer import Trainer
 
@@ -41,7 +40,7 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
             model=model_config,
             training=TrainingConfig(
                 max_context_length=model_config.max_context_length,
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
             ),
             parallelism=parallelism,
         )
@@ -54,19 +53,19 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
         model_config = build_model_config(
             "debugmodel_moe", parallelism=ParallelismConfig()
         )
-        moe = model_config.layers[1].moe
+        moe = model_config.layers[1].feed_forward
         assert moe is not None
         moe.num_experts = 63
 
         with self.assertRaisesRegex(
             ValueError,
-            r"layers\.1\.moe\.num_experts \(63\).*expert_parallel_degree \(8\)",
+            r"layers\.1\.feed_forward\.num_experts \(63\).*expert_parallel_degree \(8\)",
         ):
             Trainer.Config(
                 model=model_config,
                 training=TrainingConfig(
                     max_context_length=model_config.max_context_length,
-                    disable_cuda_graphs=True,
+                    disable_accelerator_graphs=True,
                 ),
                 parallelism=ParallelismConfig(expert_parallel_degree=8),
             )
@@ -94,7 +93,7 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
             model=model_config,
             training=TrainingConfig(
                 max_context_length=model_config.max_context_length,
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
             ),
             parallelism=ParallelismConfig(tensor_parallel_degree=2),
         )
@@ -117,8 +116,8 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
             ),
         )
 
-        trainer_moe = trainer_config.layers[0].moe
-        generator_moe = generator_config.layers[0].moe
+        trainer_moe = trainer_config.layers[0].feed_forward
+        generator_moe = generator_config.layers[0].feed_forward
         assert trainer_moe is not None
         assert generator_moe is not None
         self.assertEqual(
@@ -150,19 +149,11 @@ class TestPermute(unittest.TestCase):
     def _permute(self, tokens_per_expert_group, experts_per_rank, num_ranks):
         """Helper that calls _permute and returns (permuted_indices, num_tokens_per_expert)."""
         dispatcher = self._make_dispatcher()
-        mock_mesh = unittest.mock.MagicMock()
-        mock_mesh.size.return_value = num_ranks
         total = tokens_per_expert_group.sum().item()
         dummy_input = torch.zeros(total, 1)
-        with unittest.mock.patch.object(
-            AllToAllTokenDispatcher,
-            "ep_mesh",
-            new_callable=unittest.mock.PropertyMock,
-            return_value=mock_mesh,
-        ):
-            _, permuted_indices, num_tokens_per_expert = dispatcher._permute(
-                dummy_input, tokens_per_expert_group
-            )
+        _, permuted_indices, num_tokens_per_expert = dispatcher._permute(
+            dummy_input, tokens_per_expert_group, ep_size=num_ranks
+        )
         return permuted_indices, num_tokens_per_expert
 
     def test_basic_2ranks_2experts(self):

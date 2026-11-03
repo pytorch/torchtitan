@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 # /// script
-# requires-python = ">=3.12"
+# requires-python = ">=3.12,<3.15"
 # dependencies = ["harbor=={version}"]
 # ///
 
@@ -18,6 +18,9 @@ https://github.com/PrimeIntellect-ai/verifiers/pull/2458.
 
 ``TerminalBenchTerminusHarness`` in ``harness.py`` fills in the Harbor version
 above and runs this file as a uv script, so it is never imported by TorchTitan.
+Python stays below 3.15 because uv otherwise picks the newest interpreter, and
+Harbor's litellm dependency pulls fastuuid, which has no 3.15 wheel and fails to
+build from source there (its PyO3 supports up to 3.14).
 
 TODO: delete this file together with ``harness.py`` once a Verifiers release
 includes https://github.com/PrimeIntellect-ai/verifiers/pull/2458.

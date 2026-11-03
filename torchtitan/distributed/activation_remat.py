@@ -1,0 +1,210 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# This file provides the configs that apply activation remat (activation
+# checkpointing) to the model. Technically, this is not a part of distributed,
+# but distributed module is the best place to put it.
+
+import logging
+from collections.abc import Callable
+from dataclasses import dataclass, field
+
+import torch
+import torch.nn as nn
+import torch_remat as remat
+
+from torchtitan.models.base.module import Module
+
+
+logger = logging.getLogger(__name__)
+
+_PackHook = Callable[[torch.Tensor], object]
+_UnpackHook = Callable[[object], torch.Tensor]
+
+
+@dataclass(kw_only=True, slots=True)
+class ActivationRematConfig:
+    """Retain selected model-declared regions and recompute everything else.
+
+    Activation rematerialization, also known as activation checkpointing:
+    ``apply`` checkpoints each transformer block with ``torch_remat``. Regions
+    that model code always retains with ``recompute=False``, such as MoE
+    routing decisions, are saved under every policy.
+    """
+
+    save_regions: list[str]
+    """
+    Qualified save-region glob patterns, relative to a transformer block.
+    Region names are defined at the corresponding ``torch_remat.region``
+    call sites in model code. Everything outside a retained region is
+    recomputed.
+
+    NB: Save-region names are relative to a transformer block, so the same
+    policy applies to every transformer block. Per-block remat policies are
+    not currently supported.
+    """
+
+    recompute_regions: list[str] = field(default_factory=list)
+    """
+    Region glob patterns to recompute. ``recompute_regions`` takes precedence
+    over ``save_regions``: a region that matches both is recomputed. For
+    example, with ``save_regions=["*"]``, this lists the few regions to
+    recompute, which suits starting from no remat and recomputing just enough
+    to fit a memory budget.
+    """
+
+    preserve_rng_state: bool = False
+    """
+    Must remain false. torch_remat requires explicit RecomputeStateHooks for
+    random state that can advance inside retained regions.
+    """
+
+    determinism_check: str = "default"
+    """
+    A string specifying the determinism function. See
+    https://docs.pytorch.org/docs/stable/checkpoint.html for details.
+    """
+
+    debug: bool = False
+    """Not supported by torch_remat; must remain false."""
+
+    def __post_init__(self) -> None:
+        if self.preserve_rng_state:
+            raise ValueError(
+                "torch_remat activation checkpointing does not support "
+                "preserve_rng_state=True. Register a "
+                "torch_remat RecomputeStateHook for random state used in retained "
+                "regions."
+            )
+        if self.debug:
+            raise ValueError(
+                "torch_remat activation checkpointing does not support the debug "
+                "option."
+            )
+
+    def _check_fixed_regions(
+        self, save_regions: list[str], recompute_regions: list[str]
+    ) -> None:
+        if (
+            self.save_regions != save_regions
+            or self.recompute_regions != recompute_regions
+        ):
+            raise ValueError(
+                f"{type(self).__name__} is a fixed policy. Use "
+                "ActivationRematConfig with explicit save_regions and "
+                "recompute_regions to customize it."
+            )
+
+    def apply(
+        self,
+        model: Module,
+        *,
+        saved_tensors_hooks: (
+            Callable[[nn.Module, str], tuple[_PackHook, _UnpackHook] | None] | None
+        ) = None,
+    ) -> None:
+        """Checkpoint every transformer block of ``model`` with ``torch_remat``.
+
+        Args:
+            model: Model whose ``layers`` children are the transformer blocks.
+            saved_tensors_hooks: Optional callable returning the saved-tensor
+                hook pair for one block, given the block and its FQN
+                (``layers.<id>``), or None to leave that block unhooked. The
+                pair is passed to
+                ``torch_remat.checkpoint(saved_tensors_hooks=...)``: ``pack``
+                replaces each tensor the block retains for backward with an
+                opaque payload and ``unpack`` rebuilds it, which enables CPU
+                offloading, compression, or logging of retained activations.
+                It sees the block's inputs and the tensors retained by its
+                save regions; ``torch_remat.current_saved_tensor_info().kind``
+                tells ``pack`` which one it is handling. Called once per
+                block, so each block can own its hook state (e.g. an offload
+                buffer). torch_remat rejects the pair under ``torch.compile``
+                around the block. See torchtitan/distributed/REMAT.md and
+                https://github.com/meta-pytorch/remat/blob/main/docs/offloading.md.
+        """
+        layers = model.get_submodule("layers")
+        transformer_blocks = list(layers.named_children())
+        if not transformer_blocks:
+            logger.info(
+                "%s found no transformer blocks in this model part",
+                type(self).__name__,
+            )
+            return
+
+        # TODO: Validate unmatched patterns once validation can account for save
+        # regions across all pipeline stages instead of only this model part.
+        for layer_id, transformer_block in transformer_blocks:
+            assert isinstance(transformer_block, Module)
+            transformer_block.configure_remat_regions(
+                self.save_regions, self.recompute_regions
+            )
+            base_fqn = f"layers.{layer_id}"
+            transformer_block.forward = remat.checkpoint(
+                region_name=base_fqn,
+                determinism_check=self.determinism_check,
+                preserve_rng_state=False,
+                saved_tensors_hooks=(
+                    saved_tensors_hooks(transformer_block, base_fqn)
+                    if saved_tensors_hooks is not None
+                    else None
+                ),
+            )(transformer_block.forward)
+        logger.info(
+            "Applied %s to %d transformer blocks. Save patterns: %s, "
+            "recompute patterns: %s",
+            type(self).__name__,
+            len(transformer_blocks),
+            self.save_regions or "none",
+            self.recompute_regions or "none",
+        )
+
+
+@dataclass(kw_only=True, slots=True)
+class FullActivationRematConfig(ActivationRematConfig):
+    """A fixed policy that saves no policy-controlled region.
+
+    Every operation in a transformer block is recomputed except the regions
+    model code always retains with ``recompute=False``, such as MoE routing
+    decisions, auxiliary-loss accumulation, and trailing residual adds.
+    """
+
+    save_regions: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        super(FullActivationRematConfig, self).__post_init__()
+        self._check_fixed_regions([], [])
+
+
+_DEFAULT_SAVE_REGIONS = ["*"]
+_DEFAULT_RECOMPUTE_REGIONS = ["*routed_experts.w13.*"]
+
+
+@dataclass(kw_only=True, slots=True)
+class DefaultActivationRematConfig(ActivationRematConfig):
+    """The default remat policy and the trainer's default.
+
+    Saves every model-declared region except the routed-expert ``w13`` grouped
+    projection, whose saved activations scale with top-k and dominate MoE
+    activation memory. It balances step time and memory for current MoE
+    models and equals saving every region for dense models. Its regions may
+    change as measurements improve; use ``ActivationRematConfig`` with
+    explicit regions for a fixed policy. ``w2`` stays saved: its saved input is the activation
+    output, which replay rebuilds anyway, so recomputing ``w2`` would cost time
+    without freeing memory. Other regions under ``routed_experts`` (e.g. the EP
+    token-dispatcher all-to-alls) are retained, so recomputation never replays
+    EP communication. Code outside any model-declared region is always
+    recomputed, so a model that declares no regions gets full recomputation.
+    """
+
+    save_regions: list[str] = field(default_factory=lambda: list(_DEFAULT_SAVE_REGIONS))
+    recompute_regions: list[str] = field(
+        default_factory=lambda: list(_DEFAULT_RECOMPUTE_REGIONS)
+    )
+
+    def __post_init__(self) -> None:
+        super(DefaultActivationRematConfig, self).__post_init__()
+        self._check_fixed_regions(_DEFAULT_SAVE_REGIONS, _DEFAULT_RECOMPUTE_REGIONS)

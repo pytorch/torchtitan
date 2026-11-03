@@ -80,6 +80,7 @@ def test_get_cuda_flash_attention_impl(monkeypatch, capability, expected_impl):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: capability)
     monkeypatch.setattr(torch.version, "hip", None)
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
 
     assert get_cuda_flash_attention_impl() == expected_impl
 
@@ -95,3 +96,29 @@ def test_get_cuda_flash_attention_impl_on_rocm(monkeypatch):
     monkeypatch.setattr(torch.version, "hip", "7.0")
 
     assert get_cuda_flash_attention_impl() is None
+
+
+@pytest.mark.parametrize(
+    ("capability", "impl", "module"),
+    [((9, 0), "FA3", "flash_attn_interface"), ((10, 0), "FA4", "flash_attn.cute")],
+)
+@pytest.mark.parametrize("missing_parent", [False, True])
+def test_missing_flash_attention_raises(
+    monkeypatch, capability, impl, module, missing_parent
+):
+    monkeypatch.setattr(
+        "torchtitan.tools.utils.has_cuda_capability",
+        lambda major, minor: capability >= (major, minor),
+    )
+    monkeypatch.setattr(torch.version, "hip", None)
+    find_spec = Mock(
+        return_value=None,
+        side_effect=ModuleNotFoundError if missing_parent else None,
+    )
+    monkeypatch.setattr("importlib.util.find_spec", find_spec)
+
+    with pytest.raises(ValueError, match=f"{impl} is required") as exc:
+        get_cuda_flash_attention_impl()
+    find_spec.assert_called_once_with(module)
+    assert module in str(exc.value)
+    assert f"Install a compatible {impl} wheel" in str(exc.value)
