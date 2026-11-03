@@ -91,18 +91,9 @@ class Trainer(Configurable):
                     activation_remat=self.activation_remat,
                     max_num_documents=self.dataloader.max_num_documents,
                 )
-            self._reject_seed_checkpoint_without_save()
-
-        def _reject_seed_checkpoint_without_save(self) -> None:
-            """Reject a seed checkpoint that cannot write.
-
-            Recipes assign ``create_seed_checkpoint`` after the config object is
-            built, so ``__post_init__`` alone does not see that assignment.
-            ``Trainer.__init__`` runs this again on the final config.
-            """
-            if not self.create_seed_checkpoint:
-                return
-            if self.checkpointer is None or self.checkpointer.load_only:
+            if self.create_seed_checkpoint and (
+                self.checkpointer is None or self.checkpointer.load_only
+            ):
                 raise ValueError(
                     "create_seed_checkpoint requires a checkpointer with "
                     "load_only=False."
@@ -159,18 +150,11 @@ class Trainer(Configurable):
         config.model = copy.deepcopy(config.model)
         if config.override.imports:
             apply_overrides(config.override, config)
+        # Assignments after construction (seed checkpoint, overrides) are
+        # invisible to the first __post_init__. apply_overrides does not run
+        # when override.imports is empty, so re-validate here.
+        config.__post_init__()
         model_config = config.model
-        validate_model_training_config(
-            model_config,
-            parallelism=config.parallelism,
-            training=config.training,
-            debug=config.debug,
-            activation_remat=config.activation_remat,
-            max_num_documents=config.dataloader.max_num_documents,
-        )
-        # After overrides. Recipes also assign create_seed_checkpoint after
-        # the config object is built, so __post_init__ has already run.
-        config._reject_seed_checkpoint_without_save()
 
         self.engine = self.engine_cls(
             config,
