@@ -73,7 +73,7 @@ def test_build_renders_with_titan_tokenizer() -> None:
     ("renderers_config", "reason"),
     [
         (AutoRendererConfig(), "MODEL_RENDERER_MAP"),
-        (DefaultRendererConfig(), "special-token variables"),
+        (DefaultRendererConfig(), "bos_token and eos_token only"),
     ],
 )
 def test_auto_and_default_are_refused(renderers_config, reason: str) -> None:
