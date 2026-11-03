@@ -150,10 +150,6 @@ class Trainer(Configurable):
         config.model = copy.deepcopy(config.model)
         if config.override.imports:
             apply_overrides(config.override, config)
-        # Assignments after construction (seed checkpoint, overrides) are
-        # invisible to the first __post_init__. apply_overrides does not run
-        # when override.imports is empty, so re-validate here.
-        config.__post_init__()
         model_config = config.model
 
         self.engine = self.engine_cls(
