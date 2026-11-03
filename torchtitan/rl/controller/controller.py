@@ -103,11 +103,12 @@ from typing import Any
 
 # PYTORCH_CUDA_ALLOC_CONF is set in torchtitan/rl/__init__.py (before torch is imported)
 # and in train.py; see the note there.
-import torch  # noqa: F401
+import torch
 
 from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import apply_overrides, Configurable, OverrideConfig
+from torchtitan.models.common.aux_loss import aux_loss_denominators
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.system import ActorSystem, TrainerHandle
 from torchtitan.rl.controller.metrics import (
@@ -1162,6 +1163,18 @@ class Controller(Configurable):
                             # arrive. Calls finish in order, so wait for the one before the last.
                             # asyncio.wait returns without raising, so the group raises a failed call once.
                             await asyncio.wait([forward_backward_tasks[-2]])
+                        # The auxiliary losses divide by R / N, the routed tokens per loss token of the
+                        # step's batches sent so far, this one included. Exact for the step's last call.
+                        # An estimate for earlier calls, which can't see the step's later batches: with
+                        # long prompts and short responses (R / N about 5), the step's total auxiliary
+                        # weight can be 0.78-1.23 instead of 1.
+                        sent_batches = [*step_batches, packed]
+                        call_aux_loss_denominators = aux_loss_denominators(
+                            sum(batch.routing_token_counts for batch in sent_batches),
+                            torch.tensor(
+                                sum(batch.num_loss_tokens for batch in sent_batches)
+                            ),
+                        )
                         # TODO: the step's first call's first read is never hidden (~0.5 GB/s per rank, 4 ranks
                         # over TCP). Sending its RDMAMicrobatches during the previous optim_step would hide it.
                         sent_s = time.perf_counter()
@@ -1173,6 +1186,7 @@ class Controller(Configurable):
                                     [row[dp_rank] for row in group]
                                     for group in packed.microbatch_groups
                                 ],
+                                call_aux_loss_denominators,
                             )
                             for dp_rank, trainer_at_dp_rank in enumerate(
                                 self.trainer.by_dp_rank

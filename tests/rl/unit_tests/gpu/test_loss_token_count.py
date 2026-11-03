@@ -39,6 +39,7 @@ from torch.distributed.tensor import DTensor
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.utils import get_local_tensor
+from torchtitan.models.common.aux_loss import aux_loss_denominators
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.rollout.types import RolloutTurnID
@@ -207,12 +208,20 @@ def _run_streamed_vs_one_call(
     assert len(column) >= 2
     first, second = column[: len(column) // 2], column[len(column) // 2 :]
     gradients = _record_optimizer_gradients(trainer)
+    # The model has no auxiliary loss; every call takes the step's denominators.
+    denominators = aux_loss_denominators(
+        batch.routing_token_counts, torch.tensor(batch.num_loss_tokens)
+    )
 
-    engine.forward_backward(microbatch_groups=column)
+    engine.forward_backward(
+        microbatch_groups=column, aux_loss_denominators=denominators
+    )
     one_call_loss = engine.loss.clone()
     engine.optim_step()
-    engine.forward_backward(microbatch_groups=first)
-    engine.forward_backward(microbatch_groups=second)
+    engine.forward_backward(microbatch_groups=first, aux_loss_denominators=denominators)
+    engine.forward_backward(
+        microbatch_groups=second, aux_loss_denominators=denominators
+    )
     streamed_loss = engine.loss.clone()
     engine.optim_step()
 
@@ -266,7 +275,12 @@ def _run_dp_ranks_on_one_or_two_gpus(
         microbatch_groups = columns[rank]
     gradients = _record_optimizer_gradients(trainer)
 
-    trainer.engine.forward_backward(microbatch_groups=microbatch_groups)
+    trainer.engine.forward_backward(
+        microbatch_groups=microbatch_groups,
+        aux_loss_denominators=aux_loss_denominators(
+            batch.routing_token_counts, torch.tensor(batch.num_loss_tokens)
+        ),
+    )
     trainer.engine.optim_step()
 
     assert int(trainer.engine.global_loss_token_count) == _NUM_LOSS_TOKENS

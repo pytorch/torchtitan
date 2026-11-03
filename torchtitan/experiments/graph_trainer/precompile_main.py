@@ -240,8 +240,8 @@ def _precompile_aot_fx_trace(
                 num_mtp_layers=config.dataloader.num_mtp_layers,
             )
             extra_kwargs["aux_loss_denominators"] = aux_loss_denominators(
-                routing_token_counts, loss_token_count, device=device
-            )
+                routing_token_counts, loss_token_count
+            ).to(device)
 
     # TODO: Add CP support by generating a permutation and
     # sharding inputs here.

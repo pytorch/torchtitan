@@ -274,6 +274,8 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine.preprocess_inputs_kwargs = {}
         engine.ntokens_seen = 0
         engine.local_loss_token_count = 0
+        # Set by forward_backward: 1 routed token per loss token.
+        engine._aux_loss_denominators = torch.tensor([1.0])
         microbatches = [
             TokenizedTrainingMicrobatch(
                 input=torch.tensor([index]),
@@ -375,6 +377,8 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine.preprocess_inputs_kwargs = {}
         engine.ntokens_seen = 0
         engine.local_loss_token_count = 0
+        # Set by forward_backward: routed tokens [2, 1] per 2 loss tokens.
+        engine._aux_loss_denominators = torch.tensor([1.0, 0.5])
         microbatch = TokenizedTrainingMicrobatch(
             input=main_tokens,
             labels=main_labels,

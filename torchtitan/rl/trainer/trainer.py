@@ -260,6 +260,7 @@ class Trainer(Configurable):
         microbatch_groups: (
             list[list[TrainingMicrobatch]] | list[list[RDMAMicrobatch]]
         ),
+        aux_loss_denominators: torch.Tensor,
     ) -> dict[str, float] | None:
         """Run one optimizer step's forward/backward microbatches, or part of them when the batcher
         streams microbatches.
@@ -269,6 +270,9 @@ class Trainer(Configurable):
                 `[num_groups][num_microbatches_per_group][dp_degree]` grid. Under PP, each group runs
                 as one pipeline step. `RDMAMicrobatch`es when `rdma_min_tensor_bytes` is set,
                 read a few ahead of training.
+            aux_loss_denominators: R / N (routed tokens per loss token, over every DP rank) of
+                the step's batches sent so far, this one included, one per routing depth
+                (`aux_loss.aux_loss_denominators`), computed by the controller.
 
         Returns:
             dict[str, float] | None: Globally-reduced metrics, or ``None`` on
@@ -338,10 +342,16 @@ class Trainer(Configurable):
                 prefetcher = RDMAMicrobatchPrefetcher(
                     [microbatch for group in call_groups for microbatch in group]
                 )
-                result = engine.forward_backward(microbatch_groups=prefetcher)
+                result = engine.forward_backward(
+                    microbatch_groups=prefetcher,
+                    aux_loss_denominators=aux_loss_denominators,
+                )
                 self._step_read_microbatches_s += prefetcher.read_s
             else:
-                result = engine.forward_backward(microbatch_groups=call_groups)
+                result = engine.forward_backward(
+                    microbatch_groups=call_groups,
+                    aux_loss_denominators=aux_loss_denominators,
+                )
             loss_metrics_by_group += result.loss_metrics
         if not engine.pp_has_last_stage:
             # Ranks with the last stage wait for the GPU when they reduce the loss metrics below.
