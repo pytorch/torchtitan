@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from dataclasses import dataclass
 from unittest.mock import MagicMock
 
 import torch
@@ -57,6 +58,23 @@ class TestLRScheduler(unittest.TestCase):
         if min_lr_factor is not None:
             config.optim.lr_scheduler.min_lr_factor = min_lr_factor
         return config
+
+    def test_subclass_config_builds_custom_scheduler(self):
+        class CountingLRSchedulersContainer(LRSchedulersContainer):
+            @dataclass(kw_only=True, slots=True)
+            class Config(LRSchedulersContainer.Config):
+                pass
+
+            def step(self):
+                super().step()
+                self.num_custom_steps = getattr(self, "num_custom_steps", 0) + 1
+
+        scheduler = CountingLRSchedulersContainer.Config(warmup_steps=2).build(
+            optimizers=self.optimizer_container, training_steps=10
+        )
+        scheduler.step()
+        self.assertEqual(scheduler.num_custom_steps, 1)
+        self.assertEqual(self.optimizer.param_groups[0]["lr"], 0.1)
 
     def test_linear_warmup_decay(self):
         """Test the linear warmup followed by linear decay schedule."""

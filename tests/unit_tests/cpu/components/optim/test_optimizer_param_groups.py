@@ -980,8 +980,8 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
         optimizers = config.build(model_parts=[model], enable_accelerator_graph=True)
         group = optimizers.optimizers[0].param_groups[0]
         lr = group["lr"]
-        schedulers = LRSchedulersContainer(
-            optimizers, lr_lambda=lambda step: 1.0 / (step + 1)
+        schedulers = LRSchedulersContainer.Config(warmup_steps=0).build(
+            optimizers=optimizers, training_steps=2
         )
 
         optimizers.step()
