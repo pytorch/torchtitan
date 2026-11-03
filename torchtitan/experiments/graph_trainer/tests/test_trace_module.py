@@ -186,6 +186,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine.config = SimpleNamespace(
             compile=SimpleNamespace(memory_policy="none"),
             dist_moe_runtime=None,
+            optim=SimpleNamespace(enable_accelerator_graph=False),
             parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
             profiler=Profiler.Config(),
             sdc_replayer=None,
@@ -237,6 +238,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             device=engine.device,
             loss_fn=engine.loss_fn,
             trainer_config=engine.config,
+            optimizer_update=None,
         )
 
     def test_aot_fx_runs_multi_microbatch_group_through_graph_runtime(self):
@@ -1306,6 +1308,197 @@ class TestReparametrizeOptimizer(unittest.TestCase):
         module.load_state_dict(model_sd)
         optimizer.load_state_dict(optim_sd)
         traced_out = run_traced(traced, module=module, optimizer=optimizer)(x)
+        traced_params = [p.detach().clone() for p in module.parameters()]
+
+        self.assertTrue(torch.equal(eager_out, traced_out))
+        for ep, tp in zip(eager_params, traced_params, strict=True):
+            self.assertTrue(torch.equal(ep, tp))
+
+
+class TestTracedOptimizerUpdate(unittest.TestCase):
+    def test_config_rejects_rerunning_traced_update(self):
+        from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
+
+        from torchtitan.components.optim import Optim
+        from torchtitan.config import DebugConfig
+        from torchtitan.experiments.graph_trainer.configs import (
+            GraphTrainerCompileConfig,
+        )
+        from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+        from torchtitan.observability.sdc_replayer import SDCReplayer
+
+        model = llama3_debugmodel(attn_backend="flex").model
+        cases = [
+            (
+                {"parallelism": ParallelismConfig(pipeline_parallel_degree=2)},
+                "pipeline parallelism",
+            ),
+            (
+                {
+                    "debug": DebugConfig(deterministic=True),
+                    "sdc_replayer": SDCReplayer.Config(),
+                },
+                "SDC replay",
+            ),
+            (
+                {
+                    "compile": GraphTrainerCompileConfig(
+                        memory_policy="sac_and_paged_stash"
+                    )
+                },
+                "sac_and_paged_stash",
+            ),
+        ]
+        for overrides, match in cases:
+            with self.subTest(match=match), self.assertRaisesRegex(ValueError, match):
+                GraphTrainer.Config(
+                    model=model,
+                    optim=Optim.Config(enable_accelerator_graph=True),
+                    **overrides,
+                )
+
+    def test_rejects_gradient_accumulation(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from torchtitan_recipes.tests.graph_trainer.llama3 import (
+            graph_trainer_llama3_debugmodel,
+        )
+
+        from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
+            make_graph_runtime,
+        )
+
+        with self.assertRaisesRegex(ValueError, "gradient accumulation"):
+            make_graph_runtime(
+                [MagicMock()],
+                num_microbatches=2,
+                parallelism_context=SimpleNamespace(
+                    pp_enabled=False, fsdp_enabled=False
+                ),
+                config=graph_trainer_llama3_debugmodel(),
+                loss_fn=MagicMock(),
+                optimizer_update=MagicMock(),
+            )
+
+    def test_rejects_step_hooks(self):
+        from types import SimpleNamespace
+
+        from torchtitan.components.optim import AdamW, OptimizersContainer
+        from torchtitan.experiments.graph_trainer.traced_optimizer import (
+            TracedOptimizerUpdate,
+        )
+
+        optimizers = OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
+        ).build(model_parts=[nn.Linear(2, 2)])
+        optim = SimpleNamespace(optimizers=optimizers)
+        parallelism_context = SimpleNamespace(pp_enabled=False)
+
+        TracedOptimizerUpdate(optim, parallelism_context=parallelism_context)
+        optimizers.register_step_pre_hook(lambda *args, **kwargs: None)
+        with self.assertRaisesRegex(ValueError, "optimizer step hooks"):
+            TracedOptimizerUpdate(optim, parallelism_context=parallelism_context)
+
+    def test_waits_for_staging_before_traced_update(self):
+        from unittest.mock import MagicMock, patch
+
+        from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
+        from torchtitan.training_engine import TrainingEngine
+
+        events = []
+        engine = object.__new__(GraphTrainingEngine)
+        engine._optimizer_update = MagicMock()
+        engine.checkpointer = MagicMock()
+        engine.checkpointer.maybe_wait_for_staging.side_effect = lambda: events.append(
+            "wait"
+        )
+
+        with patch.object(
+            TrainingEngine,
+            "forward_backward",
+            side_effect=lambda *args, **kwargs: events.append("step"),
+        ):
+            engine.forward_backward(
+                microbatch_groups=[],
+                global_loss_token_counts=1,
+                global_routing_token_counts=torch.zeros(1),
+            )
+
+        self.assertEqual(events, ["wait", "step"])
+
+
+@unittest.skipUnless(torch.accelerator.is_available(), "accelerator required")
+class TestTraceCapturableOptimizers(unittest.TestCase):
+    def test_minimal_fx_tracer_with_capturable_optimizer_list(self):
+        """Trace several capturable optimizers with a device ``lr`` tensor.
+
+        The ``state_dict`` hook mirrors ``OptimizersContainer``, which saves the
+        device ``lr`` as a host float. Tracing must ignore it so ``lr`` stays a
+        graph input that later in-place scheduler updates reach.
+
+        ``foreach=False`` pins eager to the single-tensor implementation, which
+        ``torch.optim`` also selects for the plain fake tensors seen at trace time.
+        """
+
+        def save_host_lr(_optimizer, state_dict):
+            for group in state_dict["param_groups"]:
+                group["lr"] = float(group["lr"])
+            return state_dict
+
+        device = torch.accelerator.current_accelerator()
+        torch.manual_seed(0)
+        module = nn.Sequential(nn.Linear(3, 5), nn.ReLU(), nn.Linear(5, 7)).to(device)
+        weights = [p for n, p in module.named_parameters() if n.endswith("weight")]
+        biases = [p for n, p in module.named_parameters() if n.endswith("bias")]
+        optimizers = [
+            torch.optim.AdamW(
+                params,
+                lr=torch.tensor(lr, device=device),
+                capturable=True,
+                foreach=False,
+            )
+            for params, lr in ((weights, 0.1), (biases, 0.01))
+        ]
+        for optimizer in optimizers:
+            optimizer.register_state_dict_post_hook(save_host_lr)
+
+        x = torch.randn(2, 3, device=device)
+        module(x).sum().backward()
+        for optimizer in optimizers:
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+
+        def train_step(x):
+            for optimizer in optimizers:
+                optimizer.zero_grad(set_to_none=True)
+            module(x).sum().backward()
+            for optimizer in optimizers:
+                optimizer.step()
+            return torch.stack([p.detach().sum() for p in module.parameters()])
+
+        traced = minimal_fx_tracer(train_step, module=module, optimizer=optimizers)(x)
+        self.assertEqual(traced.num_static_inputs, len(traced.example_inputs) - 1)
+
+        for optimizer in optimizers:
+            optimizer.param_groups[0]["lr"].fill_(0.05)
+        params = [p.detach().clone() for p in module.parameters()]
+        states = [
+            {p: {k: v.clone() for k, v in s.items()} for p, s in opt.state.items()}
+            for opt in optimizers
+        ]
+
+        eager_out = train_step(x)
+        eager_params = [p.detach().clone() for p in module.parameters()]
+
+        with torch.no_grad():
+            for p, saved in zip(module.parameters(), params, strict=True):
+                p.copy_(saved)
+        for optimizer, saved_state in zip(optimizers, states, strict=True):
+            for p, saved in saved_state.items():
+                for k, v in saved.items():
+                    optimizer.state[p][k].copy_(v)
+        traced_out = run_traced(traced, module=module, optimizer=optimizers)(x)
         traced_params = [p.detach().clone() for p in module.parameters()]
 
         self.assertTrue(torch.equal(eager_out, traced_out))

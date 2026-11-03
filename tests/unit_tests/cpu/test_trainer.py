@@ -809,23 +809,6 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
     assert not engine._forward_backward_accelerator_graph_enabled
 
 
-def test_graph_training_engine_rejects_optimizer_accelerator_graph() -> None:
-    config = SimpleNamespace(optim=SimpleNamespace(enable_accelerator_graph=True))
-
-    with (
-        patch.object(TrainingEngine, "__init__") as init,
-        pytest.raises(ValueError, match="not supported with GraphTrainer"),
-    ):
-        GraphTrainingEngine(
-            config,
-            model_config=MagicMock(),
-            max_num_documents=None,
-            output_dir="",
-        )
-
-    init.assert_not_called()
-
-
 def test_graph_training_engine_rejects_local_compile() -> None:
     config = SimpleNamespace(optim=SimpleNamespace(enable_accelerator_graph=False))
 

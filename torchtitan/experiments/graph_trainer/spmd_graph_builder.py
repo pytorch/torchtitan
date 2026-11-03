@@ -17,6 +17,7 @@ import dataclasses
 from collections.abc import Callable
 from typing import Any, TYPE_CHECKING
 
+import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
@@ -49,18 +50,30 @@ from torchtitan.experiments.graph_trainer.precompile import (
 )
 from torchtitan.experiments.graph_trainer.registry import PASS_PIPELINE_REGISTRY
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
+from torchtitan.experiments.graph_trainer.traced_optimizer import (
+    TracedOptimizerUpdate,
+)
 
 
 if TYPE_CHECKING:
     from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 
 
-def make_fwd_bwd_step(model, loss_fn):
+def make_fwd_bwd_step(
+    model,
+    loss_fn,
+    optimizer_update: TracedOptimizerUpdate | None = None,
+):
     """Return a function that computes loss and explicit parameter gradients.
 
     Calling convention:
         ``(inputs, labels, global_loss_token_counts, extra_kwargs)``
         ``-> (loss, *parameter_gradients)``
+
+    With ``optimizer_update``, the gradients are assigned to the parameters and
+    consumed by the optimizer update inside the step instead:
+        ``(inputs, labels, global_loss_token_counts, extra_kwargs)``
+        ``-> (loss, grad_norm)``
 
     ``model`` and ``loss_fn`` are captured in the closure so neither shows up
     as a graph input. Pass ``model`` through ``minimal_fx_tracer(fn, module=model)``
@@ -85,7 +98,15 @@ def make_fwd_bwd_step(model, loss_fn):
             if parameter.requires_grad
         ]
         grads = compute_parameter_gradients(loss, named_params)
-        return [loss, *grads]
+        if optimizer_update is None:
+            return [loss, *grads]
+        parameters: dict[int, torch.Tensor] = {}
+        for (_, parameter), grad in zip(named_params, grads, strict=True):
+            if id(parameter) not in parameters:
+                parameter.grad = grad
+                parameters[id(parameter)] = parameter
+        grad_norm = optimizer_update(loss, list(parameters.values()))
+        return [loss, grad_norm]
 
     return fwd_bwd_step
 
@@ -98,12 +119,18 @@ class GraphTrainerJointStageGraphs(JointStageGraphs):
     module: nn.Module
     num_param_grads: int
     runtime_meshes: list[DeviceMesh] | None = None
+    optimizer_update: TracedOptimizerUpdate | None = None
     _run: Callable[..., Any] = dataclasses.field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._run = run_traced(
             self.traced,
             module=self.module,
+            optimizer=(
+                self.optimizer_update.optimizers
+                if self.optimizer_update is not None
+                else None
+            ),
             precompile_meshes=self.runtime_meshes,
         )
 
@@ -150,6 +177,10 @@ class GraphTrainerJointStageGraphs(JointStageGraphs):
             global_loss_token_counts,
             kwargs,
         )
+        if self.optimizer_update is not None:
+            loss, grad_norm = outputs
+            self.optimizer_update.record_grad_norm(grad_norm)
+            return loss, [None] * self.num_param_grads
         if len(outputs) != self.num_param_grads + 1:
             raise ValueError(
                 "SPMD joint forward/backward output count mismatch: "
@@ -198,10 +229,16 @@ def _trace_joint_stage_graph(
     loss_fn: Callable,
     compile_config: GraphTrainerCompileConfig,
     parallelism_context: ParallelismContext,
+    optimizer_update: TracedOptimizerUpdate | None = None,
 ) -> tuple[TracedResult, list[DeviceMesh] | None]:
     """Trace or load the joint forward/backward graph for either SPMD path."""
     runtime_meshes: list[DeviceMesh] | None = None
     if compile_config.precompile_artifact_dir:
+        if optimizer_update is not None:
+            raise ValueError(
+                "Tracing the optimizer update is not supported with precompiled "
+                "artifacts."
+            )
         storage: DiskStorageAdapter = DiskStorageAdapter(
             compile_config.precompile_artifact_dir
         )
@@ -231,10 +268,16 @@ def _trace_joint_stage_graph(
     full_forward_backward_step: Callable[..., Any] = make_fwd_bwd_step(
         stage.submod,
         loss_fn,
+        optimizer_update,
     )
+    if optimizer_update is not None:
+        optimizer_update.initialize_state()
     traced = minimal_fx_tracer(
         full_forward_backward_step,
         module=stage.submod,
+        optimizer=(
+            optimizer_update.optimizers if optimizer_update is not None else None
+        ),
     )(*runtime_args)
     return traced, runtime_meshes
 
@@ -247,6 +290,7 @@ def _bind_direct_joint_stage_graph(
     parallelism_context: ParallelismContext,
     num_param_grads: int,
     runtime_meshes: list[DeviceMesh] | None,
+    optimizer_update: TracedOptimizerUpdate | None = None,
 ) -> None:
     """Apply passes and bind the SPMD without gradient accumulation executor."""
     passes: list[Callable] = construct_joint_train_step_passes(
@@ -266,6 +310,7 @@ def _bind_direct_joint_stage_graph(
         module=stage.submod,
         num_param_grads=num_param_grads,
         runtime_meshes=runtime_meshes,
+        optimizer_update=optimizer_update,
     )
 
 
@@ -279,6 +324,7 @@ def _trace_spmd_stage_graph(
     loss_fn: Callable,
     compile_config: GraphTrainerCompileConfig,
     parallelism_context: ParallelismContext,
+    optimizer_update: TracedOptimizerUpdate | None = None,
 ) -> tuple[TracedResult, list[DeviceMesh] | None, int]:
     """Trace the joint graph for either SPMD path.
 
@@ -306,6 +352,7 @@ def _trace_spmd_stage_graph(
         loss_fn=loss_fn,
         compile_config=compile_config,
         parallelism_context=parallelism_context,
+        optimizer_update=optimizer_update,
     )
     num_param_grads: int = sum(
         parameter.requires_grad
@@ -324,6 +371,7 @@ def _build_fwd_bwd_graphs(
     loss_fn: Callable,
     trainer_config: "GraphTrainer.Config",
     parallelism_context: ParallelismContext,
+    optimizer_update: TracedOptimizerUpdate | None = None,
 ) -> None:
     """Build the SPMD without gradient accumulation graph executor."""
     traced, runtime_meshes, num_param_grads = _trace_spmd_stage_graph(
@@ -335,6 +383,7 @@ def _build_fwd_bwd_graphs(
         loss_fn=loss_fn,
         compile_config=trainer_config.compile,
         parallelism_context=parallelism_context,
+        optimizer_update=optimizer_update,
     )
     _bind_direct_joint_stage_graph(
         stage,
@@ -343,4 +392,5 @@ def _build_fwd_bwd_graphs(
         parallelism_context=parallelism_context,
         num_param_grads=num_param_grads,
         runtime_meshes=runtime_meshes,
+        optimizer_update=optimizer_update,
     )
