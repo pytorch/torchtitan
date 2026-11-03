@@ -868,6 +868,45 @@ def test_training_engine_configures_segment_accelerator_graphs(
         assert wrap.call_args.kwargs["annotation_config"] == annotation_config
 
 
+class _UncapturedGraph:
+    """A graph that has not captured yet: each call runs ``fn``."""
+
+    captured = False
+
+    def __init__(self, fn: Any) -> None:
+        self.fn = fn
+
+    def __call__(self, *args: Any) -> Any:
+        return self.fn(*args)
+
+
+def test_later_segment_capture_rejects_a_gradient_the_first_call_did_not_allocate() -> None:
+    model = torch.nn.Linear(2, 2)
+    # The first-segment graph allocated weight.grad only.
+    model.weight.grad = torch.zeros_like(model.weight)
+
+    def later_segment(segment: list[Any]) -> ForwardBackwardResult:
+        # Its capture allocates bias.grad, which the next zero_grad would drop.
+        model(torch.ones(1, 2)).sum().backward()
+        return ForwardBackwardResult(torch.tensor(1.0), [])
+
+    engine = cast(
+        TrainingEngine,
+        SimpleNamespace(
+            _step_started=True,
+            _graph_segment_is_whole_call=False,
+            _first_segment_graph=SimpleNamespace(captured=True),
+            _later_segment_graphs={1: _UncapturedGraph(later_segment)},
+            model_parts=[model],
+        ),
+    )
+
+    with pytest.raises(ValueError, match=r"Parameters \['bias'\] got a gradient"):
+        TrainingEngine._run_forward_backward_segments(
+            engine, [()], preprocess_microbatch_groups_lazily=False
+        )
+
+
 def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() -> None:
     eager_forward_backward = MagicMock(
         return_value=ForwardBackwardResult(torch.tensor(1.0), [])

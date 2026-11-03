@@ -36,39 +36,44 @@ configured number of groups and reports one validation loss.
 A segment is the microbatch groups between two gradient reductions. With FSDP or PP,
 each group reduces its gradients, so a segment is one group. With hybrid sharded data
 parallelism (HSDP) or `parallelism.fsdp_defer_gradient_reduction=True`, gradients are
-reduced once per `forward_backward` call, so a segment is the whole call. Eager
-training given the same calls reduces at the same points, so a graph replay per
-segment computes the same reductions. The GPU test (`test_segment_graphs.py`) checks
-graphs vs eager bitwise for FSDP (1 and 2 GPUs), HSDP 2x1 and deferral, on one node.
+reduced once per `forward_backward` call, so a segment is the whole call.
 
 Training uses two kinds of graphs:
-- The first-segment graph runs the step's first segment. Gradients are `None` before
-  it, so autograd allocates them in the graph pool (see `_AcceleratorGraphGradientState`
-  below).
-- A later-segment graph runs every other segment of the step and adds into those
+- The first-segment graph runs the step's whole first `forward_backward` call.
+  Gradients are `None` before it, so autograd allocates them in the graph pool (see
+  `_AcceleratorGraphGradientState` below). A trainer that makes one call per update,
+  like the core trainer, replays only this graph: one replay per update.
+- A later-segment graph runs each segment of a later call and adds into those
   gradients. There is one per segment length, made on its first call.
 
 ```text
-FSDP, calls [g0, g1, g2] then [g3]:  first([g0]) later_1([g1]) later_1([g2]) later_1([g3])
-HSDP, calls [g0] then [g1, g2]:      first([g0]) later_2([g1, g2])
+one call [g0, g1, g2]:            first([g0, g1, g2])
+FSDP, calls [g0] then [g1, g2]:   first([g0]) later_1([g1]) later_1([g2])
+HSDP, calls [g0] then [g1, g2]:   first([g0]) later_2([g1, g2])
 ```
+
+Eager training given the same calls reduces at the same points, so the graphs compute
+the same reductions. The GPU test
+(`tests/unit_tests/gpu/distributed/test_accelerator_graph_segments.py`) checks graphs vs
+eager bitwise for one call per step, FSDP (1 and 2 GPUs), HSDP 2x1 and deferral, on one
+node.
 
 A later-segment graph records adds into the gradient addresses that the first-segment
 graph's replays put back. So a later-segment graph captures only after the
 first-segment graph has captured. Until then its calls are warmup calls with capture
-blocked.
+blocked. A parameter that gets a gradient in a later call must get one in the step's
+first call too: otherwise the later graph's capture raises a `ValueError`.
 
-The number of calls per update and of groups per call can change between updates.
+The number of calls per update, and of groups in a later call, can change between
+updates. The step's first call must have the same number of groups in every update.
 Every segment of one length must keep the same input structure, tensor shapes, dtypes,
-devices, and set of parameters receiving gradients. With HSDP or deferral, the step's
-first call is the first segment, so it must have the same number of groups in every
-update. The RL trainer sends each step's first group as its own call for this, only
-when graphs are on. So under HSDP or deferral, a step whose first call has several
-groups reduces one more time with graphs than without, and the two runs are not
-bitwise equal. Each
-later segment adds one graph launch, and each new segment length adds one graph with
-its own warmup calls. With `training.preprocess_microbatch_groups_lazily=True`, each
-segment is preprocessed just before its replay.
+devices, and set of parameters receiving gradients. The RL trainer's group count
+changes with packing, so with graphs it sends each step's first group as its own call.
+Under HSDP or deferral, that step reduces one more time with graphs than without, and
+the two runs are not bitwise equal. Each later segment adds one graph launch, and each
+new segment length adds one graph with its own warmup calls. With
+`training.preprocess_microbatch_groups_lazily=True`, the step's first call is
+preprocessed before its replay, and each later segment just before its own.
 
 Training and validation use the same capture flag. Disabling training capture
 also disables validation capture.

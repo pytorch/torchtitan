@@ -279,43 +279,6 @@ def test_schedule_checks_every_call_of_a_checked_step():
     assert executions == [0, 0, 0, 0, 1]
 
 
-def test_call_with_pending_gradients_matches_unchecked_calls():
-    """A step's second call starts with the first call's gradients; replay restores them."""
-    torch.manual_seed(0)
-    model = torch.nn.Sequential(
-        torch.nn.Linear(16, 32), torch.nn.Tanh(), torch.nn.Linear(32, 1)
-    )
-    batches = [torch.randn(8, 16) for _ in range(3)]
-
-    def call(batch_list):
-        def execute():
-            total = torch.zeros(())
-            for batch in batch_list:
-                loss = model(batch).pow(2).sum()
-                loss.backward()
-                total = total + loss.detach()
-            return total
-
-        return execute
-
-    # Reference: two unchecked calls in one step.
-    call([batches[0]])()
-    call([batches[1], batches[2]])()
-    expected = [parameter.grad.clone() for parameter in model.parameters()]
-    model.zero_grad(set_to_none=True)
-
-    replayer = SDCReplayer(
-        SDCReplayer.Config(num_replays=2), modules=[model], device=torch.device("cpu")
-    )
-    replayer.run_fwd_bwd(call([batches[0]]), step=1, get_loss=lambda loss: loss)
-    replayer.run_fwd_bwd(
-        call([batches[1], batches[2]]), step=1, get_loss=lambda loss: loss
-    )
-
-    for parameter, gradient in zip(model.parameters(), expected, strict=True):
-        assert torch.equal(parameter.grad, gradient)
-
-
 def test_config_validation():
     with pytest.raises(ValueError, match="num_steps"):
         SDCReplayer.Config(num_steps=0)

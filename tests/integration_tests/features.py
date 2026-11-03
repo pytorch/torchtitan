@@ -652,11 +652,11 @@ def llama3_debugmodel_gradient_accumulation() -> Trainer.Config:
     return config
 
 
-def muse_glimmer_debugmodel_fsdp2_segment_accelerator_graphs() -> Trainer.Config:
-    """Three accumulation groups with FSDP degree 2: each step replays the first-segment
-    graph once and the 1-group later-segment graph twice.
+def muse_glimmer_debugmodel_fsdp2_accumulation_accelerator_graph() -> Trainer.Config:
+    """Three accumulation groups with FSDP degree 2: each step replays one graph for all
+    three groups.
 
-    GPU unit tests cover changing group and call counts.
+    GPU unit tests cover several forward_backward calls per step.
     """
     config = muse_glimmer_debugmodel(seq_len=2048)
     config.debug.deterministic = True
@@ -1131,9 +1131,9 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             ngpu=2,
         ),
         IntegrationTestDefinition(
-            configs=[muse_glimmer_debugmodel_fsdp2_segment_accelerator_graphs],
-            test_descr="Segment accelerator graph replay with FSDP accumulation",
-            test_name="fsdp_segment_accelerator_graphs",
+            configs=[muse_glimmer_debugmodel_fsdp2_accumulation_accelerator_graph],
+            test_descr="Accelerator graph replay with FSDP accumulation",
+            test_name="fsdp_accumulation_accelerator_graph",
             ngpu=2,
             skip_rocm_test=True,
         ),

@@ -86,9 +86,10 @@ class TrainingConfig:
     preprocess_microbatch_groups_lazily: bool = False
     """Preprocess each microbatch group (host-to-device copy, masks) just before its
     forward/backward, not all groups up front, so RL can read the next microbatches
-    during training. With accelerator graphs, each group (under HSDP or deferred gradient
-    reduction, each call) is preprocessed just before its graph replay. A step that SDC
-    replay checks runs each call several times, so it preprocesses its groups up front.
+    during training. With accelerator graphs, the step's first call is preprocessed before
+    its graph replay, and each later group (under HSDP or deferred gradient reduction, each
+    later call) just before its own. A step that SDC replay checks runs each call several
+    times, so it preprocesses its groups up front.
     """
 
     dtype: Literal["bfloat16", "float32"] = "float32"

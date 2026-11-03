@@ -230,6 +230,9 @@ class _ReplayStateProvider:
             if snapshot.original is None:
                 snapshot.module._buffers[snapshot.name] = None
                 continue
+            # TODO: with accelerator graphs and num_replays > 1, a replay writes the buffer that
+            # its graph captured, not the one put back here, so the check later reports an
+            # SDCReplayMismatch. Raise a config error here instead.
             if current is not snapshot.original:
                 snapshot.module._buffers[snapshot.name] = snapshot.original
             assert snapshot.value is not None
