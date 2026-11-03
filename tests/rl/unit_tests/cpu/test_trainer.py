@@ -163,9 +163,7 @@ def test_forward_backward_uses_global_token_count() -> None:
         _preprocess_microbatch_groups=MagicMock(
             return_value=[("input", "labels", {}, {}) for _ in range(3)]
         ),
-        _run_forward_backward=MagicMock(
-            return_value=ForwardBackwardResult(torch.tensor(1.0), [])
-        ),
+        _run_forward_backward=MagicMock(return_value=(torch.tensor(1.0), [])),
         _accelerator_graph_per_microbatch_group_enabled=False,
         sdc_replayer=None,
         flops_estimator=lambda inputs: inputs["input"].numel(),
@@ -180,7 +178,6 @@ def test_forward_backward_uses_global_token_count() -> None:
     )
 
     torch.testing.assert_close(result.loss, torch.tensor(1.0))
-    assert result.num_flops == 3
     engine.garbage_collector.run.assert_called_once_with(1)
     engine.optim.zero_grad.assert_called_once_with(set_to_none=True)
     assert engine.num_accumulation_steps == 3
@@ -258,6 +255,7 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
                         }
                     ],
                 ],
+                num_flops=0,
             )
         )
         trainer.engine = engine
@@ -381,7 +379,7 @@ def test_forward_backward_without_last_pipeline_stage_returns_no_metrics() -> No
         engine = SimpleNamespace(num_completed_steps=0, pp_has_last_stage=False)
         engine.forward_backward = MagicMock(
             return_value=ForwardBackwardResult(
-                loss=torch.tensor(-1.0), loss_metrics=[[{}, {}], [{}, {}]]
+                loss=torch.tensor(-1.0), loss_metrics=[[{}, {}], [{}, {}]], num_flops=0
             )
         )
         trainer.engine = engine

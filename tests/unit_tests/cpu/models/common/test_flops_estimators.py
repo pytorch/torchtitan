@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import importlib
 from types import SimpleNamespace
 
@@ -163,7 +164,7 @@ def test_spark_audio_uses_each_stage_token_count():
     )
 
 
-def test_lazy_forward_backward_returns_flops_for_streamed_groups():
+def test_lazy_preprocessing_counts_flops_for_streamed_groups():
     class StreamedGroups:
         def __len__(self):
             return 2
@@ -172,27 +173,49 @@ def test_lazy_forward_backward_returns_flops_for_streamed_groups():
             for num_tokens in (4, 8):
                 yield [
                     SimpleNamespace(
-                        as_input_dict=lambda: {"input": torch.empty(num_tokens)}
+                        as_input_dict=lambda: {"input": torch.empty(num_tokens)},
+                        to_input_dict=lambda *args, **kwargs: {},
                     )
                 ]
 
     engine = SimpleNamespace(
         flops_estimator=lambda inputs: inputs["input"].numel(),
         parallelism_context=SimpleNamespace(
-            dp_replicate_enabled=False, pp_enabled=False
+            dp_replicate_enabled=False,
+            pp_enabled=False,
+            cp=1,
+            activate_spmd=contextlib.nullcontext,
         ),
         _global_routing_token_counts=torch.tensor([12]),
-        _preprocess_microbatch_group=lambda group, **kwargs: (None, None, {}, {}),
+        _forward_backward_num_flops=0,
+        device=torch.device("cpu"),
+        max_num_documents=None,
+        preprocess_inputs_kwargs={},
+        ntokens_seen=0,
+        config=SimpleNamespace(
+            parallelism=None,
+            training=SimpleNamespace(
+                num_tokens_per_microbatch_per_dp_rank=1, max_context_length=128
+            ),
+        ),
+        model_parts=[
+            SimpleNamespace(
+                preprocess_inputs=lambda *args, **kwargs: (None, None, {}, {})
+            )
+        ],
         _non_pp_forward_backward_microbatch=lambda **kwargs: torch.tensor(1.0),
     )
-    result = TrainingEngine._forward_backward_body(
+    engine._preprocess_microbatch_group = lambda group, **kwargs: (
+        TrainingEngine._preprocess_microbatch_group(engine, group, **kwargs)
+    )
+    TrainingEngine._forward_backward_body(
         engine,
         StreamedGroups(),
         torch.tensor(12),
         defer_fsdp_gradient_reduction=False,
         preprocess_microbatch_groups_lazily=True,
     )
-    assert result.num_flops == 12
+    assert engine._forward_backward_num_flops == 12
 
 
 @pytest.mark.parametrize("family", ["muse_glimmer", "muse_spark"])

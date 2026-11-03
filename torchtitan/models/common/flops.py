@@ -157,4 +157,6 @@ def active_parameter_flops_per_token(
     assert (
         usage_weighted_nparams.denominator == 1
     ), f"Active parameter count must be integral, got {usage_weighted_nparams}"
+    # TODO: Account for frozen weights: forward-only costs 2P per token, while
+    # propagating input gradients without weight gradients costs 4P.
     return 6 * usage_weighted_nparams.numerator

@@ -465,16 +465,17 @@ class FaultTolerantTrainer(Configurable):
                     ft_pg,
                 ),
             )
-            mean_num_flops = (
-                dist_utils.dist_sum(
+            dp_mesh = parallelism_context.get_optional_mesh("dp")
+            if dp_mesh is not None or ft_pg is not None:
+                mean_num_flops = dist_utils.dist_sum(
                     torch.tensor(
                         mean_num_flops, dtype=torch.float64, device=engine.device
                     ),
-                    loss_mesh,
+                    dp_mesh,
                     ft_pg,
                 )
-                / loss_mesh.size()
-            )
+                if dp_mesh is not None:
+                    mean_num_flops /= dp_mesh.size()
             # ft_pg is None in semi-sync training.
             if ft_pg is not None:
                 # Avoid artificial jumps in logged loss when replicas leave or rejoin.

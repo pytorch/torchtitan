@@ -13,7 +13,7 @@ from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.optim import GradientClipper, Optim
 from torchtitan.trainer import Trainer
-from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
+from torchtitan.training_engine import TrainingEngine
 
 
 class TestInvalidLoss(unittest.TestCase):
@@ -85,7 +85,7 @@ class TestInvalidLoss(unittest.TestCase):
         loop.metrics_processor.should_log.return_value = should_log
 
         trainer._run_forward_backward = MagicMock(
-            return_value=ForwardBackwardResult(torch.tensor(loss_value), [[{}]])
+            return_value=(torch.tensor(loss_value), [[{}]])
         )
         return loop
 

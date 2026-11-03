@@ -87,7 +87,7 @@ share encoder composition through `multimodal_encoder_fqns`. Muse overrides the
 estimator to add output-module work using encoder-owned output-token counts.
 `ForwardBackwardResult.num_flops` reports unreduced work for this DP rank's raw
 microbatches, covering the full logical model and replicated across CP ranks.
-Trainers average it over the loss mesh.
+Trainers average it over the DP mesh; CP ranks hold the same value.
 
 `Config.get_parameter_counts(model)` reports unique total and architecturally
 active parameters, including embeddings and encoders and weighting routed experts

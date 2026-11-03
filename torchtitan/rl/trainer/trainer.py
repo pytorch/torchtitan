@@ -378,16 +378,16 @@ class Trainer(Configurable):
         # TODO: Move performance, LR, and auxiliary-loss reporting into a shared
         # trainer metrics interface while preserving controller-side aggregation.
         mean_num_flops = self._num_flops
-        if engine.parallelism_context.dp_cp_enabled:
-            loss_mesh = engine.parallelism_context.get_mesh("loss")
+        if engine.parallelism_context.dp_enabled:
+            dp_mesh = engine.parallelism_context.get_mesh("dp")
             mean_num_flops = (
                 dist_utils.dist_sum(
                     torch.tensor(
                         mean_num_flops, dtype=torch.float64, device=engine.device
                     ),
-                    loss_mesh,
+                    dp_mesh,
                 )
-                / loss_mesh.size()
+                / dp_mesh.size()
             )
 
         performance = compute_training_performance_metrics(
