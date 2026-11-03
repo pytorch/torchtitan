@@ -4,14 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Checkpoint conversion for the released inference namespaces and formats."""
+"""Checkpoint conversion for the released inference namespaces and formats.
+
+M: image markers, D: model width.
+"""
 
 import json
 import re
 from pathlib import Path
 
+import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Replicate
 
 from torchtitan.models.common.moe.state_dict_adapter import MoEStateDictAdapter
 from .checkpoint_storage import BlockScaledHuggingFaceStorageReader, BlockScaledLayout
@@ -26,14 +30,46 @@ class DeepSeekV41StateDictAdapter(MoEStateDictAdapter):
             "head.weight": "lm_head.weight",
         }
         self._expert_counts = {}
+        self._vision_qkv = {}
+        self._vision_gate_up = {}
         for layer_id, layer in enumerate(model_config.layers):
             self._add_layer(f"layers.{layer_id}", f"layers.{layer_id}", layer)
+        if model_config.vision is not None:
+            self._add_vision(model_config.vision)
         if self.fqn_to_index_mapping is not None:
             self.fqn_to_index_mapping = {
                 key: index
                 for key, index in self.fqn_to_index_mapping.items()
                 if key in self.from_hf_map
             }
+
+    def _add_vision(self, config):
+        mapping = self.from_hf_map
+        for name in ("weight", "bias"):
+            mapping[f"vision.patch_embed.proj.{name}"] = f"vision.patch_embed.{name}"
+            for projection in ("w1", "w2"):
+                mapping[f"aligner.{projection}.{name}"] = f"aligner.{projection}.{name}"
+        mapping["vision.norm.weight"] = "vision.norm.weight"
+        for marker in ("image_start", "image_newline", "image_end"):
+            mapping[marker] = "image_embeddings.weight"
+        for index, _ in enumerate(config.layers):
+            hf_prefix, prefix = f"vision.blocks.{index}", f"vision.layers.{index}"
+            for norm in ("norm1", "norm2"):
+                mapping[f"{hf_prefix}.{norm}.weight"] = f"{prefix}.{norm}.weight"
+            for param in ("weight", "bias"):
+                mapping[f"{hf_prefix}.attn.wo.{param}"] = f"{prefix}.attn.proj.{param}"
+                fused = f"{hf_prefix}.attn.wqkv.{param}"
+                logical = tuple(
+                    f"{prefix}.attn.{projection}.{param}"
+                    for projection in ("wq", "wk", "wv")
+                )
+                self._vision_qkv[fused] = logical
+                mapping[fused] = logical[0]
+            fused = f"{hf_prefix}.mlp.w1.weight"
+            logical = (f"{prefix}.mlp.w1.weight", f"{prefix}.mlp.w3.weight")
+            self._vision_gate_up[fused] = logical
+            mapping[fused] = logical[0]
+            mapping[f"{hf_prefix}.mlp.w2.weight"] = f"{prefix}.mlp.w2.weight"
 
     def _add_layer(self, hf, native, config):
         mapping = self.from_hf_map
@@ -90,6 +126,26 @@ class DeepSeekV41StateDictAdapter(MoEStateDictAdapter):
             if ".ffn.experts." not in hf
         }
         output = {}
+        for fused, logical in (self._vision_qkv | self._vision_gate_up).items():
+            if all(key in state_dict for key in logical):
+                output[fused] = torch.cat(
+                    [state_dict.pop(key) for key in logical], dim=0
+                )
+        if "image_embeddings.weight" in state_dict:
+            markers_MD = state_dict.pop("image_embeddings.weight")
+            if isinstance(markers_MD, DTensor):
+                markers_MD = markers_MD.redistribute(
+                    placements=[
+                        Replicate() if placement.is_shard(0) else placement
+                        for placement in markers_MD.placements
+                    ]
+                )
+            for key, value in zip(
+                ("image_start", "image_newline", "image_end"),
+                markers_MD.unbind(0),
+                strict=True,
+            ):
+                output[key] = value
         for key, value in state_dict.items():
             if self._is_expert_weight_key(key):
                 match = re.match(r"(layers)\.(\d+)\.(.*)", key)
@@ -132,6 +188,20 @@ class DeepSeekV41StateDictAdapter(MoEStateDictAdapter):
     def from_hf(self, hf_state_dict, *, is_quantized_layout=False):
         output, grouped = {}, {}
         hf_state_dict = dict(hf_state_dict)
+        for fused, logical in (self._vision_qkv | self._vision_gate_up).items():
+            if fused in hf_state_dict:
+                output.update(
+                    zip(
+                        logical,
+                        hf_state_dict.pop(fused).chunk(len(logical), dim=0),
+                        strict=True,
+                    )
+                )
+        markers = ("image_start", "image_newline", "image_end")
+        if all(key in hf_state_dict for key in markers):
+            output["image_embeddings.weight"] = torch.stack(
+                [hf_state_dict.pop(key) for key in markers]
+            )
         for key, value in hf_state_dict.items():
             if key not in self.from_hf_map:
                 raise ValueError(f"Unmapped V4.1 HF checkpoint key: {key}")

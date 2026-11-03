@@ -4,14 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
+from torchtitan.components.optim import AdamW, OptimizersContainer
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.activation import SwiGLU
+from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.deepseek_v4.mhc import HcPre
 from torchtitan.models.deepseek_v4_1 import build_model_config
 from torchtitan.models.deepseek_v4_1.attention import hierarchical_select
@@ -239,3 +243,85 @@ def test_full_index_selection_matches_dense_topk_for_tied_scores():
     expected = scores.topk(4, sorted=False).indices.sort(-1).values
     expected = expected.masked_fill(expected > positions[:, None], -1).int()
     torch.testing.assert_close(indices, expected, rtol=0, atol=0)
+
+
+def test_modality_router_weights_counts_and_image_bias_updates(monkeypatch):
+    config = build_model_config(
+        "debugmodel",
+        parallelism=ParallelismConfig(),
+        seq_len=8,
+        attention_backend="reference",
+        vision_enabled=True,
+    )
+    with torch.device("meta"):
+        model = config.build()
+    model.to_empty(device="cpu")
+    model.init_states()
+    moe = model.layers["0"].feed_forward
+    router = moe.router
+    with torch.no_grad():
+        router.gate.weight.zero_()
+        moe.expert_bias_E.zero_()
+        moe.expert_bias_E[:2] = 3
+        moe.expert_bias_vl_E.zero_()
+        moe.expert_bias_vl_E[2:4] = 3
+    x = torch.randn(6, config.dim)
+    image = torch.tensor([False, False, True, True, True, False])
+    padding = torch.tensor([False, False, False, False, True, True])
+    scores, indices, _ = router(
+        x,
+        moe.expert_bias_E,
+        image_mask_T=image,
+        expert_bias_vl_E=moe.expert_bias_vl_E,
+        padding_mask_T=padding,
+    )
+    assert torch.isin(indices[~image], torch.tensor([0, 1])).all()
+    assert torch.isin(indices[image], torch.tensor([2, 3])).all()
+    torch.testing.assert_close(scores, torch.full_like(scores, 0.75), rtol=0, atol=0)
+    torch.testing.assert_close(
+        router.tokens_per_expert_E, torch.tensor([2, 2, 0, 0, 0, 0, 0, 0]).float()
+    )
+    torch.testing.assert_close(
+        router.image_tokens_per_expert_E, torch.tensor([0, 0, 2, 2, 0, 0, 0, 0]).float()
+    )
+    router.eval()
+    router(
+        x, moe.expert_bias_E, image_mask_T=image, expert_bias_vl_E=moe.expert_bias_vl_E
+    )
+    assert router.image_tokens_per_expert_E.sum() == 4
+    router.train()
+    with patch(
+        "torchtitan.models.deepseek_v4_1.moe.remat.is_recomputing", return_value=True
+    ):
+        router(
+            x,
+            moe.expert_bias_E,
+            image_mask_T=image,
+            expert_bias_vl_E=moe.expert_bias_vl_E,
+        )
+    assert router.image_tokens_per_expert_E.sum() == 4
+    previous = moe.expert_bias_vl_E.clone()
+    previous_text = moe.expert_bias_E.clone()
+    context = SimpleNamespace(get_optional_mesh=lambda name: None, ep_enabled=False)
+    optimizers = OptimizersContainer.Config(
+        optimizers=[AdamW.Config(pattern=r".*", fused=False, lr=0.0)]
+    ).build(model_parts=[model])
+    monkeypatch.setattr(AuxLoss, "group_acc", {})
+    auxiliary = next(
+        module for module in model.modules() if isinstance(module, AuxLoss)
+    )
+    auxiliary.instance_acc.fill_(2.5)
+    type(model)._register_optimizer_hooks(optimizers, [model], context)
+    optimizers.step()
+    delta = torch.tensor([1, 1, -1, -1, 1, 1, 1, 1]).float() * moe.load_balance_coeff
+    torch.testing.assert_close(moe.expert_bias_vl_E, previous + delta - delta.mean())
+    text_delta = (
+        torch.tensor([-1, -1, 1, 1, 1, 1, 1, 1]).float() * moe.load_balance_coeff
+    )
+    torch.testing.assert_close(
+        moe.expert_bias_E, previous_text + text_delta - text_delta.mean()
+    )
+    assert router.image_tokens_per_expert_E.sum() == 0
+    assert router.tokens_per_expert_E.sum() == 0
+    assert auxiliary.instance_acc == 0
+    assert AuxLoss.group_acc[(auxiliary.reduce_mesh, auxiliary.metric_name)] == 2.5
