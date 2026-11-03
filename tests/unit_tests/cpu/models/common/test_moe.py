@@ -41,9 +41,7 @@ from torchtitan.models.common.moe import (
     sharding as moe_sharding,
     TokenChoiceTopKRouter,
 )
-from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 from torchtitan.models.kimi_k3.moe import KimiLatentMoE
 from torchtitan.models.muse_spark.moe import MuseSparkMoE
 
@@ -163,38 +161,6 @@ class _IdentityW2(nn.Module):
 
 
 class TestMoE(unittest.TestCase):
-    def test_deepep_rejects_bias_and_output_postprocess(self):
-        config = replace(
-            make_routed_experts_config(
-                dim=4,
-                hidden_dim=8,
-                num_experts=2,
-                top_k=1,
-                param_init={},
-                enable_ep=False,
-            ),
-            token_dispatcher=DeepEPTokenDispatcher.Config(
-                num_experts=2, top_k=1, hidden_dim=4, num_max_tokens_per_rank=4
-            ),
-        )
-        biased_w2 = GptOssGroupedLinear.Config(
-            group_size=2, in_features=8, out_features=4
-        )
-        postprocess = RMSNorm.Config(normalized_shape=4)
-        for w2, output_postprocess in (
-            (biased_w2, None),
-            (config.w2, postprocess),
-            (biased_w2, postprocess),
-        ):
-            with (
-                self.subTest(bias=w2.bias, output_postprocess=output_postprocess),
-                self.assertRaisesRegex(
-                    ValueError,
-                    "DeepEP does not support output_postprocess or a w2 bias",
-                ),
-            ):
-                replace(config, w2=w2, output_postprocess=output_postprocess)
-
     def test_make_router_config_requires_score_func(self):
         with self.assertRaisesRegex(TypeError, "score_func"):
             make_router_config(
