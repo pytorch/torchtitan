@@ -18,6 +18,7 @@ from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 
 _LOCAL_COMPILE_CALLBACKS: dict[str, list[Callable[["LocalCompileConfig"], None]]] = {}
 _ALWAYS_COMPILE_CALLBACKS: list[Callable[["LocalCompileConfig"], None]] = []
+_ENABLED_LOCAL_COMPILE_REGIONS: frozenset[str] = frozenset()
 
 
 @dataclass(kw_only=True, slots=True)
@@ -39,6 +40,8 @@ class LocalCompileConfig:
 
     def apply(self) -> None:
         """Bind named regions and always-compiled helpers using this config."""
+        global _ENABLED_LOCAL_COMPILE_REGIONS
+
         unknown = [
             name for name in self.regions if name not in _LOCAL_COMPILE_CALLBACKS
         ]
@@ -53,6 +56,12 @@ class LocalCompileConfig:
                 bind_local_compile_fn(self)
         for bind_compile_fn in _ALWAYS_COMPILE_CALLBACKS:
             bind_compile_fn(self)
+        _ENABLED_LOCAL_COMPILE_REGIONS = frozenset(self.regions)
+
+
+def is_local_compile_enabled(name: str) -> bool:
+    """Return whether the active config enables a named local compile region."""
+    return name in _ENABLED_LOCAL_COMPILE_REGIONS
 
 
 def local_compile(
@@ -122,6 +131,7 @@ def compile(
 
 __all__ = [
     "compile",
+    "is_local_compile_enabled",
     "local_compile",
     "LocalCompileConfig",
 ]

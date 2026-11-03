@@ -10,9 +10,14 @@ from dataclasses import dataclass, field
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch_remat as remat
 
-from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.distributed.local_compile import (
+    is_local_compile_enabled,
+    local_compile,
+    LocalCompileConfig,
+)
 from torchtitan.models.common.attention import (
     FlexAttentionMetadata,
     VarlenAttentionMetadata,
@@ -24,6 +29,20 @@ from torchtitan.models.common.flops import (
 )
 from torchtitan.models.common.moe import MoE
 from .state_dict_adapter import Qwen3StateDictAdapter
+
+# T = tokens, D = model dimension.
+
+
+@local_compile("attention_residual_norm", batch_invariant=False)
+def _attention_residual_norm(
+    h_TD: torch.Tensor,
+    attn_out_TD: torch.Tensor,
+    norm_weight_D: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    h_TD = h_TD + attn_out_TD
+    ffn_input_TD = F.rms_norm(h_TD, (h_TD.shape[-1],), norm_weight_D, eps)
+    return h_TD, ffn_input_TD
 
 
 class Qwen3TransformerBlock(TransformerBlock):
@@ -60,19 +79,31 @@ class Qwen3TransformerBlock(TransformerBlock):
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominator: torch.Tensor | None = None,
     ):
-        attn_out = self.attention(self.attention_norm(x), attention_metadata, positions)
+        attn_out_TD = self.attention(
+            self.attention_norm(x), attention_metadata, positions
+        )
         # The residual add reads the attention output with bare ops.
-        remat.recompute_needs_tensor(attn_out)
-        x = x + attn_out
+        remat.recompute_needs_tensor(attn_out_TD)
+        if is_local_compile_enabled("attention_residual_norm"):
+            assert self.ffn_norm.eps is not None
+            x, ffn_input_TD = _attention_residual_norm(
+                x,
+                attn_out_TD,
+                self.ffn_norm.weight,
+                self.ffn_norm.eps,
+            )
+        else:
+            x = x + attn_out_TD
+            ffn_input_TD = self.ffn_norm(x)
 
         if isinstance(self.feed_forward, MoE):
             ffn_out = self.feed_forward(
-                self.ffn_norm(x),
+                ffn_input_TD,
                 padding_mask_T=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
             )
         else:
-            ffn_out = self.feed_forward(self.ffn_norm(x))
+            ffn_out = self.feed_forward(ffn_input_TD)
         # Trailing add, always saved: it saves nothing for backward, so replay skips
         # it and its inputs need no persisting, matching checkpoint early stop.
         return remat.region(
