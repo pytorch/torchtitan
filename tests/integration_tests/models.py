@@ -611,6 +611,10 @@ def muse_spark_debugmodel_mm_fsdp2_tp2_cp2_ep4() -> Trainer.Config:
         ),
     )
     config.override.imports = []
+    # A new packed-vision length lowers flex attention after step 1.
+    # On 910B that compile exceeds the default 100s training collective
+    # timeout, and the ranks that finish first abort the all-gather.
+    config.comm.train_timeout_seconds = 1800
     _set_spmd_typechecking(config, typechecking=True)
     return config
 

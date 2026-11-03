@@ -1,0 +1,80 @@
+--- a/torch_npu/_inductor/kernel/flex_attention.py	2026-10-30 09:07:15.035804660 +0000
++++ b/torch_npu/_inductor/kernel/flex_attention.py	2026-10-30 09:07:15.267804660 +0000
+@@ -160,8 +160,14 @@
+ 
+ 
+ def _supports_flex_attention_mask_out() -> bool:
+-    """Return whether the selected wrapper can emit mask-out dispatch code."""
+-    return True
++    """Return whether the selected wrapper can emit mask-out dispatch code.
++
++    910B bishengir aborts or runs out of UB on the mask-out flex kernels when
++    the mask indexes captured tensors. Mask-in compiles on that soc.
++    """
++    from torch_npu._inductor.config import is_ascend950
++
++    return bool(is_ascend950)
+ 
+ 
+ def _tag_flex_attention_report_choices(new_choices, cfg):
+@@ -824,13 +830,22 @@
+     from torch_npu.utils._dynamo import _InductorNpuRegistry
+ 
+     additional_lowerings = {}
+-    # Captured tensors (e.g. document IDs) are loaded inside the template.
+-    # DVM's global index fallback would create a buffer, which is forbidden in
+-    # a pointwise subgraph. Preserve other backends' existing index lowerings.
+-    if _InductorNpuRegistry._loaded_backend == "dvm":
+-        additional_lowerings[aten.index.Tensor] = (
+-            capture_lowering_baseline().lowerings_copy[aten.index.Tensor]
++    # Captured tensors (document ids, packed-document offsets) are loaded
++    # inside the mask subgraph. A fallback index allocates a buffer, which
++    # pointwise subgraphs reject. DVM always replaces index with that
++    # fallback. The default Triton backend does the same on 910B, where
++    # indirect-memory codegen is off. Use the upstream pointwise index there.
++    from torch_npu._inductor.config import inductor_indirect_memory_mode
++
++    if (
++        _InductorNpuRegistry._loaded_backend == "dvm"
++        or not inductor_indirect_memory_mode
++    ):
++        baseline_index = capture_lowering_baseline().lowerings_copy.get(
++            aten.index.Tensor
+         )
++        if baseline_index is not None:
++            additional_lowerings[aten.index.Tensor] = baseline_index
+ 
+     bitwise_and_fn = make_pointwise(ops.bitwise_and)
+ 
+@@ -955,6 +970,15 @@
+        we need to ensure that the batch and head dims are statically known. Otherwise we just
+        use the main flex_attention kernel.
+     """
++    from torch_npu._inductor.config import is_ascend950
++
++    # 910B compile of the decode kernel is slower than the training
++    # collective timeout, so a short packed-vision step aborts the job
++    # while other ranks are still lowering it. The mask-in kernel already
++    # runs these lengths.
++    if not is_ascend950:
++        return False
++
+     force_flex = kernel_options.get("FORCE_USE_FLEX_ATTENTION", False)
+ 
+     short_query_length = V.graph.sizevars.evaluate_expr(
+@@ -1926,6 +1950,15 @@
+     )
+ 
+     kernel_options = kernel_options.copy()
++    from torch_npu._inductor.config import is_ascend950
++
++    if not is_ascend950:
++        # 910B4 segfaults in the real backward when autotune picks a tile
++        # larger than 16. 16x16 compiles and returns finite gradients.
++        kernel_options.setdefault("BLOCK_M1", 16)
++        kernel_options.setdefault("BLOCK_N1", 16)
++        kernel_options.setdefault("BLOCK_M2", 16)
++        kernel_options.setdefault("BLOCK_N2", 16)
+     _set_flex_attention_float32_precision(kernel_options, query.get_dtype())
+     kernel_options.setdefault("PRESCALE_QK", False)
+     kernel_options.setdefault("ROWS_GUARANTEED_SAFE", False)

@@ -494,6 +494,11 @@ def _reshape_for_broadcast(
     num_tokens = query_shape[0]
     if positions is None:
         rope_cache = rope_cache[:num_tokens]
+    elif rope_cache.is_complex() and rope_cache.device.type == "npu":
+        # NPU index does not implement complex64. Gather the real/imag
+        # pairs, then restore the complex cache.
+        indexed = torch.view_as_real(rope_cache)[positions]
+        rope_cache = torch.view_as_complex(indexed.contiguous())
     else:
         rope_cache = rope_cache[positions]
     return rope_cache.view(num_tokens, 1, cache_width)

@@ -325,6 +325,12 @@ class FusedSwiGLU(BinaryActivationFn):
     def __call__(
         self, gate_up: torch.Tensor, *, offsets: torch.Tensor | None = None
     ) -> torch.Tensor:
+        # The Triton custom op is registered for CUDA only. On NPU the
+        # PrivateUse1 fallback tries a CPU kernel, which does not exist.
+        if gate_up.device.type != "cuda":
+            del offsets
+            gate, up = gate_up.unbind(-2)
+            return torch.nn.functional.silu(gate) * up
         # Eager: the compiler can't fuse into the Triton op, so the base's compiled
         # region would only add graphs.
         if offsets is not None:

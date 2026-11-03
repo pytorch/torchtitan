@@ -188,10 +188,26 @@ class DistMoeRoutedExperts(Module):
         Returns:
             Combined local expert output with shape ``(T, D)``.
         """
-        del num_local_tokens_per_expert_E
         runtime = self._runtime
         if runtime is None:
             raise RuntimeError("Dist-MoE context is not initialized")
+        if x_TD.device.type == "npu":
+            from .npu import npu_dist_moe_forward
+
+            out_TD = remat.region(
+                npu_dist_moe_forward,
+                self.remat_region_name("dist_moe"),
+                recompute=False,
+            )(
+                self,
+                x_TD,
+                topk_scores_TK,
+                topk_expert_ids_TK,
+                num_local_tokens_per_expert_E,
+            )
+            remat.recompute_needs_tensor(out_TD)
+            return out_TD
+        del num_local_tokens_per_expert_E
         if padding_mask_T is not None:
             padding_mask_TK = padding_mask_T.unsqueeze(-1)
             topk_expert_ids_TK = topk_expert_ids_TK.masked_fill(padding_mask_TK, -1)

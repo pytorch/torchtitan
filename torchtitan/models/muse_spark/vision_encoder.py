@@ -335,7 +335,14 @@ class NaViTEncoder(Module):
         if self.sparse_attention_factor > 1:
             sp_perm, sp_slens = self._get_sparse_perm_and_slens(grid_h, grid_w, device)
             x_TD = x_TD[sp_perm]
-            freqs_cis_GD = freqs_cis_GD[sp_perm]
+            if freqs_cis_GD.is_complex() and freqs_cis_GD.device.type == "npu":
+                # NPU index does not implement complex64. Gather the real/imag
+                # pairs, then restore the complex cache. This site does not go
+                # through rope._reshape_for_broadcast.
+                indexed = torch.view_as_real(freqs_cis_GD)[sp_perm]
+                freqs_cis_GD = torch.view_as_complex(indexed.contiguous())
+            else:
+                freqs_cis_GD = freqs_cis_GD[sp_perm]
 
         return x_TD, freqs_cis_GD, num_tokens, grid_h, grid_w, sp_perm, sp_slens
 
@@ -448,7 +455,9 @@ class NaViTEncoder(Module):
             frame_TD = x_TD[offset : offset + num_tokens]
             offset += num_tokens
             outputs.append(self._finalize_image(frame_TD, grid_h, grid_w, sp_perm))
-        return torch.cat(outputs)
+        # cat of one frame is that frame. FSDP drops its pre-backward
+        # all-gather when the module output is a view.
+        return torch.cat(outputs).contiguous()
 
 
 __all__ = [

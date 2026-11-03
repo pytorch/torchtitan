@@ -6,6 +6,7 @@
 
 """Muse Spark model configurations used by tests."""
 
+import os
 from dataclasses import replace
 from functools import partial
 
@@ -143,14 +144,40 @@ def muse_spark_debugmodel(
             imports=[_MUSE_SPARK_FUSED_SWIGLU_OVERRIDE],
         ),
     )
+    # release/0.4 compiles RoPE and the Muse Spark norm/attention regions by
+    # default. On 910B those regions run inside activation remat, and the
+    # backward recompute specializes a different graph: saved NPU tensors come
+    # back as CPU scalars and checkpoint metadata no longer matches. Keep the
+    # region set that already completes a step on this machine.
+    config.model.local_compile_regions = ["loss", "fp32_to_bf16_split"]
+    if os.environ.get("MUSE_DEBUG_DETERMINISTIC") == "1":
+        config.debug.seed = 42
+        config.debug.deterministic = True
     return config
 
 
 def muse_spark_debugmodel_with_cp(
     seq_len: int | None = None,
 ) -> Trainer.Config:
-    config = muse_spark_debugmodel(seq_len)
+    # Checklist row 2: 4 cards TP2 x EP2 x CP2. Do not inherit the base
+    # recipe's dp_shard=2, which would make world size 8.
+    config = muse_spark_debugmodel(
+        seq_len,
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=1,
+            tensor_parallel_degree=2,
+            expert_parallel_degree=2,
+            enable_sequence_parallel=True,
+        ),
+    )
     config.parallelism.context_parallel_degree = 2
+    # Ulysses CP plus TP compiles flex attention on every rank. On 910B
+    # that compile exceeds the default 100s training collective timeout,
+    # and the ranks that finish first abort the all-gather.
+    config.comm.train_timeout_seconds = 1800
+    # Fused SwiGLU / Helion RoPE overrides target CUDA. Clear them on NPU
+    # so attention uses the same path as the other CP recipes that finish.
+    config.override.imports = []
     return apply_transforms(
         config,
         [_muse_spark_context_parallel_transform()],
@@ -161,11 +188,17 @@ def muse_spark_debugmodel_dist_moe_bf16(
     seq_len: int | None = None,
 ) -> Trainer.Config:
     """Configure the Muse debug model with BF16 Dist-MoE experts."""
-    return _with_dist_moe(
+    config = _with_dist_moe(
         muse_spark_debugmodel(seq_len),
         expert_precision="bf16",
         scratch_capacity_factor=2.0,
     )
+    # 910B has no CUDA graph capture. Keep the compile regions that already
+    # finish a step on this machine.
+    config.training.disable_cuda_graphs = True
+    config.model.local_compile_regions = ["loss", "fp32_to_bf16_split"]
+    config.comm.train_timeout_seconds = 1800
+    return config
 
 
 def muse_spark_debugmodel_dist_moe_mxfp8(
@@ -216,6 +249,9 @@ def muse_spark_debugmodel_mm(
         attn_backend="flex",
     )
     config.model = model_config
+    # debugmodel_mm replaces the model config, which would turn the v0.4
+    # compile regions back on. Keep the same eager set as the text recipe.
+    config.model.local_compile_regions = ["loss", "fp32_to_bf16_split"]
     config.tokenizer = MuseSparkTokenizer.Config(**MUSE_SPARK_DEBUG_SPECIAL_TOKENS)
     image_dataset = _muse_spark_mm_dataloader(
         model_config, MM_DATASETS["cc12m-test"]
@@ -256,6 +292,9 @@ def muse_spark_debugmodel_mm(
     )
     if context_parallel_transform is None:
         context_parallel_transform = _muse_spark_context_parallel_transform()
+    # A new packed-vision length recompiles flex attention. On 910B that
+    # exceeds the default 100s training collective timeout.
+    config.comm.train_timeout_seconds = 1800
     return apply_transforms(
         config,
         [context_parallel_transform],
