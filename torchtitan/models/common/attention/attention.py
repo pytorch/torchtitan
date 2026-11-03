@@ -44,6 +44,7 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
+from torchtitan.ops.varlen_attn import deterministic_varlen_attn
 from torchtitan.tools.utils import activate_cuda_flash_attention_impl, round_up
 
 if TYPE_CHECKING:
@@ -51,6 +52,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "Attention",
+    "DeterministicVarlenInnerAttention",
     "FlexAttentionMetadata",
     "FlexInnerAttention",
     "GQAttention",
@@ -356,6 +358,16 @@ class VarlenAttentionMetadata:
             spmd.assert_type(self.cu_seq_k, self._OFFSETS_SPMD_TYPE)
 
 
+def _varlen_attn_dtype(value_dtype: torch.dtype) -> torch.dtype:
+    """Return the dtype varlen attention runs in for a value of ``value_dtype``.
+
+    FP16/BF16 values keep their dtype; full-precision values run in BF16.
+    """
+    if value_dtype in (torch.float16, torch.bfloat16):
+        return value_dtype
+    return torch.bfloat16
+
+
 # Register as a pytree so CUDA Graph input updates can copy document offsets.
 register_dataclass(VarlenAttentionMetadata)
 
@@ -492,11 +504,7 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
 
         varlen_attn_fn = varlen_attn if out_transform is None else varlen_attn_with_lse
 
-        # Align Q/K with V while preserving its FP16/BF16 projection dtype.
-        attn_dtype = v_THV.dtype
-        if attn_dtype not in (torch.float16, torch.bfloat16):
-            # Preserve the legacy BF16 conversion for full-precision callers.
-            attn_dtype = torch.bfloat16
+        attn_dtype = _varlen_attn_dtype(v_THV.dtype)
 
         with sdpa_kernel(self.sdpa_backends, set_priority=True):
             result = varlen_attn_fn(
@@ -564,6 +572,59 @@ class SlidingWindowVarlenInnerAttention(VarlenInnerAttention[_VarlenMetadataT]):
                 max_context_length=max_context_length,
             )
             return replace(metadata, window_size=(self.sliding_window_size - 1, 0))
+
+
+class DeterministicVarlenInnerAttention(InnerAttention):
+    """Flash varlen attention whose backward is deterministic in any mode.
+
+    Runs ``torchtitan::deterministic_varlen_attn``, so it always uses Flash and
+    has no ``sdpa_backends``. It has no metadata builder: the caller builds the
+    ``VarlenAttentionMetadata``.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(InnerAttention.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        activate_cuda_flash_attention_impl()
+
+    def forward(
+        self,
+        q_THK: torch.Tensor,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
+        *,
+        attention_metadata: VarlenAttentionMetadata,
+        scale: float | None = None,
+    ) -> torch.Tensor:
+        attn_dtype = _varlen_attn_dtype(v_THV.dtype)
+        query_THK = q_THK.to(attn_dtype)
+        key_THK = k_THK.to(attn_dtype)
+        value_THV = v_THV.to(attn_dtype)
+        num_splits = 1 if is_in_batch_invariant_mode() else None
+        with spmd.no_typecheck():
+            out_THV = deterministic_varlen_attn(
+                query_THK,
+                key_THK,
+                value_THV,
+                attention_metadata.cu_seq_q,
+                attention_metadata.cu_seq_k,
+                attention_metadata.max_q,
+                attention_metadata.max_k,
+                scale,
+                list(attention_metadata.window_size),
+                num_splits,
+            )[0]
+        if spmd.is_type_checking():
+            # The output keeps the query's token and head layout.
+            spmd.assert_type(
+                out_THV,
+                spmd.get_local_type(query_THK),
+                spmd.get_partition_spec(query_THK),
+            )
+        return out_THV.to(q_THK.dtype)
 
 
 FlexAttentionMetadata: TypeAlias = BlockMask

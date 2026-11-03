@@ -21,6 +21,7 @@ from torchtitan.config.transform import (
 )
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.attention import (
+    DeterministicVarlenInnerAttention,
     FlexInnerAttention,
     QKVLinear,
     SlidingWindowFlexInnerAttention,
@@ -557,7 +558,7 @@ def _muse_spark_navit_attention_config(
     return VisionAttention.Config(
         dim=latent_dim,
         num_heads=num_heads,
-        inner_attention=FlexInnerAttention.Config(
+        inner_attention=DeterministicVarlenInnerAttention.Config(
             sharding_config=vision_inner_attention_sharding_config(),
         ),
         wq=Linear.Config(
