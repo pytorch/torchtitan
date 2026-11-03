@@ -67,15 +67,17 @@ dispatcher alone does not make the whole model capturable.
 ### HybridEP capacity
 
 - `None`: blocking dispatch sizes the permuted output from actual token counts.
-- `1.0`: nonblocking dispatch reserves worst-case token fan-out, at a higher
-  memory cost.
+- `1.0`: nonblocking dispatch reserves worst-case unpadded token fan-out, at a
+  higher memory cost.
 - Below `1.0`: a smaller permuted output can drop tokens on overflow. Load
   balancing does not guarantee that arbitrary routing stays within capacity.
-  Check `check_hybridep_over_budget()` after the step and reset the flag between
-  measurements; it stays on the device until explicitly read.
 
 The capacity factor sizes the permuted output, not the persistent communication
-buffer. Quantized experts also need the appropriate `pad_multiple`.
+buffer. Quantized experts also need the appropriate `pad_multiple`. Per-expert
+padding can overflow the allocation even at factor `1.0`. Check
+`check_hybridep_over_budget()` after the step for capacity below `1.0` or padded
+nonblocking dispatch, and reset the flag between measurements; it stays on the
+device until explicitly read.
 
 ## Activation rematerialization
 

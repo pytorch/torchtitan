@@ -593,7 +593,6 @@ def combine_tokens(
         remat_region_name,
         recompute=recompute,
     )(hidden_states, state.handle_id, state.num_tokens, pad_multiple)
-    remat.recompute_needs_tensor(combined)
     return combined
 
 

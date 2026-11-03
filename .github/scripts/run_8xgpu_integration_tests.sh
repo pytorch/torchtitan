@@ -107,6 +107,8 @@ if [[ "${GPU_ARCH_TYPE}" != "rocm" ]]; then
   # The H100 CI image provides the pinned hybrid-ep installer used by the
   # existing HybridEP workflow.
   bash /install_deepep.sh
+  # Run remat tests after switching to HybridEP: its deep_ep API is incompatible
+  # with DeepEP v2, so the earlier pytest invocation skips the HybridEP tests.
   if ! CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 python -m pytest \
     tests/unit_tests/gpu/distributed/test_deepep_activation_checkpoint.py \
     -v -k HybridEP; then

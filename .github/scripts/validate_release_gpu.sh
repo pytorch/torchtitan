@@ -406,6 +406,8 @@ run_h100_tests() {
   fi
 
   install_hybrid_ep
+  # Run remat tests after switching to HybridEP: its deep_ep API is incompatible
+  # with DeepEP v2, so the earlier pytest invocation skips the HybridEP tests.
   if ! CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 python -m pytest \
     tests/unit_tests/gpu/distributed/test_deepep_activation_checkpoint.py \
     -v -k HybridEP; then
