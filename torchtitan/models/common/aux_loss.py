@@ -63,8 +63,9 @@ def aux_loss_denominators(
         aux_loss_denominators(torch.tensor([8, 6]), torch.tensor(4))  # -> tensor([2.0, 1.5])
         aux_loss_denominators(torch.tensor([0]), torch.tensor(0))  # -> tensor([1.0])
     """
-    # Both counts clamp to 1, as main clamped the routed count: a step with no loss tokens
-    # keeps its routed-token weights, and an all-padding microbatch adds a zero loss.
+    # Both counts clamp to 1: a step with no loss tokens keeps its weights R_mb / R, and an
+    # all-padding step (R = N = 0) gets 1 instead of 0, whose inverse would turn its zero
+    # auxiliary gradients into NaN.
     return routing_token_counts.clamp_min(1).to(torch.float32) / (
         loss_token_count.clamp_min(1)
     )

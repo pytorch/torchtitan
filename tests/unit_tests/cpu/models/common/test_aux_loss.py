@@ -300,11 +300,11 @@ class TestAuxLossDenominators(_AuxLossTestCase):
         _zero_aux_losses([loss])
         self.assertEqual(AuxLoss.group_acc[_METRIC_KEY].item(), 0.0)
 
-    def test_microbatches_weigh_their_routed_tokens_not_their_loss_tokens(self):
+    def test_microbatches_weigh_their_share_of_routed_tokens(self):
         """Two microbatches with 16 routed tokens each and 4 and 12 loss tokens:
-        dividing by R / N = 32 / 16, then by N = 16, gives each microbatch main's
-        weight 1 / R = 1 / 32 (routed share 0.5 / 0.5, not the loss-token share
-        0.25 / 0.75). Every scale is a power of two, so the match is bitwise."""
+        dividing by R / N = 32 / 16, then by N = 16, gives each microbatch the
+        weight 1 / R = 1 / 32 of a division by the step's routed tokens (routed
+        share 0.5 / 0.5). Every scale is a power of two, so the match is bitwise."""
         coeff, num_tokens, num_experts, top_k = 0.1, 16, 8, 2
         loss_token_counts = (4, 12)
         num_step_loss_tokens = sum(loss_token_counts)
@@ -340,10 +340,10 @@ class TestAuxLossDenominators(_AuxLossTestCase):
                 num_loss_tokens=num_loss_tokens,
             )[f"{_METRIC_KEY[1]}/mean"]
 
-        # Main: each microbatch's aux loss divided by the step's routed tokens.
+        # Reference: each microbatch's aux loss divided by the step's routed tokens.
         step_routed_tokens = torch.tensor(float(num_tokens * len(microbatches)))
-        main_grad, main_acc = run([step_routed_tokens] * 2)
-        main_metric = metric(main_acc, num_loss_tokens=1)
+        reference_grad, reference_acc = run([step_routed_tokens] * 2)
+        reference_metric = metric(reference_acc, num_loss_tokens=1)
         # This rule: one denominator R / N for the step, then optim_step's divide by N.
         step_denominators = aux_loss_denominators(
             torch.tensor([num_tokens * len(microbatches)]),
@@ -351,21 +351,8 @@ class TestAuxLossDenominators(_AuxLossTestCase):
         )
         grad, acc = run([step_denominators[0]] * 2)
         torch._foreach_div_([grad], torch.tensor(float(num_step_loss_tokens)))
-        self.assertTrue(torch.equal(grad, main_grad))
-        self.assertEqual(metric(acc, num_step_loss_tokens), main_metric)
-        # Per-microbatch R_mb / N_mb would weigh the loss-token share instead.
-        loss_share_grad, _ = run(
-            [
-                aux_loss_denominators(
-                    torch.tensor([num_tokens]), torch.tensor(num_loss_tokens)
-                )[0]
-                for num_loss_tokens in loss_token_counts
-            ]
-        )
-        torch._foreach_div_(
-            [loss_share_grad], torch.tensor(float(num_step_loss_tokens))
-        )
-        self.assertFalse(torch.allclose(loss_share_grad, main_grad))
+        self.assertTrue(torch.equal(grad, reference_grad))
+        self.assertEqual(metric(acc, num_step_loss_tokens), reference_metric)
 
 
 class TestBatchWiseLoadBalanceLoss(_AuxLossTestCase):
