@@ -67,13 +67,13 @@ def _ratios_by_kind(logits, labels, loss_inputs, temperature):
     """The sampled-token, top-k and tail ratios p / q of every position."""
     train_logp = torch.log_softmax(logits.detach() / temperature, dim=-1)
     topk_ids = loss_inputs["generator_topk_token_ids"].long()
-    head_logp = train_logp.gather(-1, topk_ids)
-    q_head = loss_inputs["generator_topk_logprobs"]
-    tail = (1 - head_logp.exp().sum(-1)) / (1 - q_head.exp().sum(-1))
+    topk_logp = train_logp.gather(-1, topk_ids)
+    q_topk = loss_inputs["generator_topk_logprobs"]
+    tail = (1 - topk_logp.exp().sum(-1)) / (1 - q_topk.exp().sum(-1))
     sampled = (
         train_logp.gather(-1, labels[:, None])[:, 0] - loss_inputs["generator_logprobs"]
     ).exp()
-    return {"sampled": sampled, "head": (head_logp - q_head).exp(), "tail": tail}
+    return {"sampled": sampled, "topk": (topk_logp - q_topk).exp(), "tail": tail}
 
 
 def _assert_band_is_exercised(ratios) -> None:
@@ -84,11 +84,11 @@ def _assert_band_is_exercised(ratios) -> None:
         assert outside.any() and flips.any(), kind
 
 
-# 1.2 truncates sampled-token, head, and tail ratios in this setup.
+# 1.2 truncates sampled-token, top-k, and tail ratios in this setup.
 @pytest.mark.parametrize(
     "config_kwargs",
-    [{"max_ratio": None}, {"max_ratio": 1.2}, {"max_ratio": None, "ratio_band": _BAND}],
-    ids=["no_ratio", "truncated", "band"],
+    [{"max_ratio": 1.2}, {"ratio_band": _BAND}],
+    ids=["truncated", "band"],
 )
 def test_score_centering_matches_reference_implementation(config_kwargs) -> None:
     torch.manual_seed(0)
@@ -106,7 +106,6 @@ def test_score_centering_matches_reference_implementation(config_kwargs) -> None
     )
     (grad,) = torch.autograd.grad(loss, logits)
 
-    max_ratio = config_kwargs["max_ratio"]
     if "ratio_band" in config_kwargs:
         weight_fn = _band_weight
         ratios = _ratios_by_kind(logits, labels, loss_inputs, temperature)
@@ -116,10 +115,8 @@ def test_score_centering_matches_reference_implementation(config_kwargs) -> None
         torch.testing.assert_close(
             metrics["loss/ratio_masked_frac"], expected_masked_frac.mean()
         )
-    elif max_ratio is None:
-        weight_fn = torch.ones_like
     else:
-        weight_fn = lambda r: r.clamp_max(max_ratio)  # noqa: E731
+        weight_fn = lambda r: r.clamp_max(config_kwargs["max_ratio"])  # noqa: E731
     reference_loss = (
         _reference_score_centering_loss(
             torch.log_softmax(logits / temperature, dim=-1),
@@ -140,8 +137,8 @@ def test_score_centering_matches_reference_implementation(config_kwargs) -> None
 
 @pytest.mark.parametrize(
     "config_kwargs",
-    [{"max_ratio": None}, {"max_ratio": 2.0}, {"max_ratio": None, "ratio_band": _BAND}],
-    ids=["no_ratio", "truncated", "band"],
+    [{"max_ratio": 2.0}, {"ratio_band": _BAND}],
+    ids=["truncated", "band"],
 )
 def test_score_centering_cancels_drift_under_a_constant_advantage(
     config_kwargs,
@@ -153,9 +150,9 @@ def test_score_centering_cancels_drift_under_a_constant_advantage(
     vocab_size, num_topk = 8, 3
     trainer_logits = torch.randn(1, vocab_size, requires_grad=True)
     p = torch.softmax(trainer_logits.detach(), dim=-1)[0]
-    head = torch.tensor([5, 1, 6])
+    topk_ids = torch.tensor([5, 1, 6])
     q = 0.4 * p
-    q[head] = torch.tensor([0.30, 0.15, 0.20])
+    q[topk_ids] = torch.tensor([0.30, 0.15, 0.20])
     q = q / q.sum()
     labels = torch.arange(vocab_size)
 
@@ -167,26 +164,23 @@ def test_score_centering_cancels_drift_under_a_constant_advantage(
         temperature=torch.ones(vocab_size),
         advantages=q,
         loss_mask=torch.ones(vocab_size, dtype=torch.bool),
-        generator_topk_token_ids=head.expand(vocab_size, num_topk),
-        generator_topk_logprobs=q[head].log().expand(vocab_size, num_topk),
+        generator_topk_token_ids=topk_ids.expand(vocab_size, num_topk),
+        generator_topk_logprobs=q[topk_ids].log().expand(vocab_size, num_topk),
     )
     (grad,) = torch.autograd.grad(loss, trainer_logits)
-    # Without the correction, the same expectation drifts (with TIS or the band, only partly
-    # cancelled).
-    max_ratio = config_kwargs["max_ratio"]
+    # Without the correction, the same expectation drifts: the truncated or masked weights
+    # cancel it only partly.
     if "ratio_band" in config_kwargs:
         token_weight = _band_weight(p / q)
-        # The band masks a head entry or the tail here, so masked IS alone is biased.
-        p_tail = 1 - p[head].sum()
-        q_tail = 1 - q[head].sum()
+        # The band masks a top-k entry or the tail here, so masked IS alone is biased.
+        p_tail = 1 - p[topk_ids].sum()
+        q_tail = 1 - q[topk_ids].sum()
         assert (token_weight == 0).any() and (
-            (_band_weight(p[head] / q[head]) == 0).any()
+            (_band_weight(p[topk_ids] / q[topk_ids]) == 0).any()
             or _band_weight(p_tail / q_tail) == 0
         )
-    elif max_ratio is None:
-        token_weight = 1.0
     else:
-        token_weight = torch.clamp(p / q, max=max_ratio)
+        token_weight = torch.clamp(p / q, max=config_kwargs["max_ratio"])
     (uncorrected_grad,) = torch.autograd.grad(
         -(q * token_weight * torch.log_softmax(trainer_logits, dim=-1)[0]).sum(),
         trainer_logits,
@@ -198,7 +192,7 @@ def test_score_centering_cancels_drift_under_a_constant_advantage(
 
 @pytest.mark.parametrize(
     "config_kwargs",
-    [{}, {"max_ratio": None, "ratio_band": (1.0, 4.0)}],
+    [{}, {"ratio_band": (1.0, 4.0)}],
     ids=["default", "band_starts_at_1"],
 )
 def test_score_centering_is_reinforce_when_generator_matches_trainer(
@@ -213,7 +207,7 @@ def test_score_centering_is_reinforce_when_generator_matches_trainer(
     )
     # The generator's logprobs from the loss's own functions are bitwise equal to the
     # trainer's, so every sampled, top-k and tail ratio is exactly 1: on the band's lower
-    # bound, which must keep them (`<=`). Then the tail ratio is 1, alpha = 1, and each head
+    # bound, which must keep them (`<=`). Then the tail ratio is 1, alpha = 1, and each top-k
     # coefficient is p - 1 * p = 0: plain REINFORCE.
     loss_inputs["generator_logprobs"] = compute_logprobs(
         logits.detach(), labels, vocab_parallel_group=None
@@ -249,12 +243,11 @@ def test_score_centering_is_reinforce_when_generator_matches_trainer(
 @pytest.mark.parametrize(
     "config_kwargs",
     [
-        {"ratio_band": (0.5, 4.0)},  # max_ratio keeps its default 2.0
-        {"max_ratio": None, "ratio_band": (0.0, 4.0)},
-        {"max_ratio": None, "ratio_band": (1.5, 4.0)},
-        {"max_ratio": None, "ratio_band": (0.5, 0.9)},
+        {"ratio_band": (0.0, 4.0)},
+        {"ratio_band": (1.5, 4.0)},
+        {"ratio_band": (0.5, 0.9)},
     ],
-    ids=["with_max_ratio", "low_zero", "low_above_1", "high_below_1"],
+    ids=["low_zero", "low_above_1", "high_below_1"],
 )
 def test_score_centering_ratio_band_config_is_validated(config_kwargs) -> None:
     with pytest.raises(ValueError, match="ratio_band"):

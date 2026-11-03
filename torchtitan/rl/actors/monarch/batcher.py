@@ -32,7 +32,7 @@ class _BatcherActorEndpoints:
         num_pp_microbatches: int = 1,
         pad_id: int,
         temperature: float,
-        num_topk_logprobs: int = 0,
+        num_topk_logprobs: int,
         output_dir: str,
         enable_structured_logging: bool,
     ) -> None:

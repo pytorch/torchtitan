@@ -705,7 +705,8 @@ def test_generation_server_forwards_token_request() -> None:
 
 def test_generation_server_records_topk_per_generation() -> None:
     # Verifiers drops extra response fields, so the server keeps each generation's top-k,
-    # keyed by (prompt length, completion tokens), for trace_to_rollout_turns.
+    # keyed by (prompt length, completion tokens), for trace_to_rollout_turns. A second
+    # prompt of the same length with the same completion would share the key: rejected.
     topk_token_ids = np.array([[31, 5], [32, 6]], dtype=np.int32)
     topk_logprobs = np.array([[-0.1, -2.0], [-0.2, -3.0]], dtype=np.float32)
 
@@ -726,27 +727,30 @@ def test_generation_server_records_topk_per_generation() -> None:
         server.set_generate_fn(generate_fn)
         await server.start()
         try:
+            statuses = []
             async with ClientSession() as session:
-                response = await session.post(
-                    f"http://{server.host}:{server.port}/inference/v1/generate",
-                    headers={"X-Session-ID": "trace-a"},
-                    json={
-                        "token_ids": [10, 11],
-                        "sampling_params": {
-                            "temperature": 1.0,
-                            "top_p": 1.0,
-                            "max_tokens": 2,
-                            "num_topk_logprobs": 2,
-                            "torchtitan_group_id": 1,
-                            "stop_token_ids": [99],
+                for prompt_token_ids in ([10, 11], [12, 13]):
+                    response = await session.post(
+                        f"http://{server.host}:{server.port}/inference/v1/generate",
+                        headers={"X-Session-ID": "trace-a"},
+                        json={
+                            "token_ids": prompt_token_ids,
+                            "sampling_params": {
+                                "temperature": 1.0,
+                                "top_p": 1.0,
+                                "max_tokens": 2,
+                                "num_topk_logprobs": 2,
+                                "torchtitan_group_id": 1,
+                                "stop_token_ids": [99],
+                            },
                         },
-                    },
-                )
-                assert response.status == 200
+                    )
+                    statuses.append(response.status)
             generation_metadata = server.pop_generation_metadata("trace-a")
         finally:
             await server.close()
 
+        assert statuses == [200, 500]
         assert generation_metadata is not None
         ids, logprobs = generation_metadata.topk_by_generation[(2, (31, 32))]
         np.testing.assert_array_equal(ids, topk_token_ids)

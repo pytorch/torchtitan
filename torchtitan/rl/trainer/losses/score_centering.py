@@ -32,14 +32,13 @@ class ScoreCenteringLoss(Loss[torch.Tensor]):
         signal = Cov_q(A, grad log p_y)
 
     Each weight sync feeds the drift back into the generator, so it compounds. Score
-    centering subtracts the expected score `sum_v q_v grad log p_v` from each token's score,
-    which cancels the drift. The sum runs over the generator's top-k tokens `H`; outside `H`,
-    `q` is modeled as `p` rescaled to the generator's tail mass (Eq. 7-12). The token weight
-    `w(r)` is one of:
+    centering subtracts the expected score `sum_v q_v w(p_v / q_v) grad log p_v` (`w` is the
+    token weight below) from each token's weighted score, which cancels the drift. The sum
+    runs over the generator's top-k tokens `H`; outside `H`, `q` is modeled as `p` rescaled
+    to the generator's tail mass (Eq. 7-12). The token weight `w(r)` is one of:
 
-        max_ratio=C            w(r) = min(r, C)                    truncated IS
+        max_ratio=C            w(r) = min(r, C)                    truncated IS (default)
         ratio_band=(lo, hi)    w(r) = r if lo <= r <= hi else 0    masked IS
-        neither                w(r) = 1                            SC alone
 
     and enters as:
 
@@ -49,51 +48,47 @@ class ScoreCenteringLoss(Loss[torch.Tensor]):
                            - sum_H detach(q_v * w(p_v / q_v) - alpha * p_v) * log p_v)
         loss       = sum(token_loss) / global_loss_token_counts
 
-    When `p == q`, every weight is 1 and the correction is 0: plain REINFORCE. With
-    `ratio_band`, `q_v * w(p_v / q_v) = p_v` inside the band, so the correction is 0 unless a
-    top-k entry or the tail leaves it: it cancels the bias of the masked probability mass.
+    When `p == q`, every weight is 1 and the correction is 0: plain REINFORCE. Where the weight
+    is exact (`w(r) = r`), `q_v * w(p_v / q_v) = p_v`: importance sampling alone cancels the
+    drift there. Truncation and masking bring part of it back, and the correction cancels that
+    part. So it is 0 unless a top-k ratio or the tail ratio is truncated or masked.
 
-    Example (one position, k=2, max_ratio=None):
+    Example (one position, k=2, max_ratio=2):
 
-        q_head = [0.5, 0.3],  p_head = [0.4, 0.4]   # tails 0.2 and 0.2, so rho = 1
-        coefficients = q_head - rho * p_head = [0.1, -0.1]
-        # At A = 1, sampling from q moves the head logits by +[0.1, -0.1] in expectation;
-        # the correction moves them by -[0.1, -0.1], so the net drift is 0.
+        q_topk = [0.1, 0.7],  p_topk = [0.5, 0.3]   # tails 0.2 and 0.2: rho = 1, alpha = 1
+        q_topk * w(p_topk / q_topk) = [0.2, 0.3]     # token 0's ratio 5 is truncated to 2
+        coefficients = [0.2, 0.3] - alpha * p_topk = [-0.3, 0.0]
+        # At A = 1, truncated IS alone weights token 0 by 0.2 where exact IS gives 0.5. So its
+        # expected gradient has an extra -0.3 * grad log p_0, which lowers p_0 toward q_0 = 0.1.
+        # The correction adds +0.3 * grad log p_0, so the net drift is 0.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Loss.Config):
-        max_ratio: float | None = 2.0
-        """Cap (>= 1) on the detached ratio `p / q` that weights each token (truncated IS; the paper's
-        TIS+SC). None weights every token by 1 (SC alone). The paper finds both alike under
-        quantization, and the cap clearly better under large staleness."""
+        max_ratio: float = 2.0
+        """Truncated IS (the paper's TIS+SC): each token is weighted by `min(p / q, max_ratio)`.
+        Must be >= 1. 2.0 is the paper's TIS cap (App. A.3). Unused when `ratio_band` is set."""
 
         ratio_band: tuple[float, float] | None = None
-        """Masked IS: absolute bounds `(lo, hi)` on the ratio `r = p / q` (unlike
-        `DAPOLoss.ratio_clip_*`, which are offsets from 1). A token with `lo <= r <= hi` is
-        weighted by `r`, otherwise by 0; the same rule masks each top-k entry and the modeled
-        tail, whose ratio is `(1 - sum_H p) / (1 - sum_H q)`. Requires `max_ratio=None`, and
-        `lo <= 1 <= hi` so a generator that matches the trainer stays plain REINFORCE.
-        Example: `(0.2, 5.0)`."""
+        """Masked IS, used instead of `max_ratio` when set: absolute bounds `(lo, hi)` on the ratio
+        `r = p / q` (unlike `DAPOLoss.ratio_clip_*`, which are offsets from 1). A token with
+        `lo <= r <= hi` is weighted by `r`, otherwise by 0; the same rule masks each top-k entry
+        and the modeled tail, whose ratio is `(1 - sum_H p) / (1 - sum_H q)`. Requires
+        `lo <= 1 <= hi`, so a generator that matches the trainer stays plain REINFORCE.
+        Example: `(0.5, 5.0)`, the paper's masked-IS band (App. A.3)."""
 
         global_vocab_size: int | None = None
         """Full vocabulary size; required when TP shards the vocabulary."""
 
         def __post_init__(self) -> None:
             # Bounds that include 1 keep a generator that matches the trainer plain REINFORCE.
-            if self.max_ratio is not None and self.max_ratio < 1:
+            if self.max_ratio < 1:
                 raise ValueError(
                     f"ScoreCenteringLoss: max_ratio must be >= 1, got {self.max_ratio}."
                 )
-            if self.ratio_band is None:
-                return
-            if self.max_ratio is not None:
-                raise ValueError(
-                    "ScoreCenteringLoss: set max_ratio=None to use ratio_band "
-                    f"(got max_ratio={self.max_ratio}, ratio_band={self.ratio_band})."
-                )
-            low, high = self.ratio_band
-            if not 0 < low <= 1 <= high:
+            if self.ratio_band is not None and not (
+                0 < self.ratio_band[0] <= 1 <= self.ratio_band[1]
+            ):
                 raise ValueError(
                     "ScoreCenteringLoss: ratio_band=(lo, hi) needs 0 < lo <= 1 <= hi, "
                     f"got {self.ratio_band}."
@@ -171,10 +166,10 @@ class ScoreCenteringLoss(Loss[torch.Tensor]):
             )
             trainer_topk_probs = torch.exp(trainer_topk_logprobs)
             generator_topk_probs = torch.exp(generator_topk_logprobs)
-            trainer_head_mass = trainer_topk_probs.sum(-1)
-            generator_head_mass = generator_topk_probs.sum(-1)
-            rho = (1 - generator_head_mass).clamp_min(_MIN_TAIL_MASS) / (
-                1 - trainer_head_mass
+            trainer_topk_mass = trainer_topk_probs.sum(-1)
+            generator_topk_mass = generator_topk_probs.sum(-1)
+            rho = (1 - generator_topk_mass).clamp_min(_MIN_TAIL_MASS) / (
+                1 - trainer_topk_mass
             ).clamp_min(_MIN_TAIL_MASS)
             if self.log_ratio_band is not None:
                 log_low, log_high = self.log_ratio_band
@@ -183,9 +178,9 @@ class ScoreCenteringLoss(Loss[torch.Tensor]):
                 )
                 token_weight = torch.where(token_in_band, ratio, 0.0)
                 # q * w(p / q) = p inside the band and 0 outside, without dividing by q.
-                head_log_ratio = trainer_topk_logprobs - generator_topk_logprobs
+                topk_log_ratio = trainer_topk_logprobs - generator_topk_logprobs
                 weighted_generator_topk_probs = torch.where(
-                    (head_log_ratio >= log_low) & (head_log_ratio <= log_high),
+                    (topk_log_ratio >= log_low) & (topk_log_ratio <= log_high),
                     trainer_topk_probs,
                     0.0,
                 )
@@ -194,10 +189,6 @@ class ScoreCenteringLoss(Loss[torch.Tensor]):
                 alpha = ((tail_log_ratio >= log_low) & (tail_log_ratio <= log_high)).to(
                     rho.dtype
                 )
-            elif self.max_ratio is None:
-                token_weight = torch.ones_like(ratio)
-                weighted_generator_topk_probs = generator_topk_probs
-                alpha = rho
             else:
                 token_weight = torch.clamp(ratio, max=self.max_ratio)
                 # q * min(p / q, C) = min(p, C * q), which stays finite when q underflows.
@@ -223,11 +214,11 @@ class ScoreCenteringLoss(Loss[torch.Tensor]):
         with torch.no_grad():
             # Gradient of the correction w.r.t. the logits, before the advantage.
             coefficient_sum = coefficients.sum(-1)
-            head_logit_grad = (
+            topk_logit_grad = (
                 coefficients - trainer_topk_probs * coefficient_sum[:, None]
             )
-            tail_logit_grad = (1 - trainer_head_mass).clamp_min(0) * coefficient_sum
-            logit_correction_l1 = head_logit_grad.abs().sum(-1) + tail_logit_grad.abs()
+            tail_logit_grad = (1 - trainer_topk_mass).clamp_min(0) * coefficient_sum
+            logit_correction_l1 = topk_logit_grad.abs().sum(-1) + tail_logit_grad.abs()
             metrics = {
                 "loss/mean": loss.detach(),
                 "loss/ratio_mean": normalize(
@@ -248,16 +239,16 @@ class ScoreCenteringLoss(Loss[torch.Tensor]):
                     global_loss_token_counts,
                 ),
                 # Share of q (and p) inside the generator's top-k; the paper sees > 99.9% at k=128.
-                "score_centering/generator_head_mass/mean": normalize(
-                    torch.where(effective_loss_mask, generator_head_mass, 0.0).sum(),
+                "score_centering/generator_topk_mass/mean": normalize(
+                    torch.where(effective_loss_mask, generator_topk_mass, 0.0).sum(),
                     global_loss_token_counts,
                 ),
-                "score_centering/trainer_head_mass/mean": normalize(
-                    torch.where(effective_loss_mask, trainer_head_mass, 0.0).sum(),
+                "score_centering/trainer_topk_mass/mean": normalize(
+                    torch.where(effective_loss_mask, trainer_topk_mass, 0.0).sum(),
                     global_loss_token_counts,
                 ),
-                # sum_H |q * w - alpha * p|: 0 when trainer and generator agree, and with
-                # max_ratio or ratio_band whenever no head or tail ratio is truncated or masked.
+                # sum_H |q * w - alpha * p|: 0 when trainer and generator agree, or when no
+                # top-k or tail ratio is truncated or masked.
                 "score_centering/coefficient_l1/mean": normalize(
                     coefficients.abs().sum(-1).sum(), global_loss_token_counts
                 ),
@@ -277,7 +268,7 @@ class ScoreCenteringLoss(Loss[torch.Tensor]):
                     ((alpha == 0) & effective_loss_mask).float().sum(),
                     global_loss_token_counts,
                 )
-            if self.max_ratio is not None:
+            else:
                 metrics["loss/ratio_truncated_frac"] = normalize(
                     ((ratio > self.max_ratio) & effective_loss_mask).float().sum(),
                     global_loss_token_counts,

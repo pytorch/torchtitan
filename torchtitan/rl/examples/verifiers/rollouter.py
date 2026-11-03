@@ -444,10 +444,9 @@ class VerifiersRollouter(Rollouter):
                 if generation_metadata.topk_by_generation and any(mask):
                     # The prompt this node's completion was sampled from ends at its first
                     # sampled token.
-                    # TODO: two generations of one rollout with equal prompt lengths and equal
-                    # completions but different prompts share this key, and the later one's rows
-                    # win. Keying on the prompt tokens is strict, but needs a Verifiers run to
-                    # check that each trace's tokens equal the request's.
+                    # TODO: the generation server rejects a second generation with an equal prompt
+                    # length and equal completion. Keying on the prompt tokens would allow it, but
+                    # needs a Verifiers run to check that each trace's tokens equal the request's.
                     key = (
                         branch_offset + list(node.mask).index(True),
                         tuple(

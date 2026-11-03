@@ -255,6 +255,14 @@ class GenerationServer(Configurable):
         topk_by_generation = {} if previous is None else previous.topk_by_generation
         if completion.topk_token_ids is not None:
             key = (len(prompt_token_ids), tuple(completion.token_ids))
+            if key in topk_by_generation:
+                return web.json_response(
+                    {
+                        "error": f"session {session_id}: two generations share prompt length "
+                        f"{key[0]} and completion tokens, so their top-k rows can't be told apart"
+                    },
+                    status=500,
+                )
             topk_by_generation = {
                 **topk_by_generation,
                 key: (completion.topk_token_ids, completion.topk_logprobs),

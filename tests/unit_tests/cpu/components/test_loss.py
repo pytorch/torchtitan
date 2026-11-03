@@ -882,19 +882,17 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                 with self.subTest(
                     mesh_shape=mesh_shape, vocab_size=vocab_size, dtype=dtype
                 ):
-                    generator = torch.Generator(device=self.device_type).manual_seed(
-                        vocab_size
-                    )
+                    generator = torch.Generator().manual_seed(vocab_size)
                     global_logits = torch.randn(
                         num_tokens, vocab_size, dtype=dtype, generator=generator
-                    )
+                    ).to(self.device_type)
                     # Ids spread over every shard, including the last (uneven) one.
                     global_token_ids = torch.randint(
                         0, vocab_size, (num_tokens, num_topk), generator=generator
-                    )
+                    ).to(self.device_type)
                     global_weights = torch.randn(
                         num_tokens, num_topk, generator=generator
-                    )
+                    ).to(self.device_type)
 
                     reference_logits = global_logits.clone().requires_grad_(True)
                     reference_logprobs = torch.log_softmax(

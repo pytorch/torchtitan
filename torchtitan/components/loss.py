@@ -100,6 +100,34 @@ def _target_mask(target_lane: torch.Tensor, local_vocab_size: int) -> torch.Tens
     return lanes == target_lane.unsqueeze(-1)
 
 
+def _local_vocab_shard(
+    logits: torch.Tensor, tp_group: dist.ProcessGroup, global_vocab_size: int
+) -> tuple[int, int]:
+    """`(vocab_start, local_vocab_size)` of this rank's vocab shard.
+
+    Raises if `logits.shape[-1]` is not `local_vocab_size`, or if this rank's shard is empty.
+    Example: global_vocab_size=10, TP=4 -> chunks of 3, and rank 3 holds ids [9, 10): (9, 1).
+    """
+    tp_world_size = dist.get_world_size(tp_group)
+    tp_rank = dist.get_rank(tp_group)
+    chunk_size = (global_vocab_size + tp_world_size - 1) // tp_world_size
+    vocab_start = min(global_vocab_size, chunk_size * tp_rank)
+    vocab_end = min(global_vocab_size, vocab_start + chunk_size)
+    local_vocab_size = max(0, vocab_end - vocab_start)
+    if logits.shape[-1] != local_vocab_size:
+        raise ValueError(
+            f"Expected local vocab size {local_vocab_size} for global vocab size "
+            f"{global_vocab_size}, got {logits.shape[-1]}."
+        )
+    if local_vocab_size == 0:
+        raise ValueError(
+            f"Global vocab size {global_vocab_size} over TP {tp_world_size} leaves rank "
+            f"{tp_rank} an empty vocab shard; vocab-parallel cross-entropy and logprobs need "
+            "every rank to hold one."
+        )
+    return vocab_start, local_vocab_size
+
+
 class _LossParallelCrossEntropy(torch.autograd.Function):
     """
     Vocab-parallel cross-entropy on local ``[T, V_local]`` logits.
@@ -160,23 +188,9 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         """
         logits_dtype = logits.dtype
 
-        # Compute this rank's vocab shard bounds for the local logits.
-        tp_world_size = dist.get_world_size(tp_group)
-        tp_rank = dist.get_rank(tp_group)
-        chunk_size = (global_vocab_size + tp_world_size - 1) // tp_world_size
-        vocab_start = min(global_vocab_size, chunk_size * tp_rank)
-        vocab_end = min(global_vocab_size, vocab_start + chunk_size)
-        local_vocab_size = max(0, vocab_end - vocab_start)
-        if logits.shape[-1] != local_vocab_size:
-            raise ValueError(
-                "_LossParallelCrossEntropy expected local vocab size "
-                f"{local_vocab_size} for global vocab size {global_vocab_size}, "
-                f"got {logits.shape[-1]}."
-            )
-        if local_vocab_size == 0:
-            raise ValueError(
-                "_LossParallelCrossEntropy does not support empty vocab shards."
-            )
+        vocab_start, local_vocab_size = _local_vocab_shard(
+            logits, tp_group, global_vocab_size
+        )
 
         torch._assert_async(
             torch.all(
@@ -509,7 +523,8 @@ def compute_topk_logprobs(
     Like `compute_logprobs`, but for k token ids per position. A `vocab_parallel_group`
     means `logits` hold this rank's vocab shard; the result is exact and identical on every
     rank of the group, without gathering the vocab. Batch-invariant mode gathers the vocab,
-    as `compute_logprobs` does, so the result matches the vLLM generator's top-k bitwise.
+    as `compute_logprobs` does: the vLLM generator calls this function on full-vocab logits,
+    so the trainer's and the generator's top-k logprobs match bitwise.
 
     Example:
 
@@ -565,10 +580,13 @@ class _VocabParallelTopKLogprobs(torch.autograd.Function):
         tp_group: dist.ProcessGroup,
         global_vocab_size: int,
     ) -> torch.Tensor:
-        local_vocab_size = logits.shape[-1]
-        tp_world_size = dist.get_world_size(tp_group)
-        chunk_size = (global_vocab_size + tp_world_size - 1) // tp_world_size
-        vocab_start = min(global_vocab_size, chunk_size * dist.get_rank(tp_group))
+        vocab_start, local_vocab_size = _local_vocab_shard(
+            logits, tp_group, global_vocab_size
+        )
+        torch._assert_async(
+            torch.all((token_ids >= 0) & (token_ids < global_vocab_size)),
+            f"top-k token ids must be in [0, {global_vocab_size})",
+        )
         logits_fp32 = logits.float()
 
         global_max = funcol.all_reduce(

@@ -129,13 +129,15 @@ def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
             setattr(modules[parent_name], child_name, module)
 
     calls = []
-    compute_logprobs = loss_module.compute_logprobs
+    compute_topk_logprobs = loss_module.compute_topk_logprobs
 
-    def recording_compute_logprobs(logits, labels, **kwargs):
-        calls.append((logits, labels.clone(), kwargs))
-        return compute_logprobs(logits, labels, **kwargs)
+    def recording_compute_topk_logprobs(logits, token_ids, **kwargs):
+        calls.append((logits, token_ids, kwargs))
+        return compute_topk_logprobs(logits, token_ids, **kwargs)
 
-    monkeypatch.setattr(loss_module, "compute_logprobs", recording_compute_logprobs)
+    monkeypatch.setattr(
+        loss_module, "compute_topk_logprobs", recording_compute_topk_logprobs
+    )
     batch_invariance.force_logprobs_fn_for_batch_invariance()
 
     logits = torch.tensor(
@@ -149,8 +151,11 @@ def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
     )
 
     torch.testing.assert_close(actual, expected)
-    assert len(calls) == token_ids.shape[1]
-    for column, (call_logits, call_labels, call_kwargs) in enumerate(calls):
-        assert call_logits is logits
-        torch.testing.assert_close(call_labels, token_ids[:, column].to(torch.int64))
-        assert call_kwargs == {"vocab_parallel_group": None}
+    assert len(calls) == 1
+    assert calls[0][0] is logits and calls[0][1] is token_ids
+    assert calls[0][2] == {"vocab_parallel_group": None, "global_vocab_size": None}
+    # Column 0 is the sampled token, which the trainer scores with compute_logprobs.
+    trainer_logprobs = loss_module.compute_logprobs(
+        logits, token_ids[:, 0].to(torch.int64), vocab_parallel_group=None
+    )
+    assert torch.equal(actual[:, 0], trainer_logprobs)

@@ -40,6 +40,7 @@ def test_padding_workload_matches_existing_full_length_segments() -> None:
         dp_degree=1,
         pad_id=0,
         temperature=1.0,
+        num_topk_logprobs=0,
     )
     long_samples = _make_samples([8] * 6)
     short_samples = _make_samples([1] * 20)
@@ -64,6 +65,7 @@ def test_lpt_uses_padding_workload_for_full_length_documents() -> None:
         dp_degree=2,
         pad_id=0,
         temperature=1.0,
+        num_topk_logprobs=0,
     )
     samples = _make_samples([8] * 3 + [2] * 16)
 
@@ -89,6 +91,7 @@ def test_lpt_does_not_leave_a_full_length_document_in_an_expensive_bin() -> None
         dp_degree=2,
         pad_id=0,
         temperature=1.0,
+        num_topk_logprobs=0,
     )
     samples = _make_samples([10, 5, 5, 5, 5])
 
@@ -109,6 +112,7 @@ def test_lpt_rebalances_ffd_bins_with_document_limit() -> None:
         dp_degree=2,
         pad_id=0,
         temperature=1.0,
+        num_topk_logprobs=0,
     )
     samples = _make_samples([4, 4, 3, 3, 3, 3, 2, 2])
 
@@ -140,6 +144,7 @@ def test_lpt_falls_back_when_ffd_fits_but_lpt_cannot() -> None:
         dp_degree=1,
         pad_id=0,
         temperature=1.0,
+        num_topk_logprobs=0,
     )
     samples = _make_samples([3] * 8 + [2] * 9)
     assert batcher._pack_with_lpt(samples, target_num_bins=7) is None
@@ -165,6 +170,7 @@ def test_three_pp_microbatches_balance_rank_costs_within_step() -> None:
         dp_degree=2,
         pad_id=0,
         temperature=1.0,
+        num_topk_logprobs=0,
     )
     samples = _make_samples([10, 9, 8, 7, 6, 5])
 
@@ -196,6 +202,7 @@ def test_packing_preserves_all_samples_and_capacity_constraints() -> None:
             dp_degree=dp_degree,
             pad_id=0,
             temperature=1.0,
+            num_topk_logprobs=0,
         )
         samples = _make_samples(
             [rng.randint(1, seq_len) for _ in range(rng.randint(1, 30))]
@@ -230,6 +237,7 @@ def test_microbatch_carries_the_sampling_temperature_into_the_loss() -> None:
         dp_degree=1,
         pad_id=0,
         temperature=0.5,
+        num_topk_logprobs=0,
     )
     microbatch = batcher._pack_training_samples(_make_samples([3]))
 
@@ -246,6 +254,7 @@ def test_microbatch_moves_loss_kwargs_with_the_model_inputs() -> None:
         dp_degree=1,
         pad_id=0,
         temperature=1.0,
+        num_topk_logprobs=0,
     )
     microbatch = batcher._pack_training_samples(_make_samples([3]))
 
