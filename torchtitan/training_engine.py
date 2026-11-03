@@ -950,7 +950,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 for microbatch in microbatch_group
             ]
         ).sum(dim=0)
-        counts = local_counts.to(self.device)
+        # non_blocking: a pageable copy would wait for the previous step's update.
+        counts = local_counts.to(self.device, non_blocking=True)
         if self.parallelism_context.dp_enabled:
             counts = dist_utils.dist_sum_tensor(
                 counts, self.parallelism_context.get_mesh("dp")
