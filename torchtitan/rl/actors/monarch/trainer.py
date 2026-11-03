@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 from monarch.actor import Actor, concurrent_endpoint
@@ -18,11 +18,16 @@ from torchtitan.rl.trainer.rdma_microbatch import RDMAMicrobatch
 
 from torchtitan.rl.trainer.trainer import OptimizerStepOutput, Trainer
 
+if TYPE_CHECKING:
+    import torchstore as ts
+
 
 class _TrainerActorEndpoints:
     @concurrent_endpoint
-    async def initialize_torchstore_client(self) -> None:
-        await super().initialize_torchstore_client()
+    async def initialize_torchstore_client(
+        self, *, address: ts.ControlPlaneAddress | None
+    ) -> None:
+        await super().initialize_torchstore_client(address=address)
 
     @concurrent_endpoint
     async def get_policy_version(self) -> int:

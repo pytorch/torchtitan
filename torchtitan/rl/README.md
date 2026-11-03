@@ -62,6 +62,83 @@ The distributed layer builds on two core components:
 - **[Monarch](https://github.com/meta-pytorch/monarch) as the controller:** orchestrates trainers and generators on separate GPU meshes with asynchronous communication.
 - **[TorchStore](https://github.com/meta-pytorch/torchstore) for model state dict transfer:** efficiently publishes the model state dict from the trainer to generators, including direct GPU-to-GPU RDMA transfers.
 
+### TorchStore control plane
+
+`MonarchActorSystem.Config.torchstore_control_plane` chooses TorchStore's
+control plane, where trainer and generator ranks exchange the routing metadata:
+which trainer ranks publish and how each one lays out its model state dict. With
+`"monarch"`, the default, ranks exchange it through a Monarch actor that they
+look up by name. The setting lives on the Monarch actor system's config because
+the actor system carries out TorchStore's setup. At construction and again in
+`build()` the config rejects a control plane that actor system does not run. Its
+`initialize_torchstore` passes the choice to `ts.initialize` and gives what that
+returns to the trainer and to every generator through
+`initialize_torchstore_client`, which passes it to `ts.client`. With `"monarch"`
+that value is None. With `"service"`, `ts.initialize` starts TorchStore's
+coordinator service in the RL controller's process and returns the address that
+ranks reach it through, and the actor system's `stop` shuts the service down.
+Code that calls `initialize_torchstore_client` passes what `ts.initialize`
+returned as `address=`. An override takes a keyword-only `address` and passes it
+on to `ts.client`. The trainer's push and the generators' prefetch call
+`put_state_dict` and `get_state_dict` the same way on either control plane. CI
+runs the RL loss guard on `"service"` too, bit for bit against the default.
+
+A recipe selects the service through its actor system's config. This recipe
+function selects it on top of the loss guard's recipe. The CI twin
+`rl_grpo_qwen3_0_6b_varlen_batch_invariant_service` in
+`torchtitan_recipes/tests/rl/alphabet_sort.py` does the same:
+
+```python
+# my_project/service_recipe.py
+import dataclasses
+
+from torchtitan_recipes.rl.alphabet_sort import (
+    rl_grpo_qwen3_0_6b_varlen_batch_invariant,
+)
+
+
+def loss_guard_on_service():
+    config = rl_grpo_qwen3_0_6b_varlen_batch_invariant()
+    config.actor_system = dataclasses.replace(
+        config.actor_system, torchstore_control_plane="service"
+    )
+    return config
+```
+
+Run it by module and config name:
+
+```bash
+python -m torchtitan.rl.train \
+  --module my_project.service_recipe \
+  --config loss_guard_on_service \
+  --output-dir outputs/rl/loss_guard_on_service
+```
+
+With TorchStore's coordinator service alone, `"service"` keeps TorchStore's
+storage volumes as Monarch actors on the trainer mesh, as `"monarch"` does. With
+TorchStore's in-process volume servers too, each trainer rank instead runs a
+volume server that serves its part of the model state dict. Those volume servers
+carry only TorchStore's shared-memory, Gloo and RPC transfers. So a run across
+hosts on `"service"` then gives up NIXL, TorchComms, the torch.distributed
+transport and Monarch's RDMA, and syncs weights over Gloo or RPC.
+
+The coordinator service has no authentication, and neither do those volume
+servers. They listen on every interface and unpickle each request that passes a
+JSON hello, and any client of TorchStore's TCPStore can read what that hello
+checks. So any host that reaches that TCPStore can run code as the training
+user, where the job's process-group stores only hold bytes and Monarch's default
+transport on one host uses local sockets. Choose `"service"` only on a trusted
+network.
+
+TitanRL passes two arguments that TorchStore's control-plane selection adds:
+`control_plane=` to `ts.initialize` and `address=` to `ts.client`, and
+`"service"` also needs TorchStore's coordinator service. If the installed
+TorchStore lacks what a run uses, the controller fails when it sets TorchStore
+up, after every service has spawned. A TorchStore without `RankRole` already
+fails when TitanRL imports it. Rerun `scripts/install_rl_env.sh` to update
+TorchStore from its main branch once that branch has the control-plane
+selection, and for `"service"` the coordinator service.
+
 ### Package organization
 
 The package is organized by responsibility and dependency boundary:

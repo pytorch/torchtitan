@@ -9,6 +9,12 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import difflib
+import logging
+import os
+import re
+import sys
 
 import numpy as np
 import pytest
@@ -30,13 +36,18 @@ from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.types import RolloutTurnID
 from torchtitan_recipes.rl.alphabet_sort import _alphabet_sort_rollouter_config
+from torchtitan_recipes.tests.rl import alphabet_sort as test_recipes
 
 from torchtitan_recipes.tests.rl.alphabet_sort import (
     rl_grpo_fsdp2_gen_tp2_no_compile,
+    rl_grpo_fsdp2_gen_tp2_no_compile_service,
     rl_grpo_moe_debug_tp4_ep4,
     rl_grpo_moe_debug_tp4_ep4_batch_invariant,
+    rl_grpo_qwen3_0_6b_varlen_batch_invariant_service,
     rl_grpo_qwen3_5_debug_tp2_batch_invariant,
 )
+
+from tests.integration_tests import run_tests
 
 
 _Author = alphabet_data._Author
@@ -85,6 +96,99 @@ def test_ci_recipes_limit_prompt_length_to_model_context(config_fn) -> None:
     assert (
         config.rollouter.worker.token_env.max_rollout_tokens
         == config.trainer.model.max_context_length
+    )
+
+
+def _config_diff(a: object, b: object) -> list[str]:
+    """Where two configs' reprs differ apart from memory addresses, as a diff of their parts
+    between commas because pytest's own report on two such long strings takes many minutes."""
+    reprs = [re.sub(r" at 0x[0-9a-f]+", "", repr(config)) for config in (a, b)]
+    if reprs[0] == reprs[1]:
+        return []
+    return list(difflib.unified_diff(*(r.split(", ") for r in reprs), lineterm="", n=1))
+
+
+@pytest.mark.parametrize(
+    ("monarch_name", "service_fn"),
+    (
+        ("rl_grpo_fsdp2_gen_tp2_no_compile", rl_grpo_fsdp2_gen_tp2_no_compile_service),
+        (
+            "rl_grpo_qwen3_0_6b_varlen_batch_invariant",
+            rl_grpo_qwen3_0_6b_varlen_batch_invariant_service,
+        ),
+    ),
+    ids=("integration", "loss_guard"),
+)
+def test_service_recipes_change_only_the_torchstore_control_plane(
+    monarch_name, service_fn
+) -> None:
+    # Each recipe builds the default Monarch actor system's config.
+    pytest.importorskip("monarch")
+    monarch = getattr(test_recipes, monarch_name)()
+    service = service_fn()
+    # The Monarch recipe stays on Monarch's control plane, which its CI runs guard, and
+    # its twin changes only that field of the actor system's config.
+    assert monarch.actor_system.torchstore_control_plane == "monarch"
+    assert service.actor_system == dataclasses.replace(
+        monarch.actor_system, torchstore_control_plane="service"
+    )
+    # The reprs name each config's class too, which to_dict() leaves out.
+    monarch.actor_system = service.actor_system = None
+    diff = _config_diff(monarch, service)
+    assert not diff, "\n".join(diff)
+
+
+def _run_tests_main(monkeypatch, tmp_path, *args: str) -> None:
+    """Runs the integration runner's entry point with ``args`` and checks that it left
+    the process's logging alone, which its ``init_logger`` would reconfigure."""
+    monkeypatch.setattr(run_tests, "init_logger", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["run_tests.py", str(tmp_path / "out"), *args])
+    root = logging.getLogger()
+
+    def logging_state() -> tuple[object, ...]:
+        return root.level, list(root.handlers), os.environ.get("KINETO_LOG_LEVEL")
+
+    before = logging_state()
+    try:
+        run_tests.main()
+    finally:
+        assert logging_state() == before
+
+
+def test_rl_service_suite_runs_on_the_torchstore_service(monkeypatch, tmp_path) -> None:
+    # build-test-service runs this suite with --ngpu 8, which skips an entry that needs
+    # more, and the runner skips a disabled one. Nothing else there checks the plane.
+    # Each recipe builds the default Monarch actor system's config.
+    pytest.importorskip("monarch")
+    tests = []
+    monkeypatch.setattr(
+        run_tests,
+        "run_tests",
+        lambda args, test_list, parallel: tests.extend(test_list),
+    )
+    _run_tests_main(monkeypatch, tmp_path, "--test_suite", "rl_service")
+    configs = [fn() for test in tests for fn in test.configs]
+    assert configs and all(
+        config.actor_system.torchstore_control_plane == "service" for config in configs
+    )
+    assert [(test.ngpu, test.disabled) for test in tests] == [(8, False)] * len(tests)
+
+
+def test_run_tests_refuses_fake_process_groups_for_the_rl_service_suite(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    with pytest.raises(SystemExit):
+        _run_tests_main(
+            monkeypatch,
+            tmp_path,
+            "--test_suite",
+            "rl_service",
+            "--execution_mode",
+            "fake_pg",
+        )
+    assert (
+        "The rl_service suite(s) only support --execution_mode real_pg"
+        in capsys.readouterr().err
     )
 
 
