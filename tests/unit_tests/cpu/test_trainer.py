@@ -868,26 +868,22 @@ def test_training_engine_configures_segment_accelerator_graphs(
         assert wrap.call_args.kwargs["annotation_config"] == annotation_config
 
 
-class _UncapturedGraph:
-    """A graph that has not captured yet: each call runs ``fn``."""
-
-    captured = False
-
-    def __init__(self, fn: Any) -> None:
-        self.fn = fn
-
-    def __call__(self, *args: Any) -> Any:
-        return self.fn(*args)
-
-
-def test_later_segment_capture_rejects_a_gradient_the_first_call_did_not_allocate() -> None:
+@pytest.mark.parametrize(
+    ("replace_weight_gradient", "new_gradient"), [(False, "bias"), (True, "weight")]
+)
+def test_later_segment_capture_rejects_a_new_gradient_tensor(
+    replace_weight_gradient: bool, new_gradient: str
+) -> None:
     model = torch.nn.Linear(2, 2)
     # The first-segment graph allocated weight.grad only.
     model.weight.grad = torch.zeros_like(model.weight)
 
     def later_segment(segment: list[Any]) -> ForwardBackwardResult:
-        # Its capture allocates bias.grad, which the next zero_grad would drop.
-        model(torch.ones(1, 2)).sum().backward()
+        # Either tensor would live in this capture, and the next zero_grad would drop it.
+        if replace_weight_gradient:
+            model.weight.grad = model.weight.grad + 1
+        else:
+            model(torch.ones(1, 2)).sum().backward()  # allocates bias.grad
         return ForwardBackwardResult(torch.tensor(1.0), [])
 
     engine = cast(
@@ -896,12 +892,14 @@ def test_later_segment_capture_rejects_a_gradient_the_first_call_did_not_allocat
             _step_started=True,
             _graph_segment_is_whole_call=False,
             _first_segment_graph=SimpleNamespace(captured=True),
-            _later_segment_graphs={1: _UncapturedGraph(later_segment)},
+            _later_segment_graphs={
+                1: MagicMock(side_effect=later_segment, captured=False)
+            },
             model_parts=[model],
         ),
     )
 
-    with pytest.raises(ValueError, match=r"Parameters \['bias'\] got a gradient"):
+    with pytest.raises(ValueError, match=rf"Parameters \['{new_gradient}'\] got a new"):
         TrainingEngine._run_forward_backward_segments(
             engine, [()], preprocess_microbatch_groups_lazily=False
         )
@@ -948,7 +946,6 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
     eager_forward_backward.assert_called_once()
     wrap.assert_not_called()
     assert not engine._forward_backward_accelerator_graph_enabled
-    assert not engine._forward_backward_captures_whole_step
 
 
 def test_graph_training_engine_rejects_optimizer_accelerator_graph() -> None:

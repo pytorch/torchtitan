@@ -33,16 +33,16 @@ configured number of groups and reports one validation loss.
 
 ### Segments
 
-A segment is the microbatch groups between two gradient reductions. With FSDP or PP,
-each group reduces its gradients, so a segment is one group. With hybrid sharded data
-parallelism (HSDP) or `parallelism.fsdp_defer_gradient_reduction=True`, gradients are
-reduced once per `forward_backward` call, so a segment is the whole call.
+A segment is the microbatch groups that one graph replay runs. The step's first
+`forward_backward` call is one segment. In a later call, a segment ends at each
+gradient reduction: one group with FSDP or PP, the whole call with hybrid sharded data
+parallelism (HSDP) or `parallelism.fsdp_defer_gradient_reduction=True`.
 
 Training uses two kinds of graphs:
-- The first-segment graph runs the step's whole first `forward_backward` call.
-  Gradients are `None` before it, so autograd allocates them in the graph pool (see
-  `_AcceleratorGraphGradientState` below). A trainer that makes one call per update,
-  like the core trainer, replays only this graph: one replay per update.
+- The first-segment graph runs the step's first call. Gradients are `None` before it,
+  so autograd allocates them in the graph pool (see `_AcceleratorGraphGradientState`
+  below). A trainer that makes one call per update, like the core trainer, replays
+  only this graph: one replay per update.
 - A later-segment graph runs each segment of a later call and adds into those
   gradients. There is one per segment length, made on its first call.
 
@@ -61,8 +61,9 @@ node.
 A later-segment graph records adds into the gradient addresses that the first-segment
 graph's replays put back. So a later-segment graph captures only after the
 first-segment graph has captured. Until then its calls are warmup calls with capture
-blocked. A parameter that gets a gradient in a later call must get one in the step's
-first call too: otherwise the later graph's capture raises a `ValueError`.
+blocked. A later call must add into the gradient tensors the first call allocated. If
+a later graph's capture gives a parameter a new gradient tensor (none before, or a
+replaced one), it raises a `ValueError`.
 
 The number of calls per update, and of groups in a later call, can change between
 updates. The step's first call must have the same number of groups in every update.
@@ -165,7 +166,7 @@ Before its first capture, each wrapper calls `torch.cuda.empty_cache()`. This
 releases unused normal cache. It cannot release storage held by live tensors or
 live graph pools. Replay does not call it.
 
-## Memory use with and without `_AcceleratorGraphGradientState`
+## Memory use with `_AcceleratorGraphGradientState`
 
 The figures show possible reuse of one GPU address range in the shared pool.
 Each row shows when its tensor values are needed. They do not show total memory
@@ -180,41 +181,9 @@ The figures use one forward/backward call. With several microbatch groups or
 interleaved PP calls, gradients from earlier backward calls must stay intact during
 later forward calls.
 
-### Without `_AcceleratorGraphGradientState`
-
-`zero_grad(set_to_none=False)` keeps the gradient buffers allocated during eager
-warmup. These buffers are outside the graph pool. They stay allocated through
-forward, backward, optimizer, and eval. The graph allocator cannot reuse their
-storage. Eval and training can still share temporary storage inside the graph pool:
-
-```text
-Capture phase       eval            forward         backward        optimizer
-Eager grad storage  [======================================================] ...
-Eval temporary      [==========]
-Forward temporary                   [==========]
-Backward temporary                                  [==========]
-Shared range        [eval temp]     [forward temp]  [backward temp]
-```
-
-Replay keeps the eager gradient buffer separate from temporary storage:
-
-```text
-Replay phase        forward         backward        optimizer       eval
-Eager grad storage  [======================================================] ...
-Gradient values                     [========================]
-Forward temporary   [==========]
-Backward temporary                  [==========]
-Eval temporary                                                      [==========]
-Shared range        [forward temp]  [backward temp]                  [eval temp]
-```
-
-Training graphs do not use this approach: the first-segment graph uses the state below.
-
 Using `set_to_none=True` without saving and restoring gradient references fails.
 Replay does not repeat autograd's assignment to `param.grad`. After that reference
 is cleared, the optimizer sees `param.grad is None` and skips the parameter update.
-
-### With `_AcceleratorGraphGradientState`
 
 The first-segment graph uses `_AcceleratorGraphGradientState` to save and
 restore gradient references. Before training capture,

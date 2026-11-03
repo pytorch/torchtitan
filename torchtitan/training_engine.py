@@ -206,6 +206,18 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     raise ValueError(
                         "SDC replay requires debug.deterministic_warn_only=False."
                     )
+                # TODO: lift this in its own PR, with a green CI run of
+                # llama3_debugmodel_sdc_replay_accelerator_graph at num_replays > 1.
+                if (
+                    not self.training.disable_accelerator_graphs
+                    and accelerator_graphs_supported()
+                    and self.sdc_replayer.num_replays > 1
+                ):
+                    raise ValueError(
+                        "SDC replay supports at most one replay when accelerator graphs "
+                        "are enabled: set sdc_replayer.num_replays=1 or "
+                        "training.disable_accelerator_graphs=True."
+                    )
 
     config: Config
     device: torch.device
@@ -512,7 +524,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 modules=self.model_parts,
                 device=self.device,
             )
-        self._forward_backward_captures_whole_step = False
 
         if self.parallelism_context.pp_enabled:
             self._pp_loss_sentinel_on_non_last_stage = torch.full(
@@ -733,11 +744,11 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         *,
         preprocess_microbatch_groups_lazily: bool,
     ) -> ForwardBackwardResult:
-        """Replay the step's first call as one graph, and a later call as one graph per segment.
+        """Replay one accelerator graph per segment: the microbatch groups one replay runs.
 
-        A segment is the microbatch groups between two gradient reductions. The first-segment
-        graph allocates the gradients. Each later segment replays the later-segment graph of
-        its length, which adds into them. A step with one call replays one graph.
+        The step's first call is one segment. In a later call, a segment ends at each
+        gradient reduction. The first-segment graph allocates the gradients. Each later
+        segment replays the later-segment graph of its length, which adds into them.
 
         Example (one reduction per group, plain FSDP or PP):
             step's first call [g0, g1] -> first_segment_graph([g0, g1])
@@ -778,27 +789,28 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             elif graph.captured:
                 result = graph(segment)
             else:
-                # This call may capture. A gradient the first-segment graph did not allocate
-                # would be allocated in this capture, and the next zero_grad would drop it.
-                parameters_without_gradient = [
-                    (name, parameter)
+                # This call may capture. A gradient tensor the first-segment graph did not
+                # allocate (a new one, or a replacement) would be allocated in this capture,
+                # and the next zero_grad would drop it.
+                gradients_before = [
+                    (name, parameter, parameter.grad)
                     for model_part in self.model_parts
                     for name, parameter in model_part.named_parameters()
-                    if parameter.requires_grad and parameter.grad is None
+                    if parameter.requires_grad
                 ]
                 result = graph(segment)
                 new_gradients = [
                     name
-                    for name, parameter in parameters_without_gradient
-                    if parameter.grad is not None
+                    for name, parameter, gradient in gradients_before
+                    if parameter.grad is not gradient
                 ]
                 if new_gradients:
                     raise ValueError(
-                        f"Parameters {new_gradients} got a gradient in a later "
-                        "forward_backward call but none in the step's first call. With "
-                        "accelerator graphs, the first call's graph allocates every gradient, "
-                        "so these would be lost. Give them a gradient in the first call, or "
-                        "set training.disable_accelerator_graphs=True."
+                        f"Parameters {new_gradients} got a new gradient tensor in a later "
+                        "forward_backward call. With accelerator graphs, later calls must add "
+                        "into the gradients that the step's first call allocated, or the next "
+                        "zero_grad drops them. Give these parameters a gradient in the first "
+                        "call, or set training.disable_accelerator_graphs=True."
                     )
             # The next replay overwrites graph outputs.
             segment_loss = result.loss.clone()

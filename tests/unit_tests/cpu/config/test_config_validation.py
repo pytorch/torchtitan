@@ -111,6 +111,19 @@ def test_sdc_replay_requires_strict_determinism() -> None:
         TrainingEngine.Config.__post_init__(config)
 
 
+def test_sdc_replay_count_respects_accelerator_graph_support() -> None:
+    config = llama3_debugmodel()
+    config.debug.deterministic = True
+    config.sdc_replayer = SDCReplayer.Config(num_replays=2)
+
+    with _accelerator_graphs_supported(True), pytest.raises(
+        ValueError, match="at most one replay"
+    ):
+        TrainingEngine.Config.__post_init__(config)
+    with _accelerator_graphs_supported(False):
+        TrainingEngine.Config.__post_init__(config)
+
+
 def test_microbatch_tokens_match_activation_sharding() -> None:
     config = TrainingEngine.Config()
     config.training = TrainingConfig(num_tokens_per_microbatch_per_dp_rank=10)
