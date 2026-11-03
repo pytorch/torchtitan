@@ -4,8 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import torch
+import copy
 
+import torch
+import torch.nn as nn
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
+
+from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.rl.trainer.losses.dapo import _normalize, DAPOLoss
 
 
@@ -46,3 +56,118 @@ def test_dapo_loss_matches_vllm_tempered_logprobs_bitwise() -> None:
     )
 
     assert metrics["bit_wise/logprob_diff/max"] == 0
+
+
+def _rl_loss_inputs(num_tokens: int, vocab: int, loss_token_frac: float) -> tuple:
+    loss_mask = torch.rand(num_tokens) < loss_token_frac
+    generator_logprobs = -5 * torch.rand(num_tokens)
+    # -inf logprobs: the loss drops these even inside loss_mask.
+    generator_logprobs[:8] = float("-inf")
+    loss_kwargs = {
+        "generator_logprobs": generator_logprobs,
+        # Per-token values, so a misaligned row changes the loss.
+        "temperature": 0.5 + torch.rand(num_tokens),
+        "advantages": torch.randn(num_tokens) * loss_mask,
+        "loss_mask": loss_mask,
+    }
+    labels = torch.randint(0, vocab, (num_tokens,))
+    return labels, loss_mask.sum().clamp_min(1).float(), loss_kwargs
+
+
+def test_chunked_loss_runs_lm_head_on_loss_mask_tokens() -> None:
+    # Same loss, metrics and gradients as the unchunked loss; 15% loss tokens run 3 chunks.
+    # The wrapper's edge cases (0%, 100%, fewer tokens than chunks) are tested with SFT
+    # cross-entropy in tests/unit_tests/cpu/components/test_loss.py.
+    torch.manual_seed(42)
+    num_tokens, dim, vocab, num_chunks = 1024, 16, 64, 16
+    labels, global_loss_token_counts, loss_kwargs = _rl_loss_inputs(
+        num_tokens, vocab, 0.15
+    )
+    hidden = torch.randn(num_tokens, dim)
+    lm_head = nn.Linear(dim, vocab, bias=False)
+    chunked_loss = ChunkedLossWrapper.Config(
+        num_chunks=num_chunks,
+        loss_fn=DAPOLoss.Config(ratio_clip_high=0.28),
+        skip_non_loss_tokens=True,
+    ).build()
+    chunked_loss.set_lm_head(lm_head)
+
+    hidden_ref = hidden.clone().requires_grad_()
+    loss_ref, metrics_ref = chunked_loss.loss_fn(
+        lm_head(hidden_ref), labels, global_loss_token_counts, **loss_kwargs
+    )
+    loss_ref.backward()
+    grad_weight_ref, lm_head.weight.grad = lm_head.weight.grad, None
+
+    lm_head_rows = []
+    lm_head.register_forward_hook(
+        lambda module, args, output: lm_head_rows.append(args[0].shape[0])
+    )
+    hidden_input = hidden.clone().requires_grad_()
+    loss, metrics = chunked_loss(
+        hidden_input, labels, global_loss_token_counts, **loss_kwargs
+    )
+    loss.backward()
+
+    # Every loss token, padded with fewer than len(lm_head_rows) non-loss rows.
+    num_kept = max(1, int(loss_kwargs["loss_mask"].sum()))
+    assert num_kept <= sum(lm_head_rows) < num_kept + len(lm_head_rows)
+    assert max(lm_head_rows) <= num_tokens // num_chunks
+    assert (hidden_input.grad[~loss_kwargs["loss_mask"]] == 0).all()
+    torch.testing.assert_close(loss, loss_ref)
+    torch.testing.assert_close(metrics, metrics_ref)
+    torch.testing.assert_close(hidden_input.grad, hidden_ref.grad)
+    torch.testing.assert_close(lm_head.weight.grad, grad_weight_ref)
+
+
+class TestChunkedLossFSDPLossMask(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 2
+
+    @property
+    def device_type(self):
+        return "cpu"
+
+    @with_comms
+    def test_ranks_with_different_chunk_counts(self):
+        """Rank 0 has no loss tokens (1 chunk), rank 1 runs 5: no hang, unchunked numbers."""
+        mesh = init_device_mesh(self.device_type, (2,), mesh_dim_names=("dp",))
+        num_tokens, dim, vocab = 4096, 32, 128
+        torch.manual_seed(42)
+        reference_lm_head = nn.Linear(dim, vocab, bias=False)
+        torch.manual_seed(self.rank)
+        hidden = torch.randn(num_tokens, dim)
+        labels, global_loss_token_counts, loss_kwargs = _rl_loss_inputs(
+            num_tokens, vocab, (0.0, 0.6)[self.rank]
+        )
+        chunked_loss = ChunkedLossWrapper.Config(
+            num_chunks=8, loss_fn=DAPOLoss.Config(), skip_non_loss_tokens=True
+        ).build()
+
+        results = []
+        lm_head_rows = []
+        for chunked in (False, True):
+            lm_head = fully_shard(copy.deepcopy(reference_lm_head), mesh=mesh)
+            hidden_input = hidden.clone().requires_grad_()
+            if chunked:
+                lm_head.register_forward_hook(
+                    lambda module, args, output: lm_head_rows.append(args[0].shape[0])
+                )
+                chunked_loss.set_lm_head(lm_head)
+                loss, _ = chunked_loss(
+                    hidden_input, labels, global_loss_token_counts, **loss_kwargs
+                )
+            else:
+                loss, _ = chunked_loss.loss_fn(
+                    lm_head(hidden_input),
+                    labels,
+                    global_loss_token_counts,
+                    **loss_kwargs,
+                )
+            loss.backward()
+            results.append((loss, hidden_input.grad, lm_head.weight.grad.full_tensor()))
+
+        self.assertEqual(len(lm_head_rows), (1, 5)[self.rank])
+        for chunked_value, value in zip(results[1], results[0], strict=True):
+            torch.testing.assert_close(chunked_value, value)

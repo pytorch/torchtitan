@@ -13,6 +13,7 @@ from typing import Any
 import torch
 
 from torchtitan.components.data.types import TrainingMicrobatch
+from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.accelerator_graph import (
@@ -426,6 +427,14 @@ class GraphTrainer(Trainer):
                 raise ValueError(
                     "training.preprocess_microbatch_groups_lazily is not supported "
                     "with GraphTrainer."
+                )
+            if (
+                isinstance(self.loss, ChunkedLossWrapper.Config)
+                and self.loss.skip_non_loss_tokens
+            ):
+                raise ValueError(
+                    "GraphTrainer traces the step, which needs a fixed lm_head row "
+                    "count. Set loss.skip_non_loss_tokens=False."
                 )
             # to_graph_trainer_config and the flavor builders turn these off;
             # this catches a transform applied afterwards that builds them with

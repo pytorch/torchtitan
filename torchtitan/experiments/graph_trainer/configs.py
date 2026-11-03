@@ -368,8 +368,13 @@ def to_graph_trainer_config(
     # params instead of relying on .grad side effects from chunk_loss.backward().
     loss_cfg = d.get("loss")
     if isinstance(loss_cfg, ChunkedLossWrapper.Config):
+        # skip_non_loss_tokens keeps the subclass default (False): a traced step needs a fixed row count.
         d["loss"] = ChunkedLossWrapperWithParamGrads.Config(
-            **{f.name: getattr(loss_cfg, f.name) for f in fields(loss_cfg)}
+            **{
+                f.name: getattr(loss_cfg, f.name)
+                for f in fields(loss_cfg)
+                if f.name != "skip_non_loss_tokens"
+            }
         )
 
     return GraphTrainer.Config(**d)

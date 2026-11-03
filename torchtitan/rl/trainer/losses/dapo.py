@@ -50,6 +50,9 @@ class DAPOLoss(Loss[torch.Tensor]):
     old-policy logprob divided by ``global_loss_token_counts``, so gradient accumulation
     matches a single large batch. ``logits`` is the current-policy output passed to
     ``compute_logprobs``.
+
+    Every loss term and metric reads only ``loss_mask`` tokens, as
+    ``ChunkedLossWrapper.Config.skip_non_loss_tokens`` requires.
     """
 
     @dataclass(kw_only=True, slots=True)

@@ -26,7 +26,8 @@ class ChunkedLossWrapperWithParamGrads(ChunkedLossWrapper):
 
     @dataclass(kw_only=True, slots=True)
     class Config(ChunkedLossWrapper.Config):
-        pass
+        skip_non_loss_tokens: bool = False
+        """Off: the traced step needs a fixed lm_head row count."""
 
     def _gradient_backprop(
         self,
