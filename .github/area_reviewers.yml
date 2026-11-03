@@ -78,8 +78,8 @@ areas:
 
   - name: cuda_graph
     paths:
-      - torchtitan/distributed/cuda_graph.py
-      - torchtitan/distributed/CUDA_GRAPH.md
+      - torchtitan/distributed/accelerator_graph.py
+      - torchtitan/distributed/ACCELERATOR_GRAPH.md
     reviewers: [fegin]
 
   - name: checkpoint
