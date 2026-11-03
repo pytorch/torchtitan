@@ -288,7 +288,9 @@ def _record_streamed_step(
     batcher.num_tokens_to_pack = lambda sample: sample.num_tokens
     # Each packed microbatch keeps its bin, so the rows can be read back from the batches.
     batcher._pack_training_samples = lambda samples: SimpleNamespace(
-        samples=samples, loss_token_count=0
+        samples=samples,
+        loss_token_count=0,
+        routing_token_counts=torch.tensor([sum(s.num_tokens for s in samples)]),
     )
     streamed_rows: list[list[list[_SizedSample]]] = []
     last_rows: list[list[list[_SizedSample]]] = []

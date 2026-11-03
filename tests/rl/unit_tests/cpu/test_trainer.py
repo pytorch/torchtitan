@@ -286,6 +286,7 @@ def test_forward_backward_preprocesses_every_group() -> None:
     result = TrainingEngine.forward_backward(
         engine,
         microbatch_groups=microbatch_groups,
+        aux_loss_denominators=torch.tensor([1.0]),
     )
 
     torch.testing.assert_close(result.loss, torch.tensor(1.0))
@@ -349,7 +350,7 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
         )
         trained_groups = []
 
-        def train(*, microbatch_groups):
+        def train(*, microbatch_groups, aux_loss_denominators):
             trained_groups.append((type(microbatch_groups), list(microbatch_groups)))
             return ForwardBackwardResult(
                 loss=torch.tensor(0.5),
@@ -418,7 +419,9 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
 
         with patch("torchtitan.rl.trainer.trainer.torch.accelerator.current_stream"):
             result = await Trainer.forward_backward(
-                trainer, [[microbatch] for microbatch in microbatches]
+                trainer,
+                [[microbatch] for microbatch in microbatches],
+                torch.tensor([1.0]),
             )
 
         # RDMAMicrobatches are read through the prefetcher; by value, the column is passed as is.
@@ -483,7 +486,9 @@ def test_streamed_forward_backward_calls_add_up_the_step_tokens_and_read_time() 
                     microbatch_index=0,
                 )
                 call_metrics.append(
-                    await Trainer.forward_backward(trainer, [[microbatch]])
+                    await Trainer.forward_backward(
+                        trainer, [[microbatch]], torch.tensor([1.0])
+                    )
                 )
 
         # optim_step reports the step's tokens and busy time over both calls.
@@ -525,7 +530,7 @@ def test_queued_forward_backward_reads_while_the_running_call_waits_for_the_gpu(
             microbatch_index=0,
         )
 
-    def train(*, microbatch_groups):
+    def train(*, microbatch_groups, aux_loss_denominators):
         trained_groups.append(list(microbatch_groups))
         return ForwardBackwardResult(
             loss=torch.tensor(0.5), loss_metrics=[[{"loss/mean": torch.tensor(1.0)}]]
@@ -553,11 +558,15 @@ def test_queued_forward_backward_reads_while_the_running_call_waits_for_the_gpu(
             return_value=SimpleNamespace(synchronize=wait_for_gpu),
         ):
             call_0 = asyncio.create_task(
-                Trainer.forward_backward(trainer, [[rdma_microbatch(0)]])
+                Trainer.forward_backward(
+                    trainer, [[rdma_microbatch(0)]], torch.tensor([1.0])
+                )
             )
             assert await asyncio.to_thread(gpu_wait_started.wait, 5)
             call_1 = asyncio.create_task(
-                Trainer.forward_backward(trainer, [[rdma_microbatch(1)]])
+                Trainer.forward_backward(
+                    trainer, [[rdma_microbatch(1)]], torch.tensor([1.0])
+                )
             )
             assert await asyncio.to_thread(read_started[1].wait, 5)
             assert not call_0.done()
@@ -597,12 +606,14 @@ def test_forward_backward_sends_the_step_first_group_alone_to_whole_call_graphs(
         def close(self) -> None:
             pass
 
-    def forward_backward(*, microbatch_groups):
+    def forward_backward(*, microbatch_groups, aux_loss_denominators):
         microbatches = (
             microbatch_groups.microbatches
             if rdma
             else [microbatch for [microbatch] in microbatch_groups]
         )
+        # Both engine calls of a split call take the trainer call's denominators.
+        assert aux_loss_denominators is denominators
         events.append([microbatch.microbatch_index for microbatch in microbatches])
         return ForwardBackwardResult(
             loss=torch.tensor(0.5),
@@ -641,12 +652,13 @@ def test_forward_backward_sends_the_step_first_group_alone_to_whole_call_graphs(
         for index in range(3)
     ]
 
+    denominators = torch.tensor([2.0])
     with patch(
         "torchtitan.rl.trainer.trainer.RDMAMicrobatchPrefetcher", RecordingPrefetcher
     ), patch("torchtitan.rl.trainer.trainer.torch.accelerator.current_stream"):
         metrics = asyncio.run(
             Trainer.forward_backward(
-                trainer, [[microbatch] for microbatch in microbatches]
+                trainer, [[microbatch] for microbatch in microbatches], denominators
             )
         )
 
@@ -684,7 +696,7 @@ def test_forward_backward_rejects_a_misplaced_rdma_microbatch(
     )
 
     with pytest.raises(ValueError, match=r"expected \(0, 1, 0\)"):
-        asyncio.run(Trainer.forward_backward(trainer, [[wrong]]))
+        asyncio.run(Trainer.forward_backward(trainer, [[wrong]], torch.tensor([1.0])))
     wrong.read.assert_not_called()
 
 
@@ -731,16 +743,21 @@ def test_forward_backward_without_last_pipeline_stage_returns_no_metrics() -> No
             for group in range(2)
         ]
 
+        aux_loss_denominators = torch.tensor([2.0])
+
         with patch(
             "torchtitan.rl.trainer.trainer.torch.accelerator.current_stream"
         ) as current_stream:
-            result = await Trainer.forward_backward(trainer, microbatch_groups)
+            result = await Trainer.forward_backward(
+                trainer, microbatch_groups, aux_loss_denominators
+            )
 
         # Its busy time waits for the GPU, like the ranks that reduce the loss metrics.
         current_stream.assert_called_once_with(engine.device)
         current_stream.return_value.synchronize.assert_called_once_with()
         engine.forward_backward.assert_called_once_with(
-            microbatch_groups=microbatch_groups
+            microbatch_groups=microbatch_groups,
+            aux_loss_denominators=aux_loss_denominators,
         )
         assert trainer._step_num_tokens_per_dp_rank == (
             4 * trainer.config.training.num_tokens_per_microbatch_per_dp_rank

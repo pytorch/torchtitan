@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from contextlib import nullcontext
+from functools import partial
 from importlib import import_module
 from types import SimpleNamespace
 from typing import Any, cast
@@ -271,6 +272,9 @@ def test_ft_logs_loss_over_the_loss_tokens_of_every_replica(monkeypatch, dp_cp_e
         ),
         optim_step=Mock(return_value=torch.tensor(0.0)),
     )
+    engine.step_aux_loss_denominators = partial(
+        TrainingEngine.step_aux_loss_denominators, engine
+    )
     trainer = Mock(
         spec=ft.FaultTolerantTrainer,
         engine=engine,
@@ -315,7 +319,15 @@ def test_ft_logs_loss_over_the_loss_tokens_of_every_replica(monkeypatch, dp_cp_e
 
     engine.forward_backward.assert_called_once()
     forward_backward_args = engine.forward_backward.call_args.kwargs
-    assert forward_backward_args == {"microbatch_groups": [[microbatch]]}
+    assert forward_backward_args.keys() == {
+        "microbatch_groups",
+        "aux_loss_denominators",
+    }
+    assert forward_backward_args["microbatch_groups"] == [[microbatch]]
+    # 4 routed tokens per 4 loss tokens on this replica.
+    torch.testing.assert_close(
+        forward_backward_args["aux_loss_denominators"], torch.tensor([1.0])
+    )
     trainer.metrics_processor.log.assert_called_once()
     log_call = trainer.metrics_processor.log.call_args
     _, logged_loss, logged_max_loss, _ = log_call.args

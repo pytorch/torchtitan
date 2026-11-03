@@ -3475,6 +3475,8 @@ class TestBucketingPrefetchOrder(FSDPTest):
                     )
                 ]
             ],
+            # Every token is routed and is a loss token.
+            aux_loss_denominators=torch.tensor([1.0]),
         )
 
         layer_ids = self._get_bucketed_ag_layer_order(trainer.engine._traced_step.gm)

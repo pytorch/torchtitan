@@ -377,8 +377,11 @@ class FaultTolerantTrainer(Configurable):
             microbatch_groups.append(
                 [next(data_iterator) for _ in range(self.num_pp_microbatches)]
             )
+        # The denominators cover this replica's DP ranks only: the replicas' quorum starts inside
+        # forward_backward. So each replica's auxiliary losses weigh its share of the loss tokens.
         forward_backward_result = engine.forward_backward(
-            microbatch_groups=microbatch_groups
+            microbatch_groups=microbatch_groups,
+            aux_loss_denominators=engine.step_aux_loss_denominators(microbatch_groups),
         )
 
         grad_norm = engine.optim_step()

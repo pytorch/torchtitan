@@ -226,11 +226,14 @@ def _train(rank: int, port: int, case_name: str, graphs: bool, output_dir: str) 
     engine.optim.step = recording_optimizer_step
     for step, call_sizes in enumerate(case.calls_per_step, start=1):
         groups = _step_microbatch_groups(step, rank, sum(call_sizes))
+        # The model has no auxiliary loss; every call takes the step's denominators.
+        denominators = engine.step_aux_loss_denominators(groups)
         steps.append({"metrics": []})
         start = 0
         for call_size in call_sizes:
             result = engine.forward_backward(
-                microbatch_groups=groups[start : start + call_size]
+                microbatch_groups=groups[start : start + call_size],
+                aux_loss_denominators=denominators,
             )
             start += call_size
             steps[-1]["metrics"] += [
