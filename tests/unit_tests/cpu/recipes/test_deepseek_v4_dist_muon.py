@@ -209,22 +209,6 @@ def test_deepseek_v4_mtp_parameters_have_dist_muon_buckets() -> None:
     assert "hc_head" in bucket_names
 
 
-def test_deepseek_v4_recipe_configures_per_step_ns_coefficients() -> None:
-    coefficients = (
-        (3.4445, -4.7750, 2.0315),
-        (3.0, -4.0, 2.0),
-    )
-    config = deepseek_v4_debugmodel(
-        muon_ns_steps=2,
-        muon_ns_coefficients=coefficients,
-    )
-    muon_config = config.optim.optimizer.optimizers[0]
-
-    assert isinstance(muon_config, DistMuon.Config)
-    assert muon_config.ns_steps == 2
-    assert muon_config.ns_coefficients == coefficients
-
-
 def test_deepseek_v4_tp_pp_guards_apply_only_to_dist_muon() -> None:
     for degree_field in ("tensor_parallel_degree", "pipeline_parallel_degree"):
         config = deepseek_v4_debugmodel(

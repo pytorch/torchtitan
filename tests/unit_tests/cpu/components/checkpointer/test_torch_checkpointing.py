@@ -41,7 +41,6 @@ from torch_checkpointing.logging_utils import checkpoint_logging_context
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.storage.filesystem import LocalFileSystemStorageConfig
 from torchtitan.components.checkpointer import (
-    BaseCheckpointManager,
     CheckpointManager,
     CheckpointStorage,
     EMA,
@@ -178,16 +177,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         manager.close()
         self.assertTrue(backend_manager.closed)
 
-    def test_config_adds_no_checkpoint_options(self) -> None:
-        field_names = {
-            field.name for field in dataclasses.fields(TorchCheckpointingManager.Config)
-        }
-        base_field_names = {
-            field.name for field in dataclasses.fields(BaseCheckpointManager.Config)
-        }
-
-        self.assertEqual(field_names, base_field_names)
-
     def test_config_to_dict_is_json_serializable(self) -> None:
         config_dict = TorchCheckpointingManager.Config().to_dict()
 
@@ -264,12 +253,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         storage.isdir.assert_called_once_with(Path("/somewhere"))
         self.assertIs(storage_config, manager._manager_config.storage_config)
         manager.close()
-
-    def test_legacy_config_has_no_backend_selector(self) -> None:
-        config = CheckpointManager.Config()
-
-        self.assertFalse(hasattr(config, "save_backend"))
-        self.assertFalse(hasattr(config, "load_backend"))
 
     def test_save_obeys_cadence_and_tracks_backend_future(self) -> None:
         config = TorchCheckpointingManager.Config(

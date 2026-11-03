@@ -16,7 +16,6 @@ from torchtitan.rl.actors.monarch import provisioning, system as monarch_system
 from torchtitan.rl.actors.monarch.system import MonarchActorSystem
 from torchtitan.rl.actors.system import ServiceHandle, TrainerHandle
 from torchtitan.rl.controller.controller import AsyncLoopConfig
-from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
@@ -213,10 +212,6 @@ def test_main_reraises_cancellation_after_shutdown(monkeypatch):
         asyncio.run(train.main())
 
     assert _FakeController.instances[0].events == ["setup", "train", "close"]
-
-
-def test_vllm_generator_does_not_touch_cuda_from_finalizer():
-    assert "__del__" not in Generator.__dict__
 
 
 class _StubEndpoint:

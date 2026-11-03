@@ -87,26 +87,6 @@ def _training_config():
     )
 
 
-def test_autoparallel_integration_matrix():
-    from torchtitan.experiments.graph_trainer.tests.integration_tests import (
-        build_graph_trainer_autoparallel_h100_test_list,
-        build_graph_trainer_autoparallel_test_list,
-    )
-
-    suites = {
-        "default": build_graph_trainer_autoparallel_test_list(),
-        "h100": build_graph_trainer_autoparallel_h100_test_list(),
-    }
-
-    assert [test.test_name for test in suites["default"]] == [
-        "autoparallel_llama3_fsdp_tp"
-    ]
-    assert [test.test_name for test in suites["h100"]] == [
-        "autoparallel_deepseek_v3_edp_shard_ep"
-    ]
-    assert all(test.ngpu == 4 for tests in suites.values() for test in tests)
-
-
 def test_autoparallel_graph_pass_selection_uses_regular_memory_policy():
     from torchtitan.experiments.graph_trainer import passes
 

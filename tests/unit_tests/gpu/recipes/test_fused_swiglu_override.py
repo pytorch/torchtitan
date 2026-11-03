@@ -25,15 +25,6 @@ _DEVICE = torch.accelerator.current_accelerator()
 _HAS_OP_DEVICE = _DEVICE is not None and _DEVICE.type == device_type
 
 
-class TestFusedSwiGLUOverride(unittest.TestCase):
-    def test_swiglu_config_is_replaced(self):
-        cfg = SwiGLU.Config()
-
-        replacement = fused_swiglu(cfg)
-
-        self.assertIsInstance(replacement, FusedSwiGLU.Config)
-
-
 @unittest.skipUnless(_HAS_OP_DEVICE, f"requires a {device_type} accelerator")
 class TestFusedSwiGLUNumerics(unittest.TestCase):
     def test_matches_reference_forward_and_backward(self):

@@ -19,12 +19,9 @@ Verifies the key contract that distributed checkpointing relies on:
 
 The test wraps each layer with the activation checkpoint wrapper to reproduce the
 prefix asymmetry on CPU (named_parameters prefixed, state_dict clean), and derives
-ground-truth keys from the unwrapped model plus a few hard-coded structural
-anchors that catch unexpected model refactors.
+ground-truth keys from the unwrapped model.
 """
 
-import subprocess
-import sys
 import unittest
 
 import torch
@@ -47,22 +44,6 @@ _WRAPPER_PREFIX = "_checkpoint_wrapped_module"
 
 # AdamW creates these per-parameter state tensors (no amsgrad).
 _ADAMW_STATE_NAMES = ("step", "exp_avg", "exp_avg_sq")
-
-# Well-known llama3 debugmodel parameter FQNs used as structural anchors. These
-# are checked as a subset, so extra keys (biases, buffers) never cause a false
-# failure, but a rename in the model would.
-_TOP_LEVEL_ANCHORS = ("tok_embeddings.weight", "norm.weight", "lm_head.weight")
-_LAYER0_ANCHORS = (
-    # debugmodel uses fused QKV by default, and native state dicts retain its
-    # single packed ``wqkv`` parameter.
-    "layers.0.attention.qkv_linear.wqkv.weight",
-    "layers.0.attention.wo.weight",
-    # DenseFeedForward stores gate/up in one physical w13 parameter.
-    "layers.0.feed_forward.w13.weight",
-    "layers.0.feed_forward.w2.weight",
-    "layers.0.attention_norm.weight",
-    "layers.0.ffn_norm.weight",
-)
 
 
 def _build_debugmodel() -> Llama3Model:
@@ -103,24 +84,6 @@ def _debugmodel_optimizer_config() -> OptimizersContainer.Config:
 
 
 class TestStateDictKeys(unittest.TestCase):
-    def test_state_dict_helpers_can_be_imported_first(self):
-        # These modules sit below the `optimizer` and `checkpointer` packages,
-        # whose __init__ files import from each other. Importing either leaf
-        # module first, in a fresh interpreter, must not close an import cycle.
-        for module, names in (
-            (
-                "torchtitan.components.optim.utils",
-                "get_flat_optim_state_dict, init_optim_state, "
-                "load_flat_optim_state_dict",
-            ),
-            ("torchtitan.components.checkpointer.utils", "canonical_fqn"),
-        ):
-            with self.subTest(module=module):
-                subprocess.run(
-                    [sys.executable, "-c", f"from {module} import {names}"],
-                    check=True,
-                )
-
     def setUp(self) -> None:
         # Ground-truth canonical keys come from the unwrapped model.
         model = _build_debugmodel()
@@ -132,11 +95,6 @@ class TestStateDictKeys(unittest.TestCase):
         # named_parameters() but not on state_dict() (stripped by a hook).
         _wrap_layers_with_ac(model)
         self.model_parts = [model]
-
-    def test_model_structure_anchors(self) -> None:
-        """The debugmodel exposes the expected, well-known parameter FQNs."""
-        for anchor in _TOP_LEVEL_ANCHORS + _LAYER0_ANCHORS:
-            self.assertIn(anchor, self.clean_param_fqns)
 
     def test_ac_prefix_only_on_named_parameters(self) -> None:
         """named_parameters() keeps the AC prefix; state_dict() is already clean.

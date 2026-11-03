@@ -103,6 +103,22 @@ Useful references: `CONTRIBUTING.md` (proof of value), `torchtitan/models/README
 `torchtitan/config/README.md`, `torchtitan/config/OVERRIDE.md`,
 `torchtitan/distributed/README.md`, `tests/README.md`.
 
+## Deciding Whether a PR Needs Tests
+
+When authoring or reviewing a PR, do not add a test automatically for every fix.
+
+- **Identify the gap.** Name the behavior existing tests miss; cite existing
+  coverage when it is sufficient.
+- **Extend before adding.** Prefer an existing test or integration configuration
+  over another fixture, file, or model/flag permutation.
+- **Check behavior independently.** Avoid config echoes, source/README greps,
+  private-layout snapshots, and assertions that only repeat mock calls.
+- **Keep meaningful regressions.** A specific combination can protect numerics,
+  gradients, checkpoints, collectives, or demonstrated performance requirements.
+  Delete redundant cases only after identifying the coverage that remains.
+- **Control cost.** Use the smallest necessary hardware, put GPU tests in the GPU
+  suite, and report what actually ran and what was skipped.
+
 ## Review Workflow
 
 ### Step 1: Context

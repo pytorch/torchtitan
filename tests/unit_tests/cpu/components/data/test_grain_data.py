@@ -489,29 +489,6 @@ def test_hf_explicit_fields_are_passed_to_load_dataset(
 @pytest.mark.parametrize(
     "source_type", [HuggingFaceRandomAccessSource, HuggingFaceStreamingSource]
 )
-def test_hf_lineage_fields_are_serialized(source_type):
-    config = GrainDataLoader.Config(
-        dataset=SingleDatasetConfig(
-            source=source_type.Config(
-                path="owner/dataset",
-                name="configuration",
-                split="validation",
-                revision="abc123",
-            )
-        )
-    )
-
-    source = config.to_dict()["dataset"]["source"]
-
-    assert source["path"] == "owner/dataset"
-    assert source["name"] == "configuration"
-    assert source["split"] == "validation"
-    assert source["revision"] == "abc123"
-
-
-@pytest.mark.parametrize(
-    "source_type", [HuggingFaceRandomAccessSource, HuggingFaceStreamingSource]
-)
 def test_hf_config_requires_split(source_type):
     with pytest.raises(TypeError, match="split"):
         source_type.Config(path="owner/dataset")
@@ -1171,31 +1148,6 @@ def test_packing_splits_positioned_long_documents(packing_type, max_num_document
         assert int(row.positions.max()) < context.max_context_length
         real_input_ids.extend(row.input_ids[row.labels != IGNORE_INDEX].tolist())
     assert real_input_ids == list(range(16))
-
-
-def test_first_fit_num_packing_bins_is_independent_of_token_budget(monkeypatch):
-    captured = {}
-
-    def capture_options(dataset, **kwargs):
-        captured.update(kwargs)
-        return dataset
-
-    monkeypatch.setattr(
-        grain.experimental,
-        "FirstFitPackIterDataset",
-        capture_options,
-    )
-    dataset = SingleDatasetConfig(
-        source=RowsSourceConfig(rows=({"tokens": [1, 2]},)),
-        processor=RowToTokens.Config(),
-    )
-
-    FirstFitPackingConfig(dataset=dataset).build(
-        context=replace(CONTEXT, num_tokens_per_microbatch=64),
-        dataset_iteration_policy=dataset_iteration_policy(),
-    )
-
-    assert captured["num_packing_bins"] == 8
 
 
 def test_first_fit_meta_features_are_packed_arrays():

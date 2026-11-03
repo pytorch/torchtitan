@@ -16,12 +16,10 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 
 from torchtitan.components.data import GrainDataLoader
-from torchtitan.components.data.dataset import SingleDatasetConfig
 from torchtitan.components.data.multimodal import mm_datasets
 from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
 from torchtitan.components.data.multimodal.utils.audio import load_pcm_waveform
 from torchtitan.components.data.multimodal.utils.video import load_npy_video_frames
-from torchtitan.components.data.sources import IndexedJsonlSource
 from torchtitan.components.data.types import DatasetBuildContext
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
@@ -149,21 +147,6 @@ def test_video_sample_processor_resizes_and_masks(audio_tokenizer):
         audio_tokenizer,
         ("video", "vision_start", "vision_end"),
     )
-
-
-def test_synthetic_datasets_register_absolute_sources_and_processors():
-    expected = {
-        "synthetic-audio-text": ("audio_text", mm_datasets.AudioProcessor.Config),
-        "synthetic-video-text": ("video_text", mm_datasets.VisionProcessor.Config),
-    }
-    for name, (directory, processor_type) in expected.items():
-        dataset = synthetic_multimodal.SYNTHETIC_MM_DATASETS[name]
-        assert isinstance(dataset, SingleDatasetConfig)
-        assert isinstance(dataset.source, IndexedJsonlSource.Config)
-        assert dataset.source.patterns == (
-            str((_ASSET_ROOT / directory / "data.jsonl").resolve()),
-        )
-        assert isinstance(dataset.processor, processor_type)
 
 
 def _synthetic_loader(audio_tokenizer, dataset_name: str):

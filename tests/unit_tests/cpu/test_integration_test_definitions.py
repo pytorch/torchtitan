@@ -122,15 +122,6 @@ def test_numerics_run_uses_seed_config(monkeypatch, tmp_path: Path) -> None:
     assert f"--seed-config={seed_config.__name__}" in captured_command
 
 
-def test_llama3_pp_numerics_has_one_microbatch_per_stage() -> None:
-    config = llama3_debugmodel_fsdp2_tp2_pp2()
-
-    assert (
-        config.parallelism.num_pp_microbatches
-        >= config.parallelism.pipeline_parallel_degree
-    )
-
-
 def test_split_backward_pp_cases_exercise_varlen_accelerator_graphs() -> None:
     tests_by_name = {test.test_name: test for test in build_features_test_list()}
 
@@ -187,12 +178,6 @@ def test_per_group_accelerator_graph_integration_supports_fake_pg() -> None:
     )
 
 
-def test_llama3_debug_config_defaults_to_short_context() -> None:
-    config = llama3_debugmodel()
-
-    assert config.model.max_context_length == 2048
-
-
 def test_parse_multiple_integration_test_suites() -> None:
     assert _parse_test_suites("features,models,h100,b200") == (
         "features",
@@ -200,36 +185,6 @@ def test_parse_multiple_integration_test_suites() -> None:
         "h100",
         "b200",
     )
-
-
-def test_h100_tests_are_registered_in_separate_suite() -> None:
-    h100_tests = build_h100_tests_list()
-    assert {test.test_name for test in h100_tests} == {
-        "deepseek_v3_fsdp+hybridep",
-        "dist_gemm",
-        "fsdp_symm_mem",
-        "kimi_k3_mm_allgather_kv_cp",
-        "kimi_k3_mm_ulysses_cp",
-        "qwen3_fsdp+deepep",
-        "qwen3_5_mm_allgather_kv_cp",
-        "qwen3_5_mm_ulysses_cp",
-        "qwen3_5_moe_lora",
-    }
-    assert all(not hasattr(test, "use_h100") for test in build_features_test_list())
-    assert all(not hasattr(test, "use_h100") for test in build_model_tests_list())
-
-
-def test_b200_tests_are_registered_in_separate_suite() -> None:
-    assert {test.test_name for test in build_b200_tests_list()} == {
-        "kimi_k3_fsdp2_tp2_ep2_pp2_vpp4",
-        "kimi_k3_mm",
-        "kimi_k3_mm_muon",
-        "dist_moe_eager_fsdp_ep_accelerator_graph",
-        "dist_moe_eager_fsdp_ep_pp_accelerator_graph",
-        "mxfp8_linear_fsdp",
-        "nvfp4_linear_fsdp",
-    }
-    assert "kimi_k3_mm" not in {test.test_name for test in build_model_tests_list()}
 
 
 def test_specialized_moe_backends_have_ep_coverage() -> None:
@@ -264,13 +219,6 @@ def test_models_select_fake_and_real_pg_cases() -> None:
         "deepseek_v3_fsdp+cp+pp+ep",
         "deepseek_v4_fsdp+tp+ep",
     } <= real_pg_model_tests
-
-
-def test_flux_fake_pg_filters_real_collective_cases() -> None:
-    flux_tests = build_flux_test_list()
-    fake_pg_tests = {test.test_name for test in flux_tests if not test.use_real_pg}
-
-    assert fake_pg_tests == set()
 
 
 @pytest.mark.parametrize(

@@ -7,7 +7,6 @@
 """Model config transforms."""
 
 import copy
-import inspect
 import unittest
 from dataclasses import dataclass, replace
 
@@ -181,15 +180,6 @@ class TestConvertConfigType(unittest.TestCase):
         existing = AllGatherKVFlexInnerAttention.Config()
         with self.assertRaisesRegex(ValueError, "must inherit"):
             convert_config_type(existing, FlexInnerAttention)
-
-
-class TestPublicApi(unittest.TestCase):
-    def test_relation_graph_is_not_caller_configurable(self):
-        self.assertNotIn("relations", inspect.signature(apply_transforms).parameters)
-        self.assertNotIn(
-            "relations",
-            inspect.signature(transform_model_config_).parameters,
-        )
 
 
 class TestOrdering(unittest.TestCase):

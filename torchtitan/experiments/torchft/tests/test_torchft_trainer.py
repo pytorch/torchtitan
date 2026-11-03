@@ -138,11 +138,6 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
     assert hasattr(built_ffns[0].w13, "lora_a"), "FT ignored the FFN LoRA override"
 
 
-def test_ft_trainer_composes_specialized_training_engine() -> None:
-    assert not issubclass(ft.FaultTolerantTrainer, TrainingEngine)
-    assert issubclass(ft.FaultTolerantTrainingEngine, TrainingEngine)
-
-
 def test_ft_accepts_validation_with_training_accelerator_graphs():
     parallelism = ParallelismConfig()
     config = ft.FaultTolerantTrainer.Config(

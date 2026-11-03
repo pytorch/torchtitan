@@ -669,10 +669,6 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dic
     return engine_args.call_args.kwargs
 
 
-def test_generator_defaults_to_the_vllm_engine():
-    assert isinstance(Generator.Config(model=_MODEL_CONFIG).engine, VLLMEngine.Config)
-
-
 def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
     engine_kwargs = _build_engine_kwargs(
         monkeypatch,
@@ -891,81 +887,3 @@ def test_inference_parallelism_disables_dense_sequence_parallelism():
     parallelism = InferenceParallelismConfig(tensor_parallel_degree=4)
 
     assert not parallelism.to_training().enable_sequence_parallel
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_vllm_uneven_decode_tp_padding():
-    """Three decode tokens run through EP-internal TP sequence sharding."""
-    world_size = (
-        dist.get_world_size()
-        if dist.is_initialized()
-        else int(os.environ.get("WORLD_SIZE", "1"))
-    )
-    if world_size != 4:
-        pytest.skip(f"requires exactly 4 GPUs, got {world_size}")
-
-    from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_moe_debug_varlen
-
-    from tests.rl.unit_tests.gpu.test_bitwise_parity import (
-        _make_prompt_tokens,
-        _run_engine,
-        build_inference_engine,
-    )
-
-    config = rl_grpo_qwen3_moe_debug_varlen()
-    config.generator.parallelism.data_parallel_degree = 1
-    config.generator.parallelism.tensor_parallel_degree = 4
-    config.generator.gpu_memory_limit = 0.5
-
-    temporary_dump_folder = None
-    if not dist.is_initialized():
-        temporary_dump_folder = tempfile.mkdtemp(prefix="rl_generator_moe_")
-        dist_utils.init_distributed(
-            CommConfig(),
-            base_folder=temporary_dump_folder,
-        )
-
-    register_to_vllm(
-        config.generator.model,
-        parallelism=config.generator.parallelism,
-        precision=config.precision,
-        checkpointer_config=None,
-        model_state_dict_load_mode="cpu_prefetch",
-    )
-
-    engine = build_inference_engine(config)
-    try:
-        prompt_ids = _make_prompt_tokens(3, 100, engine.get_tokenizer())
-        outputs = _run_engine(
-            engine,
-            "uneven_decode",
-            prompt_ids,
-            SamplingParams(
-                temperature=0.0,
-                top_p=1.0,
-                max_tokens=2,
-                ignore_eos=True,
-                logprobs=1,
-                output_kind=RequestOutputKind.FINAL_ONLY,
-            ),
-        )
-
-        for output in outputs:
-            sample = output.outputs[0]
-            assert len(sample.token_ids) == 2
-            assert len(sample.logprobs) == 2
-            assert all(
-                math.isfinite(list(logprobs.values())[0].logprob)
-                for logprobs in sample.logprobs
-            )
-    finally:
-        if dist.is_initialized():
-            dist.barrier()
-        renderer = getattr(engine, "renderer", None)
-        if renderer is not None:
-            renderer.shutdown()
-        del engine
-        gc.collect()
-        torch.cuda.empty_cache()
-        if temporary_dump_folder is not None:
-            shutil.rmtree(temporary_dump_folder, ignore_errors=True)

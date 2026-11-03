@@ -12,7 +12,6 @@ import pytest
 import torch
 import torchvision.transforms.v2.functional as TVF
 
-from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.data.dataset import SingleDatasetConfig
 from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
 from torchtitan.components.data.multimodal.mm_datasets import (
@@ -23,16 +22,12 @@ from torchtitan.components.data.multimodal.mm_datasets import (
 from torchtitan.components.data.multimodal.utils.image import resize_to_navit_patch_grid
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan_recipes.tests.datasets.synthetic_multimodal import SYNTHETIC_MM_DATASETS
 from torchtitan_recipes.tests.models import (
-    kimi_k2_7 as kimi_configs,
     qwen3_5 as qwen35_configs,
     qwen3_6 as qwen36_configs,
     qwen3_8 as qwen38_configs,
 )
 from torchtitan_recipes.tests.models.multimodal import DPRankImagePresenceDatasetConfig
-
-from tests.integration_tests import b200 as b200_recipes, models as integration_recipes
 
 
 class _Tokenizer:
@@ -102,10 +97,6 @@ class _RowsSourceConfig:
         return _RowsSource(self.rows)
 
 
-def test_multimodal_registry_does_not_enable_packing():
-    assert isinstance(MM_DATASETS["cc12m"], SingleDatasetConfig)
-
-
 def test_vision_processor_forwards_resize_config():
     captured = {}
 
@@ -159,50 +150,6 @@ def test_dp_rank_image_presence_dataset_drops_images_on_even_ranks():
 
 
 @pytest.mark.parametrize(
-    "recipe",
-    [
-        integration_recipes.qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4,
-        integration_recipes.qwen35_debugmodel_moe_fsdp4_tp2_ep4,
-        integration_recipes.qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac,
-        integration_recipes.kimi_k2_5_debugmodel_muon_fsdp2_pp2_ep2,
-        integration_recipes.kimi_k2_5_debugmodel_muon_fsdp8_ep8,
-        integration_recipes.muse_glimmer_debugmodel_mm_fsdp2_tp2,
-        b200_recipes.kimi_k3_debugmodel_mm,
-    ],
-)
-def test_multimodal_dp_integration_recipes_use_rank_conditional_images(recipe):
-    config = recipe()
-
-    assert isinstance(config.dataloader, GrainDataLoader.Config)
-    assert isinstance(config.dataloader.dataset, DPRankImagePresenceDatasetConfig)
-
-
-@pytest.mark.parametrize(
-    "recipe_name",
-    [
-        "kimi_k2_5_debugmodel",
-    ],
-)
-def test_kimi_multimodal_recipe_copies_unpacked_dataset(recipe_name):
-    base_dataset = MM_DATASETS["cc12m-test"]
-    base_processor = base_dataset.processor
-
-    config = getattr(kimi_configs, recipe_name)()
-    dataset = config.dataloader.dataset
-    collator = config.dataloader.collator
-
-    assert isinstance(dataset, SingleDatasetConfig)
-    assert dataset is not base_dataset
-    assert isinstance(dataset.processor, VisionProcessor.Config)
-    assert dataset.processor is not base_processor
-    assert dataset.processor.resize_fn is resize_to_navit_patch_grid
-    assert dataset.processor.max_patches == 16_384
-    assert isinstance(collator, MultiModalCollator.Config)
-    assert collator.patch_order == "raster"
-    assert MM_DATASETS["cc12m-test"] is base_dataset
-
-
-@pytest.mark.parametrize(
     ("recipe_module", "recipe_name"),
     [
         (qwen35_configs, "qwen35_debugmodel"),
@@ -247,22 +194,6 @@ def test_qwen_recipe_geometry_matches_dataset_processor(recipe_module, recipe_na
         for name, dataset in MM_DATASETS.items()
         if isinstance(dataset.processor, VisionProcessor.Config)
     } == registry_state
-
-
-def test_qwen35_video_recipe_uses_synthetic_video_dataset():
-    config = qwen35_configs.qwen35_debugmodel_video()
-    assert isinstance(config.dataloader, GrainDataLoader.Config)
-    dataset = config.dataloader.dataset
-    collator = config.dataloader.collator
-
-    assert dataset is SYNTHETIC_MM_DATASETS["synthetic-video-text"]
-    assert isinstance(dataset.processor, VisionProcessor.Config)
-    assert isinstance(collator, MultiModalCollator.Config)
-    assert collator.patch_size == dataset.processor.patch_size
-    assert collator.temporal_patch_size == dataset.processor.temporal_patch_size
-    assert collator.spatial_merge_size == dataset.processor.spatial_merge_size
-    assert config.training.steps == 10
-    assert config.training.disable_accelerator_graphs
 
 
 def test_packing_preserves_ordered_media_when_merging_rows():

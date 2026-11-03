@@ -191,20 +191,6 @@ class TestSparseIndexerLoss(unittest.TestCase):
             actual = self.loss()._teacher(q, compressed, indices, lse, cu)
         torch.testing.assert_close(actual, expected, atol=1e-7, rtol=1e-6)
 
-    def test_configuration_defaults_to_unweighted_kl(self):
-        self.assertFalse(self.loss().mass_weighted)
-        cfg = build_model_config(
-            "debugmodel", seq_len=512, parallelism=ParallelismConfig()
-        )
-        losses = [
-            layer.attention.inner_attention.aux_loss
-            for layer in cfg.layers
-            if layer.attention.inner_attention.aux_loss is not None
-        ]
-        self.assertTrue(losses)
-        for loss in losses:
-            self.assertFalse(loss.mass_weighted)
-
     def test_configuration_can_be_tuned_or_disabled(self):
         for coeff in (0.0, 0.02):
             cfg = build_model_config(

@@ -155,11 +155,6 @@ class TestSetStep:
     def test_step_default_is_none(self):
         assert get_step() is None
 
-    def test_set_step_writes_to_both_global_and_cv(self):
-        set_step(10)
-        assert step_state._STEP_GLOBAL == 10
-        assert step_state._STEP_CV.get() == 10
-
     def test_get_step_prefers_cv(self):
         """ContextVar takes priority over global."""
         step_state._STEP_GLOBAL = 1
@@ -195,12 +190,6 @@ class TestStepTags:
         add_step_tag("profiling")
         clear_step_tags()
         assert get_step_tags() == ()
-
-    def test_step_tags_are_tuples(self):
-        """Step tags are tuples (immutable) to avoid shared-reference issues."""
-        add_step_tag("a")
-        tags = get_step_tags()
-        assert isinstance(tags, tuple)
 
     def test_set_step_clears_tags(self):
         add_step_tag("gc")

@@ -542,10 +542,6 @@ def test_fmt_metric_value(value, expected) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_metric_backend_is_base_logger() -> None:
-    assert m.MetricBackend is BaseLogger
-
-
 # ---------------------------------------------------------------------------
 # MetricsProcessor fan-out + build
 # ---------------------------------------------------------------------------
@@ -702,21 +698,6 @@ class TestMetricsProcessorBuild:
         fake_wandb.run = MagicMock()
         logger_inst.close()
         fake_wandb.finish.assert_called_once()
-
-    def test_console_log_keys_round_trip(self) -> None:
-        """`MetricsProcessor.Config` carries the two per-context allow lists; the
-        controller picks them up at the callsite. The build method
-        ignores them since they aren't part of any backend."""
-        cfg = m.MetricsProcessor.Config(
-            console_log_keys_train=[r"^loss/mean$"],
-            console_log_keys_validation=[r"^validation/reward$"],
-        )
-        # Build should succeed and produce no backends (no W&B configured).
-        logger_inst = cfg.build()
-        assert logger_inst._backends == []
-        # Round-trip: caller can read them straight off the config.
-        assert cfg.console_log_keys_train == [r"^loss/mean$"]
-        assert cfg.console_log_keys_validation == [r"^validation/reward$"]
 
     def test_wandb_project_env_var_wins(self, tmp_path, monkeypatch) -> None:
         """WANDB_PROJECT takes precedence over the shared default."""
