@@ -66,10 +66,11 @@ class DispatchHandle(CustomClassBase):
 
 register_opaque_type(DispatchHandle, typ="reference")
 
-# torch_remat regions return only tensors. Keep each opaque handle alive through
-# a CPU tensor ID, as in the DeepEP adapter; no device-to-host sync is needed.
-# TODO: Drop this cache after extending remat's tensor-only output contract
-# (https://github.com/meta-pytorch/remat/pull/2) to support opaque handles.
+# The pinned torch_remat release accepts only tensor outputs; direct opaque
+# outputs require an upstream release. Use CPU tensor IDs as in the DeepEP
+# adapter to retain handles without device-to-host synchronization.
+# TODO: Remove this cache once opaque output support is released:
+# https://github.com/meta-pytorch/remat/issues/10
 _handle_cache: dict[int, DispatchHandle] = {}
 _handle_counter: int = 0
 
