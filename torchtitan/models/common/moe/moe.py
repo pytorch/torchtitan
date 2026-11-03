@@ -331,8 +331,9 @@ class TokenChoiceTopKRouter(Module):
 
     # options: Inductor's batch_invariant fixes each reduction's launch config, so a token's
     # scores don't depend on the batch size (otherwise the 1-token graph picks another config
-    # and rounds differently). recompile_limit=16: DeepSeek-V4's hash and top-k layers share
-    # this frame, 2 graphs per shape (default 8).
+    # and rounds differently). Cost on GB300: up to 4 us per call at 1-64 tokens (Qwen3.5
+    # router 15 -> 19 us at 64), none from 4k tokens. recompile_limit=16: DeepSeek-V4's hash
+    # and top-k layers share this frame, 2 graphs per shape (default 8).
     @local_compile(
         "moe_router_topk",
         batch_invariant=True,
@@ -353,11 +354,14 @@ class TokenChoiceTopKRouter(Module):
             eager    this region                                      eager
 
         Outside the region:
-        - gate: ``HiMidLoLinear`` raises when traced with ``inplace_wgrad_accum=True`` (the
-          default); with it off, a compiled region would round its fp32 weight grad to bf16.
+        - gate: compiled, autograd rounds ``HiMidLoLinear``'s fp32 weight grad to bf16 when the
+          weight is bf16 with an fp32 ``grad_dtype``, as under FSDP2
+          (https://github.com/pytorch/pytorch/pull/197381). Traced, its default
+          ``inplace_wgrad_accum=True`` raises.
         - counts, aux loss, ``QuantileBalancedTopKRouter``'s histogram: they update buffers.
-          Compiled, ``remat.is_recomputing()`` is always False, so a recompute pass would
-          count them twice. ``_select_experts`` runs here, so it must not update state.
+          Remat's eager replay re-runs this region, so an update here would need a
+          ``remat.is_recomputing()`` guard, and that guard makes Dynamo compile a second graph
+          for the replay. ``_select_experts`` runs here, so it must not update state.
 
         Returns:
             scores_TE: Router scores ``(T, E)`` in FP32.
@@ -454,13 +458,17 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
         histogram in eager, as ``forward`` does for its counts."""
         if expert_bias_E is None:
             raise ValueError("Quantile balancing requires an expert bias.")
-        outputs = super()._score_and_select_experts(
+        (
+            scores_TE,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            routing_map_TE,
+        ) = super()._score_and_select_experts(
             gate_TE,
             expert_bias_E,
             padding_mask_T=padding_mask_T,
             **router_kwargs,
         )
-        scores_TE, _, _, routing_map_TE = outputs
         if self.training and not remat.is_recomputing():
             self.quantile_balancer.observe(
                 scores_TE,
@@ -468,7 +476,7 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
                 expert_bias_E,
                 padding_mask_T,
             )
-        return outputs
+        return scores_TE, topk_scores_TK, topk_expert_ids_TK, routing_map_TE
 
 
 class QuantileBalancer(Module):
