@@ -19,7 +19,7 @@ from torchtitan.distributed.activation_remat import (
 )
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.llama3 import build_model_config
-from torchtitan.observability.metrics import MetricsProcessor
+from torchtitan.observability.metrics import MetricsProcessor, TensorBoardLogger
 from torchtitan.observability.profiler import Profiler
 from torchtitan.trainer import Trainer
 
@@ -48,7 +48,7 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/Llama-3.1-8B",
         profiler=Profiler.Config(enable_profiling=True, profile_freq=100),
-        metrics=MetricsProcessor.Config(enable_tensorboard=True),
+        metrics=MetricsProcessor.Config(loggers=[TensorBoardLogger.Config()]),
         model=model_config,
         parallelism=parallelism,
         optim=Optim.Config(
@@ -85,7 +85,7 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/Llama-3.1-70B",
         profiler=Profiler.Config(enable_profiling=True, profile_freq=100),
-        metrics=MetricsProcessor.Config(enable_tensorboard=True),
+        metrics=MetricsProcessor.Config(loggers=[TensorBoardLogger.Config()]),
         model=model_config,
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(

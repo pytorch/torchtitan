@@ -46,7 +46,8 @@ from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
 
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.models.qwen3.model import Qwen3Model
-from torchtitan.observability.metrics import MetricsProcessor
+
+from torchtitan.observability.metrics import MetricsProcessor, WandBLogger
 from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.trainer import Trainer
 
@@ -357,7 +358,7 @@ def qwen3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.Co
             ),
             max_num_documents=32,
         ),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         checkpointer=CheckpointManager.Config(initial_load_in_hf=True),
         activation_remat=DefaultActivationRematConfig(),
     )
@@ -689,7 +690,7 @@ def sft_qwen3_8b_math(seq_len: int | None = None) -> Trainer.Config:
             max_num_documents=32,
         ),
         metrics=MetricsProcessor.Config(
-            enable_wandb=True,
+            loggers=[WandBLogger.Config()],
         ),
         checkpointer=CheckpointManager.Config(
             initial_load_in_hf=True,

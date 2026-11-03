@@ -37,6 +37,8 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss_model_config
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.models.qwen3_5 import build_model_config as build_qwen3_5_model_config
+
+from torchtitan.observability.metrics import WandBLogger
 from torchtitan.rl.controller.controller import (
     AsyncLoopConfig,
     Controller,
@@ -127,7 +129,9 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(
+            loggers=[WandBLogger.Config(project="titan_rl")]
+        ),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -206,7 +210,9 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(
+            loggers=[WandBLogger.Config(project="titan_rl")]
+        ),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -342,7 +348,9 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(GptOssRendererConfig(reasoning_effort="low")),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(
+            loggers=[WandBLogger.Config(project="titan_rl")]
+        ),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -417,7 +425,9 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(
+            loggers=[WandBLogger.Config(project="titan_rl")]
+        ),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -489,7 +499,9 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(
+            loggers=[WandBLogger.Config(project="titan_rl")]
+        ),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -571,7 +583,9 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(
+            loggers=[WandBLogger.Config(project="titan_rl")]
+        ),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -684,7 +698,9 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(
+            loggers=[WandBLogger.Config(project="titan_rl")]
+        ),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -782,7 +798,9 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(
+            loggers=[WandBLogger.Config(project="titan_rl")]
+        ),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(

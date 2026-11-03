@@ -43,6 +43,8 @@ from torchtitan.models.deepseek_v3 import (
 from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss_model_config
 from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_model_config
 from torchtitan.models.qwen3 import build_model_config
+
+from torchtitan.observability.metrics import WandBLogger
 from torchtitan.rl.controller.controller import (
     AsyncLoopConfig,
     Controller,
@@ -119,7 +121,9 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         # needs gpt-oss special tokens absent here, so use the qwen3 renderer
         # like the other debug configs.
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(
+            loggers=[WandBLogger.Config(project="titan_rl")]
+        ),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -223,7 +227,9 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
         # needs gpt-oss special tokens absent here, so use the qwen3 renderer
         # like the other debug configs.
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(
+            loggers=[WandBLogger.Config(project="titan_rl")]
+        ),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -313,7 +319,9 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(
+            loggers=[WandBLogger.Config(project="titan_rl")]
+        ),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -469,7 +477,9 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(
+            loggers=[WandBLogger.Config(project="titan_rl")]
+        ),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -548,7 +558,9 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(
+            loggers=[WandBLogger.Config(project="titan_rl")]
+        ),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -682,7 +694,9 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(
+            loggers=[WandBLogger.Config(project="titan_rl")]
+        ),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -796,7 +810,9 @@ def rl_grpo_deepseek_v3_debug_varlen(*, seq_len: int = 2048) -> Controller.Confi
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(
+            loggers=[WandBLogger.Config(project="titan_rl")]
+        ),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -855,7 +871,7 @@ def _configure_ci(
     )
     config.generator.sampling.max_tokens = max_generated_tokens
     config.generator.gpu_memory_limit = 0.8
-    config.metrics.enable_wandb = False
+    config.metrics.loggers = []
     config.rollouter.worker.token_env.max_rollout_tokens = (
         config.trainer.model.max_context_length
     )

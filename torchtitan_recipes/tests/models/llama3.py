@@ -44,7 +44,8 @@ from torchtitan.models.common.config_utils import (
 
 from torchtitan.models.llama3 import build_model_config
 from torchtitan.models.llama3.model import Llama3Model
-from torchtitan.observability.metrics import MetricsProcessor
+
+from torchtitan.observability.metrics import MetricsProcessor, TensorBoardLogger
 from torchtitan.observability.profiler import Profiler
 from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.trainer import Trainer
@@ -249,7 +250,7 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
             profile_freq=100,
         ),
         metrics=MetricsProcessor.Config(
-            enable_tensorboard=True,
+            loggers=[TensorBoardLogger.Config()],
         ),
         model=model_config,
         parallelism=parallelism,
@@ -326,7 +327,7 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
             profile_freq=100,
         ),
         metrics=MetricsProcessor.Config(
-            enable_tensorboard=True,
+            loggers=[TensorBoardLogger.Config()],
         ),
         model=model_config,
         optim=Optim.Config(
