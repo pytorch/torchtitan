@@ -11,14 +11,24 @@ checkpoint parameter names stay in TorchTitan.
 | --- | --- | --- |
 | Correctness reference or a new accelerator | `AllToAllTokenDispatcher` | Uses PyTorch collectives. Variable token counts require a CPU sync; disable accelerator graphs. |
 | Quantized grouped GEMMs with the reference dispatcher | `TorchAOTokenDispatcher` | Adds per-expert padding to all-to-all. Also supports EP=1. |
-| NVIDIA training with a separate grouped-GEMM implementation | `DeepEPTokenDispatcher` | Requires DeepEP v2. Compact dispatch supports backward but synchronizes with the CPU; disable training accelerator graphs. |
-| NVIDIA training with graph-captured EP communication | `HybridEPTokenDispatcher` | Requires the HybridEP branch and a supported NVLink/network topology. Set `non_blocking_capacity_factor` for CPU-free dispatch. |
+| NVIDIA training or inference with a separate grouped-GEMM implementation | `DeepEPTokenDispatcher` | Requires DeepEP v2. Training uses compact dispatch with a CPU sync; disable training accelerator graphs. Inference under `no_grad` can use `cuda_graph_compatible=True` for the static expand layout. |
+| NVIDIA training with graph-captured EP communication, including graph trainer | `HybridEPTokenDispatcher` | Requires the HybridEP branch and a supported NVLink/network topology. Set `non_blocking_capacity_factor` for CPU-free dispatch. |
 | Blackwell BF16 or MXFP8 training with integrated communication and compute | Dist-MoE | Requires SM100 or newer and `training.mixed_precision_param="bfloat16"`. Start with the [Dist-MoE recipes and runtime guide](../dist_moe/README.md). |
-| Graph-captured inference with DeepEP | `DeepEPTokenDispatcher` | Set `cuda_graph_compatible=True`. Its static expand layout is inference-only; grad-enabled execution uses compact dispatch. |
 
 Without expert parallelism, `LocalTokenDispatcher` only reorders local tokens.
 DeepEP and HybridEP require EP>1. TorchTitan does not expose a separate DeepEP
 v1 or direct NCCL EP dispatcher.
+
+HybridEP is developed by NVIDIA with CUDA graph support and has TorchTitan
+[graph-trainer](../../../experiments/graph_trainer/README.md) recipes and
+integration tests. DeepEP's graph-trainer compatibility has not been validated
+here; its current training adapter's CPU sync prevents CUDA graph capture.
+
+Both DeepEP v2 and HybridEP use NVIDIA-specific kernels and require a supported
+communication fabric. DeepEP v2 requires Hopper (SM90) or compatible newer GPUs;
+HybridEP uses TMA and targets Hopper/Blackwell systems. For other accelerators,
+start with the PyTorch all-to-all reference and check upstream hardware and
+fabric requirements before choosing an optimized backend.
 
 Choose by hardware, precision, graph requirements, and memory budget, then
 measure training step time and peak memory on the actual routing distribution.
