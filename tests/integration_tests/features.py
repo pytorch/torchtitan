@@ -392,6 +392,8 @@ def llama3_debugmodel_tp2_no_sp() -> Trainer.Config:
         ),
     )
     _set_spmd_typechecking(config, typechecking=True)
+    # The logging callsites must run under SPMD type checking.
+    config.tensor_logger = tensor_logger.TensorLogger.Config(log_freq=2)
     return config
 
 
