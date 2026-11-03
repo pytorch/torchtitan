@@ -134,7 +134,9 @@ def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
     ffn = cfg.first_feed_forward
     moe = cfg.first_moe
 
-    from torchtitan.rl.generator.vllm.attention import get_attention_dimensions
+    from torchtitan.rl.generator.vllm.attention.attention import (
+        get_attention_dimensions,
+    )
 
     n_heads, n_kv_heads, head_dim, _ = get_attention_dimensions(attn, cfg.dim)
     rope = getattr(attn, "rope", None)
@@ -283,11 +285,15 @@ def register_to_vllm(
     # vLLM needs a model-level state contract to allocate shared attention/GDN
     # cache pages before individual layers are constructed.
     if has_gdn:
-        from torchtitan.rl.generator.vllm.gdn import maybe_configure_gdn_hybrid_model
+        from torchtitan.rl.generator.vllm.attention.gdn import (
+            maybe_configure_gdn_hybrid_model,
+        )
 
         maybe_configure_gdn_hybrid_model(VLLMModelFromSpec, model_config)
     if has_kda:
-        from torchtitan.rl.generator.vllm.kda import maybe_configure_kda_hybrid_model
+        from torchtitan.rl.generator.vllm.attention.kda import (
+            maybe_configure_kda_hybrid_model,
+        )
 
         maybe_configure_kda_hybrid_model(VLLMModelFromSpec, model_config)
     ModelRegistry.register_model(VLLM_MODEL_NAME, VLLMModelFromSpec)

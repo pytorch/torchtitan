@@ -39,10 +39,23 @@ jobs:
             });
             const paths = files.flatMap(f => [f.filename, f.previous_filename].filter(Boolean));
 
-            // Areas ordered by how many changed files they match.
-            const areas = config.areas
-              .map(a => ({...a, hits: paths.filter(p => a.paths.some(prefix => p.startsWith(prefix))).length}))
-              .filter(a => a.hits > 0)
+            // Each file counts toward the area with its longest matching prefix, so a
+            // subarea wins over its parent. Areas ordered by how many files they get.
+            const hits = new Map();
+            for (const p of paths) {
+              let best = null, bestLen = -1;
+              for (const a of config.areas) {
+                for (const prefix of a.paths) {
+                  if (p.startsWith(prefix) && prefix.length > bestLen) {
+                    best = a;
+                    bestLen = prefix.length;
+                  }
+                }
+              }
+              if (best) hits.set(best, (hits.get(best) || 0) + 1);
+            }
+            const areas = [...hits]
+              .map(([a, n]) => ({...a, hits: n}))
               .sort((a, b) => b.hits - a.hits);
 
             const skip = new Set([pr.user.login, ...pr.requested_reviewers.map(r => r.login)]);

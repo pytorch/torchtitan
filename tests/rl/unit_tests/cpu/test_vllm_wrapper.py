@@ -27,9 +27,9 @@ from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_config
 from torchtitan.models.qwen3 import build_model_config as build_qwen3_config
 from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.rl.generator.vllm import model_wrapper, registry
-from torchtitan.rl.generator.vllm.attention import VLLMInnerAttention
+from torchtitan.rl.generator.vllm.attention.attention import VLLMInnerAttention
 
-from torchtitan.rl.generator.vllm.mla import (
+from torchtitan.rl.generator.vllm.attention.mla import (
     _VLLMKVBProj,
     _VLLMNativeMLAAttention,
     VLLMMLAAttention,

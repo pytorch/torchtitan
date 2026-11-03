@@ -5,12 +5,39 @@
 # LICENSE file in the root directory of this source tree.
 
 import sys
+from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 
-from torchtitan.config import ConfigLoader, OverrideConfig, ParallelismConfig
+from torchtitan.config import (
+    ConfigLoader,
+    Configurable,
+    OverrideConfig,
+    ParallelismConfig,
+)
+
+
+def _noop_post_init() -> None:
+    return None
+
+
+class _Checked(Configurable):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        bad: bool = False
+
+        def __post_init__(self) -> None:
+            if self.bad:
+                raise ValueError("bad flag")
+
+
+def recipe_sets_flag_after_init() -> _Checked.Config:
+    """Assign after construction, the way seed recipes set their flag."""
+    config = _Checked.Config()
+    config.bad = True
+    return config
 
 
 def test_loads_exact_recipe_module() -> None:
@@ -146,6 +173,18 @@ def test_resume_step_requires_checkpointer() -> None:
         )
 
 
+def test_load_revalidates_recipe_assignments() -> None:
+    with pytest.raises(ValueError, match="bad flag"):
+        ConfigLoader().load(
+            [
+                "--module",
+                __name__,
+                "--config",
+                "recipe_sets_flag_after_init",
+            ]
+        )
+
+
 def test_override_tokens_are_forwarded() -> None:
     config = SimpleNamespace(
         override=OverrideConfig(),
@@ -153,6 +192,7 @@ def test_override_tokens_are_forwarded() -> None:
         comm=SimpleNamespace(backend="nccl"),
         dump_folder="outputs",
         hf_assets_path=None,
+        __post_init__=_noop_post_init,
     )
     with mock.patch.object(
         ConfigLoader, "_load_config", return_value=config
@@ -184,6 +224,7 @@ def test_recipe_and_cli_overrides_are_applied_together() -> None:
         comm=SimpleNamespace(backend="nccl"),
         dump_folder="outputs",
         hf_assets_path=None,
+        __post_init__=_noop_post_init,
     )
     with mock.patch.object(
         ConfigLoader, "_load_config", return_value=config
@@ -210,6 +251,7 @@ def test_cli_overrides_extend_the_top_level_rl_config() -> None:
         trainer=trainer,
         dump_folder="outputs",
         hf_assets_path=None,
+        __post_init__=_noop_post_init,
     )
     with mock.patch.object(
         ConfigLoader, "_load_config", return_value=config
