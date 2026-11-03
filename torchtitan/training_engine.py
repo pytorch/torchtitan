@@ -770,24 +770,30 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         else:
             # A generator: lazy preprocessing reads each group just before its replay.
             segments = ([group] for group in microbatch_groups)
+        # SDC replay reruns a checked call from the same input tensors. A capture keeps its
+        # call's input tensors as the graph's inputs, and the call's next replays overwrite
+        # them. So later-segment graphs don't capture in a checked call.
+        sdc_checks_call = (
+            self.sdc_replayer is not None and self.sdc_replayer.checks_current_step
+        )
         loss: torch.Tensor | None = None
         loss_metrics: list[list[dict[str, torch.Tensor]]] = []
         for segment in segments:
             if preprocess_microbatch_groups_lazily:
                 segment = self._preprocess_microbatch_groups(segment)
             graph = self._later_segment_graphs[len(segment)]
-            if not self._first_segment_graph.captured:
+            if graph.captured:
+                result = graph(segment)
+            elif not self._first_segment_graph.captured or sdc_checks_call:
                 # A later-segment graph records adds into the gradient addresses that the
                 # first-segment graph's replays put back, so it captures only after that graph.
-                # Until then it warms up on the graph stream.
+                # Until it can capture, it warms up on the graph stream.
                 capture_allowed = accelerator_graph_manager.capture_allowed
                 accelerator_graph_manager.capture_allowed = False
                 try:
                     result = graph(segment)
                 finally:
                     accelerator_graph_manager.capture_allowed = capture_allowed
-            elif graph.captured:
-                result = graph(segment)
             else:
                 # This call may capture. A gradient tensor the first-segment graph did not
                 # allocate (a new one, or a replacement) would be allocated in this capture,
