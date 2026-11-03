@@ -68,7 +68,8 @@ def test_initialize_torchstore_client_uses_publisher_role() -> None:
     asyncio.run(run())
 
 
-def test_push_model_state_dict_puts_on_push_stream_in_worker() -> None:
+@pytest.mark.parametrize("use_delta", [False, True])
+def test_push_model_state_dict_puts_on_push_stream_in_worker(use_delta: bool) -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
         weight_part = torch.nn.Linear(2, 2, bias=False)
@@ -79,7 +80,8 @@ def test_push_model_state_dict_puts_on_push_stream_in_worker() -> None:
         # Under PP, a rank publishes the merged state dicts of its model parts.
         trainer.engine = SimpleNamespace(model_parts=[weight_part, buffer_part])
         trainer._transfer_dtype = torch.bfloat16
-        trainer._model_state_dict_delta = None
+        delta = MagicMock() if use_delta else None
+        trainer._model_state_dict_delta = delta
         stream = MagicMock()
         trainer._push_model_state_dict_stream = stream
         main_thread_id = threading.get_ident()
@@ -88,77 +90,50 @@ def test_push_model_state_dict_puts_on_push_stream_in_worker() -> None:
         def enter_stream() -> None:
             worker_thread_ids.append(threading.get_ident())
 
-        async def put_state_dict(*args, **kwargs) -> None:
+        async def put_after_synchronize(*args, **kwargs) -> None:
             # The put must run while the push stream is current and idle.
             stream.__exit__.assert_not_called()
             stream.synchronize.assert_called_once()
             worker_thread_ids.append(threading.get_ident())
 
         stream.__enter__.side_effect = enter_stream
-        with patch(
-            "torchtitan.rl.trainer.trainer.ts.put_state_dict",
-            new_callable=AsyncMock,
-            side_effect=put_state_dict,
-        ) as put:
+        with (
+            patch(
+                "torchtitan.rl.trainer.trainer.ts.put_state_dict",
+                new_callable=AsyncMock,
+                side_effect=put_after_synchronize,
+            ) as put,
+            # TODO: drop create=True once torchstore#279 is released.
+            patch(
+                "torchtitan.rl.trainer.trainer.ts.put_state_dict_delta",
+                new_callable=AsyncMock,
+                side_effect=put_after_synchronize,
+                create=True,
+            ) as put_delta,
+        ):
             await trainer.push_model_state_dict()
 
-        put.assert_awaited_once_with(
-            ANY,
-            "model_state_dict",
-            direct_rdma=False,
-            transfer_dtype=torch.bfloat16,
-            preserve_dtype_keys=frozenset({"norm.scale"}),
-        )
+        if use_delta:
+            put.assert_not_awaited()
+            put_delta.assert_awaited_once_with(delta, ANY, "model_state_dict")
+            state_dict = put_delta.await_args.args[1]
+        else:
+            put_delta.assert_not_awaited()
+            put.assert_awaited_once_with(
+                ANY,
+                "model_state_dict",
+                direct_rdma=False,
+                transfer_dtype=torch.bfloat16,
+                preserve_dtype_keys=frozenset({"norm.scale"}),
+            )
+            state_dict = put.await_args.args[0]
         # The live model tensors are put; TorchStore owns the CPU copy.
-        state_dict = put.await_args.args[0]
         assert set(state_dict) == {"weight", "norm.scale"}
         assert state_dict["weight"].data_ptr() == weight_part.weight.data_ptr()
         assert state_dict["norm.scale"].data_ptr() == buffer_part.norm.scale.data_ptr()
         stream.__exit__.assert_called_once()
         assert len(worker_thread_ids) == 2
         assert worker_thread_ids[0] == worker_thread_ids[1]
-        assert worker_thread_ids[0] != main_thread_id
-
-    asyncio.run(run())
-
-
-def test_push_model_state_dict_puts_delta_on_push_stream_in_worker() -> None:
-    async def run() -> None:
-        trainer = object.__new__(Trainer)
-        model_part = torch.nn.Linear(2, 2, bias=False)
-        trainer.engine = SimpleNamespace(model_parts=[model_part])
-        delta = MagicMock()
-        trainer._model_state_dict_delta = delta
-        stream = MagicMock()
-        trainer._push_model_state_dict_stream = stream
-        main_thread_id = threading.get_ident()
-        worker_thread_ids = []
-
-        async def put_state_dict_delta(*args, **kwargs) -> None:
-            # The delta is computed from the live tensors once they are final.
-            stream.__exit__.assert_not_called()
-            stream.synchronize.assert_called_once()
-            worker_thread_ids.append(threading.get_ident())
-
-        with (
-            patch(
-                "torchtitan.rl.trainer.trainer.ts.put_state_dict",
-                new_callable=AsyncMock,
-            ) as put,
-            patch(
-                "torchtitan.rl.trainer.trainer.ts.put_state_dict_delta",
-                new_callable=AsyncMock,
-                side_effect=put_state_dict_delta,
-            ) as put_delta,
-        ):
-            await trainer.push_model_state_dict()
-
-        put.assert_not_awaited()
-        put_delta.assert_awaited_once_with(delta, ANY, "model_state_dict")
-        state_dict = put_delta.await_args.args[1]
-        assert state_dict["weight"].data_ptr() == model_part.weight.data_ptr()
-        stream.__exit__.assert_called_once()
-        assert len(worker_thread_ids) == 1
         assert worker_thread_ids[0] != main_thread_id
 
     asyncio.run(run())

@@ -313,7 +313,9 @@ class Controller(Configurable):
         overflowed. Rows cost ``fraction * (wire dtype size + 4)`` bytes per
         element on every pull, so set it just above the typical changed fraction
         of a step. The trainer keeps one more CPU copy of its model state dict
-        shards, in the transfer dtype, to diff against."""
+        shards, in the transfer dtype, to diff against.
+
+        TODO: log the changed fraction per version so users can pick a value."""
 
         actor_system: ActorSystem.Config = field(
             default_factory=_default_actor_system_config
