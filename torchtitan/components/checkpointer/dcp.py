@@ -628,6 +628,7 @@ class CheckpointManager(BaseCheckpointManager):
                 self.last_save_model_only
             ), "Only model can be saved when saving in HF safetensors format."
 
+        checkpoint_id = self._create_last_step_id(curr_step)
         if self.last_save_model_only:
             states = self.states[MODEL].state_dict()
 
@@ -641,7 +642,7 @@ class CheckpointManager(BaseCheckpointManager):
             }
             logger.info(
                 f"Saving a model only checkpoint in {self.export_dtype} "
-                f"at last step, step {curr_step}."
+                f"at last step, step {curr_step}, to {checkpoint_id}."
             )
         else:
             logger.info(f"Saving a full checkpoint at last step, step {curr_step}.")
@@ -649,7 +650,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         self.dcp_save(
             states,
-            checkpoint_id=self._create_checkpoint_id(curr_step),
+            checkpoint_id=checkpoint_id,
             async_mode=AsyncMode.DISABLED,
             enable_garbage_collection=True,
             to_hf=self.last_save_in_hf,
