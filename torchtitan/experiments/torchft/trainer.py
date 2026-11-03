@@ -164,6 +164,15 @@ class FaultTolerantTrainer(Configurable):
         checkpointer: TorchFTCheckpointManager.Config | None = None
         fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
 
+        def __post_init__(self) -> None:
+            Trainer.Config.__post_init__(self)
+            if self.tensor_logger is not None:
+                # FaultTolerantTrainer has its own train_step, which never
+                # records or collects tensor statistics.
+                raise ValueError(
+                    "tensor_logger is not supported with FaultTolerantTrainer."
+                )
+
     engine: FaultTolerantTrainingEngine
 
     @record

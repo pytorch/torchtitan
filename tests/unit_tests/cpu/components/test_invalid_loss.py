@@ -79,6 +79,7 @@ class TestInvalidLoss(unittest.TestCase):
         loop.config = trainer.config
         loop.gradient_accumulation_steps = 1
         loop.num_pp_microbatches = 1
+        loop.tensor_logger = None
         loop.metrics_processor = MagicMock()
         loop.metrics_processor.should_log.return_value = should_log
 
