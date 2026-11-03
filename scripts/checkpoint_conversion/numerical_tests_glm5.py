@@ -32,8 +32,8 @@ import torch.nn.functional as F
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.moe import MoE
+from torchtitan.models.deepseek_v3.moe import DeepSeekV3Router
 from torchtitan.models.glm5 import build_model_config
-from torchtitan.models.glm5.flavors import Glm5Router
 from torchtitan.models.glm5.state_dict_adapter import Glm5StateDictAdapter
 from transformers import GlmMoeDsaConfig, GlmMoeDsaForCausalLM
 
@@ -57,7 +57,7 @@ def _build_hf_config(tt_config) -> GlmMoeDsaConfig:
     )
     if moe.shared_experts is None:
         raise ValueError("GLM-5 numerical parity requires shared experts.")
-    if not isinstance(moe.router, Glm5Router.Config):
+    if not isinstance(moe.router, DeepSeekV3Router.Config):
         raise ValueError("GLM-5 numerical parity requires the GLM group router.")
 
     routed_hidden_dim = moe.routed_experts.w13.out_features
@@ -75,6 +75,8 @@ def _build_hf_config(tt_config) -> GlmMoeDsaConfig:
         "full" if source == layer_idx else "shared"
         for layer_idx, source in enumerate(tt_config.index_sources)
     ]
+    assert moe.router.num_expert_groups is not None
+    assert moe.router.num_limited_groups is not None
     config = GlmMoeDsaConfig(
         vocab_size=tt_config.vocab_size,
         hidden_size=tt_config.dim,
@@ -107,7 +109,7 @@ def _build_hf_config(tt_config) -> GlmMoeDsaConfig:
         index_n_heads=attention.indexer.n_heads,
         indexer_types=indexer_types,
         first_k_dense_replace=mlp_layer_types.count("dense"),
-        attention_dropout=attention.inner_attention.attention_dropout,
+        attention_dropout=attention.inner_attention.inner_attention.attention_dropout,
         use_cache=False,
         tie_word_embeddings=False,
     )

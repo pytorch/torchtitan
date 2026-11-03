@@ -29,6 +29,27 @@ class TestGlm5Dsa(unittest.TestCase):
         scores = (weights.unsqueeze(1) @ scores.transpose(0, 1)).squeeze(1)
         return (scores + mask[0]).topk(min(topk, k.shape[0]), dim=-1).indices
 
+    def test_collator_padding_reaches_model_mask(self) -> None:
+        from torchtitan.components.data.collators import TextCollator
+        from torchtitan.components.data.dataset import TextSequence
+        from torchtitan.config.parallelism import ParallelismConfig
+        from torchtitan.models.glm5 import build_model_config
+
+        collator = TextCollator(
+            TextCollator.Config(),
+            context=SimpleNamespace(
+                num_tokens_per_microbatch=8, max_context_length=8, num_mtp_layers=0
+            ),
+        )
+        batch = collator([TextSequence(input_ids=[1, 2, 3], labels=[2, 3, 4])])
+        model = build_model_config(
+            "debugmodel", parallelism=ParallelismConfig(), seq_len=8
+        ).build()
+        mask = model.get_attention_masks(batch.positions, batch.padding_mask)[0] == 0
+        expected = torch.zeros(8, 8, dtype=torch.bool)
+        expected[:3, :3] = torch.ones(3, 3, dtype=torch.bool).tril()
+        torch.testing.assert_close(mask, expected)
+
     def test_indexer_matches_dense_ranking(self) -> None:
         torch.manual_seed(42)
         for dtype in (torch.float32, torch.bfloat16):
@@ -42,7 +63,9 @@ class TestGlm5Dsa(unittest.TestCase):
                 (torch.arange(32), torch.zeros(32, dtype=torch.bool)),
             ):
                 mask = create_dsa_causal_mask(
-                    positions, dtype=torch.float32, padding_mask_T=valid
+                    positions,
+                    dtype=torch.float32,
+                    padding_mask_T=None if valid is None else ~valid,
                 )
                 for topk in (1, 4, 64):
                     with self.subTest(dtype=dtype, positions=positions, topk=topk):
@@ -68,7 +91,7 @@ class TestGlm5Dsa(unittest.TestCase):
         mask = create_dsa_causal_mask(
             torch.arange(4),
             dtype=torch.float32,
-            padding_mask_T=torch.tensor([True, False, True, True]),
+            padding_mask_T=torch.tensor([False, True, False, False]),
         )
         actual = DSAIndexerTopK.Config(index_topk=2).build()(q, k, weights, mask[0])
         torch.testing.assert_close(actual[1], torch.tensor([-1, -1], dtype=torch.int32))
@@ -102,7 +125,9 @@ class TestGlm5Dsa(unittest.TestCase):
             (torch.arange(8).repeat(2), torch.arange(16) % 3 != 0),
         ):
             mask = create_dsa_causal_mask(
-                positions, dtype=torch.float32, padding_mask_T=valid
+                positions,
+                dtype=torch.float32,
+                padding_mask_T=None if valid is None else ~valid,
             )[0]
             torch.testing.assert_close(
                 compiled(q, k, weights, mask), indexer(q, k, weights, mask)
@@ -122,7 +147,7 @@ class TestGlm5Dsa(unittest.TestCase):
         for rank in range(2):
             local = slice(rank * 8, (rank + 1) * 8)
 
-            def gather(tensors, *, reduce_dtype):
+            def gather(tensors, *, reduce_dtype, local=local):
                 for actual, full in zip(
                     tensors,
                     (q, weights, document_starts, mask_values == 0),
@@ -131,7 +156,7 @@ class TestGlm5Dsa(unittest.TestCase):
                     torch.testing.assert_close(actual, full[local])
                 return q, weights, document_starts, mask_values == 0
 
-            def shard(indices, group, *, src, dst):
+            def shard(indices, group, *, src, dst, local=local):
                 self.assertEqual(src, spmd.R)
                 self.assertEqual(dst, spmd.S(0))
                 torch.testing.assert_close(indices, expected)
@@ -140,7 +165,7 @@ class TestGlm5Dsa(unittest.TestCase):
             with (
                 patch(
                     "torchtitan.models.glm5.dsa.spmd_mesh_group",
-                    return_value=SimpleNamespace(rank=lambda: rank),
+                    return_value=SimpleNamespace(rank=lambda rank=rank: rank),
                 ),
                 patch(
                     "torchtitan.models.glm5.dsa.cp_all_gather_tensors",
@@ -205,7 +230,7 @@ class TestGlm5Dsa(unittest.TestCase):
         mask = create_dsa_causal_mask(
             torch.arange(4),
             dtype=torch.float32,
-            padding_mask_T=torch.tensor([True, True, False, False]),
+            padding_mask_T=torch.tensor([False, False, True, True]),
         )
         allowed = mask[0] == 0
         expected = torch.tensor(

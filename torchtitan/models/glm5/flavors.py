@@ -15,50 +15,33 @@ import dataclasses
 from collections.abc import Callable
 from functools import partial
 
-import torch
 import torch.nn as nn
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
-    HiMidLoLinear,
     LayerNorm,
     Linear,
     RMSNorm,
     Sigmoid,
 )
-from torchtitan.models.common.config_utils import (
-    DEFAULT_DEBUG_MODEL_SEQ_LEN,
-    make_ffn_config,
-    make_moe_config,
-    make_routed_experts_config,
-    make_shared_expert_ffn_config,
-)
+from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
 from torchtitan.models.common.decoder_sharding import (
     lm_head_sharding_config,
-    norm_sharding_config,
     pre_lm_head_norm_sharding_config,
     replicated_state_sharding_config,
     rope_cache_sharding_config,
     token_embedding_sharding_config,
 )
-from torchtitan.models.common.moe import TokenChoiceTopKRouter
-from torchtitan.models.common.moe.sharding import (
-    router_gate_sharding_config,
-    router_sharding_config,
-)
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.models.deepseek_v3.sharding import (
-    mtp_block_sharding_config,
-    mtp_projection_sharding_config,
+from torchtitan.models.deepseek_v3.flavors import (
+    _build_mtp_layers,
+    build_mla_moe_layers,
+    make_deepseek_v3_router_config,
+    make_mla_attention_config,
 )
-from .dsa import (
-    DSAIndexerTopK,
-    Glm5AllGatherKVFlexAttention,
-    Glm5DsaIndexer,
-    Glm5FlexAttention,
-)
+from .dsa import DSAIndexerTopK, Glm5DsaIndexer, Glm5FlexAttention
 
 from .model import Glm5Attention, Glm5Model, Glm5TransformerBlock
 from .mtp import Glm5MTPTransformerBlock
@@ -70,11 +53,8 @@ from .sharding import (
 )
 
 
-DSAInnerAttention = Glm5FlexAttention
-
 __all__ = [
     "DSAIndexerTopK",
-    "DSAInnerAttention",
     "Glm5Attention",
     "Glm5DsaIndexer",
     "Glm5Model",
@@ -97,45 +77,17 @@ def build_glm5_mtp_layers(
     enable_sp: bool,
 ) -> list[Glm5MTPTransformerBlock.Config]:
     """Build GLM NextN blocks from the released decoder-block structure."""
-    norm_sharding = norm_sharding_config(enable_sp=enable_sp)
-    return [
-        Glm5MTPTransformerBlock.Config(
-            attention=dataclasses.replace(
-                copy.deepcopy(inner_cfg.attention),
-                indexer=copy.deepcopy(indexer),
-            ),
-            feed_forward=copy.deepcopy(inner_cfg.feed_forward),
-            attention_norm=copy.deepcopy(inner_cfg.attention_norm),
-            ffn_norm=copy.deepcopy(inner_cfg.ffn_norm),
-            enorm=RMSNorm.Config(
-                normalized_shape=dim,
-                eps=norm_eps,
-                param_init=_RMS_NORM_INIT,
-                sharding_config=norm_sharding,
-            ),
-            hnorm=RMSNorm.Config(
-                normalized_shape=dim,
-                eps=norm_eps,
-                param_init=_RMS_NORM_INIT,
-                sharding_config=norm_sharding,
-            ),
-            eh_proj=Linear.Config(
-                in_features=2 * dim,
-                out_features=dim,
-                bias=False,
-                param_init=_LINEAR_INIT,
-                sharding_config=mtp_projection_sharding_config(enable_sp=enable_sp),
-            ),
-            mtp_norm=RMSNorm.Config(
-                normalized_shape=dim,
-                eps=norm_eps,
-                param_init=_RMS_NORM_INIT,
-                sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
-            ),
-            sharding_config=mtp_block_sharding_config(enable_sp=enable_sp),
-        )
-        for _ in range(num_mtp_layers)
-    ]
+    layers = _build_mtp_layers(
+        inner_cfg, dim=dim, num_mtp_layers=num_mtp_layers, enable_sp=enable_sp
+    )
+    for layer in layers:
+        assert isinstance(layer.attention, Glm5Attention.Config)
+        layer.attention.indexer = copy.deepcopy(indexer)
+        for norm in (layer.enorm, layer.hnorm, layer.mtp_norm):
+            norm.eps = norm_eps
+            norm.param_init = _RMS_NORM_INIT
+        layer.eh_proj.param_init = _LINEAR_INIT
+    return layers
 
 
 _LINEAR_INIT = {
@@ -170,76 +122,6 @@ def _depth_experts_init(layer_id: int) -> dict[str, Callable]:
     }
 
 
-class Glm5Router(TokenChoiceTopKRouter):
-    """GLM group-limited sigmoid router."""
-
-    @dataclasses.dataclass(kw_only=True, slots=True)
-    class Config(TokenChoiceTopKRouter.Config):
-        num_expert_groups: int
-        num_limited_groups: int
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.num_expert_groups = config.num_expert_groups
-        self.num_limited_groups = config.num_limited_groups
-
-    def _select_experts(
-        self,
-        scores_TE: torch.Tensor,
-        expert_bias_E: torch.Tensor | None = None,
-        **router_kwargs,
-    ) -> torch.Tensor:
-        del router_kwargs
-        experts_per_group = self.num_experts // self.num_expert_groups
-        choice_scores_TE = (
-            scores_TE if expert_bias_E is None else scores_TE + expert_bias_E
-        )
-        choice_scores_TGP = choice_scores_TE.unflatten(
-            -1, (self.num_expert_groups, experts_per_group)
-        )
-        group_scores_TG = choice_scores_TGP.topk(2, dim=-1).values.sum(dim=-1)
-        selected_groups_TL = group_scores_TG.topk(
-            self.num_limited_groups, dim=-1, sorted=False
-        ).indices
-        excluded_groups_TG = torch.ones_like(group_scores_TG, dtype=torch.bool)
-        excluded_groups_TG.scatter_(-1, selected_groups_TL, False)
-        choice_scores_TE = choice_scores_TGP.masked_fill(
-            excluded_groups_TG.unsqueeze(-1), float("-inf")
-        ).flatten(-2)
-        return choice_scores_TE.topk(self.top_k, dim=-1, sorted=False).indices
-
-
-def make_glm5_router_config(
-    *,
-    dim: int,
-    num_experts: int,
-    top_k: int,
-    num_expert_groups: int,
-    num_limited_groups: int,
-    route_scale: float,
-    gate_param_init: dict[str, Callable],
-) -> Glm5Router.Config:
-    """Build GLM's sigmoid group-limited router using shared components."""
-    return Glm5Router.Config(
-        num_experts=num_experts,
-        gate=HiMidLoLinear.Config(
-            in_features=dim,
-            out_features=num_experts,
-            backward_mode="hi_mid_lo",
-            bias=False,
-            param_init=gate_param_init,
-            sharding_config=router_gate_sharding_config(),
-        ),
-        top_k=top_k,
-        score_func=Sigmoid.Config(),
-        route_norm=True,
-        route_scale=route_scale,
-        num_expert_groups=num_expert_groups,
-        num_limited_groups=num_limited_groups,
-        sharding_config=router_sharding_config(),
-    )
-
-
 def make_glm5_attention_config(
     *,
     layer_id: int,
@@ -265,8 +147,8 @@ def make_glm5_attention_config(
     can validate, shard, pipeline-partition, and initialize the model before
     materializing parameters on the target device.
     """
-    qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
-    return Glm5Attention.Config(
+    base = make_mla_attention_config(
+        layer_id=layer_id,
         dim=dim,
         n_heads=n_heads,
         q_lora_rank=q_lora_rank,
@@ -274,49 +156,41 @@ def make_glm5_attention_config(
         qk_nope_head_dim=qk_nope_head_dim,
         qk_rope_head_dim=qk_rope_head_dim,
         v_head_dim=v_head_dim,
-        wq_a=Linear.Config(
-            in_features=dim,
-            out_features=q_lora_rank,
-            param_init=_LINEAR_INIT,
-            sharding_config=replicated_state_sharding_config("weight", "bias"),
+        attn_backend="flex",
+        linear_init=_LINEAR_INIT,
+        norm_init=_RMS_NORM_INIT,
+        depth_init=_depth_init,
+        rope=rope,
+        enable_sp=enable_sp,
+        attention_config_factory=lambda _: Glm5FlexAttention.Config(
+            attention_dropout=attention_dropout
         ),
-        q_norm=RMSNorm.Config(
-            normalized_shape=q_lora_rank,
-            eps=mla_norm_eps,
-            param_init=_RMS_NORM_INIT,
-            sharding_config=replicated_state_sharding_config("weight"),
-        ),
-        wq_b=Linear.Config(
-            in_features=q_lora_rank,
-            out_features=n_heads * qk_head_dim,
-            param_init=_LINEAR_INIT,
-            sharding_config=replicated_state_sharding_config("weight", "bias"),
-        ),
-        wkv_a=Linear.Config(
-            in_features=dim,
-            out_features=kv_lora_rank + qk_rope_head_dim,
-            param_init=_LINEAR_INIT,
-            sharding_config=replicated_state_sharding_config("weight", "bias"),
-        ),
-        kv_norm=RMSNorm.Config(
-            normalized_shape=kv_lora_rank,
-            eps=mla_norm_eps,
-            param_init=_RMS_NORM_INIT,
-            sharding_config=replicated_state_sharding_config("weight"),
-        ),
-        wkv_b=Linear.Config(
-            in_features=kv_lora_rank,
-            out_features=n_heads * (qk_nope_head_dim + v_head_dim),
-            param_init=_LINEAR_INIT,
-            sharding_config=replicated_state_sharding_config("weight", "bias"),
-        ),
-        wo=Linear.Config(
-            in_features=n_heads * v_head_dim,
-            out_features=dim,
-            param_init=_depth_init(layer_id),
-            sharding_config=replicated_state_sharding_config("weight", "bias"),
-        ),
-        rope=dataclasses.replace(rope, sharding_config=rope_cache_sharding_config()),
+    )
+    base.q_norm.eps = mla_norm_eps
+    base.kv_norm.eps = mla_norm_eps
+    mla = base.inner_attention
+    mla.sharding_config = glm5_inner_attention_sharding_config()
+    if enable_cp:
+        import spmd_types as spmd
+
+        from torchtitan.models.common.attention.cp_mla import (
+            AllGatherKVMLAFlexAttention,
+        )
+        from torchtitan.models.common.decoder_sharding import (
+            mla_kv_projection_sharding_config,
+        )
+
+        mla = AllGatherKVMLAFlexAttention.Config(
+            **{
+                field.name: getattr(mla, field.name)
+                for field in dataclasses.fields(mla)
+            }
+        )
+        mla.wkv_b.sharding_config = mla_kv_projection_sharding_config(cp=spmd.R)
+    base.inner_attention = mla
+    base.sharding_config = glm5_attention_sharding_config(enable_sp=enable_sp)
+    return Glm5Attention.Config(
+        **{field.name: getattr(base, field.name) for field in dataclasses.fields(base)},
         indexer=Glm5DsaIndexer.Config(
             dim=dim,
             q_lora_rank=q_lora_rank,
@@ -358,15 +232,6 @@ def make_glm5_attention_config(
             ),
             sharding_config=glm5_indexer_sharding_config(),
         ),
-        inner_attention=(
-            Glm5AllGatherKVFlexAttention.Config
-            if enable_cp
-            else Glm5FlexAttention.Config
-        )(
-            attention_dropout=attention_dropout,
-            sharding_config=glm5_inner_attention_sharding_config(),
-        ),
-        sharding_config=glm5_attention_sharding_config(enable_sp=enable_sp),
     )
 
 
@@ -422,11 +287,43 @@ def build_glm5_layers(
     if router_top_k > experts_per_group * router_num_limited_groups:
         raise ValueError("router_top_k exceeds the experts in limited groups.")
 
-    layers: list[Glm5TransformerBlock.Config] = []
-    for layer_id in range(num_layers):
-        # Every block uses MLA+DSA attention. Only the FFN family changes:
-        # early blocks are dense and the remaining blocks use routed+shared MoE.
-        attention = make_glm5_attention_config(
+    base_layers = build_mla_moe_layers(
+        n_layers=num_layers,
+        n_dense_layers=num_dense_layers,
+        dim=dim,
+        n_heads=n_heads,
+        q_lora_rank=q_lora_rank,
+        kv_lora_rank=kv_lora_rank,
+        qk_nope_head_dim=qk_nope_head_dim,
+        qk_rope_head_dim=qk_rope_head_dim,
+        v_head_dim=v_head_dim,
+        mscale=1.0,
+        dense_hidden_dim=dense_hidden_dim,
+        moe_hidden_dim=moe_hidden_dim,
+        num_experts=num_experts,
+        num_shared_experts=num_shared_experts,
+        router_top_k=router_top_k,
+        router_score_func=Sigmoid.Config(),
+        router_route_scale=router_route_scale,
+        router_route_norm=True,
+        attn_backend="flex",
+        linear_init=_LINEAR_INIT,
+        norm_init=_RMS_NORM_INIT,
+        depth_init=_depth_init,
+        depth_experts_init=_depth_experts_init,
+        rope=rope,
+        router_config_factory=partial(
+            make_deepseek_v3_router_config,
+            num_expert_groups=router_num_expert_groups,
+            num_limited_groups=router_num_limited_groups,
+        ),
+        norm_eps=norm_eps,
+        enable_sp=enable_sp,
+        enable_ep=enable_ep,
+    )
+    layers = []
+    for layer_id, base in enumerate(base_layers):
+        base.attention = make_glm5_attention_config(
             layer_id=layer_id,
             dim=dim,
             n_heads=n_heads,
@@ -445,61 +342,13 @@ def build_glm5_layers(
             enable_cp=enable_cp,
         )
         if index_sources[layer_id] != layer_id:
-            attention = dataclasses.replace(attention, indexer=None)
-        if layer_id < num_dense_layers:
-            feed_forward = make_ffn_config(
-                dim=dim,
-                hidden_dim=dense_hidden_dim,
-                w13_param_init=_LINEAR_INIT,
-                w2_param_init=_depth_init(layer_id),
-                enable_sp=enable_sp,
-            )
-        else:
-            feed_forward = make_moe_config(
-                num_experts=num_experts,
-                router=make_glm5_router_config(
-                    dim=dim,
-                    num_experts=num_experts,
-                    top_k=router_top_k,
-                    num_expert_groups=router_num_expert_groups,
-                    num_limited_groups=router_num_limited_groups,
-                    route_scale=router_route_scale,
-                    gate_param_init=_depth_init(layer_id),
-                ),
-                routed_experts=make_routed_experts_config(
-                    dim=dim,
-                    hidden_dim=moe_hidden_dim,
-                    num_experts=num_experts,
-                    top_k=router_top_k,
-                    param_init=_depth_experts_init(layer_id),
-                    enable_ep=enable_ep,
-                ),
-                shared_experts=make_shared_expert_ffn_config(
-                    dim=dim,
-                    hidden_dim=moe_hidden_dim * num_shared_experts,
-                    w13_param_init=_LINEAR_INIT,
-                    w2_param_init=_depth_init(layer_id),
-                    enable_sp=enable_sp,
-                ),
-                load_balance_coeff=1e-3,
-                enable_sp=enable_sp,
-            )
+            base.attention.indexer = None
         layers.append(
             Glm5TransformerBlock.Config(
-                attention=attention,
-                attention_norm=RMSNorm.Config(
-                    normalized_shape=dim,
-                    eps=norm_eps,
-                    param_init=_RMS_NORM_INIT,
-                    sharding_config=norm_sharding_config(enable_sp=enable_sp),
-                ),
-                ffn_norm=RMSNorm.Config(
-                    normalized_shape=dim,
-                    eps=norm_eps,
-                    param_init=_RMS_NORM_INIT,
-                    sharding_config=norm_sharding_config(enable_sp=enable_sp),
-                ),
-                feed_forward=feed_forward,
+                **{
+                    field.name: getattr(base, field.name)
+                    for field in dataclasses.fields(base)
+                }
             )
         )
     return layers
@@ -666,10 +515,14 @@ def _glm5_2_scaled_debugmodel(
     vocab_size = 32768
     num_layers = 16
     index_sources = tuple(
-        layer_id
-        if layer_id < 3 or (layer_id - 2) % 4 == 0
-        else max(
-            source for source in range(layer_id) if source < 3 or (source - 2) % 4 == 0
+        (
+            layer_id
+            if layer_id < 3 or (layer_id - 2) % 4 == 0
+            else max(
+                source
+                for source in range(layer_id)
+                if source < 3 or (source - 2) % 4 == 0
+            )
         )
         for layer_id in range(num_layers)
     )
@@ -763,9 +616,13 @@ def _glm5_2_744b_a40b(
     vocab_size = 154880
     num_layers = 78
     index_sources = tuple(
-        layer_id
-        if max(layer_id - 2, 0) % 4 == 0
-        else max(source for source in range(layer_id) if max(source - 2, 0) % 4 == 0)
+        (
+            layer_id
+            if max(layer_id - 2, 0) % 4 == 0
+            else max(
+                source for source in range(layer_id) if max(source - 2, 0) % 4 == 0
+            )
+        )
         for layer_id in range(num_layers)
     )
     rope = ComplexRoPE.Config(
@@ -889,7 +746,11 @@ def build_model_config(
             f"Requested seq_len {context_len} exceeds max context length "
             f"{max_context_len} for flavor {flavor}"
         )
-    return get_config(
-        seq_len=context_len,
-        parallelism=parallelism,
-    )
+    if parallelism.context_parallel_load_balancer is not None:
+        raise ValueError(
+            "GLM DSA currently requires contiguous context parallel shards"
+        )
+    config = get_config(seq_len=context_len, parallelism=parallelism)
+    if config.mtp_layers and parallelism.pipeline_parallel_degree > 1:
+        raise ValueError("GLM MTP does not support pipeline parallelism")
+    return config

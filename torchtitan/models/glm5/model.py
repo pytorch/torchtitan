@@ -23,8 +23,10 @@ separately in ``sharding.py``; the formulas below describe global logical
 shapes. Distributed adaptation of this sparse path is a separate step.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
+
+import spmd_types as spmd
 
 import torch
 import torch_remat as remat
@@ -32,14 +34,17 @@ from torch import nn
 
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
-from torchtitan.models.common import ComplexRoPE, Linear, RMSNorm
-from torchtitan.models.common.attention import Attention, InnerAttention
 from torchtitan.models.common.aux_loss import AuxLoss
-from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.flops import get_nparams_and_active_nparams
+from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.deepseek_v3.mtp import MTPDecoder, roll_mtp_sequence
+from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
+from torchtitan.models.deepseek_v3.model import (
+    DeepSeekV3Model,
+    DeepSeekV3TransformerBlock,
+)
+from torchtitan.models.deepseek_v3.mtp import roll_mtp_sequence
 
 from .dsa import create_dsa_causal_mask, Glm5DsaIndexer
 from .sharding import dsa_mask_placement
@@ -50,7 +55,7 @@ from .state_dict_adapter import Glm5StateDictAdapter
 # D/N/H/R/P/V: model, head-count, head, RoPE, pass-through, and value dimensions.
 
 
-class Glm5Attention(Attention):
+class Glm5Attention(DeepSeekMLAAttention):
     """Multi-head latent attention (MLA) gated by DSA top-k indices.
 
     Q follows ``D -> q_lora_rank -> N * (nope + rope)``. KV follows
@@ -61,53 +66,18 @@ class Glm5Attention(Attention):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Attention.Config):
-        dim: int
-        q_lora_rank: int
-        kv_lora_rank: int
-        qk_nope_head_dim: int
-        qk_rope_head_dim: int
-        v_head_dim: int
-        wq_a: Linear.Config
-        q_norm: RMSNorm.Config
-        wq_b: Linear.Config
-        wkv_a: Linear.Config
-        kv_norm: RMSNorm.Config
-        wkv_b: Linear.Config
-        wo: Linear.Config
-        rope: ComplexRoPE.Config
+    class Config(DeepSeekMLAAttention.Config):
         indexer: Glm5DsaIndexer.Config | None
-        inner_attention: InnerAttention.Config
 
         @property
         def qk_head_dim(self) -> int:
             return self.qk_nope_head_dim + self.qk_rope_head_dim
 
     def __init__(self, config: Config):
-        super().__init__()
-        self.n_heads = config.n_heads
-        self.q_lora_rank = config.q_lora_rank
-        self.kv_lora_rank = config.kv_lora_rank
-        self.qk_nope_head_dim = config.qk_nope_head_dim
-        self.qk_rope_head_dim = config.qk_rope_head_dim
-        self.v_head_dim = config.v_head_dim
-        self.softmax_scale = config.qk_head_dim**-0.5
-        self.wq_a = config.wq_a.build()
-        self.q_norm = config.q_norm.build()
-        self.wq_b = config.wq_b.build()
-        self.wkv_a = config.wkv_a.build()
-        self.kv_norm = config.kv_norm.build()
-        self.wkv_b = config.wkv_b.build()
-        self.wo = config.wo.build()
-        self.rope = config.rope.build()
+        super().__init__(config)
         self.indexer = config.indexer.build() if config.indexer is not None else None
-        self.inner_attention = config.inner_attention.build()
 
-    @property
-    def qk_head_dim(self) -> int:
-        return self.qk_nope_head_dim + self.qk_rope_head_dim
-
-    def forward(
+    def forward(  # pyrefly: ignore[bad-param-name-override]
         self,
         x_TD: torch.Tensor,
         attention_masks: torch.Tensor,
@@ -118,6 +88,7 @@ class Glm5Attention(Attention):
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominator: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        x_TD = maybe_gather_tp_input(self, x_TD)
         T = x_TD.shape[0]
         if positions is None:
             positions = torch.arange(T, device=x_TD.device)
@@ -131,10 +102,8 @@ class Glm5Attention(Attention):
         q_TNH = self.wq_b(q_resid_TR)
         # The head view/split reads the saved projection output with bare ops.
         remat.recompute_needs_tensor(q_TNH)
-        q_TNH = q_TNH.view(T, self.n_heads, self.qk_head_dim)
-        q_nope_TNP, q_rope_TNR = torch.split(
-            q_TNH, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-        )
+        with spmd.local():
+            q_TNH = q_TNH.view(T, -1, self.qk_head_dim)
         # KV path: keep content in a compressed latent representation and keep
         # one shared rotary key. The expensive per-head expansion happens only
         # after normalization.
@@ -147,21 +116,9 @@ class Glm5Attention(Attention):
             dim=-1,
         )
         kv_TR = self.kv_norm(kv_TR)
-        q_rope_TNR, k_rope_T1R = self.rope(
-            q_rope_TNR, k_rope_TR.unsqueeze(1), positions
-        )
-        q_TNH = torch.cat((q_nope_TNP, q_rope_TNR), dim=-1)
-        kv_TNX = self.wkv_b(kv_TR)
-        # The head view/split reads the saved projection output with bare ops.
-        remat.recompute_needs_tensor(kv_TNX)
-        kv_TNX = kv_TNX.view(T, self.n_heads, self.qk_nope_head_dim + self.v_head_dim)
-        k_nope_TNP, v_TNV = torch.split(
-            kv_TNX, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
-        )
-        k_TNH = torch.cat(
-            (k_nope_TNP, k_rope_T1R.expand(-1, self.n_heads, -1)),
-            dim=-1,
-        )
+        q_TNH, k_rope_T1R = self._apply_rope_to_q_and_k_pe(q_TNH, k_rope_TR, positions)
+        with spmd.local():
+            k_shared_TR = k_rope_T1R.squeeze(1)
         # Selection and value computation are separate on purpose: the indexer
         # is frozen and discrete, while the attention path remains trainable.
         if topk_indices_TS is None:
@@ -172,8 +129,8 @@ class Glm5Attention(Attention):
             )
         output_TNV = self.inner_attention(
             q_TNH,
-            k_TNH,
-            v_TNV,
+            kv_TR,
+            k_shared_TR,
             attention_metadata=attention_masks,
             topk_indices_QS=topk_indices_TS,
             scale=self.softmax_scale,
@@ -185,22 +142,18 @@ class Glm5Attention(Attention):
         return (output_TD, topk_indices_TS) if return_indices else output_TD
 
 
-class Glm5TransformerBlock(TransformerBlock):
+class Glm5TransformerBlock(DeepSeekV3TransformerBlock):
     """GLM-5 decoder block with either a dense FFN or common MoE."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(TransformerBlock.Config):
+    class Config(DeepSeekV3TransformerBlock.Config):
         preserve_output_for_mtp: bool = False
 
     def __init__(self, config: Config):
-        super().__init__()
-        self.attention = config.attention.build()
-        self.attention_norm = config.attention_norm.build()
-        self.ffn_norm = config.ffn_norm.build()
+        super().__init__(config)
         self.preserve_output_for_mtp = config.preserve_output_for_mtp
-        self.feed_forward = config.feed_forward.build()
 
-    def forward(
+    def forward(  # pyrefly: ignore[bad-param-name-override]
         self,
         x_TD: torch.Tensor,
         attention_masks: torch.Tensor,
@@ -261,7 +214,7 @@ class Glm5TransformerBlock(TransformerBlock):
         return output_TD
 
 
-class Glm5Model(MTPDecoder):
+class Glm5Model(DeepSeekV3Model):
     """GLM-5 decoder with FlexAttention DSA attention.
 
     The inherited decoder accepts token ids on the first PP stage and hidden
@@ -272,10 +225,11 @@ class Glm5Model(MTPDecoder):
     state_dict_adapter_cls = Glm5StateDictAdapter
 
     @dataclass(kw_only=True, slots=True)
-    class Config(MTPDecoder.Config):
+    class Config(DeepSeekV3Model.Config):
         dim: int = 6144
         vocab_size: int = 154880
         index_sources: tuple[int, ...] = ()
+        local_compile_regions: list[str] = field(default_factory=list)
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int

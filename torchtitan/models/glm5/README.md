@@ -66,7 +66,7 @@ python -m tests.integration_tests.run_tests \
 |---------|-------|
 | FSDP2 / HSDP | Transformer blocks are sharded through the common decoder lifecycle. |
 | Tensor / sequence parallelism | Attention, dense projections, routed experts, shared experts, and the DSA indexer use declarative sharding configs. |
-| Context parallelism | DSA gathers indexer keys before Top-K selection and uses the common KV all-gather FlexAttention path. |
+| Context parallelism | DSA gathers indexer keys before Top-K selection and uses the common compact MLA KV all-gather FlexAttention path. |
 | Expert parallelism | Routed experts use TorchTitan's common MoE implementation; shared experts remain replicated across the EP axis. |
 | Pipeline parallelism | Decoder layers are split through the common pipeline lifecycle; shared DSA selections are forwarded when their consumer is on a later stage. |
 
@@ -82,7 +82,20 @@ document-local indices are mapped back to global key indices. Under CP, the
 indexer gathers query features and weights in addition to keys to satisfy
 Attention Gym's complete-document input contract, then returns local queries'
 selections. This currently repeats indexer selection across CP ranks.
-Attention continues to use the common KV all-gather FlexAttention backend.
+Attention uses the shared `MLAAttention` backend, or
+`AllGatherKVMLAFlexAttention` under CP. CP gathers normalized compressed KV
+and the shared rotary key before KV expansion. Q/KV projections, RoPE,
+TP column/row projections, dense/MoE layer construction, routing, and MTP
+blocks reuse DeepSeek-V3 implementations. GLM retains its indexer,
+BlockMask construction, and cross-layer selection schedule.
+
+Native KV-up-projection parameters now live under
+`attention.inner_attention.wkv_b`; Hugging Face checkpoint names are unchanged.
+The adapter inherits DeepSeek parameter mappings and reshapes fused routed
+W13 weights directly, without model-specific gate/up all-to-all conversion.
+
+CP load balancing with token reordering and PP with MTP are rejected at config
+construction; the current DSA indexer requires contiguous document order.
 
 ## Download tokenizer and checkpoint assets
 

@@ -11,6 +11,7 @@ from typing import Any
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import DataParallelMeshDims
 
@@ -158,15 +159,23 @@ class MTPTransformerBlock(TransformerBlock):
         h = self.eh_proj(
             torch.cat([self.enorm(mtp_input_embed), self.hnorm(prev_embed)], dim=-1)
         )
-        h = h + self.attention(self.attention_norm(h), attention_metadata, positions)
+        remat.recompute_needs_tensor(h)
+        attention_out = self.attention(
+            self.attention_norm(h), attention_metadata, positions
+        )
+        remat.recompute_needs_tensor(attention_out)
+        h = h + attention_out
         if isinstance(self.feed_forward, MoE):
-            h = h + self.feed_forward(
+            ffn_out = self.feed_forward(
                 self.ffn_norm(h),
                 padding_mask_T=mtp_padding_mask_T,
                 aux_loss_denominator=aux_loss_denominator,
             )
         else:
-            h = h + self.feed_forward(self.ffn_norm(h))
+            ffn_out = self.feed_forward(self.ffn_norm(h))
+        # Saved attention/MoE outputs have bare residual-add consumers here.
+        remat.recompute_needs_tensor(ffn_out)
+        h = h + ffn_out
         return self.mtp_norm(h)
 
     def _maybe_shard_mtp_valid_mask_across_tp(

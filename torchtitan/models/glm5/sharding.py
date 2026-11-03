@@ -13,7 +13,6 @@ from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
-    dense_param_placement,
     residual_activation_placement,
     token_id_placement,
 )
@@ -34,40 +33,25 @@ def dsa_mask_placement() -> SpmdType:
 def glm5_attention_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Keep a GLM attention block on the decoder residual layout."""
     residual = residual_activation_placement(enable_sp=enable_sp)
-    attention = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-    positions = token_id_placement()
-    return ShardingConfig(
-        in_src_shardings={"x_TD": residual, "positions": positions},
-        in_dst_shardings={"x_TD": attention, "positions": positions},
-        out_src_shardings=attention,
-        out_dst_shardings=residual,
-    )
+    return ShardingConfig(in_src_shardings={"x_TD": residual})
 
 
 def glm5_inner_attention_sharding_config() -> ShardingConfig:
-    """Localize head-sharded DSA tensors at the FlexAttention boundary."""
-    attention = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
-    metadata = dsa_mask_placement()
-    indices = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-    return ShardingConfig(
-        in_src_shardings={
-            "q_THK": attention,
-            "k_THK": attention,
-            "v_THV": attention,
-            "attention_metadata": metadata,
-            "topk_indices_QS": indices,
-        },
-        in_dst_shardings={
-            "q_THK": attention,
-            "k_THK": attention,
-            "v_THV": attention,
-            "attention_metadata": metadata,
-            "topk_indices_QS": indices,
-        },
-        out_src_shardings=attention,
-        out_dst_shardings=attention,
-        local_spmd=True,
+    """Extend the common compact MLA boundary with DSA query metadata."""
+    from torchtitan.models.common.decoder_sharding import (
+        mla_attention_local_spmd_sharding_config,
     )
+
+    config = mla_attention_local_spmd_sharding_config()
+    extra = {
+        "attention_metadata": dsa_mask_placement(),
+        "topk_indices_QS": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
+    }
+    assert config.in_src_shardings is not None
+    assert config.in_dst_shardings is not None
+    config.in_src_shardings = {**config.in_src_shardings, **extra}
+    config.in_dst_shardings = {**config.in_dst_shardings, **extra}
+    return config
 
 
 def glm5_indexer_sharding_config() -> ShardingConfig:
@@ -108,11 +92,3 @@ def glm5_indexer_topk_sharding_config() -> ShardingConfig:
         out_src_shardings=query,
         local_spmd=True,
     )
-
-
-def replicated_weight_sharding_config(*, bias: bool = False) -> ShardingConfig:
-    """Replicate a GLM-specific projection or norm across TP."""
-    states = {"weight": dense_param_placement(tp=spmd.R)}
-    if bias:
-        states["bias"] = dense_param_placement(tp=spmd.R)
-    return ShardingConfig(state_shardings=states)

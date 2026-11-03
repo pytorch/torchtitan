@@ -16,7 +16,6 @@ from typing import Any, Generic, TYPE_CHECKING, TypeVar
 import spmd_types as spmd
 import torch
 import torch.nn as nn
-import torch_remat as remat
 from spmd_types import SpmdType
 from torch.utils._pytree import tree_map
 
@@ -556,27 +555,12 @@ class Module(nn.Module, Configurable):
         return new_args, new_kwargs
 
     def _redistribute_outputs(self, outputs: Any) -> Any:
-        """Redistribute output to desired placement.
-
-        A scalar output layout describes the primary tensor result.  Modules
-        may additionally return auxiliary values (for example cached routing
-        indices) in a tuple; in that case redistribute the primary result and
-        preserve the auxiliary values unchanged.  Fully nested output layout
-        declarations remain unsupported.
-        """
+        """Redistribute output to desired placement."""
         sharding_config = self._sharding_config
         assert sharding_config is not None
 
         out_src = sharding_config.out_src_shardings
         out_dst = sharding_config.out_dst_shardings
-        if isinstance(outputs, tuple):
-            if not outputs:
-                return outputs
-            primary, *aux = outputs
-            if not isinstance(primary, torch.Tensor):
-                return outputs
-            return (self._redistribute_outputs(primary), *aux)
-
         if not isinstance(outputs, torch.Tensor):
             return outputs
 
@@ -597,10 +581,6 @@ class Module(nn.Module, Configurable):
 
         if out_dst is None:
             return outputs
-        # Output redistribution is a bare consumer outside the producer's
-        # remat region. Mark the tensor immediately before the collective so a
-        # saved, non-recomputed producer remains available during backward.
-        remat.recompute_needs_tensor(outputs)
         return spmd_redistribute_per_axis(
             outputs,
             current_spmd_mesh(),

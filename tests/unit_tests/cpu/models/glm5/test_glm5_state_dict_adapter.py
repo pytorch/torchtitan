@@ -31,6 +31,29 @@ class TestGlm5StateDictAdapter(unittest.TestCase):
         for key in native:
             torch.testing.assert_close(native[key], restored[key], rtol=0, atol=0)
 
+    def test_fused_experts_keep_native_storage(self) -> None:
+        config = build_model_config(
+            "glm5_2_debugmodel_mtp", parallelism=ParallelismConfig(), seq_len=8
+        )
+        model = config.build()
+        adapter = Glm5StateDictAdapter(config, hf_assets_path=None)
+        native = model.state_dict()
+        hf = adapter.to_hf(native)
+        for key, tensor in native.items():
+            if key.endswith("routed_experts.w13.weight"):
+                parts = key.split(".")
+                layer = int(parts[1])
+                if parts[0] == "mtp_layers":
+                    layer += len(config.layers)
+                self.assertEqual(
+                    hf[f"model.layers.{layer}.mlp.experts.gate_up_proj"].data_ptr(),
+                    tensor.data_ptr(),
+                )
+        restored = adapter.from_hf(hf)
+        model.load_state_dict(restored, strict=True)
+        with self.assertRaisesRegex(ValueError, "quantized"):
+            adapter.from_hf({}, is_quantized_layout=True)
+
     def test_debug_model_hf_roundtrip(self) -> None:
         self._assert_hf_roundtrip("glm5_2_debugmodel")
 

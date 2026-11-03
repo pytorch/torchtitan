@@ -27,9 +27,6 @@ from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.base.module import Module
 from torchtitan.models.common import ComplexRoPE, LayerNorm, Linear
 from torchtitan.models.common.attention import FlexInnerAttention
-from torchtitan.models.common.attention.cp_attention import (
-    AllGatherKVFlexInnerAttention,
-)
 from torchtitan.models.common.attn_gym import lightning_indexer, require_attn_gym
 
 
@@ -54,7 +51,7 @@ def create_dsa_causal_mask(
         document_ids_T[:, None] == document_ids_T[None, :]
     )
     if padding_mask_T is not None:
-        allowed_TT = allowed_TT & padding_mask_T[:, None] & padding_mask_T[None, :]
+        allowed_TT = allowed_TT & ~padding_mask_T[:, None] & ~padding_mask_T[None, :]
     return torch.zeros(1, T, T, dtype=dtype, device=positions_T.device).masked_fill(
         ~allowed_TT.unsqueeze(0), torch.finfo(dtype).min
     )
@@ -316,45 +313,6 @@ class Glm5FlexAttention(FlexInnerAttention):
                 )
 
     def __init__(self, config):
-        super().__init__(config)
-        assert isinstance(config.block_size, int)
-        self.block_size = config.block_size
-
-    def forward(  # pyrefly: ignore[bad-override]
-        self,
-        q_THK: torch.Tensor,
-        k_THK: torch.Tensor,
-        v_THV: torch.Tensor,
-        *,
-        attention_metadata: torch.Tensor,
-        topk_indices_QS: torch.Tensor,
-        scale: float | None = None,
-    ) -> torch.Tensor:
-        mask = build_dsa_block_mask(
-            topk_indices_QS, attention_metadata, self.block_size
-        )
-        return super().forward(
-            q_THK, k_THK, v_THV, attention_metadata=mask, scale=scale
-        )
-
-
-class Glm5AllGatherKVFlexAttention(AllGatherKVFlexInnerAttention):
-    """GLM DSA with local queries and official all-gathered CP keys/values."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(AllGatherKVFlexInnerAttention.Config):
-        block_size: int | tuple[int, int] = 128
-        attention_dropout: float = 0.0
-
-        def __post_init__(self):
-            if not isinstance(self.block_size, int):
-                raise ValueError("GLM DSA requires a square integer block_size")
-            if self.attention_dropout != 0.0:
-                raise ValueError(
-                    "GLM FlexAttention currently requires attention_dropout=0"
-                )
-
-    def __init__(self, config: Config):
         super().__init__(config)
         assert isinstance(config.block_size, int)
         self.block_size = config.block_size
