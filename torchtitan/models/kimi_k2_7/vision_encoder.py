@@ -451,6 +451,7 @@ class MoonViTEncoder(Module):
                 segment_lengths,
                 total_tokens,
                 x.device,
+                inner_attention=self.config.block.attn.inner_attention,
             )
 
         for block in self.layers.values():

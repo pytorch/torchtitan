@@ -482,6 +482,7 @@ class Qwen35VisionEncoder(Module):
                 segment_lengths,
                 total_tokens,
                 x.device,
+                inner_attention=self.config.block.attn.inner_attention,
             )
 
         for layer in self.layers.values():

@@ -16,6 +16,7 @@ from torch.nn.attention.flex_attention import create_mask
 from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
 
 from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
@@ -251,9 +252,32 @@ class TestPackedVision(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "2 vision entries"):
             collator(batch)
 
+    def test_block_diagonal_mask_dq_write_order_for_deterministic_flash(self) -> None:
+        flash = FlexInnerAttention.Config(kernel_options={"BACKEND": "FLASH"})
+        for config, deterministic, expected in (
+            (flash, True, True),
+            (flash, False, False),
+            (FlexInnerAttention.Config(), True, False),
+        ):
+            previous = torch.are_deterministic_algorithms_enabled()
+            torch.use_deterministic_algorithms(deterministic)
+            try:
+                mask = create_block_diagonal_mask(
+                    torch.tensor([3, 2]),
+                    total_tokens=5,
+                    device=torch.device("cpu"),
+                    inner_attention=config,
+                )
+            finally:
+                torch.use_deterministic_algorithms(previous)
+            self.assertEqual(mask.dq_write_order is not None, expected)
+
     def test_block_diagonal_mask_respects_segments(self) -> None:
         mask = create_block_diagonal_mask(
-            torch.tensor([3, 2]), total_tokens=5, device=torch.device("cpu")
+            torch.tensor([3, 2]),
+            total_tokens=5,
+            device=torch.device("cpu"),
+            inner_attention=FlexInnerAttention.Config(),
         )
         dense_mask = create_mask(
             mask.mask_mod,
