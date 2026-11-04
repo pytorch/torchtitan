@@ -20,6 +20,10 @@ from torchtitan_recipes.tests.graph_trainer.b200 import (
 from torchtitan_recipes.tests.graph_trainer.deepseek_v3 import (
     graph_trainer_deepseek_v3_debugmodel,
 )
+from torchtitan_recipes.tests.graph_trainer.deepseek_v4 import (
+    deepseek_v4_debugmodel_adamw,
+    graph_trainer_deepseek_v4_debugmodel,
+)
 from torchtitan_recipes.tests.graph_trainer.gpt_oss import (
     graph_trainer_gpt_oss_debugmodel_flex,
 )
@@ -300,6 +304,32 @@ def qwen3_moe_graph_numerics():
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 2
     return config
+
+
+def _deepseek_v4_numerics(config):
+    # The debugmodel's DistMuon rejects TP, so TP is set after construction.
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.expert_parallel_degree = 2
+    config.training.disable_accelerator_graphs = True
+    return config
+
+
+def deepseek_v4_eager_numerics():
+    config = deepseek_v4_debugmodel_adamw(
+        parallelism=ParallelismConfig(expert_parallel_degree=2)
+    )
+    # Match GraphTrainer, which captures model and loss in one eager FX graph.
+    config.model.local_compile.regions = []
+    return _without_inplace_wgrad_accum(_deepseek_v4_numerics(config))
+
+
+def deepseek_v4_graph_numerics():
+    return _deepseek_v4_numerics(
+        graph_trainer_deepseek_v4_debugmodel(
+            parallelism=ParallelismConfig(expert_parallel_degree=2)
+        )
+    )
 
 
 def _gpt_oss_numerics_parallelism() -> ParallelismConfig:

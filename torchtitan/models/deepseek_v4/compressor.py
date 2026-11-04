@@ -13,6 +13,7 @@ import torch_remat as remat
 from torch import nn
 from torch.distributed._functional_collectives import all_reduce, wait_tensor
 from torch.distributed.tensor import DTensor, Replicate
+from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
 from torchtitan.distributed.spmd_types import spmd_mesh_group, spmd_mesh_size
 from torchtitan.models.base.module import Module
@@ -27,14 +28,25 @@ from torchtitan.tools.utils import has_cuda_capability
 # G = compressed groups, R = compression ratio, S = compressed pool size.
 
 
-@cache
-def _hadamard(dim: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+def _build_hadamard(dim: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
     if dim & (dim - 1) != 0:
         raise ValueError("Hadamard dim must be a power of two")
     h = torch.ones((1, 1), dtype=dtype, device=device)
     while h.shape[0] < dim:
         h = torch.cat([torch.cat([h, h], 1), torch.cat([h, -h], 1)], 0)
     return h
+
+
+_cached_hadamard = cache(_build_hadamard)
+
+
+def _hadamard(dim: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+    # A trace (torch.compile, or make_fx, which does not set is_compiling)
+    # records the construction instead: caching its fake tensor would leak it
+    # into later traces and eager calls.
+    if torch.compiler.is_compiling() or get_proxy_mode() is not None:
+        return _build_hadamard(dim, dtype, device)
+    return _cached_hadamard(dim, dtype, device)
 
 
 def compressed_cu_seqlens(cu_seqlens: torch.Tensor, ratio: int) -> torch.Tensor:

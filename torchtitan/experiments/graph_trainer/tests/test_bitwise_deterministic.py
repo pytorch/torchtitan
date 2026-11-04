@@ -41,6 +41,9 @@ from torchtitan.experiments.graph_trainer.configs import (
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
     build_model_config as build_deepseek_v3_model_config,
 )
+from torchtitan.experiments.graph_trainer.deepseek_v4 import (
+    build_model_config as build_deepseek_v4_model_config,
+)
 from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
     maybe_apply_ep_overlap_eager_chunking,
 )
@@ -112,8 +115,9 @@ class BitwiseDeterministicBase(unittest.TestCase):
     build_model_config: Callable
     annotate_model: Callable
     model_flavor: str
-    # Flex-specific subclasses override the shared Varlen backend.
-    attn_backend: str = "varlen"
+    # Flex-specific subclasses override the shared Varlen backend. None is for
+    # models whose flavors fix their own attention.
+    attn_backend: str | None = "varlen"
 
     def setUp(self):
         self.parallelism_context = self.enterContext(
@@ -144,11 +148,14 @@ class BitwiseDeterministicBase(unittest.TestCase):
         torch._dynamo.reset()
 
         _set_deterministic()
+        backend_kwargs = (
+            {} if self.attn_backend is None else {"attn_backend": self.attn_backend}
+        )
         self.model_config = self.build_model_config(
             self.model_flavor,
-            attn_backend=self.attn_backend,
             seq_len=SEQ_LEN,
             parallelism=ParallelismConfig(),
+            **backend_kwargs,
         )
         Trainer.Config(
             model=self.model_config,
@@ -937,6 +944,48 @@ class TestGptOssFlexAttnBitwiseDeterministic(TestGptOssBitwiseDeterministic):
     """Bitwise determinism tests for GPT-OSS with FlexInnerAttention."""
 
     attn_backend = "flex"
+
+
+class TestDSv4BitwiseDeterministic(BitwiseDeterministicBase):
+    """Bitwise determinism tests for the DeepSeek V4 debug model.
+
+    Covers hyper-connection branches, sliding-window, compressed, and sparse
+    attention, and the hash-routed and learned-routed MoE layers.
+    """
+
+    build_model_config = staticmethod(build_deepseek_v4_model_config)
+    model_flavor = "debugmodel"
+    attn_backend = None
+    annotate_model = staticmethod(annotate_graph_trainer_model)
+
+    def test_aot_fx_trace_vs_eager(self):
+        """aot_fx_trace and eager produce bitwise identical losses and grads."""
+        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+
+        self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
+
+    def test_precompile_vs_trace(self):
+        """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+        run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
+
+        self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
+
+    def test_numerics_changing_optim_run_to_run(self):
+        """Two runs with numerics_changing_optim produce bitwise identical results."""
+        run_a = self._run_steps(
+            copy.deepcopy(self.model),
+            GraphTrainer,
+            numerics_changing_optim=True,
+        )
+        run_b = self._run_steps(
+            copy.deepcopy(self.model),
+            GraphTrainer,
+            numerics_changing_optim=True,
+        )
+
+        self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
 
 
 if __name__ == "__main__":
