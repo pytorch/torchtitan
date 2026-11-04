@@ -6,7 +6,9 @@
 
 import hashlib
 import json
+import os
 
+import pytest
 import torch
 from torch.distributed.tensor import DTensor
 
@@ -120,3 +122,16 @@ def hash_gradient(
         include_weights=False,
         include_gradients=True,
     )
+
+
+def qwen3_5_tokenizer():
+    """The Qwen3.5 tokenizer at ``QWEN3_5_TOKENIZER`` (the RL CPU CI job sets it).
+
+    Skips when the variable is unset; fails when it is set but does not load.
+    """
+    path = os.environ.get("QWEN3_5_TOKENIZER")
+    if path is None:
+        pytest.skip("set QWEN3_5_TOKENIZER to a Qwen3.5 tokenizer directory")
+    import transformers
+
+    return transformers.AutoTokenizer.from_pretrained(path)

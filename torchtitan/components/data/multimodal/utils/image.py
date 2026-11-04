@@ -8,11 +8,32 @@
 
 Handles image decoding, resizing, normalization, and patch extraction for the
 vision encoder.
+
+RL image prompts carry each image's file bytes (JPEG, PNG, ...), not pixels, and use
+the steps separately, all from the model's `ImageSpec`:
+
+- `lookup_image` (the renderer): reads the file, hashes it into the content key, and
+  computes the patch grid from the image header, without decoding the pixels.
+- `decode_image_files` (the generator) and `decode_image_files_flat` (the trainer):
+  decode the image files and resize the images to uint8.
+- `patchify` / `patchify_flat`: normalize and cut into patches on the images' device;
+  the generator and the trainer run them on the GPU (~20 ms per image on one CPU
+  thread), bitwise equal to the CPU.
+
+``patchify(decode_image_files(files, spec), spec)`` returns exactly the patches
+``process_image`` + ``vision_to_patches`` produce for ``spec``. A file is usually much
+smaller than its resized pixels (Geometry3K median: 14 KB vs 0.31 MB of uint8 pixels; a
+large photo the resize scales down gains less), and the processes that decode the image
+file need no access to the file system the dataset is on.
 """
 
+import functools
+import hashlib
+import io
 import logging
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 
 import einops as E
 import requests
@@ -199,6 +220,71 @@ def resize_to_navit_patch_grid(
     return h, w, pad_h, pad_w
 
 
+def decode_and_resize_image(
+    image: str | bytes | Image.Image,
+    patch_size: int = 16,
+    merge_size: int = 2,
+    max_pixels: int = 16777216,
+    min_pixels: int = 65536,
+    resize_fn: Callable[..., tuple[int, int, int, int]] = resize_to_pixel_budget,
+    image_interpolation_mode: TVF.InterpolationMode = TVF.InterpolationMode.BICUBIC,
+    max_patches: int = 4096,
+    max_patches_per_side: int = 512,
+) -> torch.Tensor:
+    """Decode an image and resize (and pad) it to the vision encoder's patch grid.
+
+    The uint8 half of ``process_image`` (see there for the arguments); the image
+    cache stores its output. Raises on failure.
+
+    Returns:
+        Tensor of shape (C, H, W), uint8.
+    """
+    # Decode to (C, H, W) uint8 tensor
+    img_tensor = _decode_image(image)
+    _, original_height, original_width = img_tensor.shape
+
+    resize_h, resize_w, pad_h, pad_w = resize_fn(
+        original_height,
+        original_width,
+        patch_size=patch_size,
+        merge_size=merge_size,
+        min_pixels=min_pixels,
+        max_pixels=max_pixels,
+        max_patches=max_patches,
+        max_patches_per_side=max_patches_per_side,
+    )
+    if (resize_h, resize_w) != (original_height, original_width):
+        # Resize on uint8 (leverages AVX2/NEON SIMD fast paths)
+        img_tensor = TVF.resize(
+            img_tensor,
+            [resize_h, resize_w],
+            interpolation=image_interpolation_mode,
+            antialias=True,
+        )
+    if pad_h or pad_w:
+        # Pad right/bottom with zeros (black); after normalization these are
+        # constant padding patches the encoder sees as part of the grid.
+        img_tensor = TVF.pad(img_tensor, [0, 0, pad_w, pad_h])
+    return img_tensor
+
+
+def normalize_image(
+    image: torch.Tensor,
+    image_mean: tuple[float, ...] = (0.5, 0.5, 0.5),
+    image_std: tuple[float, ...] = (0.5, 0.5, 0.5),
+) -> torch.Tensor:
+    """Normalize a (C, H, W) uint8 image to a (1, H, W, C) float32 tensor.
+
+    The float half of ``process_image``; elementwise, so it gives the same values
+    on any device.
+    """
+    # uint8 → float32 [0, 1] → normalize
+    image = TVF.to_dtype(image, torch.float32, scale=True)
+    image = TVF.normalize(image, list(image_mean), list(image_std), inplace=True)
+    # (C, H, W) → (1, H, W, C)
+    return image.permute(1, 2, 0).unsqueeze(0)
+
+
 def process_image(
     image: str | bytes | Image.Image,
     patch_size: int = 16,
@@ -215,7 +301,8 @@ def process_image(
     """Load and preprocess a single image for VLM training.
 
     Uses torchvision APIs for decoding and resizing (faster uint8 SIMD paths),
-    then normalizes with the given mean/std. ``resize_fn`` is the resize strategy
+    then normalizes with the given mean/std: ``decode_and_resize_image``, then
+    ``normalize_image``. ``resize_fn`` is the resize strategy
     -- ``resize_to_pixel_budget`` (Qwen-VL, default) or
     ``resize_to_navit_patch_grid`` (Kimi-VL) -- with the uniform signature
     ``(height, width, *, patch_size, merge_size, **budget) -> (resize_h,
@@ -241,41 +328,18 @@ def process_image(
         Tensor of shape (1, H, W, C) with a dummy temporal dim, or None on failure.
     """
     try:
-        # Decode to (C, H, W) uint8 tensor
-        img_tensor = _decode_image(image)
-        _, original_height, original_width = img_tensor.shape
-
-        resize_h, resize_w, pad_h, pad_w = resize_fn(
-            original_height,
-            original_width,
+        img_tensor = decode_and_resize_image(
+            image,
             patch_size=patch_size,
             merge_size=merge_size,
-            min_pixels=min_pixels,
             max_pixels=max_pixels,
+            min_pixels=min_pixels,
+            resize_fn=resize_fn,
+            image_interpolation_mode=image_interpolation_mode,
             max_patches=max_patches,
             max_patches_per_side=max_patches_per_side,
         )
-        if (resize_h, resize_w) != (original_height, original_width):
-            # Resize on uint8 (leverages AVX2/NEON SIMD fast paths)
-            img_tensor = TVF.resize(
-                img_tensor,
-                [resize_h, resize_w],
-                interpolation=image_interpolation_mode,
-                antialias=True,
-            )
-        if pad_h or pad_w:
-            # Pad right/bottom with zeros (black); after normalization these are
-            # constant padding patches the encoder sees as part of the grid.
-            img_tensor = TVF.pad(img_tensor, [0, 0, pad_w, pad_h])
-
-        # uint8 → float32 [0, 1] → normalize
-        img_tensor = TVF.to_dtype(img_tensor, torch.float32, scale=True)
-        img_tensor = TVF.normalize(
-            img_tensor, list(image_mean), list(image_std), inplace=True
-        )
-
-        # (C, H, W) → (1, H, W, C)
-        return img_tensor.permute(1, 2, 0).unsqueeze(0)
+        return normalize_image(img_tensor, image_mean, image_std)
 
     except Exception as e:
         logger.warning(f"Error processing image: {e}")
@@ -398,3 +462,208 @@ def vision_to_patches(
 
     grid_thw = torch.tensor([T_patches, H_patches, W_patches])
     return patches, grid_thw
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class ImageSpec:
+    """The model's image preprocessing; defaults match Qwen3-VL / Qwen3.5.
+
+    The arguments of ``process_image`` + ``vision_to_patches`` for the model's
+    vision encoder. It must match the model's vision encoder and the SFT data
+    pipeline of the same model, so the generator and the trainer see the pixels
+    the model was trained on.
+    """
+
+    patch_size: int = 16
+    temporal_patch_size: int = 2
+    merge_size: int = 2
+    """Patches merged per side into one placeholder token (``spatial_merge_size``)."""
+    min_pixels: int = 65536
+    """Lower bound on H * W after ``resize_to_pixel_budget``."""
+    max_pixels: int = 16777216
+    """Upper bound on H * W after ``resize_to_pixel_budget``."""
+    image_mean: tuple[float, float, float] = (0.5, 0.5, 0.5)
+    image_std: tuple[float, float, float] = (0.5, 0.5, 0.5)
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class ImageInfo:
+    """One image of a prompt: content key, file, raw patch grid and file bytes."""
+
+    key: str
+    """Hash of the file bytes."""
+    path: str
+    """The file `lookup_image` read."""
+    grid_thw: tuple[int, int, int]
+    """Raw patch grid ``(T, H, W)`` before spatial merging."""
+    data: bytes = field(repr=False, compare=False)
+    """The file's bytes, which the generator and the trainer decode into the image. Not
+    compared: ``key`` is their hash."""
+
+
+def lookup_image(path: str, spec: ImageSpec) -> ImageInfo:
+    """Return ``path``'s content key, its patch grid under ``spec`` and its bytes, without
+    decoding the pixels. The file must be readable where the prompt is rendered.
+
+    Example:
+
+        image = lookup_image("./assets/datasets/geometry3k/images/train/00000_0.png", spec)
+        num_image_tokens(image.grid_thw, spec)  # placeholder tokens after spatial merging
+        pixel_values = patchify(decode_image_files([image.data], spec), spec)
+    """
+    with open(path, "rb") as f:
+        data = f.read()
+    # The header gives the stored size; decode_image applies no EXIF rotation either.
+    width, height = Image.open(io.BytesIO(data)).size
+    return ImageInfo(
+        key=_content_key(data),
+        path=path,
+        grid_thw=_grid_thw(height, width, spec),
+        data=data,
+    )
+
+
+def num_image_tokens(grid_thw: tuple[int, int, int], spec: ImageSpec) -> int:
+    """Placeholder tokens of a ``grid_thw`` image after ``merge_size x merge_size`` merging."""
+    t, h, w = grid_thw
+    return t * h * w // spec.merge_size**2
+
+
+def largest_image_grid(spec: ImageSpec, max_tokens: int) -> tuple[int, int, int]:
+    """The largest square grid within ``spec``'s resize budget and ``max_tokens``
+    placeholder tokens; vLLM profiles the vision encoder with it. The encoder's
+    cost depends on the token count, not on the shape."""
+    budget = spec.max_pixels // (spec.patch_size * spec.merge_size) ** 2
+    side = math.isqrt(min(max_tokens, budget))
+    if side == 0:
+        raise ValueError(
+            f"No image fits {max_tokens} tokens with patch size {spec.patch_size} "
+            f"and merge size {spec.merge_size}."
+        )
+    return (1, side * spec.merge_size, side * spec.merge_size)
+
+
+def decode_image_files(files: Sequence[bytes], spec: ImageSpec) -> list[torch.Tensor]:
+    """Return the resized uint8 images ``(C, H, W)`` of image ``files``, unnormalized."""
+    return [_decode_and_resize_image_file(data, spec) for data in files]
+
+
+@functools.lru_cache(maxsize=64)
+def read_image_file(path: str, key: str) -> bytes:
+    """Return the bytes of the image file at ``path``, which must hash to ``key``.
+
+    The renderer read them in `lookup_image`, but the renderers library keeps only
+    ``pixel_values`` and the grid of what `_process_image` returns, so `TokenEnv` reads
+    the file again for the prompt. Cached: the samples of a GRPO group render together in one
+    process, so they share one bytes object, and a message that holds several of them
+    pickles the bytes once.
+    """
+    with open(path, "rb") as f:
+        data = f.read()
+    if _content_key(data) != key:
+        raise ValueError(
+            f"{path!r} changed after it was rendered: its content key is "
+            f"{_content_key(data)}, the prompt has {key}."
+        )
+    return data
+
+
+def decode_image_files_flat(
+    image_files: torch.Tensor,
+    file_sizes: list[int],
+    grid_thw: list[list[int]],
+    spec: ImageSpec,
+) -> torch.Tensor:
+    """Decode and resize concatenated image files into `patchify_flat`'s input.
+
+    Raises unless each image file decodes to the grid its prompt has: placeholders and
+    M-RoPE positions follow the prompt's grid, the patches the decoded image.
+
+    Args:
+        image_files: uint8 ``(sum(file_sizes),)``, the files' bytes concatenated.
+        file_sizes: Bytes per file.
+        grid_thw: Each file's raw patch grid ``(T, H, W)``, from its prompt.
+        spec: The model's image preprocessing.
+    """
+    images = []
+    for index, (data, (t, h, w)) in enumerate(
+        zip(image_files.split(file_sizes), grid_thw, strict=True)
+    ):
+        image = _decode_and_resize_image_file(data.numpy().tobytes(), spec)
+        patch = spec.patch_size
+        decoded_image_grid = (1, image.shape[1] // patch, image.shape[2] // patch)
+        if decoded_image_grid != (t, h, w):
+            raise ValueError(
+                f"Image file {index} decodes to grid {decoded_image_grid}, but its prompt has "
+                f"{(t, h, w)}; the renderer and the batcher must use the same "
+                "ImageSpec."
+            )
+        images.append(image.flatten())
+    return torch.cat(images)
+
+
+def patchify(images: Sequence[torch.Tensor], spec: ImageSpec) -> torch.Tensor:
+    """Normalize resized uint8 images and cut them into concatenated patches.
+
+    These are ``normalize_image`` and ``vision_to_patches``. They run on the images'
+    device and are elementwise float32 ops plus reshapes, so the CPU and the GPU
+    give bitwise-equal patches.
+    """
+    patches = []
+    for image in images:
+        image_patches, _ = vision_to_patches(
+            normalize_image(image, spec.image_mean, spec.image_std),
+            spec.patch_size,
+            spec.temporal_patch_size,
+            spec.merge_size,
+        )
+        patches.append(image_patches)
+    return torch.cat(patches)
+
+
+def patchify_flat(
+    flat_images: torch.Tensor, grid_thw: list[list[int]], spec: ImageSpec
+) -> torch.Tensor:
+    """`patchify` for `decode_image_files` outputs flattened and concatenated in
+    ``grid_thw`` order.
+
+    Decoded images are ``(3, h * patch_size, w * patch_size)`` with ``t == 1`` (see
+    `_decode_and_resize_image_file`).
+    """
+    assert all(t == 1 for t, _, _ in grid_thw), grid_thw
+    shapes = [(3, h * spec.patch_size, w * spec.patch_size) for _, h, w in grid_thw]
+    flat = flat_images.split([c * h * w for c, h, w in shapes])
+    return patchify(
+        [image.view(shape) for image, shape in zip(flat, shapes, strict=True)], spec
+    )
+
+
+def _content_key(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()[:32]
+
+
+def _decode_and_resize_image_file(data: bytes, spec: ImageSpec) -> torch.Tensor:
+    return decode_and_resize_image(
+        data,
+        patch_size=spec.patch_size,
+        merge_size=spec.merge_size,
+        min_pixels=spec.min_pixels,
+        max_pixels=spec.max_pixels,
+    )
+
+
+def _grid_thw(height: int, width: int, spec: ImageSpec) -> tuple[int, int, int]:
+    """Patch grid of a ``height x width`` image after `_decode_and_resize_image_file`."""
+    resize_h, resize_w, pad_h, pad_w = resize_to_pixel_budget(
+        height,
+        width,
+        patch_size=spec.patch_size,
+        merge_size=spec.merge_size,
+        min_pixels=spec.min_pixels,
+        max_pixels=spec.max_pixels,
+    )
+    return (
+        1,
+        (resize_h + pad_h) // spec.patch_size,
+        (resize_w + pad_w) // spec.patch_size,
+    )
