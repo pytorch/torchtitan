@@ -11,7 +11,6 @@ from functools import partial
 from typing import Any
 
 import torch
-import torch.distributed as dist
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
     PipelineScheduleMulti,
@@ -411,7 +410,7 @@ class Validator(BaseValidator):
                 f"validation_metrics/{key}": value.item()
                 / (
                     num_global_valid_tokens
-                    if loss_metric_reduce_op(key)[0] == dist.ReduceOp.SUM.name
+                    if loss_metric_reduce_op(key) == "sum"
                     else 1
                 )
                 for key, value in global_metrics.items()
