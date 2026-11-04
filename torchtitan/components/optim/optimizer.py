@@ -241,10 +241,12 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         persistent_redistribution_buffers: bool = True
         """Keep exchange and compute scratch allocated between eager updates.
 
-        False reserves scratch only for each eager update and releases it
-        afterward. Construction and checkpoint loading do not reserve scratch.
+        False targets fully eager training: reserve scratch on the caller stream
+        for each update, then release it for reuse by later eager work on that
+        stream. Construction and checkpoint loading do not reserve scratch.
         Parameters, optimizer state, and initialized communication resources
-        remain owned; optimizer updates must remain outside graph capture.
+        remain owned. This option does not share memory with a CUDA-graph private
+        pool; optimizer updates must remain outside graph capture.
         """
 
     def __init__(

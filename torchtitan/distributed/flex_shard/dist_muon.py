@@ -196,9 +196,10 @@ class DistMuon(Optimizer):
     scratch only for each step, then releases it. Construction and checkpoint
     loading do not reserve scratch. Communication streams and events are created
     on the first reservation and retained between steps, along with parameters,
-    optimizer state, and communicators. This mode is for eager optimizer updates,
-    including updates following a captured forward/backward; directly capturing
-    optimizer updates is not supported.
+    optimizer state, and communicators. This policy targets fully eager training:
+    later forward/backward work on the same caller stream can reuse released
+    allocator blocks. It does not share scratch with a CUDA-graph private pool;
+    directly capturing optimizer updates is not supported.
 
     ``ns_device`` selects where Newton-Schulz runs. ``None`` keeps the storage
     device, where each parameter's local shard lives (the host under FSDP2 CPU
@@ -291,17 +292,15 @@ class DistMuon(Optimizer):
                 self._bucket_plans,
                 local_tensor_spec=self._local_tensor_spec,
             )
-        try:
-            self._redistribution_runtime.run(
-                self._bucket_plans,
-                local_tensor_spec=self._local_tensor_spec,
-                prepare=self._prepare_local,
-                compute=self._compute_update,
-                finalize=self._apply_update,
-            )
-        finally:
-            if not self._persistent_redistribution_buffers:
-                self._redistribution_runtime.release_buffers()
+        self._redistribution_runtime.run(
+            self._bucket_plans,
+            local_tensor_spec=self._local_tensor_spec,
+            prepare=self._prepare_local,
+            compute=self._compute_update,
+            finalize=self._apply_update,
+        )
+        if not self._persistent_redistribution_buffers:
+            self._redistribution_runtime.release_buffers()
         return loss
 
     def add_param_group(self, param_group: dict[str, Any]) -> None:
