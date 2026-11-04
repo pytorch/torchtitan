@@ -28,6 +28,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.spmd_types import maybe_replicate_invariant
 from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 
@@ -498,7 +500,8 @@ class NaViTEncoder(Module):
             frame_TD = x_TD[offset : offset + num_tokens]
             offset += num_tokens
             outputs.append(self._finalize_image(frame_TD, grid_h, grid_w, sp_perm))
-        return torch.cat(outputs)
+        # Every CP rank consumes the full features; backward sums their gradients.
+        return maybe_replicate_invariant(torch.cat(outputs), MeshAxisName.CP)
 
 
 __all__ = [

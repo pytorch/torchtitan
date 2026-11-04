@@ -470,7 +470,8 @@ class MoonViTEncoder(Module):
         # Temporal pool + spatial merge, then project to the LLM hidden size.
         # pyrefly: ignore [bad-argument-type]
         merged = _tpool_patch_merger(x, grids, self.merge_kernel_size)
-        return self.projector(merged)
+        # Every CP rank consumes the full features; backward sums their gradients.
+        return maybe_replicate_invariant(self.projector(merged), MeshAxisName.CP)
 
 
 class KimiK25VisionEncoder(MoonViTEncoder):

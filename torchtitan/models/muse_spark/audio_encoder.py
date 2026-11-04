@@ -12,6 +12,8 @@ import torch
 import torch.nn.functional as F
 import torch_remat as remat
 
+from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.spmd_types import maybe_replicate_invariant
 from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 
@@ -202,4 +204,6 @@ class MuseSparkAudioEncoder(Module):
         # attn_gym.linear.causal_conv1d with per-waveform cu_seqlens.
         # The Qwen3.5 wrapper cannot be reused directly because it hardcodes
         # activation="silu" and omits bias.
-        return torch.cat([self._encode(value_LC) for value_LC in waveforms])
+        output_TD = torch.cat([self._encode(value_LC) for value_LC in waveforms])
+        # Every CP rank consumes the full features; backward sums their gradients.
+        return maybe_replicate_invariant(output_TD, MeshAxisName.CP)

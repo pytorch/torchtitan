@@ -497,4 +497,5 @@ class Qwen35VisionEncoder(Module):
                 attention_mask=attention_mask,
             )
 
-        return self.merger(x)
+        # Every CP rank consumes the full features; backward sums their gradients.
+        return maybe_replicate_invariant(self.merger(x), MeshAxisName.CP)

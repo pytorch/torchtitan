@@ -123,6 +123,5 @@ def audio_encoder_sharding_config() -> ShardingConfig:
             "waveforms_SC": invariant,
             "waveform_padded_lengths_N": invariant,
         },
-        out_src_shardings=invariant,
-        out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I}),
+        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I}),
     )

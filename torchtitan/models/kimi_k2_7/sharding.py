@@ -56,12 +56,12 @@ def moonvit_encoder_sharding_config() -> ShardingConfig:
     """MoonViT3d encoder boundary; its ``pos_embed`` table is TP-invariant.
 
     ``patch_embed`` wraps the plain ``pixel_values`` input as a TP-invariant
-    tensor so the rest of the encoder runs in distributed tensor space.
+    tensor so the rest of the encoder runs in distributed tensor space. The
+    encoder replicates its output across CP itself.
     """
     return ShardingConfig(
         state_shardings={"pos_embed": _moonvit_state_placement()},
-        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.R}),
-        out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.R}),
+        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.R}),
     )
 
 
