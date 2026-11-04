@@ -246,6 +246,7 @@ class TokenChoiceTopKRouter(Module):
         scores_for_choice_TE = (
             scores_TE if expert_bias_E is None else scores_TE + expert_bias_E
         )
+        # Argmax rounds only pay off fused: in eager they are 2-12x slower than topk (GB300).
         if torch.compiler.is_compiling():
             return topk_ids_by_argmax(scores_for_choice_TE, self.top_k)
         return torch.topk(
@@ -334,6 +335,7 @@ class TokenChoiceTopKRouter(Module):
     # and rounds differently). Cost on GB300: a few us per call at decode sizes, none from 4k
     # tokens. recompile_limit=16: DeepSeek-V4's hash and top-k layers share this frame, 2 graphs
     # per shape (default 8).
+    # The decorator's batch_invariant=True only declares batch invariance; the option provides it.
     @local_compile(
         "moe_router_topk",
         batch_invariant=True,
