@@ -18,6 +18,7 @@ from typing import Any
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import PrecisionConfig
+from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
@@ -72,6 +73,41 @@ def _model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
     }
 
 
+def _gdn_config_kwargs(cfg: Decoder.Config) -> dict[str, Any] | None:
+    """The ``TorchTitanGDNConfig`` fields of a model's GDN layers, or None without
+    any; SGLang sizes one state slot shape for all of them."""
+    gdn_layers = {
+        layer_id: layer.attention
+        for layer_id, layer in enumerate(cfg.layers)
+        if isinstance(layer.attention, GDN.Config)
+    }
+    if not gdn_layers:
+        return None
+    dimensions = {
+        (
+            gdn.n_key_heads,
+            gdn.n_heads,
+            gdn.key_head_dim,
+            gdn.value_head_dim,
+            gdn.conv_kernel_size,
+        )
+        for gdn in gdn_layers.values()
+    }
+    if len(dimensions) != 1:
+        raise ValueError(
+            f"All GDN layers must have the same dimensions, got {dimensions}"
+        )
+    ((num_k_heads, num_v_heads, head_k_dim, head_v_dim, conv_kernel_size),) = dimensions
+    return dict(
+        linear_layer_ids=sorted(gdn_layers),
+        num_k_heads=num_k_heads,
+        num_v_heads=num_v_heads,
+        head_k_dim=head_k_dim,
+        head_v_dim=head_v_dim,
+        conv_kernel_size=conv_kernel_size,
+    )
+
+
 def register_to_sglang(
     model_config: Decoder.Config,
     *,
@@ -88,9 +124,12 @@ def register_to_sglang(
       1. A dynamic ``SGLangModelWrapper`` subclass under ``TORCHTITAN_ARCHITECTURE`` in
          SGLang's ``ModelRegistry``; it closes over the arguments below.
       2. A config parser under ``TORCHTITAN_CONFIG_PARSER`` that builds the HF-shaped
-         config from ``model_config`` instead of reading ``config.json``.
+         config from ``model_config`` instead of reading ``config.json``: a
+         ``TorchTitanGDNConfig`` for models with GDN layers.
       3. ``TorchTitanVarlenAttnBackend`` under ``TORCHTITAN_VARLEN_ATTENTION_BACKEND``,
          also as a backend SGLang's deterministic mode accepts with its radix cache.
+      4. ``TorchTitanGDNAttnBackend`` as the linear attention backend of
+         ``TorchTitanGDNConfig`` models, with SGLang's radix cache of their states.
 
     Args:
         model_config: The generator's model config, with ``SGLangInnerAttention``
@@ -118,6 +157,10 @@ def register_to_sglang(
         TORCHTITAN_VARLEN_ATTENTION_BACKEND,
         TorchTitanVarlenAttnBackend,
     )
+    from torchtitan.rl.generator.sglang.gdn import (
+        TorchTitanGDNAttnBackend,
+        TorchTitanGDNConfig,
+    )
     from torchtitan.rl.generator.sglang.model_wrapper import SGLangModelWrapper
 
     class TorchTitanForCausalLM(SGLangModelWrapper):
@@ -139,11 +182,16 @@ def register_to_sglang(
     # directly to register a class built at runtime.
     ModelRegistry.models[TORCHTITAN_ARCHITECTURE] = TorchTitanForCausalLM
 
+    gdn_kwargs = _gdn_config_kwargs(model_config)
+
     @register_model_config_parser(TORCHTITAN_CONFIG_PARSER)
     class TorchTitanConfigParser(ModelConfigParserBase):
         def parse(self, model, trust_remote_code, revision=None, **kwargs):
-            return PretrainedConfig.from_dict(
-                _model_config_to_hf_config_dict(model_config)
+            config_dict = _model_config_to_hf_config_dict(model_config)
+            if gdn_kwargs is None:
+                return PretrainedConfig.from_dict(config_dict)
+            return TorchTitanGDNConfig(
+                **config_dict, **gdn_kwargs, conv_state_dtype=precision.param_dtype
             )
 
     if TORCHTITAN_VARLEN_ATTENTION_BACKEND not in ATTENTION_BACKENDS:
@@ -165,6 +213,26 @@ def register_to_sglang(
         )
         register_attention_backend(TORCHTITAN_VARLEN_ATTENTION_BACKEND)(
             TorchTitanVarlenAttnBackend
+        )
+        from sglang.srt.configs.linear_attn_model_registry import (
+            LinearAttnModelSpec,
+            register_linear_attn_model,
+        )
+
+        # TODO(https://github.com/sgl-project/sglang/issues/48463): support SGLang's
+        # extra_buffer mamba cache strategy (support_mamba_cache_extra_buffer), which
+        # keeps overlap scheduling; it needs the kernels to write state snapshots at
+        # intermediate positions.
+        register_linear_attn_model(
+            LinearAttnModelSpec(
+                config_class=TorchTitanGDNConfig,
+                backend_class_name=(
+                    f"{TorchTitanGDNAttnBackend.__module__}."
+                    f"{TorchTitanGDNAttnBackend.__qualname__}"
+                ),
+                uses_mamba_radix_cache=True,
+                support_mamba_cache=True,
+            )
         )
 
     logger.info(

@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from torchtitan.rl.generator import paged_gdn
 from torchtitan.rl.generator.vllm.attention import gdn, linear_attention
 from torchtitan.rl.generator.vllm.attention.linear_attention import (
     LinearAttentionExecutionPath,
@@ -491,12 +492,13 @@ def test_packed_forward_routes_decode_rows(monkeypatch, capturing):
     torch.nn.Module.__init__(layer)
     layer.prefix, layer.kv_cache = "gdn", (torch.empty(0), torch.empty(0))
     layer.local_num_k_heads = layer.local_num_v_heads = 1
-    layer.head_k_dim = layer.head_v_dim = layer.local_key_dim = 1
+    layer.head_k_dim = layer.head_v_dim = 1
     monkeypatch.setattr(gdn, "is_in_batch_invariant_mode", lambda: False)
+    monkeypatch.setattr(paged_gdn, "is_in_batch_invariant_mode", lambda: False)
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
     monkeypatch.setattr(gdn, "paged_causal_conv1d", lambda x, *args, **kwargs: x)
-    monkeypatch.setattr(gdn, "gate_transform", lambda a, *args, **kwargs: a)
-    monkeypatch.setattr(gdn, "l2norm", lambda x, **kwargs: x)
+    monkeypatch.setattr(paged_gdn, "gate_transform", lambda a, *args, **kwargs: a)
+    monkeypatch.setattr(paged_gdn, "l2norm", lambda x, **kwargs: x)
 
     def decode(conv, a, b, A_log, dt_bias, ssm, slots, *, out, **kwargs):
         rows = 4 if capturing else 2
@@ -512,7 +514,7 @@ def test_packed_forward_routes_decode_rows(monkeypatch, capturing):
         return torch.where(tokens >= 2, 2.0, 0.0)[None, :, None, None]
 
     monkeypatch.setattr(gdn, "recurrent_gdn_decode", decode)
-    monkeypatch.setattr(gdn, "paged_chunk_gdn", chunk)
+    monkeypatch.setattr(paged_gdn, "paged_chunk_gdn", chunk)
     context = ForwardContext(
         no_compile_layers={}, attn_metadata={"gdn": metadata}, slot_mapping={}
     )
@@ -551,7 +553,6 @@ def test_packed_decode_routing_matches_recurrence(monkeypatch) -> None:
     layer.prefix = "gdn"
     layer.local_num_k_heads = layer.local_num_v_heads = 16
     layer.head_k_dim = layer.head_v_dim = 128
-    layer.local_key_dim = 2048
     pools = (
         (torch.randn(5, 3, 6144, device=device) * 0.5).bfloat16(),
         torch.randn(5, 16, 128, 128, device=device) * 0.05,
@@ -567,6 +568,9 @@ def test_packed_decode_routing_matches_recurrence(monkeypatch) -> None:
 
     def run(batch_invariant: bool) -> tuple[torch.Tensor, torch.Tensor]:
         monkeypatch.setattr(gdn, "is_in_batch_invariant_mode", lambda: batch_invariant)
+        monkeypatch.setattr(
+            paged_gdn, "is_in_batch_invariant_mode", lambda: batch_invariant
+        )
         layer.kv_cache = tuple(pool.clone() for pool in pools)
         with torch.inference_mode(), override_forward_context(context):
             output = layer._forward(inputs, a, b, weight, None, A_log, dt_bias)

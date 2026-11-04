@@ -16,12 +16,16 @@ Generator engine loop (every rank, SPMD)
   SGLangEngine
     add_requests ----> Scheduler.process_input_requests   (no tokenizer/detokenizer procs)
     step ------------> one iteration of Scheduler.event_loop_overlap
+                       (event_loop_normal for GDN models)
                           ModelRunner -> SGLangModelWrapper.forward(input_ids, positions, forward_batch)
                                            TorchTitan Decoder
                                              Attention -> SGLangInnerAttention -> RadixAttention
                                                             TorchTitanVarlenAttnBackend:
                                                             SGLang's paged-KV metadata,
                                                             torch varlen FlashAttention (the trainer's kernel)
+                                             GDN -> SGLangInnerGDN -> RadixLinearAttention
+                                                      TorchTitanGDNAttnBackend: SGLang's state
+                                                      slots, the trainer's Attention Gym kernels
                                            lm_head + TP gather -> SGLang LogitsProcessor / Sampler
     load_model_state_dict -> ModelStateDictLoader (FSDP groups, in place: CUDA graphs stay valid)
 ```
@@ -79,7 +83,8 @@ tree falls back to its Python implementation.
 | Per-request metrics (queue time, TTFT, prefill, decode, preemptions, cached tokens) | Supported |
 | Data parallelism within a generator | Not supported: run more generators |
 | Sliding-window attention (e.g. Muse Glimmer) | Supported; KV of every token stays cached (no sliding-window KV pool) |
-| Flex attention, MLA, GDN/KDA, attention sinks (GPT-OSS) | Not supported |
+| GDN linear attention (Qwen3.5) | Supported; see below |
+| Flex attention, MLA, KDA, attention sinks (GPT-OSS) | Not supported |
 | MoE with expert parallelism over the TP group, Dist-MoE | Supported; see below |
 | Sequence parallelism | Not supported |
 
@@ -105,6 +110,18 @@ the padding rows. The all-to-all token dispatcher reads its split sizes on the
 host, which CUDA graphs cannot capture: it needs `cuda_graph="none"`. Dist-MoE
 (`Generator.Config.dist_moe_runtime`) runs under both kinds of CUDA graphs. The
 other EP token dispatchers (DeepEP, HybridEP) are not supported.
+
+## GDN
+
+SGLang keeps each request's GDN conv and recurrent state in its state pool, and
+its radix cache snapshots them, so a session's next turn resumes from its cached
+prefix as with KV. The trainer's Attention Gym kernels advance the states
+(`TorchTitanGDNAttnBackend`, registered through SGLang's linear attention model
+registry). The backend registers without SGLang's `extra_buffer` mamba cache
+strategy, which needs the kernels to write state snapshots at intermediate
+positions. SGLang then snapshots a request's state only when it caches the
+request, and disables overlap scheduling: the engine steps SGLang's normal event
+loop for these models.
 
 ## Multi-turn sessions
 
@@ -132,8 +149,10 @@ SGLangEngine.Config(
 
 KV loaded back is bitwise identical to recomputed KV (checked in batch-invariant
 mode on a multi-turn workload), and a reset on model state dict load clears the
-host cache too. It pays off when recomputing a prefix costs more than copying
-its KV: for Qwen3-0.6B, recompute is faster.
+host cache too. For GDN models, it keeps the conv and recurrent states of evicted
+prefixes in host memory too: a cached turn whose prefix was loaded back matched
+the trainer's prefill bitwise. HiCache pays off when recomputing a prefix costs
+more than copying its KV: for Qwen3-0.6B, recompute is faster.
 
 ## Seeds
 
@@ -153,6 +172,7 @@ logprobs bitwise at matched TP (see `torchtitan/rl/BITWISE_PARITY.md`):
   `logits / temperature` (`batch_invariance.py`);
 - SGLang's custom all-reduce is off, and the model's TP all-reduces run on NCCL.
 
-`tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py` checks trainer vs.
-SGLang decode parity, before and after an in-place model state dict load, and
-SGLang decode batch invariance.
+`tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py` checks, for each
+supported model family, trainer vs. SGLang decode parity (also for a session's
+next turn, which resumes its cached prefix, and after an in-place model state
+dict load) and SGLang decode batch invariance.
