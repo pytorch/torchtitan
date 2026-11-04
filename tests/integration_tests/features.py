@@ -380,6 +380,8 @@ def llama3_debugmodel_tp2_pp2_gpipe() -> Trainer.Config:
 def llama3_debugmodel_fsdp2_tp2_pp2_save() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
+    # The load twin resumes from pinned host moments.
+    config.optim.optimizer.optimizers[0].moment_location = "pinned_host"
     config.checkpointer = CheckpointManager.Config(
         interval=10,
         last_save_model_only=False,
@@ -973,6 +975,8 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             test_name="pp_dp_tp",
             ngpu=8,
             use_real_pg=True,
+            # pinned_host Adam moments are not verified on ROCm.
+            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[
