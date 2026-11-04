@@ -295,7 +295,6 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs(
             config=SimpleNamespace(
                 parallelism="PARA",
                 training=SimpleNamespace(
-                    max_context_length=2048,
                     num_tokens_per_microbatch_per_dp_rank=1,
                 ),
             ),
@@ -442,7 +441,6 @@ def test_forward_backward_runs_whole_accumulation(
         ),
         training=SimpleNamespace(
             disable_accelerator_graphs=True,
-            max_context_length=2048,
             num_tokens_per_microbatch_per_dp_rank=7,
             preprocess_microbatch_groups_lazily=lazily,
         ),
@@ -506,7 +504,6 @@ def test_forward_backward_runs_whole_accumulation(
         "parallelism_context": engine.parallelism_context,
         "parallelism": engine.config.parallelism,
         "max_num_documents": 4,
-        "max_context_length": 2048,
         "processor": "VALUE",
     }
 
@@ -819,6 +816,7 @@ def test_graph_training_engine_rejects_optimizer_accelerator_graph() -> None:
         GraphTrainingEngine(
             config,
             model_config=MagicMock(),
+            precision=MagicMock(),
             max_num_documents=None,
             output_dir="",
         )
@@ -838,6 +836,7 @@ def test_graph_training_engine_rejects_local_compile() -> None:
             model_config=SimpleNamespace(
                 local_compile=SimpleNamespace(regions=["loss"])
             ),
+            precision=MagicMock(),
             max_num_documents=None,
             output_dir="",
         )

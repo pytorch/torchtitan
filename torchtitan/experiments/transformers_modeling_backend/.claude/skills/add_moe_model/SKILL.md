@@ -490,7 +490,7 @@ def _new_model_test_config(*, tp: int = 1, ep: int = 1) -> Trainer.Config:
     config = transformers_modeling_backend_debugmodel_moe()
     model_config = model_registry(
         "debugmodel_moe",
-        seq_len=config.training.max_context_length,
+        seq_len=config.model.max_context_length,
         hf_model="<model_id>",
     )
     config.model = model_config

@@ -80,6 +80,8 @@ class Compressor(Module):
         head_dim: int = 512
         rope_head_dim: int = 64
         compress_ratio: int = 4
+        # ape is added to the float32 compression scores.
+        preserve_dtype_params: tuple[str, ...] = ("ape",)
 
     def __init__(self, config: Config):
         super().__init__()

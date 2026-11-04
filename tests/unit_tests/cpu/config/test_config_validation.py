@@ -11,7 +11,8 @@ import pytest
 
 from torchtitan.components.checkpointer.dcp import CheckpointManager
 from torchtitan.components.validator import Validator
-from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import DebugConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.observability.sdc_replayer import SDCReplayer
@@ -42,8 +43,6 @@ def test_training_token_counts_are_positive() -> None:
         TrainingConfig(num_tokens_per_microbatch_per_dp_rank=0)
     with pytest.raises(ValueError, match="must be -1 or greater than 0"):
         TrainingConfig(num_tokens_per_train_step=0)
-    with pytest.raises(ValueError, match="must be greater than 0"):
-        TrainingConfig(max_context_length=0)
 
 
 def test_per_group_accelerator_graph_config_restrictions() -> None:
@@ -240,10 +239,10 @@ def test_varlen_accelerator_graphs_require_document_bound() -> None:
 def test_cpu_offload_requires_distinct_dp_shard_seeds() -> None:
     with pytest.raises(ValueError, match="distinct_seed_mesh_axes"):
         TrainingEngine.Config(
-            training=TrainingConfig(enable_cpu_offload=True),
+            parallelism=ParallelismConfig(fsdp_enable_cpu_offloading=True),
         )
 
     TrainingEngine.Config(
-        training=TrainingConfig(enable_cpu_offload=True),
+        parallelism=ParallelismConfig(fsdp_enable_cpu_offloading=True),
         debug=DebugConfig(distinct_seed_mesh_axes=["pp", "dp_shard"]),
     )

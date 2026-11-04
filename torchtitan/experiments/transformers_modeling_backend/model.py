@@ -23,7 +23,7 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.flex_attention import flex_attention_forward
 from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.local_compile import LocalCompileConfig
@@ -215,7 +215,7 @@ class HFTransformerModel(BaseModel):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
         from torchtitan.distributed.fsdp import (
@@ -230,10 +230,10 @@ class HFTransformerModel(BaseModel):
         apply_fsdp(
             self,
             dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
+            reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
             pp_enabled=parallelism_context.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
+            cpu_offload=parallelism.fsdp_enable_cpu_offloading,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             symm_mem_scope=parallelism.fsdp_symm_mem_scope,
             ep_degree=parallelism_context.ep,
@@ -284,13 +284,14 @@ class HFTransformerModel(BaseModel):
             PretrainedConfig.__init__(
                 self, attn_implementation=_ATTN_IMPLEMENTATION, **kwargs
             )
-            # Set param_init and sharding_config before Module.Config.build()
-            # accesses them. PretrainedConfig.__getattribute__ doesn't
-            # recognize slots inherited from Module.Config.
+            # Set param_init, sharding_config and preserve_dtype_params before
+            # Module.Config.build() accesses them. PretrainedConfig.__getattribute__
+            # doesn't recognize slots inherited from Module.Config.
             self.param_init = (
                 None  # noqa: this sets Config.param_init, not Module._param_init
             )
             self.sharding_config = None
+            self.preserve_dtype_params = ()
             # HF modules run eager; the loss and the swapped-in TorchTitan MoE (SwiGLU) can compile.
             self.local_compile = LocalCompileConfig(
                 regions=["loss", "fused_binary_activation"]
@@ -516,6 +517,8 @@ class HFTransformerModel(BaseModel):
                 if key == "num_experts" and hasattr(self, "n_routed_experts"):
                     self.n_routed_experts = value
 
+            self.max_context_length = max_context_length
+            # Aliases HF's max_position_embeddings.
             self.max_seq_len = max_context_length
             self.deterministic = deterministic
 
@@ -1233,11 +1236,10 @@ class HFTransformerModel(BaseModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Build the attention mask (when positions are present), CP-shard, return."""
-        del max_num_documents, max_context_length, global_routing_token_counts
+        del max_num_documents, global_routing_token_counts
         # Function-local import avoids a circular import.
         from torchtitan.distributed import context_parallel
         from torchtitan.distributed.spmd_types import annotate_input_spmd_types

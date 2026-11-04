@@ -92,7 +92,6 @@ def qwen35_debugmodel(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         checkpointer=None,
@@ -167,7 +166,6 @@ def qwen35_debugmodel_moe(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
             disable_accelerator_graphs=True,
         ),

@@ -86,7 +86,6 @@ def qwen36_debugmodel(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         checkpointer=None,
@@ -144,7 +143,6 @@ def qwen36_debugmodel_moe(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
             disable_accelerator_graphs=True,
         ),
@@ -184,7 +182,6 @@ def qwen36_27b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=1000,
         ),
         parallelism=parallelism,
@@ -224,7 +221,6 @@ def qwen36_35b_a3b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=1000,
             disable_accelerator_graphs=True,
         ),
