@@ -102,7 +102,7 @@ def load_video(
         or None if loading fails.
     """
     try:
-        import av
+        import av  # pyrefly: ignore [missing-import]
 
         with av.open(path) as container:
             stream = container.streams.video[0]
