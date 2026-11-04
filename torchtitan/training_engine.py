@@ -134,6 +134,15 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
         def __post_init__(self) -> None:
             if (
+                self.profiler.kernel_span_ring is not None
+                and self.training.disable_accelerator_graphs
+            ):
+                raise ValueError(
+                    "profiler.kernel_span_ring requires accelerator graphs: kernels "
+                    "are named from their CUDA graph nodes. Set "
+                    "training.disable_accelerator_graphs=False."
+                )
+            if (
                 self.dist_moe_runtime is not None
                 and self.training.mixed_precision_param != "bfloat16"
             ):

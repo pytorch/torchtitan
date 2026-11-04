@@ -85,3 +85,56 @@ print(sorted(supported_metrics()))  # e.g. "sm__cycles_active" -> "sm__cycles_ac
 The trace gets the PM samples still in the buffer when profiling ends. If the warmup and active steps together take longer than the lookback window, the earliest samples are dropped.
 
 The sample buffer is held in process memory while profiling, not written to the trace. CUPTI stores raw hardware counters for every sample (several KB each, depending on the metrics), so it grows with lookback / interval: e.g. about 1.1 GiB at 100 s / 2 ms with 7 metrics.
+
+## Always-on kernel spans
+
+`Profiler.Config.kernel_span_ring` records every CUDA kernel's GPU start and end
+time on every training step with Cuspy, so a slow step can be inspected after the
+fact without having scheduled a profiling window for it. Each rank keeps the most
+recent `num_steps_retained` steps (default 1000) on disk:
+
+```python
+from torchtitan.observability.profiler import KernelSpanRingConfig
+
+config.profiler.kernel_span_ring = KernelSpanRingConfig(num_steps_retained=1000)
+```
+
+```
+<dump_folder>/profiling/kernel_span_ring/
+  rank0/
+    steps_000000000901_000000001000.npz   # one file per steps_per_file (100) steps, oldest deleted first
+    steps_000000001001_000000001100.npz
+  rank1/
+    ...
+```
+
+Kernels are named from the CUDA graph nodes they were replayed from, so this
+requires accelerator graphs (the default). Each file carries the kernel names and
+graph annotations (`mark_kernels` regions, c10d collective metadata) of the graphs
+its steps ran; eager kernels outside graphs are recorded without names. See
+[`kernel_span_ring.py`](kernel_span_ring.py) for the file format.
+
+Requirements are the Cuspy ones above, plus CUDA graph node ids: a CUDA 13.1 or
+newer driver, or cuda-compat 13.1 or newer on `LD_LIBRARY_PATH` (see
+`torch.cuda.graph_annotations.is_available`).
+
+Convert steps into a Chrome trace and open it in <https://ui.perfetto.dev>:
+
+```bash
+python scripts/kernel_span_ring_to_trace.py \
+    outputs/profiling/kernel_span_ring --steps 1050-1052 --ranks 0-3 \
+    --output trace.json.gz
+```
+
+Ranks become processes and CUDA streams become tracks, with a `steps` track
+marking each step's kernels.
+
+A step holds the kernels that started on the GPU between the host-side ends of
+the previous step and this one. Training only syncs the host with the GPU on
+logging steps, so when the host runs ahead of the GPU, a step can hold the tail of
+earlier steps. Steps buffered since the last file are lost if the process is
+killed without a clean shutdown.
+
+Measured on 4 GB300s with FSDP and CUDA graphs, collection and writing cost 0.4%
+of step time for Llama 3 8B (about 2,300 kernels per step) and under 0.5% for
+Qwen3 32B (about 5,400 kernels per step, about 190 KB per step on disk).

@@ -45,6 +45,8 @@ PY_STACKS_FILE = "rank{rank}_cuda_graph_py_stacks.json.gz"
 MEMORY_DIR = (
     "profiling/memory_snapshot"  # Profiler.Config.save_memory_snapshot_folder default
 )
+KERNEL_SPAN_RING_DIR = "profiling/kernel_span_ring"  # KernelSpanRingConfig default
+KERNEL_SPAN_RING_RANK_DIR = "rank{rank}"  # KERNEL_SPAN_RING_DIR/{..._RANK_DIR}
 MEMORY_STEP_DIR = "step_{step:012d}"  # MEMORY_DIR/{MEMORY_STEP_DIR}
 MEMORY_EXIT_DIR = "step_{step:012d}_exit"  # OOM dump variant
 MEMORY_FILE = (
@@ -118,7 +120,46 @@ class CuspyProfilerConfig:
             )
 
 
-def _cuspy_unavailable_reasons(config: CuspyProfilerConfig) -> list[str]:
+@dataclass(kw_only=True, slots=True)
+class KernelSpanRingConfig:
+    """Configure always-on CUDA kernel span collection with Cuspy.
+
+    Every step, each rank records its kernels' GPU start/end times, CUDA graph
+    node ids and streams, and writes them to disk every ``steps_per_file`` steps,
+    keeping the newest ``num_steps_retained`` steps. Requires accelerator graphs,
+    whose nodes name the kernels. See
+    ``torchtitan/observability/kernel_span_ring.py`` for the file format.
+    """
+
+    save_folder: str = KERNEL_SPAN_RING_DIR
+    """Step file location, relative to the job's output folder."""
+
+    num_steps_retained: int = 1000
+    """Number of steps to keep on disk per rank, rounded up to whole files. A step
+    takes about 32 bytes per kernel, e.g. 1.6 MB for a step of 50k kernels, so the
+    default keeps about 1.6 GB per rank at that size."""
+
+    steps_per_file: int = 100
+    """Number of steps buffered in host memory and written together, on the
+    training thread. Steps not yet written are lost if the process is killed.
+    Writing every step costs up to ~0.5 ms/step at 50k-200k kernels/step; batching
+    100 steps about halves that, and a 100-step file of ~5k-kernel steps takes
+    ~20 ms to write."""
+
+    def __post_init__(self) -> None:
+        if self.num_steps_retained <= 0:
+            raise ValueError(
+                "kernel_span_ring.num_steps_retained must be positive, got "
+                f"{self.num_steps_retained}."
+            )
+        if self.steps_per_file <= 0:
+            raise ValueError(
+                "kernel_span_ring.steps_per_file must be positive, got "
+                f"{self.steps_per_file}."
+            )
+
+
+def cuspy_unavailable_reasons(config: CuspyProfilerConfig) -> list[str]:
     """Return why Cuspy cannot run ``config`` in this environment; empty when it can.
 
     Probes without taking a CUPTI subscription: holding one makes Kineto's one-shot
@@ -335,6 +376,9 @@ class Profiler(Configurable):
         cuspy: CuspyProfilerConfig | None = None
         """Cuspy profiler settings; ``None`` profiles CUDA with Kineto."""
 
+        kernel_span_ring: KernelSpanRingConfig | None = None
+        """Always-on kernel span collection; ``None`` disables it."""
+
         def __post_init__(self) -> None:
             if self.enable_profiling and self.profile_freq < (
                 self.profiler_warmup + self.profiler_active
@@ -343,6 +387,17 @@ class Profiler(Configurable):
                     "profiler.profile_freq must be greater than or equal to "
                     "profiler_warmup + profiler_active."
                 )
+            if (
+                self.kernel_span_ring is not None
+                and self.enable_profiling
+                and self.cuspy is None
+            ):
+                # Kineto's one-shot CUPTI init fails once Cuspy holds the subscription.
+                raise ValueError(
+                    "profiler.kernel_span_ring requires profiler.cuspy when "
+                    "profiler.enable_profiling is set: Kineto cannot profile CUDA "
+                    "while Cuspy collects kernel spans."
+                )
 
         def maybe_cuda_graph_annotation_config(self) -> dict[str, Any] | None:
             """``torch.cuda.graph`` annotation options for a Cuspy-profiled run, or
@@ -350,7 +405,9 @@ class Profiler(Configurable):
             if not self.enable_profiling or self.cuspy is None:
                 return None
             return get_cuspy_cuda_graph_annotation_config(
-                enable_event_node_ids=self.cuspy.enable_event_node_ids,
+                # The kernel span ring names spans by exec-graph node id.
+                enable_event_node_ids=self.cuspy.enable_event_node_ids
+                or self.kernel_span_ring is not None,
                 record_py_stacks=self.cuspy.record_py_stacks,
             )
 
@@ -368,6 +425,7 @@ class Profiler(Configurable):
         self._leaf_folder = leaf_folder
         self.torch_profiler = None
         self.memory_profiler = None
+        self.kernel_span_recorder = None
 
     def active(
         self,
@@ -392,6 +450,11 @@ class Profiler(Configurable):
         return self
 
     def __enter__(self) -> "Profiler":
+        self.kernel_span_recorder = self.build_kernel_span_recorder(
+            global_step=self._global_step,
+            base_folder=self._base_folder,
+            leaf_folder=self._leaf_folder,
+        )
         self.torch_profiler = self.build_torch_profiler(
             global_step=self._global_step,
             base_folder=self._base_folder,
@@ -426,11 +489,17 @@ class Profiler(Configurable):
             if caused_by_oom(exc_val):
                 self.memory_profiler.step(exit_ctx=True)
             self.memory_profiler = None
+        if self.kernel_span_recorder is not None:
+            self.kernel_span_recorder.close()
+            self.kernel_span_recorder = None
         return False
 
     def step(self) -> None:
         """Advance all active profilers by one training step."""
 
+        if self.kernel_span_recorder is not None:
+            with sl.log_trace_span("kernel_span_recorder_step_call"):
+                self.kernel_span_recorder.step()
         if self.torch_profiler is not None:
             with sl.log_trace_span("kineto_profiler_step_call"):
                 self.torch_profiler.step()
@@ -537,7 +606,7 @@ class Profiler(Configurable):
                 raise ValueError(
                     "profiler.cuspy is set, but no CUDA device is available."
                 )
-            if reasons := _cuspy_unavailable_reasons(cuspy):
+            if reasons := cuspy_unavailable_reasons(cuspy):
                 raise ValueError(
                     "profiler.cuspy is set, but Cuspy cannot run here:\n  - "
                     + "\n  - ".join(reasons)
@@ -613,3 +682,38 @@ class Profiler(Configurable):
             rank,
             cfg.memory_snapshot_max_entries,
         )
+
+    def build_kernel_span_recorder(
+        self,
+        *,
+        global_step: int,
+        base_folder: str,
+        leaf_folder: str,
+    ):
+        """Create and return a ``KernelSpanRecorder``, or ``None`` if disabled.
+
+        The recorder starts collecting kernel spans immediately.
+        """
+        ring = self._config.kernel_span_ring
+        if ring is None:
+            return None
+        # Imported here: the module needs Cuspy and cupti-python.
+        from torchtitan.observability.kernel_span_ring import KernelSpanRecorder
+
+        ring_dir = os.path.join(
+            base_folder,
+            ring.save_folder,
+            leaf_folder,
+            KERNEL_SPAN_RING_RANK_DIR.format(rank=torch.distributed.get_rank()),
+        )
+        recorder = KernelSpanRecorder(
+            ring_dir,
+            global_step=global_step,
+            num_steps_retained=ring.num_steps_retained,
+            steps_per_file=ring.steps_per_file,
+        )
+        logger.info(
+            f"Kernel span ring active. Keeping the last {ring.num_steps_retained} "
+            f"steps at {ring_dir}"
+        )
+        return recorder
