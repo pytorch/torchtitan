@@ -496,7 +496,9 @@ def test_shutdown_closes_the_renderer():
 def test_reset_kv_cache_on_model_state_dict_load_controls_cache_reset(
     reset_kv_cache: bool,
 ):
-    model = SimpleNamespace(load_model_state_dict=lambda fetch: None)
+    model = SimpleNamespace(
+        model_state_dict_loader=SimpleNamespace(load=lambda fetch: None)
+    )
     engine = _vllm_engine(
         reset_kv_cache_on_model_state_dict_load=reset_kv_cache, model=model
     )

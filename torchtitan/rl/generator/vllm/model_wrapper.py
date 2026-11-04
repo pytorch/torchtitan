@@ -13,16 +13,11 @@ TorchTitan models for vLLM.
 
 import copy
 import dataclasses
-from collections.abc import Callable, Iterable, Iterator
-from typing import Any, cast
+from typing import cast
 
 import spmd_types as spmd
 
 import torch
-import torch.distributed as dist
-import torch.nn as nn
-from torch.distributed._composable.fsdp import FSDPModule
-from torch.distributed._state_dict_utils import _create_cpu_state_dict
 from torch.distributed.tensor import DTensor, Replicate
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -31,14 +26,10 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils import torch_utils as _torch_utils
 
-# Registers the "loss" local-compile region. The generator shares the trainer's
-# model config, whose local_compile.regions may name it, but never builds a loss.
-from torchtitan.components import loss as _loss  # noqa: F401
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
-from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
@@ -51,11 +42,15 @@ from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
-from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
+from torchtitan.rl.generator.inference_model import (
+    build_inference_model,
+    get_attention_dimensions,
+    load_initial_weights,
+    ModelStateDictLoader,
+)
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.vllm.registry import uses_compressed_mla_cache
-from torchtitan.tools.utils import set_default_dtype
 
 
 logger = init_logger(__name__)
@@ -67,10 +62,7 @@ def _replace_vllm_layer_configs(model_config):
     # Defer imports until vLLM constructs the model, after the generator has set
     # that environment. Import the GDN adapter only for hybrid models so other
     # models do not acquire its vLLM-specific dependencies.
-    from torchtitan.rl.generator.vllm.attention.attention import (
-        get_attention_dimensions,
-        VLLMInnerAttention,
-    )
+    from torchtitan.rl.generator.vllm.attention.attention import VLLMInnerAttention
     from torchtitan.rl.generator.vllm.attention.mla import (
         VLLMMLAAttention,
         VLLMMLAInnerAttention,
@@ -294,109 +286,6 @@ def _patch_vllm_all_reduce() -> None:
     )
 
 
-def _sharded_param_storages(module: FSDPModule) -> Iterator[torch.Tensor]:
-    """Yield the sharded parameter tensors of ``module``'s FSDP group."""
-    for param_group in module._get_fsdp_state()._fsdp_param_groups:
-        for param in param_group.fsdp_params:
-            sharded_data = param._sharded_param_data
-            if isinstance(sharded_data, _ShardedFSDPTensor):
-                sharded_data = sharded_data._tensor
-            yield sharded_data
-
-
-def _reshard(module: FSDPModule) -> None:
-    """Reshard ``module``'s FSDP group unconditionally, like FSDP's load_state_dict pre-hook.
-
-    ``module.reshard()`` is a no-op for a group left in the FORWARD state with
-    reshard_after_forward=False, e.g. the tied [tok_embeddings, norm, lm_head]
-    group after ``compute_logits`` calls lm_head alone.
-    """
-    # TODO: replace with a public FSDP API that reshards regardless of training state.
-    for param_group in module._get_fsdp_state()._fsdp_param_groups:
-        param_group._to_sharded()
-
-
-def _restore_sharded_params(module: FSDPModule) -> None:
-    """Re-allocate the sharded buffers of `module`'s FSDP group so new weights can be copied in.
-
-    before:  sharded: freed                     unsharded: old weights (what CUDA graphs read)
-    after:   sharded: allocated, uninitialized  unsharded: unchanged
-
-    FSDP's own load pre-hook may have resharded the group already (e.g.
-    tok_embeddings), so ``is_sharded`` can be True while the storage is still
-    freed; allocate unconditionally.
-    """
-    from torch.distributed.fsdp._fully_shard._fsdp_param import alloc_storage
-
-    # TODO: replace this with FSDPModule._restore_sharded_params()
-    for sharded_data in _sharded_param_storages(module):
-        alloc_storage(sharded_data)
-
-
-def _unshard_and_free_sharded_params(module: FSDPModule) -> None:
-    """Unshard `module`'s FSDP group into its unsharded buffers, then free its sharded ones.
-
-        before:  sharded: new weights   unsharded: old weights
-        after:   sharded: freed         unsharded: new weights (what CUDA graphs read)
-
-    The unshard is explicit because CUDA graph replays skip FSDP's forward pre-hook.
-    """
-    from torch.distributed.fsdp._fully_shard._fsdp_param import free_storage
-
-    with torch.inference_mode():
-        module.unshard()
-        # TODO: replace this with FSDPModule._free_sharded_params()
-        for sharded_data in _sharded_param_storages(module):
-            free_storage(sharded_data)
-
-
-def _fsdp_load_groups(
-    model: nn.Module,
-) -> tuple[list[tuple[FSDPModule, list[tuple[str, Any]]]], list[str]]:
-    """Group ``model.state_dict()`` keys by the FSDP group whose sharded parameters hold them.
-
-    Must run while every group is sharded, so the state dict holds the sharded
-    parameters. Tied parameters list each of their keys under the same group.
-
-    Returns:
-        ``(groups, buffer_keys)``: one ``(module, [(key, fsdp_param), ...])`` per FSDP
-        group in module order, where ``module`` is the group's first module; and the
-        keys of the buffers.
-    """
-    sharded_param_to_group: dict[int, tuple[FSDPModule, Any]] = {}
-    group_modules: dict[Any, FSDPModule] = {}
-    for module in model.modules():
-        if not isinstance(module, FSDPModule):
-            continue
-        state = module._get_fsdp_state()
-        if state in group_modules:
-            continue
-        group_modules[state] = module
-        for param_group in state._fsdp_param_groups:
-            for fsdp_param in param_group.fsdp_params:
-                sharded_param_to_group[id(fsdp_param.sharded_param)] = (
-                    module,
-                    fsdp_param,
-                )
-
-    keys_by_module: dict[FSDPModule, list[tuple[str, Any]]] = {
-        module: [] for module in group_modules.values()
-    }
-    buffers = {id(buffer) for buffer in model.buffers()}
-    buffer_keys = []
-    for key, value in model.state_dict(keep_vars=True).items():
-        group = sharded_param_to_group.get(id(value))
-        if group is None:
-            # A parameter here would be loaded outside the reshard/unshard sequence.
-            assert id(value) in buffers, f"{key} is neither FSDP-sharded nor a buffer"
-            buffer_keys.append(key)
-            continue
-        module, fsdp_param = group
-        keys_by_module[module].append((key, fsdp_param))
-    groups = [(module, keyed) for module, keyed in keys_by_module.items() if keyed]
-    return groups, buffer_keys
-
-
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,
@@ -438,105 +327,26 @@ class VLLMModelWrapper(Module):
 
         assert vllm_config is not None, "vllm_config is required"
 
-        # Translate the inference parallelism into torchtitan's full
-        # ParallelismConfig that ParallelismContext and model.parallelize consume.
-        training_parallelism = parallelism.to_training()
         model_config = copy.deepcopy(model_config)
         self.config = _replace_vllm_layer_configs(model_config)
-
-        # Build ParallelismContext from the translated ParallelismConfig so TP/EP
-        # sharding sees the same mesh shape as vLLM. The DP axis is represented
-        # as generator FSDP.
-        self.parallelism_context = ParallelismContext(
-            dp_replicate=training_parallelism.data_parallel_replicate_degree,
-            dp_shard=training_parallelism.data_parallel_shard_degree,
-            cp=training_parallelism.context_parallel_degree,
-            tp=training_parallelism.tensor_parallel_degree,
-            pp=training_parallelism.pipeline_parallel_degree,
-            ep=training_parallelism.expert_parallel_degree,
-            world_size=dist.get_world_size(),
-            enable_sequence_parallel=training_parallelism.enable_sequence_parallel,
-        )
-
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
-        param_dtype = TORCH_DTYPE_MAP[precision.param_dtype]
-        if vllm_config.model_config.dtype != param_dtype:
+        if vllm_config.model_config.dtype != TORCH_DTYPE_MAP[precision.param_dtype]:
             raise ValueError(
                 f"vLLM computes in {vllm_config.model_config.dtype}, but the trainer computes "
                 f"in precision.param_dtype={precision.param_dtype!r}. Pass "
                 "precision.param_dtype as the engine dtype."
             )
-        # Build model on meta device to avoid allocating full model on every GPU.
-        # Build in the trainer's master dtype (`precision.dtype`), so buffers and
-        # `preserve_dtype_params` get the dtypes the trainer has and sends.
-        with (
-            self.parallelism_context.activate_spmd(),
-            torch.device("meta"),
-            set_default_dtype(TORCH_DTYPE_MAP[precision.dtype]),
-        ):
-            self.model = self.config.build()
-        # The generator never computes gradients. Frozen parameters also let FSDP
-        # hold mixed dtypes, and Dist-MoE's inference context rejects any operand
-        # with requires_grad.
-        self.model.requires_grad_(False)
-        # Hold the other parameters in `precision.param_dtype`, the dtype the trainer
-        # computes with and sends, so the FSDP below casts none of them. Swap each
-        # parameter's tensor rather than assigning `param.data`, which keeps a
-        # quantized tensor subclass's inner tensor in the old dtype; keep the
-        # parameter's attributes (e.g. its SPMD type).
-        preserved = {param for _, param in self.model.named_preserve_dtype_params()}
-        for param in self.model.parameters():
-            if param in preserved or param.dtype == param_dtype:
-                continue
-            new_param = nn.Parameter(
-                param.detach().to(param_dtype), requires_grad=False
-            )
-            for name, value in param.__dict__.items():
-                new_param.__dict__.setdefault(name, value)
-            torch.utils.swap_tensors(param, new_param)
-        self.model._skip_lm_head = True
-        if getattr(self.model, "vision_encoder", None) is not None:
-            self.model.vision_encoder = None
-
-        self.model = self.model.parallelize(
-            parallelism_context=self.parallelism_context,
-            precision=precision,
-            parallelism=training_parallelism,
-            local_compile=self.config.local_compile,
-            activation_remat=None,
-            dump_folder="",
+        device = cast(torch.device, vllm_config.device_config.device)
+        self.model, self.parallelism_context = build_inference_model(
+            self.config, parallelism=parallelism, precision=precision, device=device
         )
-
-        # Preserve compute storage addresses across model state dict loads for CUDA graphs
-        assert isinstance(self.model, FSDPModule)
-        self.model.set_keep_unsharded_storage(True)
-
-        # Load initial weights based on checkpoint config.
-        self._checkpointer_config = checkpointer_config
-
-        # Materialize model on GPU — only allocates local shards (not full
-        # model) thanks to EP/TP DTensor sharding applied above.
-        self.model.to_empty(device=vllm_config.device_config.device)
-        # HF checkpoints do not necessarily contain every TorchTitan buffer
-        # (for example MoE expert_bias_E).
-        # TODO: When checkpoint doesn't contains expert_bias_E, check the config
-        # should use loss based load balancing strategy.
-        with torch.no_grad():
-            # spmd_types parameter init needs the current mesh to materialize
-            # local shards for fused parameters, including the fused QKV linear
-            # used by model variants such as Qwen3.
-            # TODO: Consider an init_non_persistent_buffers contract on the
-            # Decoder / Model class so buffer-only init does not need this
-            # spmd context.
-            with self.parallelism_context.activate_spmd():
-                self.model.init_weights(buffer_device=None)
         self._initialize_dist_moe_runtime(
             dist_moe_runtime,
             vllm_config.scheduler_config.max_num_batched_tokens,
-            cast(torch.device, vllm_config.device_config.device),
+            device,
         )
-        self._maybe_initial_load_weights()
+        load_initial_weights(self.model, self.config, checkpointer_config)
 
         # Give each gpt-oss attention's vLLM backend its sink rescale.
         self._inject_attention_sinks()
@@ -546,100 +356,12 @@ class VLLMModelWrapper(Module):
         if self.parallelism_context.tp_enabled and not is_in_batch_invariant_mode():
             _patch_vllm_all_reduce()
 
-        self._fsdp_load_groups, self._buffer_keys = _fsdp_load_groups(self.model)
-        if model_state_dict_load_mode == "gpu_fetch":
-            # gpu_fetch writes into the sharded parameter itself, not a quantized
-            # parameter's high-precision _tensor.
-            for _, keyed_params in self._fsdp_load_groups:
-                for key, fsdp_param in keyed_params:
-                    if isinstance(fsdp_param._sharded_param_data, _ShardedFSDPTensor):
-                        raise ValueError(
-                            "model_state_dict_load_mode='gpu_fetch' does not support "
-                            f"quantized parameters ({key})"
-                        )
-
-        # With cpu_prefetch, build pinned CPU receive buffers for model state dict
-        # loads while the model is still sharded. Bind first so first-touch places
-        # them on the NUMA node local to this rank's GPU.
         maybe_apply_numa_binding(torch.cuda.current_device(), "cuda")
-        self._prefetched_model_state_dict: dict[str, torch.Tensor] | None = None
-        if model_state_dict_load_mode == "cpu_prefetch":
-            # The sharded state dict has the dtypes the trainer sends (see
-            # `Trainer._put_model_state_dict`); torchstore's RDMA transport copies
-            # bytes and asserts matching dtypes.
-            with torch.device("cpu"):
-                self._prefetched_model_state_dict = _create_cpu_state_dict(
-                    self.model.state_dict(), pin_memory=True
-                )
-
-        # Unshard the model here so vLLM performs its GPU memory profiling
-        # based on the model's actual representation used during forward
-        for module in self.model.modules():
-            if isinstance(module, FSDPModule):
-                _unshard_and_free_sharded_params(module)
-
-    def load_model_state_dict(
-        self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
-    ) -> None:
-        """Fetch new weights into `self.model`, allocating one FSDP group's sharded buffers at a time.
-
-        Each group is allocated, filled by `fetch`, then unsharded and freed:
-
-            FSDP group:     [emb] | [l0] | ... | [lN] | [norm, lm_head] | buffers
-            allocate:       emb   | l0   |     | lN   | norm, lm_head   |
-            fetch:          emb   | l0   |     | lN   | norm, lm_head   | buffers
-            unshard, free:  emb   | l0   |     | lN   | norm, lm_head   |
-
-        With tied embeddings the group is [tok_embeddings, norm, lm_head].
-
-        Why this shape:
-          - Memory: allocating every sharded buffer first adds a second copy of the weights at
-            FSDP degree 1: 64.6 GiB extra for bf16 Qwen3.5-35B-A3B at TP1, vs 1.6 GiB here.
-          - Per group: modules from one `fully_shard` call share one FSDP state, so unsharding
-            after `norm` would all-gather `lm_head` before it loads.
-
-        Args:
-            fetch: Fills each tensor of the given subset of `self.model.state_dict()`
-                (each in its own dtype, as the trainer sends it) in place with the
-                new weights and returns the keys it filled, e.g. a
-                copy from the generator's pinned CPU buffers or a TorchStore read. Each
-                group's sharded storage is reallocated just before its fetch, so a
-                fetch writing outside the current stream (e.g. RDMA) must first wait
-                for queued device work, and must finish writing before it returns.
-        """
-        error = None
-        for module, keyed_params in self._fsdp_load_groups:
-            # unshard() is a no-op while the group is unsharded. Resharding registers
-            # the sharded parameters and keeps the unsharded storage CUDA graphs read.
-            _reshard(module)
-            _restore_sharded_params(module)
-            # After a failed fetch, keep unsharding the remaining groups: unshard()
-            # all-gathers across the FSDP group and the other ranks are still loading.
-            if error is None:
-                try:
-                    # The trainer sends each parameter in the dtype the generator
-                    # holds it in, so fetch fills the sharded parameters in place.
-                    params = {
-                        key: fsdp_param.sharded_param
-                        for key, fsdp_param in keyed_params
-                    }
-                    # An unfilled parameter would load its just-reallocated,
-                    # uninitialized storage.
-                    missing = params.keys() - fetch(params)
-                    if missing:
-                        raise RuntimeError(
-                            f"fetch did not fill {len(missing)} weights, e.g. "
-                            f"{sorted(missing)[:5]}"
-                        )
-                except Exception as e:
-                    error = e
-            _unshard_and_free_sharded_params(module)
-        if error is not None:
-            raise error
-        # Buffers load after every FSDP collective, so a failure here cannot hang
-        # peers. A fetch that skips unpublished keys (gpu_fetch) leaves them as is.
-        if self._buffer_keys:
-            fetch({key: self.model.get_buffer(key) for key in self._buffer_keys})
+        # Unshards the model, so vLLM profiles GPU memory with the model's
+        # representation during forward.
+        self.model_state_dict_loader = ModelStateDictLoader(
+            self.model, model_state_dict_load_mode=model_state_dict_load_mode
+        )
 
     def set_num_valid_tokens(self, num_valid_tokens: int) -> None:
         """Publish how many of this step's tokens are real, for the padding mask.
@@ -836,42 +558,6 @@ class VLLMModelWrapper(Module):
                 )
 
         return logits
-
-    def _maybe_initial_load_weights(self) -> None:
-        """Load initial HF weights via CheckpointManager.
-
-        A configured manager loads initial weights. ``None`` skips loading for
-        the RL loop, where weights arrive via TorchStore.
-        """
-        cfg = self._checkpointer_config
-        if cfg is None:
-            return
-
-        adapter_cls = type(self.model).state_dict_adapter_cls
-        sd_adapter = None
-        if adapter_cls is not None:
-            sd_adapter = adapter_cls(
-                model_config=self.config,
-                hf_assets_path=cfg.initial_load_path,
-            )
-
-        # Model-only CheckpointManager: initial_load_model_only=True (default)
-        # ensures only MODEL state is loaded, so None optimizer/lr_scheduler
-        # are never accessed.
-        checkpointer = cfg.build(
-            model_parts=[self.model],
-            optimizers=None,
-            lr_schedulers=None,
-            ema=None,
-            extra_states={},
-            sd_adapter=sd_adapter,
-        )
-        checkpointer.load()
-        # Free the large transient allocations the HF load/from_hf conversion left in the
-        # caching allocator, so the later CUDA-graph capture (which needs its own private
-        # pool) has room. Without this, large models (e.g. 235B) OOM capture even though
-        # the live weights fit.
-        torch.cuda.empty_cache()
 
     def load_weights(self, weights_iter):
         """
