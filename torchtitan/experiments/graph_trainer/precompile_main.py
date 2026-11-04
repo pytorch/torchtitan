@@ -126,7 +126,7 @@ def _common_setup(config):
     with (
         parallelism_context.activate_spmd(),
         torch.device("meta"),
-        utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
+        utils.set_default_dtype(TORCH_DTYPE_MAP[config.precision.dtype]),
     ):
         model = model_config.build()
 
@@ -134,6 +134,7 @@ def _common_setup(config):
     # (returns model unchanged), so we pass the real compile_config.
     model = model.parallelize(
         parallelism_context=parallelism_context,
+        precision=config.precision,
         training=config.training,
         parallelism=parallelism,
         compile_config=compile_config,

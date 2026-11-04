@@ -100,7 +100,7 @@ need `cast_forward_inputs=True`.
 Batch-invariant mode requires bfloat16 computation in both trainer and
 generator so they operate at the same precision. The generator always runs in
 bfloat16 (`generator.model_dtype="bfloat16"`). The trainer reaches the same
-precision with FSDP mixed precision (`training.mixed_precision_param="bfloat16"`,
+precision with FSDP mixed precision (`precision.param_dtype="bfloat16"`,
 the default): it keeps fp32 master weights and FSDP's `MixedPrecisionPolicy`
 casts them to bf16 before the forward, so the forward is numerically identical to
 the generator's bf16 path. The trainer always wraps the model in FSDP
@@ -111,7 +111,7 @@ still casts to bf16). No extra GPUs are required relative to TP-only. With
 `data_parallel_shard_degree > 1` the same cast happens during the sharded
 all-gather.
 
-The batch-invariant configs keep fp32 master weights (`TrainingConfig()` with
+The batch-invariant configs keep fp32 master weights (`PrecisionConfig()` with
 default `dtype="float32"`) and rely on FSDP mixed precision for the bf16 forward,
 so the optimizer updates fp32 weights while the forward stays bitwise identical
 to the generator.

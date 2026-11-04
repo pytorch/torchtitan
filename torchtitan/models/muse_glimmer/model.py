@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch_remat as remat
 
-from torchtitan.config import TrainingConfig
+from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
@@ -385,7 +385,7 @@ class MuseGlimmerModel(MultimodalModel):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
         local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
@@ -402,7 +402,7 @@ class MuseGlimmerModel(MultimodalModel):
 
         return super().parallelize(
             parallelism_context=parallelism_context,
-            training=training,
+            precision=precision,
             parallelism=parallelism,
             local_compile=local_compile,
             activation_remat=activation_remat,

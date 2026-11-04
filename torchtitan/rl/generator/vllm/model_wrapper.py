@@ -35,7 +35,7 @@ from vllm.utils import torch_utils as _torch_utils
 # model config, whose local_compile.regions may name it, but never builds a loss.
 from torchtitan.components import loss as _loss  # noqa: F401
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import TrainingConfig
+from torchtitan.config import PrecisionConfig
 from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import ParallelismContext
@@ -477,7 +477,7 @@ class VLLMModelWrapper(Module):
 
         self.model = self.model.parallelize(
             parallelism_context=self.parallelism_context,
-            training=TrainingConfig(),
+            precision=PrecisionConfig(),
             parallelism=training_parallelism,
             local_compile=self.config.local_compile,
             activation_remat=None,

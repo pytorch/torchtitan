@@ -14,7 +14,7 @@ import torch
 from spmd_types import SpmdType
 from torch import nn
 
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
@@ -159,7 +159,7 @@ class Decoder(BaseModel):
     _skip_lm_head: bool = False
 
     # FSDP's per-parameter dtype override (``param_dtype_override_fn``); None casts every
-    # parameter to ``training.mixed_precision_param``. The generator sets it.
+    # parameter to ``precision.param_dtype``. The generator sets it.
     # TODO: remove once parameters carry a per-FQN dtype, so FSDP keeps A_log/dt_bias
     # in float32 without a model attribute.
     _fsdp_param_dtype_override_fn: Callable[
@@ -170,7 +170,7 @@ class Decoder(BaseModel):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
         from torchtitan.distributed.fsdp import (
@@ -184,10 +184,10 @@ class Decoder(BaseModel):
         apply_fsdp_to_decoder(
             self,
             dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
+            reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
             pp_enabled=parallelism_context.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
+            cpu_offload=parallelism.fsdp_enable_cpu_offloading,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             ep_degree=parallelism_context.ep,
             edp_mesh=edp_mesh,

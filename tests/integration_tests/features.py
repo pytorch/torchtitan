@@ -32,6 +32,7 @@ from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.components.renderer import from_renderers
 from torchtitan.components.validator import Validator
+from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.distributed.activation_remat import (
@@ -83,12 +84,14 @@ class SDCReplayMismatchTrainingEngine(TrainingEngine):
         config: TrainingEngine.Config,
         *,
         model_config: BaseModel.Config,
+        precision: PrecisionConfig,
         max_num_documents: int | None,
         output_dir: str,
     ) -> None:
         super().__init__(
             config,
             model_config=model_config,
+            precision=precision,
             max_num_documents=max_num_documents,
             output_dir=output_dir,
         )
@@ -465,7 +468,7 @@ def llama3_debugmodel_pp2_custom_csv() -> Trainer.Config:
 def muse_glimmer_debugmodel_optimizer_bf16_states() -> Trainer.Config:
     config = muse_glimmer_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
-    config.training.mixed_precision_reduce = "float32"
+    config.precision.reduce_dtype = "float32"
     config.optim.optimizer = OptimizersContainer.Config(
         optimizers=[AdamW.Config(pattern=r".*", moment_dtype="bfloat16")]
     )

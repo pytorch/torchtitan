@@ -13,7 +13,7 @@ checkpoint parameter names stay in TorchTitan.
 | Quantized grouped GEMMs with the reference dispatcher | `TorchAOTokenDispatcher` | Adds per-expert padding to all-to-all. Also supports EP=1. |
 | NVIDIA training or inference with a separate grouped-GEMM implementation | `DeepEPTokenDispatcher` | Requires DeepEP v2. Training uses compact dispatch with a CPU sync; disable training accelerator graphs. Inference under `no_grad` can use `cuda_graph_compatible=True` for the static expand layout. |
 | NVIDIA training with graph-captured EP communication, including graph trainer | `HybridEPTokenDispatcher` | Requires the HybridEP branch and a supported NVLink/network topology. Set `non_blocking_capacity_factor` for CPU-free dispatch. |
-| Blackwell BF16 or MXFP8 training with integrated communication and compute | Dist-MoE | Requires SM100 or newer and `training.mixed_precision_param="bfloat16"`. Start with the [Dist-MoE recipes and runtime guide](../dist_moe/README.md). |
+| Blackwell BF16 or MXFP8 training with integrated communication and compute | Dist-MoE | Requires SM100 or newer and `precision.param_dtype="bfloat16"`. Start with the [Dist-MoE recipes and runtime guide](../dist_moe/README.md). |
 
 Without expert parallelism, `LocalTokenDispatcher` only reorders local tokens.
 DeepEP and HybridEP require EP>1. TorchTitan does not expose a separate DeepEP

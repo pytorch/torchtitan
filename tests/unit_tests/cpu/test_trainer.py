@@ -819,6 +819,7 @@ def test_graph_training_engine_rejects_optimizer_accelerator_graph() -> None:
         GraphTrainingEngine(
             config,
             model_config=MagicMock(),
+            precision=MagicMock(),
             max_num_documents=None,
             output_dir="",
         )
@@ -838,6 +839,7 @@ def test_graph_training_engine_rejects_local_compile() -> None:
             model_config=SimpleNamespace(
                 local_compile=SimpleNamespace(regions=["loss"])
             ),
+            precision=MagicMock(),
             max_num_documents=None,
             output_dir="",
         )

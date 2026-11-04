@@ -233,6 +233,7 @@ def test_ft_training_engine_rejects_optimizer_accelerator_graph() -> None:
         ft.FaultTolerantTrainingEngine(
             config,
             model_config=MagicMock(),
+            precision=MagicMock(),
             max_num_documents=None,
             output_dir="",
             fault_tolerance=MagicMock(),

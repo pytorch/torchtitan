@@ -134,13 +134,13 @@ def build_trainer_model(
     with (
         parallelism_context.activate_spmd(),
         torch.device("meta"),
-        utils.set_default_dtype(TORCH_DTYPE_MAP[trainer_config.training.dtype]),
+        utils.set_default_dtype(TORCH_DTYPE_MAP[config.precision.dtype]),
     ):
         model = model_config.build()
 
     model = model.parallelize(
         parallelism_context=parallelism_context,
-        training=trainer_config.training,
+        precision=config.precision,
         parallelism=parallelism,
         local_compile=model_config.local_compile,
         activation_remat=trainer_config.activation_remat,

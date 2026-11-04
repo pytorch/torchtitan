@@ -12,7 +12,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.tensor import Shard
 
-from torchtitan.config import TrainingConfig
+from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
@@ -100,7 +100,7 @@ def test_decoder_fsdp_param_dtype_override_fn_keeps_float32_param(
                 world_size=1,
                 enable_sequence_parallel=False,
             ),
-            training=TrainingConfig(),
+            precision=PrecisionConfig(),
             parallelism=parallelism,
         )
         model.norm.unshard()

@@ -18,7 +18,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpointer import DATALOADER
 from torchtitan.components.data.loader import DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
-from torchtitan.config import apply_overrides, Configurable
+from torchtitan.config import apply_overrides, Configurable, PrecisionConfig
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.accelerator_graph import accelerator_graphs_supported
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
@@ -50,6 +50,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         config: TrainingEngine.Config,
         *,
         model_config: BaseModel.Config,
+        precision: PrecisionConfig,
         max_num_documents: int | None,
         output_dir: str,
         fault_tolerance: FaultTolerance,
@@ -61,6 +62,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         super().__init__(
             config,
             model_config=model_config,
+            precision=precision,
             max_num_documents=max_num_documents,
             output_dir=output_dir,
         )
@@ -87,7 +89,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         )
         topology = dist_utils.init_distributed(
             config.comm,
-            enable_cpu_backend=config.training.enable_cpu_offload,
+            enable_cpu_backend=config.parallelism.fsdp_enable_cpu_offloading,
             base_folder=self.output_dir,
             ranks=global_ranks,
             pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
@@ -177,6 +179,7 @@ class FaultTolerantTrainer(Configurable):
         self.engine = FaultTolerantTrainingEngine(
             config,
             model_config=model_config,
+            precision=config.precision,
             max_num_documents=config.dataloader.max_num_documents,
             output_dir=config.dump_folder,
             fault_tolerance=config.fault_tolerance,

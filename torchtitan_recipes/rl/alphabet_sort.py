@@ -25,7 +25,12 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.components.renderer import from_renderers
-from torchtitan.config import DebugConfig, OverrideConfig, TrainingConfig
+from torchtitan.config import (
+    DebugConfig,
+    OverrideConfig,
+    PrecisionConfig,
+    TrainingConfig,
+)
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     BatchInvariantFlexConverter,
@@ -213,6 +218,7 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
+        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -228,7 +234,6 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
-                dtype="bfloat16",
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -306,7 +311,7 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     for bitwise-identical numerics between trainer and generator (4 GPUs: 2 gen + 2 train).
 
     Trainer keeps fp32 master weights; FSDP mixed precision
-    (mixed_precision_param="bfloat16", the default) casts them to bf16 for the
+    (precision.param_dtype="bfloat16", the default) casts them to bf16 for the
     forward (even at data_parallel_shard_degree=1), matching the bf16 generator.
     """
     config = rl_grpo_qwen3_0_6b_flex()
@@ -314,11 +319,11 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     # latest weights before generating so trainer/generator logprobs stay
     # bitwise-identical (bit_wise/logprob_diff == 0) every step, not just step 1.
     config.async_loop.target_offpolicy_steps = 0
+    # fp32 master weights; FSDP mixed precision casts to bf16 for the forward.
+    config.precision = dataclasses.replace(config.precision, dtype="float32")
     config.trainer = dataclasses.replace(
         config.trainer,
         debug=_BATCH_INVARIANT_DEBUG,
-        # fp32 master weights; FSDP mixed precision casts to bf16 for the forward.
-        training=dataclasses.replace(config.trainer.training, dtype="float32"),
         parallelism=dataclasses.replace(
             config.trainer.parallelism, enable_sequence_parallel=False
         ),
@@ -530,6 +535,7 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
+        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -545,7 +551,6 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
-                dtype="bfloat16",
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -612,6 +617,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
+        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -627,7 +633,6 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
-                dtype="bfloat16",
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -684,7 +689,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
     Enables deterministic + batch-invariant mode for true on-policy RL training.
 
     Trainer keeps fp32 master weights; FSDP mixed precision
-    (mixed_precision_param="bfloat16", the default) casts them to bf16 for the
+    (precision.param_dtype="bfloat16", the default) casts them to bf16 for the
     forward (the cast happens even at data_parallel_shard_degree=1, where FSDP
     wraps the model purely as a mixed-precision boundary), so the trainer
     forward is bitwise identical to the bf16 generator.
@@ -823,6 +828,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
+        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -838,7 +844,6 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
                 max_context_length=seq_len,
-                dtype="bfloat16",
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
