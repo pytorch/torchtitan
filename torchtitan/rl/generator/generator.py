@@ -9,9 +9,11 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import os
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -22,6 +24,7 @@ import torchstore as ts
 from torchstore import RankRole
 
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.data.multimodal.image_processor import ImageProcessor
 from torchtitan.config import Configurable, DebugConfig, PrecisionConfig
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.models.common.decoder import Decoder
@@ -33,10 +36,13 @@ from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadM
 from torchtitan.rl.generator.engine_loop import EngineLoop, EngineLoopThread
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
-from torchtitan.rl.rollout.types import Completion
+from torchtitan.rl.rollout.types import Completion, Prompt
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 
 logger = logging.getLogger(__name__)
+
+# Image files `Generator.generate` keeps one bytes object of, newest first.
+_NUM_SHARED_IMAGE_FILES = 64
 
 
 def _default_engine_config() -> GenerationEngine.Config:
@@ -84,6 +90,8 @@ class Generator(Configurable):
             adapter supplies ``Channel.open``; standalone runtimes can supply
             an equivalent transport. It is unused when data parallelism is
             disabled.
+        image_processor: How the model turns an image into vision tokens; the engine
+            decodes and patchifies image prompts' files with it. None: text only.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -154,7 +162,10 @@ class Generator(Configurable):
         later turns reuse its KV across model state dict loads, while new groups use the current
         version.
         Enable this to clear prefix-cache entries and preempt running requests; the engine
-        then recomputes their KV under the new weights when they resume."""
+        then recomputes their KV under the new weights when they resume. With image
+        prompts it also clears vLLM's encoder cache (image embeddings from the old vision
+        weights); without it, image embeddings are salted by the pinned version like the
+        KV."""
 
         model_state_dict_load_mode: ModelStateDictLoadMode = "cpu_prefetch"
         """How a model state dict load moves the StorageVolume snapshot into the engine's weights.
@@ -211,6 +222,7 @@ class Generator(Configurable):
         rank: int | None = None,
         generator_name: str = "generator",
         open_result_channel: Callable[[], tuple[Any, Any]] | None = None,
+        image_processor: ImageProcessor.Config | None = None,
     ):
         init_logger()
         # TODO: Quiet torchstore's per-op transport-resolve INFO spam (very noisy in CI).
@@ -224,6 +236,8 @@ class Generator(Configurable):
         sl.log_trace_instant("structured_logger_started")
 
         self.config = config
+        # Content key -> one bytes object for the file, so a decision's requests share it.
+        self._image_files: OrderedDict[str, bytes] = OrderedDict()
 
         self._rank = rank if rank is not None else int(os.environ.get("RANK", "0"))
         dp_degree = config.parallelism.data_parallel_degree
@@ -254,6 +268,7 @@ class Generator(Configurable):
                         config.reset_kv_cache_on_model_state_dict_load
                     ),
                     model_state_dict_load_mode=config.model_state_dict_load_mode,
+                    image_processor=image_processor,
                     rank=self._rank,
                     generator_name=generator_name,
                     output_dir=output_dir,
@@ -366,7 +381,7 @@ class Generator(Configurable):
     @sl.log_trace_span("generate")
     async def generate(
         self,
-        prompt_token_ids: list[int],
+        prompt: Prompt,
         *,
         request_id: str,
         group_id: int,
@@ -385,7 +400,8 @@ class Generator(Configurable):
         `VLLMValidationError` or `ValueError`).
 
         Args:
-            prompt_token_ids: One tokenized prompt `[token_ids]`.
+            prompt: One prompt: its tokens and images, with their files' bytes (the engine
+                decodes the images).
             request_id: Unique id for this request, echoed on the `Completion`.
             group_id: Rollout group id. Requests of one group share a prefix cache
                 salt; `release_groups` drops it. Also sets the vLLM priority; see
@@ -400,7 +416,7 @@ class Generator(Configurable):
         Example:
 
             completion = await generator.slice(hosts=0, gpus=0).generate.call_one(
-                [1, 2, 3],
+                Prompt(token_ids=[1, 2, 3]),
                 request_id="step=3/group=0/sample=0/turn=0",
                 group_id=0,
                 routing_session_id="group=0/rollout=0",
@@ -415,7 +431,7 @@ class Generator(Configurable):
         return await self._engine_loop.generate(
             EngineRequest(
                 request_id=request_id,
-                prompt_token_ids=prompt_token_ids,
+                prompt=self._share_image_files(prompt),
                 sampling=sampling,
                 group_id=group_id,
                 routing_session_id=routing_session_id,
@@ -423,6 +439,21 @@ class Generator(Configurable):
             ),
             metrics_prefix=metrics_prefix,
         )
+
+    def _share_image_files(self, prompt: Prompt) -> Prompt:
+        """Return ``prompt`` with one bytes object per image file across requests.
+
+        The samples of a group arrive as separate calls with copies of the same files; sharing
+        one object lets the engine loop's decision broadcast to TP ranks pickle each file once.
+        """
+        shared = []
+        for image in prompt.images:
+            data = self._image_files.pop(image.key, image.data)
+            self._image_files[image.key] = data
+            if len(self._image_files) > _NUM_SHARED_IMAGE_FILES:
+                self._image_files.popitem(last=False)
+            shared.append(dataclasses.replace(image, data=data))
+        return dataclasses.replace(prompt, images=tuple(shared))
 
     async def release_groups(self, group_ids: list[int]) -> None:
         """Drop the pinned cache salts and the held KV of finished rollout groups.

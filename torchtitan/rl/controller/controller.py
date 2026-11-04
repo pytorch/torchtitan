@@ -101,6 +101,7 @@ from typing import Any
 # and in train.py; see the note there.
 import torch  # noqa: F401
 
+from torchtitan.components.data.multimodal.image_processor import ImageProcessor
 from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import (
@@ -127,7 +128,7 @@ from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout.rollouter import Rollouter
-from torchtitan.rl.rollout.types import Completion, GenerateFn, ReleaseSessionFn
+from torchtitan.rl.rollout.types import Completion, GenerateFn, Prompt, ReleaseSessionFn
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
 from torchtitan.rl.trainer.trainer import Trainer
@@ -278,6 +279,13 @@ class Controller(Configurable):
         )
         """Tokenizer loaded from `hf_assets_path`."""
 
+        image_processor: ImageProcessor.Config | None = None
+        """The model's image preprocessing, for image prompts, e.g.
+        `ImageProcessor.Config(**QWEN3_5_IMAGE_PROCESSOR)`. The renderer computes each
+        image's patch grid and number of placeholder tokens with it, and the generator
+        decodes and patchifies the image files with it, so both see the same pixels.
+        None: text prompts only."""
+
         renderer: RendererConfig
         """The model's chat template; renders messages to token ids and parses completions
         back. E.g. `from_renderers(Qwen3RendererConfig(enable_thinking=False))`."""
@@ -405,6 +413,18 @@ class Controller(Configurable):
                     "async_loop.batcher.rdma_min_tensor_bytes does not support "
                     "trainer pipeline parallelism yet."
                 )
+            if self.image_processor is not None:
+                if getattr(self.generator.model, "vision_encoder", None) is None:
+                    raise ValueError(
+                        "image_processor is set, but the generator model "
+                        f"({type(self.generator.model).__qualname__}) has no vision encoder."
+                    )
+                # TODO: remove once the batcher and the trainer take image inputs.
+                raise NotImplementedError(
+                    "image_processor is set, but training on image prompts is not "
+                    "supported yet: the trainer would see their placeholder tokens "
+                    "without the images."
+                )
             if self.trainer.parallelism.enable_sequence_parallel:
                 sp_degree = self.trainer.parallelism.tensor_parallel_degree
                 max_context_length = self.trainer.model.max_context_length
@@ -463,7 +483,13 @@ class Controller(Configurable):
             job_config=config.to_dict(),
         )
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
-        self.renderer = config.renderer.build(tokenizer=self.tokenizer)
+        # The renderer config every rollout worker builds its renderer from.
+        self._renderer_config = config.renderer
+        if config.image_processor is not None:
+            self._renderer_config = config.renderer.with_image_processor(
+                config.image_processor
+            )
+        self.renderer = self._renderer_config.build(tokenizer=self.tokenizer)
 
         # Carry the base seed and renderer stop tokens on the sampling config so
         # the generator reads them off each request; the rollouter offsets the
@@ -541,7 +567,7 @@ class Controller(Configurable):
 
         @sl.log_trace_span("generate")
         async def generate(
-            prompt_token_ids: list[int],
+            prompt: Prompt,
             *,
             request_id: str,
             group_id: int,
@@ -549,7 +575,7 @@ class Controller(Configurable):
             sampling_config: SamplingConfig | None = None,
         ) -> Completion | None:
             return await generator_router.generate.call_one(
-                prompt_token_ids,
+                prompt,
                 request_id=request_id,
                 group_id=group_id,
                 routing_session_id=routing_session_id,
@@ -647,6 +673,7 @@ class Controller(Configurable):
                 model_path=config.hf_assets_path,
                 max_num_seqs=max_num_seqs,
                 output_dir=config.dump_folder,
+                image_processor=config.image_processor,
             )
             self.batcher = await actor_system.spawn_batcher(
                 async_loop.batcher,
@@ -670,7 +697,7 @@ class Controller(Configurable):
             await self._rollouter.setup_async(
                 actor_system=actor_system,
                 tokenizer_config=config.tokenizer,
-                renderer_config=config.renderer,
+                renderer_config=self._renderer_config,
                 hf_assets_path=config.hf_assets_path,
             )
 

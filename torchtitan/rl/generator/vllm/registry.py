@@ -49,6 +49,8 @@ from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+    from torchtitan.components.data.multimodal.image_processor import ImageProcessor
+
 logger = logging.getLogger(__name__)
 
 # Model-agnostic name used for vLLM model registration.
@@ -202,13 +204,16 @@ def register_to_vllm(
     checkpointer_config: CheckpointManager.Config | None,
     dist_moe_runtime: DistMoeRuntime.Config | None = None,
     model_state_dict_load_mode: ModelStateDictLoadMode,
+    image_processor: ImageProcessor.Config | None = None,
 ) -> None:
     """Register the TorchTitan model class and the TorchTitan config parser with vLLM.
 
     Single entry point for vLLM integration. Must be called before creating
     a vLLM engine that uses a TorchTitan model. Registers three things:
 
-      1. ``VLLMModelFromSpec`` (subclass of ``VLLMModelWrapper``)
+      1. ``VLLMModelFromSpec`` (subclass of ``VLLMModelWrapper``, or of
+         ``VLLMMultimodalModelWrapper`` with an image processor attached when
+         ``image_processor`` is set)
          with vLLM's ``ModelRegistry`` under the name ``VLLM_MODEL_NAME``.
          The dynamic subclass closes over
          ``model_config``/``parallelism``/``precision``/``checkpointer_config``
@@ -243,6 +248,10 @@ def register_to_vllm(
             with Dist-MoE routed experts; ``None`` otherwise.
         model_state_dict_load_mode: ``Generator.Config``'s field; ``"cpu_prefetch"``
             allocates the pinned CPU copy model state dicts are prefetched into.
+        image_processor: Serve image prompts preprocessed with it: registers
+            ``VLLMMultimodalModelWrapper`` (keeps the vision encoder) and an image
+            processor for vLLM's startup, after checking the model's attention uses
+            M-RoPE. ``None``: text only.
     """
     has_gdn = any(
         isinstance(layer.attention, GDN.Config) for layer in model_config.layers
@@ -271,8 +280,25 @@ def register_to_vllm(
 
     from torchtitan.rl.generator.vllm.model_wrapper import VLLMModelWrapper
 
+    wrapper_cls = VLLMModelWrapper
+    wrapper_kwargs = {}
+    # The HF config entries for M-RoPE; computed before the engine build, so a model
+    # without M-RoPE attention raises here.
+    mrope_config: dict[str, Any] = {}
+    processor = None
+    if image_processor is not None:
+        from torchtitan.rl.generator.vllm.multimodal import (
+            mrope_hf_config,
+            VLLMMultimodalModelWrapper,
+        )
+
+        mrope_config = mrope_hf_config(model_config)
+        processor = image_processor.build()
+        wrapper_cls = VLLMMultimodalModelWrapper
+        wrapper_kwargs["image_processor"] = processor
+
     # Dynamic model class capturing torchtitan config in the closure.
-    class VLLMModelFromSpec(VLLMModelWrapper):
+    class VLLMModelFromSpec(wrapper_cls):
         def __init__(self, *, vllm_config, prefix=""):
             super().__init__(
                 model_config=model_config,
@@ -283,6 +309,7 @@ def register_to_vllm(
                 prefix=prefix,
                 dist_moe_runtime=dist_moe_runtime,
                 model_state_dict_load_mode=model_state_dict_load_mode,
+                **wrapper_kwargs,
             )
 
     VLLMModelFromSpec.__name__ = VLLM_MODEL_NAME
@@ -301,6 +328,12 @@ def register_to_vllm(
         )
 
         maybe_configure_kda_hybrid_model(VLLMModelFromSpec, model_config)
+    if processor is not None:
+        from torchtitan.rl.generator.vllm.multimodal import (
+            register_multimodal_processor,
+        )
+
+        register_multimodal_processor(VLLMModelFromSpec, processor)
     ModelRegistry.register_model(VLLM_MODEL_NAME, VLLMModelFromSpec)
 
     # Dynamic config parser class capturing the model config in the closure. This
@@ -317,6 +350,7 @@ def register_to_vllm(
             **kwargs,
         ):
             config_dict = model_config_to_hf_config_dict(model_config)
+            config_dict.update(mrope_config)
             return config_dict, PretrainedConfig.from_dict(config_dict)
 
     # vLLM's default is_deepseek_mla only recognizes a hardcoded list of model

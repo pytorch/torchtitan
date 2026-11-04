@@ -483,7 +483,7 @@ class RolloutWorker(Configurable):
 
                 # generator call
                 completion = await generate_fn(
-                    prompt_token_ids=env_step.next_prompt_token_ids,
+                    prompt=env_step.next_prompt,
                     request_id=turn_rollout_id.to_string(),
                     group_id=group_id,
                     routing_session_id=routing_session_id,
@@ -499,6 +499,8 @@ class RolloutWorker(Configurable):
                         rollout_id=turn_rollout_id,
                         prompt_prefix_len=env_step.next_prompt_prefix_len,
                         prompt_delta_token_ids=env_step.next_prompt_delta_token_ids,
+                        prompt_images=env_step.next_prompt.images,
+                        prompt_image_placeholders=env_step.next_prompt.image_placeholders,
                         prompt_messages=env_step.next_prompt_messages or [],
                         completion_token_ids=np.asarray(
                             completion.token_ids, dtype=np.int32

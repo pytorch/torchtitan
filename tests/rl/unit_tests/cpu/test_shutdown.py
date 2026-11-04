@@ -134,6 +134,7 @@ def _make_stub_rl_trainer():
         tokenizer = SimpleNamespace(
             build=lambda *, tokenizer_path: SimpleNamespace(eos_id=0)
         )
+        image_processor = None
         renderer = SimpleNamespace(
             build=lambda *, tokenizer: SimpleNamespace(get_stop_token_ids=lambda: [])
         )
