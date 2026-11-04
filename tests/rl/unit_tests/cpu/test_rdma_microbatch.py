@@ -77,6 +77,11 @@ def _microbatch(num_tokens: int) -> TrainingMicrobatch:
         temperature=torch.ones(num_tokens),
         loss_mask=tokens % 2 == 0,
         advantages=tokens.float() / num_tokens,
+        # One top-k row per loss token (every other token).
+        generator_topk_token_ids=torch.arange(num_tokens * 2, dtype=torch.int32).view(
+            num_tokens // 2, 4
+        ),
+        generator_topk_logprobs=-torch.ones(num_tokens // 2, 4),
         model_kwargs={
             "routed_expert_ids": torch.arange(num_tokens * 4, dtype=torch.uint8).view(
                 num_tokens, 2, 2
@@ -140,6 +145,7 @@ def _build_batcher(rdma_min_tensor_bytes: int | None) -> Batcher:
         dp_degree=1,
         pad_id=0,
         temperature=1.0,
+        num_topk_logprobs=0,
         register_rdma_microbatch=MonarchRDMAMicrobatch.register,
     )
 
@@ -153,6 +159,7 @@ def test_batcher_rejects_rdma_without_a_registration() -> None:
             dp_degree=1,
             pad_id=0,
             temperature=1.0,
+            num_topk_logprobs=0,
         )
 
 
@@ -311,6 +318,7 @@ def test_four_ranks_read_their_columns_exactly_across_released_batches(
         dp_degree=4,
         pad_id=0,
         temperature=1.0,
+        num_topk_logprobs=0,
     )
     rdma_batcher = Batcher.Config(rdma_min_tensor_bytes=256).build(
         **batcher_kwargs, register_rdma_microbatch=MonarchRDMAMicrobatch.register

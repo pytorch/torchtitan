@@ -32,7 +32,10 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder import TransformerBlock
-from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+from torchtitan.models.common.decoder_sharding import (
+    decoder_input_sharding,
+    loss_kwarg_sharding,
+)
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.flops import (
     get_nparams_and_active_nparams,
@@ -616,7 +619,9 @@ class MuseSparkModel(MultimodalModel):
             "audio_bank_indices_T",
         ):
             input_sharding[bank_indices_name] = bank_indices_placement
-        input_sharding.update(dict.fromkeys(loss_kwargs, input_sharding["labels"]))
+        input_sharding.update(
+            loss_kwarg_sharding(loss_kwargs, input_sharding["labels"])
+        )
         batch.update(loss_kwargs)
         if parallelism_context.cp_enabled:
             batch = self._cp_shard(

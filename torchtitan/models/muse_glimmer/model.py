@@ -32,7 +32,10 @@ from torchtitan.models.common.attention import (
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+from torchtitan.models.common.decoder_sharding import (
+    decoder_input_sharding,
+    loss_kwarg_sharding,
+)
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.flops import (
@@ -474,7 +477,9 @@ class MuseGlimmerModel(MultimodalModel):
         input_shardings["vision_bank_indices_T"] = vision_bank_indices_placement(
             enable_sp=parallelism.enable_sequence_parallel
         )
-        input_shardings.update(dict.fromkeys(loss_kwargs, input_shardings["labels"]))
+        input_shardings.update(
+            loss_kwarg_sharding(loss_kwargs, input_shardings["labels"])
+        )
         input_dict.update(loss_kwargs)
         if parallelism_context.cp_enabled:
             input_dict = self._cp_shard(

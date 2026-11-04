@@ -1246,11 +1246,16 @@ class HFTransformerModel(BaseModel):
         from torchtitan.models.common.attention.cp_attention import (
             AllGatherKVFlexInnerAttention,
         )
-        from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+        from torchtitan.models.common.decoder_sharding import (
+            decoder_input_sharding,
+            loss_kwarg_sharding,
+        )
 
         input_shardings = decoder_input_sharding()
         loss_kwargs = input_dict.pop("loss_kwargs", {})
-        input_shardings.update(dict.fromkeys(loss_kwargs, input_shardings["labels"]))
+        input_shardings.update(
+            loss_kwarg_sharding(loss_kwargs, input_shardings["labels"])
+        )
         input_dict.update(loss_kwargs)
         input_dict.pop("padding_mask", None)
         if "attention_metadata" not in input_dict:

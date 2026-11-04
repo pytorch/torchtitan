@@ -67,6 +67,8 @@ class TestDecoderLossKwargsContextParallel(DTensorTestBase):
                             "loss_kwargs": {
                                 "advantages": labels_T.float() / 10,
                                 "loss_mask": labels_T % 3 != 0,
+                                # [T, k]: sharded along tokens, k replicated.
+                                "topk_ids_TK": labels_T[:, None] * 10 + torch.arange(3),
                                 "reduction": "sum",
                             },
                         },
@@ -90,6 +92,10 @@ class TestDecoderLossKwargsContextParallel(DTensorTestBase):
                 )
                 torch.testing.assert_close(
                     loss_kwargs["loss_mask"], local_labels_T % 3 != 0
+                )
+                torch.testing.assert_close(
+                    loss_kwargs["topk_ids_TK"],
+                    local_labels_T[:, None] * 10 + torch.arange(3),
                 )
                 self.assertEqual(loss_kwargs["reduction"], "sum")
                 self.assertFalse(model_kwargs.keys() & loss_kwargs.keys())

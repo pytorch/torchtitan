@@ -100,6 +100,34 @@ def _target_mask(target_lane: torch.Tensor, local_vocab_size: int) -> torch.Tens
     return lanes == target_lane.unsqueeze(-1)
 
 
+def _local_vocab_shard(
+    logits: torch.Tensor, tp_group: dist.ProcessGroup, global_vocab_size: int
+) -> tuple[int, int]:
+    """`(vocab_start, local_vocab_size)` of this rank's vocab shard.
+
+    Raises if `logits.shape[-1]` is not `local_vocab_size`, or if this rank's shard is empty.
+    Example: global_vocab_size=10, TP=4 -> chunks of 3, and rank 3 holds ids [9, 10): (9, 1).
+    """
+    tp_world_size = dist.get_world_size(tp_group)
+    tp_rank = dist.get_rank(tp_group)
+    chunk_size = (global_vocab_size + tp_world_size - 1) // tp_world_size
+    vocab_start = min(global_vocab_size, chunk_size * tp_rank)
+    vocab_end = min(global_vocab_size, vocab_start + chunk_size)
+    local_vocab_size = max(0, vocab_end - vocab_start)
+    if logits.shape[-1] != local_vocab_size:
+        raise ValueError(
+            f"Expected local vocab size {local_vocab_size} for global vocab size "
+            f"{global_vocab_size}, got {logits.shape[-1]}."
+        )
+    if local_vocab_size == 0:
+        raise ValueError(
+            f"Global vocab size {global_vocab_size} over TP {tp_world_size} leaves rank "
+            f"{tp_rank} an empty vocab shard; vocab-parallel cross-entropy and logprobs need "
+            "every rank to hold one."
+        )
+    return vocab_start, local_vocab_size
+
+
 class _LossParallelCrossEntropy(torch.autograd.Function):
     """
     Vocab-parallel cross-entropy on local ``[T, V_local]`` logits.
@@ -160,23 +188,9 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         """
         logits_dtype = logits.dtype
 
-        # Compute this rank's vocab shard bounds for the local logits.
-        tp_world_size = dist.get_world_size(tp_group)
-        tp_rank = dist.get_rank(tp_group)
-        chunk_size = (global_vocab_size + tp_world_size - 1) // tp_world_size
-        vocab_start = min(global_vocab_size, chunk_size * tp_rank)
-        vocab_end = min(global_vocab_size, vocab_start + chunk_size)
-        local_vocab_size = max(0, vocab_end - vocab_start)
-        if logits.shape[-1] != local_vocab_size:
-            raise ValueError(
-                "_LossParallelCrossEntropy expected local vocab size "
-                f"{local_vocab_size} for global vocab size {global_vocab_size}, "
-                f"got {logits.shape[-1]}."
-            )
-        if local_vocab_size == 0:
-            raise ValueError(
-                "_LossParallelCrossEntropy does not support empty vocab shards."
-            )
+        vocab_start, local_vocab_size = _local_vocab_shard(
+            logits, tp_group, global_vocab_size
+        )
 
         torch._assert_async(
             torch.all(
@@ -494,6 +508,125 @@ def compute_logprobs(
         entropy = log_normalizer - weighted_logits.sum(dim=-1)
         entropy.masked_fill_(~torch.isfinite(log_normalizer), torch.nan)
     return logprobs, entropy
+
+
+@local_compile("loss", batch_invariant=False)
+def compute_topk_logprobs(
+    logits: torch.Tensor,
+    token_ids: torch.Tensor,
+    *,
+    vocab_parallel_group: dist.ProcessGroup | None,
+    global_vocab_size: int | None,
+) -> torch.Tensor:
+    """Logprobs `[T, k]` of `token_ids[T, k]` under `softmax(logits[T, V])`.
+
+    Like `compute_logprobs`, but for k token ids per position. A `vocab_parallel_group`
+    means `logits` hold this rank's vocab shard; the result is exact and identical on every
+    rank of the group, without gathering the vocab. Batch-invariant mode gathers the vocab,
+    as `compute_logprobs` does: the vLLM generator calls this function on full-vocab logits,
+    so the trainer's and the generator's top-k logprobs match bitwise.
+
+    Example:
+
+        logits = log([[0.5, 0.3, 0.2]]);  token_ids = [[2, 0]]  ->  log([[0.2, 0.5]])
+    """
+    token_ids = token_ids.long()
+    if vocab_parallel_group is not None:
+        if global_vocab_size is None:
+            raise ValueError(
+                "global_vocab_size is required for vocab-parallel top-k logprobs"
+            )
+        if not is_in_batch_invariant_mode():
+            return _VocabParallelTopKLogprobs.apply(
+                logits, token_ids, vocab_parallel_group, global_vocab_size
+            )
+        # dst=I, as in compute_logprobs: backward slices the grad back to this rank's shard.
+        logits = spmd.redistribute(
+            logits, vocab_parallel_group, src=spmd.S(-1), dst=spmd.I
+        )
+    return torch.log_softmax(logits.float(), dim=-1).gather(-1, token_ids)
+
+
+class _VocabParallelTopKLogprobs(torch.autograd.Function):
+    """`compute_topk_logprobs` on local `[T, V_local]` logits shards.
+
+    Forward uses three TP all-reduces (max, sumexp, gathered logits); backward needs none,
+    since the output is identical on every rank and each rank owns its shard's gradient.
+    """
+
+    @staticmethod
+    def spmd_typecheck(
+        result: torch.Tensor,
+        *,
+        logits: torch.Tensor,
+        token_ids: torch.Tensor,
+        tp_group: dist.ProcessGroup,
+    ) -> None:
+        """SPMD type: logits S(-1)@TP, token_ids I@TP -> logprobs I@TP."""
+        spmd.assert_type(logits, {tp_group: spmd.S(logits.dim() - 1)})
+        spmd.assert_type(token_ids, {tp_group: spmd.I})
+        spmd.assert_local_type_like(
+            result,
+            logits,
+            {tp_group: spmd.I},  # pyrefly: ignore [bad-argument-type]
+        )
+
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def forward(
+        ctx,
+        logits: torch.Tensor,
+        token_ids: torch.Tensor,
+        tp_group: dist.ProcessGroup,
+        global_vocab_size: int,
+    ) -> torch.Tensor:
+        vocab_start, local_vocab_size = _local_vocab_shard(
+            logits, tp_group, global_vocab_size
+        )
+        torch._assert_async(
+            torch.all((token_ids >= 0) & (token_ids < global_vocab_size)),
+            f"top-k token ids must be in [0, {global_vocab_size})",
+        )
+        logits_fp32 = logits.float()
+
+        global_max = funcol.all_reduce(
+            torch.amax(logits_fp32, dim=-1, keepdim=True),
+            reduceOp=dist.ReduceOp.MAX.name,
+            group=tp_group,
+        )
+        sumexp = funcol.all_reduce(
+            torch.exp(logits_fp32 - global_max).sum(dim=-1, keepdim=True),
+            reduceOp=dist.ReduceOp.SUM.name,
+            group=tp_group,
+        )
+        logsumexp = global_max + torch.log(sumexp)
+
+        # Each id lives on exactly one shard; the others contribute 0 to the sum.
+        local_token_ids = token_ids - vocab_start
+        in_shard = (local_token_ids >= 0) & (local_token_ids < local_vocab_size)
+        local_token_ids = local_token_ids.clamp(0, local_vocab_size - 1)
+        topk_logits = funcol.all_reduce(
+            torch.where(in_shard, logits_fp32.gather(-1, local_token_ids), 0.0),
+            reduceOp=dist.ReduceOp.SUM.name,
+            group=tp_group,
+        )
+
+        ctx.save_for_backward(logits, logsumexp, local_token_ids, in_shard)
+        return topk_logits - logsumexp
+
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def backward(
+        ctx, grad_output: torch.Tensor
+    ) -> tuple[torch.Tensor, None, None, None]:
+        logits, logsumexp, local_token_ids, in_shard = ctx.saved_tensors
+        # d log p_j / d logit_v = [v == id_j] - softmax_v, summed over the k ids.
+        probs = torch.exp(logits.float() - logsumexp)
+        grad_logits = -grad_output.sum(dim=-1, keepdim=True) * probs
+        grad_logits.scatter_add_(
+            -1, local_token_ids, torch.where(in_shard, grad_output, 0.0)
+        )
+        return grad_logits.to(logits.dtype), None, None, None
 
 
 class _DecoderOutputGradientBackProp(torch.autograd.Function):
