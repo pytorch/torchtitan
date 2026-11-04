@@ -830,29 +830,15 @@ class MoE(FeedForward):
             routed_out_TD: The routed branch's output, of the routed tokens.
             x_TD: The MoE input.
         """
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if (
-            self.shared_experts is not None
-            and is_in_batch_invariant_mode()
-            and spmd_sparse_mesh() is not None
-            and not spmd_dense_sp_enabled()
-            and tp_group is not None
-        ):
+        if self.shared_experts is not None and is_in_batch_invariant_mode():
             # Adding a token's routed output to its TP rank's shared-expert partial
             # sum (below) makes the reduced sum depend on which rank owns the token,
             # which moves with the token count. Reduce the routed output (exact: the
             # other ranks add zeros) and the shared partials separately, then add:
-            # one more all-reduce.
-            routed_out_TD = remat.region(
-                spmd.redistribute,
-                self.remat_region_name("tp_routed_reduction"),
-                recompute=self.remat_should_recompute("tp_routed_reduction"),
-            )(
+            # one more all-reduce with EP over TP.
+            routed_out_TD = self._maybe_all_reduce_moe_output_across_tp(
                 self._maybe_zero_fill_routed_output_to_tp_partial(routed_out_TD),
-                tp_group,
-                src=spmd.P,
-                dst=spmd.I,
-                backward_options={"op_dtype": routed_out_TD.dtype},
+                region_name="tp_routed_reduction",
             )
             shared_TD = self._maybe_all_reduce_moe_output_across_tp(
                 self.shared_experts(x_TD)
@@ -940,9 +926,13 @@ class MoE(FeedForward):
         )
 
     def _maybe_all_reduce_moe_output_across_tp(
-        self, out_TD: torch.Tensor
+        self, out_TD: torch.Tensor, *, region_name: str = "tp_output_reduction"
     ) -> torch.Tensor:
-        """Reduce the combined partial output when dense SP is disabled."""
+        """Reduce the combined partial output when dense SP is disabled.
+
+        Args:
+            region_name: The reduction's remat region.
+        """
         if spmd_dense_sp_enabled():
             return out_TD
         tp_group = spmd_mesh_group(MeshAxisName.TP)
@@ -952,8 +942,8 @@ class MoE(FeedForward):
         # shared/routed branch addition separate it from either w2 computation.
         out_TD = remat.region(
             spmd.redistribute,
-            self.remat_region_name("tp_output_reduction"),
-            recompute=self.remat_should_recompute("tp_output_reduction"),
+            self.remat_region_name(region_name),
+            recompute=self.remat_should_recompute(region_name),
         )(
             out_TD,
             tp_group,
