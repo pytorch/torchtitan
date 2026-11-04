@@ -79,7 +79,8 @@ scripts/install_rl_env.sh --sglang
 | Data parallelism within a generator | Not supported: run more generators |
 | Sliding-window attention (e.g. Muse Glimmer) | Supported; KV of every token stays cached (no sliding-window KV pool) |
 | GDN linear attention (Qwen3.5) | Supported; see below |
-| Flex attention, MLA, KDA, attention sinks (GPT-OSS) | Not supported |
+| MLA (DeepSeek V3) | Supported with per-head K/V in the KV cache, as the vLLM engine runs MLA in batch-invariant mode; SGLang's compressed-latent MLA cache is not used |
+| Flex attention, KDA, attention sinks (GPT-OSS) | Not supported |
 | MoE with expert parallelism over the TP group, Dist-MoE | Supported; see below |
 | Sequence parallelism | Not supported |
 

@@ -29,6 +29,7 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
     Attention,
     FlexInnerAttention,
+    MLAAttention,
     SlidingWindowVarlenInnerAttention,
     VarlenInnerAttention,
 )
@@ -57,8 +58,9 @@ def _replace_sglang_layer_configs(model_config: Decoder.Config) -> Decoder.Confi
     layers, ``SGLangInnerGDN``.
 
     Only GDN and softmax attention with the varlen backend, full or sliding-window, are
-    supported; other layers raise ``ValueError``. The inner attention keeps the trainer
-    attention's sharding config.
+    supported; other layers raise ``ValueError``. MLA layers keep their projection of
+    the latent to per-head K/V, which SGLang caches. The inner attention keeps the
+    trainer attention's sharding config.
     """
     from torchtitan.models.gpt_oss.model import GptOssAttention
 
@@ -99,6 +101,13 @@ def _replace_sglang_layer_configs(model_config: Decoder.Config) -> Decoder.Confi
                 "sinks (GPT-OSS)"
             )
         inner_cfg = attention_cfg.inner_attention
+        mla_cfg = None
+        if isinstance(inner_cfg, MLAAttention.Config):
+            # TODO(https://github.com/sgl-project/sglang/issues/48462): cache MLA's
+            # compressed latent with SGLang's MLA backends, as the vLLM engine does
+            # outside batch-invariant mode; SGLang recognizes MLA models by their
+            # architecture name only.
+            mla_cfg, inner_cfg = inner_cfg, inner_cfg.inner_attention
         if isinstance(inner_cfg, FlexInnerAttention.Config):
             # TODO: run flex attention through an SGLang backend with the trainer's
             # block sizes, as the vLLM engine does with vLLM's FLEX_ATTENTION.
@@ -117,16 +126,12 @@ def _replace_sglang_layer_configs(model_config: Decoder.Config) -> Decoder.Confi
         num_heads, num_kv_heads, head_dim, value_head_dim = get_attention_dimensions(
             attention_cfg, model_config.dim
         )
-        if value_head_dim != head_dim:
-            raise ValueError(
-                f"layers[{layer_id}]: the SGLang engine needs equal query/key and "
-                f"value head dims, got {head_dim} and {value_head_dim}"
-            )
         sglang_inner_cfg = SGLangInnerAttention.Config(
             layer_id=layer_id,
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
+            value_head_dim=value_head_dim,
             scale=attention_cfg.softmax_scale,
             sliding_window_size=(
                 inner_cfg.sliding_window_size
@@ -135,6 +140,10 @@ def _replace_sglang_layer_configs(model_config: Decoder.Config) -> Decoder.Confi
             ),
             sharding_config=inner_cfg.sharding_config,
         )
+        if mla_cfg is not None:
+            sglang_inner_cfg = dataclasses.replace(
+                mla_cfg, inner_attention=sglang_inner_cfg
+            )
         new_layers.append(
             dataclasses.replace(
                 layer_cfg,
@@ -198,6 +207,8 @@ class _DecoderBody(Module):
         # the state dict is unchanged.
         for layer in decoder.layers.values():
             inner = layer.attention.inner_attention
+            if isinstance(inner, MLAAttention):
+                inner = inner.inner_attention
             object.__setattr__(
                 layer.attention,
                 "attn",

@@ -60,6 +60,9 @@ from torchtitan.config.transform import apply_transforms
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.models.common.dist_moe import DistMoeRuntime
+from torchtitan.models.deepseek_v3 import (
+    build_model_config as build_deepseek_v3_model_config,
+)
 from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
@@ -410,16 +413,20 @@ class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):
     reset_kv_cache_on_model_state_dict_load = True
 
 
-def _debug_model_config(build_model_config, **kwargs) -> Controller.Config:
+def _debug_model_config(
+    build_model_config, *, expert_parallel_degree: int = 1, **kwargs
+) -> Controller.Config:
     """A model's debug flavor at TP 2 on both sides, in the batch-invariant Qwen3 MoE
     debug recipe."""
     config = rl_grpo_qwen3_moe_debug_varlen_batch_invariant()
     trainer_parallelism = dataclasses.replace(
         config.trainer.parallelism,
         data_parallel_shard_degree=1,
-        expert_parallel_degree=1,
+        expert_parallel_degree=expert_parallel_degree,
     )
-    generator_parallelism = InferenceParallelismConfig(tensor_parallel_degree=2)
+    generator_parallelism = InferenceParallelismConfig(
+        tensor_parallel_degree=2, expert_parallel_degree=expert_parallel_degree
+    )
     trainer_model, generator_model = build_rl_model_configs(
         build_model_config,
         "debugmodel",
@@ -456,6 +463,23 @@ class TestSGLangBitwiseParitySlidingWindow(SGLangBitwiseParityTestBase):
         )
     )
     sync_weights_from_trainer = True
+
+
+class TestSGLangBitwiseParityMLA(SGLangBitwiseParityTestBase):
+    """DeepSeek V3 debug model with random weights: MLA, whose per-head K/V SGLang
+    caches, with EP 2 over TP 2."""
+
+    __test__ = True
+    config_fn = staticmethod(
+        functools.partial(
+            _debug_model_config,
+            build_deepseek_v3_model_config,
+            expert_parallel_degree=2,
+        )
+    )
+    sync_weights_from_trainer = True
+    # The all-to-all token dispatcher syncs the host for its split sizes.
+    cuda_graph = "none"
 
 
 def _qwen3_moe_debug_dist_moe_tp2_ep2_config() -> Controller.Config:
