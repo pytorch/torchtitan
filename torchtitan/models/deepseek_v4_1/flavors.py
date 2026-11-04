@@ -7,7 +7,7 @@
 """The released Flash architecture and a feature-preserving debug architecture."""
 
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import fields, replace
 from functools import partial
 
 import spmd_types as spmd
@@ -64,6 +64,7 @@ from torchtitan.models.deepseek_v4.sharding import (
 )
 
 from .attention import Compressor, CSA2InnerAttention, DeepSeekV41Attention, Indexer
+from .dspark import ConfidenceHead, DSpark, DSparkAttention, DSparkBlock, MarkovHead
 from .engram import (
     compressed_token_map,
     Engram,
@@ -229,6 +230,110 @@ def _vision_configs(*, dim, released, attention_backend):
     return vision, aligner, image_embeddings
 
 
+def _make_drafter(
+    layers, *, dim, vocab_size, seq_len, released, enable_sp, enable_ep, num_layers
+):
+    if not num_layers:
+        return None
+    blocks = []
+    num_experts, top_k = (128, 3) if released else (4, 2)
+    base = layers[-1]
+    for index in range(num_layers):
+        attn = layers[0].attention
+        kwargs = {
+            field.name: getattr(attn, field.name)
+            for field in fields(DeepSeekV41Attention.Config)
+        }
+        kwargs.update(
+            rope=replace(attn.rope, max_context_length=seq_len + 5),
+            inner_attention=replace(
+                attn.inner_attention, window_size=0, index_topk=0, aux_loss=None
+            ),
+        )
+        attention = DSparkAttention.Config(
+            **kwargs, block_size=5, context_window=attn.inner_attention.window_size
+        )
+        router = replace(
+            base.feed_forward.router,
+            num_experts=num_experts,
+            top_k=top_k,
+            gate=replace(base.feed_forward.router.gate, out_features=num_experts),
+        )
+        experts = make_routed_experts_config(
+            dim=dim,
+            hidden_dim=base.feed_forward.routed_experts.w2.in_features,
+            num_experts=num_experts,
+            top_k=top_k,
+            param_init={
+                "w1_EFD": _LINEAR_INIT["weight"],
+                "w3_EFD": _LINEAR_INIT["weight"],
+                "w2_EDF": _LINEAR_INIT["weight"],
+            },
+            enable_ep=enable_ep,
+        )
+        experts.activation_fn = Float32LimitedSwiGLU.Config(limit=10.0)
+        moe = replace(
+            base.feed_forward,
+            num_experts=num_experts,
+            router=router,
+            routed_experts=experts,
+        )
+        markov = confidence = norm = None
+        if index == num_layers - 1:
+            rank = 256 if released else 32
+            head_sharding = lm_head_sharding_config()
+            head_sharding.in_src_shardings = {
+                "input": residual_activation_placement(enable_sp=False)
+            }
+            markov = MarkovHead.Config(
+                embed=Embedding.Config(
+                    num_embeddings=vocab_size,
+                    embedding_dim=rank,
+                    param_init={"weight": partial(nn.init.normal_, std=0.02)},
+                    sharding_config=token_embedding_sharding_config(enable_sp=False),
+                ),
+                head=Linear.Config(
+                    in_features=rank,
+                    out_features=vocab_size,
+                    bias=False,
+                    param_init=_LINEAR_INIT,
+                    sharding_config=head_sharding,
+                ),
+            )
+            confidence = ConfidenceHead.Config(proj=_replicated_linear(dim + rank, 1))
+            norm = _norm_config(
+                dim,
+                1e-20,
+                sharding=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
+            )
+        blocks.append(
+            DSparkBlock.Config(
+                attention=attention,
+                attention_norm=replace(base.attention_norm),
+                ffn_norm=replace(base.ffn_norm),
+                feed_forward=moe,
+                hc_attn=replace(base.hc_attn),
+                hc_ffn=replace(base.hc_ffn),
+                hc_post=replace(base.hc_post),
+                main_proj=_replicated_linear(3 * dim, dim) if index == 0 else None,
+                main_norm=_norm_config(dim, 1e-20) if index == 0 else None,
+                norm=norm,
+                markov_head=markov,
+                confidence_head=confidence,
+            )
+        )
+    return DSpark.Config(
+        dim=dim,
+        vocab_size=vocab_size,
+        max_context_length=seq_len + 5,
+        layers=blocks,
+        hc_mult=4,
+        block_size=5,
+        noise_token_id=128799 if released else vocab_size - 1,
+        target_layer_ids=tuple(range(len(layers) - 3, len(layers))),
+    )
+
+
 def _make_config(
     *,
     seq_len,
@@ -238,6 +343,7 @@ def _make_config(
     quantize,
     indexer_loss_coeff,
     vision_enabled,
+    num_draft_layers,
     vision_attention_backend,
     attention_backend,
 ):
@@ -531,6 +637,16 @@ def _make_config(
         if vision_enabled
         else (None, None, None)
     )
+    drafter = _make_drafter(
+        layers,
+        dim=dim,
+        vocab_size=vocab_size,
+        seq_len=seq_len,
+        released=released,
+        enable_sp=enable_sp,
+        enable_ep=enable_ep,
+        num_layers=num_draft_layers,
+    )
     return DeepSeekV41Model.Config(
         dim=dim,
         vocab_size=vocab_size,
@@ -546,6 +662,7 @@ def _make_config(
         vision=vision,
         aligner=aligner,
         image_embeddings=image_embeddings,
+        drafter=drafter,
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
@@ -592,6 +709,7 @@ def build_model_config(
     quantize: bool = True,
     indexer_loss_coeff: float = 0.01,
     vision_enabled: bool | None = None,
+    num_draft_layers: int | None = None,
     vision_attention_backend: str = "flex",
     attention_backend: str = "fused",
 ):
@@ -605,6 +723,12 @@ def build_model_config(
         raise ValueError(f"seq_len must be in [1, {max_context_length}].")
     if indexer_loss_coeff < 0:
         raise ValueError("indexer_loss_coeff must be nonnegative.")
+    if num_draft_layers is None:
+        num_draft_layers = 3 if flavor == "deepseek_v4_1_flash" else 0
+    if num_draft_layers not in (0, 3):
+        raise ValueError(
+            "DSpark uses three draft blocks; num_draft_layers must be zero or three."
+        )
     if vision_attention_backend not in ("flex", "reference"):
         raise ValueError("vision_attention_backend must be flex or reference.")
     if attention_backend not in ("fused", "reference"):
@@ -618,6 +742,7 @@ def build_model_config(
         vision_enabled=flavor == "deepseek_v4_1_flash"
         if vision_enabled is None
         else vision_enabled,
+        num_draft_layers=num_draft_layers,
         vision_attention_backend=vision_attention_backend,
         attention_backend=attention_backend,
     )

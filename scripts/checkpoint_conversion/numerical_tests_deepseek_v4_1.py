@@ -9,8 +9,16 @@
 The author provides inference kernels, not a training reference. This harness
 executes the unchanged Python model with independent PyTorch implementations
 of those kernels. Dense math uses FP32 on both sides; activation quantization
-and the quantized Engram table remain enabled. It checks text/image logits, per-block outputs, vision gradients, and text
-backbone and sliding-window block gradients.
+and the quantized Engram table remain enabled. It checks text/image logits,
+per-block outputs, vision gradients, DSpark logits/confidence and gradients,
+and text backbone and sliding-window block gradients.
+The image arithmetic comparison holds attention quantizer inputs fixed and
+checks both quantizers independently on those inputs. Raw independently rounded
+image logits are reported separately; rounding at FP8/FP4 midpoints can amplify
+otherwise acceptable FP32 arithmetic differences.
+
+B: draft blocks, T: context tokens, S: draft positions, D: hidden width,
+V: vocabulary, F: concatenated backbone width.
 """
 
 import argparse
@@ -21,6 +29,7 @@ import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
@@ -148,6 +157,193 @@ class IdentityTokenizer:
         return f"token_{token_id}"
 
 
+def compare_draft_gradients(
+    native, *, reference, adapter, features_TF, tokens_T, anchor
+):
+    """Compare a conditional five-position draft objective with frozen shared weights."""
+    frozen = [
+        (parameter, parameter.requires_grad)
+        for module in (reference.embed, reference.head)
+        for parameter in module.parameters()
+    ]
+    for parameter, _ in frozen:
+        parameter.requires_grad_(False)
+    anchors_B = torch.tensor([anchor])
+    input_ids_B = tokens_T[anchors_B]
+    reference_features_BTF = features_TF.detach().clone()[None]
+    native_features_TF = features_TF.detach().clone().requires_grad_()
+    with torch.autograd.graph.allow_mutation_on_saved_tensors():
+        type(reference).forward_spec.__wrapped__(
+            reference, input_ids_B, reference_features_BTF[:, :anchor], start_pos=0
+        )
+        output_ids_BS, reference_logits_BSV, reference_confidence_BS = type(
+            reference
+        ).forward_spec.__wrapped__(
+            reference,
+            input_ids_B,
+            reference_features_BTF[:, anchor : anchor + 1],
+            start_pos=anchor,
+        )
+        previous_BS = output_ids_BS[:, :-1].clone()
+        draft_ids_BS = torch.full((1, 5), native.drafter.config.noise_token_id)
+        draft_ids_BS[:, 0] = input_ids_B
+        native_logits_BSV, native_confidence_BS = native.forward_draft(
+            native_features_TF,
+            native.tok_embeddings(draft_ids_BS.flatten()),
+            previous_BS,
+            anchors_B,
+            main_positions_T=torch.arange(tokens_T.numel()),
+            output_weight_VD=native.lm_head.weight,
+        )
+        targets_S = tokens_T[anchor + 1 : anchor + 6]
+        native_loss = F.cross_entropy(
+            native_logits_BSV.flatten(0, 1), targets_S
+        ) + F.binary_cross_entropy_with_logits(
+            native_confidence_BS, torch.full_like(native_confidence_BS, 0.5)
+        )
+        reference_loss = F.cross_entropy(
+            reference_logits_BSV.flatten(0, 1), targets_S
+        ) + F.binary_cross_entropy_with_logits(
+            reference_confidence_BS, torch.full_like(reference_confidence_BS, 0.5)
+        )
+        torch.testing.assert_close(native_loss, reference_loss, rtol=2e-5, atol=2e-6)
+        native_loss.backward()
+        reference_loss.backward()
+    assert native_features_TF.grad is None
+    assert all(
+        parameter.grad is None
+        for name, parameter in native.named_parameters()
+        if not name.startswith("drafter.")
+    )
+    gradients = adapter.to_hf(
+        {
+            name: parameter.grad
+            for name, parameter in native.named_parameters()
+            if name.startswith("drafter.") and parameter.grad is not None
+        }
+    )
+    expected_names = {
+        name
+        for name, parameter in reference.named_parameters()
+        if name.startswith("mtp.") and parameter.grad is not None
+    }
+    assert expected_names <= gradients.keys(), expected_names - gradients.keys()
+    maximum_error, inactive_experts = 0.0, 0
+    actual_norm_squared, reference_norm_squared = 0.0, 0.0
+    for name, gradient in gradients.items():
+        expected = reference.get_parameter(name).grad
+        if expected is None:
+            # GroupedLinear returns zero rows for experts skipped by the loop oracle.
+            assert ".ffn.experts." in name
+            expected = torch.zeros_like(gradient)
+            inactive_experts += 1
+        torch.testing.assert_close(gradient, expected, rtol=2e-4, atol=2e-6)
+        maximum_error = max(maximum_error, (gradient - expected).abs().max().item())
+        actual_norm_squared += gradient.double().square().sum().item()
+        reference_norm_squared += expected.double().square().sum().item()
+    actual_norm = actual_norm_squared**0.5
+    reference_norm = reference_norm_squared**0.5
+    torch.testing.assert_close(actual_norm, reference_norm, rtol=2e-4, atol=2e-6)
+    for parameter, requires_grad in frozen:
+        parameter.requires_grad_(requires_grad)
+    native.zero_grad(set_to_none=True)
+    reference.zero_grad(set_to_none=True)
+    return {
+        "draft_objective": "five-position next-token cross entropy plus confidence BCE",
+        "draft_cross_entropy_plus_confidence_loss": native_loss.item(),
+        "reference_draft_cross_entropy_plus_confidence_loss": reference_loss.item(),
+        "draft_parameter_grad_max_abs_error": maximum_error,
+        "num_draft_parameter_gradients": len(gradients),
+        "num_zero_routed_expert_gradients": inactive_experts,
+        "draft_gradient_norm_ratio": actual_norm / reference_norm,
+        "draft_shared_projection_gradients_stopped": True,
+    }
+
+
+def compare_image_quantizers(
+    native, *, reference, author, tokens, token_types, patches, image
+):
+    """Check image arithmetic and quantizers separately from rounding boundaries.
+
+    Execute inside no_grad. The native image forward retains quantization;
+    the author quantizer receives the same source activation at each call.
+    Each author's incoming activation must still pass an FP32 arithmetic check.
+    """
+    from torchtitan.models.deepseek_v4_1 import attention
+
+    samples = []
+
+    def capture(quantize, name):
+        def forward(value, *args, **kwargs):
+            original = value.detach().clone()
+            output = quantize(value, *args, **kwargs)
+            samples.append((name, original, output.detach().clone()))
+            return output
+
+        return forward
+
+    with (
+        patch.object(
+            attention, "fp8_activation", capture(attention.fp8_activation, "fp8")
+        ),
+        patch.object(
+            attention, "fp4_activation", capture(attention.fp4_activation, "fp4")
+        ),
+    ):
+        actual = native(
+            tokens,
+            token_types=token_types,
+            pixel_values=patches.detach(),
+            grid_hw=((6, 6),),
+        )
+    _, raw_expected, _ = reference(
+        tokens[None], images=[[image]], token_types=token_types[None]
+    )
+    raw_error = (actual - raw_expected[0]).abs().max().item()
+    cursor, input_error = 0, 0.0
+
+    def compare_quantizer(quantize, name):
+        def forward(value, *args, **kwargs):
+            nonlocal cursor, input_error
+            captured_name, original, expected = samples[cursor]
+            cursor += 1
+            assert captured_name == name
+            original = original.reshape(value.shape)
+            torch.testing.assert_close(value, original, rtol=2e-5, atol=2e-6)
+            input_error = max(input_error, (value - original).abs().max().item())
+            independent = original.clone()
+            quantize(independent, *args, **kwargs)
+            torch.testing.assert_close(
+                independent, expected.reshape(value.shape), rtol=0, atol=0
+            )
+            value.copy_(independent)
+            return value
+
+        return forward
+
+    with (
+        patch.object(author, "act_quant", compare_quantizer(author.act_quant, "fp8")),
+        patch.object(
+            author, "fp4_act_quant", compare_quantizer(author.fp4_act_quant, "fp4")
+        ),
+    ):
+        _, expected, _ = reference(
+            tokens[None], images=[[image]], token_types=token_types[None]
+        )
+    assert cursor == len(samples)
+    torch.testing.assert_close(actual, expected[0], rtol=2e-4, atol=2e-5)
+    return (
+        actual,
+        expected,
+        {
+            "image_attention_quantizer_inputs": "held identical for independent quantizer checks",
+            "image_uncontrolled_logit_max_abs_error": raw_error,
+            "image_quantizer_input_max_abs_error": input_error,
+            "num_image_quantizer_comparisons": cursor,
+        },
+    )
+
+
 def compare(reference_dir, *, seq_len):
     torch.set_num_threads(1)
     torch.set_default_dtype(torch.float32)
@@ -159,10 +355,12 @@ def compare(reference_dir, *, seq_len):
         seq_len=seq_len,
         indexer_loss_coeff=0.0,
         vision_enabled=True,
+        num_draft_layers=3,
         vision_attention_backend="reference",
         attention_backend="reference",
     )
-    for layer in config.layers:
+    assert config.drafter is not None
+    for layer in (*config.layers, *config.drafter.layers):
         layer.feed_forward.routed_experts.compute_dtype = "float32"
     native = config.build()
     native.init_states(buffer_device=torch.device("cpu"))
@@ -183,7 +381,7 @@ def compare(reference_dir, *, seq_len):
         dim=config.dim,
         moe_inter_dim=128,
         n_layers=len(config.layers),
-        n_mtp_layers=0,
+        n_mtp_layers=3,
         n_heads=8,
         n_routed_experts=8,
         n_shared_experts=1,
@@ -222,10 +420,12 @@ def compare(reference_dir, *, seq_len):
         vision_inter_dim=128,
         vision_patch_size=2,
         vision_downsample_ratio=3,
-        dspark_block_size=0,
+        dspark_block_size=5,
+        dspark_noise_token_id=config.drafter.noise_token_id,
+        dspark_target_layer_ids=config.drafter.target_layer_ids,
         dspark_markov_rank=32,
-        dspark_n_routed_experts=8,
-        dspark_n_activated_experts=2,
+        dspark_n_routed_experts=config.drafter.layers[0].feed_forward.num_experts,
+        dspark_n_activated_experts=config.drafter.layers[0].feed_forward.router.top_k,
     )
     reference = (
         author.Transformer(args, IdentityTokenizer(config.vocab_size)).float().eval()
@@ -253,6 +453,9 @@ def compare(reference_dir, *, seq_len):
         )
     # The Python reference registers aliases for the shared embedding and head;
     # the published safetensors checkpoint stores each shared weight only once.
+    for index in range(3):
+        weights[f"mtp.{index}.embed.weight"] = weights["embed.weight"]
+        weights[f"mtp.{index}.head.weight"] = weights["head.weight"]
     reference.load_state_dict(weights, strict=True)
     original_head = reference.head.forward
     reference.head.forward = lambda hidden, full_logits=True: original_head(
@@ -335,7 +538,7 @@ def compare(reference_dir, *, seq_len):
     )
     tokens = torch.randint(3, config.vocab_size, (seq_len,))
     with torch.no_grad():
-        actual = native(tokens)
+        actual, native_context = native(tokens, return_draft_context=True)
         actual = actual.float()
         _, expected, reference_context = reference(tokens[None])
     for handle in handles:
@@ -361,6 +564,9 @@ def compare(reference_dir, *, seq_len):
             (native_shared[name] - reference_shared[name]).abs().max().item()
         )
     torch.testing.assert_close(actual, expected.squeeze(0), rtol=1e-4, atol=2e-5)
+    torch.testing.assert_close(
+        native_context, reference_context[0], rtol=2e-4, atol=1e-5
+    )
     patches = torch.randn(36, 12, requires_grad=True)
     reference_patches = patches.detach().clone().requires_grad_()
     encoded = native.vision(patches, grid_hw=((6, 6),))
@@ -379,13 +585,39 @@ def compare(reference_dir, *, seq_len):
         start=2, types=types[2:10], patches=patches.detach(), n_vit_h=6, n_vit_w=6
     )
     with torch.no_grad():
-        image_actual = native(
-            tokens, token_types=types, pixel_values=patches.detach(), grid_hw=((6, 6),)
+        image_actual, image_expected, image_quantization = compare_image_quantizers(
+            native,
+            reference=reference,
+            author=author,
+            tokens=tokens,
+            token_types=types,
+            patches=patches,
+            image=image,
         )
-        _, image_expected, _ = reference(
-            tokens[None], images=[[image]], token_types=types[None]
+    anchor = min(10, seq_len - 6)
+    anchors = torch.tensor([anchor])
+    initial_tokens = tokens[anchors]
+    with torch.no_grad():
+        reference.forward_spec(
+            initial_tokens, reference_context[:, :anchor], start_pos=0
         )
-    torch.testing.assert_close(image_actual, image_expected[0], rtol=2e-4, atol=2e-5)
+        output_ids, reference_draft, reference_confidence = reference.forward_spec(
+            initial_tokens, reference_context[:, anchor : anchor + 1], start_pos=anchor
+        )
+        draft_ids = torch.full((1, 5), config.drafter.noise_token_id)
+        draft_ids[:, 0] = initial_tokens
+        native_draft, native_confidence = native.forward_draft(
+            native_context,
+            native.tok_embeddings(draft_ids.flatten()),
+            output_ids[:, :-1],
+            anchors,
+            main_positions_T=torch.arange(seq_len),
+            output_weight_VD=native.lm_head.weight,
+        )
+    torch.testing.assert_close(native_draft, reference_draft, rtol=2e-4, atol=2e-5)
+    torch.testing.assert_close(
+        native_confidence, reference_confidence, rtol=2e-4, atol=2e-5
+    )
     # A standalone SWA block also tests arbitrary incoming mHC coefficients.
     block = native.layers["0"]
     h = torch.randn(seq_len, config.hc_mult, config.dim, requires_grad=True)
@@ -436,6 +668,14 @@ def compare(reference_dir, *, seq_len):
         )
     native.zero_grad(set_to_none=True)
     reference.zero_grad(set_to_none=True)
+    draft_gradients = compare_draft_gradients(
+        native,
+        reference=reference,
+        adapter=adapter,
+        features_TF=native_context,
+        tokens_T=tokens,
+        anchor=anchor,
+    )
     for layer_id in config.engram_layer_ids:
         table = reference.layers[layer_id].engram.embed.weight
         assert table.dtype == torch.float32
@@ -542,6 +782,8 @@ def compare(reference_dir, *, seq_len):
         .sqrt()
     )
     return {
+        **draft_gradients,
+        **image_quantization,
         "revision": REVISION,
         "source_sha256": SOURCE_HASHES,
         "dtype": "float32",
@@ -553,6 +795,14 @@ def compare(reference_dir, *, seq_len):
         "vision_max_abs_error": (encoded - reference_encoded).abs().max().item(),
         "aligner_max_abs_error": (aligned - reference_aligned).abs().max().item(),
         "image_logit_max_abs_error": (image_actual - image_expected[0])
+        .abs()
+        .max()
+        .item(),
+        "draft_logit_max_abs_error": (native_draft - reference_draft)
+        .abs()
+        .max()
+        .item(),
+        "confidence_max_abs_error": (native_confidence - reference_confidence)
         .abs()
         .max()
         .item(),
@@ -607,11 +857,7 @@ def compare_checkpoint_manifest(index_path):
         model = config.build()
     keys = set(DeepSeekV41StateDictAdapter(config).to_hf(model.state_dict()))
     manifest = json.loads(index_path.read_text())["weight_map"]
-    expected = {
-        key
-        for key in manifest
-        if not key.endswith(".scale") and not key.startswith(("mtp.",))
-    }
+    expected = {key for key in manifest if not key.endswith(".scale")}
     if keys != expected:
         raise AssertionError(
             f"Checkpoint keys differ: missing={sorted(expected - keys)}, "

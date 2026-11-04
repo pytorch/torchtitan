@@ -1,4 +1,16 @@
 {
+  "draft_objective": "five-position next-token cross entropy plus confidence BCE",
+  "draft_cross_entropy_plus_confidence_loss": 8.35378646850586,
+  "reference_draft_cross_entropy_plus_confidence_loss": 8.35378646850586,
+  "draft_parameter_grad_max_abs_error": 1.4901161193847656e-08,
+  "num_draft_parameter_gradients": 102,
+  "num_zero_routed_expert_gradients": 6,
+  "draft_gradient_norm_ratio": 1.000000000029365,
+  "draft_shared_projection_gradients_stopped": true,
+  "image_attention_quantizer_inputs": "held identical for independent quantizer checks",
+  "image_uncontrolled_logit_max_abs_error": 0.0015944577753543854,
+  "image_quantizer_input_max_abs_error": 1.430511474609375e-06,
+  "num_image_quantizer_comparisons": 34,
   "revision": "314113f8a7dadb388215396ba5fbee2c610a04d6",
   "source_sha256": {
     "model.py": "e5decd76fe70fd56ef2f10124d245c6f64fb6a0003cc9068a1d3182a168b8d2d",
@@ -12,17 +24,17 @@
   "quantization": "FP8 SWA/Engram and FP4 global KV/indexer",
   "block_max_abs_error": {
     "0": 2.384185791015625e-07,
-    "1": 4.76837158203125e-07,
+    "1": 2.384185791015625e-07,
     "2": 4.76837158203125e-07,
-    "3": 1.0967254638671875e-05,
-    "4": 1.1026859283447266e-05,
-    "5": 1.1086463928222656e-05,
-    "6": 1.1086463928222656e-05,
-    "7": 1.0967254638671875e-05,
-    "8": 1.0967254638671875e-05,
-    "9": 1.0907649993896484e-05,
-    "10": 1.0907649993896484e-05,
-    "11": 1.0788440704345703e-05
+    "3": 4.76837158203125e-07,
+    "4": 7.152557373046875e-07,
+    "5": 7.152557373046875e-07,
+    "6": 8.672475814819336e-06,
+    "7": 8.612871170043945e-06,
+    "8": 8.672475814819336e-06,
+    "9": 8.702278137207031e-06,
+    "10": 8.702278137207031e-06,
+    "11": 8.702278137207031e-06
   },
   "first_block_component_max_abs_error": {
     "attention_norm": 0.0,
@@ -33,7 +45,7 @@
     "attention.kv_norm": 0.0,
     "attention.wo_b": 0.0,
     "ffn_norm": 0.0,
-    "feed_forward": 9.313225746154785e-09
+    "feed_forward": 1.30385160446167e-08
   },
   "shared_kv_index_selection_max_abs_error": {
     "kv": 0.0,
@@ -41,32 +53,34 @@
     "selected": 0
   },
   "vision_max_abs_error": 4.76837158203125e-07,
-  "aligner_max_abs_error": 6.705522537231445e-08,
-  "image_logit_max_abs_error": 5.662441253662109e-07,
-  "logit_max_abs_error": 3.3676624298095703e-06,
-  "reference_to_native_probability_kl": 6.425780219352134e-15,
-  "logit_cosine_similarity": 0.9999999999998406,
+  "aligner_max_abs_error": 5.960464477539063e-08,
+  "image_logit_max_abs_error": 3.5762786865234375e-07,
+  "draft_logit_max_abs_error": 1.1920928955078125e-07,
+  "confidence_max_abs_error": 0.0,
+  "logit_max_abs_error": 2.4586915969848633e-06,
+  "reference_to_native_probability_kl": 4.563883343776037e-15,
+  "logit_cosine_similarity": 0.9999999999998759,
   "top1_agreement": 1.0,
   "top5_set_agreement": 1.0,
   "input_grad_max_abs_error": 1.4551915228366852e-11,
-  "parameter_grad_max_abs_error": 3.934837877750397e-08,
+  "parameter_grad_max_abs_error": 2.814340405166149e-08,
   "num_parameter_gradients": 67,
-  "whole_model_input_grad_max_abs_error": 8.149072527885437e-10,
-  "whole_model_parameter_grad_max_abs_error": 5.217443685978651e-07,
+  "whole_model_input_grad_max_abs_error": 2.5902409106492996e-09,
+  "whole_model_parameter_grad_max_abs_error": 1.0038202162832022e-06,
   "num_whole_model_parameter_gradients": 547,
   "whole_model_objective": "train-mode normalized next-token cross entropy; indexer auxiliary loss disabled",
   "whole_model_loss_token_count": 63,
-  "whole_model_cross_entropy_loss": 7.644362449645996,
-  "reference_whole_model_cross_entropy_loss": 7.644362449645996,
-  "whole_model_gradient_norm_ratio": 0.999999996604135,
+  "whole_model_cross_entropy_loss": 7.651185035705566,
+  "reference_whole_model_cross_entropy_loss": 7.651185035705566,
+  "whole_model_gradient_norm_ratio": 0.9999999996865158,
   "released_checkpoint_manifest": {
     "index_sha256": "74b0686a3d2891980d5e303251b075a3bccae2c2ff650747db2620a649b98fa8",
-    "num_weight_keys": 47272,
+    "num_weight_keys": 48496,
     "num_manifest_keys": 96085,
     "engram_rows": [
       384006168,
       384016682
     ],
-    "num_parameters": 748979922544
+    "num_parameters": 763205284306
   }
 }
