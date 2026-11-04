@@ -228,15 +228,3 @@ def test_controller_rejects_an_image_processor_without_a_vision_encoder():
             ),
             image_processor=ImageProcessor.Config(**QWEN3_5_IMAGE_PROCESSOR),
         )
-
-
-def test_controller_rejects_image_prompts_until_the_trainer_takes_them():
-    # TODO: remove with the guard, once the batcher and the trainer take image inputs.
-    from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_5_debug_varlen
-
-    config = rl_grpo_qwen3_5_debug_varlen(seq_len=128)
-
-    with pytest.raises(NotImplementedError, match="training on image prompts"):
-        dataclasses.replace(
-            config, image_processor=ImageProcessor.Config(**QWEN3_5_IMAGE_PROCESSOR)
-        )
