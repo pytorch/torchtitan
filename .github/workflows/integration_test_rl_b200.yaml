@@ -120,6 +120,10 @@ jobs:
             torchrun --nproc-per-node=2 -m pytest \
               "tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParity${test_class}" -v
           done
+          for test_class in MLA; do
+            torchrun --nproc-per-node=1 -m pytest \
+              "tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParity${test_class}" -v
+          done
 
       - name: Upload artifacts
         if: always()
