@@ -337,12 +337,12 @@ class TokenChoiceTopKRouter(Module):
         "moe_router_topk",
         # Declares the region batch-invariant. The Inductor option below makes it so.
         batch_invariant=True,
-        # Dynamo's default limit is 8. DeepSeek-V4's hash and top-k layers share this frame.
-        # At most 48 graphs: 2 layer kinds x train or eval x grad on or off x padding or none
-        # x static, dynamic or 1-token T. Measured on CPU: 28 for the call mix in
-        # test_router_compile_regions.py, 37 when training calls also run at T = 1. Past the
-        # limit, fullgraph=True raises instead of falling back to eager.
-        recompile_limit=48,
+        # Graphs this function may compile in one process (Dynamo's default is 8). Past the
+        # limit, fullgraph=True raises. DeepSeek-V4 needs the most: its 2 layer kinds (hash, top-k)
+        # x 3 token-count graphs (the first count, one shared by all other counts, 1 token) = 6 in
+        # a vLLM generator, and 2 x 2 (grad on, grad off) = 4 in a trainer with its validator
+        # (test_router_compile_regions.py). 16 still fits one more two-valued guard: 6 x 2 = 12.
+        recompile_limit=16,
         # Fixes each reduction's launch config, so a token's scores don't depend on the batch
         # size. Cost on GB300, measured on the inference (decode and prefill) graph: a few us
         # per call at decode sizes, none from 4k tokens.
