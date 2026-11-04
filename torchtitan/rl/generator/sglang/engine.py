@@ -108,9 +108,9 @@ class SGLangEngine(GenerationEngine):
     identical decisions, as the engine loop's SPMD contract requires. ``step()`` runs one
     iteration of SGLang's overlap event loop, so the CPU schedules the next batch while
     the GPU runs the current one, and returns the requests whose results that iteration
-    processed. For GDN models, whose radix cache of recurrent states disables overlap
-    without SGLang's extra_buffer strategy (not registered, see the README), it runs
-    one iteration of SGLang's normal event loop instead.
+    processed. For linear attention (GDN, KDA) models, whose radix cache of recurrent
+    states disables overlap without SGLang's extra_buffer strategy (not registered,
+    see the README), it runs one iteration of SGLang's normal event loop instead.
 
     See ``GenerationEngine`` for the build arguments and the threading contract.
     """

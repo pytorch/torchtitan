@@ -13,12 +13,14 @@ SGLang reads before it builds the model.
 
 from __future__ import annotations
 
+import functools
 import logging
 from typing import Any
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import PrecisionConfig
 from torchtitan.models.common.attention.gdn import GDN
+from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
@@ -68,38 +70,61 @@ def _model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
     }
 
 
-def _gdn_config_kwargs(cfg: Decoder.Config) -> dict[str, Any] | None:
-    """The ``TorchTitanGDNConfig`` fields of a model's GDN layers, or None without
-    any; SGLang sizes one state slot shape for all of them."""
-    gdn_layers = {
+def _linear_attention_config_kwargs(
+    cfg: Decoder.Config, attention_cls: type, dimension_fields: dict[str, str]
+) -> dict[str, Any] | None:
+    """The linear attention config fields of a model's ``attention_cls`` layers, or
+    None without any; SGLang sizes one state slot shape for all of them.
+
+    Args:
+        dimension_fields: The HF-shaped config field of each layer config field.
+    """
+    layers = {
         layer_id: layer.attention
         for layer_id, layer in enumerate(cfg.layers)
-        if isinstance(layer.attention, GDN.Config)
+        if isinstance(layer.attention, attention_cls.Config)
     }
-    if not gdn_layers:
+    if not layers:
         return None
     dimensions = {
-        (
-            gdn.n_key_heads,
-            gdn.n_heads,
-            gdn.key_head_dim,
-            gdn.value_head_dim,
-            gdn.conv_kernel_size,
-        )
-        for gdn in gdn_layers.values()
+        tuple(getattr(attention, field) for field in dimension_fields.values())
+        for attention in layers.values()
     }
     if len(dimensions) != 1:
         raise ValueError(
-            f"All GDN layers must have the same dimensions, got {dimensions}"
+            f"All {attention_cls.__name__} layers must have the same dimensions, "
+            f"got {dimensions}"
         )
-    ((num_k_heads, num_v_heads, head_k_dim, head_v_dim, conv_kernel_size),) = dimensions
-    return dict(
-        linear_layer_ids=sorted(gdn_layers),
-        num_k_heads=num_k_heads,
-        num_v_heads=num_v_heads,
-        head_k_dim=head_k_dim,
-        head_v_dim=head_v_dim,
-        conv_kernel_size=conv_kernel_size,
+    (values,) = dimensions
+    return dict(linear_layer_ids=sorted(layers), **dict(zip(dimension_fields, values)))
+
+
+def _patch_hybrid_full_attention_v_head_dim() -> None:
+    """Build the full attention KV pool of TorchTitan's hybrid linear attention models
+    with the model's V head dim, which MLA's per-head K/V (Kimi K3) make differ from
+    K's.
+
+    TODO(https://github.com/sgl-project/sglang/issues/48461): SGLang's
+    HybridLinearKVPool builds its MHATokenToKVPool without ``v_head_dim`` (V rows of
+    K's head dim), though its pool sizing counts it.
+    """
+    from sglang.srt.mem_cache.kv_cache_configurator import KVCacheConfigurator
+
+    original = KVCacheConfigurator._hybrid_full_attention_pool_class
+
+    def _hybrid_full_attention_pool_class(self, **kwargs):
+        pool_class = original(self, **kwargs)
+        model_config = self.model_config
+        if (
+            model_config.hf_config.architectures != [TORCHTITAN_ARCHITECTURE]
+            or self.use_mla_backend
+            or model_config.v_head_dim == model_config.head_dim
+        ):
+            return pool_class
+        return functools.partial(pool_class, v_head_dim=model_config.v_head_dim)
+
+    KVCacheConfigurator._hybrid_full_attention_pool_class = (
+        _hybrid_full_attention_pool_class
     )
 
 
@@ -120,11 +145,13 @@ def register_to_sglang(
          SGLang's ``ModelRegistry``; it closes over the arguments below.
       2. A config parser under ``TORCHTITAN_CONFIG_PARSER`` that builds the HF-shaped
          config from ``model_config`` instead of reading ``config.json``: a
-         ``TorchTitanGDNConfig`` for models with GDN layers.
+         ``TorchTitanGDNConfig`` for models with GDN layers, and a
+         ``TorchTitanKDAConfig`` for models with KDA layers.
       3. ``TorchTitanVarlenAttnBackend`` under ``TORCHTITAN_VARLEN_ATTENTION_BACKEND``,
          also as a backend SGLang's deterministic mode accepts with its radix cache.
-      4. ``TorchTitanGDNAttnBackend`` as the linear attention backend of
-         ``TorchTitanGDNConfig`` models, with SGLang's radix cache of their states.
+      4. ``TorchTitanGDNAttnBackend`` and ``TorchTitanKDAAttnBackend`` as the linear
+         attention backends of ``TorchTitanGDNConfig`` and ``TorchTitanKDAConfig``
+         models, with SGLang's radix cache of their states.
 
     Args:
         model_config: The generator's model config, with ``SGLangInnerAttention``
@@ -156,6 +183,10 @@ def register_to_sglang(
         TorchTitanGDNAttnBackend,
         TorchTitanGDNConfig,
     )
+    from torchtitan.rl.generator.sglang.kda import (
+        TorchTitanKDAAttnBackend,
+        TorchTitanKDAConfig,
+    )
     from torchtitan.rl.generator.sglang.model_wrapper import SGLangModelWrapper
 
     class TorchTitanForCausalLM(SGLangModelWrapper):
@@ -177,17 +208,44 @@ def register_to_sglang(
     # directly to register a class built at runtime.
     ModelRegistry.models[TORCHTITAN_ARCHITECTURE] = TorchTitanForCausalLM
 
-    gdn_kwargs = _gdn_config_kwargs(model_config)
+    gdn_kwargs = _linear_attention_config_kwargs(
+        model_config,
+        GDN,
+        {
+            "num_k_heads": "n_key_heads",
+            "num_v_heads": "n_heads",
+            "head_k_dim": "key_head_dim",
+            "head_v_dim": "value_head_dim",
+            "conv_kernel_size": "conv_kernel_size",
+        },
+    )
+    kda_kwargs = _linear_attention_config_kwargs(
+        model_config,
+        KDA,
+        {
+            "kda_num_heads": "n_heads",
+            "kda_head_dim": "head_dim",
+            "conv_kernel_size": "conv_kernel_size",
+        },
+    )
+    if gdn_kwargs is not None and kda_kwargs is not None:
+        raise ValueError(
+            "The SGLang engine does not support models with both GDN and KDA layers"
+        )
 
     @register_model_config_parser(TORCHTITAN_CONFIG_PARSER)
     class TorchTitanConfigParser(ModelConfigParserBase):
         def parse(self, model, trust_remote_code, revision=None, **kwargs):
             config_dict = _model_config_to_hf_config_dict(model_config)
-            if gdn_kwargs is None:
-                return PretrainedConfig.from_dict(config_dict)
-            return TorchTitanGDNConfig(
-                **config_dict, **gdn_kwargs, conv_state_dtype=precision.param_dtype
-            )
+            if gdn_kwargs is not None:
+                return TorchTitanGDNConfig(
+                    **config_dict, **gdn_kwargs, conv_state_dtype=precision.param_dtype
+                )
+            if kda_kwargs is not None:
+                return TorchTitanKDAConfig(
+                    **config_dict, **kda_kwargs, conv_state_dtype=precision.param_dtype
+                )
+            return PretrainedConfig.from_dict(config_dict)
 
     if TORCHTITAN_VARLEN_ATTENTION_BACKEND not in ATTENTION_BACKENDS:
         from sglang.srt.arg_groups.choices import (
@@ -214,21 +272,25 @@ def register_to_sglang(
             register_linear_attn_model,
         )
 
+        _patch_hybrid_full_attention_v_head_dim()
         # TODO(https://github.com/sgl-project/sglang/issues/48463): support SGLang's
         # extra_buffer mamba cache strategy (support_mamba_cache_extra_buffer), which
         # keeps overlap scheduling; it needs the kernels to write state snapshots at
         # intermediate positions.
-        register_linear_attn_model(
-            LinearAttnModelSpec(
-                config_class=TorchTitanGDNConfig,
-                backend_class_name=(
-                    f"{TorchTitanGDNAttnBackend.__module__}."
-                    f"{TorchTitanGDNAttnBackend.__qualname__}"
-                ),
-                uses_mamba_radix_cache=True,
-                support_mamba_cache=True,
+        for config_class, backend_class in (
+            (TorchTitanGDNConfig, TorchTitanGDNAttnBackend),
+            (TorchTitanKDAConfig, TorchTitanKDAAttnBackend),
+        ):
+            register_linear_attn_model(
+                LinearAttnModelSpec(
+                    config_class=config_class,
+                    backend_class_name=(
+                        f"{backend_class.__module__}.{backend_class.__qualname__}"
+                    ),
+                    uses_mamba_radix_cache=True,
+                    support_mamba_cache=True,
+                )
             )
-        )
 
     logger.info(
         f"Registered {TORCHTITAN_ARCHITECTURE} + config parser "
