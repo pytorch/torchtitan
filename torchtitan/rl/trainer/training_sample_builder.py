@@ -13,11 +13,12 @@ import statistics
 from dataclasses import dataclass, field
 
 import numpy as np
+from renderers import PlaceholderRange
 
 from torchtitan.config import Configurable
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import Rollout, RolloutGroup
-from torchtitan.rl.rollout.types import RolloutTurnID
+from torchtitan.rl.rollout.types import PromptImage, RolloutTurnID
 
 
 @dataclass(kw_only=True, slots=True)
@@ -57,6 +58,11 @@ class TrainingSample:
     """[L] generator logprobs; 0.0 where loss_mask is False."""
     advantage: np.ndarray  # float32
     """[L] advantage on assistant tokens, 0.0 elsewhere."""
+    images: tuple[PromptImage, ...] = ()
+    """Every image in `token_ids`: the last turn's prompt images (images only appear in
+    prompts, and that prompt is a prefix of `token_ids`)."""
+    image_placeholders: tuple[PlaceholderRange, ...] = ()
+    """Where each of `images` sits in `token_ids` (see `Prompt.image_placeholders`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +97,8 @@ class _SampleInProgress:
     loss_mask: list[np.ndarray] = field(default_factory=list)
     logprobs: list[np.ndarray] = field(default_factory=list)
     advantage: list[np.ndarray] = field(default_factory=list)
+    images: tuple[PromptImage, ...] = ()
+    image_placeholders: tuple[PlaceholderRange, ...] = ()
 
     def to_training_sample(self) -> TrainingSample:
         return TrainingSample(
@@ -101,6 +109,8 @@ class _SampleInProgress:
             loss_mask=np.concatenate(self.loss_mask),
             logprobs=np.concatenate(self.logprobs, dtype=np.float32),
             advantage=np.concatenate(self.advantage),
+            images=self.images,
+            image_placeholders=self.image_placeholders,
         )
 
 
@@ -294,6 +304,9 @@ class TrainingSampleBuilder(Configurable):
         sample_in_progress: _SampleInProgress | None = None
         # Length of the previous turn's prompt + completion
         prev_len = 0
+        # The previous turn's prompt images and where they sit (images appear only in prompts)
+        prev_images: tuple[PromptImage, ...] = ()
+        prev_image_placeholders: tuple[PlaceholderRange, ...] = ()
 
         # Skip if no completion (nothing to train on). This happens when the prompt is too
         # long in the first turn, before any generation. We keep these rollouts for debugging.
@@ -320,6 +333,34 @@ class TrainingSampleBuilder(Configurable):
                     f"reuses {prompt_prefix_len} tokens, but the previous turn has only "
                     f"{prev_len}; build it with `split_prompt`"
                 )
+            # Delta images sit in the delta, at full-prompt positions; an offset inside the
+            # delta (e.g. 1 instead of prefix + 1) would put image embeddings on other tokens.
+            for placeholder in rollout_turn.prompt_delta_image_placeholders:
+                if not (
+                    prompt_prefix_len
+                    <= placeholder.offset
+                    <= rollout_turn.num_prompt_tokens - placeholder.length
+                ):
+                    raise ValueError(
+                        f"rollout {rollout.group_id}/rollout={rollout.rollout_id}: turn "
+                        f"{turn_idx} has an image at tokens [{placeholder.offset}, "
+                        f"{placeholder.offset + placeholder.length}), outside its prompt delta "
+                        f"[{prompt_prefix_len}, {rollout_turn.num_prompt_tokens}); image "
+                        "placeholders are positions in the full prompt"
+                    )
+
+            # The full prompt's images: the previous prompt's images in the shared prefix, then
+            # the turn's own. `split_prompt` ends the prefix at the first changed image, so an
+            # image swapped in place (equal placeholder tokens) shortens the prefix too.
+            num_prefix_images = sum(
+                placeholder.offset < prompt_prefix_len
+                for placeholder in prev_image_placeholders
+            )
+            images = prev_images[:num_prefix_images] + rollout_turn.prompt_delta_images
+            image_placeholders = (
+                prev_image_placeholders[:num_prefix_images]
+                + rollout_turn.prompt_delta_image_placeholders
+            )
 
             # True when this prompt continues the previous one (prefix-preserving);
             # False when the env edited history -> open a new training_sample (branch).
@@ -340,11 +381,17 @@ class TrainingSampleBuilder(Configurable):
                 # Too few: the first new token equals prev's token at the same position, so the turn
                 # could reuse at least one more. E.g. prev = [0, 1, 2, 3], stored (0, [0, 1, 9, 3]):
                 # 0 == prev[0]; split_prompt gives (2, [9, 3]). Catches a full prompt stored as the delta.
+                # Not when a changed image starts the delta: `split_prompt` ends the prefix at
+                # it, and its placeholder tokens equal the previous image's.
                 could_reuse_one_more = (
                     prompt_prefix_len < prev_len
                     and len(prompt_delta_token_ids) > 0
                     and prompt_delta_token_ids[0]
                     == prev_prompt_and_completion[prompt_prefix_len]
+                    and not any(
+                        placeholder.offset == prompt_prefix_len
+                        for placeholder in rollout_turn.prompt_delta_image_placeholders
+                    )
                 )
                 if could_reuse_one_more:
                     raise ValueError(
@@ -392,6 +439,8 @@ class TrainingSampleBuilder(Configurable):
                 np.zeros(num_delta, dtype=np.float32),
                 np.full(num_completion, rollout_advantage, dtype=np.float32),
             ]
+            sample_in_progress.images = images
+            sample_in_progress.image_placeholders = image_placeholders
             sample_in_progress.min_policy_version = min(
                 sample_in_progress.min_policy_version, rollout_turn.min_policy_version
             )
@@ -400,6 +449,7 @@ class TrainingSampleBuilder(Configurable):
             )
 
             prev_len = rollout_turn.num_prompt_tokens + num_completion
+            prev_images, prev_image_placeholders = images, image_placeholders
 
         if sample_in_progress is not None:
             training_samples.append(sample_in_progress.to_training_sample())

@@ -316,6 +316,11 @@ class Trainer(Configurable):
             # and broadcast it, to cut the trainer's reads by cp * tp. Needs a per-replica group.
             # The controller rejects RDMA with PP, so every group holds one microbatch.
             microbatch_groups = RDMAMicrobatchPrefetcher(microbatches)
+        else:
+            microbatch_groups = [
+                [microbatch.preprocess_images() for microbatch in group]
+                for group in microbatch_groups
+            ]
         result = engine.forward_backward(
             microbatch_groups=microbatch_groups,
             global_loss_token_counts=global_loss_token_counts,

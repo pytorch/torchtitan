@@ -438,6 +438,16 @@ class VisionProcessor(Configurable):
         grid_thw = torch.tensor([T_patches, H_patches, W_patches])
         return patches, grid_thw
 
+    def patchify_all(
+        self, items_THWC: Sequence[torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """`patchify` each item and pack them as the vision encoder takes a batch:
+        ``(total_num_patches, patch_dim)`` patches and ``(num_items, 3)`` grids, in
+        item order. ``grid_thw.prod(-1)`` gives each item's length in the patches.
+        """
+        patches, grids = zip(*(self.patchify(item) for item in items_THWC))
+        return torch.cat(patches), torch.stack(grids)
+
     def grid_thw(self, height: int, width: int) -> tuple[int, int, int]:
         """The patch grid ``(1, H, W)`` that ``resize_and_normalize`` gives a
         ``height x width`` image, without decoding it.
