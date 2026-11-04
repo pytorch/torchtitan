@@ -380,6 +380,19 @@ def _run_qwen3_moe_loss_compare() -> bool:
     )
 
 
+def _run_deepseek_v4_loss_compare() -> bool:
+    """Compare DeepSeek V4 eager and GraphTrainer with FSDP+TP+EP on four GPUs."""
+    return run_loss_compare(
+        baseline_module=NUMERICS_CONFIG_MODULE,
+        baseline_config="deepseek_v4_eager_numerics",
+        test_module=NUMERICS_CONFIG_MODULE,
+        test_config="deepseek_v4_graph_numerics",
+        baseline_ngpus=4,
+        test_ngpus=4,
+        metrics=("loss", "grad_norm"),
+    )
+
+
 def _run_gpt_oss_loss_compare() -> bool:
     """Compare GPT-OSS eager and GraphTrainer with FSDP+TP+EP on four GPUs."""
     return run_loss_compare(
@@ -470,6 +483,9 @@ class TestGraphTrainerNumerics(unittest.TestCase):
 
     def test_moe_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_qwen3_moe_loss_compare())
+
+    def test_moe_dsv4_aot_fx_trace_vs_eager(self):
+        self.assertTrue(_run_deepseek_v4_loss_compare())
 
     def test_moe_gpt_oss_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_gpt_oss_loss_compare())
