@@ -12,7 +12,11 @@ import torch
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
 from torchtitan.components.loss import compute_logprobs, cross_entropy_loss, mse_loss
-from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
+from torchtitan.distributed.local_compile import (
+    is_local_compile_enabled,
+    local_compile,
+    LocalCompileConfig,
+)
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.attention.attention import _compiled_create_block_mask
 from torchtitan.models.common.moe.moe import _microbatch_load_balance_local_stats
@@ -42,6 +46,18 @@ def reset_local_compile():
 def test_local_compile_config_rejects_unknown_name() -> None:
     with pytest.raises(ValueError, match=r"foo.*registered values"):
         LocalCompileConfig(regions=["foo"]).apply()
+
+
+def test_local_compile_reports_enabled_regions() -> None:
+    @local_compile("test_enabled_region", batch_invariant=True)
+    def fn(value: int) -> int:
+        return value
+
+    assert not is_local_compile_enabled("test_enabled_region")
+    LocalCompileConfig(regions=["test_enabled_region"]).apply()
+    assert is_local_compile_enabled("test_enabled_region")
+    LocalCompileConfig().apply()
+    assert not is_local_compile_enabled("test_enabled_region")
 
 
 def test_local_compile_binds_once_from_existing_config(monkeypatch) -> None:
