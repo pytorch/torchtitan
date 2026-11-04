@@ -12,7 +12,7 @@ from typing import Any, TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from torchtitan.components.optim import Optim, OptimizersContainer
+from torchtitan.components.optim import Adam, AdamW, Optim, OptimizersContainer
 from torchtitan.components.optim.utils import (
     get_flat_optim_state_dict,
     init_optim_state,
@@ -29,7 +29,16 @@ logger = logging.getLogger(__name__)
 class TorchFTOptimizersContainer(OptimizersContainer):
     @dataclass(kw_only=True, slots=True)
     class Config(OptimizersContainer.Config):
-        pass
+        def __post_init__(self) -> None:
+            if any(
+                isinstance(optimizer, (Adam.Config, AdamW.Config))
+                and optimizer.moment_location == "pinned_host"
+                for optimizer in self.optimizers
+            ):
+                raise ValueError(
+                    "TorchFT does not support pinned_host Adam moments: replica "
+                    "recovery is not verified with them."
+                )
 
     def __init__(
         self,

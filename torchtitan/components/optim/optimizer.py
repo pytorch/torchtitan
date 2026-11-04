@@ -9,6 +9,7 @@ from __future__ import annotations
 import fnmatch
 import logging
 import re
+import weakref
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, cast, Literal, overload
@@ -18,6 +19,7 @@ import torch.nn as nn
 from torch import Tensor
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
@@ -27,7 +29,7 @@ from torchtitan.distributed.flex_shard import (
     ComputeLayout,
     DistMuon as FlexShardDistMuon,
 )
-from torchtitan.distributed.utils import build_alternative_fsdp_mesh
+from torchtitan.distributed.utils import build_alternative_fsdp_mesh, get_local_tensor
 
 from .utils import (
     get_flat_optim_state_dict,
@@ -47,6 +49,7 @@ __all__ = [
 ]
 
 MomentDType = Literal["parameter", "bfloat16"]
+MomentLocation = Literal["device", "pinned_host"]
 
 
 class BaseOptimizer(Optimizer, Configurable):
@@ -58,15 +61,152 @@ class BaseOptimizer(Optimizer, Configurable):
         """Regex matched against parameter fully qualified names."""
 
 
-def _validate_moment_dtype(
+def _validate_adam_moments(
     *,
     moment_dtype: MomentDType,
+    moment_location: MomentLocation,
     fused: bool | None,
 ) -> None:
     if moment_dtype not in ("parameter", "bfloat16"):
         raise ValueError(f"Unsupported Adam moment dtype {moment_dtype!r}")
     if moment_dtype == "bfloat16" and fused is not True:
         raise ValueError("bfloat16 Adam moments require fused=True")
+    if moment_location not in ("device", "pinned_host"):
+        raise ValueError(f"Unsupported Adam moment location {moment_location!r}")
+    if moment_location == "pinned_host" and fused is not True:
+        raise ValueError("pinned_host Adam moments require fused=True")
+    if moment_location == "pinned_host" and torch.version.hip is not None:
+        raise ValueError(
+            "pinned_host Adam moments are not verified on ROCm. "
+            "Use moment_location='device'."
+        )
+
+
+# cudaHostRegisterPortable: the pinned memory is usable from every CUDA context.
+_CUDA_HOST_REGISTER_PORTABLE = 1
+
+
+def _call_cudart(name: str, *args: int) -> None:
+    """Call a CUDA runtime function through ``torch.cuda.cudart()``."""
+    error = int(getattr(torch.cuda.cudart(), name)(*args))
+    if error != 0:
+        raise RuntimeError(f"{name} failed with CUDA error {error}.")
+
+
+class _PinnedHostBuffer:
+    """Pin a CPU tensor in place and expose it to CUDA.
+
+    ``torch.as_tensor`` turns this object into a CUDA tensor that aliases the
+    pinned memory through ``__cuda_array_interface__``. That CUDA tensor keeps
+    this object alive. When the last such tensor is freed, the memory is unpinned
+    and then freed.
+
+    The interface has no bfloat16 type code, so it describes the memory as raw
+    bytes. The caller views the bytes as the moment dtype.
+    """
+
+    def __init__(self, host: Tensor, device: torch.device) -> None:
+        self.host = host
+        # Pin the existing pages. pin_memory=True would round each allocation up to
+        # a power of two, using up to 2x host memory.
+        # TODO(pytorch/pytorch#32167): Use in-place pinning once PyTorch has it.
+        _call_cudart(
+            "cudaHostRegister",
+            host.data_ptr(),
+            host.nbytes,
+            _CUDA_HOST_REGISTER_PORTABLE,
+        )
+        # Runs before ``host`` is released. Skipped at exit, when the CUDA context
+        # may already be gone.
+        weakref.finalize(
+            self, _unpin_after_device_work, device, host.data_ptr()
+        ).atexit = False
+        # CUDA Array Interface v3 (the current spec version): one uint8 ("|u1")
+        # per byte, at this address, writable (read-only flag False).
+        self.__cuda_array_interface__ = {
+            "shape": (host.nbytes,),
+            "typestr": "|u1",
+            "data": (host.data_ptr(), False),
+            "version": 3,
+        }
+
+
+def _unpin_after_device_work(device: torch.device, data_ptr: int) -> None:
+    # Unregister before the memory is freed. Otherwise the pages stay locked after
+    # free, and registering reused addresses later fails. Synchronize first:
+    # kernels may still use the memory, e.g. if the optimizer is freed right after
+    # step().
+    torch.accelerator.synchronize(device)
+    _call_cudart("cudaHostUnregister", data_ptr)
+
+
+def _pinned_host_zeros_like(local: Tensor, dtype: torch.dtype) -> Tensor:
+    """Return zeros shaped like ``local`` in pinned CPU memory, as a CUDA tensor."""
+    # cudaHostRegister rejects empty buffers. An empty shard needs no memory.
+    if local.numel() == 0:
+        return torch.zeros_like(local, dtype=dtype)
+    # The pages land on the NUMA node this process is bound to.
+    host = torch.zeros(local.shape, dtype=dtype)
+    # The CUDA Array Interface normally describes device memory. Registered pinned
+    # host memory is also addressable by CUDA kernels (unified addressing), so the
+    # tensor gets an explicit device.
+    raw = torch.as_tensor(_PinnedHostBuffer(host, local.device), device=local.device)
+    return raw.view(dtype).view(local.shape)
+
+
+def _as_dtensor_like(param: Tensor, local: Tensor) -> Tensor:
+    """Wrap a local state shard as a DTensor with ``param``'s mesh and placements.
+
+    Returns ``local`` unchanged if ``param`` is not a DTensor. DCP then saves and
+    reshards the state like the parameter.
+    """
+    if not isinstance(param, DTensor):
+        return local
+    return DTensor.from_local(
+        local,
+        param.device_mesh,
+        param.placements,
+        run_check=False,
+        shape=param.shape,
+        stride=param.stride(),
+    )
+
+
+def _init_pinned_host_optim_state(
+    optimizer: torch.optim.Optimizer, *, moment_dtype: MomentDType
+) -> None:
+    """Create the Adam state now, with the moments in pinned CPU memory.
+
+    This does what ``init_optim_state`` does, except that ``exp_avg`` and
+    ``exp_avg_sq`` live in pinned CPU memory that CUDA kernels can access. Because
+    the state already exists, ``init_optim_state`` is a no-op and DCP loads into
+    the pinned memory directly. The moment addresses never change, so a captured
+    optimizer graph stays valid.
+    """
+    for group in optimizer.param_groups:
+        names = group.get("param_names") or [None] * len(group["params"])
+        for name, param in zip(names, group["params"], strict=True):
+            local = get_local_tensor(param)
+            if local.device.type != "cuda":
+                raise ValueError(
+                    "pinned_host Adam moments require CUDA parameters, got "
+                    f"{local.device}. Use moment_location='device' with "
+                    "parallelism.fsdp_enable_cpu_offloading or create_seed_checkpoint."
+                )
+            if not local.is_contiguous():
+                raise ValueError(
+                    "pinned_host Adam moments require contiguous parameters, got "
+                    f"strides {local.stride()} for {name or 'a parameter'} with "
+                    f"shape {tuple(local.shape)}"
+                )
+            dtype = torch.bfloat16 if moment_dtype == "bfloat16" else local.dtype
+            optimizer.state[param].update(
+                step=torch.zeros((), dtype=torch.float32, device=local.device),
+                exp_avg=_as_dtensor_like(param, _pinned_host_zeros_like(local, dtype)),
+                exp_avg_sq=_as_dtensor_like(
+                    param, _pinned_host_zeros_like(local, dtype)
+                ),
+            )
 
 
 def _register_bfloat16_moment_hooks(optimizer: torch.optim.Optimizer) -> None:
@@ -123,10 +263,14 @@ class Adam(torch.optim.Adam, BaseOptimizer):
         weight_decay: float = 0.0
         fused: bool | None = True
         moment_dtype: MomentDType = "parameter"
+        moment_location: MomentLocation = "device"
+        """``"pinned_host"`` keeps the moments in pinned CPU memory, where the fused
+        kernel reads and writes them in place. See ``PINNED_HOST_MOMENTS.md``."""
 
         def __post_init__(self) -> None:
-            _validate_moment_dtype(
+            _validate_adam_moments(
                 moment_dtype=self.moment_dtype,
+                moment_location=self.moment_location,
                 fused=self.fused,
             )
 
@@ -144,7 +288,9 @@ class Adam(torch.optim.Adam, BaseOptimizer):
             weight_decay=config.weight_decay,
             fused=config.fused,
         )
-        if config.moment_dtype == "bfloat16":
+        if config.moment_location == "pinned_host":
+            _init_pinned_host_optim_state(self, moment_dtype=config.moment_dtype)
+        elif config.moment_dtype == "bfloat16":
             _register_bfloat16_moment_hooks(self)
 
 
@@ -160,10 +306,14 @@ class AdamW(torch.optim.AdamW, BaseOptimizer):
         foreach: bool | None = None
         fused: bool | None = True
         moment_dtype: MomentDType = "parameter"
+        moment_location: MomentLocation = "device"
+        """``"pinned_host"`` keeps the moments in pinned CPU memory, where the fused
+        kernel reads and writes them in place. See ``PINNED_HOST_MOMENTS.md``."""
 
         def __post_init__(self) -> None:
-            _validate_moment_dtype(
+            _validate_adam_moments(
                 moment_dtype=self.moment_dtype,
+                moment_location=self.moment_location,
                 fused=self.fused,
             )
 
@@ -182,7 +332,9 @@ class AdamW(torch.optim.AdamW, BaseOptimizer):
             foreach=config.foreach,
             fused=config.fused,
         )
-        if config.moment_dtype == "bfloat16":
+        if config.moment_location == "pinned_host":
+            _init_pinned_host_optim_state(self, moment_dtype=config.moment_dtype)
+        elif config.moment_dtype == "bfloat16":
             _register_bfloat16_moment_hooks(self)
 
 
