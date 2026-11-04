@@ -38,9 +38,10 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
+from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.model import (
+    build_dist_moe_runtime,
     build_inference_model,
     compute_logits,
     get_attention_dimensions,
@@ -351,45 +352,18 @@ class VLLMModelWrapper(Module):
         max_num_batched_tokens: int,
         device: torch.device,
     ) -> None:
-        """Give the generator's Dist-MoE experts their annex context.
-
-        Dist-MoE experts refuse to run without a runtime. The trainer
-        gets one from ``TrainingEngine``; vLLM constructs this model directly,
-        so the wrapper builds the generator's. The context is built once, before
-        any CUDA-graph capture, so no per-forward Python work runs under
-        capture or replay.
-        """
-        self._dist_moe_runtime = None
+        """Build the Dist-MoE runtime (see ``build_dist_moe_runtime``) and the
+        device scalar of each step's real token count."""
         self._num_valid_tokens: torch.Tensor | None = None
-        if not any(
-            isinstance(module, DistMoeRoutedExperts) for module in self.model.modules()
-        ):
-            if runtime_config is not None:
-                logger.warning(
-                    "Ignoring dist_moe_runtime: the generator model has no "
-                    "Dist-MoE routed experts."
-                )
-            return
-        if runtime_config is None:
-            raise ValueError(
-                "The generator model uses Dist-MoE routed experts but no "
-                "dist_moe_runtime was registered. Pass a "
-                "DistMoeRuntime.Config(inference=True) to register_to_vllm()."
-            )
-        if not runtime_config.inference:
-            raise ValueError(
-                "dist_moe_runtime must set inference=True; got "
-                f"{runtime_config!r}. The generator runs no "
-                "backward, so a training context's activation slots would reserve "
-                "memory it can never use."
-            )
-        self._dist_moe_runtime = runtime_config.build(
-            model_parts=[self.model],
+        self._dist_moe_runtime = build_dist_moe_runtime(
+            self.model,
+            runtime_config,
             parallelism_context=self.parallelism_context,
             device=device,
-            num_tokens_per_microbatch_per_dp_rank=max_num_batched_tokens,
-            pp_schedule=None,
+            max_num_tokens_per_step=max_num_batched_tokens,
         )
+        if self._dist_moe_runtime is None:
+            return
         # The runner writes each step's real token count here before the forward
         # runs, and forward builds the padding mask from it on the device, so
         # CUDA-graph replay sees the current count. The address must stay fixed
