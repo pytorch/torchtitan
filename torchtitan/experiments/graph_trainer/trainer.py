@@ -35,6 +35,7 @@ from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
 )
 from torchtitan.experiments.graph_trainer.passes import resolve_registered_graph_passes
 from torchtitan.models.base import BaseModel
+from torchtitan.models.common.attention.linear_attention import LinearAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.observability import structured_logger as sl
 from torchtitan.trainer import Trainer
@@ -77,6 +78,15 @@ class GraphTrainingEngine(TrainingEngine):
             raise ValueError(
                 "GraphTrainer's SimpleFSDP does not support "
                 "parallelism.fsdp_symm_mem_scope; set it to None."
+            )
+        if (
+            max_num_documents is None
+            and next(model_config.traverse(LinearAttention.Config), None) is not None
+        ):
+            raise ValueError(
+                "GraphTrainer bakes the traced step's document count into linear "
+                "attention's chunk metadata; set dataloader.max_num_documents so "
+                "every step uses the same fixed-capacity metadata."
             )
         validate_memory_policy_config(config.compile)
         # Fail before building the model rather than at trace time.

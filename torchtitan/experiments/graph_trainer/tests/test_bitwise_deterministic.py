@@ -59,6 +59,9 @@ from torchtitan.experiments.graph_trainer.llama3 import (
 from torchtitan.experiments.graph_trainer.qwen3 import (
     build_model_config as build_qwen3_model_config,
 )
+from torchtitan.experiments.graph_trainer.qwen3_5 import (
+    build_model_config as build_qwen3_5_model_config,
+)
 from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
     build_minimal_trainer,
     single_device_parallelism_context,
@@ -118,6 +121,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
     # Flex-specific subclasses override the shared Varlen backend. None is for
     # models whose flavors fix their own attention.
     attn_backend: str | None = "varlen"
+    param_dtype: torch.dtype = torch.float32
 
     def setUp(self):
         self.parallelism_context = self.enterContext(
@@ -174,6 +178,10 @@ class BitwiseDeterministicBase(unittest.TestCase):
         model.to_empty(device="cuda")
         with torch.no_grad():
             model.init_states(buffer_device=None)
+            # Single-GPU runs skip FSDP's mixed-precision cast, so kernels that
+            # only take BF16 inputs need BF16 parameters.
+            for param in model.parameters():
+                param.data = param.data.to(self.param_dtype)
         model.train()
         self.model = model
         self.inputs = torch.randint(0, vocab_size, (NUM_TOKENS,), device="cuda")
@@ -956,6 +964,52 @@ class TestDSv4BitwiseDeterministic(BitwiseDeterministicBase):
     build_model_config = staticmethod(build_deepseek_v4_model_config)
     model_flavor = "debugmodel"
     attn_backend = None
+    annotate_model = staticmethod(annotate_graph_trainer_model)
+
+    def test_aot_fx_trace_vs_eager(self):
+        """aot_fx_trace and eager produce bitwise identical losses and grads."""
+        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+
+        self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
+
+    def test_precompile_vs_trace(self):
+        """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+        run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
+
+        self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
+
+    def test_numerics_changing_optim_run_to_run(self):
+        """Two runs with numerics_changing_optim produce bitwise identical results."""
+        run_a = self._run_steps(
+            copy.deepcopy(self.model),
+            GraphTrainer,
+            numerics_changing_optim=True,
+        )
+        run_b = self._run_steps(
+            copy.deepcopy(self.model),
+            GraphTrainer,
+            numerics_changing_optim=True,
+        )
+
+        self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
+
+
+@unittest.skipUnless(
+    has_cuda_capability(9, 0), "Attention Gym GDN requires CUDA capability 9.0+"
+)
+class TestQwen35MoEBitwiseDeterministic(BitwiseDeterministicBase):
+    """Bitwise determinism tests for the text-only Qwen3.5 MoE debug model.
+
+    Covers Gated DeltaNet and gated full-attention layers, MRoPE, and MoE with
+    a shared expert.
+    """
+
+    build_model_config = staticmethod(build_qwen3_5_model_config)
+    model_flavor = "debugmodel_moe_text"
+    # Attention Gym's fused chunk GDN takes BF16 or FP16 Q/K/V only.
+    param_dtype = torch.bfloat16
     annotate_model = staticmethod(annotate_graph_trainer_model)
 
     def test_aot_fx_trace_vs_eager(self):

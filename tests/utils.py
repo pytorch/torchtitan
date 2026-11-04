@@ -33,6 +33,9 @@ def _hash_model_impl(
                 t = obj.to_local().cpu().contiguous()
             else:
                 t = obj.cpu().contiguous()
+            if t.dtype == torch.bfloat16:
+                # NumPy has no bfloat16; hash the same bytes as int16.
+                t = t.view(torch.int16)
 
             # NOTE: data.numpy().tobytes() is the fastest way to convert a
             # tensor to a bytestream. See benchmark results at

@@ -6,6 +6,8 @@
 
 """Qwen3.8 model flavors."""
 
+from functools import partial
+
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
@@ -108,7 +110,7 @@ def _qwen3_8_2_4t_a95b(
 
 MODEL_FLAVORS = {
     "debugmodel": (_debugmodel, 4096),
-    "debugmodel_moe": (_debugmodel_moe, 4096),
+    "debugmodel_moe": (partial(_debugmodel_moe, with_vision=True), 4096),
     "27B": (_27b, 262144),
     "2.4T-A95B": (_qwen3_8_2_4t_a95b, 262144),
 }

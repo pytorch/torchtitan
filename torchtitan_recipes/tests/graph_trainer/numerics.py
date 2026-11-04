@@ -39,6 +39,10 @@ from torchtitan_recipes.tests.graph_trainer.qwen3 import (
     graph_trainer_qwen3_debugmodel,
     graph_trainer_qwen3_debugmodel_moe,
 )
+from torchtitan_recipes.tests.graph_trainer.qwen3_5 import (
+    graph_trainer_qwen35_debugmodel_moe,
+    qwen35_debugmodel_moe_text,
+)
 from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2,
@@ -353,6 +357,25 @@ def gpt_oss_graph_numerics():
     return graph_trainer_gpt_oss_debugmodel_flex(
         parallelism=_gpt_oss_numerics_parallelism()
     )
+
+
+def _qwen35_numerics_parallelism() -> ParallelismConfig:
+    return ParallelismConfig(
+        data_parallel_shard_degree=2,
+        tensor_parallel_degree=2,
+        expert_parallel_degree=2,
+    )
+
+
+def qwen35_moe_eager_numerics():
+    config = qwen35_debugmodel_moe_text(_qwen35_numerics_parallelism())
+    # Match GraphTrainer, which captures model and loss in one eager FX graph.
+    config.model.local_compile.regions = []
+    return _without_inplace_wgrad_accum(config)
+
+
+def qwen35_moe_graph_numerics():
+    return graph_trainer_qwen35_debugmodel_moe(_qwen35_numerics_parallelism())
 
 
 def _kimi_k3_numerics(config):
