@@ -17,16 +17,16 @@ Generator engine loop (every rank, SPMD)
   SGLangEngine
     add_requests ----> Scheduler.process_input_requests   (no tokenizer/detokenizer procs)
     step ------------> one iteration of Scheduler.event_loop_overlap
-                       (event_loop_normal for GDN models)
+                       (event_loop_normal for GDN and KDA models)
                           ModelRunner -> SGLangModelWrapper.forward(input_ids, positions, forward_batch)
                                            TorchTitan Decoder
                                              Attention -> SGLangInnerAttention -> RadixAttention
                                                             TorchTitanVarlenAttnBackend:
                                                             SGLang's paged-KV metadata,
                                                             torch varlen FlashAttention (the trainer's kernel)
-                                             GDN -> SGLangInnerGDN -> RadixLinearAttention
-                                                      TorchTitanGDNAttnBackend: SGLang's state
-                                                      slots, the trainer's Attention Gym kernels
+                                             GDN / KDA -> SGLangInnerGDN / SGLangInnerKDA -> RadixLinearAttention
+                                                            TorchTitanGDNAttnBackend / TorchTitanKDAAttnBackend:
+                                                            SGLang's state slots, the trainer's Attention Gym kernels
                                            lm_head + TP gather -> SGLang LogitsProcessor / Sampler
     load_model_state_dict -> ModelStateDictLoader (FSDP groups, in place: CUDA graphs stay valid)
 ```
@@ -79,8 +79,9 @@ scripts/install_rl_env.sh --sglang
 | Data parallelism within a generator | Not supported: run more generators |
 | Sliding-window attention (e.g. Muse Glimmer) | Supported; KV of every token stays cached (no sliding-window KV pool) |
 | GDN linear attention (Qwen3.5) | Supported; see below |
+| KDA linear attention (Kimi K3) | Supported; see below |
 | MLA (DeepSeek V3) | Supported with per-head K/V in the KV cache, as the vLLM engine runs MLA in batch-invariant mode; SGLang's compressed-latent MLA cache is not used |
-| Flex attention, KDA, attention sinks (GPT-OSS) | Not supported |
+| Flex attention, attention sinks (GPT-OSS) | Not supported |
 | MoE with expert parallelism over the TP group, Dist-MoE | Supported; see below |
 | Sequence parallelism | Not supported |
 
@@ -111,17 +112,24 @@ shards a step's tokens over the TP ranks even without expert parallelism, so wit
 TP > 1 it needs expert parallelism too. The other EP token dispatchers (DeepEP,
 HybridEP) are not supported.
 
-## GDN
+## GDN and KDA
 
-SGLang keeps each request's GDN conv and recurrent state in its state pool, and
-its radix cache snapshots them, so a session's next turn resumes from its cached
-prefix as with KV. The trainer's Attention Gym kernels advance the states
-(`TorchTitanGDNAttnBackend`, registered through SGLang's linear attention model
-registry). The backend registers without SGLang's `extra_buffer` mamba cache
-strategy, which needs the kernels to write state snapshots at intermediate
-positions. SGLang then snapshots a request's state only when it caches the
-request, and disables overlap scheduling: the engine steps SGLang's normal event
-loop for these models.
+SGLang keeps each request's GDN or KDA conv and recurrent state in its state
+pool, and its radix cache snapshots them, so a session's next turn resumes from
+its cached prefix as with KV. The trainer's Attention Gym kernels advance the
+states (`TorchTitanGDNAttnBackend` and `TorchTitanKDAAttnBackend`, registered
+through SGLang's linear attention model registry). The backends register without
+SGLang's `extra_buffer` mamba cache strategy, which needs the kernels to write
+state snapshots at intermediate positions. SGLang then snapshots a request's
+state only when it caches the request, and disables overlap scheduling: the
+engine steps SGLang's normal event loop for these models.
+
+In batch-invariant mode, a KDA state is the state after the last complete
+64-token chunk plus Attention Gym's replay state of the unfinished chunk, as in
+the vLLM engine. SGLang's state pool holds the replay tensors as extra conv
+state entries of each slot (`TorchTitanKDAConfig`), so its radix cache snapshots
+them with the state; at head dim 128, they take 1.25x the memory of the
+recurrent states.
 
 ## Multi-turn sessions
 
@@ -149,10 +157,14 @@ SGLangEngine.Config(
 
 KV loaded back is bitwise identical to recomputed KV (checked in batch-invariant
 mode on a multi-turn workload), and a reset on model state dict load clears the
-host cache too. For GDN models, it keeps the conv and recurrent states of evicted
-prefixes in host memory too: a cached turn whose prefix was loaded back matched
-the trainer's prefill bitwise. HiCache pays off when recomputing a prefix costs
-more than copying its KV: for Qwen3-0.6B, recompute is faster.
+host cache too. For GDN and KDA models, it keeps the conv and recurrent states
+(and KDA's replay state) of evicted prefixes in host memory too: a cached turn
+whose prefix was loaded back matched the trainer's prefill bitwise. HiCache pays
+off when recomputing a prefix costs more than copying its KV: for Qwen3-0.6B,
+recompute is faster.
+
+TODO: with HiCache's `write_through` policy, one run in 18 of the KDA parity
+class mismatched the trainer (max logprob delta 3.1e-2); not root-caused.
 
 ## Seeds
 

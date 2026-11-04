@@ -989,7 +989,7 @@ class KimiK3BitwiseParityTestBase(BitwiseParityTestBase):
         cls.model.train()
 
 
-def _kimi_k3_debug_bitwise_config() -> Controller.Config:
+def kimi_k3_debug_bitwise_config() -> Controller.Config:
     """Build a one-GPU random-weight Kimi K3 parity configuration."""
     config = rl_grpo_kimi_k3_debug_varlen_batch_invariant()
     config.trainer = dataclasses.replace(
@@ -1006,7 +1006,7 @@ class TestBitwiseParityKimiK3DebugVarlen(KimiK3BitwiseParityTestBase):
     """Kimi K3 KDA/MLA parity with random weights and matched TP=1."""
 
     __test__ = True
-    config_fn = staticmethod(_kimi_k3_debug_bitwise_config)
+    config_fn = staticmethod(kimi_k3_debug_bitwise_config)
     attn_backend = "varlen"
     sync_weights_from_trainer = True
     BATCH_SIZE = 3
