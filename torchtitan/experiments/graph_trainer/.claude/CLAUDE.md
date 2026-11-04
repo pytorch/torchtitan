@@ -38,10 +38,10 @@ Graph passes are structured into three tiers:
 
 3. **Registered passes** -- opt-in by name via `config.compile.extra_passes`.
    Registered with `@register_graph_pass` (`registry.py`) from any module,
-   including outside torchtitan. They run after graph normalization and
-   before memory policy tagging. Use them
-   for model- or shape-specialized rewrites such as replacing a subgraph with
-   a handwritten kernel.
+   including outside torchtitan. They run on the joint graph after the other
+   GraphTrainer passes and before Inductor compilation. Use them for model-
+   or shape-specialized rewrites such as replacing a subgraph with a
+   handwritten kernel.
 
 When adding a new pass, put it in `performance_passes.py` if it changes
 numerics; otherwise put it in `passes.py` or a dedicated file like

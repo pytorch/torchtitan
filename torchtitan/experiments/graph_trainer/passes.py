@@ -249,9 +249,6 @@ def compile_time_passes(
                 deduplicate_fsdp_unshard_chains_pass,
             ]
         )
-    # Registered passes (e.g. kernel fusions) rewrite the normalized graph
-    # before memory policy tagging decides what to save from their outputs.
-    passes.extend(resolve_registered_graph_passes(config.compile.extra_passes))
     ep_overlap_module_fqn: str | None = None
     if ep_overlap_enabled:
         _, ep_overlap_module_fqn = validate_ep_overlap_config(config.compile.ep_overlap)
@@ -394,6 +391,11 @@ def compile_time_passes(
 
     if config.compile.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
+
+    # Registered passes (e.g. kernel fusions) run last on the joint graph,
+    # after memory policy, remat and collective scheduling, and before any
+    # GraphPP split or Inductor compilation.
+    passes.extend(resolve_registered_graph_passes(config.compile.extra_passes))
 
     if not include_inductor:
         return passes

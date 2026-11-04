@@ -156,20 +156,22 @@ from my_pkg.fusions import my_kernel_fusion_pass
 config.compile.extra_passes = [my_kernel_fusion_pass.__name__]
 ```
 
-Selected passes run in list order on the normalized joint forward/backward
-graph, after cleanup and before memory policy tagging:
+Selected passes run in list order on the joint forward/backward graph, after
+the other GraphTrainer passes and right before Inductor compilation:
 
 ```
-remove_parameter_gradient_markers -> eliminate_dead_code -> canonicalize_graph
-  -> deduplicate_fsdp_unshard_chains -> [compile.extra_passes] -> tag_with_memory_policy
-  -> ... -> regional_inductor
+... -> tag_with_memory_policy -> selective_activation_remat -> bucketing/reordering
+  -> [async_tensor_parallel] -> [compile.extra_passes]
+  -> annotate_flex_attention -> regional_inductor
 ```
 
-An unregistered or repeated name in `compile.extra_passes` raises at trainer init.
-A replacement node should copy the meta of the node it replaces, which carries the fake value, module FQN, and
-forward/backward marker that later passes read. The default memory policy
-recomputes outputs of ops outside its save list, so backward reruns a custom
-forward kernel whose output it reads.
+GraphPP and SPMD gradient accumulation run them on the joint graph before
+splitting it into per-action graphs. A pass sees the graph as the earlier
+passes left it: recomputed forward ops are already duplicated in front of their
+backward users, and collectives are bucketed and reordered. An unregistered or
+repeated name in `compile.extra_passes` raises at trainer init. A replacement
+node should copy the meta of the node it replaces, which carries the fake
+value, module FQN, and forward/backward marker that later passes read.
 
 ### Expert Parallel Overlap
 

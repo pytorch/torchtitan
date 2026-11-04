@@ -180,9 +180,10 @@ class GraphTrainerCompileConfig:
 
     extra_passes: list[str] = field(default_factory=list)
     """Names of graph passes registered with ``register_graph_pass`` to apply,
-    in order, between graph normalization and memory policy tagging. Use them
-    for model- or shape-specialized rewrites such as kernel fusions. The recipe
-    must import the module that registers each pass.
+    in order, on the joint graph after the other GraphTrainer passes and before
+    Inductor compilation. Use them for model- or shape-specialized rewrites
+    such as kernel fusions. The recipe must import the module that registers
+    each pass.
     """
 
     enable_passes: bool = True
