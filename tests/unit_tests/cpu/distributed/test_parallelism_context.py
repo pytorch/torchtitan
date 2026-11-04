@@ -873,30 +873,41 @@ class TestOneDimensionalMeshesSkipFakeAxes(DTensorTestBase):
                 )
 
     @with_comms
-    def test_edp_shard_reported_when_ep_enabled(self):
-        """With ep>1, edp_shard is real and must still be reported."""
-        with patch(
-            "torchtitan.distributed.parallelism_context.device_type", self.device_type
-        ):
-            pd = ParallelismContext(
-                dp_replicate=1,
-                dp_shard=4,
-                cp=1,
-                tp=2,
-                pp=1,
-                ep=2,
-                world_size=8,
-                enable_sequence_parallel=False,
-            )
-            pd.build_mesh()
-
-            one_d_meshes = pd.get_all_one_dimensional_meshes()
-            self.assertIn("edp_shard", one_d_meshes)
-            self.assertIn("ep", one_d_meshes)
-            for name, mesh in one_d_meshes.items():
-                self.assertNotEqual(
-                    dist.get_backend(mesh.get_group()), "fake", f"axis {name}"
+    def test_edp_shard_when_ep_enabled(self):
+        """With ep>1, edp_shard stays available; it is fake-backed only at size 1."""
+        # edp_shard = dp_shard * cp * tp / ep = 4 * 1 * 2 / ep.
+        for ep, edp_shard_size in ((2, 4), (8, 1)):
+            with patch(
+                "torchtitan.distributed.parallelism_context.device_type",
+                self.device_type,
+            ):
+                pd = ParallelismContext(
+                    dp_replicate=1,
+                    dp_shard=4,
+                    cp=1,
+                    tp=2,
+                    pp=1,
+                    ep=ep,
+                    world_size=8,
+                    enable_sequence_parallel=False,
                 )
+                pd.build_mesh()
+
+                # FSDP shards the routed experts on edp_shard, even at size 1.
+                edp_shard_mesh = pd.get_optional_mesh("edp_shard")
+                self.assertIsNotNone(edp_shard_mesh)
+                self.assertEqual(edp_shard_mesh.size(), edp_shard_size)
+                # A one-rank edp_shard needs no communicator.
+                is_fake = dist.get_backend(edp_shard_mesh.get_group()) == "fake"
+                self.assertEqual(is_fake, edp_shard_size == 1, f"ep={ep}")
+
+                one_d_meshes = pd.get_all_one_dimensional_meshes()
+                self.assertEqual("edp_shard" in one_d_meshes, edp_shard_size > 1)
+                self.assertIn("ep", one_d_meshes)
+                for name, mesh in one_d_meshes.items():
+                    self.assertNotEqual(
+                        dist.get_backend(mesh.get_group()), "fake", f"axis {name}"
+                    )
 
 
 class TestParallelismContextWorld8MeshOperations(DTensorTestBase):

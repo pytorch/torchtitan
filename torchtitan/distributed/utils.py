@@ -412,8 +412,9 @@ def build_alternative_fsdp_mesh(
     new communicators rather than looking them up in a persistent cache.
 
     Requires NCCL on the FSDP shard axes; other backends raise ``ValueError``.
-    The fake backend preserves its groups with a warning. A mesh without FSDP
-    shard axes is returned unchanged with a warning that the cap is not applied.
+    The fake backend preserves its groups with a warning. Size-1 shard axes keep
+    their groups. A mesh without FSDP shard axes is returned unchanged with a
+    warning that the cap is not applied.
     """
     mesh_axis_names = storage_mesh.mesh_dim_names
     if mesh_axis_names is None:
@@ -433,7 +434,9 @@ def build_alternative_fsdp_mesh(
     replaced_group = False
     for axis_name in mesh_axis_names:
         parent_group = storage_mesh.get_group(axis_name)
-        if axis_name not in fsdp_shard_axes:
+        # A one-rank group has no peers to cap, so keep its parent group. This
+        # also covers the fake-backed size-1 edp_shard from ParallelismContext.
+        if axis_name not in fsdp_shard_axes or storage_mesh[axis_name].size() == 1:
             groups.append(parent_group)
             continue
 
