@@ -30,9 +30,19 @@ on:
         value: ${{ jobs.set.outputs.docker-hash }}
 
 jobs:
-  # Source the current ROCm version from pytorch/test-infra instead of hardcoding.
+  # Only look up ROCm from test-infra when ROCm will actually be in the matrix.
+  # CUDA-only callers (gpu-arch: cuda) and ordinary PRs must not depend on this,
+  # so a ROCm/test-infra failure cannot block CUDA CI.
   generate-rocm-matrix:
-    if: ${{ inputs.is-experimental != true }}
+    if: >-
+      inputs.is-experimental != true &&
+      inputs.gpu-arch != 'cuda' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+      (
+        inputs.gpu-arch == 'rocm' ||
+        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        github.event_name == 'schedule'
+      )
     uses: pytorch/test-infra/.github/workflows/generate_binary_build_matrix.yml@main
     with:
       package-type: wheel
@@ -48,7 +58,7 @@ jobs:
 
   set:
     if: >-
-      always() && !cancelled() &&
+      !cancelled() &&
       (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
       (needs.generate-rocm-matrix.result == 'success' || needs.generate-rocm-matrix.result == 'skipped')
     needs: generate-rocm-matrix
@@ -99,10 +109,22 @@ jobs:
           EOF
           )"
 
+          # Use default value as 'false' for unset environment variables
+          IS_MAIN_PUSH="${IS_MAIN_PUSH:-false}"
+          IS_SCHEDULE="${IS_SCHEDULE:-false}"
+          GPU_ARCH_INPUT="${{ inputs.gpu-arch }}"
+
+          # Decide which matrix entries to include based on event type.
+          # Runs CUDA and ROCm for push to main, cron schedules, or when
+          # gpu-arch is explicitly set to rocm (e.g. ciflow/rocm/* tag runs).
+          # Runs CUDA only as default, including pull requests.
+          # Only parse the test-infra ROCm matrix on the ROCm-selected path so
+          # CUDA-only runs never depend on it.
           if [[ "${{ inputs.is-experimental }}" == "true" ]]; then
-            ROCM_MATRIX=""
-            FULL_MATRIX="$CUDA_MATRIX"
-          else
+            cat > matrix.json <<JSON
+          {"include": [$CUDA_MATRIX]}
+          JSON
+          elif [[ "$IS_MAIN_PUSH" == "true" || "$IS_SCHEDULE" == "true" || "${GPU_ARCH_INPUT}" == "rocm" ]]; then
             # Latest ROCm from test-infra nightly binary matrix (single entry so
             # expensive 8-GPU jobs do not multiply across every shipped version).
             if [[ -z "${ROCM_BINARY_MATRIX}" ]]; then
@@ -133,21 +155,8 @@ jobs:
           }
           EOF
             )"
-            FULL_MATRIX="$CUDA_MATRIX,$ROCM_MATRIX"
-          fi
-
-          # Use default value as 'false' for unset environment variables
-          IS_MAIN_PUSH="${IS_MAIN_PUSH:-false}"
-          IS_SCHEDULE="${IS_SCHEDULE:-false}"
-
-          # Decide which matrix entries to include based on event type.
-          # Runs CUDA and ROCm for push to main, cron schedules, or when
-          # gpu-arch is explicitly set to rocm (e.g. ciflow/rocm/* tag runs).
-          # Runs CUDA only as default, including pull requests.
-          GPU_ARCH_INPUT="${{ inputs.gpu-arch }}"
-          if [[ "$IS_MAIN_PUSH" == "true" || "$IS_SCHEDULE" == "true" || "${GPU_ARCH_INPUT}" == "rocm" ]]; then
             cat > matrix.json <<JSON
-          {"include": [$FULL_MATRIX]}
+          {"include": [$CUDA_MATRIX,$ROCM_MATRIX]}
           JSON
           else
             cat > matrix.json <<JSON
