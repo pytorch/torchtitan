@@ -49,7 +49,10 @@ class Loss(Function[LossResult], Generic[LossInputT], ABC):
         ...
 
 
-@local_compile("loss", batch_invariant=False)
+# With bf16 logits, the compiled CE kernels are slowed by the accurate exp (libdevice.exp).
+# use_fast_math makes Inductor emit a faster approximate exp (tl_math.exp) instead.
+# Not bitwise vs the accurate exp. Error vs fp64: the same with bf16 logits, 1.3x with fp32.
+@local_compile("loss", batch_invariant=False, options={"use_fast_math": True})
 def cross_entropy_loss(
     pred: torch.Tensor,
     labels: torch.Tensor,
@@ -416,6 +419,7 @@ class _VocabParallelEntropy(torch.autograd.Function):
         return torch.log(sumexp) - weighted_sum / sumexp
 
 
+# TODO: try use_fast_math here once its effect on the trainer-generator logprob gap is measured.
 @local_compile("loss", batch_invariant=False)
 def compute_logprobs(
     logits: torch.Tensor,
