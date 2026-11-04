@@ -45,6 +45,7 @@ from sglang.srt.utils.common import next_power_of_2
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import DebugConfig, PrecisionConfig
+from torchtitan.models.common.attention.linear_attention import LinearAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.models.common.moe.token_dispatcher import (
@@ -107,7 +108,9 @@ class SGLangEngine(GenerationEngine):
     identical decisions, as the engine loop's SPMD contract requires. ``step()`` runs one
     iteration of SGLang's overlap event loop, so the CPU schedules the next batch while
     the GPU runs the current one, and returns the requests whose results that iteration
-    processed.
+    processed. For GDN models, whose radix cache of recurrent states disables overlap
+    without SGLang's extra_buffer strategy (not registered, see the README), it runs
+    one iteration of SGLang's normal event loop instead.
 
     See ``GenerationEngine`` for the build arguments and the threading contract.
     """
@@ -267,7 +270,15 @@ class SGLangEngine(GenerationEngine):
         # The sessions of each rollout group with a request admitted, for
         # `release_sessions`.
         self._group_sessions: dict[int, set[str]] = {}
-        self._init_overlap_event_loop()
+        # Without the extra_buffer strategy (see register_to_sglang), SGLang's radix
+        # cache of linear attention states disables overlap scheduling; every other
+        # model runs with it.
+        self._init_event_loop(
+            needs_overlap=not any(
+                isinstance(layer.attention, LinearAttention.Config)
+                for layer in model.layers
+            )
+        )
         # Exclude the ~1.5M objects SGLang's modules and the build created from garbage
         # collection, as SGLang's freeze_gc does: each full collection (e.g. the engine
         # loop's after a model state dict load) otherwise traverses them for ~1s.
@@ -338,14 +349,21 @@ class SGLangEngine(GenerationEngine):
         server_kwargs.update(self.config.extra_server_args)
         return ServerArgs(**server_kwargs)
 
-    def _init_overlap_event_loop(self) -> None:
-        """Set up what SGLang's ``run_event_loop`` sets before its overlap loop."""
+    def _init_event_loop(self, *, needs_overlap: bool) -> None:
+        """Set up what SGLang's ``run_event_loop`` sets before its event loop.
+
+        Args:
+            needs_overlap: Raise if SGLang runs the model without overlap scheduling.
+        """
         # TODO(https://github.com/sgl-project/sglang/issues/48472): mirrors the pinned
         # SGLang version's run_event_loop, private fields included; SGLang has no public
         # API to run its loop one iteration at a time.
         scheduler = self._scheduler
+        scheduler._war_barrier_enabled = is_war_barrier_enabled()
         if not scheduler.enable_overlap:
-            raise ValueError("SGLangEngine needs SGLang's overlap scheduler")
+            if needs_overlap:
+                raise ValueError("SGLangEngine needs SGLang's overlap scheduler")
+            return
         scheduler.enable_skip_finishing_decode = True
         scheduler.result_queue = deque()
         # The schedule stream must differ from the forward stream to overlap them.
@@ -356,7 +374,6 @@ class SGLangEngine(GenerationEngine):
             scheduler.schedule_stream = allocate_distinct_stream(
                 scheduler.device_module, (scheduler.forward_stream,)
             )
-        scheduler._war_barrier_enabled = is_war_barrier_enabled()
 
     @property
     def data_parallel_size(self) -> int:
@@ -475,11 +492,14 @@ class SGLangEngine(GenerationEngine):
         return bool(self._finished) or not self._scheduler.is_fully_idle()
 
     def step(self) -> list[FinishedRequest]:
-        """Run one iteration of SGLang's overlap event loop, a TP collective, and return
-        the requests whose results it processed."""
+        """Run one iteration of SGLang's event loop, a TP collective, and return the
+        requests whose results it processed."""
         scheduler = self._scheduler
         with scheduler.device_module.StreamContext(scheduler.schedule_stream):
-            _overlap_event_loop_iteration(scheduler)
+            if scheduler.enable_overlap:
+                _overlap_event_loop_iteration(scheduler)
+            else:
+                _normal_event_loop_iteration(scheduler)
         finished, self._finished = self._finished, []
         finished.extend(request for request, _ in self._outputs.take())
         return finished
@@ -665,6 +685,29 @@ def _metrics_inputs(
         num_generation_tokens=num_generation_tokens,
         num_preemptions=req.retraction_count,
     )
+
+
+def _normal_event_loop_iteration(scheduler: Scheduler) -> None:
+    """One iteration of ``Scheduler.event_loop_normal``, without receiving requests.
+
+    The engine loop admits requests through ``add_requests`` instead.
+    """
+    # TODO(https://github.com/sgl-project/sglang/issues/48472): SGLang has no public
+    # single-iteration API; this mirrors the loop body of the pinned SGLang version and
+    # must be kept in sync with it.
+    scheduler.increment_scheduler_iterations()
+    plan = scheduler.get_next_batch_to_run(
+        running_batch=scheduler.running_batch, last_batch=scheduler.last_batch
+    )
+    scheduler.running_batch = plan.running_batch
+    batch = plan.batch_to_run
+    scheduler.cur_batch_for_debug = batch
+    if batch:
+        scheduler.process_batch_result(batch, scheduler.run_batch(batch))
+    else:
+        scheduler._sched_idled = True
+        scheduler.on_idle()
+    scheduler.last_batch = batch
 
 
 def _overlap_event_loop_iteration(scheduler: Scheduler) -> None:
