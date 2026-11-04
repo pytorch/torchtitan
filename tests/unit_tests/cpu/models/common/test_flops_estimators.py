@@ -194,9 +194,7 @@ def test_lazy_preprocessing_counts_flops_for_streamed_groups():
         ntokens_seen=0,
         config=SimpleNamespace(
             parallelism=None,
-            training=SimpleNamespace(
-                num_tokens_per_microbatch_per_dp_rank=1, max_context_length=128
-            ),
+            training=SimpleNamespace(num_tokens_per_microbatch_per_dp_rank=1),
         ),
         model_parts=[
             SimpleNamespace(

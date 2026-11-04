@@ -1126,7 +1126,6 @@ def test_engine_replay_checks_whole_accumulation() -> None:
             disable_accelerator_graphs=True,
             preprocess_microbatch_groups_lazily=False,
             num_tokens_per_microbatch_per_dp_rank=1,
-            max_context_length=128,
         ),
         parallelism=SimpleNamespace(
             fsdp_defer_gradient_reduction=False,
@@ -1622,9 +1621,7 @@ def test_pp_lazy_preprocessing_prepares_each_group_before_its_step() -> None:
             ntokens_seen=0,
             config=SimpleNamespace(
                 parallelism=None,
-                training=SimpleNamespace(
-                    num_tokens_per_microbatch_per_dp_rank=1, max_context_length=128
-                ),
+                training=SimpleNamespace(num_tokens_per_microbatch_per_dp_rank=1),
             ),
             flops_estimator=lambda inputs: inputs["input"].numel(),
             _preprocess_microbatch_group=preprocess,
