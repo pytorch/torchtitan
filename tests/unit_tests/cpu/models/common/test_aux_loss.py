@@ -33,6 +33,7 @@ from torchtitan.distributed.activation_remat import (
     DefaultActivationRematConfig,
     FullActivationRematConfig,
 )
+from torchtitan.distributed.spmd_types import spmd_local_context
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.aux_loss import (
@@ -103,6 +104,21 @@ def _make_inputs(T: int, E: int, K: int):
     return scores_TE, scores_TE.gather(dim=-1, index=ids_TK), _routing_map(ids_TK, E)
 
 
+def _stats(
+    scores_TE: torch.Tensor,
+    routing_map_TE: torch.Tensor,
+    padding_mask_T: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(counts_E, score_sums_E)`` as the router region computes them, DP-local."""
+    with spmd_local_context("dp"):
+        if padding_mask_T is not None:
+            routing_map_TE = routing_map_TE & ~padding_mask_T.unsqueeze(-1)
+        probs_TE = F.normalize(scores_TE, p=1, dim=-1)
+        if padding_mask_T is not None:
+            probs_TE = probs_TE * ~padding_mask_T.unsqueeze(-1)
+        return routing_map_TE.to(scores_TE.dtype).sum(dim=0), probs_TE.sum(dim=0)
+
+
 def _make_loss(
     coeff: float, per_step_denominator: int
 ) -> MicrobatchWiseLoadBalanceLoss:
@@ -149,8 +165,7 @@ class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
         loss = _make_loss(self.coeff, self.denominator)
 
         out_TK = loss(
-            scores_TE,
-            routing_map_TE,
+            *_stats(scores_TE, routing_map_TE),
             carrier=carrier_TK,
             denominator=loss.test_denominator,
         )
@@ -183,8 +198,7 @@ class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
         for _ in range(3):
             scores_TE, carrier_TK, routing_map_TE = _make_inputs(self.T, self.E, self.K)
             out_TK = loss(
-                scores_TE,
-                routing_map_TE,
+                *_stats(scores_TE, routing_map_TE),
                 carrier=carrier_TK,
                 denominator=loss.test_denominator,
             )
@@ -207,10 +221,8 @@ class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
 
         padding_mask_T = ~routing_map_TE.any(dim=-1)
         out_TK = loss(
-            scores_TE,
-            routing_map_TE,
+            *_stats(scores_TE, routing_map_TE, padding_mask_T),
             carrier=carrier_TK,
-            padding_mask_T=padding_mask_T,
             denominator=loss.test_denominator,
         )
         out_TK.sum().backward()
@@ -250,8 +262,7 @@ class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
 
         def _forward_once(module, carrier, scores_TE, routing_map_TE):
             return module(
-                scores_TE,
-                routing_map_TE,
+                *_stats(scores_TE, routing_map_TE),
                 carrier=carrier,
                 denominator=module.test_denominator,
             ).sum()
@@ -287,10 +298,8 @@ class TestBatchWiseLoadBalanceLoss(_AuxLossTestCase):
 
         outputs = [
             loss(
-                scores,
-                routing_map,
+                *_stats(scores, routing_map, padding_mask),
                 carrier=carrier,
-                padding_mask_T=padding_mask,
                 denominator=denominator_t,
             )
             for (scores, carrier, routing_map), padding_mask in zip(
@@ -362,8 +371,7 @@ class TestBatchWiseLoadBalanceLoss(_AuxLossTestCase):
                 ids_TK = torch.topk(scores_TE.detach(), k=K, dim=-1).indices
                 carrier_TK = scores_TE.gather(dim=-1, index=ids_TK)
                 return self.aux_loss(
-                    scores_TE,
-                    _routing_map(ids_TK, E),
+                    *_stats(scores_TE, _routing_map(ids_TK, E)),
                     carrier=carrier_TK,
                     denominator=denominator,
                 )
@@ -608,8 +616,7 @@ class TestLoadBalanceLossSpmdTypes(DTensorTestBase):
             local_scores.requires_grad_(True)
             carrier_TK = local_scores.gather(dim=-1, index=local_ids_TK)
             out_TK = loss(
-                local_scores,
-                local_map,
+                *_stats(local_scores, local_map),
                 carrier=carrier_TK,
                 denominator=denominator,
             )
@@ -704,10 +711,8 @@ class TestLoadBalanceLossSpmdTypes(DTensorTestBase):
             local_scores.requires_grad_(True)
             carrier_TK = local_scores.gather(dim=-1, index=local_ids_TK)
             out_TK = loss(
-                local_scores,
-                local_map,
+                *_stats(local_scores, local_map, local_padding_mask_T),
                 carrier=carrier_TK,
-                padding_mask_T=local_padding_mask_T,
                 denominator=torch.tensor(float(denominator), dtype=torch.float64),
             )
 
