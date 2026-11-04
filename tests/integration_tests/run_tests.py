@@ -380,14 +380,22 @@ def _filter_tests(
 ]:
     """Filter tests by name, scope, skip rules, and GPU count.
 
+    Skip files are only loaded when ``args`` carries a ``test_suite``; a runner
+    without one (an experiment with its own parser) applies no file-based skip.
+
     Returns (runnable, skipped_due_to_ngpu, skipped_due_to_skip_file).
     """
     exclude_set = set()
     if hasattr(args, "exclude") and args.exclude:
         exclude_set = {name.strip() for name in args.exclude.split(",")}
 
-    validate_suite(args.test_suite, {test.test_name for test in test_list})
-    skips = active_skips()
+    suite = getattr(args, "test_suite", None)
+    skips: dict[tuple[str, str], str] = {}
+    if suite is not None:
+        validate_suite(
+            suite, {test.test_name for test in test_list}, set(_TEST_SUITES)
+        )
+        skips = active_skips()
 
     runnable: list[IntegrationTestDefinition] = []
     skipped_ngpu: list[IntegrationTestDefinition] = []
@@ -405,15 +413,11 @@ def _filter_tests(
             continue
         if test_flavor.disabled or test_flavor.test_name in exclude_set:
             continue
-        if (
-            getattr(args, "gpu_arch_type", "cuda") == "rocm"
-            and test_flavor.skip_rocm_test
-        ):
-            continue
-        section = skips.get((args.test_suite, test_flavor.test_name))
-        if section is not None:
-            skipped_skips.append((test_flavor, section))
-            continue
+        if suite is not None:
+            section = skips.get((suite, test_flavor.test_name))
+            if section is not None:
+                skipped_skips.append((test_flavor, section))
+                continue
         if execution_mode != "fake_pg" and args.ngpu < test_flavor.ngpu:
             skipped_ngpu.append(test_flavor)
             continue
@@ -428,9 +432,10 @@ def run_tests(
 ):
     """Run all integration tests to test the core features of TorchTitan."""
     runnable, skipped_ngpu, skipped_skips = _filter_tests(args, test_list)
+    suite = getattr(args, "test_suite", None)
     for test_flavor, section in skipped_skips:
         logger.info(
-            f"Skipping test {args.test_suite}/{test_flavor.test_name} "
+            f"Skipping test {suite + '/' if suite else ''}{test_flavor.test_name} "
             f"(matched skip section: {section})"
         )
     for test_flavor in skipped_ngpu:

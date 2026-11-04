@@ -7,13 +7,11 @@
 """Skip cases for integration tests.
 
 The default rules live in ``skip_cases.toml`` next to this module. A hardware
-backend can register an additional file in three ways:
+backend can register an additional file in two ways:
 
 * an entry point in the ``torchtitan.skip_cases`` group, loaded automatically
-  on import and disabled with ``TORCHTITAN_SKIP_CASES_AUTOLOAD=0``;
-* :func:`register_skip_cases`, called from a test bootstrap;
-* the ``TORCHTITAN_SKIP_CASES`` environment variable, an ``os.pathsep``-separated
-  list of paths.
+  and disabled with ``TORCHTITAN_SKIP_CASES_AUTOLOAD=0``;
+* :func:`register_skip_cases`, called from a test bootstrap.
 
 All files use the same schema and are merged into one set of sections.
 """
@@ -25,7 +23,7 @@ import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Collection, Mapping
 
 import torch
 
@@ -48,13 +46,13 @@ def _parse(text: str, source: str) -> list[SkipSection]:
     sections: list[SkipSection] = []
     for name, cfg in raw.items():
         if not isinstance(cfg, dict):
-            raise TypeError(f"{source}: section {name!r} must be a table")
+            raise ValueError(f"{source}: section {name!r} must be a table")
         skips: dict[str, frozenset[str]] = {}
         for suite, tests in cfg.items():
             if not isinstance(tests, list) or not all(
                 isinstance(test, str) for test in tests
             ):
-                raise TypeError(
+                raise ValueError(
                     f"{source}: {name}.{suite} must be an array of strings"
                 )
             skips[suite] = frozenset(tests)
@@ -63,15 +61,26 @@ def _parse(text: str, source: str) -> list[SkipSection]:
 
 
 _SECTIONS: list[SkipSection] = []
+# Suites an outside file may name: the default file is held to the core suites
+# of tests/integration_tests/run_tests.py, while a file registered with
+# ``suites=`` declares its own.
+_OUTSIDE_SUITES: dict[str, frozenset[str]] = {}
 
 
-def register_skip_cases(source: str | Path) -> None:
+def register_skip_cases(
+    source: str | Path, *, suites: Collection[str] | None = None
+) -> None:
     """Register an additional skip-cases file with the same schema.
 
+    ``suites`` declares the suite names the file may mention; without it the
+    file is held to the core suites of ``tests.integration_tests.run_tests``.
     Registration must happen before the runner starts filtering tests.
     """
+    _load()
     path = Path(source)
-    _SECTIONS.extend(_parse(path.read_text(), str(path)))
+    _SECTIONS.extend(_parse(path.read_text(encoding="utf-8"), str(path)))
+    if suites is not None:
+        _OUTSIDE_SUITES[str(path)] = frozenset(suites)
 
 
 def _import_skip_case_extensions() -> None:
@@ -97,12 +106,32 @@ def _is_skip_case_autoload_enabled() -> bool:
     return os.getenv("TORCHTITAN_SKIP_CASES_AUTOLOAD", "1") == "1"
 
 
-_SECTIONS.extend(_parse(SKIP_CASES_FILE.read_text(), str(SKIP_CASES_FILE)))
-for _path in os.environ.get("TORCHTITAN_SKIP_CASES", "").split(os.pathsep):
-    if _path.strip():
-        register_skip_cases(_path.strip())
-if _is_skip_case_autoload_enabled():
-    _import_skip_case_extensions()
+_loaded = False
+_loading = False
+
+
+def _load() -> None:
+    """Read the default file and the entry points.
+
+    Runs on first use instead of at import, so importing this module reads
+    no files and executes no third-party code.
+    """
+    global _loaded, _loading
+    if _loaded or _loading:
+        return
+    # ``_loading`` covers re-entry (an entry point may call register_skip_cases);
+    # ``_loaded`` is only set once everything was read, so a malformed file
+    # leaves the state empty instead of half-filled.
+    _loading = True
+    try:
+        _SECTIONS.extend(
+            _parse(SKIP_CASES_FILE.read_text(encoding="utf-8"), str(SKIP_CASES_FILE))
+        )
+        if _is_skip_case_autoload_enabled():
+            _import_skip_case_extensions()
+        _loaded = True
+    finally:
+        _loading = False
 
 
 def _section_applies(name: str) -> bool:
@@ -115,29 +144,43 @@ def _section_applies(name: str) -> bool:
     return utils.device_type == name
 
 
-def validate_suite(suite: str, known: set[str]) -> None:
-    """Reject entries that reference unknown suites or test names."""
-    from tests.integration_tests.run_tests import _TEST_SUITES
+def validate_suite(
+    suite: str | None, known: set[str], core_suites: Collection[str]
+) -> None:
+    """Reject entries that reference unknown suites or test names.
 
+    ``core_suites`` are the suites the default file may name. A registered file
+    may declare its own suites via ``register_skip_cases(..., suites=...)``;
+    without a declaration it is held to the same list. Test names are only
+    checked for ``suite``, the one being run.
+    """
+    _load()
+    allowed_core_suites = set(core_suites)
     for section in _SECTIONS:
-        for declared_suite, tests in section.skips.items():
-            if declared_suite not in _TEST_SUITES:
-                raise ValueError(
-                    f"{section.source}: section {section.name!r} references "
-                    f"unknown suite {declared_suite!r}"
-                )
-            if declared_suite != suite:
-                continue
-            unknown = tests - known
-            if unknown:
-                raise ValueError(
-                    f"{section.source}: section {section.name!r}, suite "
-                    f"{suite!r}: unknown test(s) {sorted(unknown)}"
-                )
+        unknown_suites = set(section.skips) - _OUTSIDE_SUITES.get(
+            section.source, allowed_core_suites
+        )
+        if unknown_suites:
+            raise ValueError(
+                f"{section.source}: section {section.name!r} references "
+                f"unknown suite(s) {sorted(unknown_suites)}"
+            )
+        if suite is None:
+            continue
+        tests = section.skips.get(suite)
+        if tests is None:
+            continue
+        unknown = tests - known
+        if unknown:
+            raise ValueError(
+                f"{section.source}: section {section.name!r}, suite "
+                f"{suite!r}: unknown test(s) {sorted(unknown)}"
+            )
 
 
 def active_skips() -> dict[tuple[str, str], str]:
     """Map (suite, test_name) to the section that applies on this machine."""
+    _load()
     active: dict[tuple[str, str], str] = {}
     for section in _SECTIONS:
         if not _section_applies(section.name):

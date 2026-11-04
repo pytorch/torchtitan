@@ -41,3 +41,10 @@ maintained; it has to earn its cost.
   a change pass. An expected change must be explained in the PR and regenerated
   for every affected backend and suite (e.g. both real-PG and fake-PG goldens).
 - Verify that the intended test actually ran (not skipped, right config).
+
+## Skip Integration Tests on Specific Backend
+- An integration test that a backend cannot run goes in that backend section of
+  `tests/integration_tests/skips/skip_cases.toml`, not in a per-backend flag.
+  Out-of-tree device repos register their own file through the
+  `torchtitan.skip_cases` interface.
+  See `tests/integration_tests/skips/README.md`.
