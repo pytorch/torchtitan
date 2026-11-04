@@ -50,6 +50,9 @@ from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
 from torchtitan.experiments.graph_trainer.gpt_oss import (
     build_model_config as build_gpt_oss_model_config,
 )
+from torchtitan.experiments.graph_trainer.kimi_k2_7 import (
+    build_model_config as build_kimi_k2_7_model_config,
+)
 from torchtitan.experiments.graph_trainer.kimi_k3 import (
     build_model_config as build_kimi_k3_model_config,
 )
@@ -1010,6 +1013,47 @@ class TestQwen35MoEBitwiseDeterministic(BitwiseDeterministicBase):
     model_flavor = "debugmodel_moe_text"
     # Attention Gym's fused chunk GDN takes BF16 or FP16 Q/K/V only.
     param_dtype = torch.bfloat16
+    annotate_model = staticmethod(annotate_graph_trainer_model)
+
+    def test_aot_fx_trace_vs_eager(self):
+        """aot_fx_trace and eager produce bitwise identical losses and grads."""
+        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+
+        self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
+
+    def test_precompile_vs_trace(self):
+        """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+        run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
+
+        self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
+
+    def test_numerics_changing_optim_run_to_run(self):
+        """Two runs with numerics_changing_optim produce bitwise identical results."""
+        run_a = self._run_steps(
+            copy.deepcopy(self.model),
+            GraphTrainer,
+            numerics_changing_optim=True,
+        )
+        run_b = self._run_steps(
+            copy.deepcopy(self.model),
+            GraphTrainer,
+            numerics_changing_optim=True,
+        )
+
+        self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
+
+
+class TestKimiK27BitwiseDeterministic(BitwiseDeterministicBase):
+    """Bitwise determinism tests for the text-only Kimi K2.7 debug model.
+
+    Covers MLA flex attention with YaRN RoPE and MoE with shared experts.
+    """
+
+    build_model_config = staticmethod(build_kimi_k2_7_model_config)
+    model_flavor = "debugmodel_text"
+    attn_backend = None
     annotate_model = staticmethod(annotate_graph_trainer_model)
 
     def test_aot_fx_trace_vs_eager(self):

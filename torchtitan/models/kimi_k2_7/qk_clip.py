@@ -131,7 +131,7 @@ def _clip_mla_weights(
 def qk_clip(
     model_parts: list[nn.Module],
     *,
-    reduction_mesh: DeviceMesh,
+    reduction_mesh: DeviceMesh | None,
 ) -> None:
     """Apply the Kimi K2 QK clipping update with the report defaults."""
     threshold = 100.0
@@ -158,7 +158,7 @@ def qk_clip(
     ]
     num_heads_per_layer = [logits.numel() for logits in layer_max_logits_H]
     max_logits_H = torch.cat(layer_max_logits_H)
-    if reduction_mesh.size() > 1:
+    if reduction_mesh is not None and reduction_mesh.size() > 1:
         dist.all_reduce(
             max_logits_H,
             op=dist.ReduceOp.MAX,
@@ -183,7 +183,8 @@ def register_qk_clip_hook(
     parallelism_context: ParallelismContext,
 ) -> None:
     """Apply QK clipping after each ordinary optimizer step."""
-    reduction_mesh = parallelism_context.get_mesh("loss")
+    # None without data or context parallelism: the local maxima are global.
+    reduction_mesh = parallelism_context.get_optional_mesh("loss")
 
     def _qk_clip_hook(
         _optimizer: torch.optim.Optimizer,

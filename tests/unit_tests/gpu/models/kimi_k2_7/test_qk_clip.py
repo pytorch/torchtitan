@@ -154,13 +154,13 @@ class QKClipTest(unittest.TestCase):
             SimpleNamespace(size=lambda: 1),
         )
 
-        def get_mesh(mesh_name: str) -> DeviceMesh:
+        def get_optional_mesh(mesh_name: str) -> DeviceMesh:
             self.assertEqual(mesh_name, "loss")
             return reduction_mesh
 
         parallelism_context = cast(
             ParallelismContext,
-            SimpleNamespace(get_mesh=get_mesh),
+            SimpleNamespace(get_optional_mesh=get_optional_mesh),
         )
         with patch("torchtitan.models.kimi_k2_7.qk_clip.qk_clip") as mock_qk_clip:
             register_qk_clip_hook(optimizers, [model], parallelism_context)
