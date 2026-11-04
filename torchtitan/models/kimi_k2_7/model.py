@@ -17,7 +17,7 @@ import spmd_types as spmd
 import torch
 from torch import nn
 
-from torchtitan.config import TrainingConfig
+from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.local_compile import LocalCompileConfig
@@ -111,7 +111,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
         local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
@@ -125,7 +125,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
 
         return super().parallelize(
             parallelism_context=parallelism_context,
-            training=training,
+            precision=precision,
             parallelism=parallelism,
             local_compile=local_compile,
             activation_remat=activation_remat,
@@ -139,7 +139,6 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
@@ -153,7 +152,6 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
             )
 
         input_shardings = {

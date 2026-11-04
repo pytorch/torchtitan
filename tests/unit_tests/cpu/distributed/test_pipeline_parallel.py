@@ -313,6 +313,7 @@ def test_static_decoder_stage_metadata_is_complete(
         training=pipeline_parallel.TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=128
         ),
+        precision=pipeline_parallel.PrecisionConfig(),
         model_config=model_config,
         lm_head_in_loss=True,
     )
@@ -343,6 +344,7 @@ def test_static_decoder_stage_metadata_describes_logits_output():
         training=pipeline_parallel.TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=128
         ),
+        precision=pipeline_parallel.PrecisionConfig(),
         model_config=model_config,
         lm_head_in_loss=False,
     )

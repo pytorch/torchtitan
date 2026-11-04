@@ -21,7 +21,12 @@ from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.loss import ChunkedLossWrapper, Loss
 from torchtitan.components.optim import Optim
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
-from torchtitan.config.configs import CommConfig, DebugConfig, TrainingConfig
+from torchtitan.config.configs import (
+    CommConfig,
+    DebugConfig,
+    PrecisionConfig,
+    TrainingConfig,
+)
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.accelerator_graph import (
@@ -134,11 +139,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
         def __post_init__(self) -> None:
             if (
-                self.dist_moe_runtime is not None
-                and self.training.mixed_precision_param != "bfloat16"
-            ):
-                raise ValueError("Dist-MoE requires mixed_precision_param='bfloat16'")
-            if (
                 self.debug.spmd_typechecking
                 and self.parallelism.pipeline_parallel_degree > 1
             ):
@@ -150,11 +150,11 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 )
 
             if (
-                self.training.enable_cpu_offload
+                self.parallelism.fsdp_enable_cpu_offloading
                 and "dp_shard" not in self.debug.distinct_seed_mesh_axes
             ):
                 raise ValueError(
-                    "training.enable_cpu_offload requires 'dp_shard' in "
+                    "parallelism.fsdp_enable_cpu_offloading requires 'dp_shard' in "
                     "debug.distinct_seed_mesh_axes; otherwise every FSDP shard "
                     "is initialized with the same CPU RNG stream."
                 )
@@ -235,6 +235,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     parallelism_context: ParallelismContext
     model_parts: list[BaseModel]
     model_config: BaseModel.Config
+    precision: PrecisionConfig
     output_dir: str
     loss_fn: Loss[Any]
     optim: Optim
@@ -263,6 +264,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         config: Config,
         *,
         model_config: BaseModel.Config,
+        precision: PrecisionConfig,
         max_num_documents: int | None,
         output_dir: str,
     ) -> None:
@@ -270,6 +272,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
         self.config = config
         self.model_config = model_config
+        self.precision = precision
         self.max_num_documents = max_num_documents
         self.output_dir = output_dir
         self.has_quantization = has_quantization(model_config)
@@ -303,7 +306,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         with sl.log_trace_span("torch_distributed_init"):
             topology = dist_utils.init_distributed(
                 config.comm,
-                enable_cpu_backend=config.training.enable_cpu_offload,
+                enable_cpu_backend=config.parallelism.fsdp_enable_cpu_offloading,
                 base_folder=self.output_dir,
                 pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
             )
@@ -359,7 +362,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         if create_seed_checkpoint:
             init_device = "cpu"
             buffer_device = None
-        elif self.config.training.enable_cpu_offload:
+        elif self.config.parallelism.fsdp_enable_cpu_offloading:
             init_device = "cpu"
             buffer_device = torch.device(self.device.type)
         else:
@@ -369,7 +372,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         with (
             self.parallelism_context.activate_spmd(),
             torch.device("meta"),
-            utils.set_default_dtype(TORCH_DTYPE_MAP[self.config.training.dtype]),
+            utils.set_default_dtype(TORCH_DTYPE_MAP[self.precision.dtype]),
         ):
             model = self.model_config.build()
         self.model_cls = type(model)
@@ -383,7 +386,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self.model_param_count,
             self.num_flops_per_token,
         ) = self.model_config.get_nparams_and_flops(
-            model, self.config.training.max_context_length
+            model, self.model_config.max_context_length
         )
         config = self.config
         if self.parallelism_context.pp_enabled:
@@ -395,24 +398,25 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             ) = model.pipeline(
                 parallelism_context=self.parallelism_context,
                 training=config.training,
+                precision=self.precision,
                 parallelism=config.parallelism,
                 activation_remat=config.activation_remat,
                 dump_folder=self.output_dir,
                 device=self.device,
                 model_config=self.model_config,
                 loss_fn=self.loss_fn,
-                **self._parallelize_compile_kwargs(),
+                **self._parallelize_kwargs(),
             )
             del model
         else:
             if not create_seed_checkpoint:
                 model = model.parallelize(
                     parallelism_context=self.parallelism_context,
-                    training=config.training,
+                    precision=self.precision,
                     parallelism=config.parallelism,
                     activation_remat=config.activation_remat,
                     dump_folder=self.output_dir,
-                    **self._parallelize_compile_kwargs(),
+                    **self._parallelize_kwargs(),
                 )
             self.model_parts = [model]
             self.pp_has_first_stage = True
@@ -447,15 +451,15 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             f"{self.model_param_count:,} total parameters"
         )
 
-    def _parallelize_compile_kwargs(self) -> dict[str, Any]:
-        """Return the compile kwargs ``model.parallelize``/``model.pipeline`` expect for this engine's models.
+    def _parallelize_kwargs(self) -> dict[str, Any]:
+        """Return the engine-specific kwargs ``model.parallelize``/``model.pipeline`` expect.
 
         Regular models expect ``local_compile`` (compiled regions); GraphTrainer overrides this to
-        return ``compile_config`` (whole-step compile).
+        return ``compile_config`` (whole-step compile) and ``training``.
         """
         # TODO: apply local compile outside parallelize/pipeline (#5026 review). That needs
         # GraphTrainer to stop reading its compile config there first (apply_compile,
-        # EP-overlap chunking, enable_autoparallel, GraphPP runtime); then delete this hook.
+        # EP-overlap chunking, enable_autoparallel, GraphPP runtime).
         return {"local_compile": self.model_config.local_compile}
 
     def _initialize_optim(self) -> None:
@@ -706,7 +710,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                         parallelism_context=self.parallelism_context,
                         parallelism=self.config.parallelism,
                         max_num_documents=self.max_num_documents,
-                        max_context_length=self.config.training.max_context_length,
                         global_routing_token_counts=global_routing_token_counts,
                         **self.preprocess_inputs_kwargs,
                     )

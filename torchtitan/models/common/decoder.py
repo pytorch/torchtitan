@@ -5,16 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
-from torch import nn
 
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
@@ -81,7 +79,6 @@ class Decoder(BaseModel):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config):
-        max_context_length: int
         dim: int
         vocab_size: int
         lm_head: Linear.Config
@@ -158,19 +155,11 @@ class Decoder(BaseModel):
     # inputs (bool kwargs cause 'has no attribute requires_grad' errors).
     _skip_lm_head: bool = False
 
-    # FSDP's per-parameter dtype override (``param_dtype_override_fn``); None casts every
-    # parameter to ``training.mixed_precision_param``. The generator sets it.
-    # TODO: remove once parameters carry a per-FQN dtype, so FSDP keeps A_log/dt_bias
-    # in float32 without a model attribute.
-    _fsdp_param_dtype_override_fn: Callable[
-        [nn.Parameter], torch.dtype | None
-    ] | None = None
-
     def _apply_fsdp(
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
         from torchtitan.distributed.fsdp import (
@@ -184,17 +173,16 @@ class Decoder(BaseModel):
         apply_fsdp_to_decoder(
             self,
             dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
+            reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
             pp_enabled=parallelism_context.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
+            cpu_offload=parallelism.fsdp_enable_cpu_offloading,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             ep_degree=parallelism_context.ep,
             edp_mesh=edp_mesh,
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
             symm_mem_scope=parallelism.fsdp_symm_mem_scope,
-            param_dtype_override_fn=self._fsdp_param_dtype_override_fn,
         )
 
     def __init__(self, config: Config):
@@ -353,7 +341,6 @@ class Decoder(BaseModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[
@@ -372,7 +359,6 @@ class Decoder(BaseModel):
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
             )
             input_dict["attention_metadata"] = attention_metadata
 
@@ -463,7 +449,6 @@ class Decoder(BaseModel):
         *,
         padding_mask: torch.Tensor | None = None,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
     ) -> AttentionMetadataMap:
         attention_metadata: dict[type[InnerAttention], AttentionMetadata] = {}
         for layer_config in self.config.layers:
@@ -477,7 +462,7 @@ class Decoder(BaseModel):
                     positions,
                     padding_mask=padding_mask,
                     max_num_documents=max_num_documents,
-                    max_context_length=max_context_length,
+                    max_context_length=self.config.max_context_length,
                 )
                 if metadata is not None:
                     attention_metadata[backend] = metadata

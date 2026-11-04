@@ -19,7 +19,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 from torchtitan.components.loss import ChunkedLossWrapper
-from torchtitan.config import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.pipeline_parallel import _build_pipeline_schedule
 
 

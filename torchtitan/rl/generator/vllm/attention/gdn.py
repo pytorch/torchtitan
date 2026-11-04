@@ -48,7 +48,7 @@ from torchtitan.models.common.attn_gym import (
     recurrent_gdn_decode,
 )
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.rl.generator.vllm.linear_attention import (
+from torchtitan.rl.generator.vllm.attention.linear_attention import (
     configure_hybrid_state,
     LinearAttentionExecutionPath,
     TorchTitanLinearAttentionBackend,
@@ -425,8 +425,8 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
     ) -> torch.Tensor:
         """Run the flattened vLLM cache operation on rank-local tensors.
 
-        ``A_log_H`` and ``dt_bias_H`` are float32 (the model wrapper keeps them so); the
-        GDN kernels reject other dtypes.
+        The GDN kernels take ``A_log_H`` and ``dt_bias_H`` only in float32, and
+        they arrive in the trainer's master dtype (``preserve_dtype_params``).
         """
         del attention_metadata
         assert key_head_dim == self.head_k_dim
@@ -443,8 +443,8 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
             b_TH,
             conv_weight_CW,
             None,
-            A_log_H,
-            dt_bias_H,
+            A_log_H.float(),
+            dt_bias_H.float(),
         )
 
 

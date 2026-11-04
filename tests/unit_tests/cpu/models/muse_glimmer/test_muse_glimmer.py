@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
-from torchtitan.config import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.muse_glimmer import build_model_config
 from torchtitan.models.muse_glimmer.state_dict_adapter import (

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from monarch.actor import Actor, Channel, concurrent_endpoint, context, current_rank
 
+from torchtitan.config import PrecisionConfig
 from torchtitan.rl.generator.generator import Generator
 
 from torchtitan.rl.generator.types import SamplingConfig
@@ -21,12 +22,14 @@ class _GeneratorActorEndpoints:
         self,
         config: Generator.Config,
         *,
+        precision: PrecisionConfig,
         model_path: str,
         max_num_seqs: int,
         output_dir: str,
     ) -> None:
         super().__init__(
             config,
+            precision=precision,
             model_path=model_path,
             max_num_seqs=max_num_seqs,
             output_dir=output_dir,
