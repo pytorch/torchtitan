@@ -311,6 +311,7 @@ text-only flavors without a vision encoder.
 | Qwen3 (dense and MoE) | |
 | Muse Glimmer | Text-only flavors; no CP |
 | Kimi K3 | `debugmodel_text` flavor; FSDP, TP, and EP; no CP or PP |
+| GPT-OSS | FSDP, TP, and EP; no CP |
 
 ### Citation
 
