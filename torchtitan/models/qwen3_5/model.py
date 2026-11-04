@@ -457,7 +457,14 @@ class Qwen35Model(MultimodalModel):
         if parallelism_context.cp_enabled and self.tok_embeddings is not None:
             special_tokens = input_dict.get("special_tokens")
             pixel_values = input_dict.get("pixel_values")
-            if pixel_values is not None:
+            # Under CP, build each token's image bank row from the placeholder tokens (one
+            # bank block per placeholder run, in order), unless the batch provides the rows:
+            # the RL batcher encodes each distinct image once and points every run that
+            # shows it at the same block, which rows rebuilt from the tokens would not.
+            if (
+                pixel_values is not None
+                and "image_vision_bank_indices_T" not in input_dict
+            ):
                 if special_tokens is None or "image_id" not in special_tokens:
                     raise ValueError(
                         "pixel_values require special_tokens with an 'image_id' entry."
@@ -589,8 +596,10 @@ class Qwen35Model(MultimodalModel):
             grid_thw: Grid dimensions for images or None
             grid_thw_videos: Grid dimensions for videos or None
             special_tokens: Special token definitions
-            image_vision_bank_indices_T: Image-bank rows for local CP tokens
-            video_vision_bank_indices_T: Video-bank rows for local CP tokens
+            image_vision_bank_indices_T: Bank row of each local token, -1 for text;
+                built from placeholders under CP, or provided by the batch (several
+                placeholder runs may share rows). None: placed by special_tokens.
+            video_vision_bank_indices_T: Same for videos.
 
         Returns:
             ``(num_tokens, dim)`` embeddings with vision tokens scattered in.
@@ -617,8 +626,6 @@ class Qwen35Model(MultimodalModel):
         if image_is_dummy:
             inputs_embeds = add_zero_vision_dependency(inputs_embeds, vision_embeds)
         else:
-            if special_tokens is None:
-                raise ValueError("special_tokens is required for image inputs")
             if image_vision_bank_indices_T is not None:
                 inputs_embeds = gather_vision_embeds(
                     inputs_embeds,
@@ -626,6 +633,8 @@ class Qwen35Model(MultimodalModel):
                     vision_bank_indices_T=image_vision_bank_indices_T,
                 )
             else:
+                if special_tokens is None:
+                    raise ValueError("special_tokens is required for image inputs")
                 image_positions = get_vision_positions(
                     tokens, num_tokens, special_tokens["image_id"]
                 )
@@ -650,8 +659,6 @@ class Qwen35Model(MultimodalModel):
         if video_is_dummy:
             inputs_embeds = add_zero_vision_dependency(inputs_embeds, vision_embeds)
         else:
-            if special_tokens is None:
-                raise ValueError("special_tokens is required for video inputs")
             if video_vision_bank_indices_T is not None:
                 inputs_embeds = gather_vision_embeds(
                     inputs_embeds,
@@ -659,6 +666,8 @@ class Qwen35Model(MultimodalModel):
                     vision_bank_indices_T=video_vision_bank_indices_T,
                 )
             else:
+                if special_tokens is None:
+                    raise ValueError("special_tokens is required for video inputs")
                 video_positions = get_vision_positions(
                     tokens, num_tokens, special_tokens["video_id"]
                 )

@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from torchtitan.rl.rollout import Rollout, RolloutGroup, RolloutStatus, RolloutTurn
-from torchtitan.rl.rollout.types import RolloutTurnID, split_prompt
+from torchtitan.rl.rollout.types import PromptImage, RolloutTurnID, split_prompt
 
 from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 
@@ -173,6 +173,64 @@ def test_history_edit_branches_into_separate_training_samples() -> None:
     )
     assert first.advantage.tolist() == pytest.approx([0.0, 0.0, 0.1])
     assert second.advantage.tolist() == pytest.approx([0.0, 0.0, 0.1])
+
+
+def test_training_samples_carry_the_images_of_their_turns() -> None:
+    # Turn 1 extends turn 0 and adds image b; turn 2 compacts the history (a new branch) and
+    # shows image b again at a new offset.
+    image_a = PromptImage(
+        key="a", path="a.png", grid_thw=(1, 2, 2), offset=1, length=1, data=b"a"
+    )
+    image_b = PromptImage(
+        key="b", path="b.png", grid_thw=(1, 2, 2), offset=5, length=1, data=b"b"
+    )
+    image_b_compacted = PromptImage(
+        key="b", path="b.png", grid_thw=(1, 2, 2), offset=1, length=1, data=b"b"
+    )
+    turns = [
+        _turn(prompt_token_ids=[1, 7, 2], completion_token_ids=[4], version=1),
+        _turn(prompt_token_ids=[1, 7, 2, 4, 3, 7], completion_token_ids=[5], version=1),
+        _turn(prompt_token_ids=[90, 7, 91], completion_token_ids=[6], version=1),
+    ]
+    turns[0].prompt_images = (image_a,)
+    turns[1].prompt_images = (image_a, image_b)
+    turns[2].prompt_images = (image_b_compacted,)
+
+    first, second = rollout_to_training_samples(
+        _scored_rollout(turns, reward=0.5, advantage=0.1)
+    )
+
+    assert first.token_ids.tolist() == [1, 7, 2, 4, 3, 7, 5]
+    assert first.images == (image_a, image_b)
+    assert second.token_ids.tolist() == [90, 7, 91, 6]
+    assert second.images == (image_b_compacted,)
+
+
+def test_an_image_swapped_in_place_branches() -> None:
+    # Turn 1 keeps every token of turn 0 but shows image b where a was: the placeholder
+    # tokens are equal, so only the images tell that turn 0's completion saw a.
+    image_a = PromptImage(
+        key="a", path="a.png", grid_thw=(1, 2, 2), offset=1, length=1, data=b"a"
+    )
+    image_b = PromptImage(
+        key="b", path="b.png", grid_thw=(1, 2, 2), offset=1, length=1, data=b"b"
+    )
+    turns = [
+        _turn(prompt_token_ids=[1, 7, 2], completion_token_ids=[4], version=1),
+        _turn(prompt_token_ids=[1, 7, 2, 4, 3], completion_token_ids=[5], version=1),
+    ]
+    turns[0].prompt_images = (image_a,)
+    turns[1].prompt_images = (image_b,)
+
+    first, second = rollout_to_training_samples(
+        _scored_rollout(turns, reward=0.5, advantage=0.1)
+    )
+
+    assert (first.token_ids.tolist(), first.images) == ([1, 7, 2, 4], (image_a,))
+    assert (second.token_ids.tolist(), second.images) == (
+        [1, 7, 2, 4, 3, 5],
+        (image_b,),
+    )
 
 
 def test_rewrite_that_keeps_a_prefix_branches_then_continues() -> None:

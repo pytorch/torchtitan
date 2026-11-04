@@ -426,12 +426,14 @@ class Controller(Configurable):
                         "rdma_min_image_bytes is set, but generator.engine.image_spec is "
                         "None: prompts carry no image files."
                     )
-            if self.generator.engine.image_spec is not None:
-                # TODO: remove once the batcher and the trainer take image inputs.
-                raise NotImplementedError(
-                    "generator.engine.image_spec is set, but training on image prompts is "
-                    "not supported yet: the trainer would see their placeholder tokens "
-                    "without the images."
+            # The generator and the trainer must turn each image into the same pixels.
+            # Both set also serves and trains on text prompts.
+            if self.generator.engine.image_spec != self.async_loop.batcher.image_spec:
+                raise ValueError(
+                    "generator.engine.image_spec and async_loop.batcher.image_spec must be "
+                    "the same ImageSpec, or both None; got "
+                    f"{self.generator.engine.image_spec!r} and "
+                    f"{self.async_loop.batcher.image_spec!r}."
                 )
             if self.trainer.parallelism.enable_sequence_parallel:
                 sp_degree = self.trainer.parallelism.tensor_parallel_degree

@@ -20,6 +20,7 @@ import torch
 from monarch.actor import Actor, current_rank, endpoint, this_host
 from torch.utils import _pytree as pytree
 
+from torchtitan.components.data.multimodal.utils.image import ImageSpec
 from torchtitan.rl.actors.monarch import rdma_microbatch
 from torchtitan.rl.actors.monarch.rdma_microbatch import (
     _TensorRef,
@@ -83,6 +84,7 @@ def _microbatch(num_tokens: int) -> TrainingMicrobatch:
             ),
             "topk_logprobs": torch.zeros(0, 4),
         },
+        image_spec=ImageSpec(),
     )
 
 
@@ -110,6 +112,9 @@ def test_rdma_microbatch_round_trips_every_field_and_drops_its_buffers(
     for leaf, rdma_leaf, read_leaf in zip(
         leaves, rdma_leaves, read_leaves, strict=True
     ):
+        if not isinstance(leaf, torch.Tensor):  # e.g. image_spec, by value
+            assert rdma_leaf == leaf == read_leaf
+            continue
         assert isinstance(rdma_leaf, _TensorRef) == (leaf.nbytes >= min_bytes)
         assert torch.equal(leaf, read_leaf) and leaf.dtype == read_leaf.dtype
 
