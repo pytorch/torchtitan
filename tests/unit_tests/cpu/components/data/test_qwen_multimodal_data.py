@@ -102,10 +102,6 @@ class _RowsSourceConfig:
         return _RowsSource(self.rows)
 
 
-def test_multimodal_registry_does_not_enable_packing():
-    assert isinstance(MM_DATASETS["cc12m"], SingleDatasetConfig)
-
-
 def test_vision_processor_forwards_resize_config():
     captured = {}
 
@@ -262,7 +258,7 @@ def test_qwen35_video_recipe_uses_synthetic_video_dataset():
     assert collator.temporal_patch_size == dataset.processor.temporal_patch_size
     assert collator.spatial_merge_size == dataset.processor.spatial_merge_size
     assert config.training.steps == 10
-    assert config.training.disable_cuda_graphs
+    assert config.training.disable_accelerator_graphs
 
 
 def test_packing_preserves_ordered_media_when_merging_rows():

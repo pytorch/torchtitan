@@ -46,8 +46,8 @@ def test_qwen36_27b_matches_hugging_face_config() -> None:
 
     linear_layer = config.layers[0]
     assert isinstance(linear_layer.attention, GDN.Config)
-    assert linear_layer.attention.in_proj_q.out_features == 16 * 128
-    assert linear_layer.attention.in_proj_v.out_features == 48 * 128
+    assert linear_layer.attention.n_key_heads == 16
+    assert linear_layer.attention.n_heads == 48
 
     full_attention_layer = config.layers[3]
     assert full_attention_layer.attention is not None
@@ -68,8 +68,8 @@ def test_qwen36_35b_a3b_matches_hugging_face_config() -> None:
 
     linear_layer = config.layers[0]
     assert isinstance(linear_layer.attention, GDN.Config)
-    assert linear_layer.attention.in_proj_q.out_features == 16 * 128
-    assert linear_layer.attention.in_proj_v.out_features == 32 * 128
+    assert linear_layer.attention.n_key_heads == 16
+    assert linear_layer.attention.n_heads == 32
     assert linear_layer.feed_forward is not None
     assert linear_layer.feed_forward.router.num_experts == 256
     assert linear_layer.feed_forward.router.top_k == 8

@@ -18,7 +18,7 @@ from torch.distributed.fsdp import (
 )
 from torch.distributed.tensor import Shard
 
-from torchtitan.config import TrainingConfig
+from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_remat import ActivationRematConfig
@@ -85,7 +85,7 @@ def parallelize_hf_transformers(
     model: nn.Module,
     *,
     parallelism_context: ParallelismContext,
-    training: TrainingConfig,
+    precision: PrecisionConfig,
     parallelism: ParallelismConfig,
     local_compile: LocalCompileConfig,
     activation_remat: ActivationRematConfig | None,
@@ -176,11 +176,11 @@ def parallelize_hf_transformers(
 
     model._apply_fsdp(
         parallelism_context=parallelism_context,
-        training=training,
+        precision=precision,
         parallelism=parallelism,
     )
 
-    if training.enable_cpu_offload:
+    if parallelism.fsdp_enable_cpu_offloading:
         logger.info("Applied CPU Offloading to the model")
 
     if parallelism_context.cp_enabled:

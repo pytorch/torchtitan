@@ -23,7 +23,7 @@ from torchtitan.components.optim import (
     Optim,
     OptimizersContainer,
 )
-from torchtitan.config import OverrideConfig, TrainingConfig
+from torchtitan.config import OverrideConfig, PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
@@ -127,14 +127,13 @@ def muse_spark_debugmodel(
             ),
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
+        precision=PrecisionConfig(
+            dtype="float32", param_dtype="bfloat16", reduce_dtype="float32"
+        ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
-            dtype="float32",
-            mixed_precision_param="bfloat16",
-            mixed_precision_reduce="float32",
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=None,
@@ -234,7 +233,7 @@ def muse_spark_debugmodel_mm(
             expected_num_channels=audio_encoder.input_channels,
             target_sample_rate=24_000,
             max_audio_samples=audio_encoder.patch_size
-            * config.training.max_context_length
+            * config.model.max_context_length
             // 2,
             audio_token_count_fn=partial(
                 _audio_token_count, samples_per_audio_token=audio_encoder.patch_size
@@ -286,12 +285,11 @@ def muse_spark_debugmodel_ultradata_lora_sft() -> Trainer.Config:
     config.training = TrainingConfig(
         num_tokens_per_microbatch_per_dp_rank=32_768,
         num_tokens_per_train_step=65_536,
-        max_context_length=32_768,
         steps=10,
-        dtype="bfloat16",
-        mixed_precision_param="bfloat16",
-        mixed_precision_reduce="float32",
-        disable_cuda_graphs=True,
+        disable_accelerator_graphs=True,
+    )
+    config.precision = PrecisionConfig(
+        dtype="bfloat16", param_dtype="bfloat16", reduce_dtype="float32"
     )
     config.parallelism = ParallelismConfig(
         data_parallel_replicate_degree=1,

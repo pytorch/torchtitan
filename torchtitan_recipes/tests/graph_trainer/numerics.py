@@ -91,7 +91,7 @@ def llama3_graph_hsdp_gradient_accumulation_numerics():
 
 
 def _llama3_hsdp_pp_numerics(config):
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
@@ -125,7 +125,7 @@ def deepseek_v3_eager_numerics():
     )
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     # The numerics baselines keep CUDA graphs on.
-    config.training.disable_cuda_graphs = False
+    config.training.disable_accelerator_graphs = False
     return _without_inplace_wgrad_accum(config)
 
 
@@ -139,7 +139,7 @@ def deepseek_v3_graph_numerics():
     )
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     # The numerics baselines keep CUDA graphs on.
-    config.training.disable_cuda_graphs = False
+    config.training.disable_accelerator_graphs = False
     return config
 
 
@@ -150,7 +150,7 @@ def _pp_ep_parallelism() -> ParallelismConfig:
 
 def _deepseek_v3_pp_numerics(config, *, schedule: str):
     """Configure PP numerics on a config built with ``_pp_ep_parallelism()``."""
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.max_norm = float("inf")
     config.parallelism.pipeline_parallel_degree = 2
@@ -244,7 +244,7 @@ def deepseek_v3_dist_moe_graph_pp_stage_microbatch_numerics():
         graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2(),
         slot_policy="stage_microbatch",
     )
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -279,14 +279,14 @@ def qwen3_moe_eager_numerics():
     config.dataloader.max_num_documents = None
     # Match GraphTrainer, which captures model and loss in one eager FX graph.
     config.model.local_compile.regions = []
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     return _without_inplace_wgrad_accum(config)
 
 
 def qwen3_moe_graph_numerics():
     config = graph_trainer_qwen3_debugmodel_moe()
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.tensor_parallel_degree = 2

@@ -20,6 +20,7 @@ import torch
 import torch.distributed as dist
 from renderers import Message, Qwen3RendererConfig
 from torch.distributed.tensor import DTensor
+
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import (
     FirstFitPackingConfig,
@@ -31,6 +32,7 @@ from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.components.renderer import from_renderers
 from torchtitan.components.validator import Validator
+from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.distributed.activation_remat import (
@@ -52,6 +54,7 @@ from torchtitan.models.common.attention.cp_attention import (
     UlyssesVarlenInnerAttention,
 )
 from torchtitan.models.muse_glimmer import build_model_config
+from torchtitan.observability.metrics import TensorBoardLogger
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import TrainingEngine
@@ -81,12 +84,14 @@ class SDCReplayMismatchTrainingEngine(TrainingEngine):
         config: TrainingEngine.Config,
         *,
         model_config: BaseModel.Config,
+        precision: PrecisionConfig,
         max_num_documents: int | None,
         output_dir: str,
     ) -> None:
         super().__init__(
             config,
             model_config=model_config,
+            precision=precision,
             max_num_documents=max_num_documents,
             output_dir=output_dir,
         )
@@ -172,13 +177,13 @@ def deepseek_v3_debugmodel_sdc_replay_mismatch() -> Trainer.Config:
     )
     config.debug.deterministic = True
     config.debug.seed = 42
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     config.training.steps = 1
     config.sdc_replayer = SDCReplayer.Config()
     return config
 
 
-def llama3_debugmodel_sdc_replay_cuda_graph() -> Trainer.Config:
+def llama3_debugmodel_sdc_replay_accelerator_graph() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     config.debug.deterministic = True
     config.debug.seed = 42
@@ -191,7 +196,7 @@ def llama3_debugmodel_default() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
     config.profiler.enable_profiling = True
-    config.metrics.enable_tensorboard = True
+    config.metrics.loggers = [TensorBoardLogger.Config()]
     return config
 
 
@@ -262,7 +267,7 @@ def llama3_debugmodel_hf_checkpoint_load() -> Trainer.Config:
     )
     config.checkpointer.initial_load_path = os.path.join(
         test_output_dir,
-        "hf_checkpoint/step-10/",
+        "hf_checkpoint/exports/step-10/",
     )
     config.checkpointer.initial_load_model_only = True
     config.checkpointer.initial_load_in_hf = True
@@ -331,7 +336,7 @@ def _muse_glimmer_debugmodel_pp2_max_outstanding_sends(
     config.parallelism.pipeline_parallel_max_outstanding_sends = 2
     config.activation_remat = None
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -343,15 +348,15 @@ def muse_glimmer_debugmodel_pp2_interleaved_1f1b_send_budget() -> Trainer.Config
     return _muse_glimmer_debugmodel_pp2_max_outstanding_sends("Interleaved1F1B")
 
 
-def muse_glimmer_debugmodel_fsdp2_pp2_optimizer_cuda_graph() -> Trainer.Config:
+def muse_glimmer_debugmodel_fsdp2_pp2_optimizer_accelerator_graph() -> Trainer.Config:
     config = muse_glimmer_debugmodel_fsdp2_pp2_deferred_gradient_reduction()
-    config.optim.enable_cuda_graph = True
+    config.optim.enable_accelerator_graph = True
     return config
 
 
-def muse_glimmer_debugmodel_fsdp2_optimizer_cuda_graph() -> Trainer.Config:
+def muse_glimmer_debugmodel_fsdp2_optimizer_accelerator_graph() -> Trainer.Config:
     config = muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction()
-    config.optim.enable_cuda_graph = True
+    config.optim.enable_accelerator_graph = True
     return config
 
 
@@ -390,17 +395,6 @@ def llama3_debugmodel_fsdp2_tp2_pp2_save() -> Trainer.Config:
 def llama3_debugmodel_fsdp2_tp2_pp2_load() -> Trainer.Config:
     config = llama3_debugmodel_fsdp2_tp2_pp2_save()
     config.training.steps = 20
-    return config
-
-
-def llama3_debugmodel_fsdp2_tp2_pp2() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=2048)
-    _set_spmd_typechecking(config, typechecking=False)
-    config.parallelism.pipeline_parallel_degree = 2
-    config.parallelism.num_pp_microbatches = 8
-    config.parallelism.data_parallel_shard_degree = 2
-    config.parallelism.tensor_parallel_degree = 2
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     return config
 
 
@@ -463,7 +457,7 @@ def llama3_debugmodel_pp2_custom_csv() -> Trainer.Config:
 def muse_glimmer_debugmodel_optimizer_bf16_states() -> Trainer.Config:
     config = muse_glimmer_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
-    config.training.mixed_precision_reduce = "float32"
+    config.precision.reduce_dtype = "float32"
     config.optim.optimizer = OptimizersContainer.Config(
         optimizers=[AdamW.Config(pattern=r".*", moment_dtype="bfloat16")]
     )
@@ -645,13 +639,13 @@ def llama3_debugmodel_gradient_accumulation() -> Trainer.Config:
     """Two gradient accumulation steps on 2 GPUs."""
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     config.training.num_tokens_per_train_step = 65536
     return config
 
 
-def muse_glimmer_debugmodel_fsdp2_per_group_cuda_graph() -> Trainer.Config:
+def muse_glimmer_debugmodel_fsdp2_per_group_accelerator_graph() -> Trainer.Config:
     """Three fixed accumulation groups with FSDP degree 2.
 
     GPU unit tests cover changing group counts.
@@ -659,7 +653,7 @@ def muse_glimmer_debugmodel_fsdp2_per_group_cuda_graph() -> Trainer.Config:
     config = muse_glimmer_debugmodel(seq_len=2048)
     config.debug.deterministic = True
     config.debug.seed = 42
-    config.training.cuda_graph_per_microbatch_group = True
+    config.training.accelerator_graph_per_microbatch_group = True
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     config.training.num_tokens_per_train_step = 98304
     config.parallelism.data_parallel_shard_degree = 2
@@ -675,13 +669,13 @@ def muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction() -> Trainer.Confi
     return config
 
 
-def muse_glimmer_debugmodel_shared_eval_cuda_graph() -> Trainer.Config:
+def muse_glimmer_debugmodel_shared_eval_accelerator_graph() -> Trainer.Config:
     """Train and validate with shared graph workspace on two FSDP ranks."""
     config = muse_glimmer_debugmodel(seq_len=128)
     config.debug.deterministic = True
     config.debug.seed = 42
     config.parallelism.data_parallel_shard_degree = 2
-    config.optim.enable_cuda_graph = True
+    config.optim.enable_accelerator_graph = True
     config.validator = Validator.Config(
         freq=2,
         steps=1,
@@ -704,7 +698,7 @@ def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return apply_transforms(
         config,
         [
@@ -754,7 +748,7 @@ def deepseek_v3_debugmodel_fused_swiglu_tp2_ep4() -> Trainer.Config:
     )
     _set_spmd_typechecking(config, typechecking=True)
     config.override.imports = ["torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"]
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -838,7 +832,7 @@ def llama3_debugmodel_seed_checkpoint() -> Trainer.Config:
     _set_spmd_typechecking(config, typechecking=True)
     config.checkpointer = CheckpointManager.Config()
     config.create_seed_checkpoint = True
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -850,9 +844,9 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
     """
     return [
         IntegrationTestDefinition(
-            configs=[llama3_debugmodel_sdc_replay_cuda_graph],
-            test_descr="SDC replay with CUDA graphs",
-            test_name="sdc_replay_cuda_graph",
+            configs=[llama3_debugmodel_sdc_replay_accelerator_graph],
+            test_descr="SDC replay with accelerator graphs",
+            test_name="sdc_replay_accelerator_graph",
             ngpu=1,
             skip_rocm_test=True,
         ),
@@ -949,17 +943,17 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
-            configs=[muse_glimmer_debugmodel_fsdp2_pp2_optimizer_cuda_graph],
-            test_descr="FSDP+PP forward-backward and optimizer CUDA graphs",
-            test_name="fsdp_pp_optimizer_cuda_graph",
+            configs=[muse_glimmer_debugmodel_fsdp2_pp2_optimizer_accelerator_graph],
+            test_descr="FSDP+PP forward-backward and optimizer accelerator graphs",
+            test_name="fsdp_pp_optimizer_accelerator_graph",
             ngpu=4,
             use_real_pg=True,
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
-            configs=[muse_glimmer_debugmodel_fsdp2_optimizer_cuda_graph],
-            test_descr="FSDP forward-backward and optimizer CUDA graphs",
-            test_name="fsdp_optimizer_cuda_graph",
+            configs=[muse_glimmer_debugmodel_fsdp2_optimizer_accelerator_graph],
+            test_descr="FSDP forward-backward and optimizer accelerator graphs",
+            test_name="fsdp_optimizer_accelerator_graph",
             ngpu=2,
             use_real_pg=True,
             skip_rocm_test=True,
@@ -977,13 +971,6 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             ],
             test_descr="PP+DP+TP 3D test with save/load resume ckpt",
             test_name="pp_dp_tp",
-            ngpu=8,
-            use_real_pg=True,
-        ),
-        IntegrationTestDefinition(
-            configs=[llama3_debugmodel_fsdp2_tp2_pp2],
-            test_descr="PP+DP+TP 3D test",
-            test_name="3d",
             ngpu=8,
             use_real_pg=True,
         ),
@@ -1130,16 +1117,16 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             ngpu=2,
         ),
         IntegrationTestDefinition(
-            configs=[muse_glimmer_debugmodel_fsdp2_per_group_cuda_graph],
-            test_descr="Per-group CUDA graph replay with FSDP accumulation",
-            test_name="fsdp_per_group_cuda_graph",
+            configs=[muse_glimmer_debugmodel_fsdp2_per_group_accelerator_graph],
+            test_descr="Per-group accelerator graph replay with FSDP accumulation",
+            test_name="fsdp_per_group_accelerator_graph",
             ngpu=2,
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
-            configs=[muse_glimmer_debugmodel_shared_eval_cuda_graph],
-            test_descr="Shared train and eval CUDA graphs with FSDP",
-            test_name="shared_eval_cuda_graph",
+            configs=[muse_glimmer_debugmodel_shared_eval_accelerator_graph],
+            test_descr="Shared train and eval accelerator graphs with FSDP",
+            test_name="shared_eval_accelerator_graph",
             ngpu=2,
             skip_rocm_test=True,
         ),

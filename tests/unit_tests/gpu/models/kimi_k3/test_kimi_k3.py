@@ -15,8 +15,6 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     LinearAttentionMetadata,
-    MLAAttention,
-    VarlenInnerAttention,
 )
 from torchtitan.models.common.attention.kda import KDA, KDAKernel
 from torchtitan.models.common.feed_forward import DenseFeedForward
@@ -135,31 +133,6 @@ class TestKimiK3(unittest.TestCase):
                 inner_attention=FlexInnerAttention.Config(),
             )
 
-    def test_varlen_config_uses_mla_backend(self):
-        model_config = _small_model_config(attn_backend="varlen")
-        for layer in model_config.layers:
-            if isinstance(layer.attention, KimiMLAAttention.Config):
-                self.assertIsInstance(
-                    layer.attention.inner_attention,
-                    MLAAttention.Config,
-                )
-                self.assertIsInstance(
-                    layer.attention.inner_attention.inner_attention,
-                    VarlenInnerAttention.Config,
-                )
-
-        flex_model_config = _small_model_config()
-        for layer in flex_model_config.layers:
-            if isinstance(layer.attention, KimiMLAAttention.Config):
-                self.assertIsInstance(
-                    layer.attention.inner_attention,
-                    MLAAttention.Config,
-                )
-                self.assertIsInstance(
-                    layer.attention.inner_attention.inner_attention,
-                    FlexInnerAttention.Config,
-                )
-
     def test_dist_muon_config_uses_native_grouped_linear_fqns(self):
         """DistMuon buckets reference the native routed W13 and W2 parameters."""
         model_config = _small_model_config()
@@ -206,6 +179,7 @@ class TestKimiK3(unittest.TestCase):
         self.assertRegex(
             "layers.1.feed_forward.routed_experts.w2.weight", muon_config.pattern
         )
+        self.assertEqual(muon_config.max_nccl_ctas_for_comms, 8)
 
     def test_flex_attention_mask(self):
         config = _small_model_config()

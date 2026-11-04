@@ -63,7 +63,7 @@ def deepseek_v3_debugmodel(
     )
     num_tokens_per_microbatch_per_dp_rank = 8 * model_config.max_context_length
     # The stock all-to-all EP dispatcher syncs with the CPU.
-    disable_cuda_graphs = parallelism.expert_parallel_degree > 1
+    disable_accelerator_graphs = parallelism.expert_parallel_degree > 1
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -76,7 +76,7 @@ def deepseek_v3_debugmodel(
         dataloader=GrainDataLoader.Config(
             max_num_documents=(
                 c4_document_capacity(num_tokens_per_microbatch_per_dp_rank)
-                if attn_backend == "varlen" and not disable_cuda_graphs
+                if attn_backend == "varlen" and not disable_accelerator_graphs
                 else None
             ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
@@ -93,9 +93,8 @@ def deepseek_v3_debugmodel(
             ),
         ),
         training=TrainingConfig(
-            disable_cuda_graphs=disable_cuda_graphs,
+            disable_accelerator_graphs=disable_accelerator_graphs,
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=parallelism,
@@ -161,7 +160,7 @@ def deepseek_v3_debugmodel_hybridep(
         seq_len=seq_len, parallelism=ParallelismConfig(expert_parallel_degree=2)
     )
     # HybridEP's non-blocking dispatch has no CPU sync, so CUDA graphs stay on.
-    config.training.disable_cuda_graphs = False
+    config.training.disable_accelerator_graphs = False
     config.dataloader.max_num_documents = c4_document_capacity(
         config.training.num_tokens_per_microbatch_per_dp_rank
     )
@@ -220,9 +219,8 @@ def deepseek_v3_16b(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=1000,
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=None,
@@ -237,7 +235,7 @@ def deepseek_v3_16b_hybridep(seq_len: int | None = None) -> Trainer.Config:
         seq_len=seq_len,
         parallelism=config.parallelism,
     )
-    config.training.disable_cuda_graphs = False
+    config.training.disable_accelerator_graphs = False
     return apply_transforms(
         config,
         [
@@ -269,14 +267,14 @@ def deepseek_v3_debugmodel_dist_moe_bf16(
 
     config = deepseek_v3_debugmodel(seq_len=seq_len, parallelism=parallelism)
     # Dist-MoE dispatch is CUDA-graph capturable, so CUDA graphs stay on.
-    config.training.disable_cuda_graphs = False
+    config.training.disable_accelerator_graphs = False
     config.model = build_model_config(
         "debugmodel",
         seq_len=seq_len,
         parallelism=config.parallelism,
     )
     config.dataloader.max_num_documents = 512
-    config.training.mixed_precision_reduce = "bfloat16"
+    config.precision.reduce_dtype = "bfloat16"
     config.dist_moe_runtime = _dist_moe_runtime_config(
         scratch_capacity_factor=scratch_capacity_factor
     )
@@ -295,7 +293,7 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8(
 
     config = deepseek_v3_debugmodel(seq_len=seq_len, parallelism=parallelism)
     # Dist-MoE dispatch is CUDA-graph capturable, so CUDA graphs stay on.
-    config.training.disable_cuda_graphs = False
+    config.training.disable_accelerator_graphs = False
     config.model = build_model_config(
         "debugmodel",
         seq_len=seq_len,
@@ -305,7 +303,7 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8(
         ],
     )
     config.dataloader.max_num_documents = 512
-    config.training.mixed_precision_reduce = "bfloat16"
+    config.precision.reduce_dtype = "bfloat16"
     config.dist_moe_runtime = _dist_moe_runtime_config(
         scratch_capacity_factor=scratch_capacity_factor
     )
@@ -336,7 +334,6 @@ def configure_dist_moe_fsdp2_ep2(config: Trainer.Config) -> Trainer.Config:
     assert isinstance(runtime_config, DistMoeRuntime.Config)
     runtime_config.scratch_capacity_factor = 2.0
     config.training.num_tokens_per_microbatch_per_dp_rank = 128
-    config.training.max_context_length = 128
     config.training.steps = 4
     config.checkpointer = None
     return config
@@ -372,7 +369,7 @@ def deepseek_v3_16b_dist_moe_bf16(seq_len: int | None = None) -> Trainer.Config:
         parallelism=config.parallelism,
     )
     config.dataloader.max_num_documents = 512
-    config.training.mixed_precision_reduce = "bfloat16"
+    config.precision.reduce_dtype = "bfloat16"
     config.dist_moe_runtime = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
     return apply_transforms(config, [DistMoeTransform()])
 
@@ -392,7 +389,7 @@ def deepseek_v3_16b_dist_moe_mxfp8(seq_len: int | None = None) -> Trainer.Config
         ],
     )
     config.dataloader.max_num_documents = 512
-    config.training.mixed_precision_reduce = "bfloat16"
+    config.precision.reduce_dtype = "bfloat16"
     config.dist_moe_runtime = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
     return apply_transforms(
         config,
@@ -443,9 +440,8 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=10000,
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=None,
@@ -490,7 +486,7 @@ def deepseek_v3_16b_nvfp4_ffn_mxfp8_attn(
 ) -> Trainer.Config:
     config = deepseek_v3_16b(seq_len=seq_len)
     config.optim.lr_scheduler.warmup_steps = 200
-    config.training.disable_cuda_graphs = False
+    config.training.disable_accelerator_graphs = False
     model_config = config.model
     layer_fqns = nvfp4_bf16_tail_fqns(len(model_config.layers), bf16_tail_fraction)
     config.model = build_model_config(

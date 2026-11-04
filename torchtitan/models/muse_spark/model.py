@@ -214,14 +214,27 @@ class MuseSparkRMSNorm(RMSNorm):
     def __init__(self, config: Config):
         super().__init__(config)
         self.gain_center = config.gain_center
+        # Compiled code reads gain_center from this tensor, so every graph takes it as an
+        # input and saves the same tensors. A float is baked into layer 0's graph, and remat
+        # recompute of layer 0 can run layer 1's graph, which saves different tensors
+        # (CheckpointError). Eager keeps the float: SPMD typechecking rejects untyped tensors.
+        # TODO(pytorch/pytorch#166926): drop the copy once recompute reuses the forward's graph.
+        self._gain_center_tensor = torch.tensor(
+            config.gain_center, dtype=torch.float32, device="cpu"
+        )
 
     def _get_effective_weight(self) -> torch.Tensor | None:
         if self.weight is None:
             return None
+        if torch.compiler.is_compiling():
+            return self.weight + self._gain_center_tensor
         return self.weight + self.gain_center
 
-    # Limit 16, not the default 8: all residual-stream norms share this region and use 12 graphs.
-    @local_compile("muse_spark_rmsnorm", batch_invariant=False, recompile_limit=16)
+    # Limit 32, not the default 8: all residual-stream norms share this region. Pretraining uses 12
+    # graphs (weight or none, 8192- or 4096-wide weight, FSDP-wrapped or plain). An RL trainer adds a
+    # no_grad log-prob pass and micro-batches of varying token counts: 22 graphs measured on Muse Spark
+    # with the dapo_math recipe's LoRA setup, so 16 fails the first training step (fullgraph=True).
+    @local_compile("muse_spark_rmsnorm", batch_invariant=False, recompile_limit=32)
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         input_dtype = input.dtype
         effective_weight_D = self._get_effective_weight()
@@ -546,7 +559,6 @@ class MuseSparkModel(MultimodalModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
@@ -584,7 +596,6 @@ class MuseSparkModel(MultimodalModel):
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
             )
 
         perception_input_sharding = multimodal_input_sharding()

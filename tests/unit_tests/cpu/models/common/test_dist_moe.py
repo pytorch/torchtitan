@@ -24,7 +24,7 @@ import torchtitan_recipes.tests.models.deepseek_v3 as eager_test_recipes
 from torch.distributed.pipelining import PipelineStageInfo
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optim import AdamW
-from torchtitan.config.configs import TrainingConfig
+from torchtitan.config.configs import PrecisionConfig
 from torchtitan.config.transform import (
     apply_transforms,
     LoRATransform,
@@ -235,11 +235,9 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
         dist_moe_runtime=runtime_config,
         sdc_replayer=None,
         training=SimpleNamespace(
-            cuda_graph_per_microbatch_group=False,
-            disable_cuda_graphs=True,
+            accelerator_graph_per_microbatch_group=False,
+            disable_accelerator_graphs=True,
             num_tokens_per_microbatch_per_dp_rank=8,
-            mixed_precision_param="bfloat16",
-            mixed_precision_reduce="float32",
             preprocess_microbatch_groups_lazily=False,
         ),
         parallelism=SimpleNamespace(
@@ -326,8 +324,8 @@ def test_transform_propagates_clamped_swiglu_to_annex_config(
     source = replace(
         _stock_config(dim=64),
         activation_fn=ClampedSwiGLU.Config(
-            swiglu_alpha=1.75,
-            swiglu_limit=8.0,
+            alpha=1.75,
+            limit=8.0,
         ),
     )
     transformed = DistMoeTransform(expert_precision=expert_precision).transform(source)
@@ -964,11 +962,11 @@ def test_runtime_config_rejects_invalid_values(kwargs, error_type, message) -> N
 
 def test_runtime_config_requires_bfloat16_unsharded_parameters() -> None:
     """Dist-MoE rejects FSDP mixed-precision parameter dtypes it cannot consume."""
-    with pytest.raises(ValueError, match="mixed_precision_param='bfloat16'"):
-        TrainingEngine.Config(
-            dist_moe_runtime=DistMoeRuntime.Config(),
-            training=TrainingConfig(mixed_precision_param="float32"),
-        )
+    config = deepseek_v3_debugmodel()
+    config.dist_moe_runtime = DistMoeRuntime.Config()
+    config.precision = PrecisionConfig(param_dtype="float32")
+    with pytest.raises(ValueError, match="param_dtype='bfloat16'"):
+        config.__post_init__()
 
 
 @pytest.mark.parametrize(
@@ -995,7 +993,7 @@ def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
     assert isinstance(runtime, DistMoeRuntime.Config)
     assert runtime.vmm_capacity_factor is None
     assert runtime.scratch_capacity_factor == scratch_capacity_factor
-    assert config.training.mixed_precision_reduce == "bfloat16"
+    assert config.precision.reduce_dtype == "bfloat16"
     assert all(expert.inplace_wgrad_accum for _, expert, _, _ in experts)
     assert all(
         isinstance(
@@ -1006,7 +1004,7 @@ def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
     assert config.dataloader.max_num_documents == max_documents
 
 
-def test_eager_dist_moe_recipe_supports_cuda_graphs_with_pipeline_parallelism():
+def test_eager_dist_moe_recipe_supports_accelerator_graphs_with_pipeline_parallelism():
     """The eager recipe accepts EP and PP while retaining CUDA graphs."""
     config = eager_test_recipes.deepseek_v3_debugmodel_dist_moe_bf16(seq_len=128)
     config.parallelism.expert_parallel_degree = 2
@@ -1053,7 +1051,7 @@ def test_dist_moe_mxfp8_recipes_quantize_dense_linears_and_lm_head(
     assert isinstance(runtime, DistMoeRuntime.Config)
     assert runtime.vmm_capacity_factor is None
     assert runtime.scratch_capacity_factor == scratch_capacity_factor
-    assert config.training.mixed_precision_reduce == "bfloat16"
+    assert config.precision.reduce_dtype == "bfloat16"
     assert all(expert.inplace_wgrad_accum for _, expert, _, _ in experts)
     assert "lm_head" in linears
     assert config.dataloader.max_num_documents == max_documents
@@ -1075,13 +1073,13 @@ def test_dist_moe_671b_recipe_topology(factory, dp_degree, num_microbatches) -> 
     assert config.parallelism.data_parallel_shard_degree == dp_degree
     assert config.parallelism.expert_parallel_degree == 64
     assert config.parallelism.num_pp_microbatches == num_microbatches
-    assert config.training.max_context_length == 4096
+    assert config.model.max_context_length == 4096
     assert config.training.num_tokens_per_microbatch_per_dp_rank == 4096
     assert config.training.num_tokens_per_train_step % 4096 == 0
     assert config.training.num_tokens_per_train_step // 4096 == 15360
-    assert config.training.dtype == "float32"
-    assert config.training.mixed_precision_param == "bfloat16"
-    assert config.training.mixed_precision_reduce == "bfloat16"
+    assert config.precision.dtype == "float32"
+    assert config.precision.param_dtype == "bfloat16"
+    assert config.precision.reduce_dtype == "bfloat16"
     assert config.activation_remat is None
     assert isinstance(config.loss, CrossEntropyLoss.Config)
     assert config.override.imports == [

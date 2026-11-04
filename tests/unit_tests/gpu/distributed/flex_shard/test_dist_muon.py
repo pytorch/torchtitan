@@ -38,10 +38,14 @@ from torchtitan.distributed.flex_shard import (
     dist_muon as dist_muon_module,
     Owned,
 )
+from torchtitan.distributed.flex_shard._optimizer_reshard_schedule import (
+    _RedistributionBucketPlan,
+)
 from torchtitan.distributed.flex_shard.dist_muon import (
     _adjust_muon_learning_rate,
     DistMuon,
 )
+from torchtitan.distributed.utils import build_alternative_fsdp_mesh
 
 
 pytestmark = pytest.mark.multi_gpu
@@ -57,8 +61,60 @@ class TestDistMuon(DTensorTestBase):
     def device_type(self):
         return "cuda"
 
+    @with_comms(eager_init=True)
+    def test_build_alternative_fsdp_mesh_creates_capped_nccl_group(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (1, self.world_size),
+            mesh_dim_names=("dp_replicate", "dp_shard"),
+        )
+        parent_group = mesh.get_group("dp_shard")
+        replicate_group = mesh.get_group("dp_replicate")
+        redistribution_mesh = build_alternative_fsdp_mesh(mesh, max_ctas=8)
+        redistribution_group = redistribution_mesh.get_group("dp_shard")
+        redistribution_backend = redistribution_group._get_backend(
+            torch.device(self.device_type, self.rank)
+        )
+        self.assertEqual(
+            torch.distributed.get_backend(redistribution_group),
+            torch.distributed.Backend.NCCL,
+        )
+        self.assertEqual(redistribution_backend.options.config.max_ctas, 8)
+        self.assertEqual(redistribution_backend.options.config.split_share, 0)
+
+        self.assertIsNot(redistribution_group, parent_group)
+        self.assertIs(
+            redistribution_mesh.get_group("dp_replicate"),
+            replicate_group,
+        )
+        self.assertEqual(
+            torch.distributed.get_process_group_ranks(redistribution_group),
+            torch.distributed.get_process_group_ranks(parent_group),
+        )
+
+        device = torch.device(self.device_type, self.rank)
+        input_tensor = torch.arange(
+            self.rank * self.world_size,
+            (self.rank + 1) * self.world_size,
+            device=device,
+        )
+        output_tensor = torch.empty_like(input_tensor)
+        torch.distributed.all_to_all_single(
+            output_tensor,
+            input_tensor,
+            group=redistribution_group,
+        )
+        expected = torch.tensor(
+            [
+                source_rank * self.world_size + self.rank
+                for source_rank in range(self.world_size)
+            ],
+            device=device,
+        )
+        torch.testing.assert_close(output_tensor, expected)
+
     @parametrize("block_sizes", [(4,), (4, 2)])
-    @with_comms
+    @with_comms(eager_init=True)
     def test_matches_plain_muon_across_flat_checkpoint(
         self, block_sizes: tuple[int, ...]
     ):
@@ -72,14 +128,16 @@ class TestDistMuon(DTensorTestBase):
         weight_decay = 0.2
         mesh = init_device_mesh(
             self.device_type,
-            (self.world_size,),
-            mesh_dim_names=("dp_shard",),
+            (1, self.world_size),
+            mesh_dim_names=("dp_replicate", "dp_shard"),
         )
+        redistribution_mesh = build_alternative_fsdp_mesh(mesh, max_ctas=8)
+        redistribution_group = redistribution_mesh.get_group("dp_shard")
         device = torch.device(self.device_type, self.rank)
 
         def make_parameter(value: torch.Tensor) -> torch.nn.Parameter:
             return torch.nn.Parameter(
-                distribute_tensor(value.clone(), mesh, (Shard(0),))
+                distribute_tensor(value.clone(), mesh, (Replicate(), Shard(0)))
             )
 
         def make_optimizer(
@@ -117,6 +175,7 @@ class TestDistMuon(DTensorTestBase):
                     BucketConfig(
                         patterns=("layers.0.*",),
                         name="layers.0",
+                        mesh=redistribution_mesh,
                     )
                 ],
                 lr=lr,
@@ -163,15 +222,26 @@ class TestDistMuon(DTensorTestBase):
             redistributed_grad: torch.Tensor,
             local_blocks_grad: torch.Tensor,
         ) -> None:
+            (plan,) = current_optimizer._bucket_plans
+            self.assertIsInstance(plan, _RedistributionBucketPlan)
+            self.assertIs(plan.group.process_group, redistribution_group)
+            self.assertIs(
+                plan.storage_to_compute_schedule.process_group,
+                redistribution_group,
+            )
+            self.assertIs(
+                plan.compute_to_storage_schedule.process_group,
+                redistribution_group,
+            )
             local_blocks_before = current_local_blocks.to_local().clone()
             reference_local_blocks_before = tuple(
                 parameter.detach().clone() for parameter in reference_local_blocks
             )
             current_redistributed.grad = distribute_tensor(
-                redistributed_grad.clone(), mesh, (Shard(0),)
+                redistributed_grad.clone(), mesh, (Replicate(), Shard(0))
             )
             current_local_blocks.grad = distribute_tensor(
-                local_blocks_grad.clone(), mesh, (Shard(0),)
+                local_blocks_grad.clone(), mesh, (Replicate(), Shard(0))
             )
             reference_redistributed.grad = redistributed_grad.clone()
             for parameter, grad in zip(
@@ -184,7 +254,7 @@ class TestDistMuon(DTensorTestBase):
             current_optimizer.step()
             reference_optimizer.step()
 
-            rank = mesh.get_local_rank()
+            rank = mesh.get_local_rank("dp_shard")
             expected_redistributed = reference_redistributed.detach().chunk(
                 self.world_size, dim=0
             )[rank]

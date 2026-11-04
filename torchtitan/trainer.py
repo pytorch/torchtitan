@@ -23,7 +23,12 @@ from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhauste
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validator import BaseValidator, Validator
-from torchtitan.config import apply_overrides, Configurable, OverrideConfig
+from torchtitan.config import (
+    apply_overrides,
+    Configurable,
+    OverrideConfig,
+    PrecisionConfig,
+)
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.base.model import BaseModel
@@ -51,6 +56,9 @@ class Trainer(Configurable):
 
         model: BaseModel.Config
 
+        precision: PrecisionConfig = field(default_factory=PrecisionConfig)
+        """Parameter, compute, and gradient-reduction dtypes of the model."""
+
         hf_assets_path: str = "./tests/assets/tokenizer"
         """
         Path to HF assets folder. This folder contains local copies of Hugging Face assets,
@@ -77,6 +85,11 @@ class Trainer(Configurable):
 
         def __post_init__(self):
             TrainingEngine.Config.__post_init__(self)
+            if (
+                self.dist_moe_runtime is not None
+                and self.precision.param_dtype != "bfloat16"
+            ):
+                raise ValueError("Dist-MoE requires precision.param_dtype='bfloat16'")
             if self.debug.batch_invariant:
                 raise ValueError(
                     "Batch-invariant mode is not needed in supervised learning."
@@ -90,6 +103,13 @@ class Trainer(Configurable):
                     debug=self.debug,
                     activation_remat=self.activation_remat,
                     max_num_documents=self.dataloader.max_num_documents,
+                )
+            if self.create_seed_checkpoint and (
+                self.checkpointer is None or self.checkpointer.load_only
+            ):
+                raise ValueError(
+                    "create_seed_checkpoint requires a checkpointer with "
+                    "load_only=False."
                 )
 
         def to_dict(self) -> dict[str, Any]:
@@ -144,18 +164,11 @@ class Trainer(Configurable):
         if config.override.imports:
             apply_overrides(config.override, config)
         model_config = config.model
-        validate_model_training_config(
-            model_config,
-            parallelism=config.parallelism,
-            training=config.training,
-            debug=config.debug,
-            activation_remat=config.activation_remat,
-            max_num_documents=config.dataloader.max_num_documents,
-        )
 
         self.engine = self.engine_cls(
             config,
             model_config=model_config,
+            precision=config.precision,
             max_num_documents=config.dataloader.max_num_documents,
             output_dir=config.dump_folder,
         )
@@ -213,7 +226,7 @@ class Trainer(Configurable):
             dp_world_size=dp_degree,
             dp_rank=dp_rank,
             tokenizer=self.tokenizer,
-            max_context_length=config.training.max_context_length,
+            max_context_length=config.model.max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
         )
 
@@ -262,7 +275,7 @@ class Trainer(Configurable):
             )
 
             self.validator = config.validator.build(
-                cuda_graph_enabled=engine._forward_backward_cuda_graph_enabled,
+                accelerator_graph_enabled=engine._forward_backward_accelerator_graph_enabled,
                 cuda_graph_annotation_config=config.profiler.maybe_cuda_graph_annotation_config(),
                 parallelism=config.parallelism,
                 dp_world_size=dp_degree,
@@ -271,7 +284,7 @@ class Trainer(Configurable):
                 parallelism_context=parallelism_context,
                 loss_fn=engine.loss_fn,
                 metrics_processor=self.metrics_processor,
-                seq_len=config.training.max_context_length,
+                seq_len=config.model.max_context_length,
                 num_tokens_per_microbatch=num_tokens_per_microbatch,
                 pp_schedule=pp_schedule,
                 pp_has_first_stage=pp_has_first_stage,
@@ -283,7 +296,7 @@ class Trainer(Configurable):
             f"{num_tokens_per_dp_rank} tokens per DP rank, "
             f"{num_tokens_per_train_step} tokens per train step, "
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
-            f"maximum context length {config.training.max_context_length}, "
+            f"maximum context length {config.model.max_context_length}, "
             f"total steps {config.training.steps} "
             f"(warmup {config.optim.lr_scheduler.warmup_steps})"
         )

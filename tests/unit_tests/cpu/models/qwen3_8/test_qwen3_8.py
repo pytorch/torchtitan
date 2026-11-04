@@ -64,8 +64,8 @@ def test_qwen38_2_4t_a95b_matches_hugging_face_config() -> None:
 
     linear_layer = config.layers[0]
     assert isinstance(linear_layer.attention, GDN.Config)
-    assert linear_layer.attention.in_proj_q.out_features == 16 * 128
-    assert linear_layer.attention.in_proj_v.out_features == 128 * 128
+    assert linear_layer.attention.n_key_heads == 16
+    assert linear_layer.attention.n_heads == 128
 
     full_attention_layer = config.layers[3]
     assert full_attention_layer.attention is not None
@@ -169,8 +169,8 @@ def test_text_only_checkpoint_adapter_converts_fused_deltanet_qkv() -> None:
     adapter = Qwen35StateDictAdapter(config, hf_assets_path=None)
     delta_net = config.layers[0].attention
     assert isinstance(delta_net, GDN.Config)
-    key_dim = delta_net.in_proj_q.out_features
-    value_dim = delta_net.in_proj_v.out_features
+    key_dim = delta_net.n_key_heads * delta_net.key_head_dim
+    value_dim = delta_net.n_heads * delta_net.value_head_dim
     fused_qkv = torch.randn(key_dim * 2 + value_dim, 1)
 
     converted = adapter.from_hf(

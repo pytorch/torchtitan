@@ -88,8 +88,7 @@ class TestLlama3WeightTying(unittest.TestCase):
             Trainer.Config(
                 model=config,
                 training=TrainingConfig(
-                    max_context_length=config.max_context_length,
-                    disable_cuda_graphs=True,
+                    disable_accelerator_graphs=True,
                 ),
                 parallelism=ParallelismConfig(pipeline_parallel_degree=2),
             )
@@ -101,8 +100,7 @@ class TestLlama3WeightTying(unittest.TestCase):
         Trainer.Config(
             model=config,
             training=TrainingConfig(
-                max_context_length=config.max_context_length,
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
             ),
             parallelism=ParallelismConfig(pipeline_parallel_degree=2),
         )

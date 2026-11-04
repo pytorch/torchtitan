@@ -51,7 +51,7 @@ in a recipe derived from one that builds such a model::
         config = graph_trainer_deepseek_v3_debugmodel_hybridep()
         config.compile.memory_policy = "sac_and_paged_stash"
         # Paged stash may release and reallocate buffers after an overflow.
-        config.training.disable_cuda_graphs = True
+        config.training.disable_accelerator_graphs = True
         config.parallelism.data_parallel_shard_degree = 4
         config.parallelism.expert_parallel_degree = 2
         # Route round-robin, with exact balance (see below).

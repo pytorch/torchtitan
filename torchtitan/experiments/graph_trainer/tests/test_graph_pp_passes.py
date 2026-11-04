@@ -158,9 +158,8 @@ def _trace_dsv3_moe_block_stage(
             model=model_config,
             training=TrainingConfig(
                 num_tokens_per_microbatch_per_dp_rank=batch_size * seq_len,
-                max_context_length=seq_len,
                 steps=1,
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
             ),
             parallelism=parallelism,
             checkpointer=CheckpointManager.Config(initial_load_model_only=False),

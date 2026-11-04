@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
-from torchtitan.components.checkpointer import ModelWrapper
+from torchtitan.components.checkpointer import export_state_dict, ModelWrapper
 from torchtitan.config import TORCH_DTYPE_MAP
 
 if __package__:
@@ -51,21 +51,19 @@ def convert_to_hf(
         checkpoint_id=input_dir,
     )
 
-    # convert state dict tt->hf
+    # apply export dtype, then convert state dict tt->hf
+    state_dict = export_state_dict(
+        state_dict, dtype=TORCH_DTYPE_MAP[export_dtype], model_parts=model.model
+    )
     hf_state_dict = sd_adapter.to_hf(state_dict)
 
     storage_writer = HuggingFaceStorageWriter(
         path=output_dir,
         save_distributed=True,
-        fqn_to_index_mapping=sd_adapter.fqn_to_index_mapping,
+        fqn_to_index_mapping=sd_adapter.fqn_to_index_mapping_for_save(hf_state_dict),
         enable_consolidation=True,
         thread_count_consolidation=5,
     )
-
-    # map and apply export dtype if needed
-    target_dtype = TORCH_DTYPE_MAP[export_dtype]
-    if target_dtype != torch.float32:
-        hf_state_dict = {k: v.to(target_dtype) for k, v in hf_state_dict.items()}
 
     dcp.save(
         hf_state_dict,

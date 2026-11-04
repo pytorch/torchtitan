@@ -15,7 +15,7 @@ import torch_remat as remat
 from spmd_types import SpmdType
 from torch import nn
 
-from torchtitan.config import TrainingConfig
+from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
@@ -340,6 +340,7 @@ class Qwen35Model(MultimodalModel):
                     "loss",
                     "fused_binary_activation",
                     "gated_rmsnorm",
+                    "gdn_split_in_proj",
                     "offset_rmsnorm",
                     "partial_rope",
                     "shared_expert_gate",
@@ -370,11 +371,8 @@ class Qwen35Model(MultimodalModel):
                     )
                 elif isinstance(layer.attention, GDN.Config):
                     delta_net = layer.attention
-                    num_value_heads = (
-                        delta_net.in_proj_v.out_features // delta_net.value_head_dim
-                    )
                     attention_op_flops += delta_rule_flops_per_token(
-                        num_heads=num_value_heads,
+                        num_heads=delta_net.n_heads,
                         key_head_dim=delta_net.key_head_dim,
                         v_head_dim=delta_net.value_head_dim,
                     )
@@ -394,12 +392,8 @@ class Qwen35Model(MultimodalModel):
                 None,
             )
             if delta_net is not None:
-                num_key_heads = (
-                    delta_net.in_proj_q.out_features // delta_net.key_head_dim
-                )
-                num_value_heads = (
-                    delta_net.in_proj_v.out_features // delta_net.value_head_dim
-                )
+                num_key_heads = delta_net.n_key_heads
+                num_value_heads = delta_net.n_heads
                 if num_key_heads % tp != 0 or num_value_heads % tp != 0:
                     raise ValueError(
                         f"tensor parallel degree ({tp}) must divide "
@@ -421,7 +415,7 @@ class Qwen35Model(MultimodalModel):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
         local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
@@ -429,7 +423,7 @@ class Qwen35Model(MultimodalModel):
     ) -> Qwen35Model:
         return super().parallelize(
             parallelism_context=parallelism_context,
-            training=training,
+            precision=precision,
             parallelism=parallelism,
             local_compile=local_compile,
             activation_remat=activation_remat,
@@ -443,7 +437,6 @@ class Qwen35Model(MultimodalModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
@@ -459,7 +452,6 @@ class Qwen35Model(MultimodalModel):
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
             )
 
         if parallelism_context.cp_enabled and self.tok_embeddings is not None:

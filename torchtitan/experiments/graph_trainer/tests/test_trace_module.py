@@ -190,7 +190,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             profiler=Profiler.Config(),
             sdc_replayer=None,
             training=SimpleNamespace(
-                disable_cuda_graphs=False,
+                disable_accelerator_graphs=False,
                 num_tokens_per_microbatch_per_dp_rank=1,
                 num_tokens_per_train_step=2,
             ),
@@ -216,12 +216,12 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                 return_value=graph_runtime,
             ) as make_runtime,
             patch(
-                "torchtitan.experiments.graph_trainer.trainer.cuda_graphs_supported",
+                "torchtitan.experiments.graph_trainer.trainer.accelerator_graphs_supported",
                 return_value=True,
             ),
             patch(
                 "torchtitan.experiments.graph_trainer.trainer."
-                "wrap_fwd_bwd_with_cuda_graph",
+                "wrap_fwd_bwd_with_accelerator_graph",
                 return_value=MagicMock(),
             ) as wrap_cuda_graph,
         ):
@@ -257,7 +257,6 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             compile=SimpleNamespace(),
             parallelism="PARALLELISM",
             training=SimpleNamespace(
-                max_context_length=8,
                 num_tokens_per_microbatch_per_dp_rank=1,
             ),
         )
@@ -363,7 +362,6 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine.config = SimpleNamespace(
             parallelism="PARALLELISM",
             training=SimpleNamespace(
-                max_context_length=8,
                 num_tokens_per_microbatch_per_dp_rank=2,
             ),
         )
@@ -2314,9 +2312,8 @@ class TestTraceContextParallel(FSDPTest):
         trainer = None
         try:
             with tempfile.TemporaryDirectory() as dump_folder:
-                config = graph_trainer_llama3_debugmodel_varlen()
+                config = graph_trainer_llama3_debugmodel_varlen(seq_len=128)
                 config.dump_folder = dump_folder
-                config.training.max_context_length = 128
                 config.training.num_tokens_per_microbatch_per_dp_rank = 2 * 128
                 config.training.steps = 1
                 config.parallelism.data_parallel_replicate_degree = 1
@@ -2350,7 +2347,7 @@ class TestTraceContextParallel(FSDPTest):
                         device=trainer.engine.device,
                         dtype=torch.int32,
                     )
-                    % config.training.max_context_length
+                    % config.model.max_context_length
                 )
                 trainer.engine.forward_backward_microbatch(
                     microbatch_group=[

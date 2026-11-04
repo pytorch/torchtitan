@@ -34,7 +34,7 @@ from torchtitan.rl.examples.verifiers.generation_server import (
     VerifiersGenerationMetadata,
 )
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
-from torchtitan.rl.rollout.data import IterableRLDataLoader
+from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
 from torchtitan.rl.rollout.rubric import RewardFn, Rubric
 from torchtitan.rl.rollout.types import (
@@ -89,7 +89,7 @@ class VerifiersRollouter(Rollouter):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Rollouter.Config):
-        training_dataloader: IterableRLDataLoader.Config
+        training_dataloader: IterableRolloutDataLoader.Config
         """Verifiers taskset used for training samples and environment scoring."""
 
         validation_dataset: VerifiersTaskDataset.Config

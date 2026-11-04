@@ -18,9 +18,9 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpointer import DATALOADER
 from torchtitan.components.data.loader import DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
-from torchtitan.config import apply_overrides, Configurable
+from torchtitan.config import apply_overrides, Configurable, PrecisionConfig
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
-from torchtitan.distributed.cuda_graph import cuda_graphs_supported
+from torchtitan.distributed.accelerator_graph import accelerator_graphs_supported
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.manager import maybe_semi_sync_training
@@ -50,17 +50,19 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         config: TrainingEngine.Config,
         *,
         model_config: BaseModel.Config,
+        precision: PrecisionConfig,
         max_num_documents: int | None,
         output_dir: str,
         fault_tolerance: FaultTolerance,
     ) -> None:
-        if config.optim.enable_cuda_graph:
-            raise ValueError("Optim CUDA graphs are not supported with TorchFT.")
+        if config.optim.enable_accelerator_graph:
+            raise ValueError("Optim accelerator graphs are not supported with TorchFT.")
         # The base constructor invokes the distributed-runtime hook.
         self.fault_tolerance = fault_tolerance
         super().__init__(
             config,
             model_config=model_config,
+            precision=precision,
             max_num_documents=max_num_documents,
             output_dir=output_dir,
         )
@@ -87,7 +89,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         )
         topology = dist_utils.init_distributed(
             config.comm,
-            enable_cpu_backend=config.training.enable_cpu_offload,
+            enable_cpu_backend=config.parallelism.fsdp_enable_cpu_offloading,
             base_folder=self.output_dir,
             ranks=global_ranks,
             pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
@@ -104,6 +106,10 @@ class FaultTolerantTrainingEngine(TrainingEngine):
                 )
         self.parallelism_context = ParallelismContext.from_config(
             config.parallelism, topology, dump_folder=self.output_dir
+        )
+        dist_utils.set_pg_timeouts(
+            timeout=timedelta(seconds=config.comm.init_timeout_seconds),
+            parallelism_context=self.parallelism_context,
         )
         self.garbage_collector = config.garbage_collector.build()
         dist_utils.set_determinism(
@@ -173,6 +179,7 @@ class FaultTolerantTrainer(Configurable):
         self.engine = FaultTolerantTrainingEngine(
             config,
             model_config=model_config,
+            precision=config.precision,
             max_num_documents=config.dataloader.max_num_documents,
             output_dir=config.dump_folder,
             fault_tolerance=config.fault_tolerance,
@@ -210,7 +217,7 @@ class FaultTolerantTrainer(Configurable):
             dp_world_size=dp_degree,
             dp_rank=dp_rank,
             tokenizer=self.tokenizer,
-            max_context_length=config.training.max_context_length,
+            max_context_length=config.model.max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
         )
 
@@ -246,13 +253,13 @@ class FaultTolerantTrainer(Configurable):
         )
         if (
             config.fault_tolerance.enable
-            and cuda_graphs_supported()
-            and not config.training.disable_cuda_graphs
+            and accelerator_graphs_supported()
+            and not config.training.disable_accelerator_graphs
             and parallelism_context.fsdp_enabled
             and self.gradient_accumulation_steps > 1
         ):
             raise ValueError(
-                "TorchFT does not support CUDA-graphed FSDP gradient accumulation."
+                "TorchFT does not support accelerator-graphed FSDP gradient accumulation."
             )
 
         engine.initialize(
@@ -284,8 +291,8 @@ class FaultTolerantTrainer(Configurable):
 
         # Build validator if validation is configured
         if config.validator is not None:
-            if engine._forward_backward_cuda_graph_enabled:
-                logger.warning("TorchFT validation runs without CUDA graphs.")
+            if engine._forward_backward_accelerator_graph_enabled:
+                logger.warning("TorchFT validation runs without accelerator graphs.")
             pp_schedule, pp_has_first_stage, pp_has_last_stage = (
                 (
                     engine.pp_schedule,
@@ -297,7 +304,7 @@ class FaultTolerantTrainer(Configurable):
             )
 
             self.validator = config.validator.build(
-                cuda_graph_enabled=False,
+                accelerator_graph_enabled=False,
                 parallelism=config.parallelism,
                 job_config=config,
                 dp_world_size=dp_degree,
@@ -306,7 +313,7 @@ class FaultTolerantTrainer(Configurable):
                 parallelism_context=parallelism_context,
                 loss_fn=engine.loss_fn,
                 metrics_processor=self.metrics_processor,
-                seq_len=config.training.max_context_length,
+                seq_len=config.model.max_context_length,
                 num_tokens_per_microbatch=num_tokens_per_microbatch,
                 pp_schedule=pp_schedule,
                 pp_has_first_stage=pp_has_first_stage,
@@ -318,7 +325,7 @@ class FaultTolerantTrainer(Configurable):
             f"{num_tokens_per_dp_rank} tokens per DP rank, "
             f"{num_tokens_per_train_step} tokens per train step, "
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
-            f"maximum context length {config.training.max_context_length}, "
+            f"maximum context length {config.model.max_context_length}, "
             f"total steps {config.training.steps} "
             f"(warmup {config.optim.lr_scheduler.warmup_steps})"
         )
