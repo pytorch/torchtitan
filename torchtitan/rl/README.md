@@ -78,10 +78,12 @@ The package is organized by responsibility and dependency boundary:
 - `generator/` contains the standalone generator service (`generator.py`), the
   SPMD engine loop that drives it (`engine_loop.py`), request dispatch across
   data-parallel replicas (`dispatcher.py`), the inference engine interface
-  (`engine.py`, `GenerationEngine`), engine-agnostic types (`types.py`), and
-  inference parallelism. `generator/vllm/` holds everything vLLM-specific: the
+  (`engine.py`, `GenerationEngine`), engine-agnostic types (`types.py`), the
+  generator model's build and model state dict loads (`inference_model.py`),
+  and inference parallelism. `generator/vllm/` holds everything vLLM-specific: the
   `VLLMEngine` implementation and its config (`Generator.Config.engine`), and
-  the model-side adapters that run TorchTitan models in vLLM.
+  the model-side adapters that run TorchTitan models in vLLM. `generator/sglang/`
+  holds the same for SGLang (`SGLangEngine`).
 - `rollout/` contains rollout execution (`rollouter.py`), the user extension
   APIs for environments (`message_env.py`, `token_env.py`) and rewards
   (`rubric.py`), advantages, data loading, rollout recording, and the rollout

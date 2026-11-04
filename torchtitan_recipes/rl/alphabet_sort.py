@@ -186,6 +186,16 @@ def rl_grpo_qwen3_0_6b_varlen_no_compile(*, seq_len: int = 2048) -> Controller.C
     return config
 
 
+def rl_grpo_qwen3_0_6b_varlen_sglang(*, seq_len: int = 2048) -> Controller.Config:
+    """``rl_grpo_qwen3_0_6b_varlen`` with the SGLang engine (6 GPUs: 4 gen + 2 train)."""
+    # Imported here so the other recipes do not depend on SGLang.
+    from torchtitan.rl.generator.sglang.engine import SGLangEngine
+
+    config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
+    config.generator.engine = SGLangEngine.Config()
+    return config
+
+
 def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
     """GRPO training config for Qwen3-0.6B with flex attention (4 GPUs: 2 gen + 2 train)."""
     num_samples_per_prompt = 8

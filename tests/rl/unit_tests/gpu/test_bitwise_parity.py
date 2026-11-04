@@ -554,7 +554,7 @@ _FILLER_TEXT = (
 )
 
 
-def _make_prompt_tokens(batch_size, prompt_length, tokenizer):
+def make_prompt_tokens(batch_size, prompt_length, tokenizer):
     """Create token ID sequences of the given prompt_length.
 
     For batch_size > 1, varies lengths across the batch (first seq at max,
@@ -695,7 +695,7 @@ class BitwiseParityTestBase(unittest.TestCase):
             _sync_trainer_weights_to_vllm(cls.model, cls.engine)
 
         tokenizer = cls.engine.get_tokenizer()
-        cls.prompt_ids = _make_prompt_tokens(
+        cls.prompt_ids = make_prompt_tokens(
             cls.BATCH_SIZE, cls.PROMPT_LENGTH, tokenizer
         )
 
