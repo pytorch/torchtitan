@@ -126,30 +126,46 @@ def test_local_compile_rejects_non_batch_invariant_region(monkeypatch) -> None:
 
 
 def test_loss_functions_use_local_compile(monkeypatch) -> None:
-    compiled_names = []
+    compile_kwargs = {}
+    called = []
 
     def fake_compile(reference, **kwargs):
-        del kwargs
-        compiled_names.append(reference.__name__)
-        return reference
+        compile_kwargs[reference.__name__] = kwargs
+
+        def compiled(*args, **fn_kwargs):
+            called.append(reference.__name__)
+            return reference(*args, **fn_kwargs)
+
+        return compiled
 
     monkeypatch.setattr(torch, "compile", fake_compile)
     LocalCompileConfig(regions=["loss"]).apply()
+    labels = torch.tensor([0, 3])
+    cross_entropy_loss(torch.randn(2, 4), labels)
+    cross_entropy_loss(torch.randn(2, 4, dtype=torch.bfloat16), labels)
 
-    assert [
-        name
-        for name in compiled_names
-        if name
-        in {
-            cross_entropy_loss.__name__,
+    # fp32 logits keep the plain region; bf16 logits get the fast exp.
+    assert called == [
+        "_fp32_cross_entropy_loss",
+        "_low_precision_cross_entropy_loss",
+    ]
+    assert {
+        name: compile_kwargs[name]
+        for name in (
+            "_fp32_cross_entropy_loss",
+            "_low_precision_cross_entropy_loss",
             mse_loss.__name__,
             compute_logprobs.__name__,
-        }
-    ] == [
-        cross_entropy_loss.__name__,
-        mse_loss.__name__,
-        compute_logprobs.__name__,
-    ]
+        )
+    } == {
+        "_fp32_cross_entropy_loss": {"fullgraph": True},
+        "_low_precision_cross_entropy_loss": {
+            "fullgraph": True,
+            "options": {"use_fast_math": True},
+        },
+        mse_loss.__name__: {"fullgraph": True},
+        compute_logprobs.__name__: {"fullgraph": True},
+    }
 
 
 def test_moe_aux_loss_uses_local_compile(monkeypatch) -> None:
