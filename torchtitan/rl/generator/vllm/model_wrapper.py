@@ -15,8 +15,6 @@ import copy
 import dataclasses
 from typing import cast
 
-import spmd_types as spmd
-
 import torch
 from torch.distributed.tensor import DTensor, Replicate
 from vllm.compilation.decorators import support_torch_compile
@@ -30,7 +28,6 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
-from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
     Attention,
@@ -45,8 +42,10 @@ from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRunti
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.model import (
     build_inference_model,
+    compute_logits,
     get_attention_dimensions,
     ModelStateDictLoader,
+    route_tp_all_reduce,
 )
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.vllm.registry import uses_compressed_mla_cache
@@ -199,64 +198,27 @@ def _dtensor_safe_weak_ref_tensor(tensor):
 _torch_utils.weak_ref_tensor = _dtensor_safe_weak_ref_tensor
 
 
-# Process-global: install the op swap at most once even if the generator is
-# re-initialized in the same process (re-wrapping would chain shims).
-_tp_all_reduce_patched = False
-
-
 def _patch_vllm_all_reduce() -> None:
     """Route the generator's tensor-parallel all-reduce through vLLM's custom
-    one-shot/multimem AR instead of DTensor's NCCL ring redistribute (applied
-    when batch-invariant mode is off). Idempotent. Two changes:
+    one-shot/multimem AR instead of NCCL's ring (``route_tp_all_reduce``; applied
+    when batch-invariant mode is off).
 
-    1. Swap torch.ops._c10d_functional.all_reduce (the op every DTensor
-       Partial -> Replicate redistribute calls) for
-       tensor_model_parallel_all_reduce, which reuses vLLM's TP GroupCoordinator
-       -- the same ranks, but the group that owns the custom-AR shared buffers.
-       DTensor wraps the synchronous result in an AsyncCollectiveTensor whose
-       wait_tensor is a no-op. Only sum reductions are routed (the custom AR is
-       sum-only); others fall through to the original op. No-op at world_size 1.
+    ``tensor_model_parallel_all_reduce`` reuses vLLM's TP GroupCoordinator: the
+    same ranks as DTensor's TP mesh group, but the group that owns the custom-AR
+    shared buffers. It guards world_size == 1 and on CUDA dispatches to
+    torch.ops.vllm.all_reduce.
 
-    2. Force the custom AR onto its registered=False path so CUDA graph capture
-       works. registered=True records graph buffers and calls cudaIpcGetMemHandle
-       on them, which fails for the expandable_segments (VMM) memory the RL stack
-       enables for Monarch RDMA. registered=False reduces via the init-time
-       buffer_ptrs (raw cudaMalloc, IPC-able), records no graph buffers, at the
-       cost of one staging copy per AR.
-
-    3. (spmd_types) spmd.redistribute issues an in-place dist.all_reduce that the
-       point-1 swap can't see, so route its Partial -> {R,I} reduce straight to
-       the same custom AR. Guarded on no-grad: the generator is inference-only and
-       the custom AR is sum-only/forward-only; under grad we keep spmd.redistribute
-       (its dst-dependent backward is correct).
-
-    TODO: this is a stopgap to close the generator's TP all-reduce perf gap.
-    Improve our native (DTensor) all-reduce path and remove this patch.
+    The custom AR is also forced onto its registered=False path so CUDA graph
+    capture works. registered=True records graph buffers and calls
+    cudaIpcGetMemHandle on them, which fails for the expandable_segments (VMM)
+    memory the RL stack enables for Monarch RDMA. registered=False reduces via the
+    init-time buffer_ptrs (raw cudaMalloc, IPC-able), records no graph buffers, at
+    the cost of one staging copy per AR.
     """
-    global _tp_all_reduce_patched
-    if _tp_all_reduce_patched:
-        return
-
     from vllm.distributed import get_tp_group
 
-    c10d = torch.ops._c10d_functional
-    # Op schema: all_reduce(Tensor input, str reduce_op, Any group_name) -> Tensor.
-    original_all_reduce = c10d.all_reduce
+    route_tp_all_reduce(tensor_model_parallel_all_reduce)
 
-    def all_reduce(input, reduce_op, group_name):
-        if reduce_op == "sum":
-            # Use vLLM's helper rather than the incoming group_name: the custom-AR
-            # kernel is bound to vLLM's TP GroupCoordinator and the shared buffers
-            # it registered, so the reduction must run on vLLM's TP group, not
-            # DTensor's TP mesh PG (a different PG over the same ranks -> rank-for-
-            # rank equivalent). The helper resolves that group, guards
-            # world_size==1, and on CUDA dispatches to torch.ops.vllm.all_reduce.
-            return tensor_model_parallel_all_reduce(input)
-        return original_all_reduce(input, reduce_op, group_name)
-
-    c10d.all_reduce = all_reduce
-
-    # Force vLLM's TP custom AR onto its registered=False path (see point 2).
     device_comm = get_tp_group().device_communicator
     ca = getattr(device_comm, "ca_comm", None) if device_comm is not None else None
     if ca is not None and not ca.disabled:
@@ -268,21 +230,6 @@ def _patch_vllm_all_reduce() -> None:
             return ca.all_reduce(input, registered=False)
 
         ca.custom_all_reduce = custom_all_reduce
-
-    original_redistribute = spmd.redistribute
-
-    def redistribute(x, group, *, src, dst, **kwargs):
-        if src == spmd.P and dst in (spmd.R, spmd.I) and not torch.is_grad_enabled():
-            return tensor_model_parallel_all_reduce(x)
-        return original_redistribute(x, group, src=src, dst=dst, **kwargs)
-
-    spmd.redistribute = redistribute
-
-    _tp_all_reduce_patched = True
-    logger.info(
-        "vllm_allreduce: routed _c10d_functional.all_reduce (TP sum reductions) "
-        "through vLLM custom all-reduce (registered=False, CUDA-graph-safe)"
-    )
 
 
 @support_torch_compile(
@@ -541,23 +488,7 @@ class VLLMModelWrapper(Module):
         """vLLM required API.
         Compute logits from hidden states."""
 
-        with self.parallelism_context.activate_spmd():
-            logits = self.model.lm_head(hidden_states)
-
-            # lm_head returns vocab-sharded logits under TP; gather to the
-            # full local logits tensor that vLLM expects.
-            if self.parallelism_context.tp_enabled:
-                mesh = current_spmd_mesh()
-                assert mesh is not None
-                logits = spmd.redistribute(
-                    logits,
-                    mesh.get_group("tp"),
-                    src=spmd.S(-1),
-                    dst=spmd.R,
-                    backward_options={"op_dtype": logits.dtype},
-                )
-
-        return logits
+        return compute_logits(self.model, hidden_states, self.parallelism_context)
 
     def load_weights(self, weights_iter):
         """
