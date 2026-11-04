@@ -57,9 +57,7 @@ def scaleless_head_norm_sharding_config() -> ShardingConfig:
     head_shard = attention_activation_placement()
     return ShardingConfig(
         in_src_shardings={"input": head_shard},
-        in_dst_shardings={"input": head_shard},
         out_src_shardings=head_shard,
-        out_dst_shardings=head_shard,
     )
 
 
@@ -76,7 +74,5 @@ def cp_replicated_vision_sharding_config() -> ShardingConfig:
     return ShardingConfig(
         state_shardings={"weight": state, "bias": state},
         in_src_shardings={"input": activation},
-        in_dst_shardings={"input": activation},
         out_src_shardings=activation,
-        out_dst_shardings=activation,
     )

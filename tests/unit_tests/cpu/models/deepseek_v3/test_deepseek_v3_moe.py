@@ -99,7 +99,6 @@ class TestDeepSeekV3Router(unittest.TestCase):
         assert mtp_config is not None
         assert mtp_config.in_src_shardings is not None
         self.assertIn("mtp_input_valid_mask", mtp_config.in_src_shardings)
-        self.assertIsNone(mtp_config.in_dst_shardings)
 
     def test_select_experts_limits_choices_to_selected_groups(self):
         router = DeepSeekV3Router.Config(
@@ -144,10 +143,8 @@ class TestDeepSeekV3Router(unittest.TestCase):
         self.assertIs(type(attention_config.wo), RowParallelLinear.Config)
         assert attention_config.sharding_config is not None
         self.assertIsNotNone(attention_config.sharding_config.in_src_shardings)
-        self.assertIsNone(attention_config.sharding_config.in_dst_shardings)
         assert attention_config.wo.sharding_config is not None
         self.assertIsNotNone(attention_config.wo.sharding_config.out_src_shardings)
-        self.assertIsNone(attention_config.wo.sharding_config.out_dst_shardings)
 
         AsyncTensorParallelTransform(
             enable_sequence_parallel=True, disable_inplace_wgrad_accum=True

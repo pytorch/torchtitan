@@ -223,9 +223,7 @@ def head_norm_sharding_config() -> ShardingConfig:
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
         in_src_shardings={"input": head_layout},
-        in_dst_shardings={"input": head_layout},
         out_src_shardings=head_layout,
-        out_dst_shardings=head_layout,
     )
 
 
@@ -246,8 +244,8 @@ def inner_attention_local_spmd_sharding_config() -> ShardingConfig:
     """Localize TNH attention inputs without changing their placements.
 
     q/k use ``(T, H, K)`` and v uses ``(T, H, V)``. DP/CP shard T and TP
-    shards H. CP collectives run inside the CP kernels; TP collectives still
-    run at module boundaries.
+    shards H. CP collectives run inside the CP kernels; the enclosing
+    attention module issues the TP collectives explicitly.
     The local SPMD boundary converts annotated tensors to local tensors before
     the kernel runs, then wraps outputs back.
 
@@ -256,11 +254,6 @@ def inner_attention_local_spmd_sharding_config() -> ShardingConfig:
     placements = attention_activation_placement()
     return ShardingConfig(
         in_src_shardings={
-            "q_THK": placements,
-            "k_THK": placements,
-            "v_THV": placements,
-        },
-        in_dst_shardings={
             "q_THK": placements,
             "k_THK": placements,
             "v_THV": placements,
@@ -281,7 +274,6 @@ def mla_attention_local_spmd_sharding_config() -> ShardingConfig:
     }
     return ShardingConfig(
         in_src_shardings=inputs,
-        in_dst_shardings=inputs,
         out_src_shardings=head_placement,
         local_spmd=True,
     )
@@ -345,7 +337,5 @@ def lm_head_sharding_config() -> ShardingConfig:
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
         in_src_shardings={"input": replicated},
-        in_dst_shardings={"input": replicated},
         out_src_shardings=vocab_sharded,
-        out_dst_shardings=vocab_sharded,
     )

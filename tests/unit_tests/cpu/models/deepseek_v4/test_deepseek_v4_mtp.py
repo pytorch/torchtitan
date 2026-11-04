@@ -46,7 +46,6 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
         mtp_config = config.mtp_layers[0].sharding_config
         assert mtp_config is not None
         self.assertIsNotNone(mtp_config.in_src_shardings)
-        self.assertIsNone(mtp_config.in_dst_shardings)
 
     @patch("torchtitan.distributed.fsdp.resolve_sparse_fsdp_mesh")
     @patch("torchtitan.distributed.fsdp.resolve_fsdp_mesh")

@@ -76,7 +76,7 @@ def _hf_rowwise_sharding_config(*, output_sp: bool = False) -> ShardingConfig:
 
     The output layout is after the reduction that ``_set_row_parallel`` adds.
     """
-    out_dst = (
+    out_layout = (
         _hf_sequence_parallel_placement()
         if output_sp
         else _hf_activation_placement(tp=spmd.I)
@@ -86,7 +86,7 @@ def _hf_rowwise_sharding_config(*, output_sp: bool = False) -> ShardingConfig:
             "weight": dense_param_placement(tp=spmd.S(1)),
             "bias": dense_param_placement(tp=spmd.R),
         },
-        out_src_shardings=out_dst,
+        out_src_shardings=out_layout,
     )
 
 
@@ -336,11 +336,6 @@ def _attach_flex_kernel(attn: nn.Module) -> None:
                 "key": heads_in,
                 "value": heads_in,
             },
-            in_dst_shardings={
-                "query": heads_in,
-                "key": heads_in,
-                "value": heads_in,
-            },
             out_src_shardings=heads_out,
             local_spmd=True,
         )
@@ -507,9 +502,7 @@ def _hf_norm_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     return ShardingConfig(
         state_shardings=state,
         in_src_shardings={"hidden_states": sp_layout},
-        in_dst_shardings={"hidden_states": sp_layout},
         out_src_shardings=sp_layout,
-        out_dst_shardings=sp_layout,
     )
 
 
@@ -535,12 +528,11 @@ def _rope_sharding_config(module: nn.Module, *, enable_sp: bool) -> ShardingConf
     buffer is replicated so the computed cos/sin have matching SPMD types in
     ``apply_rotary_pos_emb``.
 
-    Core's input redistribution requires ``in_src_shardings`` to match the
-    incoming placement exactly. Under SP the hidden-states arg arrives sharded
-    on the sequence dim (the embedding output layout), so declare the first arg
-    with the SP activation placement; the remaining (plain) args are wrapped as
-    Replicate. ``in_dst`` mirrors ``in_src`` -- the rotary embedding only reads
-    hidden_states for dtype/device, so there is no need to redistribute it.
+    ``in_src_shardings`` must match the incoming placement exactly. Under SP
+    the hidden-states arg arrives sharded on the sequence dim (the embedding
+    output layout), so declare the first arg with the SP activation placement;
+    the remaining (plain) args are wrapped as Replicate. The rotary embedding
+    only reads hidden_states for dtype/device, so it is never redistributed.
     """
     state_shardings: dict = {}
     for name, _ in module.named_parameters(recurse=False):
@@ -560,7 +552,6 @@ def _rope_sharding_config(module: nn.Module, *, enable_sp: bool) -> ShardingConf
     return ShardingConfig(
         state_shardings=state_shardings,
         in_src_shardings=in_shardings,
-        in_dst_shardings=in_shardings,
     )
 
 

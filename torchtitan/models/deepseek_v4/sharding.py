@@ -104,9 +104,7 @@ def dsa_inner_attention_sharding_config(*, compress_ratio: int) -> ShardingConfi
 
     return ShardingConfig(
         in_src_shardings=input_shardings,
-        in_dst_shardings=dict(input_shardings),
         out_src_shardings=query_states,
-        out_dst_shardings=query_states,
         local_spmd=True,
     )
 
@@ -148,10 +146,6 @@ def indexer_sharding_config() -> ShardingConfig:
     replicated_activation = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     return ShardingConfig(
         in_src_shardings={
-            "x": replicated_activation,
-            "qr": replicated_activation,
-        },
-        in_dst_shardings={
             "x": replicated_activation,
             "qr": replicated_activation,
         },

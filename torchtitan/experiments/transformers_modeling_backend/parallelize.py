@@ -145,7 +145,7 @@ def parallelize_hf_transformers(
 
     # 2. Convert HF modules to Module protocol.
     # The spmd_types backend uses the Module protocol for state distribution,
-    # activation checks, and any TP/EP/CP redistribution.
+    # activation checks, and local SPMD regions.
     from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
         set_hf_sharding_configs,
     )

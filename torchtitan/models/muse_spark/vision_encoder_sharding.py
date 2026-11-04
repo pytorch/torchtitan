@@ -39,9 +39,7 @@ def cp_replicated_vision_sharding_config(config: ShardingConfig) -> ShardingConf
         config,
         state_shardings=replicate_tree(config.state_shardings),
         in_src_shardings=replicate_tree(config.in_src_shardings),
-        in_dst_shardings=replicate_tree(config.in_dst_shardings),
         out_src_shardings=replicate_tree(config.out_src_shardings),
-        out_dst_shardings=replicate_tree(config.out_dst_shardings),
     )
 
 

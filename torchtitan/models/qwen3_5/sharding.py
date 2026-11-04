@@ -80,12 +80,7 @@ def gated_rms_norm_sharding_config() -> ShardingConfig:
             "input": head_placement,
             "gate": head_placement,
         },
-        in_dst_shardings={
-            "input": head_placement,
-            "gate": head_placement,
-        },
         out_src_shardings=head_placement,
-        out_dst_shardings=head_placement,
     )
 
 
@@ -111,9 +106,7 @@ def inner_gated_delta_net_sharding_config() -> ShardingConfig:
     }
     return ShardingConfig(
         in_src_shardings=input_shardings,
-        in_dst_shardings=dict(input_shardings),
         out_src_shardings=head_placement,
-        out_dst_shardings=head_placement,
         local_spmd=True,
     )
 

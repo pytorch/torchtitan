@@ -409,10 +409,6 @@ class NVFP4Linear(Linear):
                         **(sc.in_src_shardings or {}),
                         "input": in_layout,
                     },
-                    in_dst_shardings={
-                        **(sc.in_dst_shardings or {}),
-                        "input": in_layout,
-                    },
                     local_spmd=True,
                 )
             return instance
