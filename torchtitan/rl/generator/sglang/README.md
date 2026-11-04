@@ -78,7 +78,8 @@ tree falls back to its Python implementation.
 | Batch-invariant mode | Supported; see below |
 | Per-request metrics (queue time, TTFT, prefill, decode, preemptions, cached tokens) | Supported |
 | Data parallelism within a generator | Not supported: run more generators |
-| Flex attention, MLA, GDN/KDA, sliding window, attention sinks | Not supported |
+| Sliding-window attention (e.g. Muse Glimmer) | Supported; KV of every token stays cached (no sliding-window KV pool) |
+| Flex attention, MLA, GDN/KDA, attention sinks (GPT-OSS) | Not supported |
 | MoE with expert parallelism over the TP group, Dist-MoE | Supported; see below |
 | Sequence parallelism | Not supported |
 
