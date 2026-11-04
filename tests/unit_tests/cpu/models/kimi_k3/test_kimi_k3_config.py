@@ -17,6 +17,19 @@ _TRITON_ATTENTION_RESIDUAL = (
 )
 
 
+def test_kimi_k3_enables_attention_residual_local_compile() -> None:
+    config = kimi_k3_debugmodel()
+    model_config = cast(KimiK3Model.Config, config.model)
+
+    assert model_config.local_compile.regions == [
+        "loss",
+        "gated_rmsnorm",
+        "fused_binary_activation",
+        "fp32_to_bf16_split",
+        "attention_residual",
+    ]
+
+
 def test_triton_attention_residual_override_replaces_all_configs() -> None:
     config = kimi_k3_debugmodel()
     model_config = cast(KimiK3Model.Config, config.model)

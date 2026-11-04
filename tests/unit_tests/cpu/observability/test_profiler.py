@@ -16,6 +16,15 @@ from torchtitan.observability.profiler import Profiler
 class TestProfilerDisabledPaths(unittest.TestCase):
     """Tests for the no-op / disabled paths that require no GPU."""
 
+    def test_runtime_args_stored_on_init(self):
+        """Runtime kwargs passed to __init__ are stored on the instance."""
+        profiler = Profiler(
+            Profiler.Config(), global_step=42, base_folder="/data", leaf_folder="sub"
+        )
+        self.assertEqual(profiler._global_step, 42)
+        self.assertEqual(profiler._base_folder, "/data")
+        self.assertEqual(profiler._leaf_folder, "sub")
+
     def test_context_manager_step_is_noop(self):
         """With everything disabled, context manager and step() don't raise."""
         profiler = Profiler(Profiler.Config())
@@ -25,6 +34,21 @@ class TestProfilerDisabledPaths(unittest.TestCase):
             self.assertIsNone(prof.memory_profiler)
             prof.step()
             prof.step()
+
+    def test_active_updates_runtime_args(self):
+        """active() updates runtime args and returns self for context manager use."""
+        profiler = Profiler(Profiler.Config())
+        self.assertEqual(profiler._global_step, 0)
+        self.assertEqual(profiler._base_folder, "")
+        self.assertEqual(profiler._leaf_folder, "")
+
+        result = profiler.active(
+            global_step=10, base_folder="/output", leaf_folder="replica_0"
+        )
+        self.assertIs(result, profiler)
+        self.assertEqual(profiler._global_step, 10)
+        self.assertEqual(profiler._base_folder, "/output")
+        self.assertEqual(profiler._leaf_folder, "replica_0")
 
     def test_active_as_context_manager(self):
         """active() can be used as a context manager with 'with' statement."""

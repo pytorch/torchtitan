@@ -155,6 +155,11 @@ class TestSetStep:
     def test_step_default_is_none(self):
         assert get_step() is None
 
+    def test_set_step_writes_to_both_global_and_cv(self):
+        set_step(10)
+        assert step_state._STEP_GLOBAL == 10
+        assert step_state._STEP_CV.get() == 10
+
     def test_get_step_prefers_cv(self):
         """ContextVar takes priority over global."""
         step_state._STEP_GLOBAL = 1

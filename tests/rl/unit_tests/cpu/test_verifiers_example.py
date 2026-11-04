@@ -15,10 +15,13 @@ import pytest
 
 pytest.importorskip("verifiers")
 
+import verifiers.v1 as vf
 
 from torchtitan.rl.examples.dapo_math import DapoMathSample
 from torchtitan.rl.examples.verifiers.dapo_math import data
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
+from torchtitan_recipes.rl.verifiers_dapo_math import _verifiers_math_rollouter_config
+from verifiers.v1.harnesses.null import NullHarnessConfig as VerifiersNullHarnessConfig
 
 
 def test_verifiers_task_scores_math_response() -> None:
@@ -85,3 +88,19 @@ def test_verifiers_task_dataset_keeps_the_first_num_tasks(monkeypatch) -> None:
 
     task_indices = [next(dataset).verifiers_task_data["idx"] for _ in range(4)]
     assert task_indices == [0, 1, 0, 1]
+
+
+def test_verifiers_environment_uses_no_sandbox() -> None:
+    rollouter_config = _verifiers_math_rollouter_config(max_rollout_tokens=10240)
+    config = rollouter_config.verifiers_env_server
+
+    assert isinstance(config.environment, vf.SingleAgentEnvConfig)
+    assert isinstance(config.environment.agent.runtime, vf.SubprocessConfig)
+    assert isinstance(config.environment.agent.harness, VerifiersNullHarnessConfig)
+    assert isinstance(config.serve.pool, vf.StaticPoolConfig)
+    assert config.serve.pool.num_workers == 1
+    assert (
+        config.environment.taskset
+        == rollouter_config.training_dataloader.dataset.verifiers_taskset
+    )
+    assert config.local_taskset_module == data.__name__

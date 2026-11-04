@@ -1150,6 +1150,31 @@ def test_packing_splits_positioned_long_documents(packing_type, max_num_document
     assert real_input_ids == list(range(16))
 
 
+def test_first_fit_num_packing_bins_is_independent_of_token_budget(monkeypatch):
+    captured = {}
+
+    def capture_options(dataset, **kwargs):
+        captured.update(kwargs)
+        return dataset
+
+    monkeypatch.setattr(
+        grain.experimental,
+        "FirstFitPackIterDataset",
+        capture_options,
+    )
+    dataset = SingleDatasetConfig(
+        source=RowsSourceConfig(rows=({"tokens": [1, 2]},)),
+        processor=RowToTokens.Config(),
+    )
+
+    FirstFitPackingConfig(dataset=dataset).build(
+        context=replace(CONTEXT, num_tokens_per_microbatch=64),
+        dataset_iteration_policy=dataset_iteration_policy(),
+    )
+
+    assert captured["num_packing_bins"] == 8
+
+
 def test_first_fit_meta_features_are_packed_arrays():
     dataset = SingleDatasetConfig(
         source=RowsSourceConfig(

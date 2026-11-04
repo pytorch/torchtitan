@@ -24,6 +24,17 @@ from torchtitan_recipes.tests.graph_trainer.muse_glimmer import (
     graph_trainer_muse_glimmer_debugmodel,
 )
 
+from tests.integration_tests.features import (
+    muse_glimmer_debugmodel_shared_eval_accelerator_graph,
+)
+
+
+def test_shared_eval_accelerator_graph_recipe_enables_capture() -> None:
+    config = muse_glimmer_debugmodel_shared_eval_accelerator_graph()
+    assert not config.training.disable_accelerator_graphs
+    assert config.optim.enable_accelerator_graph
+    assert not hasattr(config.validator, "enable_cuda_graphs")
+
 
 @pytest.fixture(autouse=True)
 def reset_accelerator_graph_manager():
