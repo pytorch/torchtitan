@@ -200,7 +200,7 @@ class _RoutingOutputs(NamedTuple):
     # Training only (None in eval). Padding tokens left out.
     # int64 counts to add to the tokens_per_expert_E buffer.
     tokens_per_expert_E: torch.Tensor | None  # noqa: N815
-    # This DP rank's fp32 sums for the aux loss. None without an aux loss.
+    # This DP rank's fp32 sums for the aux loss. Training only, and None without an aux loss.
     local_counts_E: torch.Tensor | None  # noqa: N815
     local_prob_sums_E: torch.Tensor | None  # noqa: N815
 
@@ -336,9 +336,10 @@ class TokenChoiceTopKRouter(Module):
         "moe_router_topk",
         # Declares the region batch-invariant. The Inductor option below makes it so.
         batch_invariant=True,
-        # Default 8. DeepSeek-V4's hash and top-k layers share this frame. At most 48 graphs:
-        # 2 layer kinds x train or eval x grad on or off x padding or none x static, dynamic
-        # or 1-token T. Past the limit, fullgraph=True raises instead of falling back to eager.
+        # Dynamo's default limit is 8. DeepSeek-V4's hash and top-k layers share this frame.
+        # At most 48 graphs: 2 layer kinds x train or eval x grad on or off x padding or none
+        # x static, dynamic or 1-token T. Past the limit, fullgraph=True raises instead of
+        # falling back to eager.
         recompile_limit=48,
         # Fixes each reduction's launch config, so a token's scores don't depend on the batch
         # size. Cost on GB300, measured on the inference (decode and prefill) graph: a few us

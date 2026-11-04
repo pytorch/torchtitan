@@ -274,8 +274,8 @@ the original forward. The MoE `routing_decision` region owns expert selection
 (retained with `moe_router_topk` off; with it on, replay recomputes the same
 selection), while token-count accumulation and quantile-histogram
 observation explicitly ignore checkpoint replay. Token counts come from the
-router region's per-expert sums; the histogram reads the routing map built for
-dispatch. Kimi K2.7 QK-clipping statistics also
+per-expert sums in the router's `_score_and_select_experts`; the histogram reads
+the routing map built for dispatch. Kimi K2.7 QK-clipping statistics also
 ignore replay. Auxiliary-loss accumulation uses an always-retained region.
 Replay picks the same experts only if the recomputed router input and gate
 GEMM are bitwise equal to the original forward's;
