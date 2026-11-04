@@ -22,7 +22,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import DebugConfig
+from torchtitan.config import DebugConfig, PrecisionConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
@@ -121,7 +121,7 @@ class VLLMEngine(GenerationEngine):
         parallelism: InferenceParallelismConfig,
         model_path: str,
         max_num_seqs: int,
-        model_dtype: str,
+        precision: PrecisionConfig,
         gpu_memory_limit: float,
         max_num_batched_tokens: int | None,
         checkpointer: CheckpointManager.Config | None,
@@ -148,6 +148,7 @@ class VLLMEngine(GenerationEngine):
         self._setup(
             model,
             parallelism=parallelism,
+            precision=precision,
             checkpointer=checkpointer,
             dist_moe_runtime=dist_moe_runtime,
             batch_invariant=debug.batch_invariant,
@@ -158,7 +159,7 @@ class VLLMEngine(GenerationEngine):
             parallelism=parallelism,
             model_path=model_path,
             max_num_seqs=max_num_seqs,
-            model_dtype=model_dtype,
+            param_dtype=precision.param_dtype,
             gpu_memory_limit=gpu_memory_limit,
             max_num_batched_tokens=max_num_batched_tokens,
             seed=debug.seed,
@@ -192,6 +193,7 @@ class VLLMEngine(GenerationEngine):
         model: Decoder.Config,
         *,
         parallelism: InferenceParallelismConfig,
+        precision: PrecisionConfig,
         checkpointer: CheckpointManager.Config | None,
         dist_moe_runtime: DistMoeRuntime.Config | None,
         batch_invariant: bool,
@@ -202,6 +204,7 @@ class VLLMEngine(GenerationEngine):
         register_to_vllm(
             model,
             parallelism=parallelism,
+            precision=precision,
             checkpointer_config=checkpointer,
             dist_moe_runtime=dist_moe_runtime,
             model_state_dict_load_mode=model_state_dict_load_mode,
@@ -219,7 +222,7 @@ class VLLMEngine(GenerationEngine):
         parallelism: InferenceParallelismConfig,
         model_path: str,
         max_num_seqs: int,
-        model_dtype: str,
+        param_dtype: str,
         gpu_memory_limit: float,
         max_num_batched_tokens: int | None,
         seed: int | None,
@@ -238,7 +241,7 @@ class VLLMEngine(GenerationEngine):
             # register_to_vllm in _setup). It builds PretrainedConfig from
             # model config instead of reading config.json from disk.
             config_format=TORCHTITAN_CONFIG_FORMAT,
-            dtype=model_dtype,
+            dtype=param_dtype,
             tensor_parallel_size=parallelism.tensor_parallel_degree,
             data_parallel_size=parallelism.data_parallel_degree,
             # NOTE: Monarch launches the generator workers and sets the torch

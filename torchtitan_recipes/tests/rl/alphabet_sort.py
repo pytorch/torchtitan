@@ -154,7 +154,6 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -261,7 +260,6 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             # TODO: use FULL CUDA graphs once a CUDA-graph-compatible
             # distributed MoE token dispatcher is enabled for GPT-OSS.
@@ -507,7 +505,6 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             parallelism=generator_parallelism,
             checkpointer=None,
@@ -584,7 +581,6 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             # vLLM models FULL-graph capture warmup as one sequence, so keep
             # its synthetic sequence within the GDN model's context length.
             max_num_batched_tokens=seq_len,
@@ -719,7 +715,6 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             engine=VLLMEngine.Config(
                 cuda_graph=VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY")
             ),

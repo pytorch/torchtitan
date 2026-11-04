@@ -98,12 +98,13 @@ need `cast_forward_inputs=True`.
 ## Precision requirements
 
 Batch-invariant mode requires bfloat16 computation in both trainer and
-generator so they operate at the same precision. The generator always runs in
-bfloat16 (`generator.model_dtype="bfloat16"`). The trainer reaches the same
-precision with FSDP mixed precision (`precision.param_dtype="bfloat16"`,
-the default): it keeps fp32 master weights and FSDP's `MixedPrecisionPolicy`
-casts them to bf16 before the forward, so the forward is numerically identical to
-the generator's bf16 path. The trainer always wraps the model in FSDP
+generator so they operate at the same precision (`precision.param_dtype="bfloat16"`,
+the default). The generator computes in `precision.param_dtype`. The trainer
+reaches the same precision with FSDP mixed precision: it keeps fp32 master
+weights and FSDP's `MixedPrecisionPolicy` casts them to bf16 before the forward,
+so the forward is numerically identical to the generator's bf16 path.
+Parameters listed in `preserve_dtype_params` stay in their master dtype on both
+sides. The trainer always wraps the model in FSDP
 (`Decoder._apply_fsdp` applies `apply_fsdp_to_decoder` for the trainer), so this
 cast happens even at `data_parallel_shard_degree=1`, where FSDP
 acts purely as a mixed-precision boundary (the degree-1 all-gather is a no-op but

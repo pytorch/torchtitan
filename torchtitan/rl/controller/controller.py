@@ -291,7 +291,9 @@ class Controller(Configurable):
         """Trainer config. Controls the trainer model, optimizer, training, parallelism."""
 
         precision: PrecisionConfig = field(default_factory=PrecisionConfig)
-        """Parameter, compute, and gradient-reduction dtypes of the trainer model."""
+        """Parameter, compute, and gradient-reduction dtypes of the trainer model. The
+        generators mirror it: they compute in ``param_dtype`` and hold the parameters
+        the trainer sends in the dtypes it sends them."""
 
         # TODO: put generator, num generators and generator router in a separate config
         generator: Generator.Config
@@ -426,25 +428,17 @@ class Controller(Configurable):
                     )
                 if not self.trainer.debug.deterministic:
                     raise ValueError("batch_invariant requires deterministic=True")
-                # The trainer forward must compute in bf16 to match the bf16
-                # generator, via FSDP mixed precision. The trainer always wraps
-                # the model in FSDP (even at data_parallel_shard_degree=1, where
-                # FSDP acts purely as a mixed-precision boundary), so
-                # param_dtype == "bfloat16" casts the fp32 master
-                # weights to bf16 for the forward before any matmul.
+                # Batch-invariant mode computes in bf16. The generator computes in
+                # precision.param_dtype, and so does the trainer forward: the trainer
+                # always wraps the model in FSDP (even at data_parallel_shard_degree=1,
+                # where FSDP acts purely as a mixed-precision boundary), which casts
+                # the master weights to param_dtype before any matmul.
                 if self.precision.param_dtype != "bfloat16":
                     raise ValueError(
-                        "batch_invariant requires the trainer forward to compute "
-                        "in bfloat16 to match the generator. Set "
-                        "precision.param_dtype='bfloat16' (fp32 master "
-                        "weights, bf16-cast forward via FSDP mixed precision). "
+                        "batch_invariant requires the trainer and generator to compute "
+                        "in bfloat16. Set precision.param_dtype='bfloat16'. "
                         "Got param_dtype="
                         f"{self.precision.param_dtype!r}."
-                    )
-                if self.generator.model_dtype != "bfloat16":
-                    raise ValueError(
-                        f"batch_invariant requires bfloat16 generator dtype, "
-                        f"got {self.generator.model_dtype!r}"
                     )
                 if self.trainer.parallelism.enable_sequence_parallel:
                     raise ValueError(
@@ -644,7 +638,6 @@ class Controller(Configurable):
                 dp_degree=self.trainer_dp_degree,
                 precision=config.precision,
                 hf_assets_path=config.hf_assets_path,
-                generator_dtype=config.generator.model_dtype,
                 max_num_documents=config.async_loop.batcher.max_num_documents,
                 output_dir=config.dump_folder,
             )
@@ -652,6 +645,7 @@ class Controller(Configurable):
             self.generator_router = await actor_system.spawn_generator_router(
                 config.generator_router,
                 generator_config=config.generator,
+                precision=config.precision,
                 model_path=config.hf_assets_path,
                 max_num_seqs=max_num_seqs,
                 output_dir=config.dump_folder,

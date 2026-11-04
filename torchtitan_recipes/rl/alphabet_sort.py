@@ -170,7 +170,6 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -250,7 +249,6 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -419,7 +417,6 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             # TODO: use FULL CUDA graphs once a CUDA-graph-compatible
             # distributed MoE token dispatcher is enabled for GPT-OSS.
@@ -494,7 +491,6 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -567,7 +563,6 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -649,7 +644,6 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             parallelism=generator_parallelism,
             checkpointer=None,
@@ -762,7 +756,6 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -860,7 +853,6 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             parallelism=generator_parallelism,
             checkpointer=None,

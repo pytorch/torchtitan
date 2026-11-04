@@ -17,6 +17,8 @@ from torchtitan.components.data.types import (
     TrainingMicrobatch as CoreTrainingMicrobatch,
 )
 from torchtitan.config import Configurable, DebugConfig, PrecisionConfig, TrainingConfig
+from torchtitan.models.base.module import Module
+from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.rl.actors.monarch.trainer import TrainerActor
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
@@ -71,9 +73,13 @@ def test_initialize_torchstore_client_uses_publisher_role() -> None:
 def test_push_model_state_dict_puts_on_push_stream_in_worker() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
-        weight_part = torch.nn.Linear(2, 2, bias=False)
-        buffer_part = torch.nn.Module()
-        buffer_part.norm = torch.nn.Module()
+        # Model parts are torchtitan Modules (BaseModel in the engine).
+        weight_part = Module()
+        weight_part.register_parameter("weight", torch.nn.Parameter(torch.ones(2, 2)))
+        buffer_part = Module()
+        buffer_part.norm = RMSNorm.Config(
+            normalized_shape=2, preserve_dtype_params=("weight",)
+        ).build()
         buffer_part.norm.register_buffer("scale", torch.tensor(3.0))
         buffer_part.register_buffer("cache", torch.ones(2), persistent=False)
         # Under PP, a rank publishes the merged state dicts of its model parts.
@@ -106,11 +112,11 @@ def test_push_model_state_dict_puts_on_push_stream_in_worker() -> None:
             "model_state_dict",
             direct_rdma=False,
             transfer_dtype=torch.bfloat16,
-            preserve_dtype_keys=frozenset({"norm.scale"}),
+            preserve_dtype_keys=frozenset({"norm.weight", "norm.scale"}),
         )
         # The live model tensors are put; TorchStore owns the CPU copy.
         state_dict = put.await_args.args[0]
-        assert set(state_dict) == {"weight", "norm.scale"}
+        assert set(state_dict) == {"weight", "norm.weight", "norm.scale"}
         assert state_dict["weight"].data_ptr() == weight_part.weight.data_ptr()
         assert state_dict["norm.scale"].data_ptr() == buffer_part.norm.scale.data_ptr()
         stream.__exit__.assert_called_once()

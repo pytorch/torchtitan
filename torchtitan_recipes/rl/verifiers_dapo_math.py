@@ -193,7 +193,6 @@ def _qwen3_4b_verifiers_config(
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             checkpointer=None,

@@ -126,9 +126,11 @@ def _state_dict_with_random_experts(wrapper, experts, *, seed: int) -> dict:
 
 def _trainer_model(wrapper, state_dict: dict[str, torch.Tensor]) -> SimpleNamespace:
     """Stand in for the trainer model: ``state_dict`` under the generator model's
-    buffer names, which match the trainer's."""
+    buffer and ``preserve_dtype_params`` names, which match the trainer's."""
     return SimpleNamespace(
-        state_dict=lambda: state_dict, named_buffers=wrapper.model.named_buffers
+        state_dict=lambda: state_dict,
+        named_buffers=wrapper.model.named_buffers,
+        named_preserve_dtype_params=wrapper.model.named_preserve_dtype_params,
     )
 
 
@@ -259,6 +261,7 @@ def test_vllm_generator_enables_mxfp8_mega_inference_weights():
         register_to_vllm(
             config.generator.model,
             parallelism=config.generator.parallelism,
+            precision=config.precision,
             checkpointer_config=None,
             dist_moe_runtime=config.generator.dist_moe_runtime,
             model_state_dict_load_mode="cpu_prefetch",

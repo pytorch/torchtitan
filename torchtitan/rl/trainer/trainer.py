@@ -80,8 +80,6 @@ class Trainer(Configurable):
         max_num_documents: Fixed varlen metadata capacity configured by the batcher.
         hf_assets_path: Path to HF assets folder for checkpoint loading.
             Shared with the generator (both load from the same HF checkpoint).
-        generator_dtype: Generator dtype (e.g. "bfloat16"). Needed to cast weights to generator dtype
-            if generator dtype differs from training dtype. If None, no cast is performed.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -98,7 +96,6 @@ class Trainer(Configurable):
         precision: PrecisionConfig,
         max_num_documents: int | None,
         hf_assets_path: str = "",
-        generator_dtype: str = "",
         output_dir: str,
     ):
         init_logger()
@@ -133,10 +130,13 @@ class Trainer(Configurable):
         self._resume_state = MirroredState()
         maybe_apply_numa_binding(engine.device.index, engine.device.type)
 
-        # Only cast when the generator and training dtypes differ.
-        training_dtype = TORCH_DTYPE_MAP[precision.dtype]
-        gen_dtype = TORCH_DTYPE_MAP[generator_dtype] if generator_dtype else None
-        self._transfer_dtype = gen_dtype if gen_dtype != training_dtype else None
+        # Send parameters in the dtype the generator computes with, as FSDP casts
+        # them for the trainer's forward. Only cast when it differs.
+        self._transfer_dtype = (
+            TORCH_DTYPE_MAP[precision.param_dtype]
+            if precision.param_dtype != precision.dtype
+            else None
+        )
 
         self.gpu_peak_flops = utils.get_peak_flops(
             engine.device_memory_monitor.device_name
@@ -448,13 +448,13 @@ class Trainer(Configurable):
         await asyncio.to_thread(
             self._put_model_state_dict,
             model_state_dict,
-            self._model_buffer_names(model_state_dict),
+            self._preserve_dtype_keys(model_state_dict),
         )
 
     def _put_model_state_dict(
         self,
         model_state_dict: dict[str, torch.Tensor],
-        buffer_names: frozenset[str],
+        preserve_dtype_keys: frozenset[str],
     ) -> None:
         """Publish without blocking the actor event loop."""
         # The current stream is thread-local; set it in this worker so TorchStore
@@ -470,8 +470,9 @@ class Trainer(Configurable):
                     "model_state_dict",
                     direct_rdma=False,
                     transfer_dtype=self._transfer_dtype,
-                    # Buffers keep their registered dtype when weights are cast.
-                    preserve_dtype_keys=buffer_names,
+                    # Buffers and `preserve_dtype_params` keep their dtype when
+                    # weights are cast.
+                    preserve_dtype_keys=preserve_dtype_keys,
                 )
             )
 
@@ -487,17 +488,21 @@ class Trainer(Configurable):
             for name, tensor in model_part.state_dict().items()
         }
 
-    def _model_buffer_names(
+    def _preserve_dtype_keys(
         self, model_state_dict: dict[str, torch.Tensor]
     ) -> frozenset[str]:
-        """Return the `model_state_dict` keys of this rank's buffers.
+        """Return the `model_state_dict` keys sent in their own dtype: this rank's
+        buffers and `preserve_dtype_params`.
 
         Non-persistent buffers (e.g. RoPE caches) are not in the state dict.
         """
         return frozenset(
             canonical_fqn(name)
             for model_part in self.engine.model_parts
-            for name, _ in model_part.named_buffers()
+            for name, _ in (
+                *model_part.named_buffers(),
+                *model_part.named_preserve_dtype_params(),
+            )
         ).intersection(model_state_dict)
 
     async def initialize_torchstore_client(self) -> None:

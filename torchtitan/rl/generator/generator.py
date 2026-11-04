@@ -22,7 +22,7 @@ import torchstore as ts
 from torchstore import RankRole
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import Configurable, DebugConfig
+from torchtitan.config import Configurable, DebugConfig, PrecisionConfig
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
@@ -73,6 +73,7 @@ class Generator(Configurable):
 
     Args:
         config: Generator-specific configuration, including its model.
+        precision: The trainer's dtypes, which the generator's model mirrors.
         model_path: Path to the HF model checkpoint.
         max_num_seqs: The engine's upper bound on concurrently scheduled sequences (it may admit
             fewer if KV is tight).
@@ -120,9 +121,6 @@ class Generator(Configurable):
         model config carries Dist-MoE routed experts. Separate from the trainer's
         ``Trainer.Config.dist_moe_runtime``: the generator plans scratch-only execution
         over its own, smaller, expert-parallel mesh."""
-
-        model_dtype: str = "bfloat16"
-        """Data type for model weights, passed to the engine (auto, float16, bfloat16, float32)."""
 
         gpu_memory_limit: float = 0.9
         """Fraction of GPU memory to use for the engine (0.0 to 1.0)."""
@@ -206,6 +204,7 @@ class Generator(Configurable):
         self,
         config: Config,
         *,
+        precision: PrecisionConfig,
         model_path: str,
         max_num_seqs: int,
         output_dir: str,
@@ -245,7 +244,7 @@ class Generator(Configurable):
                     parallelism=config.parallelism,
                     model_path=model_path,
                     max_num_seqs=max_num_seqs,
-                    model_dtype=config.model_dtype,
+                    precision=precision,
                     gpu_memory_limit=config.gpu_memory_limit,
                     max_num_batched_tokens=config.max_num_batched_tokens,
                     checkpointer=config.checkpointer,
