@@ -73,6 +73,7 @@ def test_rl_recipes_get_model_defaults(module_name: str) -> None:
             assert is_fp32_head == (name not in _BF16_HEAD_RECIPES), name
             moe_configs = [moe for _, moe, _, _ in model.traverse(MoE.Config)]
             assert all(moe.freeze_expert_bias for moe in moe_configs), name
+            assert not any(moe.router.freeze_gate for moe in moe_configs), name
             assert all(moe.router.aux_loss is None for moe in moe_configs), name
 
 
