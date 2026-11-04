@@ -25,8 +25,8 @@ from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 # PyTorch's default ignore index for cross-entropy loss
 IGNORE_INDEX = -100
 
-LossFunction: TypeAlias = Callable[..., torch.Tensor]
 LossResult: TypeAlias = tuple[torch.Tensor, dict[str, torch.Tensor]]
+LossFunction: TypeAlias = Callable[..., LossResult]
 LossInput: TypeAlias = torch.Tensor | tuple[torch.Tensor, ...]
 LossInputT = TypeVar("LossInputT", contravariant=True)
 
@@ -169,7 +169,6 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         logits: torch.Tensor,
         labels: torch.Tensor,
         tp_group: dist.ProcessGroup,
-        return_lse: bool = False,
     ) -> None:
         """
         SPMD type: logits S(-1)@TP, labels I@TP -> loss (and lse) I@TP.
@@ -177,7 +176,7 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         """
         spmd.assert_type(logits, {tp_group: spmd.S(logits.dim() - 1)})
         spmd.assert_type(labels, {tp_group: spmd.I})
-        outputs = result if return_lse else (result,)
+        outputs = result if isinstance(result, tuple) else (result,)
         for output in outputs:
             spmd.assert_local_type_like(
                 output,
@@ -415,7 +414,7 @@ class MSELoss(Loss[torch.Tensor]):
 
     def __init__(self, config: Config):
         del config
-        self._loss_fn: LossFunction = mse_loss
+        self._loss_fn: Callable[..., torch.Tensor] = mse_loss
 
     def __call__(
         self,
