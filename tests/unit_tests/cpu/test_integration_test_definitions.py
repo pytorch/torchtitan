@@ -21,19 +21,14 @@ from tests.integration_tests import (
     IntegrationTestDefinition,
     validate_fake_pg_compatibility,
 )
-from tests.integration_tests.b200 import build_b200_tests_list
 from tests.integration_tests.features import (
     build_features_test_list,
     llama3_debugmodel_default,
     llama3_debugmodel_hf_checkpoint_load,
     muse_glimmer_debugmodel_fsdp2_per_group_accelerator_graph,
 )
-from tests.integration_tests.flux import build_flux_test_list
 from tests.integration_tests.h100 import build_h100_tests_list
-from tests.integration_tests.models import (
-    build_model_tests_list,
-    llama3_debugmodel_fsdp2_tp2_pp2,
-)
+from tests.integration_tests.models import build_model_tests_list
 from tests.integration_tests.run_tests import _parse_test_suites, run_single_test
 
 

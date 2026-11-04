@@ -10,17 +10,10 @@
 Exercises them in isolation -- no Monarch, no GPU, no real model, and no broadcast
 (`test_engine_loop.py` covers the engine loop). Covers completion (token-out + the
 metrics that ride with it), the SamplingParams contract, and the vLLM metric timing math.
-
-The uneven-decode integration test requires four GPUs and a torchrun launcher.
 """
 
 import asyncio
 import concurrent.futures
-import gc
-import math
-import os
-import shutil
-import tempfile
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import cast
@@ -28,14 +21,12 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import torch
-import torch.distributed as dist
 
 import torchtitan.rl.generator.generator as generator_module
 import torchtitan.rl.generator.vllm.engine as vllm_engine_module
 from torchstore import RankRole
 from torchtitan.components.optim import AdamW
-from torchtitan.config import CommConfig, DebugConfig, PrecisionConfig
-from torchtitan.distributed import utils as dist_utils
+from torchtitan.config import DebugConfig, PrecisionConfig
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.rl.generator.dispatcher import (
@@ -55,7 +46,6 @@ from torchtitan.rl.generator.vllm.engine import (
     add_extra_vllm_engine_args,
     VLLMEngine,
 )
-from torchtitan.rl.generator.vllm.registry import register_to_vllm
 from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.generator.vllm.worker import (
     TorchTitanGPUModelRunner,
@@ -64,7 +54,6 @@ from torchtitan.rl.generator.vllm.worker import (
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.rl.routing.strategies import LeastLoadedRoutingStrategy
-from vllm import SamplingParams
 from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind

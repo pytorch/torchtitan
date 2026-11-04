@@ -34,11 +34,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    AsyncTensorParallelTransform,
-    LoRATransform,
-    transform_model_config_,
-)
+from torchtitan.config.transform import AsyncTensorParallelTransform
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.decoder_sharding import (

@@ -13,21 +13,15 @@ import pytest
 
 import torch
 from torchstore import RankRole
-from torchtitan.components.data.types import (
-    TrainingMicrobatch as CoreTrainingMicrobatch,
-)
-from torchtitan.config import Configurable, DebugConfig, PrecisionConfig, TrainingConfig
+from torchtitan.config import PrecisionConfig, TrainingConfig
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.observability.sdc_replayer import SDCReplayer
-from torchtitan.rl.actors.monarch.trainer import TrainerActor
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import (
     RDMAMicrobatch,
     RDMAMicrobatchPrefetcher,
 )
 from torchtitan.rl.trainer.trainer import MirroredState, Trainer
-from torchtitan.trainer import Trainer as DatasetTrainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
 

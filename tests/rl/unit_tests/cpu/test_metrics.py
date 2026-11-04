@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-from torchtitan.observability.metrics import BaseLogger, TensorBoardLogger, WandBLogger
+from torchtitan.observability.metrics import TensorBoardLogger, WandBLogger
 from torchtitan.rl.controller.metrics import compute_rollout_metrics
 
 from torchtitan.rl.observability import metrics as m
