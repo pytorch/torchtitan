@@ -189,21 +189,20 @@ def _topk_ids_by_argmax(scores: torch.Tensor, k: int) -> torch.Tensor:
 
 
 class _RoutingOutputs(NamedTuple):
-    """``TokenChoiceTopKRouter._score_and_select_experts`` outputs.
+    """Outputs of ``TokenChoiceTopKRouter._score_and_select_experts``."""
 
-    ``scores_TE`` is FP32. ``routing_map_TE`` keeps padding rows: they are still dispatched.
-    The last 3 skip padding tokens and are None in eval mode. ``tokens_per_expert_E``: int64
-    counts for the counter. ``counts_E`` and ``score_sums_E``: this DP rank's fp32 sums for the
-    aux loss, also None without one (Kimi K3).
-    """
-
+    # FP32 scores.
     scores_TE: torch.Tensor  # noqa: N815
     topk_scores_TK: torch.Tensor  # noqa: N815
     topk_expert_ids_TK: torch.Tensor  # noqa: N815
+    # Padding rows included: they are still dispatched.
     routing_map_TE: torch.Tensor  # noqa: N815
+    # Training only (None in eval). Padding tokens left out.
+    # int64 counts to add to the tokens_per_expert_E buffer.
     tokens_per_expert_E: torch.Tensor | None  # noqa: N815
-    counts_E: torch.Tensor | None  # noqa: N815
-    score_sums_E: torch.Tensor | None  # noqa: N815
+    # This DP rank's fp32 sums for the aux loss. None without an aux loss.
+    local_counts_E: torch.Tensor | None  # noqa: N815
+    local_prob_sums_E: torch.Tensor | None  # noqa: N815
 
 
 class TokenChoiceTopKRouter(Module):
@@ -326,25 +325,24 @@ class TokenChoiceTopKRouter(Module):
                 if aux_loss_denominator is None:
                     raise ValueError("An auxiliary-loss denominator is required.")
                 topk_scores_TK = self.aux_loss(
-                    routing.counts_E,
-                    routing.score_sums_E,
+                    routing.local_counts_E,
+                    routing.local_prob_sums_E,
                     carrier=topk_scores_TK,
                     denominator=aux_loss_denominator,
                 )
         return topk_scores_TK, routing.topk_expert_ids_TK, routing.routing_map_TE
 
-    # options: Inductor's batch_invariant fixes each reduction's launch config, so a token's
-    # scores don't depend on the batch size (otherwise the 1-token graph picks another config
-    # and rounds differently). Cost on GB300: a few us per call at decode sizes, none from 4k
-    # tokens. recompile_limit=32: one graph per DeepSeek-V4 hash or top-k layer, train or eval,
-    # grad on or off, padding or none (train), and static, dynamic or 1-token T: at most 28
-    # (test_router_compile_regions.py). Past the limit, fullgraph=True raises instead of
-    # falling back to eager.
-    # The decorator's batch_invariant=True only declares batch invariance; the option provides it.
     @local_compile(
         "moe_router_topk",
+        # Declares the region batch-invariant. The Inductor option below makes it so.
         batch_invariant=True,
-        recompile_limit=32,
+        # Default 8. DeepSeek-V4's hash and top-k layers share this frame. At most 48 graphs:
+        # 2 layer kinds x train or eval x grad on or off x padding or none x static, dynamic
+        # or 1-token T. Past the limit, fullgraph=True raises instead of falling back to eager.
+        recompile_limit=48,
+        # Fixes each reduction's launch config, so a token's scores don't depend on the batch
+        # size. Cost on GB300, measured on the inference (decode and prefill) graph: a few us
+        # per call at decode sizes, none from 4k tokens.
         options={"batch_invariant": True},
     )
     def _score_and_select_experts(
@@ -357,8 +355,8 @@ class TokenChoiceTopKRouter(Module):
     ) -> _RoutingOutputs:
         """Score the gate output, pick each token's experts, and sum the load-balancing statistics.
 
-            gate -> [score, top-k, gather, normalize, routing map, counts, score sums] -> counter, aux loss
-            eager    this region: every (T, E) op of the call but the buffer updates     eager, (E,) only
+            gate -> [score, top-k, gather, normalize, routing map, counts, prob sums] -> buffer updates, aux loss
+            eager    this region: all (T, E) work except the buffer updates             eager
 
         Outside the region:
         - gate: traced, its default ``inplace_wgrad_accum=True`` raises. With it off, a compiled
@@ -366,10 +364,11 @@ class TokenChoiceTopKRouter(Module):
           or None, as FSDP2 sets with an fp32 reduce dtype.
           TODO: try the gate in this region (``inplace_wgrad_accum=False``) once
           https://github.com/pytorch/pytorch/pull/197381 lands.
-        - the counter, aux loss, ``QuantileBalancedTopKRouter``'s histogram: they update buffers.
-          Remat's eager replay re-runs this region, so an update here would need a
-          ``remat.is_recomputing()`` guard, and that guard makes Dynamo compile a second graph
-          for the replay. ``_select_experts`` runs here, so it must not update state.
+        - buffer updates: ``tokens_per_expert_E``, the aux loss's accumulators and
+          ``QuantileBalancedTopKRouter``'s histogram. Remat's eager replay re-runs this region,
+          so an update here would need a ``remat.is_recomputing()`` guard, and that guard makes
+          Dynamo compile a second graph for the replay. ``_select_experts`` runs here, so it
+          must not update state.
         """
         scores_TE = self.score_func(gate_TE)
         topk_expert_ids_TK = remat.region(
@@ -403,32 +402,35 @@ class TokenChoiceTopKRouter(Module):
             topk_expert_ids_TK,
             True,
         )
-        counts_E = score_sums_E = tokens_per_expert_E = None
+        tokens_per_expert_E = local_counts_E = local_prob_sums_E = None
         if self.training:
             # Statistics skip padding tokens; dispatch keeps the full map.
             valid_map_TE = routing_map_TE
             if padding_mask_T is not None:
                 valid_map_TE = routing_map_TE & ~padding_mask_T.unsqueeze(-1)
-            # The counter adds exact integer counts in the global view, as before this region.
+            # Exact integer counts for the tokens_per_expert_E buffer: batch-invariant mode runs
+            # a float sum as mean * T, which isn't exact. Summed outside the DP-local context
+            # below, so they are Partial over DP, as the buffer is.
             tokens_per_expert_E = valid_map_TE.sum(dim=0)
             if self.aux_loss is not None:
-                # DP-local, as the aux losses use them: each DP rank balances its own microbatch.
+                # DP-local: each loss picks its own DP reduction. MicrobatchWise keeps DP ranks
+                # apart; BatchWise sums the counts over DP.
                 with spmd_local_context("dp"):
                     # Cast before summing: casting a Partial tensor is non-linear and
                     # rejected by spmd_types.
-                    counts_E = valid_map_TE.to(scores_TE.dtype).sum(dim=0)
+                    local_counts_E = valid_map_TE.to(scores_TE.dtype).sum(dim=0)
                     probs_TE = F.normalize(scores_TE, p=1, dim=-1)
                     if padding_mask_T is not None:
                         probs_TE = probs_TE * ~padding_mask_T.unsqueeze(-1)
-                    score_sums_E = probs_TE.sum(dim=0)
+                    local_prob_sums_E = probs_TE.sum(dim=0)
         return _RoutingOutputs(
             scores_TE,
             topk_scores_TK,
             topk_expert_ids_TK,
             routing_map_TE,
             tokens_per_expert_E,
-            counts_E,
-            score_sums_E,
+            local_counts_E,
+            local_prob_sums_E,
         )
 
 
@@ -654,8 +656,8 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
 
     def forward(
         self,
-        counts_E: torch.Tensor,
-        score_sums_E: torch.Tensor,
+        local_counts_E: torch.Tensor,
+        local_prob_sums_E: torch.Tensor,
         *,
         carrier: torch.Tensor,
         denominator: torch.Tensor,
@@ -663,9 +665,9 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
         """Compute the per-forward balance loss and inject its gradient.
 
         Args:
-            counts_E: This DP rank's routed-token count per expert ``(E,)``,
-                padding excluded (``_RoutingOutputs.counts_E``).
-            score_sums_E: This DP rank's per-expert sums of the L1-normalized
+            local_counts_E: This DP rank's routed-token count per expert ``(E,)``,
+                padding excluded.
+            local_prob_sums_E: This DP rank's per-expert sums of the L1-normalized
                 router scores ``(E,)``, padding excluded.
             carrier: Tensor whose backward path carries the injected
                 gradient (the router's top-k scores).
@@ -682,13 +684,13 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
             # sum_i f_i = E).  The latter is the (E / (K T)) form with
             # T = sum_j counts_j / K, so it needs no token count, shape or mesh
             # degree and follows any masking the router applies to the map.
-            counts_E = self._reduce_token_partials(counts_E)
+            counts_E = self._reduce_token_partials(local_counts_E)
             f_E = F.normalize(counts_E, p=1, dim=0) * counts_E.size(-1)
 
             # Eq. 19: p_i = (1/T) sum_t s'_t,i, the per-token L1-normalized
             # scores.  F.normalize's eps clamp only guards an all-zero score
             # row: the scores are non-negative, so the norm is a plain sum.
-            p_E = self._reduce_token_partials(score_sums_E)
+            p_E = self._reduce_token_partials(local_prob_sums_E)
 
             # Eq. 17: L_bal = sum_i f_i * p_i
             loss = (f_E * p_E).sum()
@@ -749,20 +751,21 @@ class BatchWiseLoadBalanceLoss(AuxLoss):
 
     def forward(
         self,
-        counts_E: torch.Tensor,
-        score_sums_E: torch.Tensor,
+        local_counts_E: torch.Tensor,
+        local_prob_sums_E: torch.Tensor,
         *,
         carrier: torch.Tensor,
         denominator: torch.Tensor,
     ) -> torch.Tensor:
         """Compute batch-wise balance and inject its router gradient.
 
-        ``counts_E`` and ``score_sums_E`` are DP-local, as for
+        ``local_counts_E`` and ``local_prob_sums_E`` are DP-local, as for
         ``MicrobatchWiseLoadBalanceLoss``.
         """
+        counts_E = local_counts_E
         if spmd_mesh_size("dp") > 1:
-            # counts_E covers this DP rank's tokens. Restate it as a share of the sum over DP;
-            # the data doesn't change. spmd_types accepts this only while DP is a local axis.
+            # local_counts_E covers this DP rank's tokens. Restate it as a share of the sum over
+            # DP; the data doesn't change. spmd_types accepts this only while DP is a local axis.
             with spmd_local_context("dp"):
                 counts_E = spmd.reinterpret(counts_E, "dp", src=spmd.V, dst=spmd.P)
         # The rolling-count update is a forward side effect, and the snapshot
@@ -790,7 +793,7 @@ class BatchWiseLoadBalanceLoss(AuxLoss):
         # remains local here because parameter-gradient reduction combines
         # these additive score-sum contributions across DP coordinates.
         with spmd_local_context("dp"):
-            prob_sums_E = self._reduce_token_partials(score_sums_E)
+            prob_sums_E = self._reduce_token_partials(local_prob_sums_E)
             loss = (f_E * prob_sums_E).sum()
             return self.inject(loss, carrier=carrier, denominator=denominator)
 

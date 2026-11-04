@@ -110,13 +110,13 @@ def _forward_with_routed_mask(
 class _CapturingAuxLoss(nn.Module):
     def __init__(self):
         super().__init__()
-        self.counts_E = None
-        self.score_sums_E = None
+        self.local_counts_E = None
+        self.local_prob_sums_E = None
 
-    def forward(self, counts_E, score_sums_E, *, carrier, denominator):
+    def forward(self, local_counts_E, local_prob_sums_E, *, carrier, denominator):
         del denominator
-        self.counts_E = counts_E
-        self.score_sums_E = score_sums_E
+        self.local_counts_E = local_counts_E
+        self.local_prob_sums_E = local_prob_sums_E
         return carrier
 
 
@@ -437,12 +437,13 @@ class TestMoE(unittest.TestCase):
         # Padding is routed (and dispatched), but left out of the statistics.
         self.assertTrue(routing_map_TE[padding_mask_T].any())
         torch.testing.assert_close(
-            aux_loss.counts_E,
+            aux_loss.local_counts_E,
             routing_map_TE[~padding_mask_T].sum(dim=0).to(torch.float32),
         )
-        # Zero gate weights: every score is sigmoid(0) = 0.5, so each valid token adds 1/2 per expert.
-        torch.testing.assert_close(aux_loss.score_sums_E, torch.tensor([1.0, 1.0]))
-        torch.testing.assert_close(router.tokens_per_expert_E, aux_loss.counts_E)
+        # Zero gate weights: equal scores, so each valid token's normalized scores are
+        # [1/2, 1/2]. 2 valid tokens -> [1, 1].
+        torch.testing.assert_close(aux_loss.local_prob_sums_E, torch.tensor([1.0, 1.0]))
+        torch.testing.assert_close(router.tokens_per_expert_E, aux_loss.local_counts_E)
 
     def test_router_validates_padding_mask(self):
         router = make_router_config(

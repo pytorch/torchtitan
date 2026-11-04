@@ -48,9 +48,9 @@ def test_moe_models_list_only_registered_regions(model, flavor: str) -> None:
 
 
 def test_deepseek_v4_router_region_stays_under_its_graph_limit() -> None:
-    """Every call kind of a run compiles under the region's recompile limit (fullgraph raises past it).
+    """A mix of train and eval calls compiles under the region's recompile limit (fullgraph raises past it).
 
-    Worst order: every kind first at one size (static graphs), then at a second size (dynamic),
+    Order: every call kind first at one size (static graphs), then at a second size (dynamic),
     then decode at T = 1 (size 1 is specialized).
     """
     graphs = []

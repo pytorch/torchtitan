@@ -135,7 +135,10 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
                         )
 
     def test_flavor_router_scores_do_not_depend_on_batch_size(self):
-        """Bitwise: a token's router outputs at 1-256 tokens, and at 16k with grad on, equal its no-grad 16k outputs."""
+        """Bitwise: a token's router outputs equal its no-grad 16k outputs.
+
+        Checked at 1-256 tokens, and in 16k training calls, padded or not.
+        """
         for flavor, (build_router, uses_bias) in FLAVOR_ROUTERS.items():
             with self.subTest(flavor):
                 torch.manual_seed(0)
@@ -147,13 +150,18 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
                     if uses_bias
                     else None
                 )
-                # The trainer's graph first, as in training: train mode, grad on and a static 16k
-                # shape, so the compiled forward also saves tensors for backward.
-                trainer_outputs = router._score_and_select_experts(
-                    gate_TE.detach().requires_grad_(),
-                    expert_bias_E=expert_bias_E,
-                    padding_mask_T=None,
-                )
+                # The trainer's graphs first, as in training: train mode, grad on and a static 16k
+                # shape, so the compiled forward also saves tensors for backward. Without and with
+                # a padding mask (the RL batcher always passes one).
+                padding_mask_T = torch.arange(16384, device="cuda") % 11 == 0
+                trainer_outputs = [
+                    router._score_and_select_experts(
+                        gate_TE.detach().requires_grad_(),
+                        expert_bias_E=expert_bias_E,
+                        padding_mask_T=mask_T,
+                    )
+                    for mask_T in (None, padding_mask_T)
+                ]
                 router.eval()
                 with torch.no_grad():
                     # Largest first, as the generator compiles; T turns dynamic at 256.
@@ -167,17 +175,20 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
                     }
                 torch._dynamo.reset()
                 # The per-token outputs. The statistics are None in eval mode, so only the
-                # trainer's call returns them.
+                # trainer's calls return them.
                 per_token = slice(0, 4)
                 for n in (256, 34, 3, 1):
                     for actual, expected in zip(
                         outputs[n][per_token], outputs[16384][per_token], strict=True
                     ):
                         self.assertTrue(torch.equal(actual, expected[:n]))
-                for actual, expected in zip(
-                    trainer_outputs[per_token], outputs[16384][per_token], strict=True
-                ):
-                    self.assertTrue(torch.equal(actual.detach(), expected))
+                for trainer_output in trainer_outputs:
+                    for actual, expected in zip(
+                        trainer_output[per_token],
+                        outputs[16384][per_token],
+                        strict=True,
+                    ):
+                        self.assertTrue(torch.equal(actual.detach(), expected))
 
 
 if __name__ == "__main__":
