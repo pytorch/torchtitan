@@ -13,10 +13,12 @@ import logging
 from collections.abc import Iterable
 
 import torch
+import torch.nn.functional as F
 from sglang.srt.distributed import tensor_model_parallel_all_reduce
 from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_executor.runner_utils.forward_batch import set_forward_batch
+from sglang.srt.runtime_context import get_schedule
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import PrecisionConfig
@@ -29,8 +31,10 @@ from torchtitan.models.common.attention import (
     VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.inference_model import (
+    build_dist_moe_runtime,
     build_inference_model,
     compute_logits,
     get_attention_dimensions,
@@ -126,12 +130,25 @@ class _DecoderBody(Module):
     SGLang captures ``forward(input_ids, positions, forward_batch)`` of the module that
     owns ``layers`` behind ``SGLangModelWrapper.model``, and replays it inside the
     wrapper's eager forward, which keeps the LM head and logits processing eager.
+
+    With expert parallelism, the MoE layers shard the step's tokens over TP, so the
+    body pads them to a multiple of the TP degree; ``SGLangInnerAttention`` runs on the
+    rows SGLang scheduled only.
     """
 
-    def __init__(self, decoder: Decoder, parallelism_context) -> None:
+    def __init__(
+        self,
+        decoder: Decoder,
+        parallelism_context,
+        *,
+        token_multiple: int,
+        dist_moe_runtime: DistMoeRuntime | None,
+    ) -> None:
         super().__init__()
         self.decoder = decoder
         self._parallelism_context = parallelism_context
+        self._token_multiple = token_multiple
+        self._dist_moe_runtime = dist_moe_runtime
         # TODO(https://github.com/sgl-project/sglang/issues/48475): SGLang finds each
         # layer's RadixAttention by attribute path (``layers[i].attention.attn`` among
         # others); alias it there, unregistered so the state dict is unchanged.
@@ -150,10 +167,39 @@ class _DecoderBody(Module):
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
-        # The attention layers read forward_batch from SGLang's context variable.
-        del forward_batch
+        # The attention layers read forward_batch from SGLang's context variable too.
+        num_tokens = input_ids.shape[0]
+        num_padding = -num_tokens % self._token_multiple
+        if num_padding:
+            input_ids = F.pad(input_ids, (0, num_padding))
+            positions = F.pad(positions, (0, num_padding))
+        padding_mask = None
+        if self._dist_moe_runtime is not None:
+            # Dist-MoE routes padding rows to no expert (the stock token dispatchers
+            # dispatch them like real tokens): the rows padding the step to the token
+            # multiple, and those SGLang pads a batch with to a CUDA graph's size.
+            # TODO: this relies on two SGLang internals: its allocators never hand
+            # out KV slot 0, and its graph buffers zero-fill the padded part of
+            # out_cache_loc. SGLang's own real-token count (num_token_non_padded)
+            # is filled only when SGLang itself runs EP.
+            padding_mask = F.pad(
+                forward_batch.out_cache_loc == 0, (0, num_padding), value=True
+            )
+            # Every EP rank passes the same count: the EP group is the TP group, which
+            # shares the step, and the MoE splits its tokens evenly over TP. The count
+            # is fixed per captured graph, so it is set at capture.
+            tp = self._parallelism_context.tp
+            assert (
+                input_ids.shape[0] % tp == 0
+            ), f"TP={tp} does not divide {input_ids.shape[0]} tokens"
+            self._dist_moe_runtime.set_num_local_input_tokens_per_call(
+                input_ids.shape[0] // tp
+            )
         with self._parallelism_context.activate_spmd():
-            return self.decoder(input_ids, positions)
+            hidden_states = self.decoder(
+                input_ids, positions, padding_mask=padding_mask
+            )
+        return hidden_states[:num_tokens]
 
 
 class SGLangModelWrapper(Module):
@@ -172,6 +218,8 @@ class SGLangModelWrapper(Module):
         precision: The trainer's dtypes, which the model mirrors.
         checkpointer_config: Initial-weight loader; None when weights arrive through
             model state dict loads.
+        dist_moe_runtime: The runtime of the model's Dist-MoE experts, if any (see
+            ``build_dist_moe_runtime``).
         model_state_dict_load_mode: See ``ModelStateDictLoader``.
     """
 
@@ -183,6 +231,7 @@ class SGLangModelWrapper(Module):
         parallelism: InferenceParallelismConfig,
         precision: PrecisionConfig,
         checkpointer_config: CheckpointManager.Config | None,
+        dist_moe_runtime: DistMoeRuntime.Config | None,
         model_state_dict_load_mode: ModelStateDictLoadMode,
     ) -> None:
         super().__init__()
@@ -192,6 +241,21 @@ class SGLangModelWrapper(Module):
         device = torch.device(device_type, device_index)
         decoder, self.parallelism_context = build_inference_model(
             self.config, parallelism=parallelism, precision=precision, device=device
+        )
+        schedule = get_schedule()
+        token_multiple = parallelism.expert_sequence_parallel_size
+        # A step runs at most chunked_prefill_size prefill tokens plus a decode token
+        # per running request, padded to token_multiple.
+        max_num_tokens_per_step = (
+            schedule.chunked_prefill_size + schedule.max_running_requests
+        )
+        dist_moe = build_dist_moe_runtime(
+            decoder,
+            dist_moe_runtime,
+            parallelism_context=self.parallelism_context,
+            device=device,
+            max_num_tokens_per_step=-(-max_num_tokens_per_step // token_multiple)
+            * token_multiple,
         )
         load_initial_weights(decoder, self.config, checkpointer_config)
         # SGLang's TP all-reduce picks its algorithm by message size, which breaks
@@ -204,7 +268,12 @@ class SGLangModelWrapper(Module):
         self.model_state_dict_loader = ModelStateDictLoader(
             decoder, model_state_dict_load_mode=model_state_dict_load_mode
         )
-        self.model = _DecoderBody(decoder, self.parallelism_context)
+        self.model = _DecoderBody(
+            decoder,
+            self.parallelism_context,
+            token_multiple=token_multiple,
+            dist_moe_runtime=dist_moe,
+        )
         self.logits_processor = _TorchTitanLogitsProcessor(
             hf_config,
             lambda hidden_states: compute_logits(

@@ -79,7 +79,8 @@ tree falls back to its Python implementation.
 | Per-request metrics (queue time, TTFT, prefill, decode, preemptions, cached tokens) | Supported |
 | Data parallelism within a generator | Not supported: run more generators |
 | Flex attention, MLA, GDN/KDA, sliding window, attention sinks | Not supported |
-| MoE expert parallelism, sequence parallelism | Not supported |
+| MoE with expert parallelism over the TP group, Dist-MoE | Supported; see below |
+| Sequence parallelism | Not supported |
 
 Unsupported configurations raise at engine build.
 
@@ -94,6 +95,15 @@ about 30 s to startup; `"decode"` skips it.
 
 Attention kernels compile on first use for each kernel variant, so the first
 prefill batches of a run can take a few seconds.
+
+## MoE
+
+With expert parallelism, the MoE layers shard each step's tokens over the TP
+ranks, so the model pads a step to a multiple of the TP degree; attention skips
+the padding rows. The all-to-all token dispatcher reads its split sizes on the
+host, which CUDA graphs cannot capture: it needs `cuda_graph="none"`. Dist-MoE
+(`Generator.Config.dist_moe_runtime`) runs under both kinds of CUDA graphs. The
+other EP token dispatchers (DeepEP, HybridEP) are not supported.
 
 ## Multi-turn sessions
 
