@@ -426,7 +426,8 @@ class TestSharedOuterLoRAExpertParallel(DTensorTestBase):
             for per_expert in (experts.w13.lora_b, experts.w2.lora_a):
                 self.assertIs(per_expert.weight.device_mesh, edp_mesh)
                 self.assertEqual(per_expert.weight.full_tensor().shape[0], 4)
-            # perturb the per-expert factor so the shared one receives a gradient
+            # perturb the zero-initialized B factors so every adapter factor,
+            # shared or per expert, receives a nonzero gradient
             with torch.no_grad():
                 experts.w13.lora_b.weight.normal_()
                 experts.w2.lora_b.weight.normal_()

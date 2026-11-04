@@ -197,8 +197,8 @@ def _build_grouped_lora_adapters(
     config: GroupedLinear.Config,
     *,
     rank: int,
-    shared_factor: Literal["none", "lora_a", "lora_b"],
-) -> tuple[Module, Module]:
+    shared_factor: Literal["lora_a", "lora_b"] | None,
+) -> tuple[Linear | GroupedLinear, Linear | GroupedLinear]:
     """Build the adapters of a grouped projection.
 
     Per expert, A is ``[E, L, I]`` and B ``[E, O, L]`` or ``[E, num_linears, O, L]``.
@@ -255,7 +255,7 @@ def _build_grouped_lora_adapters(
 
 
 def _adapter_matmul(
-    adapter: Module,
+    adapter: Linear | GroupedLinear,
     input_RI: torch.Tensor,
     offsets_E: torch.Tensor,
 ) -> torch.Tensor:
@@ -271,7 +271,7 @@ def _adapter_matmul(
 
 
 def _adapter_operands(
-    adapter_a: Module, adapter_b: Module
+    adapter_a: Linear | GroupedLinear, adapter_b: Linear | GroupedLinear
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """``B [E, O, L]`` and ``A [E, L, I]`` per expert, a shared factor as a
     stride-0 expanded view."""
@@ -301,8 +301,8 @@ class _LoRAGroupedLinearMixin(_LoRAMixin):
     """
 
     num_linears: int
-    lora_a: Module
-    lora_b: Module
+    lora_a: Linear | GroupedLinear
+    lora_b: Linear | GroupedLinear
 
     def __init__(self, config) -> None:
         super().__init__(config)
@@ -423,8 +423,8 @@ def get_lora_grouped_linear(parent_cls: type[Module]) -> type[Module]:
         class Config(parent_config_cls):  # type: ignore[misc]
             rank: int
             alpha: float
-            shared_factor: Literal["none", "lora_a", "lora_b"] = "none"
-            """Adapter factor every expert shares; ``"none"`` keeps both per expert."""
+            shared_factor: Literal["lora_a", "lora_b"] | None
+            """Adapter factor every expert shares; ``None`` keeps both per expert."""
 
     return _name_lora_class(LoRAProjection, parent_cls)
 
