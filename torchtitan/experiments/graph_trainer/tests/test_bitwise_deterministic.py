@@ -59,6 +59,9 @@ from torchtitan.experiments.graph_trainer.kimi_k3 import (
 from torchtitan.experiments.graph_trainer.llama3 import (
     build_model_config as build_llama3_model_config,
 )
+from torchtitan.experiments.graph_trainer.muse_glimmer import (
+    build_model_config as build_muse_glimmer_model_config,
+)
 from torchtitan.experiments.graph_trainer.qwen3 import (
     build_model_config as build_qwen3_model_config,
 )
@@ -1084,6 +1087,53 @@ class TestKimiK27BitwiseDeterministic(BitwiseDeterministicBase):
         )
 
         self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
+
+
+class TestMuseGlimmerBitwiseDeterministic(BitwiseDeterministicBase):
+    """Bitwise determinism tests for the text-only Muse Glimmer debug model.
+
+    Covers sliding-window and full attention layers, the embedding with a
+    scaleless norm, and the soft-capped lm_head.
+    """
+
+    build_model_config = staticmethod(build_muse_glimmer_model_config)
+    model_flavor = "debugmodel"
+    annotate_model = staticmethod(annotate_graph_trainer_model)
+
+    def test_aot_fx_trace_vs_eager(self):
+        """aot_fx_trace and eager produce bitwise identical losses and grads."""
+        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+
+        self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
+
+    def test_precompile_vs_trace(self):
+        """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+        run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
+
+        self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
+
+    def test_numerics_changing_optim_run_to_run(self):
+        """Two runs with numerics_changing_optim produce bitwise identical results."""
+        run_a = self._run_steps(
+            copy.deepcopy(self.model),
+            GraphTrainer,
+            numerics_changing_optim=True,
+        )
+        run_b = self._run_steps(
+            copy.deepcopy(self.model),
+            GraphTrainer,
+            numerics_changing_optim=True,
+        )
+
+        self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
+
+
+class TestMuseGlimmerFlexAttnBitwiseDeterministic(TestMuseGlimmerBitwiseDeterministic):
+    """Bitwise determinism tests for Muse Glimmer with FlexInnerAttention."""
+
+    attn_backend = "flex"
 
 
 if __name__ == "__main__":
