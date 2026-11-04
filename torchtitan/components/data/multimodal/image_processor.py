@@ -152,6 +152,32 @@ class ImageProcessor(Configurable):
         )
         return num_tokens
 
+    def resized_size(self, height: int, width: int) -> tuple[int, int]:
+        """``(H, W)`` that ``decode_and_resize`` gives a ``height x width`` image,
+        padding included, without decoding it.
+
+        For callers that know an image's size but not its pixels, e.g. a renderer
+        that reads the size from the file header to count placeholder tokens with
+        ``num_placeholder_tokens(1, *processor.resized_size(height, width))``.
+        """
+        resize_h, resize_w, pad_h, pad_w = self._resize_rule(height, width)
+        return resize_h + pad_h, resize_w + pad_w
+
+    def _resize_rule(self, height: int, width: int) -> tuple[int, int, int, int]:
+        """``config.resize_fn``'s ``(resize_h, resize_w, pad_h, pad_w)`` for a
+        ``height x width`` image."""
+        config = self.config
+        return config.resize_fn(
+            height,
+            width,
+            patch_size=config.patch_size,
+            merge_size=config.spatial_merge_size,
+            min_pixels=config.min_pixels,
+            max_pixels=config.max_pixels,
+            max_patches=config.max_patches,
+            max_patches_per_side=config.max_patches_per_side,
+        )
+
     def _resize(self, image: torch.Tensor) -> torch.Tensor:
         """Resize uint8 ``(..., C, H, W)`` pixels to ``config.resize_fn``'s
         ``(resize_h, resize_w, pad_h, pad_w)``, then zero-pad right/bottom.
@@ -162,16 +188,7 @@ class ImageProcessor(Configurable):
         """
         config = self.config
         height, width = image.shape[-2:]
-        resize_h, resize_w, pad_h, pad_w = config.resize_fn(
-            height,
-            width,
-            patch_size=config.patch_size,
-            merge_size=config.spatial_merge_size,
-            min_pixels=config.min_pixels,
-            max_pixels=config.max_pixels,
-            max_patches=config.max_patches,
-            max_patches_per_side=config.max_patches_per_side,
-        )
+        resize_h, resize_w, pad_h, pad_w = self._resize_rule(height, width)
         if (resize_h, resize_w) != (height, width):
             image = TVF.resize(
                 image,

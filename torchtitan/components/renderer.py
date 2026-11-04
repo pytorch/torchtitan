@@ -6,14 +6,25 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+import hashlib
+from dataclasses import dataclass, replace
+from typing import Any, TYPE_CHECKING
 
 from renderers import create_renderer, Renderer
 from renderers.configs import RendererConfig as PrimeRendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
+
+if TYPE_CHECKING:
+    from torchtitan.components.data.multimodal.image_processor import ImageProcessor
+
+
+def image_content_key(data: bytes) -> str:
+    """The content key of an image file's bytes, which a rendered prompt carries for
+    each image (its ``mm_hashes`` entry): their hash, so a file gets the same key from
+    any path."""
+    return hashlib.sha256(data).hexdigest()[:32]
 
 
 @dataclass(kw_only=True, slots=True)
@@ -27,6 +38,20 @@ class RendererConfig(Configurable.Config):
     # pyrefly: ignore[bad-override]
     def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
         raise NotImplementedError
+
+    def with_image_processor(
+        self, image_processor: ImageProcessor.Config
+    ) -> RendererConfig:
+        """Return this config with ``image_processor`` set on its renderer, which reads
+        image parts from files with it (e.g. `Qwen35ImageRefRenderer`).
+
+        TitanRL calls it with `Controller.Config.image_processor`, so the renderer and the
+        processes that decode the images share one image processor.
+        """
+        raise ValueError(
+            f"{type(self).__name__} reads no image files with an image processor; unset "
+            "Controller.Config.image_processor or use an image-reference renderer."
+        )
 
 
 @dataclass(kw_only=True, slots=True)
@@ -62,6 +87,30 @@ class RenderersConfigAdapter(RendererConfig):
 
     def to_dict(self) -> dict[str, Any]:
         return {"renderers_config": self.renderers_config.model_dump(mode="json")}
+
+    def with_image_processor(
+        self, image_processor: ImageProcessor.Config
+    ) -> RendererConfig:
+        config = self.renderers_config
+        if config.name != "custom":
+            raise ValueError(
+                f"The {config.name!r} renderer reads no image files; use an image-reference "
+                "renderer, e.g. CustomRendererConfig(import_path="
+                '"torchtitan.models.qwen3_5.renderer.Qwen35ImageRefRenderer").'
+            )
+        if (config.model_extra or {}).get("image_processor") is not None:
+            raise ValueError(
+                "The renderer config sets image_processor; set it only in "
+                "Controller.Config.image_processor."
+            )
+        # The renderer's own config validates the field when the renderer is built, and
+        # rejects it if the renderer takes no image processor.
+        return replace(
+            self,
+            renderers_config=config.model_copy(
+                update={"image_processor": image_processor}
+            ),
+        )
 
     def get_renderers_config(self) -> PrimeRendererConfig:
         """Return the `renderers` config that Verifiers workers rebuild the renderer from."""
