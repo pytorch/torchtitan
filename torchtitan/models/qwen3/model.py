@@ -112,7 +112,6 @@ class Qwen3Model(Decoder):
                     "rope",
                     "fp32_to_bf16_split",
                     "moe_router_topk",
-                    "moe_aux_loss",
                 ]
             )
         )
