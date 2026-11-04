@@ -132,6 +132,45 @@ graph capture is owned by the client around the complete forward/backward
 execution. Users can disable CUDA graphs with
 `config.training.disable_accelerator_graphs = True`.
 
+#### Registered Graph Passes
+
+Model- or shape-specialized rewrites, such as replacing a subgraph with a
+handwritten kernel, are registered graph passes. Register one with
+`@register_graph_pass` from `registry.py` in any module, including one outside
+torchtitan, and enable it by name in the recipe that imports it:
+
+```python
+# my_pkg/fusions.py
+from torchtitan.experiments.graph_trainer.registry import register_graph_pass
+
+
+@register_graph_pass
+def my_kernel_fusion_pass(gm, example_inputs):
+    ...  # replace matched subgraphs with calls to a custom op
+    return gm
+
+
+# recipe
+from my_pkg.fusions import my_kernel_fusion_pass
+
+config.compile.extra_passes = [my_kernel_fusion_pass.__name__]
+```
+
+Selected passes run in list order on the normalized joint forward/backward
+graph, after cleanup and before memory policy tagging:
+
+```
+remove_parameter_gradient_markers -> eliminate_dead_code -> canonicalize_graph
+  -> deduplicate_fsdp_unshard_chains -> [compile.extra_passes] -> tag_with_memory_policy
+  -> ... -> regional_inductor
+```
+
+An unregistered or repeated name in `compile.extra_passes` raises at trainer init.
+A replacement node should copy the meta of the node it replaces, which carries the fake value, module FQN, and
+forward/backward marker that later passes read. The default memory policy
+recomputes outputs of ops outside its save list, so backward reruns a custom
+forward kernel whose output it reads.
+
 ### Expert Parallel Overlap
 
 EP overlap is an experimental graph-trainer optimization for MoE models with

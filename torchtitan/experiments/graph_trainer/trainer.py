@@ -33,6 +33,7 @@ from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
     PagedStashManager,
     PagedStashRunner,
 )
+from torchtitan.experiments.graph_trainer.passes import resolve_registered_graph_passes
 from torchtitan.models.base import BaseModel
 from torchtitan.models.common.linear import Linear
 from torchtitan.observability import structured_logger as sl
@@ -78,6 +79,8 @@ class GraphTrainingEngine(TrainingEngine):
                 "parallelism.fsdp_symm_mem_scope; set it to None."
             )
         validate_memory_policy_config(config.compile)
+        # Fail before building the model rather than at trace time.
+        resolve_registered_graph_passes(config.compile.extra_passes)
         super().__init__(
             config,
             model_config=model_config,

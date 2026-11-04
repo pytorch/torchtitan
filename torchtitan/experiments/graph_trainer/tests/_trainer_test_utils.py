@@ -81,7 +81,7 @@ def build_minimal_trainer(
     *,
     activation_remat: ActivationRematConfig | None = None,
     compile_enable_passes: bool = True,
-    compile_passes: list[str] | None = None,
+    compile_extra_passes: list[str] | None = None,
     compile_ep_overlap_enabled: bool = False,
     compile_ep_overlap_chunk_dim: str = "batch",
     compile_ep_overlap_module_fqn: str = "layers.*",
@@ -118,7 +118,9 @@ def build_minimal_trainer(
         trainer.config = SimpleNamespace(
             compile=GraphTrainerCompileConfig(
                 enable_passes=compile_enable_passes,
-                passes=[] if compile_passes is None else list(compile_passes),
+                extra_passes=[]
+                if compile_extra_passes is None
+                else list(compile_extra_passes),
                 disable_passes=(
                     []
                     if compile_disable_passes is None

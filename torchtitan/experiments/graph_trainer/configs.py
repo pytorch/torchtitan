@@ -178,9 +178,11 @@ class GraphTrainerCompileConfig:
     enable_async_tensor_parallel: bool = False
     """Whether to pipeline tensor-parallel collectives with matrix multiplications."""
 
-    passes: list[str] = field(default_factory=list)
-    """
-    Additional compiler pass names to apply or prepare inputs for.
+    extra_passes: list[str] = field(default_factory=list)
+    """Names of graph passes registered with ``register_graph_pass`` to apply,
+    in order, between graph normalization and memory policy tagging. Use them
+    for model- or shape-specialized rewrites such as kernel fusions. The recipe
+    must import the module that registers each pass.
     """
 
     enable_passes: bool = True
