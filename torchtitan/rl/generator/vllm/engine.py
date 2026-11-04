@@ -343,7 +343,7 @@ class VLLMEngine(GenerationEngine):
         """The pinned CPU buffers a model state dict is prefetched into, and loaded from by
         a model state dict load. Safe to fill from any thread while no load runs. None with
         ``model_state_dict_load_mode="gpu_fetch"``."""
-        return self._get_model()._prefetched_model_state_dict
+        return self._get_model().model_state_dict_loader.prefetched_model_state_dict
 
     def add_requests(
         self, requests: list[EngineRequest]
@@ -417,7 +417,7 @@ class VLLMEngine(GenerationEngine):
     ) -> None:
         """Fetch the model state dict into the model's weights one FSDP group at a time, and
         reset the KV cache when configured."""
-        self._get_model().load_model_state_dict(fetch)
+        self._get_model().model_state_dict_loader.load(fetch)
         if self._reset_kv_cache_on_model_state_dict_load:
             # Always reset running requests too: the only reason to reset is a strict
             # recompute under the new weights. Keeping running requests' KV while hiding
