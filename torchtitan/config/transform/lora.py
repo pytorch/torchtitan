@@ -17,6 +17,7 @@ from torchtitan.models.common.lora import (
     get_lora_grouped_linear,
     get_lora_linear,
 )
+from torchtitan.models.common.moe import RoutedExperts
 
 from .base import ModelConfigTransform
 
@@ -128,16 +129,21 @@ _SHARED_OUTER_FACTOR = {"w13": "lora_a", "w2": "lora_b"}
 
 def _shared_factor(
     fqn: str,
+    parent: Any,
     attr: str | int | None,
     expert_adapter_layout: Literal["per_expert", "shared_outer"],
-) -> Literal["none", "lora_a", "lora_b"]:
+) -> Literal["lora_a", "lora_b"] | None:
     if expert_adapter_layout == "per_expert":
-        return "none"
+        return None
+    # The roles come from the routed-experts contract (w13 reads the hidden
+    # stream, w2 writes it), not from a field name alone.
     shared = _SHARED_OUTER_FACTOR.get(cast(str, attr))
-    if shared is None:
+    if shared is None or not isinstance(
+        parent, (RoutedExperts.Config, DistMoeRoutedExperts.Config)
+    ):
         raise ValueError(
-            "expert_adapter_layout='shared_outer' knows the routed-expert "
-            f"projections w13 and w2 only, got grouped projection {fqn!r}."
+            "expert_adapter_layout='shared_outer' applies to the w13 and w2 of "
+            f"routed experts only, got grouped projection {fqn!r}."
         )
     return cast(Literal["lora_a", "lora_b"], shared)
 
@@ -147,7 +153,7 @@ def _make_grouped_linear_lora_config(
     *,
     rank: int,
     alpha: float,
-    shared_factor: Literal["none", "lora_a", "lora_b"],
+    shared_factor: Literal["lora_a", "lora_b"] | None,
 ) -> Module.Config:
     if rank % 8:
         raise ValueError(f"Grouped LoRA rank must be divisible by 8, got {rank}")
@@ -314,7 +320,9 @@ class LoRATransform(ModelConfigTransform):
                     cfg,
                     rank=self.rank,
                     alpha=self.alpha,
-                    shared_factor=_shared_factor(fqn, attr, self.expert_adapter_layout),
+                    shared_factor=_shared_factor(
+                        fqn, parent, attr, self.expert_adapter_layout
+                    ),
                 )
             elif isinstance(cfg, Linear.Config) and is_target:
                 new_cfg = _make_linear_lora_config(

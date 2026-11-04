@@ -19,6 +19,7 @@ from torchtitan_recipes.tests.models.llama3 import (
 )
 from torchtitan_recipes.tests.models.qwen3_5 import (
     qwen35_debugmodel_moe_lora as _qwen35_debugmodel_moe_lora,
+    qwen35_debugmodel_moe_lora_shared_outer as _qwen35_debugmodel_moe_lora_shared_outer,
 )
 
 from tests.integration_tests import IntegrationTestDefinition
@@ -54,6 +55,10 @@ def qwen3_moe_deepep_fsdp4_ep4() -> Trainer.Config:
 
 def qwen35_debugmodel_moe_lora() -> Trainer.Config:
     return _qwen35_debugmodel_moe_lora(seq_len=512)
+
+
+def qwen35_debugmodel_moe_lora_shared_outer() -> Trainer.Config:
+    return _qwen35_debugmodel_moe_lora_shared_outer(seq_len=512)
 
 
 def kimi_k3_debugmodel_mm_allgather_kv_cp2() -> Trainer.Config:
@@ -214,6 +219,13 @@ def build_h100_tests_list() -> list[IntegrationTestDefinition]:
             configs=[qwen35_debugmodel_moe_lora],
             test_descr="Qwen3.5 MoE LoRA",
             test_name="qwen3_5_moe_lora",
+            ngpu=8,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[qwen35_debugmodel_moe_lora_shared_outer],
+            test_descr="Qwen3.5 MoE LoRA, shared-outer expert adapters",
+            test_name="qwen3_5_moe_lora_shared_outer",
             ngpu=8,
             use_real_pg=True,
         ),
