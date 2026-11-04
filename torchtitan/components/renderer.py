@@ -6,14 +6,22 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 
 from renderers import create_renderer, Renderer
 from renderers.configs import RendererConfig as PrimeRendererConfig
 
+from torchtitan.components.data.multimodal.image_processor import ImageProcessor
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
+
+
+def hash_image_file(data: bytes) -> str:
+    """The hash of an image file's bytes, which a rendered prompt carries for each image
+    (its ``mm_hashes`` entry), so a file gets the same hash from any path."""
+    return hashlib.sha256(data).hexdigest()[:32]
 
 
 @dataclass(kw_only=True, slots=True)
@@ -25,7 +33,20 @@ class RendererConfig(Configurable.Config):
     """
 
     # pyrefly: ignore[bad-override]
-    def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
+    def build(
+        self,
+        *,
+        tokenizer: HuggingFaceTokenizer,
+        image_processor: ImageProcessor | None = None,
+    ) -> Renderer:
+        """Build the renderer on ``tokenizer``.
+
+        Args:
+            tokenizer: The model's tokenizer.
+            image_processor: The model's image preprocessing, for a renderer that reads
+                image parts from files (e.g. `Qwen35ImageRefRenderer`). None: the renderer
+                reads no image files.
+        """
         raise NotImplementedError
 
 
@@ -67,7 +88,12 @@ class RenderersConfigAdapter(RendererConfig):
         """Return the `renderers` config that Verifiers workers rebuild the renderer from."""
         return self.renderers_config
 
-    def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
+    def build(
+        self,
+        *,
+        tokenizer: HuggingFaceTokenizer,
+        image_processor: ImageProcessor | None = None,
+    ) -> Renderer:
         if self.renderers_config.name == "auto":
             raise ValueError(
                 f"AutoRendererConfig resolves by exact match of tokenizer.name_or_path ({tokenizer.tokenizer_path!r}) "
@@ -82,8 +108,29 @@ class RenderersConfigAdapter(RendererConfig):
                 "(pad_token, unk_token, ...), and would silently produce different tokens. "
                 "Pick the model's renderer, e.g. Qwen3RendererConfig(...)."
             )
+        renderers_config = self.renderers_config
+        if image_processor is not None:
+            if renderers_config.name != "custom":
+                raise ValueError(
+                    f"The {renderers_config.name!r} renderer comes from the renderers "
+                    "library, so it cannot use TorchTitan's ImageProcessor: it either "
+                    "reads no images, or preprocesses them inside render() with the "
+                    "Hugging Face image processor. Use an in-tree renderer that takes the "
+                    "ImageProcessor, e.g. CustomRendererConfig(import_path="
+                    '"torchtitan.models.qwen3_5.renderer.Qwen35ImageRefRenderer").'
+                )
+            if (renderers_config.model_extra or {}).get("image_processor") is not None:
+                raise ValueError(
+                    "The renderer config sets image_processor too; pass it only to build "
+                    "(TitanRL passes Controller.Config.image_processor)."
+                )
+            # The renderer's own config validates the field, and rejects it if the renderer
+            # takes no image processor.
+            renderers_config = renderers_config.model_copy(
+                update={"image_processor": image_processor.config}
+            )
         return create_renderer(
-            tokenizer=RendererTokenizerWrapper(tokenizer), config=self.renderers_config
+            tokenizer=RendererTokenizerWrapper(tokenizer), config=renderers_config
         )
 
 

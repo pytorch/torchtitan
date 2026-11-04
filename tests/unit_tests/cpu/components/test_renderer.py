@@ -18,6 +18,7 @@ from renderers import (
     Tokenizer,
 )
 from renderers.qwen3 import Qwen3Renderer
+from torchtitan.components.data.multimodal.image_processor import ImageProcessor
 from torchtitan.components.renderer import (
     from_renderers,
     RendererConfig,
@@ -27,6 +28,7 @@ from torchtitan.components.renderer import (
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
+from torchtitan.models.qwen3_5 import QWEN3_5_IMAGE_PROCESSOR_KWARGS
 
 _TOKENIZER_PATH = "tests/assets/tokenizer"
 
@@ -60,6 +62,30 @@ def test_build_renders_with_titan_tokenizer() -> None:
         tokenizer.token_to_id("<|endoftext|>"),
     ]
     assert len(rendered.is_content) == len(rendered.token_ids)
+
+
+def test_build_rejects_an_image_processor_for_a_library_renderer() -> None:
+    tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
+    image_processor = ImageProcessor.Config(**QWEN3_5_IMAGE_PROCESSOR_KWARGS).build()
+    with pytest.raises(
+        ValueError, match="'qwen3' renderer comes from the renderers library"
+    ):
+        from_renderers(Qwen3RendererConfig()).build(
+            tokenizer=tokenizer, image_processor=image_processor
+        )
+
+
+def test_build_rejects_an_image_processor_set_twice() -> None:
+    tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
+    image_processor = ImageProcessor.Config(**QWEN3_5_IMAGE_PROCESSOR_KWARGS)
+    config = from_renderers(
+        CustomRendererConfig(
+            import_path="torchtitan.models.qwen3_5.renderer.Qwen35ImageRefRenderer",
+            image_processor=image_processor,
+        )
+    )
+    with pytest.raises(ValueError, match="sets image_processor too"):
+        config.build(tokenizer=tokenizer, image_processor=image_processor.build())
 
 
 @pytest.mark.parametrize(
