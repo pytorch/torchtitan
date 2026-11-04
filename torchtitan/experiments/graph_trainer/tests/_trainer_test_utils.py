@@ -19,7 +19,7 @@ from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.experiments.graph_trainer.common_utils import (
     accumulate_param_grads_,
-    maybe_register_blockmask_pytree_node,
+    maybe_register_attention_metadata_pytree_nodes,
 )
 from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
@@ -158,7 +158,7 @@ def build_minimal_trainer(
             (model_kwargs,) = model_kwargs
 
             if engine._traced_step is None:
-                maybe_register_blockmask_pytree_node()
+                maybe_register_attention_metadata_pytree_nodes()
                 fwd_bwd_fn = make_fwd_bwd_step(model, engine.loss_fn)
                 with parallelism_context.activate_spmd():
                     engine._traced_step = minimal_fx_tracer(fwd_bwd_fn, module=model,)(

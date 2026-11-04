@@ -26,7 +26,7 @@ from torch.distributed.pipelining.schedules import (
 
 from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import (
-    maybe_register_blockmask_pytree_node,
+    maybe_register_attention_metadata_pytree_nodes,
 )
 from torchtitan.experiments.graph_trainer.graph_builder_utils import (
     GraphTrainerConfigView,
@@ -202,7 +202,7 @@ class GraphTrainerStageGraphProvider:
     ) -> dict[tuple[int, int], OverlapStageGraphs]:
         """Build one graph per stage with its optional Dist-MoE slot input."""
         graph_stages = [cast(GraphPipelineStage, stage) for stage in schedule._stages]
-        maybe_register_blockmask_pytree_node()
+        maybe_register_attention_metadata_pytree_nodes()
         trace_ctx = ctx
         if ctx.arg_mbs is not None or ctx.kwarg_mbs is not None:
             # Upstream PP creates a fresh _PipelineContext for each action, but

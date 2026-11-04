@@ -35,7 +35,7 @@ from torchtitan.experiments.graph_trainer.chunked_loss import (
 from torchtitan.experiments.graph_trainer.common_utils import (
     compute_annotated_loss,
     ensure_boxed_graph_module,
-    maybe_register_blockmask_pytree_node,
+    maybe_register_attention_metadata_pytree_nodes,
 )
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
@@ -213,7 +213,7 @@ def _split_batch_offset_block_masks() -> list[Any]:
     from torch.distributed.pipelining.microbatch import _split_block_mask
     from torch.nn.attention.flex_attention import create_block_mask
 
-    maybe_register_blockmask_pytree_node()
+    maybe_register_attention_metadata_pytree_nodes()
 
     def mask_mod(b, h, q_idx, kv_idx):
         return (b == 1) & (q_idx >= kv_idx)

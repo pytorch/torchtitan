@@ -29,7 +29,7 @@ from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
     get_simple_fsdp_mesh,
-    maybe_register_blockmask_pytree_node,
+    maybe_register_attention_metadata_pytree_nodes,
     PARAMETER_GRADIENT_FQNS_META,
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
@@ -146,7 +146,7 @@ def _trace_dsv3_moe_block_stage(
     if not torch.cuda.is_available():
         raise unittest.SkipTest("DeepSeek V3 MoE block tracing requires CUDA")
 
-    maybe_register_blockmask_pytree_node()
+    maybe_register_attention_metadata_pytree_nodes()
     torch.manual_seed(0)
 
     with _stable_flex_attention_compile_config():

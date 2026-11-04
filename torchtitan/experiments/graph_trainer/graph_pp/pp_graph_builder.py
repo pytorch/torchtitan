@@ -21,7 +21,7 @@ from torch.distributed.pipelining.schedules import _PipelineScheduleRuntime
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_parameter_gradient,
     compute_annotated_loss,
-    maybe_register_blockmask_pytree_node,
+    maybe_register_attention_metadata_pytree_nodes,
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.grad_accumulation import (
@@ -795,7 +795,7 @@ def _build_stage_graphs(
 ) -> None:
     """Trace one stage-local train step and attach bound GraphPP graphs."""
     compile_config: GraphTrainerCompileConfig = config.compile
-    maybe_register_blockmask_pytree_node()
+    maybe_register_attention_metadata_pytree_nodes()
 
     # 1. Prepare representative trace inputs. ``minimal_fx_tracer`` fakeifies
     # these tensors before running the stage function, so this must not execute
