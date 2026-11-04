@@ -100,6 +100,21 @@ jobs:
             "$RUNNER_TEMP/artifacts-to-be-uploaded/rl/integration" --ngpu 8 \
             --test_suite rl_b200
 
+      # SGLang is installed on top of the RL environment, so its tests run after
+      # the others. The engine has been verified only on Blackwell GPUs.
+      - name: SGLang generator tests
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: |
+          set -eux
+          source .venv/bin/activate
+          export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+
+          bash scripts/install_sglang.sh "$RUNNER_TEMP/sglang"
+          MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
+
+          HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
+            tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py -v
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v7
