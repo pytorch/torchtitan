@@ -191,7 +191,6 @@ def test_llama3_debug_config_defaults_to_short_context() -> None:
     config = llama3_debugmodel()
 
     assert config.model.max_context_length == 2048
-    assert config.training.max_context_length == 2048
 
 
 def test_parse_multiple_integration_test_suites() -> None:

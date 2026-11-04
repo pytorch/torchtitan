@@ -54,7 +54,6 @@ class BaseModel(Module, ABC):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[
@@ -95,6 +94,11 @@ class BaseModel(Module, ABC):
 
         Subclasses define model-specific hyperparameters.
         """
+
+        max_context_length: int
+        """Longest sequence the model trains or serves. The data pipeline splits
+        documents at this length, attention metadata is built for it, and the
+        RL generator uses it as vLLM's ``max_model_len``."""
 
         local_compile: LocalCompileConfig = field(default_factory=LocalCompileConfig)
         """Configuration for named regions, FlexAttention, and block-mask helpers.

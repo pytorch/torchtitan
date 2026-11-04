@@ -158,5 +158,4 @@ def test_graph_trainer_debug_config_default_seq_len(
     config_factory: DebugConfigFactory,
 ) -> None:
     config = config_factory()
-    assert config.training.max_context_length == DEFAULT_DEBUG_MODEL_SEQ_LEN
     assert config.model.max_context_length == DEFAULT_DEBUG_MODEL_SEQ_LEN

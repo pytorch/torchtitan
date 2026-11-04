@@ -95,7 +95,6 @@ def deepseek_v3_debugmodel(
         training=TrainingConfig(
             disable_accelerator_graphs=disable_accelerator_graphs,
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=parallelism,
@@ -220,7 +219,6 @@ def deepseek_v3_16b(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=1000,
             disable_accelerator_graphs=True,
         ),
@@ -336,7 +334,6 @@ def configure_dist_moe_fsdp2_ep2(config: Trainer.Config) -> Trainer.Config:
     assert isinstance(runtime_config, DistMoeRuntime.Config)
     runtime_config.scratch_capacity_factor = 2.0
     config.training.num_tokens_per_microbatch_per_dp_rank = 128
-    config.training.max_context_length = 128
     config.training.steps = 4
     config.checkpointer = None
     return config
@@ -443,7 +440,6 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=10000,
             disable_accelerator_graphs=True,
         ),

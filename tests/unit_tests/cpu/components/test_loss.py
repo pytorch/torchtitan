@@ -181,7 +181,6 @@ class TestLoss(unittest.TestCase):
                 parallelism_context=SimpleNamespace(cp_enabled=False),
                 parallelism=SimpleNamespace(),
                 max_num_documents=2,
-                max_context_length=8,
                 global_routing_token_counts=routing_token_counts,
             )
 

@@ -141,7 +141,6 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=None,
@@ -246,7 +245,6 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=None,
@@ -333,7 +331,6 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=None,
@@ -491,7 +488,6 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=None,
@@ -568,7 +564,6 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=None,  # random-init weights
@@ -701,7 +696,6 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
-                max_context_length=seq_len,
             ),
             # Kimi K3 currently supports FSDP data parallelism but not TP.
             parallelism=trainer_parallelism,
@@ -750,7 +744,7 @@ def _set_kimi_k3_batch_invariant(config: Controller.Config) -> Controller.Config
     )
     config.trainer.model, config.generator.model = _kimi_k3_rl_model_configs(
         "debugmodel",
-        seq_len=config.trainer.training.max_context_length,
+        seq_len=config.trainer.model.max_context_length,
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
     )
@@ -813,7 +807,6 @@ def rl_grpo_deepseek_v3_debug_varlen(*, seq_len: int = 2048) -> Controller.Confi
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=None,

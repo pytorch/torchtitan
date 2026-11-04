@@ -1073,7 +1073,7 @@ def test_dist_moe_671b_recipe_topology(factory, dp_degree, num_microbatches) -> 
     assert config.parallelism.data_parallel_shard_degree == dp_degree
     assert config.parallelism.expert_parallel_degree == 64
     assert config.parallelism.num_pp_microbatches == num_microbatches
-    assert config.training.max_context_length == 4096
+    assert config.model.max_context_length == 4096
     assert config.training.num_tokens_per_microbatch_per_dp_rank == 4096
     assert config.training.num_tokens_per_train_step % 4096 == 0
     assert config.training.num_tokens_per_train_step // 4096 == 15360

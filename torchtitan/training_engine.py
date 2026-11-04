@@ -386,7 +386,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self.model_param_count,
             self.num_flops_per_token,
         ) = self.model_config.get_nparams_and_flops(
-            model, self.config.training.max_context_length
+            model, self.model_config.max_context_length
         )
         config = self.config
         if self.parallelism_context.pp_enabled:
@@ -710,7 +710,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                         parallelism_context=self.parallelism_context,
                         parallelism=self.config.parallelism,
                         max_num_documents=self.max_num_documents,
-                        max_context_length=self.config.training.max_context_length,
                         global_routing_token_counts=global_routing_token_counts,
                         **self.preprocess_inputs_kwargs,
                     )

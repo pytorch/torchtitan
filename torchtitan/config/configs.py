@@ -49,9 +49,6 @@ class TrainingConfig:
     data-parallel degree`.
     """
 
-    max_context_length: int = 2048
-    """Maximum logical context length used for training."""
-
     def __post_init__(self) -> None:
         if self.num_tokens_per_microbatch_per_dp_rank <= 0:
             raise ValueError(
@@ -59,8 +56,6 @@ class TrainingConfig:
             )
         if self.num_tokens_per_train_step != -1 and self.num_tokens_per_train_step <= 0:
             raise ValueError("num_tokens_per_train_step must be -1 or greater than 0.")
-        if self.max_context_length <= 0:
-            raise ValueError("max_context_length must be greater than 0.")
 
     steps: int = 10000
     """How many train steps to run"""

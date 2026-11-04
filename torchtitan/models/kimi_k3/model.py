@@ -322,7 +322,6 @@ class KimiK3Model(MultimodalModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
@@ -336,7 +335,6 @@ class KimiK3Model(MultimodalModel):
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
             )
 
         pixel_values = input_dict.get("pixel_values")

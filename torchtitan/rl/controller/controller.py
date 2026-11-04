@@ -407,10 +407,10 @@ class Controller(Configurable):
                 )
             if self.trainer.parallelism.enable_sequence_parallel:
                 sp_degree = self.trainer.parallelism.tensor_parallel_degree
-                max_context_length = self.trainer.training.max_context_length
+                max_context_length = self.trainer.model.max_context_length
                 if sp_degree > 1 and max_context_length % sp_degree != 0:
                     raise ValueError(
-                        "training.max_context_length "
+                        "trainer.model.max_context_length "
                         f"({max_context_length}) must be divisible "
                         f"by sequence parallel degree ({sp_degree})."
                     )
@@ -655,7 +655,7 @@ class Controller(Configurable):
                 num_tokens_per_microbatch_per_dp_rank=(
                     config.trainer.training.num_tokens_per_microbatch_per_dp_rank
                 ),
-                max_context_length=config.trainer.training.max_context_length,
+                max_context_length=config.trainer.model.max_context_length,
                 num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
                 dp_degree=self.trainer_dp_degree,
                 num_pp_microbatches=(

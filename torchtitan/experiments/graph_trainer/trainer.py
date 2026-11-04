@@ -277,7 +277,6 @@ class GraphTrainingEngine(TrainingEngine):
                         parallelism_context=self.parallelism_context,
                         parallelism=self.config.parallelism,
                         max_num_documents=self.max_num_documents,
-                        max_context_length=self.config.training.max_context_length,
                         global_routing_token_counts=global_routing_token_counts,
                         **self.preprocess_inputs_kwargs,
                     )

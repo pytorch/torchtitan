@@ -243,7 +243,7 @@ def test_training_recipe_uses_separate_datasets() -> None:
     assert config.async_loop.num_prompts_per_train_step == 12
     assert config.async_loop.num_samples_per_prompt == 32
     assert config.async_loop.target_offpolicy_steps == 3
-    assert config.trainer.training.max_context_length == 131072
+    assert config.trainer.model.max_context_length == 131072
     assert config.precision.dtype == "float32"
     assert config.precision.param_dtype == "bfloat16"
     assert config.precision.reduce_dtype == "float32"
@@ -288,7 +288,7 @@ def test_muse_glimmer_terminal_bench_recipe_uses_worker_loadable_renderer() -> N
     assert worker_config.model_extra is not None
     assert worker_config.model_extra["reasoning_strength"] == "low"
 
-    assert config.trainer.training.max_context_length == 16384
+    assert config.trainer.model.max_context_length == 16384
     assert config.generator.model.max_context_length == 16384
     assert config.rollouter.generation_server.max_rollout_tokens == 16384
     assert config.generator.sampling.max_tokens == 4096
@@ -391,7 +391,7 @@ def test_recipes_share_the_loop_and_keep_fp32_master_weights(name: str) -> None:
     assert agent.max_turns == 120
     assert (
         config.rollouter.generation_server.max_rollout_tokens
-        == config.trainer.training.max_context_length
+        == config.trainer.model.max_context_length
     )
     loop = config.async_loop
     serve = config.rollouter.verifiers_env_server.serve

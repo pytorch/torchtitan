@@ -84,7 +84,6 @@ class _FakeAutoParallelGraph:
 def _training_config():
     return TrainingConfig(
         num_tokens_per_microbatch_per_dp_rank=2 * 8,
-        max_context_length=8,
     )
 
 

@@ -149,7 +149,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             dataloader=BaseDataLoader.Config(max_num_documents=BATCH_SIZE),
             training=TrainingConfig(
                 num_tokens_per_microbatch_per_dp_rank=NUM_TOKENS,
-                max_context_length=SEQ_LEN,
                 steps=NUM_STEPS,
             ),
             parallelism=ParallelismConfig(),
@@ -181,7 +180,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
         attention_metadata = model._get_attention_metadata(
             self.positions,
             max_num_documents=BATCH_SIZE,
-            max_context_length=SEQ_LEN,
         )
         return {"attention_metadata": attention_metadata}
 
@@ -224,7 +222,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             parallelism_context=self.parallelism_context,
             max_num_documents=BATCH_SIZE,
         )
-        trainer.config.training.max_context_length = SEQ_LEN
         global_loss_token_counts = torch.tensor(
             NUM_TOKENS, dtype=torch.float, device="cuda"
         )
@@ -291,7 +288,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             parallelism_context=self.parallelism_context,
             max_num_documents=BATCH_SIZE,
         )
-        trainer.config.training.max_context_length = SEQ_LEN
         fwd_bwd_fn = make_fwd_bwd_step(model, trainer.engine.loss_fn)
 
         global_loss_token_counts = torch.tensor(

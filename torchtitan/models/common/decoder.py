@@ -79,7 +79,6 @@ class Decoder(BaseModel):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config):
-        max_context_length: int
         dim: int
         vocab_size: int
         lm_head: Linear.Config
@@ -342,7 +341,6 @@ class Decoder(BaseModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[
@@ -361,7 +359,6 @@ class Decoder(BaseModel):
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
             )
             input_dict["attention_metadata"] = attention_metadata
 
@@ -452,7 +449,6 @@ class Decoder(BaseModel):
         *,
         padding_mask: torch.Tensor | None = None,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
     ) -> AttentionMetadataMap:
         attention_metadata: dict[type[InnerAttention], AttentionMetadata] = {}
         for layer_config in self.config.layers:
@@ -466,7 +462,7 @@ class Decoder(BaseModel):
                     positions,
                     padding_mask=padding_mask,
                     max_num_documents=max_num_documents,
-                    max_context_length=max_context_length,
+                    max_context_length=self.config.max_context_length,
                 )
                 if metadata is not None:
                     attention_metadata[backend] = metadata

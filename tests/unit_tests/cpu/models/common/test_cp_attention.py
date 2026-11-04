@@ -334,7 +334,9 @@ class TestCpMlaMetadata(unittest.TestCase):
     @staticmethod
     def _get_attention_metadata(config):
         attention = Attention.Config(n_heads=4, inner_attention=config)
-        decoder = SimpleNamespace(config=SimpleNamespace(layers=[attention]))
+        decoder = SimpleNamespace(
+            config=SimpleNamespace(layers=[attention], max_context_length=8)
+        )
         return Decoder._get_attention_metadata(cast(Decoder, decoder), torch.arange(8))
 
     def test_all_gather_uses_cp_backend_key(self):
