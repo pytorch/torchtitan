@@ -101,6 +101,13 @@ def compute_config_fingerprint(
 
     h.update(f"compile:passes:{list(compile_config.passes)}\n".encode())
     h.update(f"compile:memory_policy:{compile_config.memory_policy}\n".encode())
+    if compile_config.memory_policy == "sac_and_offload":
+        for name in (
+            "cpu_offload_prefetch_n_layers",
+            "cpu_offload_defer_n_layers",
+            "cpu_offload_budget_gb",
+        ):
+            h.update(f"compile:{name}:{getattr(compile_config, name)}\n".encode())
     h.update(
         "compile:full_recompute_save_ops:"
         f"{compile_config.full_recompute_save_ops}\n".encode()

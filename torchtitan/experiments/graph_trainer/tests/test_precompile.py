@@ -347,6 +347,28 @@ class TestConfigFingerprint(unittest.TestCase):
         )
         self.assertNotEqual(fp_graph_batch, fp_graph_seq)
 
+    def test_cpu_offload_settings_sensitivity(self):
+        from torchtitan.experiments.graph_trainer.configs import (
+            GraphTrainerCompileConfig,
+        )
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+        )
+
+        model = _make_stub_model()
+        context = _StubParallelismContext()
+        for policy in ("default", "sac_and_offload"):
+            cfg = GraphTrainerCompileConfig(memory_policy=policy)
+            for name in (
+                "cpu_offload_prefetch_n_layers",
+                "cpu_offload_defer_n_layers",
+                "cpu_offload_budget_gb",
+            ):
+                before = compute_config_fingerprint(model, cfg, context)
+                setattr(cfg, name, getattr(cfg, name) + 1)
+                after = compute_config_fingerprint(model, cfg, context)
+                self.assertEqual(before != after, policy == "sac_and_offload")
+
     def test_pass_order_sensitive(self):
         from torchtitan.experiments.graph_trainer.precompile import (
             compute_config_fingerprint,
