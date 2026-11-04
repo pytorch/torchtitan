@@ -199,7 +199,10 @@ def test_validation_logs_loss_metrics(monkeypatch):
     validator.metrics_processor.log_validation.assert_called_once_with(
         loss=10 / 4,
         step=1,
-        extra_metrics={"validation_metrics/x/mean": 20 / 4, "validation_metrics/x/max": 3.0},
+        extra_metrics={
+            "validation_metrics/x/mean": 20 / 4,
+            "validation_metrics/x/max": 3.0,
+        },
     )
 
 

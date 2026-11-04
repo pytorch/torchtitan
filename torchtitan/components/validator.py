@@ -403,9 +403,7 @@ class Validator(BaseValidator):
             # The loss runs without token counts here, so /mean and /frac
             # metrics are raw sums; normalize them like the loss above. Under
             # PP, ranks without the last stage have none.
-            global_metrics = combine_loss_metrics(
-                [accumulated_metrics], mesh=loss_mesh
-            )
+            global_metrics = combine_loss_metrics([accumulated_metrics], mesh=loss_mesh)
             extra_metrics = {
                 f"validation_metrics/{key}": value.item()
                 / (
