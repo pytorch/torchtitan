@@ -338,8 +338,9 @@ class TokenChoiceTopKRouter(Module):
         batch_invariant=True,
         # Dynamo's default limit is 8. DeepSeek-V4's hash and top-k layers share this frame.
         # At most 48 graphs: 2 layer kinds x train or eval x grad on or off x padding or none
-        # x static, dynamic or 1-token T. Past the limit, fullgraph=True raises instead of
-        # falling back to eager.
+        # x static, dynamic or 1-token T. Measured on CPU: 28 for the call mix in
+        # test_router_compile_regions.py, 37 when training calls also run at T = 1. Past the
+        # limit, fullgraph=True raises instead of falling back to eager.
         recompile_limit=48,
         # Fixes each reduction's launch config, so a token's scores don't depend on the batch
         # size. Cost on GB300, measured on the inference (decode and prefill) graph: a few us
@@ -420,6 +421,8 @@ class TokenChoiceTopKRouter(Module):
                     # Cast before summing: casting a Partial tensor is non-linear and
                     # rejected by spmd_types.
                     local_counts_E = valid_map_TE.to(scores_TE.dtype).sum(dim=0)
+                    # F.normalize's eps clamp only guards an all-zero score row: the scores
+                    # are non-negative, so the norm is a plain sum.
                     probs_TE = F.normalize(scores_TE, p=1, dim=-1)
                     if padding_mask_T is not None:
                         probs_TE = probs_TE * ~padding_mask_T.unsqueeze(-1)
@@ -689,8 +692,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
             f_E = F.normalize(counts_E, p=1, dim=0) * counts_E.size(-1)
 
             # Eq. 19: p_i = (1/T) sum_t s'_t,i, the per-token L1-normalized
-            # scores.  F.normalize's eps clamp only guards an all-zero score
-            # row: the scores are non-negative, so the norm is a plain sum.
+            # scores, summed by the router (``_score_and_select_experts``).
             p_E = self._reduce_token_partials(local_prob_sums_E)
 
             # Eq. 17: L_bal = sum_i f_i * p_i
