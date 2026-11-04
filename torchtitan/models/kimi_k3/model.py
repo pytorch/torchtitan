@@ -35,6 +35,7 @@ from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
     token_id_placement,
 )
+from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
     build_dummy_vision_inputs,
@@ -251,6 +252,9 @@ class KimiK3Model(MultimodalModel):
         self.vision_encoder = (
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
+        # Fixed at build time, like layer 0's input layout. The RL generator drops
+        # ``vision_encoder`` after build but keeps the decoder's sharding.
+        self._built_with_vision_encoder = config.vision_encoder is not None
 
     def parallelize(
         self,
@@ -346,6 +350,15 @@ class KimiK3Model(MultimodalModel):
         input_dict["aux_loss_denominators"] = global_routing_token_counts
         return inputs, labels, input_dict, loss_kwargs
 
+    def _replicates_embeddings_for_vision(self) -> bool:
+        """Whether the token embeddings are gathered to TP-``Replicate`` for the
+        vision scatter.
+
+        Decided by the config, not by the runtime ``vision_encoder``, so it
+        always matches the input layout layer 0 was built with.
+        """
+        return self.tok_embeddings is not None and self._built_with_vision_encoder
+
     def _prepare_multimodal_embeds(
         self,
         tokens: torch.Tensor,
@@ -356,6 +369,10 @@ class KimiK3Model(MultimodalModel):
         vision_bank_indices_T: torch.Tensor | None = None,
     ) -> torch.Tensor:
         embeddings_TD = self.tok_embeddings(tokens)
+        if self._replicates_embeddings_for_vision():
+            # The vision scatter writes arbitrary positions, so every TP rank
+            # needs the full sequence.
+            embeddings_TD = maybe_gather_tp_input(self.tok_embeddings, embeddings_TD)
         if (pixel_values is None) != (grid_thw is None):
             raise ValueError(
                 "pixel_values and grid_thw must either both be provided or "
@@ -480,7 +497,7 @@ class KimiK3Model(MultimodalModel):
             self.output_res_proj,
             self.output_res_norm,
         )
-        h_TD = self.norm(h_TD) if self.norm is not None else h_TD
+        h_TD = self._pre_lm_head_norm_and_gather(h_TD)
         if self._skip_lm_head:
             return h_TD
         return self.lm_head(h_TD) if self.lm_head is not None else h_TD

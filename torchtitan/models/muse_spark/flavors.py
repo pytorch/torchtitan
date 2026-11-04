@@ -40,12 +40,11 @@ from torchtitan.models.common.decoder_sharding import (
     inner_attention_local_spmd_sharding_config,
     lm_head_sharding_config,
     norm_sharding_config,
-    pre_lm_head_norm_sharding_config,
     rope_cache_sharding_config,
     rowwise_sharding_config,
     token_embedding_sharding_config,
 )
-from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common.embedding import VocabParallelEmbedding
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
@@ -874,7 +873,7 @@ def _muse_spark_config(
         dim=dim,
         vocab_size=vocab_size,
         tok_embeddings=MuseSparkEmbeddingWithNorm.Config(
-            embedding=Embedding.Config(
+            embedding=VocabParallelEmbedding.Config(
                 num_embeddings=vocab_size,
                 embedding_dim=dim,
                 param_init=_EMBEDDING_INIT,
@@ -900,7 +899,7 @@ def _muse_spark_config(
                 if final_norm_gain_center == 0.0
                 else _GAIN_NORM_INIT
             ),
-            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
+            sharding_config=norm_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=MuseSparkLMHead.Config(
             in_features=dim,
