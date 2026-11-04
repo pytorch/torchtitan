@@ -122,12 +122,13 @@ from torchtitan.rl.controller.work_buffer import (
     RolloutGroupWorkBuffer,
 )
 from torchtitan.rl.generator.generator import Generator
+from torchtitan.rl.generator.rdma_prompt import RDMAPrompt
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout.rollouter import Rollouter
-from torchtitan.rl.rollout.types import Completion, GenerateFn, ReleaseSessionFn
+from torchtitan.rl.rollout.types import Completion, GenerateFn, Prompt, ReleaseSessionFn
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
 from torchtitan.rl.trainer.trainer import Trainer
@@ -312,6 +313,15 @@ class Controller(Configurable):
         )
         """Generator routing strategy configuration."""
 
+        rdma_min_image_bytes: int | None = None
+        """Send prompt image files of at least this many bytes from the rollout workers to
+        generator rank 0 as RDMA buffers (the actor system's `RDMAPrompt`), not in the
+        `generate` call, which the router forwards:
+            None (default): every file in the call.
+            e.g. 1024: files >= 1 KiB stay in the rollout worker until `generate` returns.
+        Same transport as `Batcher.Config.rdma_min_tensor_bytes`. With Monarch, each rollout
+        worker that registers a file makes a CUDA context on GPU 0 (~256 MiB) first."""
+
         actor_system: ActorSystem.Config = field(
             default_factory=_default_actor_system_config
         )
@@ -404,6 +414,24 @@ class Controller(Configurable):
                 raise ValueError(
                     "async_loop.batcher.rdma_min_tensor_bytes does not support "
                     "trainer pipeline parallelism yet."
+                )
+            if self.rdma_min_image_bytes is not None:
+                if self.rdma_min_image_bytes < 1:
+                    raise ValueError(
+                        "rdma_min_image_bytes must be None or >= 1 (RDMABuffer rejects "
+                        f"empty buffers), got {self.rdma_min_image_bytes}"
+                    )
+                if self.generator.engine.image_spec is None:
+                    raise ValueError(
+                        "rdma_min_image_bytes is set, but generator.engine.image_spec is "
+                        "None: prompts carry no image files."
+                    )
+            if self.generator.engine.image_spec is not None:
+                # TODO: remove once the batcher and the trainer take image inputs.
+                raise NotImplementedError(
+                    "generator.engine.image_spec is set, but training on image prompts is "
+                    "not supported yet: the trainer would see their placeholder tokens "
+                    "without the images."
                 )
             if self.trainer.parallelism.enable_sequence_parallel:
                 sp_degree = self.trainer.parallelism.tensor_parallel_degree
@@ -537,24 +565,40 @@ class Controller(Configurable):
         # `self`. A GenerateFn may be shipped to another process, where an actor
         # handle serializes cheaply and the whole controller does not.
         generator_router = self.generator_router
+        rdma_min_image_bytes = self.config.rdma_min_image_bytes
+        register_rdma_prompt = None
+        if rdma_min_image_bytes is not None:
+            assert self.actor_system is not None
+            register_rdma_prompt = self.actor_system.register_rdma_prompt
 
         @sl.log_trace_span("generate")
         async def generate(
-            prompt_token_ids: list[int],
+            prompt: Prompt,
             *,
             request_id: str,
             group_id: int,
             routing_session_id: str | None = None,
             sampling_config: SamplingConfig | None = None,
         ) -> Completion | None:
-            return await generator_router.generate.call_one(
-                prompt_token_ids,
-                request_id=request_id,
-                group_id=group_id,
-                routing_session_id=routing_session_id,
-                sampling_config=sampling_config,
-                metrics_prefix=metrics_prefix,
-            )
+            sent: Prompt | RDMAPrompt = prompt
+            if register_rdma_prompt is not None and any(
+                len(image.data) >= rdma_min_image_bytes for image in prompt.images
+            ):
+                sent = register_rdma_prompt(prompt, min_bytes=rdma_min_image_bytes)
+            try:
+                return await generator_router.generate.call_one(
+                    sent,
+                    request_id=request_id,
+                    group_id=group_id,
+                    routing_session_id=routing_session_id,
+                    sampling_config=sampling_config,
+                    metrics_prefix=metrics_prefix,
+                )
+            finally:
+                # Rank 0 has read the files once `generate` returns or raises. A cancelled call
+                # drops them too; a read rank 0 is still doing then fails, for no caller.
+                if isinstance(sent, RDMAPrompt):
+                    await sent.drop()
 
         return generate
 

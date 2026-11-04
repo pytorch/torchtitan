@@ -28,6 +28,7 @@ from torchtitan.rl.actors.monarch.provisioning import (
     spawn_cpu_procs,
     spawn_proc_mesh,
 )
+from torchtitan.rl.actors.monarch.rdma_prompt import MonarchRDMAPrompt
 from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 from torchtitan.rl.actors.monarch.router import InterGeneratorRouterActor
 from torchtitan.rl.actors.monarch.torch_elastic import setup_torch_elastic_env
@@ -35,6 +36,7 @@ from torchtitan.rl.actors.monarch.trainer import TrainerActor
 from torchtitan.rl.actors.system import ActorSystem, ServiceHandle, TrainerHandle
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.rdma_prompt import RegisterRDMAPrompt
 from torchtitan.rl.rollout.rollouter import RolloutWorker
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.trainer.batcher import Batcher
@@ -230,3 +232,7 @@ class MonarchActorSystem(ActorSystem):
 
     def shutdown(self) -> None:
         shutdown()
+
+    @property
+    def register_rdma_prompt(self) -> RegisterRDMAPrompt:
+        return MonarchRDMAPrompt.register

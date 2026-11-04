@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from torchtitan.config.parallelism import ParallelismConfig
     from torchtitan.rl.generator.generator import Generator
     from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+    from torchtitan.rl.generator.rdma_prompt import RegisterRDMAPrompt
     from torchtitan.rl.rollout.rollouter import RolloutWorker
     from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
     from torchtitan.rl.trainer.batcher import Batcher
@@ -141,3 +142,10 @@ class ActorSystem(Configurable, abc.ABC):
     def shutdown(self) -> None:
         """Release the framework's client in this process, after the event loop
         has finished."""
+
+    @property
+    @abc.abstractmethod
+    def register_rdma_prompt(self) -> RegisterRDMAPrompt:
+        """Registers a prompt's large image files as RDMA buffers in the calling process
+        (``Controller.Config.rdma_min_image_bytes``). The controller's `GenerateFn` carries it
+        to the rollout workers, so it must pickle without the actor system."""

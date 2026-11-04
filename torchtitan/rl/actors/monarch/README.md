@@ -23,6 +23,7 @@ dependency of its own: it declares the service's methods as
 | `router.py` | `InterGeneratorRouterActor`, the endpoints of `rl/routing/inter_generator.py`'s `InterGeneratorRouter`; enforces that the router is a singleton. |
 | `batcher.py` | `BatcherActor`, the endpoints of `rl/trainer/batcher.py`'s `Batcher`, in its own CPU process; supplies `MonarchRDMAMicrobatch.register`. |
 | `rdma_microbatch.py` | `MonarchRDMAMicrobatch`, the `RDMAMicrobatch` (`rl/trainer/rdma_microbatch.py`) on Monarch RDMA buffers: the batcher keeps a microbatch's large tensors and each trainer rank reads its column. |
+| `rdma_prompt.py` | `MonarchRDMAPrompt`, the `RDMAPrompt` (`rl/generator/rdma_prompt.py`) on Monarch RDMA buffers: a rollout worker keeps a prompt's large image files and generator rank 0 reads them. |
 | `rollout_worker.py` | `RolloutWorkerActor`, a rollout worker in the controller-host CPU pool. |
 | `provisioning.py` | Proc meshes: the trainer and generator GPU meshes (`spawn_proc_mesh`, `PerHostProvisioner`), CPU procs on the controller host (`spawn_cpu_procs`), and the Monarch client's `shutdown`. |
 | `torch_elastic.py` | Sets the torch-elastic env vars (`RANK`, `MASTER_PORT`, ...) on a proc mesh before `init_process_group`; rank 0 keeps its rendezvous store port open so no other socket takes it. |
@@ -113,7 +114,9 @@ each generator as a `ServiceHandle` the router gets, so callers never slice
 meshes themselves. The controller reaches the generators only through the
 router. These calls appear in the controller, the rollouter (`.choose()` on the
 worker pool) and the router (on generator handles). The batcher and the trainer
-see RDMA microbatches only through the `RDMAMicrobatch` interface.
+see RDMA microbatches only through the `RDMAMicrobatch` interface, and the
+controller's `GenerateFn` and the generator see RDMA prompts only through the
+`RDMAPrompt` interface.
 
 Another actor framework (e.g. Ray) would add its own `ActorSystem`
 implementation and adapters, wrapping its handles to provide this call

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -22,6 +23,10 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.data.multimodal.utils.image import (
+    decode_image_files,
+    ImageSpec,
+)
 from torchtitan.config import DebugConfig, PrecisionConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
@@ -37,6 +42,7 @@ from torchtitan.rl.generator.vllm.batch_invariance import (
     force_logprobs_fn_for_batch_invariance,
 )
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
+from torchtitan.rl.generator.vllm.multimodal import image_prompt
 from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
@@ -48,9 +54,13 @@ from torchtitan.rl.generator.vllm.stat_logger import (
     StatLoggerContext,
     VllmOtelStatLogger,
 )
+from torchtitan.rl.rollout.types import PromptImage
 from torchtitan.tools.utils import has_cuda_capability
 
 logger = logging.getLogger(__name__)
+
+# Decoded images `VLLMEngine` keeps, newest first.
+_NUM_DECODED_IMAGES = 32
 
 
 def add_extra_vllm_engine_args(
@@ -91,7 +101,9 @@ class VLLMEngine(GenerationEngine):
     """The generator's vLLM ``LLMEngine``, behind the calls the engine loop makes.
 
     See ``GenerationEngine`` for the build arguments and the threading contract;
-    ``LLMEngine`` is not thread-safe.
+    ``LLMEngine`` is not thread-safe. With ``Config.image_spec`` set, it keeps the model's
+    vision encoder and serves image prompts through vLLM's multimodal and M-RoPE interfaces
+    (MRoPE models such as Qwen3.5 only; see ``vllm/multimodal.py``).
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -145,6 +157,7 @@ class VLLMEngine(GenerationEngine):
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load
         )
+        image_spec = config.image_spec
         self._setup(
             model,
             parallelism=parallelism,
@@ -153,7 +166,25 @@ class VLLMEngine(GenerationEngine):
             dist_moe_runtime=dist_moe_runtime,
             batch_invariant=debug.batch_invariant,
             model_state_dict_load_mode=model_state_dict_load_mode,
+            image_spec=image_spec,
         )
+        self._decode_image_file: Callable[[PromptImage], torch.Tensor] | None = None
+        if image_spec is not None:
+            # Requests that share a prompt arrive together with the same images: keep a
+            # few decoded images, by content key, so each file is decoded once. An entry
+            # is up to 3 * max_pixels bytes.
+            decoded_images: OrderedDict[str, torch.Tensor] = OrderedDict()
+
+            def decode_image_file(image: PromptImage) -> torch.Tensor:
+                pixels = decoded_images.pop(image.key, None)
+                if pixels is None:
+                    [pixels] = decode_image_files([image.data], image_spec)
+                decoded_images[image.key] = pixels
+                if len(decoded_images) > _NUM_DECODED_IMAGES:
+                    decoded_images.popitem(last=False)
+                return pixels
+
+            self._decode_image_file = decode_image_file
         engine_args = self._build_engine_args(
             model,
             parallelism=parallelism,
@@ -198,6 +229,7 @@ class VLLMEngine(GenerationEngine):
         dist_moe_runtime: DistMoeRuntime.Config | None,
         batch_invariant: bool,
         model_state_dict_load_mode: ModelStateDictLoadMode,
+        image_spec: ImageSpec | None,
     ) -> None:
         """Process-wide vLLM setup before the engine build: register the TorchTitan model
         and config parser with vLLM, and select vLLM's model runner."""
@@ -208,6 +240,7 @@ class VLLMEngine(GenerationEngine):
             checkpointer_config=checkpointer,
             dist_moe_runtime=dist_moe_runtime,
             model_state_dict_load_mode=model_state_dict_load_mode,
+            image_spec=image_spec,
         )
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         if batch_invariant:
@@ -300,6 +333,10 @@ class VLLMEngine(GenerationEngine):
             engine_kwargs["compilation_config"] = vllm_compilation_config
         if seed is not None:
             engine_kwargs["seed"] = seed
+        if self.config.image_spec is not None:
+            # Image prompts bypass vLLM's processor (see `image_prompt`), whose cache
+            # would only keep a second copy of every image.
+            engine_kwargs["mm_processor_cache_gb"] = 0
         add_extra_vllm_engine_args(engine_kwargs, self.config.extra_engine_args)
         return EngineArgs(**engine_kwargs)
 
@@ -351,11 +388,31 @@ class VLLMEngine(GenerationEngine):
         vLLM rejected."""
         rejected_requests: list[tuple[str, Exception]] = []
         for request in requests:
-            prompt = {"prompt_token_ids": request.prompt_token_ids}
-            if not self._reset_kv_cache_on_model_state_dict_load:
-                # Salt by the pinned version so a request only reuses KV
-                # computed under that version.
-                prompt["cache_salt"] = str(request.min_policy_version)
+            images = request.prompt.images
+            if images and self._decode_image_file is None:
+                rejected_requests.append(
+                    (
+                        request.request_id,
+                        ValueError(
+                            f"{request.request_id} has images; set VLLMEngine.Config."
+                            "image_spec to serve image prompts."
+                        ),
+                    )
+                )
+                continue
+            pixels = []
+            if images:
+                assert self._decode_image_file is not None
+                # Image decoding stays outside the `try` below: a corrupt file must crash
+                # loudly, not reject the request on one TP rank only.
+                pixels = [self._decode_image_file(image) for image in images]
+            # Salt by the pinned version so a request only reuses KV computed under
+            # that version.
+            cache_salt = (
+                None
+                if self._reset_kv_cache_on_model_state_dict_load
+                else str(request.min_policy_version)
+            )
             # vLLM validates a request (prompt length, sampling params, token ids) as it
             # admits it: render_cmpl and InputProcessor.process_inputs raise
             # VLLMClientError (e.g. VLLMValidationError, not a ValueError subclass) or
@@ -364,10 +421,18 @@ class VLLMEngine(GenerationEngine):
             # state (recheck on a vLLM upgrade). The checks are deterministic, so every TP
             # rank of this replica rejects the same requests.
             try:
-                # render_cmpl is vLLM's input pipeline (tokenize is a no-op for tokenized
-                # prompts); the high-level entry stays resilient to vLLM internals vs
-                # vllm.inputs.tokens_input.
-                [engine_input] = self._engine.renderer.render_cmpl([prompt])
+                if images:
+                    engine_input = image_prompt(
+                        request.prompt, pixels, cache_salt=cache_salt
+                    )
+                else:
+                    prompt = {"prompt_token_ids": request.prompt.token_ids}
+                    if cache_salt is not None:
+                        prompt["cache_salt"] = cache_salt
+                    # render_cmpl is vLLM's input pipeline (tokenize is a no-op for
+                    # tokenized prompts); the high-level entry stays resilient to vLLM
+                    # internals vs vllm.inputs.tokens_input.
+                    [engine_input] = self._engine.renderer.render_cmpl([prompt])
                 # vLLM appends a random suffix to the id; the scheduler knows only that one.
                 internal_request_id = self._engine.add_request(
                     request_id=request.request_id,
@@ -415,7 +480,7 @@ class VLLMEngine(GenerationEngine):
         self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
     ) -> None:
         """Fetch the model state dict into the model's weights one FSDP group at a time, and
-        reset the KV cache when configured."""
+        reset the KV cache (and, for image prompts, vLLM's encoder cache) when configured."""
         self._get_model().load_model_state_dict(fetch)
         if self._reset_kv_cache_on_model_state_dict_load:
             # Always reset running requests too: the only reason to reset is a strict
@@ -424,6 +489,14 @@ class VLLMEngine(GenerationEngine):
             self._engine.reset_prefix_cache(
                 reset_running_requests=True,
             )
+            if self._decode_image_file is not None:
+                # Without the salt, image mm hashes carry no policy version (see
+                # `image_prompt`), so drop encoder outputs of the old vision weights too.
+                # vLLM warns here while requests are queued (the preempted ones always
+                # are); the caches it warns about are its processor caches, which image
+                # prompts turn off (mm_processor_cache_gb=0). Text-only engines have no
+                # encoder outputs and skip the call.
+                self._engine.reset_encoder_cache()
 
     def shutdown(self) -> None:
         """Close renderer-local resources.

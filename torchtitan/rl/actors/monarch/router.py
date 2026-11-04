@@ -34,7 +34,7 @@ class _InterGeneratorRouterActorEndpoints:
     @concurrent_endpoint
     async def generate(
         self,
-        prompt_token_ids: list[int],
+        prompt: Any,
         *,
         request_id: str,
         group_id: int,
@@ -43,7 +43,7 @@ class _InterGeneratorRouterActorEndpoints:
         metrics_prefix: str,
     ) -> Any:
         return await super().generate(
-            prompt_token_ids,
+            prompt,
             request_id=request_id,
             group_id=group_id,
             routing_session_id=routing_session_id,
