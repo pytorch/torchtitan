@@ -36,7 +36,9 @@ def apply_patches() -> tuple[int, ...]:
         torch_version = version("torch")
     except PackageNotFoundError:
         return ()
-    if torch_version.split("+")[0] != "2.15.0":
+    # Dev builds (2.15.0.dev*) are accepted too; the per-function sha256
+    # anchors below reject any source drift explicitly.
+    if not torch_version.split("+")[0].startswith("2.15.0"):
         return ()
 
     from torch.distributed.pipelining import _backward, schedules, stage
