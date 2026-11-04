@@ -18,6 +18,10 @@ from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2,
     deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2,
 )
+from torchtitan_recipes.tests.models.deepseek_v4_1 import (
+    deepseek_v4_1_debugmodel_fsdp2_tp2_pp2_ep2,
+    deepseek_v4_1_debugmodel_seed,
+)
 from torchtitan_recipes.tests.models.multimodal import (
     set_rank_conditional_image_presence,
 )
@@ -136,6 +140,17 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_vmm() -> Trainer.Config:
 def build_b200_tests_list() -> list[IntegrationTestDefinition]:
     """Build integration tests that require B200-class hardware."""
     return [
+        IntegrationTestDefinition(
+            configs=[deepseek_v4_1_debugmodel_fsdp2_tp2_pp2_ep2],
+            test_descr="DeepSeek V4.1 Flash FSDP, TP, PP and EP numerics",
+            test_name="deepseek_v4_1_flash_fsdp2_tp2_pp2_ep2_numerics",
+            ngpu=8,
+            use_real_pg=True,
+            golden_numerics_path=(
+                "tests/assets/losses/real_pg/deepseek_v4_1_flash_b200.txt"
+            ),
+            loss_compare_seed_config=deepseek_v4_1_debugmodel_seed,
+        ),
         IntegrationTestDefinition(
             configs=[kimi_k3_debugmodel_mm],
             test_descr="Kimi K3 multimodal SPMD-typed FSDP, TP and EP",

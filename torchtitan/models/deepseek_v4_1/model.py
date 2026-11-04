@@ -4,15 +4,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""V4.1 Flash training model with explicit cross-layer state.
+"""V4.1 Flash training model with explicit cross-layer and pipeline state.
 
 T: tokens, C: HC branches, D: model width, S: global KV tokens,
 K: selected keys, P: candidate keys, L: Engram layers, Q: hash columns,
 F: concatenated backbone width.
 """
 
+import copy
 from dataclasses import dataclass, field
-from typing import ClassVar, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
@@ -143,11 +144,11 @@ class DeepSeekV41Model(MultimodalModel):
     """Teacher-forced training evaluates the complete causal encoder and decoder.
 
     Full layers replace the shared global pool. Reindex replaces selections;
-    Reuse consumes both. Carried tensors keep autograd history, and are scoped to one forward/microbatch.
+    Reuse consumes both. Carried tensors keep autograd history, including
+    across pipeline edges, and are scoped to one forward/microbatch.
     """
 
     state_dict_adapter_cls = DeepSeekV41StateDictAdapter
-    supports_pipeline_parallel: ClassVar[bool] = False
     multimodal_encoder_fqns = ("vision",)
 
     @dataclass(kw_only=True, slots=True)
@@ -362,14 +363,216 @@ class DeepSeekV41Model(MultimodalModel):
             )
         register_aux_loss_zero_hook(optimizers, model_parts, parallelism_context)
 
+    def pipeline(self, **kwargs):
+        from torchtitan.components.loss import ChunkedLossWrapper
+
+        from torchtitan.distributed.pipeline_parallel import (
+            get_module_fqns_per_model_part,
+            pipeline_llm,
+        )
+
+        parallelism = copy.copy(kwargs.pop("parallelism"))
+        pp_mesh = kwargs["parallelism_context"].get_mesh("pp")
+        if torch.distributed.get_backend(pp_mesh.get_group("pp")) == "fake":
+            raise ValueError(
+                "V4.1's multiple pipeline payloads require use_real_pg=True."
+            )
+        if parallelism.pipeline_parallel_module_fqns_per_model_part is None:
+            splits = get_module_fqns_per_model_part(
+                self,
+                first_stage_module_fqns=("vision", "aligner", "image_embeddings"),
+                last_stage_module_fqns=("drafter",),
+                parallelism_context=kwargs["parallelism_context"],
+                parallelism=parallelism,
+                model_config=kwargs["model_config"],
+            )
+        else:
+            splits = copy.deepcopy(
+                parallelism.pipeline_parallel_module_fqns_per_model_part
+            )
+        if any(not any(name.startswith("layers.") for name in part) for part in splits):
+            raise ValueError("V4.1 pipeline stages must contain transformer blocks.")
+        layer_fqns = [
+            name for part in splits for name in part if name.startswith("layers.")
+        ]
+        if layer_fqns != [
+            f"layers.{layer}" for layer in range(len(self.config.layers))
+        ]:
+            raise ValueError(
+                "V4.1 pipeline splits require complete transformer blocks, "
+                "once in layer order."
+            )
+        for owner_stage, names in (
+            (0, ("tok_embeddings", "vision", "aligner", "image_embeddings")),
+            (len(splits) - 1, ("norm", "lm_head", "drafter")),
+        ):
+            for name in names:
+                if getattr(self, name) is None:
+                    continue
+                actual_stages = [
+                    stage
+                    for stage, part in enumerate(splits)
+                    for fqn in part
+                    if fqn == name
+                ]
+                if actual_stages != [owner_stage]:
+                    raise ValueError(
+                        f"V4.1 module {name} must occur exactly once on pipeline "
+                        f"stage {owner_stage}."
+                    )
+        # All stages preprocess the same raw batch; hashes have no trainable state.
+        for part in splits:
+            if "engram_hash" not in part:
+                part.append("engram_hash")
+        parallelism.pipeline_parallel_module_fqns_per_model_part = splits
+        return pipeline_llm(
+            self,
+            parallelism=parallelism,
+            stage_metadata_factory=lambda stage_idx, num_stages: self._pipeline_stage_metadata(
+                stage_idx,
+                num_stages,
+                module_fqns=splits,
+                training=kwargs["training"],
+                parallelism_context=kwargs["parallelism_context"],
+                parallelism=parallelism,
+                lm_head_in_loss=isinstance(kwargs["loss_fn"], ChunkedLossWrapper),
+            ),
+            **kwargs,
+        )
+
+    def _pipeline_stage_metadata(
+        self,
+        stage_idx,
+        num_stages,
+        *,
+        module_fqns,
+        training,
+        parallelism_context,
+        parallelism,
+        lm_head_in_loss,
+    ):
+        """Describe cache tuples without probing synthetic integer cache IDs."""
+        from torchtitan.config import TORCH_DTYPE_MAP
+
+        num_tokens = training.num_tokens_per_microbatch_per_dp_rank
+        hidden_tokens = (
+            num_tokens // parallelism_context.tp
+            if parallelism.enable_sequence_parallel
+            else num_tokens
+        )
+        dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]
+        config = self.config
+
+        def example(*shape, dtype=dtype, requires_grad=True):
+            return torch.empty(
+                shape, dtype=dtype, device="meta", requires_grad=requires_grad
+            )
+
+        def boundary(stage):
+            last_layer = max(
+                int(name.split(".")[1])
+                for names in module_fqns[: stage + 1]
+                for name in names
+                if name.startswith("layers.")
+            )
+            pool_tokens, selected_keys, candidate_keys = 0, 0, 0
+            first_indexer = config.layers[config.kv_source_layers[0]].attention.indexer
+            assert first_indexer is not None
+            index_dim = first_indexer.head_dim
+            for layer in config.layers[: last_layer + 1]:
+                attention = layer.attention
+                if attention.compressor is not None:
+                    pool_tokens = num_tokens // attention.ratio
+                if (indexer := attention.indexer) is not None:
+                    width = min(
+                        pool_tokens, training.max_context_length // attention.ratio
+                    )
+                    selected_keys = min(
+                        indexer.topk,
+                        width
+                        if indexer.candidate_source or indexer.uses_candidates
+                        else training.max_context_length // attention.ratio,
+                    )
+                    if indexer.candidate_source:
+                        candidate_keys = (
+                            min(
+                                indexer.num_candidate_blocks,
+                                (width + indexer.candidate_block_size - 1)
+                                // indexer.candidate_block_size,
+                            )
+                            * indexer.candidate_block_size
+                        )
+            has_pool = last_layer >= config.kv_source_layers[0]
+            return (
+                example(hidden_tokens, config.hc_mult, config.dim),
+                example(hidden_tokens, config.hc_mult, dtype=torch.float32),
+                example(
+                    pool_tokens,
+                    config.layers[0].attention.head_dim,
+                    requires_grad=has_pool,
+                ),
+                example(pool_tokens, index_dim, requires_grad=has_pool),
+                example(
+                    num_tokens, selected_keys, dtype=torch.int32, requires_grad=False
+                ),
+                example(
+                    num_tokens,
+                    selected_keys,
+                    dtype=torch.float32,
+                    requires_grad=has_pool,
+                ),
+                example(
+                    num_tokens, candidate_keys, dtype=torch.int32, requires_grad=False
+                ),
+            )
+
+        is_first, is_last = stage_idx == 0, stage_idx == num_stages - 1
+        inputs = (
+            (example(num_tokens, dtype=torch.int64, requires_grad=False),)
+            if is_first
+            else boundary(stage_idx - 1)
+        )
+        if is_last:
+            output_dim = config.dim if lm_head_in_loss else config.vocab_size
+            if not lm_head_in_loss and parallelism_context.tp_enabled:
+                tp_rank = parallelism_context.get_mesh("tp").get_local_rank()
+                output_dim, remainder = divmod(output_dim, parallelism_context.tp)
+                output_dim += tp_rank < remainder
+            outputs = (example(num_tokens, output_dim),)
+        else:
+            outputs = boundary(stage_idx)
+        return {
+            "input_args": inputs,
+            "output_args": outputs,
+            "input_grads": tuple(
+                value.detach() if value.requires_grad else None for value in inputs
+            ),
+            "output_grads": (None,)
+            if is_last
+            else tuple(
+                value.detach() if value.requires_grad else None for value in outputs
+            ),
+        }
+
     def preprocess_inputs(
-        self, input_dict, *, parallelism_context, parallelism, **kwargs
+        self,
+        input_dict,
+        *,
+        parallelism_context,
+        parallelism,
+        max_num_documents: int | None = None,
+        **kwargs,
     ):
         from torchtitan.models.common.decoder_sharding import token_id_placement
 
         if parallelism_context.cp_enabled:
             raise ValueError(
                 "CSA2 shared pools currently require context_parallel_degree=1."
+            )
+        if parallelism_context.pp_enabled and max_num_documents is None:
+            raise ValueError(
+                "V4.1 pipeline parallelism requires dataloader.max_num_documents "
+                "for fixed attention payload shapes."
             )
         extras = {
             name: input_dict.pop(name)
@@ -426,6 +629,7 @@ class DeepSeekV41Model(MultimodalModel):
             input_dict,
             parallelism_context=parallelism_context,
             parallelism=parallelism,
+            max_num_documents=max_num_documents,
             **kwargs,
         )
         # These offsets describe each DP rank's documents, identically on TP.
@@ -519,12 +723,19 @@ class DeepSeekV41Model(MultimodalModel):
             hidden_TD = merged_TD
         return hidden_TD
 
-    def forward(
+    # Pipeline stages receive the carried tensors as additional positional inputs.
+    def forward(  # pyrefly: ignore [bad-param-name-override]
         self,
         tokens,
+        pre_mix=None,
+        global_k=None,
+        index_k=None,
+        selected_indices=None,
+        selected_scores=None,
+        candidates=None,
+        *,
         positions=None,
         attention_metadata=None,
-        *,
         padding_mask=None,
         aux_loss_denominators=None,
         engram_hashes=None,
@@ -549,52 +760,65 @@ class DeepSeekV41Model(MultimodalModel):
             token_mask_T = (
                 ~padding_mask if token_mask_T is None else token_mask_T & ~padding_mask
             )
-        if engram_hashes is None:
-            engram_hashes = self.engram_hash(
-                tokens, positions, token_mask_T=token_mask_T
-            )
-        hidden_TD = self.tok_embeddings(tokens)
-        hidden_TD = self._merge_images(
-            hidden_TD,
-            pixel_values=pixel_values,
-            grid_hw=grid_hw,
-            token_types=token_types,
-            vision_rope_cache=vision_rope_cache,
-            vision_bank_indices=vision_bank_indices,
-        )
-        if self.config.vision is not None:
-            if (tp_group := spmd_mesh_group("tp")) is not None:
-                hidden_TD = spmd.redistribute(
-                    hidden_TD,
-                    tp_group,
-                    src=spmd.R,
-                    dst=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+        if self.tok_embeddings is not None:
+            if engram_hashes is None:
+                engram_hashes = self.engram_hash(
+                    tokens, positions, token_mask_T=token_mask_T
                 )
-        h_TCD = hidden_TD[:, None, :].expand(-1, self.config.hc_mult, -1)
-        pre_mix = initial_pre_mix(h_TCD)
-        # Empty shared state is replicated across TP, unlike the residual.
-        with spmd.no_typecheck():
-            global_k = hidden_TD.new_empty(0, self.config.layers[0].attention.head_dim)
-            first_indexer = self.config.layers[
-                self.config.kv_source_layers[0]
-            ].attention.indexer
-            assert first_indexer is not None
-            index_k = hidden_TD.new_empty(0, first_indexer.head_dim)
-            selected_indices = torch.empty(
-                tokens.size(0), 0, dtype=torch.int32, device=tokens.device
+            hidden_TD = self.tok_embeddings(tokens)
+            hidden_TD = self._merge_images(
+                hidden_TD,
+                pixel_values=pixel_values,
+                grid_hw=grid_hw,
+                token_types=token_types,
+                vision_rope_cache=vision_rope_cache,
+                vision_bank_indices=vision_bank_indices,
             )
-            selected_scores = hidden_TD.new_empty(
-                tokens.size(0), 0, dtype=torch.float32
-            )
-        candidates = selected_indices
-        if spmd.is_type_checking():
-            from torchtitan.models.common.decoder_sharding import (
-                replicated_activation_placement,
-            )
+            if self.config.vision is not None:
+                if (tp_group := spmd_mesh_group("tp")) is not None:
+                    hidden_TD = spmd.redistribute(
+                        hidden_TD,
+                        tp_group,
+                        src=spmd.R,
+                        dst=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+                    )
+            h_TCD = hidden_TD[:, None, :].expand(-1, self.config.hc_mult, -1)
+            pre_mix = initial_pre_mix(h_TCD)
+            # Empty shared state is replicated across TP, unlike the residual.
+            with spmd.no_typecheck():
+                global_k = hidden_TD.new_empty(
+                    0, self.config.layers[0].attention.head_dim
+                )
+                first_indexer = self.config.layers[
+                    self.config.kv_source_layers[0]
+                ].attention.indexer
+                assert first_indexer is not None
+                index_k = hidden_TD.new_empty(0, first_indexer.head_dim)
+                selected_indices = torch.empty(
+                    tokens.size(0), 0, dtype=torch.int32, device=tokens.device
+                )
+                selected_scores = hidden_TD.new_empty(
+                    tokens.size(0), 0, dtype=torch.float32
+                )
+            candidates = selected_indices
+            if spmd.is_type_checking():
+                from torchtitan.models.common.decoder_sharding import (
+                    replicated_activation_placement,
+                )
 
-            spmd.assert_type(
-                (global_k, index_k, selected_indices, selected_scores, candidates),
-                replicated_activation_placement(),
+                spmd.assert_type(
+                    (global_k, index_k, selected_indices, selected_scores, candidates),
+                    replicated_activation_placement(),
+                )
+        else:
+            h_TCD = tokens
+            assert (
+                pre_mix is not None
+                and global_k is not None
+                and index_k is not None
+                and selected_indices is not None
+                and selected_scores is not None
+                and candidates is not None
             )
         with spmd.no_typecheck():
             denominator = (
@@ -643,6 +867,16 @@ class DeepSeekV41Model(MultimodalModel):
                 engram_hashes_TQ=layer_hashes_TQ,
                 engram_token_mask_T=token_mask_T,
                 aux_loss_denominator=denominator,
+            )
+        if self.norm is None:
+            return (
+                h_TCD,
+                pre_mix,
+                global_k,
+                index_k,
+                selected_indices,
+                selected_scores,
+                candidates,
             )
         hidden_TD = rms_norm(self.norm, mix_branches(h_TCD, pre_mix))
         output = hidden_TD if self._skip_lm_head else self.lm_head(hidden_TD)

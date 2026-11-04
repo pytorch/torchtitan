@@ -1,110 +1,154 @@
 # DeepSeek V4.1 Flash
 
-The text model implements teacher-forced training through the complete causal
-encoder and decoder. It reuses TorchTitan's shared MoE, RoPE, normalization,
-expert dispatch, activation rematerialization, and FSDP lifecycle.
+Native TorchTitan model definitions for the text backbone, vision encoder,
+Engram memory, and DSpark drafter. Architecture and checkpoint mappings are
+pinned to [DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/tree/314113f8a7dadb388215396ba5fbee2c610a04d6)
+and its [technical report](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/314113f8a7dadb388215396ba5fbee2c610a04d6/DeepSeek_V41_Tech_Report.pdf).
 
 ## Architecture
 
-The released model has 40 blocks and an encoder boundary after block 20.
-All block indices below are zero based.
+| Component | Released Flash flavor |
+| --- | --- |
+| Backbone | 40 layers, width 5120, four mHC branches |
+| Attention | 64 heads, head width 512, query rank 1280 |
+| Encoder / decoder | 20 / 20 layers; compression ratios 2 / 1 |
+| Local attention | Causal sliding window of 128 tokens in every layer |
+| Shared global KV producers | Layers 2, 8, 14, 20 (zero based) |
+| Index producers | Layers 2, 8, 14, 20, 24, 28, 32, 36 |
+| CSA2 | 512 selected keys; 2048 candidate blocks of eight keys |
+| MoE | 384 routed experts, top six, one shared expert, intermediate width 2304 |
+| Engram | Layers 1 and 14; orders 2 through 4, eight heads per order |
+| Vision | 32 layers, width 1024, patch size 14, downsample ratio 3 |
+| DSpark | Three draft layers, five draft positions, rank-256 Markov head |
+| Vocabulary / maximum context | 129280 / 1048576 |
 
-- Blocks 0 and 1 use sliding-window attention only.
-- Blocks 2 through 39 combine a 128-token local window with indexed global keys.
-- Blocks 2, 8, 14, and 20 project a new global KV pool. Encoder pools compress
-  two tokens per entry; the decoder pool retains one entry per token.
-- Reindex blocks update selections; Reuse blocks keep the previous selections.
-- Each block computes two sets of single-pass mHC coefficients over four
-  residual streams. The incoming read-in coefficients feed the current sublayer.
-- Engram uses causal 2-, 3-, and 4-gram hashes with gated phrase embeddings.
+CSA2 builds a candidate pool at the first decoder layer, periodically reindexes
+within that pool, and reuses the selected keys between index producers. Shared
+KV tensors retain their gradient paths to the producer. Indexer inputs are
+detached from the backbone, with the existing sparse-indexer auxiliary loss
+training the indexer parameters. Every layer still computes its own local KV.
 
-```text
-tokens -> embeddings -> four residual streams -> 40 blocks -> norm -> logits
-                            |                       ^
-                            +-> Engram hashes        |
-Full producer -> global KV/index keys -> Reindex/Reuse consumers
+The causal encoder-decoder design preserves the hidden-state chain through all
+40 layers. Teacher-forced training processes the complete sequence in each
+layer. The report's decoder prompt warmup and reduced prefill work require a
+serving engine's incremental caches and scheduling.
+
+## Run the debug model
+
+The debug flavor retains encoder and decoder layers, all three CSA2 layer
+roles, Engram, and mHC. It uses the bundled test tokenizer and C4 fixture.
+Recipes run ten steps with seed 42 and strict deterministic execution.
+
+```bash
+NGPU=1 MODULE=torchtitan_recipes.tests.models.deepseek_v4_1 \
+  CONFIG=deepseek_v4_1_debugmodel ./run_train.sh
 ```
 
-The debug flavor retains all attention modes, the encoder boundary, three KV
-producers, a decoder Reindex block, two Engram layers, and MoE routing.
+Two-GPU recipes are `deepseek_v4_1_debugmodel_tp2_ep2` and
+`deepseek_v4_1_debugmodel_pp2`. The combined eight-GPU recipe uses real FSDP2,
+TP2, PP2, and EP2, with four pipeline microbatches and four virtual stages:
 
-## Configuration
+```bash
+NGPU=8 MODULE=torchtitan_recipes.tests.models.deepseek_v4_1 \
+  CONFIG=deepseek_v4_1_debugmodel_fsdp2_tp2_pp2_ep2 ./run_train.sh
+```
+
+Pipeline edges explicitly carry the residual branches, next input mixing
+coefficients, shared KV, index keys, selected indices, selected scores, and
+candidate pool. These tensors belong to the current microbatch; no mutable
+cross-microbatch cache is used. The split places KV producers before pipeline
+boundaries and consumers after them. The model supplies static `PipelineStage`
+metadata for its seven tensors; metadata inference cannot safely execute with
+uninitialized integer selections. Custom splits must preserve layer order and
+put complete transformer blocks in every stage, the token embedding in the
+first stage, and the output norm and head in the last stage.
+Pipeline preprocessing requires `dataloader.max_num_documents` to keep selected
+key widths fixed across packed microbatches.
+
+## Released checkpoint and tokenizer
+
+Download a pinned tokenizer and model card first:
+
+```bash
+hf download deepseek-ai/DeepSeek-V4.1-Flash \
+  --revision 314113f8a7dadb388215396ba5fbee2c610a04d6 \
+  --include 'tokenizer*' 'config.json' 'model.safetensors.index.json' \
+  --local-dir ./assets/deepseek-v4.1-flash
+```
+
+Downloading the complete checkpoint additionally requires all safetensors
+shards. Build the released architecture with the matching tokenizer:
 
 ```python
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.deepseek_v4_1 import build_model_config
 
 config = build_model_config(
-    "debugmodel", parallelism=ParallelismConfig(), seq_len=128,
+    "deepseek_v4_1_flash",
+    parallelism=ParallelismConfig(),
+    seq_len=4096,
+    tokenizer_path="./assets/deepseek-v4.1-flash",
 )
 ```
 
-This increment supports FSDP with TP=EP=PP=1 and CP=1. The standard CUDA recipe
-uses the public attention-gym fused kernels. The explicit `reference` backend
-uses eager PyTorch attention for independent CPU comparisons. Training runs the
-full graph; optimized serving prefill is not implemented here.
+Engram's normalized token map and hash buffers are derived from the tokenizer
+and rebuilt by `init_states()`. A metadata-only full configuration can omit
+the tokenizer; a forward pass then requires explicitly supplied Engram hashes.
+Hash history is isolated at packed document boundaries, padding, and images.
 
-The adapter maps released HF text checkpoint keys and reads block-scaled FP8
-and packed FP4 tensors through slice-aware DCP loading. The manifest check does
-not download the released parameter values.
+`DeepSeekV41StateDictAdapter` maps native and HF weights, including grouped
+experts, vision, and DSpark. Its quantized HF storage reader exposes logical
+floating-point tensors and dequantizes only requested slices of FP8 or packed
+FP4 weights, including slices crossing quantization blocks. Loading through
+`CheckpointManager` uses `initial_load_in_hf=True` and
+`initial_load_in_hf_quantized=True`. Export produces ordinary floating-point HF
+weights. The two released Engram tables have 384006168 and 384016682 rows; a
+dequantized training model requires substantial distributed storage.
 
-## Images
+## Vision and draft APIs
 
-Set `vision_enabled=True` to include DeepSeek ViT, the padded 3x3 unshuffle
-aligner, and image marker embeddings. The released flavor includes them by
-default; the debug flavor uses a smaller encoder.
+Enable `vision_enabled=True` and `num_draft_layers=3` in a debug model to exercise
+these components. Image forward inputs are flattened patch vectors,
+`grid_hw=((height, width), ...)`, and per-token `token_types`; preprocessing
+also accepts `grid_thw` with time equal to one. Image-marker embeddings and the
+channel-major 3-by-3 aligner follow the reference checkpoint. The vision
+encoder uses bidirectional attention separately within each image.
 
-```text
-flattened patches -> ViT with two-axis RoPE -> 3x3 unshuffle -> aligner
-                                                                |
-packed tokens -> token embeddings + image markers + visual tokens -> backbone
-```
+`model(tokens, return_draft_context=True)` returns logits and concatenated
+backbone features from DSpark's three target layers. `model.forward_draft()`
+accepts those features, frozen draft-token embeddings, teacher-forced previous
+tokens, block anchors, context positions, and the frozen output weight. Draft
+attention sees its complete five-position block plus preceding local context.
+The Markov and confidence heads are trainable; the backbone and shared
+embedding/output projections are detached at the draft API.
 
-Preprocessing accepts `pixel_values`, `grid_thw` with time=1, and `token_types`.
-Types -1, 0, 1, 2, and 3 denote text, image start, aligned visual token,
-newline, and image end. Visual positions receive no Engram residual update and
-use their own expert-balancing counters. Text-only ranks execute a dummy visual
-dependency so FSDP can reduce the visual parameters when another rank has images.
-The image-balancing hook reduces all layers' counts together and is registered
-only for vision-enabled models. Distributed HF conversion keeps both stacked
-ViT projections on each rank and gathers the three marker rows before splitting
-them into the released checkpoint names.
+DSpark currently requires tensor-parallel degree one; explicitly set
+`num_draft_layers=0` when building a tensor-parallel released backbone.
+Draft-context collection currently requires an unsplit backbone. A caller
+using sharded shared projection weights must gather or unshard them before
+passing them to the draft API. The frozen output projection must remain owned
+through auxiliary backward; a retained FSDP all-gather view needs a copy.
+Input projections and final heads execute within their owning drafter blocks.
+Default rematerialization checkpoints the drafter blocks, and its separate
+optimizer registers the drafter expert-balancing update and counter reset. Incremental generation, acceptance/rejection,
+and serving throughput measurement require a serving engine.
 
-## DSpark
+## Validation and current limits
 
-Set `num_draft_layers=3` to build the auxiliary decoder. Its three blocks predict
-a five-position draft together, attending the preceding main-model context and
-the complete draft block. A low-rank Markov head corrects the token logits; the
-FP32 confidence head reads the residual before the drafter's final norm.
+See [VALIDATION.md](VALIDATION.md) for pinned sources, reference comparisons,
+hardware, distributed runs, and reproducibility evidence.
 
-```text
-three backbone residuals -> main projection -> draft blocks -> token logits
-noise-token embeddings ----------------------^                    ^
-previous tokens -> Markov embedding -> Markov correction ----------+
-                                     +-> confidence head
-```
+CPU execution uses `attention_backend="reference"`. The standard CUDA debug
+recipe uses the public attention-gym fused kernels shared with V4. The combined
+numerical recipe explicitly selects the reference backend; its `_fused` variant
+selects the fused backend. Both use CSA2's new selection and state flow.
+Training models FP8 local KV/Engram and FP4 global
+KV/indexer values with straight-through gradients while retaining ordinary
+floating-point tensors. This is not a packed incremental KV-cache allocator.
 
-`model(tokens, return_draft_context=True)` returns logits and the concatenated
-backbone features. `model.forward_draft(...)` accepts those features, draft
-embeddings, teacher-forced previous tokens, block anchors, and a frozen output
-projection. Gradients stop at the backbone features, draft embeddings, and
-shared output weight. The caller owns the auxiliary loss and serving schedule;
-the standard text-training recipe does not invoke the drafter.
-The supplied frozen projection must stay materialized through auxiliary
-backward; a retained FSDP all-gather view needs an owned copy. Input projection
-and final heads execute inside their owning drafter blocks so FSDP gathers
-their parameters before use.
-Default rematerialization also checkpoints the drafter blocks. Build its
-optimizer separately to register the drafter's expert-balancing update and
-counter reset at each auxiliary optimizer step.
-
-## Validation
-
-```bash
-pytest tests/unit_tests/cpu/models/deepseek_v4_1
-python -m scripts.checkpoint_conversion.numerical_tests_deepseek_v4_1 \
-  --reference-dir=/path/to/pinned/inference \
-  --output-json=/tmp/deepseek-v4-1-reference.json
-```
-
-See [VALIDATION.md](VALIDATION.md) for the reference revision and current evidence.
+Context parallelism currently requires degree one, and expert parallel degree
+must be at least tensor parallel degree. The combined pipeline recipe disables
+SPMD type checking because TorchTitan's training engine does not support that
+checker with PP; the TP/EP recipe enables it. Full released weight loading,
+full-scale convergence, and H100 execution remain to be validated before
+publishing a full-scale Trainer recipe.
