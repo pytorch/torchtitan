@@ -62,7 +62,8 @@ _buffer: ElasticBuffer | None = None
 # Combine removes the entry it uses. Under FullAC with absorbed scores, dispatch
 # replays while combine is saved. A finalizer in _dispatch_op_impl removes unused
 # replay handles.
-# TODO: return an opaque handle from the ops (like hybridep.DispatchHandle) and delete this cache.
+# TODO: Return opaque handles and delete this cache once upstream supports them:
+# https://github.com/meta-pytorch/remat/issues/10
 _handle_cache: dict = {}
 _handle_counter: int = 0
 

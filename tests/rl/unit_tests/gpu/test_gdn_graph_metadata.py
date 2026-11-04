@@ -12,8 +12,8 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from torchtitan.rl.generator.vllm import gdn
-from torchtitan.rl.generator.vllm.linear_attention import (
+from torchtitan.rl.generator.vllm.attention import gdn
+from torchtitan.rl.generator.vllm.attention.linear_attention import (
     LinearAttentionExecutionPath,
     TorchTitanLinearAttentionBackend,
     TorchTitanLinearAttentionMetadata,

@@ -15,7 +15,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import DataParallelMeshDims
 
 from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX, Loss
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
@@ -220,7 +220,7 @@ class MTPDecoder(Decoder):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
         from torchtitan.distributed.fsdp import (
@@ -233,10 +233,10 @@ class MTPDecoder(Decoder):
         apply_fsdp_to_mtp_decoder(
             self,
             dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
+            reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
             pp_enabled=parallelism_context.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
+            cpu_offload=parallelism.fsdp_enable_cpu_offloading,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             ep_degree=parallelism_context.ep,
             edp_mesh=edp_mesh,
@@ -252,7 +252,6 @@ class MTPDecoder(Decoder):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[
@@ -308,7 +307,6 @@ class MTPDecoder(Decoder):
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
             )
             input_dict["attention_metadata"] = attention_metadata
 

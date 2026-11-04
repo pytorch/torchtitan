@@ -103,7 +103,12 @@ import torch  # noqa: F401
 
 from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.config import apply_overrides, Configurable, OverrideConfig
+from torchtitan.config import (
+    apply_overrides,
+    Configurable,
+    OverrideConfig,
+    PrecisionConfig,
+)
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.system import ActorSystem, TrainerHandle
 from torchtitan.rl.controller.metrics import (
@@ -285,6 +290,11 @@ class Controller(Configurable):
         trainer: Trainer.Config
         """Trainer config. Controls the trainer model, optimizer, training, parallelism."""
 
+        precision: PrecisionConfig = field(default_factory=PrecisionConfig)
+        """Parameter, compute, and gradient-reduction dtypes of the trainer model. The
+        generators mirror it: they compute in ``param_dtype`` and hold the parameters
+        the trainer sends in the dtypes it sends them."""
+
         # TODO: put generator, num generators and generator router in a separate config
         generator: Generator.Config
         """Generator actor configuration (generator model, vLLM engine, sampling)."""
@@ -316,7 +326,19 @@ class Controller(Configurable):
 
         override: OverrideConfig = field(default_factory=OverrideConfig)
         """Registered overrides applied to this whole config tree, including the
-        trainer and generator models, when the controller is constructed."""
+        trainer and generator models, by ``resolve_overrides``: when the
+        controller is constructed, and by the launcher's submit command before
+        it plans the job."""
+
+        def resolve_overrides(self) -> None:
+            """Apply ``override`` to this config in place. Call it once, before
+            reading the config, wherever the run is planned or built."""
+            # Copy each model so overrides never write through a model config the
+            # recipe shares between the trainer and generator.
+            self.trainer.model = copy.deepcopy(self.trainer.model)
+            self.generator.model = copy.deepcopy(self.generator.model)
+            if self.override.imports:
+                apply_overrides(self.override, self)
 
         def maybe_log(self) -> None:
             debug = self.trainer.debug
@@ -352,6 +374,11 @@ class Controller(Configurable):
                     "(weights are synced from the trainer via TorchStore). "
                     "Set generator.checkpointer=None."
                 )
+            if (
+                self.trainer.dist_moe_runtime is not None
+                and self.precision.param_dtype != "bfloat16"
+            ):
+                raise ValueError("Dist-MoE requires precision.param_dtype='bfloat16'")
             if self.trainer.training.num_tokens_per_train_step != -1:
                 warnings.warn(
                     "trainer.training.num_tokens_per_train_step is ignored by "
@@ -380,10 +407,10 @@ class Controller(Configurable):
                 )
             if self.trainer.parallelism.enable_sequence_parallel:
                 sp_degree = self.trainer.parallelism.tensor_parallel_degree
-                max_context_length = self.trainer.training.max_context_length
+                max_context_length = self.trainer.model.max_context_length
                 if sp_degree > 1 and max_context_length % sp_degree != 0:
                     raise ValueError(
-                        "training.max_context_length "
+                        "trainer.model.max_context_length "
                         f"({max_context_length}) must be divisible "
                         f"by sequence parallel degree ({sp_degree})."
                     )
@@ -401,25 +428,17 @@ class Controller(Configurable):
                     )
                 if not self.trainer.debug.deterministic:
                     raise ValueError("batch_invariant requires deterministic=True")
-                # The trainer forward must compute in bf16 to match the bf16
-                # generator, via FSDP mixed precision. The trainer always wraps
-                # the model in FSDP (even at data_parallel_shard_degree=1, where
-                # FSDP acts purely as a mixed-precision boundary), so
-                # mixed_precision_param == "bfloat16" casts the fp32 master
-                # weights to bf16 for the forward before any matmul.
-                if self.trainer.training.mixed_precision_param != "bfloat16":
+                # Batch-invariant mode computes in bf16. The generator computes in
+                # precision.param_dtype, and so does the trainer forward: the trainer
+                # always wraps the model in FSDP (even at data_parallel_shard_degree=1,
+                # where FSDP acts purely as a mixed-precision boundary), which casts
+                # the master weights to param_dtype before any matmul.
+                if self.precision.param_dtype != "bfloat16":
                     raise ValueError(
-                        "batch_invariant requires the trainer forward to compute "
-                        "in bfloat16 to match the generator. Set "
-                        "training.mixed_precision_param='bfloat16' (fp32 master "
-                        "weights, bf16-cast forward via FSDP mixed precision). "
-                        "Got mixed_precision_param="
-                        f"{self.trainer.training.mixed_precision_param!r}."
-                    )
-                if self.generator.model_dtype != "bfloat16":
-                    raise ValueError(
-                        f"batch_invariant requires bfloat16 generator dtype, "
-                        f"got {self.generator.model_dtype!r}"
+                        "batch_invariant requires the trainer and generator to compute "
+                        "in bfloat16. Set precision.param_dtype='bfloat16'. "
+                        "Got param_dtype="
+                        f"{self.precision.param_dtype!r}."
                     )
                 if self.trainer.parallelism.enable_sequence_parallel:
                     raise ValueError(
@@ -430,12 +449,7 @@ class Controller(Configurable):
 
     def __init__(self, config: Config):
         self.config = config
-        # Copy each model so overrides never write through a model config the
-        # recipe shares between the trainer and generator.
-        config.trainer.model = copy.deepcopy(config.trainer.model)
-        config.generator.model = copy.deepcopy(config.generator.model)
-        if config.override.imports:
-            apply_overrides(config.override, config)
+        config.resolve_overrides()
         config.maybe_log()
         self.actor_system: ActorSystem | None = None
         self.trainer: TrainerHandle | None = None
@@ -555,8 +569,16 @@ class Controller(Configurable):
 
         return release_session
 
+    async def _build_actor_system(self) -> ActorSystem:
+        """Build the actor system ``setup_async`` spawns the services through.
+
+        Subclasses override it to build the actor system differently, e.g. on
+        hosts a launcher allocated (``MonarchControllerWithLauncher``).
+        """
+        return self.config.actor_system.build()
+
     @sl.log_trace_span("setup_async")
-    async def setup_async(self, *, actor_system: ActorSystem | None = None):
+    async def setup_async(self):
         """Spawn the services through the actor system and initialize weights.
 
         Kept separate from ``__init__`` because provisioning processes, spawning
@@ -567,11 +589,6 @@ class Controller(Configurable):
         Provisions and spawns the trainer, generators, router, batcher and rollout
         workers through the actor system, and synchronizes initial weights from
         trainer to generator. Must be called before :meth:`run`.
-
-        Args:
-            actor_system: An actor system the launcher built, e.g. a
-                ``MonarchActorSystem`` on hosts it allocated; None builds
-                ``config.actor_system``.
         """
         # Peak concurrent rollout sequences (groups * num_samples_per_prompt, or the validation pass); sizes max_num_seqs below.
         async_loop = self.config.async_loop
@@ -609,8 +626,7 @@ class Controller(Configurable):
         )
 
         with sl.log_trace_span("mesh_spawn"):
-            if actor_system is None:
-                actor_system = config.actor_system.build()
+            actor_system = await self._build_actor_system()
             self.actor_system = actor_system
             await actor_system.provision(
                 trainer_parallelism=config.trainer.parallelism,
@@ -620,8 +636,8 @@ class Controller(Configurable):
             self.trainer = await actor_system.spawn_trainer(
                 config.trainer,
                 dp_degree=self.trainer_dp_degree,
+                precision=config.precision,
                 hf_assets_path=config.hf_assets_path,
-                generator_dtype=config.generator.model_dtype,
                 max_num_documents=config.async_loop.batcher.max_num_documents,
                 output_dir=config.dump_folder,
             )
@@ -629,6 +645,7 @@ class Controller(Configurable):
             self.generator_router = await actor_system.spawn_generator_router(
                 config.generator_router,
                 generator_config=config.generator,
+                precision=config.precision,
                 model_path=config.hf_assets_path,
                 max_num_seqs=max_num_seqs,
                 output_dir=config.dump_folder,
@@ -638,7 +655,7 @@ class Controller(Configurable):
                 num_tokens_per_microbatch_per_dp_rank=(
                     config.trainer.training.num_tokens_per_microbatch_per_dp_rank
                 ),
-                max_context_length=config.trainer.training.max_context_length,
+                max_context_length=config.trainer.model.max_context_length,
                 num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
                 dp_degree=self.trainer_dp_degree,
                 num_pp_microbatches=(
@@ -1070,16 +1087,16 @@ class Controller(Configurable):
         The push and pull of policy N overlap forward/backward N+1:
 
             Trainer:    forward/backward N
-            Controller: await push N-1     (optimizer N must not mutate weights push N-1 stages)
+            Controller: await push N-1     (optimizer N must not mutate weights push N-1 reads)
             Trainer:    optimizer N -> policy N
             Controller: await pull N-1     (push N must not overwrite the TorchStore key mid-pull)
             Controller: start push N -> pull N -> release groups, in the background
-                          |-> Trainer: stage policy N, TorchStore put_state_dict
-                          |-> Generators: prefetch policy N into pinned CPU memory, then load it
+                          |-> Trainer: TorchStore put_state_dict of policy N
+                          |-> Generators: load policy N (cpu_prefetch: prefetch it into pinned CPU memory first)
                           |-> Group buffer: admit the next rollout groups
             Trainer:    forward/backward N+1 (does not mutate persistent model state)
 
-        See `Trainer.push_model_state_dict` for why staging can overlap forward/backward, and
+        See `Trainer.push_model_state_dict` for why the push can overlap forward/backward, and
         `Generator.load_model_state_dict` for how a generator applies the load between steps.
 
         Impact on off-policiness: no sample is born stale, because the buffer admits new rollout

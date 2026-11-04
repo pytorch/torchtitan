@@ -17,7 +17,7 @@ from typing import Self
 import spmd_types as spmd
 import torch
 
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.local_compile import LocalCompileConfig
@@ -35,7 +35,7 @@ class MultimodalModel(Decoder):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
         local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
@@ -57,7 +57,7 @@ class MultimodalModel(Decoder):
 
             self._apply_fsdp(
                 parallelism_context=parallelism_context,
-                training=training,
+                precision=precision,
                 parallelism=parallelism,
             )
         return self
@@ -66,7 +66,7 @@ class MultimodalModel(Decoder):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
         from torchtitan.distributed.fsdp import (
@@ -86,16 +86,16 @@ class MultimodalModel(Decoder):
                 apply_fsdp_to_multimodal_encoder(
                     encoder,
                     dp_mesh,
-                    param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-                    reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+                    param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
+                    reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
                     reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
                     pp_enabled=parallelism_context.pp_enabled,
-                    cpu_offload=training.enable_cpu_offload,
+                    cpu_offload=parallelism.fsdp_enable_cpu_offloading,
                     dp_mesh_dims=dp_mesh_dims,
                 )
         super()._apply_fsdp(
             parallelism_context=parallelism_context,
-            training=training,
+            precision=precision,
             parallelism=parallelism,
         )
 

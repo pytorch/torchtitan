@@ -34,7 +34,7 @@ from torchtitan.components.loss import (
     IGNORE_INDEX,
     Loss,
 )
-from torchtitan.config import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import LoRATransform, transform_model_config_
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.deepseek_v3.mtp import (
@@ -181,7 +181,6 @@ class TestLoss(unittest.TestCase):
                 parallelism_context=SimpleNamespace(cp_enabled=False),
                 parallelism=SimpleNamespace(),
                 max_num_documents=2,
-                max_context_length=8,
                 global_routing_token_counts=routing_token_counts,
             )
 

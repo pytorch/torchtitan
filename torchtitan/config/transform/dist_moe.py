@@ -51,8 +51,8 @@ def _replace_routed_experts(
             swiglu_limit = None
         elif isinstance(source.activation_fn, ClampedSwiGLU.Config):
             activation = "swiglu_clamped"
-            swiglu_alpha = source.activation_fn.swiglu_alpha
-            swiglu_limit = source.activation_fn.swiglu_limit
+            swiglu_alpha = source.activation_fn.alpha
+            swiglu_limit = source.activation_fn.limit
         else:
             raise TypeError(
                 "Dist-MoE supports SwiGLU.Config or ClampedSwiGLU.Config; "

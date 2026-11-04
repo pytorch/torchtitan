@@ -4,12 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
 import unittest
 
 from unittest.mock import patch
 
 import pytest
 import torch
+import torch.utils.deterministic
 import torch_remat as remat
 from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -27,7 +29,10 @@ from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.activation import SwiGLU
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import (
+    DeepEPTokenDispatcher,
+    HybridEPTokenDispatcher,
+)
 
 deep_ep = pytest.importorskip("deep_ep")
 
@@ -39,8 +44,8 @@ _NUM_TOKENS = 64
 _TOP_K = 2
 
 
-class _DeepEPBlock(Module):
-    def __init__(self, num_experts: int):
+class _EPBlock(Module):
+    def __init__(self, num_experts: int, dispatcher_config):
         super().__init__()
         # RoutedExperts.forward runs after EP has selected this rank's local
         # expert-weight shard. This test bypasses parallelization, so construct
@@ -61,12 +66,7 @@ class _DeepEPBlock(Module):
         ).build()
         routed_experts.activation_fn = SwiGLU.Config().build()
         routed_experts.output_postprocess = None
-        routed_experts.token_dispatcher = DeepEPTokenDispatcher.Config(
-            num_experts=num_experts,
-            top_k=_TOP_K,
-            hidden_dim=_MODEL_DIM,
-            num_max_tokens_per_rank=_NUM_TOKENS,
-        ).build()
+        routed_experts.token_dispatcher = dispatcher_config.build()
         self.gate = torch.nn.Linear(_MODEL_DIM, num_experts, bias=False)
         with torch.no_grad():
             for parameter in routed_experts.parameters():
@@ -95,7 +95,7 @@ class _DeepEPBlock(Module):
         return out_TD.float().square().sum()
 
 
-class _PostW2(_DeepEPBlock):
+class _PostW2(_EPBlock):
     """Reference DeepEP experts with router scores applied after W2."""
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
@@ -140,54 +140,34 @@ class _Model(Module):
 def _run_forward_backward(
     model: Module,
     x_TD: torch.Tensor,
-) -> tuple[torch.Tensor, list[torch.Tensor]]:
+) -> list[torch.Tensor]:
     model.zero_grad(set_to_none=True)
     input_TD = x_TD.detach().clone().requires_grad_(True)
     loss = model(input_TD)
     loss.backward()
     assert input_TD.grad is not None
-    grads = [input_TD.grad.detach().clone()]
+    grads = [loss.detach().clone(), input_TD.grad.detach().clone()]
     grads += [parameter.grad.detach().clone() for parameter in model.parameters()]
-    return loss.detach().clone(), grads
+    return grads
 
 
-@unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
-class TestDeepEPActivationCheckpointing(DTensorTestBase):
+class _EPActivationCheckpointing(DTensorTestBase):
     @property
     def world_size(self) -> int:
         return 2
 
-    @with_comms
-    def test_dispatch_and_combine_are_saved_not_replayed(self):
-        # DeepEP fills receive slots with atomics, so a replayed dispatch can
-        # receive rows in another order than the forward's handle records.
-        # Backward would then pair each token's gradient with another token's
-        # activations. These policies save dispatch and combine instead.
-        self._check_deepep_activation_checkpointing(
-            (
-                DefaultActivationRematConfig(),
-                ActivationRematConfig(save_regions=["*ep_communication"]),
-            ),
-            num_replays=0,
-        )
-
-    @with_comms
-    def test_region_ac_replay_is_exact(self):
-        # These policies replay dispatch with a deterministic buffer, so the
-        # gradients match the run without AC bitwise. Combine is always saved.
-        self._check_deepep_activation_checkpointing(
-            (
-                FullActivationRematConfig(),
-                ActivationRematConfig(save_regions=[]),
-            ),
-            num_replays=1,
-        )
-
-    def _check_deepep_activation_checkpointing(
+    def _check_ep_activation_checkpointing(
         self,
         ac_configs: tuple,
         *,
-        num_replays: int,
+        num_dispatch_replays: int,
+        num_combine_replays: int,
+        dispatcher_config,
+        buffer_type,
+        dispatch_method: str,
+        combine_method: str,
+        exact: bool,
+        capture: bool = False,
     ) -> None:
         mesh = init_device_mesh(
             self.device_type,
@@ -207,28 +187,32 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                 set_current_spmd_mesh(mesh),
             ):
                 torch.manual_seed(42)
-                baseline = _Model(_DeepEPBlock(num_experts)).to(
+                baseline = _Model(_EPBlock(num_experts, dispatcher_config)).to(
                     self.device_type, torch.bfloat16
                 )
-                ac_model = _Model(_DeepEPBlock(num_experts)).to(
-                    self.device_type, torch.bfloat16
-                )
-                reference = _Model(_PostW2(num_experts)).to(
+                ac_model = _Model(_EPBlock(num_experts, dispatcher_config)).to(
                     self.device_type, torch.bfloat16
                 )
                 ac_model.load_state_dict(baseline.state_dict())
-                reference.load_state_dict(baseline.state_dict())
+                reference = None
+                if isinstance(dispatcher_config, DeepEPTokenDispatcher.Config):
+                    reference = _Model(_PostW2(num_experts, dispatcher_config)).to(
+                        self.device_type, torch.bfloat16
+                    )
+                    reference.load_state_dict(baseline.state_dict())
                 activation_remat.apply(ac_model)
-                # As in training, the buffer is created after AC is applied. Both
+                # As in training, the buffer is created after AC is applied. All
                 # models share it, so the baseline also runs deterministic when
                 # the AC model replays.
                 baseline.layers["0"].routed_experts.token_dispatcher.init_buffer()
                 ac_model.layers["0"].routed_experts.token_dispatcher.init_buffer()
-                reference.layers["0"].routed_experts.token_dispatcher.init_buffer()
+                if reference is not None:
+                    reference.layers["0"].routed_experts.token_dispatcher.init_buffer()
 
                 num_calls = {"dispatch": 0, "combine": 0}
                 original = {
-                    name: getattr(deep_ep.ElasticBuffer, name) for name in num_calls
+                    "dispatch": getattr(buffer_type, dispatch_method),
+                    "combine": getattr(buffer_type, combine_method),
                 }
 
                 def counted(name):
@@ -245,49 +229,64 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                     device=self.device_type,
                     dtype=torch.bfloat16,
                 )
+                if capture:
+                    stream = torch.cuda.Stream()
+                    stream.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(stream):
+                        for _ in range(3):
+                            _run_forward_backward(ac_model, x_TD)
+                    torch.cuda.current_stream().wait_stream(stream)
                 with (
                     patch.object(
-                        deep_ep.ElasticBuffer,
-                        "dispatch",
+                        buffer_type,
+                        dispatch_method,
                         autospec=True,
                         side_effect=counted("dispatch"),
                     ),
                     patch.object(
-                        deep_ep.ElasticBuffer,
-                        "combine",
+                        buffer_type,
+                        combine_method,
                         autospec=True,
                         side_effect=counted("combine"),
                     ),
                 ):
-                    expected_loss, expected = _run_forward_backward(baseline, x_TD)
+                    expected = _run_forward_backward(baseline, x_TD)
                     baseline_calls = dict(num_calls)
                     num_calls.update(dispatch=0, combine=0)
-                    _, actual = _run_forward_backward(ac_model, x_TD)
+                    if capture:
+                        graph = torch.cuda.CUDAGraph()
+                        with torch.cuda.graph(graph):
+                            actual = _run_forward_backward(ac_model, x_TD)
+                        graph.replay()
+                    else:
+                        actual = _run_forward_backward(ac_model, x_TD)
 
-                reference_loss, reference_grads = _run_forward_backward(reference, x_TD)
-                # Compare the default pre-W2 router-score absorption path with
-                # the previous behavior, which applied router scores after W2.
-                bf16_rtol = 2 * torch.finfo(torch.bfloat16).eps
-                for value, reference_value in zip(
-                    [expected_loss, *expected],
-                    [reference_loss, *reference_grads],
-                ):
-                    error_norm = torch.linalg.vector_norm(
-                        value.float() - reference_value.float()
-                    )
-                    reference_norm = torch.linalg.vector_norm(reference_value.float())
-                    self.assertLessEqual(
-                        error_norm.item(), bf16_rtol * reference_norm.item()
-                    )
+                if reference is not None:
+                    reference_values = _run_forward_backward(reference, x_TD)
+                    # Compare pre-W2 absorption with the previous post-W2 scoring.
+                    bf16_rtol = 2 * torch.finfo(torch.bfloat16).eps
+                    for value, reference_value in zip(expected, reference_values):
+                        error_norm = torch.linalg.vector_norm(
+                            value.float() - reference_value.float()
+                        )
+                        reference_norm = torch.linalg.vector_norm(
+                            reference_value.float()
+                        )
+                        self.assertLessEqual(
+                            error_norm.item(), bf16_rtol * reference_norm.item()
+                        )
 
                 # Forward dispatch and combine, plus their backward passes.
                 self.assertEqual(baseline_calls, {"dispatch": 2, "combine": 2})
                 self.assertEqual(
                     num_calls,
-                    {"dispatch": 2 + num_replays, "combine": 2},
-                    msg=f"unexpected DeepEP replays: {num_calls}",
+                    {
+                        "dispatch": 2 + num_dispatch_replays,
+                        "combine": 2 + num_combine_replays,
+                    },
+                    msg=f"unexpected EP communication replays: {num_calls}",
                 )
-                if num_replays:
+                if exact:
                     for actual_grad, expected_grad in zip(actual, expected):
                         torch.testing.assert_close(
                             actual_grad, expected_grad, rtol=0, atol=0
@@ -298,3 +297,120 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                     # weight grads.
                     for actual_grad, expected_grad in zip(actual, expected):
                         torch.testing.assert_close(actual_grad, expected_grad)
+
+
+@unittest.skipUnless(
+    torch.cuda.device_count() >= 2 and hasattr(deep_ep, "ElasticBuffer"),
+    "requires two CUDA devices and DeepEP v2",
+)
+class TestDeepEPActivationCheckpointing(_EPActivationCheckpointing):
+    def _check_deepep_activation_checkpointing(self, ac_configs, *, num_replays):
+        self._check_ep_activation_checkpointing(
+            ac_configs,
+            num_dispatch_replays=num_replays,
+            num_combine_replays=0,
+            dispatcher_config=DeepEPTokenDispatcher.Config(
+                num_experts=4 * self.world_size,
+                top_k=_TOP_K,
+                hidden_dim=_MODEL_DIM,
+                num_max_tokens_per_rank=_NUM_TOKENS,
+            ),
+            buffer_type=deep_ep.ElasticBuffer,
+            dispatch_method="dispatch",
+            combine_method="combine",
+            exact=bool(num_replays),
+        )
+
+    @with_comms
+    def test_dispatch_and_combine_are_saved_not_replayed(self):
+        self._check_deepep_activation_checkpointing(
+            (
+                DefaultActivationRematConfig(),
+                ActivationRematConfig(save_regions=["*ep_communication"]),
+            ),
+            num_replays=0,
+        )
+
+    @with_comms
+    def test_region_ac_replay_is_exact(self):
+        self._check_deepep_activation_checkpointing(
+            (FullActivationRematConfig(), ActivationRematConfig(save_regions=[])),
+            num_replays=1,
+        )
+
+
+@unittest.skipUnless(
+    torch.cuda.device_count() >= 2 and hasattr(deep_ep, "HybridEPBuffer"),
+    "requires two CUDA devices and HybridEP",
+)
+class TestHybridEPActivationCheckpointing(_EPActivationCheckpointing):
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(
+            torch.use_deterministic_algorithms,
+            torch.are_deterministic_algorithms_enabled(),
+        )
+        torch.use_deterministic_algorithms(True)
+        # Match set_determinism: filling empty outputs races with comm streams.
+        self.addCleanup(
+            setattr,
+            torch.utils.deterministic,
+            "fill_uninitialized_memory",
+            torch.utils.deterministic.fill_uninitialized_memory,
+        )
+        torch.utils.deterministic.fill_uninitialized_memory = False
+        env = patch.dict(os.environ, {"CUBLAS_WORKSPACE_CONFIG": ":4096:8"})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def _check_hybridep_activation_checkpointing(
+        self, ac_configs, *, num_replays, capture=False
+    ):
+        for capacity_factor in (1.0,) if capture else (None, 1.0):
+            with self.subTest(capacity_factor=capacity_factor):
+                self._check_ep_activation_checkpointing(
+                    ac_configs,
+                    num_dispatch_replays=num_replays,
+                    num_combine_replays=num_replays,
+                    dispatcher_config=HybridEPTokenDispatcher.Config(
+                        num_experts=4 * self.world_size,
+                        top_k=_TOP_K,
+                        hidden_dim=_MODEL_DIM,
+                        num_max_tokens_per_rank=_NUM_TOKENS,
+                        non_blocking_capacity_factor=capacity_factor,
+                    ),
+                    buffer_type=deep_ep.HybridEPBuffer,
+                    dispatch_method="dispatch_with_permute",
+                    combine_method="combine_with_unpermute",
+                    exact=True,
+                    capture=capture,
+                )
+
+    @with_comms
+    def test_dispatch_and_combine_are_saved_not_replayed(self):
+        # Copying saved tensors must not release the CPU ID owning the handle.
+        with remat.saved_tensors_hooks(
+            lambda tensor: tensor.detach().clone(), lambda tensor: tensor
+        ):
+            self._check_hybridep_activation_checkpointing(
+                (
+                    DefaultActivationRematConfig(),
+                    ActivationRematConfig(save_regions=["*ep_communication"]),
+                ),
+                num_replays=0,
+            )
+
+    @with_comms
+    def test_region_ac_replay_is_exact(self):
+        self._check_hybridep_activation_checkpointing(
+            (FullActivationRematConfig(), ActivationRematConfig(save_regions=[])),
+            num_replays=1,
+        )
+
+    @with_comms
+    def test_saved_communication_is_graph_capturable(self):
+        self._check_hybridep_activation_checkpointing(
+            (DefaultActivationRematConfig(),),
+            num_replays=0,
+            capture=True,
+        )
