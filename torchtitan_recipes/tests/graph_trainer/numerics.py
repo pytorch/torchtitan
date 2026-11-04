@@ -27,6 +27,10 @@ from torchtitan_recipes.tests.graph_trainer.deepseek_v4 import (
 from torchtitan_recipes.tests.graph_trainer.gpt_oss import (
     graph_trainer_gpt_oss_debugmodel_flex,
 )
+from torchtitan_recipes.tests.graph_trainer.kimi_k2_7 import (
+    graph_trainer_kimi_k2_7_debugmodel,
+    kimi_k2_7_debugmodel_text,
+)
 from torchtitan_recipes.tests.graph_trainer.kimi_k3 import (
     graph_trainer_kimi_k3_debugmodel,
     kimi_k3_debugmodel_text,
@@ -378,8 +382,8 @@ def qwen35_moe_graph_numerics():
     return graph_trainer_qwen35_debugmodel_moe(_qwen35_numerics_parallelism())
 
 
-def _kimi_k3_numerics(config):
-    # The debugmodel's DistMuon rejects TP, so TP is set after construction.
+def _kimi_numerics(config):
+    # The Kimi debugmodels' DistMuon rejects TP, so TP is set after construction.
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 2
@@ -392,12 +396,29 @@ def kimi_k3_eager_numerics():
     )
     # Match GraphTrainer, which captures model and loss in one eager FX graph.
     config.model.local_compile.regions = []
-    return _without_inplace_wgrad_accum(_kimi_k3_numerics(config))
+    return _without_inplace_wgrad_accum(_kimi_numerics(config))
 
 
 def kimi_k3_graph_numerics():
-    return _kimi_k3_numerics(
+    return _kimi_numerics(
         graph_trainer_kimi_k3_debugmodel(
+            parallelism=ParallelismConfig(expert_parallel_degree=2)
+        )
+    )
+
+
+def kimi_k2_7_eager_numerics():
+    config = kimi_k2_7_debugmodel_text(
+        parallelism=ParallelismConfig(expert_parallel_degree=2)
+    )
+    # Match GraphTrainer, which captures model and loss in one eager FX graph.
+    config.model.local_compile.regions = []
+    return _without_inplace_wgrad_accum(_kimi_numerics(config))
+
+
+def kimi_k2_7_graph_numerics():
+    return _kimi_numerics(
+        graph_trainer_kimi_k2_7_debugmodel(
             parallelism=ParallelismConfig(expert_parallel_degree=2)
         )
     )

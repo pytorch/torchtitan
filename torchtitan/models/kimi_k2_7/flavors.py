@@ -283,6 +283,7 @@ def _debugmodel(
     *,
     seq_len: int,
     parallelism: ParallelismConfig,
+    with_vision: bool,
 ) -> KimiK25Model.Config:
     dim = 256
     n_layers = 6
@@ -325,7 +326,7 @@ def _debugmodel(
             original_seq_len=4096,
         ),
         first_layer_sharding_config=_first_layer_sharding(
-            enable_sp=enable_sp, multimodal=True
+            enable_sp=enable_sp, multimodal=with_vision
         ),
         enable_sp=enable_sp,
         enable_ep=parallelism.expert_parallel_degree > 1,
@@ -339,7 +340,7 @@ def _debugmodel(
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
             sharding_config=_token_embedding_sharding(
-                enable_sp=enable_sp, multimodal=True
+                enable_sp=enable_sp, multimodal=with_vision
             ),
         ),
         norm=RMSNorm.Config(
@@ -354,15 +355,19 @@ def _debugmodel(
             sharding_config=lm_head_sharding_config(),
         ),
         layers=layers,
-        vision_encoder=_vision_encoder_config(
-            dim=256,
-            ffn_dim=512,
-            num_layers=4,
-            num_heads=4,
-            patch_size=14,
-            init_pos_emb_height=16,
-            init_pos_emb_width=16,
-            text_hidden_size=dim,
+        vision_encoder=(
+            _vision_encoder_config(
+                dim=256,
+                ffn_dim=512,
+                num_layers=4,
+                num_heads=4,
+                patch_size=14,
+                init_pos_emb_height=16,
+                init_pos_emb_width=16,
+                text_hidden_size=dim,
+            )
+            if with_vision
+            else None
         ),
     )
     return config
@@ -593,7 +598,9 @@ def _kimi_k2_5(
 
 
 MODEL_FLAVORS = {
-    "debugmodel": (_debugmodel, 16384),
+    "debugmodel": (partial(_debugmodel, with_vision=True), 16384),
+    # The debug decoder without its vision encoder.
+    "debugmodel_text": (partial(_debugmodel, with_vision=False), 16384),
     "moonlight-16B-A3B": (_moonlight_16b_a3b, 8192),
     "Kimi-VL-A3B": (_kimi_vl_a3b, 131072),
     "Kimi-K2.5": (_kimi_k2_5, 262144),

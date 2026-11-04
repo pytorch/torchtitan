@@ -419,6 +419,19 @@ def _run_kimi_k3_loss_compare() -> bool:
     )
 
 
+def _run_kimi_k2_7_loss_compare() -> bool:
+    """Compare Kimi K2.7 eager and GraphTrainer with FSDP+TP+EP on four GPUs."""
+    return run_loss_compare(
+        baseline_module=NUMERICS_CONFIG_MODULE,
+        baseline_config="kimi_k2_7_eager_numerics",
+        test_module=NUMERICS_CONFIG_MODULE,
+        test_config="kimi_k2_7_graph_numerics",
+        baseline_ngpus=4,
+        test_ngpus=4,
+        metrics=("loss", "grad_norm"),
+    )
+
+
 def _run_qwen35_moe_loss_compare() -> bool:
     """Compare Qwen3.5 MoE eager and GraphTrainer with FSDP+TP+EP on four GPUs."""
     return run_loss_compare(
@@ -508,6 +521,9 @@ class TestGraphTrainerNumerics(unittest.TestCase):
     )
     def test_moe_kimi_k3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_kimi_k3_loss_compare())
+
+    def test_moe_kimi_k2_7_aot_fx_trace_vs_eager(self):
+        self.assertTrue(_run_kimi_k2_7_loss_compare())
 
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Attention Gym GDN requires CUDA capability 9.0+"
