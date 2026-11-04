@@ -71,7 +71,6 @@ from .model import (
 from .sharding import (
     attention_sharding_config,
     cp_replicated_vision_sharding_config,
-    perception_emb_norm_sharding_config,
     scaleless_head_norm_sharding_config,
 )
 
@@ -355,7 +354,7 @@ def _muse_glimmer_config(
         perception_emb_norm = _scaleless_norm(
             dim,
             _NORM_EPS,
-            sharding_config=perception_emb_norm_sharding_config(enable_sp=enable_sp),
+            sharding_config=cp_replicated_vision_sharding_config(),
         )
 
     return MuseGlimmerModel.Config(

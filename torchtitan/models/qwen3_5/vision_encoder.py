@@ -20,6 +20,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.spmd_types import maybe_replicate_invariant
 from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common import Linear
@@ -301,7 +303,10 @@ class PatchMerger(Module):
         """
         x_TD = self.norm(x_TD)
         x_MK = x_TD.view(-1, self.merged_hidden_size)
-        return self.linear_fc2(self.act_fn(self.linear_fc1(x_MK)))
+        out_MO = self.linear_fc2(self.act_fn(self.linear_fc1(x_MK)))
+        # The merged features are scattered into the TP-replicated text
+        # embeddings; the encoder output separately owns the CP boundary.
+        return maybe_replicate_invariant(out_MO, MeshAxisName.TP)
 
 
 class Qwen35VisionEncoder(Module):

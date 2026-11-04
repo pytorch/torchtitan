@@ -24,6 +24,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.spmd_types import maybe_replicate_invariant
 from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common import Linear
@@ -322,7 +324,9 @@ class VisionProjector(Module):
         x = self.pre_norm(x).view(num_merged_tokens, self.merged_dim)
         x = self.linear_1(x)
         x = self.act_fn(x)
-        return self.linear_2(x)
+        # The projected features are scattered into the TP-replicated text
+        # embeddings; the encoder output separately owns the CP boundary.
+        return maybe_replicate_invariant(self.linear_2(x), MeshAxisName.TP)
 
 
 class MoonViTEncoder(Module):

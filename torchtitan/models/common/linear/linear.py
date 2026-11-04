@@ -264,11 +264,18 @@ class _LinearFunction(torch.autograd.Function):
         return grad_input, grad_weight, grad_bias
 
 
-def maybe_gather_tp_input(module: Module, x: torch.Tensor) -> torch.Tensor:
+def maybe_gather_tp_input(
+    module: Module,
+    x: torch.Tensor,
+    *,
+    src: spmd.PerMeshAxisSpmdType | None = None,
+) -> torch.Tensor:
     """Redistribute a TP input to ``Replicate`` in the ``<fqn>.tp_gather`` region.
 
-    ``<fqn>`` is ``module``'s remat name. This is an all-gather under sequence
-    parallelism, and otherwise a forward no-op whose backward all-reduces.
+    ``<fqn>`` is ``module``'s remat name. ``src`` defaults to the dense residual
+    layout: ``Shard(0)`` under sequence parallelism, an all-gather, and
+    otherwise ``Invariant``, a forward no-op whose backward all-reduces. Vision
+    encoders pass ``spmd.I``: their activations stay invariant under SP.
     Modules whose projections share one input call this once at their common
     boundary. Returns ``x`` unchanged without TP.
     """
@@ -282,7 +289,9 @@ def maybe_gather_tp_input(module: Module, x: torch.Tensor) -> torch.Tensor:
     )(
         x,
         tp_group,
-        src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+        src=src
+        if src is not None
+        else (spmd.S(0) if spmd_dense_sp_enabled() else spmd.I),
         dst=spmd.R,
         backward_options={"op_dtype": x.dtype},
     )

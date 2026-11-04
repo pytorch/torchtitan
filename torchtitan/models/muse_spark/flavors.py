@@ -65,6 +65,7 @@ from torchtitan.models.common.nn_modules import Conv1d, GELU, LayerNorm, RMSNorm
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
+    InvariantColumnParallelLinear,
     InvariantRowParallelLinear,
     VisionAttention,
     VisionMLP,
@@ -104,7 +105,6 @@ from .sharding import (
     audio_wrapper_sharding_config,
     compressed_moe_linear_sharding_config,
     muse_spark_activation_placement,
-    perception_norm_sharding_config,
     post_expert_norm_sharding_config,
     residual_gate_sharding_config,
     transformer_block_sharding_config,
@@ -593,7 +593,7 @@ def _muse_spark_navit_mlp_config(
     mlp_hidden_dim: int,
 ) -> VisionMLP.Config:
     return VisionMLP.Config(
-        fc1=Linear.Config(
+        fc1=InvariantColumnParallelLinear.Config(
             in_features=latent_dim,
             out_features=mlp_hidden_dim,
             bias=True,
@@ -788,7 +788,9 @@ def _muse_spark_config(
     perception_emb_norm = _gain_norm(
         dim,
         elementwise_affine=False,
-        sharding_config=perception_norm_sharding_config(enable_sp=enable_sp),
+        sharding_config=cp_replicated_vision_sharding_config(
+            invariant_norm_sharding_config()
+        ),
     )
 
     layers = []

@@ -36,6 +36,7 @@ from torchtitan.models.common.decoder_sharding import (
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.common.vision_encoder import (
+    InvariantColumnParallelLinear,
     InvariantRowParallelLinear,
     VisionAttention,
     VisionMLP,
@@ -129,6 +130,18 @@ def _vl_linear(
     )
 
 
+def _vision_column_parallel_linear(
+    in_features: int, out_features: int
+) -> InvariantColumnParallelLinear.Config:
+    return InvariantColumnParallelLinear.Config(
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        param_init=_LINEAR_INIT,
+        sharding_config=vision_colwise_sharding_config(),
+    )
+
+
 def _vision_row_parallel_linear(
     in_features: int, out_features: int
 ) -> InvariantRowParallelLinear.Config:
@@ -205,9 +218,7 @@ def _vision_encoder_config(
             sharding_config=vision_attention_sharding_config(rope_cache_dp=spmd.V),
         ),
         mlp=VisionMLP.Config(
-            fc1=_vl_linear(
-                dim, ffn_dim, sharding_config=vision_colwise_sharding_config()
-            ),
+            fc1=_vision_column_parallel_linear(dim, ffn_dim),
             fc2=_vision_row_parallel_linear(ffn_dim, dim),
         ),
     )
@@ -237,9 +248,7 @@ def _vision_encoder_config(
             vt_hidden_size=dim,
             merged_dim=merged_dim,
             pre_norm=_vl_layernorm(dim),
-            linear_1=_vl_linear(
-                merged_dim, merged_dim, sharding_config=vision_colwise_sharding_config()
-            ),
+            linear_1=_vision_column_parallel_linear(merged_dim, merged_dim),
             linear_2=_vision_row_parallel_linear(merged_dim, text_hidden_size),
             sharding_config=moonvit_projector_sharding_config(),
         ),

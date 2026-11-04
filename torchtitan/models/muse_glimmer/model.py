@@ -18,9 +18,11 @@ from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
-from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
+    maybe_replicate_invariant,
+    spmd_dense_sp_enabled,
     spmd_local_context,
 )
 from torchtitan.models.base.model import FlopsEstimator
@@ -528,7 +530,15 @@ class MuseGlimmerModel(MultimodalModel):
         vision_features_VD = self.vision_adapter(
             self.vision_encoder(pixel_values, grid_thw=grid_thw)
         )
-        return self.perception_emb_norm(self.vision_projection(vision_features_VD))
+        vision_embeds_VD = self.perception_emb_norm(
+            self.vision_projection(vision_features_VD)
+        )
+        if spmd_dense_sp_enabled():
+            # Each rank selects vision rows for its own token shard.
+            vision_embeds_VD = maybe_replicate_invariant(
+                vision_embeds_VD, MeshAxisName.TP
+            )
+        return vision_embeds_VD
 
     def _prepare_multimodal_embeds(
         self,

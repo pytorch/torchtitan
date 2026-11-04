@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 
 import torch
 
+from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.spmd_types import maybe_replicate_invariant
 from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module
 from torchtitan.models.common import Linear
@@ -45,7 +47,9 @@ class KimiK3VisionProjector(Module):
 
     def forward(self, merged_MF: torch.Tensor) -> torch.Tensor:
         projected_MO = self.linear_2(self.activation(self.linear_1(merged_MF)))
-        return self.post_norm(projected_MO)
+        # The projected features are scattered into the TP-replicated text
+        # embeddings; the encoder output separately owns the CP boundary.
+        return maybe_replicate_invariant(self.post_norm(projected_MO), MeshAxisName.TP)
 
 
 class KimiK3VisionEncoder(MoonViTEncoder):

@@ -175,10 +175,12 @@ def vision_encoder_sharding_config() -> ShardingConfig:
 
 
 def vision_merger_sharding_config() -> ShardingConfig:
-    """The merger owns the TP boundary; the encoder output owns the CP boundary."""
+    """The merger owns the TP boundary; the encoder output owns the CP boundary.
+
+    The merger replicates its output across TP itself.
+    """
     return ShardingConfig(
-        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I}),
-        out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.R}),
+        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.R}),
     )
 
 

@@ -92,7 +92,12 @@ def vision_colwise_sharding_config(
     *,
     input_tp: spmd.PerMeshAxisSpmdType = spmd.I,
 ) -> ShardingConfig:
-    """Colwise vision linear with a TP-replicated local matmul input."""
+    """Colwise vision linear with a TP-replicated local matmul input.
+
+    ``input_tp`` is the input's TP layout at the module boundary: ``I`` for an
+    ``InvariantColumnParallelLinear``, which replicates it itself, or ``R``
+    behind a shared boundary that already did (the attention q/k/v).
+    """
     return ShardingConfig(
         state_shardings={
             "weight": _vision_state_placement(tp=spmd.S(0), cp=spmd.I),
@@ -100,9 +105,6 @@ def vision_colwise_sharding_config(
         },
         in_src_shardings={
             "input": _vision_activation_placement(tp=input_tp),
-        },
-        in_dst_shardings={
-            "input": _vision_activation_placement(tp=spmd.R),
         },
         out_src_shardings=_vision_activation_placement(tp=spmd.S(-1)),
     )
@@ -130,18 +132,14 @@ def vision_attention_sharding_config(
     *,
     rope_cache_dp: spmd.PerMeshAxisSpmdType,
 ) -> ShardingConfig:
-    """Vision attention boundary: gather ``x`` and ``rope_cache`` across TP."""
+    """Vision attention boundary: TP-invariant ``x`` and ``rope_cache``.
+
+    ``VisionAttention`` replicates both across TP itself.
+    """
     return ShardingConfig(
         in_src_shardings={
             "x": _vision_activation_placement(),
             "rope_cache": _vision_activation_placement(dp=rope_cache_dp),
-        },
-        in_dst_shardings={
-            "x": _vision_activation_placement(tp=spmd.R),
-            "rope_cache": _vision_activation_placement(
-                dp=rope_cache_dp,
-                tp=spmd.R,
-            ),
         },
     )
 

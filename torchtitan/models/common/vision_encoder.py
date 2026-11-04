@@ -31,10 +31,10 @@ from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.distributed.local_compile import compile
 from torchtitan.distributed.parallelism_context import MeshAxisName
-from torchtitan.distributed.spmd_types import spmd_mesh_group
+from torchtitan.distributed.spmd_types import maybe_replicate_invariant, spmd_mesh_group
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 
 compiled_create_block_mask = compile(create_block_mask)
@@ -43,6 +43,24 @@ compiled_create_block_mask = compile(create_block_mask)
 RopeApply = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]
 ]
+
+
+class InvariantColumnParallelLinear(Linear):
+    """Column-parallel vision projection of a TP-invariant input.
+
+    Vision residual activations remain invariant even when decoder sequence
+    parallelism is enabled, so this boundary always performs ``I -> R``: a
+    forward no-op whose backward all-reduces. Like ``ColumnParallelLinear``,
+    the conversion and the projection are the remat regions ``<fqn>.tp_gather``
+    and ``<fqn>.linear``.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Linear.Config):
+        pass
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return super().forward(maybe_gather_tp_input(self, input, src=spmd.I))
 
 
 class InvariantRowParallelLinear(Linear):
@@ -211,6 +229,10 @@ class VisionAttention(Module):
         attention_mask: BlockMask,
     ) -> torch.Tensor:
         num_tokens = x.shape[0]
+        # The q/k/v projections share one TP-replicated input; the rope cache
+        # must match the head-sharded q/k.
+        x = maybe_gather_tp_input(self, x, src=spmd.I)
+        rope_cache = maybe_replicate_invariant(rope_cache, MeshAxisName.TP)
 
         # -1 infers the head count locally (= num_heads / TP under tensor
         # parallelism, where wq/wk/wv are colwise-sharded).
