@@ -85,7 +85,7 @@ The package is organized by responsibility and dependency boundary:
 - `rollout/` contains rollout execution (`rollouter.py`), the user extension
   APIs for environments (`message_env.py`, `token_env.py`) and rewards
   (`rubric.py`), advantages, data loading, rollout recording, and the rollout
-  data types including the generation contract (`types.py`: `GenerateFn`,
+  data types including the generation contract (`types.py`: `GenerateFn`, `Prompt`,
   `Completion`). Renderers are shared with SFT and live in core
   `torchtitan/components/renderer.py`.
 - `routing/` contains request routing across and within generators.

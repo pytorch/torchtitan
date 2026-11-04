@@ -15,6 +15,7 @@ from typing import Literal
 
 import torch
 
+from torchtitan.components.data.multimodal.utils.image import ImageSpec
 from torchtitan.config import Configurable
 from torchtitan.rl.generator.types import EngineRequest, FinishedRequest
 
@@ -50,8 +51,8 @@ class GenerationEngine(Configurable, abc.ABC):
         dist_moe_runtime: Dist-MoE runtime policy, when the model has Dist-MoE experts.
         debug: Debug and determinism settings.
         reset_kv_cache_on_model_state_dict_load: Whether each model state dict load resets
-            all KV. When False, a request may reuse only KV computed under its
-            ``min_policy_version``.
+            all KV (and vLLM's encoder cache for image prompts). When False, a request may
+            reuse only KV and image embeddings salted with its ``min_policy_version``.
         model_state_dict_load_mode: ``"cpu_prefetch"`` allocates the pinned CPU buffers of
             ``prefetched_model_state_dict``; ``"gpu_fetch"`` does not.
         rank: Global rank of this process.
@@ -61,7 +62,11 @@ class GenerationEngine(Configurable, abc.ABC):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        pass
+        image_spec: ImageSpec | None = None
+        """How the model turns an image into vision tokens (resize, patch and merge sizes);
+        the engine decodes and resizes image prompts' files (`PromptImage.data`) with it.
+        Must equal the renderer's and `Batcher.Config.image_spec`. None: text only; requests
+        with images are rejected. Text prompts work either way."""
 
     @property
     @abc.abstractmethod

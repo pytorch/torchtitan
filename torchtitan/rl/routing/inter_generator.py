@@ -269,7 +269,7 @@ class InterGeneratorRouter(Configurable):
 
     async def generate(
         self,
-        prompt_token_ids: list[int],
+        prompt: Any,
         *,
         request_id: str,
         group_id: int,
@@ -280,7 +280,7 @@ class InterGeneratorRouter(Configurable):
         """Route one generation call to a generator and return its completion."""
         return await self._route(
             "generate",
-            prompt_token_ids,
+            prompt,
             request_id=request_id,
             group_id=group_id,
             # Generator.generate also requires this field for its

@@ -14,7 +14,7 @@ from torchtitan.config import PrecisionConfig
 from torchtitan.rl.generator.generator import Generator
 
 from torchtitan.rl.generator.types import SamplingConfig
-from torchtitan.rl.rollout.types import Completion
+from torchtitan.rl.rollout.types import Completion, Prompt
 
 
 class _GeneratorActorEndpoints:
@@ -57,7 +57,7 @@ class _GeneratorActorEndpoints:
     @concurrent_endpoint
     async def generate(
         self,
-        prompt_token_ids: list[int],
+        prompt: Prompt,
         *,
         request_id: str,
         group_id: int,
@@ -66,7 +66,7 @@ class _GeneratorActorEndpoints:
         metrics_prefix: str = "generator",
     ) -> Completion:
         return await super().generate(
-            prompt_token_ids,
+            prompt,
             request_id=request_id,
             group_id=group_id,
             routing_session_id=routing_session_id,

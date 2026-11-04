@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -159,6 +159,15 @@ class RolloutSampleRecorder(Configurable):
             "completion_message": turn.completion_message,
             "env_messages": turn.env_messages,
             "env_rewards": turn.env_rewards,
+            # Without the file bytes, which JSON can't hold.
+            "prompt_images": [
+                {
+                    image_field.name: getattr(image, image_field.name)
+                    for image_field in fields(image)
+                    if image_field.name != "data"
+                }
+                for image in turn.prompt_images
+            ],
         }
         if self._log_tensors:
             encoded["prompt_prefix_len"] = turn.prompt_prefix_len

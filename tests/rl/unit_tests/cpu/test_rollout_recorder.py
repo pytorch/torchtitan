@@ -20,7 +20,7 @@ from torchtitan.rl.rollout.recorder import (
     KeepExtremeRewardsFilter,
     RolloutSampleRecorder,
 )
-from torchtitan.rl.rollout.types import RolloutTurnID
+from torchtitan.rl.rollout.types import PromptImage, RolloutTurnID
 
 
 def _recorder(tmp_path, **config_kwargs) -> RolloutSampleRecorder:
@@ -176,6 +176,28 @@ def _record_one(tmp_path, rollout: Rollout) -> dict:
     (record,) = _read_lines(tmp_path / "rollout_samples.jsonl")
     assert "step" not in record  # training omits step
     return record
+
+
+def test_prompt_images_are_recorded_without_their_file_bytes(tmp_path) -> None:
+    image = PromptImage(
+        key="k", path="a.png", grid_thw=(1, 4, 4), offset=1, length=4, data=b"\xff\xd8"
+    )
+    turn = dataclasses.replace(
+        _turn(completion_logprobs=[-0.5]), prompt_images=(image,)
+    )
+    rollout = Rollout(
+        group_id=0,
+        rollout_id=0,
+        status=RolloutStatus.COMPLETED,
+        turns=[turn],
+        reward=1.0,
+    )
+
+    [recorded] = _record_one(tmp_path, rollout)["turns"]
+
+    assert recorded["prompt_images"] == [
+        {"key": "k", "path": "a.png", "grid_thw": [1, 4, 4], "offset": 1, "length": 4}
+    ]
 
 
 def test_empty_turns_rollout(tmp_path) -> None:

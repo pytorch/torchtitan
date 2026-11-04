@@ -127,7 +127,7 @@ from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout.rollouter import Rollouter
-from torchtitan.rl.rollout.types import Completion, GenerateFn, ReleaseSessionFn
+from torchtitan.rl.rollout.types import Completion, GenerateFn, Prompt, ReleaseSessionFn
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
 from torchtitan.rl.trainer.trainer import Trainer
@@ -405,6 +405,13 @@ class Controller(Configurable):
                     "async_loop.batcher.rdma_min_tensor_bytes does not support "
                     "trainer pipeline parallelism yet."
                 )
+            if self.generator.engine.image_spec is not None:
+                # TODO: remove once the batcher and the trainer take image inputs.
+                raise NotImplementedError(
+                    "generator.engine.image_spec is set, but training on image prompts is "
+                    "not supported yet: the trainer would see their placeholder tokens "
+                    "without the images."
+                )
             if self.trainer.parallelism.enable_sequence_parallel:
                 sp_degree = self.trainer.parallelism.tensor_parallel_degree
                 max_context_length = self.trainer.model.max_context_length
@@ -540,7 +547,7 @@ class Controller(Configurable):
 
         @sl.log_trace_span("generate")
         async def generate(
-            prompt_token_ids: list[int],
+            prompt: Prompt,
             *,
             request_id: str,
             group_id: int,
@@ -548,7 +555,7 @@ class Controller(Configurable):
             sampling_config: SamplingConfig | None = None,
         ) -> Completion | None:
             return await generator_router.generate.call_one(
-                prompt_token_ids,
+                prompt,
                 request_id=request_id,
                 group_id=group_id,
                 routing_session_id=routing_session_id,

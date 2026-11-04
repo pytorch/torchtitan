@@ -26,6 +26,68 @@ _TRUNCATED = frozenset(
 _ERROR = frozenset({"error_parse", "error_timeout", "error_abort", "error"})
 
 
+@dataclass(frozen=True, kw_only=True, slots=True)
+class PromptImage:
+    """One image in a prompt: which image file fills which placeholder tokens.
+
+    Prompts carry the image file's bytes instead of pixels; the generator and the
+    trainer decode the images from them (``components/data/multimodal/utils/image.py``).
+
+    Example (a 64x64-patch image whose 1024 placeholders start at token 5):
+
+        PromptImage(
+            key="9f2c...", path="./assets/datasets/geometry3k/images/train/00000_0.png",
+            grid_thw=(1, 64, 64), offset=5, length=1024,
+            data=b"\\xff\\xd8\\xff\\xe0...",  # the JPEG file
+        )
+    """
+
+    key: str
+    """Content hash of the image file; also the generator's multimodal hash."""
+
+    path: str
+    """The image file the prompt's message names."""
+
+    grid_thw: tuple[int, int, int]
+    """Raw patch grid ``(T, H, W)`` before spatial merging."""
+
+    offset: int
+    """Index of the first placeholder token in the prompt."""
+
+    length: int
+    """Number of placeholder tokens the renderer emitted (``T * H * W // merge_size**2``
+    with Qwen-VL merging)."""
+
+    data: bytes = field(repr=False, compare=False)
+    """The image file's bytes (JPEG, PNG, ...). Not compared: ``key`` is their hash."""
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class Prompt:
+    """What `GenerateFn` generates from: the prompt's tokens and the images its placeholder
+    tokens stand for.
+
+    Each image is a run of ``length`` placeholder tokens at ``offset`` in `token_ids`, and its
+    `PromptImage` names the file that fills them. This is the form the renderer emits
+    (``RenderedTokens``), vLLM takes (prompt ids, placeholder ranges and mm hashes) and the
+    trainer packs, so no layer converts it.
+
+    Example (a text prompt, and a prompt whose 4 image placeholders start at token 1):
+
+        Prompt(token_ids=[1, 2, 3])
+        Prompt(
+            token_ids=[1, 9, 9, 9, 9, 2],
+            images=(PromptImage(key="9f2c...", offset=1, length=4, ...),),
+        )
+    """
+
+    token_ids: list[int]  # [num_prompt_tokens]
+    """The tokenized prompt, including each image's placeholder tokens."""
+
+    images: tuple[PromptImage, ...] = ()
+    """Images whose placeholder tokens are in `token_ids`, in prompt order. Empty for text."""
+
+
 @dataclass(frozen=True, slots=True)
 class RolloutTurnID:
     """A turn's id: (group, sibling rollout, turn index); renders to the generator request_id.
@@ -91,7 +153,7 @@ class GenerateFn(Protocol):
 
     async def __call__(
         self,
-        prompt_token_ids: list[int],
+        prompt: Prompt,
         *,
         request_id: str,
         group_id: int,
@@ -101,7 +163,7 @@ class GenerateFn(Protocol):
         """Run one generation.
 
         Args:
-            prompt_token_ids: The tokenized prompt to generate from.
+            prompt: The prompt to generate from: its tokens and images.
             request_id: Unique per call; identifies the exact turn (e.g. ".../turn=2") in logs.
             group_id: Rollout group this call belongs to. Calls of one group share a prefix
                 cache namespace, so siblings and later turns can reuse the group's KV.
@@ -160,7 +222,7 @@ class RolloutTurn:
     `rollout_to_training_samples` packs the rollout into training tokens.
 
     A turn doesn't store its full prompt. It stores how many leading tokens it copies from the previous
-    turn's prompt + completion, then its new tokens (`prompt_messages` stay in full):
+    turn's prompt + completion, then its new tokens (`prompt_messages` and `prompt_images` stay in full):
 
         full prompt = (previous prompt + completion)[:prompt_prefix_len] + prompt_delta_token_ids
 
@@ -186,6 +248,9 @@ class RolloutTurn:
 
     prompt_delta_token_ids: np.ndarray  # [num_prompt_tokens - prompt_prefix_len] int32
     """The prompt after its first `prompt_prefix_len` tokens."""
+
+    prompt_images: tuple[PromptImage, ...] = ()
+    """Images of the full prompt (not the delta), with offsets into the full prompt."""
 
     completion_token_ids: np.ndarray  # [num_completion_tokens] int32
     """This turn's completion token ids."""
