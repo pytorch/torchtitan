@@ -48,6 +48,28 @@ The adapter maps released HF text checkpoint keys and reads block-scaled FP8
 and packed FP4 tensors through slice-aware DCP loading. The manifest check does
 not download the released parameter values.
 
+## Images
+
+Set `vision_enabled=True` to include DeepSeek ViT, the padded 3x3 unshuffle
+aligner, and image marker embeddings. The released flavor includes them by
+default; the debug flavor uses a smaller encoder.
+
+```text
+flattened patches -> ViT with two-axis RoPE -> 3x3 unshuffle -> aligner
+                                                                |
+packed tokens -> token embeddings + image markers + visual tokens -> backbone
+```
+
+Preprocessing accepts `pixel_values`, `grid_thw` with time=1, and `token_types`.
+Types -1, 0, 1, 2, and 3 denote text, image start, aligned visual token,
+newline, and image end. Visual positions receive no Engram residual update and
+use their own expert-balancing counters. Text-only ranks execute a dummy visual
+dependency so FSDP can reduce the visual parameters when another rank has images.
+The image-balancing hook reduces all layers' counts together and is registered
+only for vision-enabled models. Distributed HF conversion keeps both stacked
+ViT projections on each rank and gathers the three marker rows before splitting
+them into the released checkpoint names.
+
 ## Validation
 
 ```bash

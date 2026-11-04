@@ -4,14 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-
 import copy
 
 import pytest
 import torch
 import torch.nn.functional as F
-from torchtitan.config.parallelism import ParallelismConfig
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.models.deepseek_v4_1 import build_model_config
 from torchtitan.models.deepseek_v4_1.state_dict_adapter import (
@@ -86,6 +85,16 @@ def test_checkpoint_roundtrip_is_exact(model):
     assert "layers.1.engram.embed.weight" in hf
     for key in original:
         torch.testing.assert_close(restored[key], original[key], rtol=0, atol=0)
+
+
+def test_forward_rejects_images_without_a_vision_encoder(model):
+    with pytest.raises(ValueError, match="vision-enabled model"):
+        model(
+            torch.arange(18),
+            pixel_values=torch.randn(36, 12),
+            grid_hw=((6, 6),),
+            token_types=torch.tensor([-1, -1, 0, 1, 1, 2, 1, 1, 2, 3] + [-1] * 8),
+        )
 
 
 # T: packed tokens; V: vocabulary.
