@@ -13,6 +13,7 @@ Shape suffixes:
 """
 
 from dataclasses import dataclass, field
+from typing import cast
 
 import torch
 
@@ -55,3 +56,15 @@ class KimiK3VisionEncoder(MoonViTEncoder):
 
         final_norm: RMSNorm.Config  # pyrefly: ignore [bad-override]
         projector: KimiK3VisionProjector.Config  # pyrefly: ignore [bad-override]
+
+    def compute_position_embeddings(
+        self, grids: list[list[int]]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        max_num_frames = cast(KimiK3VisionEncoder.Config, self.config).max_num_frames
+        longest = max(t for t, _, _ in grids)
+        if longest > max_num_frames:
+            raise ValueError(
+                f"A vision item holds {longest} frames; Kimi K3 encodes video in "
+                f"chunks of at most max_num_frames={max_num_frames} frames."
+            )
+        return super().compute_position_embeddings(grids)
