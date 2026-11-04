@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
-import warnings
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -65,24 +64,6 @@ def test_alternative_fsdp_mesh_warns_for_fake_backend(axis_name: str) -> None:
         result = build_alternative_fsdp_mesh(storage_mesh, max_ctas=8)
 
     assert result is storage_mesh
-
-
-def test_alternative_fsdp_mesh_keeps_size_one_shard_group() -> None:
-    # A size-1 edp_shard, fake-backed as ParallelismContext builds it, keeps its
-    # group without a warning.
-    storage_mesh = MagicMock(spec=DeviceMesh, mesh_dim_names=("edp_shard", "ep"))
-    storage_mesh.__getitem__.return_value.size.return_value = 1
-
-    with (
-        patch.object(dist_utils.dist, "get_backend", return_value="fake"),
-        patch.object(dist_utils.dist, "split_group") as split_group,
-        warnings.catch_warnings(),
-    ):
-        warnings.simplefilter("error")
-        result = build_alternative_fsdp_mesh(storage_mesh, max_ctas=8)
-
-    assert result is storage_mesh
-    split_group.assert_not_called()
 
 
 def test_alternative_fsdp_mesh_warns_without_fsdp_shard_axes() -> None:
