@@ -111,8 +111,15 @@ jobs:
           bash scripts/install_sglang.sh "$RUNNER_TEMP/sglang"
           MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
 
+          # Each class runs in its own torchrun launch, one process per TP rank.
+          # Only TestSGLangBitwiseParityVarlen loads HF weights; the debug-model
+          # classes read the repo's test tokenizer.
           HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
-            tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py -v
+            tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParityVarlen -v
+          for test_class in MoEEP DistMoE; do
+            torchrun --nproc-per-node=2 -m pytest \
+              "tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParity${test_class}" -v
+          done
 
       - name: Upload artifacts
         if: always()

@@ -22,6 +22,7 @@ from typing import Any, Literal
 
 import torch
 import torch.distributed as dist
+import triton
 from sglang.srt.managers.io_struct import (
     AbortReq,
     BatchTokenIDOutput,
@@ -40,11 +41,16 @@ from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.runtime_context import publish, SpawnRanks
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.utils.common import next_power_of_2
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import DebugConfig, PrecisionConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
+from torchtitan.models.common.moe.token_dispatcher import (
+    AllToAllTokenDispatcher,
+    BaseEPTokenDispatcher,
+)
 from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.sglang.attention import TORCHTITAN_VARLEN_ATTENTION_BACKEND
@@ -162,12 +168,24 @@ class SGLangEngine(GenerationEngine):
                 "SGLangEngine supports data_parallel_degree=1 only; run more "
                 "generators to scale out"
             )
-        if parallelism.expert_parallel_degree != 1 or dist_moe_runtime is not None:
-            raise ValueError("SGLangEngine does not support MoE expert parallelism yet")
         if parallelism.enable_sequence_parallel:
             raise ValueError("SGLangEngine does not support sequence parallelism")
         # Raises for layers SGLang cannot run, before any process group or SGLang state.
         model = replace_sglang_layer_configs(copy.deepcopy(model))
+        if parallelism.expert_parallel_degree > 1:
+            for fqn, dispatcher, _, _ in model.traverse(BaseEPTokenDispatcher.Config):
+                if not isinstance(dispatcher, AllToAllTokenDispatcher.Config):
+                    raise ValueError(
+                        f"{fqn}: the SGLang engine supports the all-to-all token "
+                        f"dispatcher and Dist-MoE only, got "
+                        f"{type(dispatcher).__qualname__}"
+                    )
+                if config.cuda_graph != "none":
+                    raise ValueError(
+                        "The all-to-all token dispatcher reads its split sizes on the "
+                        "host, which CUDA graphs cannot capture: set "
+                        "SGLangEngine.Config.cuda_graph to 'none', or use Dist-MoE"
+                    )
         self.config = config
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load
@@ -188,6 +206,11 @@ class SGLangEngine(GenerationEngine):
                 f"{parallelism.tensor_parallel_degree}"
             )
 
+        # TODO(https://github.com/sgl-project/sglang/issues/48460): importing SGLang
+        # replaces triton.next_power_of_2 with a host-only function, process-wide,
+        # which Triton kernels cannot call (e.g. Dist-MoE's routing kernels); make it
+        # callable in kernels again.
+        triton.next_power_of_2 = triton.constexpr_function(next_power_of_2)
         if debug.seed is not None:
             # TODO(https://github.com/sgl-project/sglang/issues/48474): SGLang's
             # deterministic mode (needed for seeded sampling, see _build_server_args)
@@ -202,6 +225,7 @@ class SGLangEngine(GenerationEngine):
             parallelism=parallelism,
             precision=precision,
             checkpointer_config=checkpointer,
+            dist_moe_runtime=dist_moe_runtime,
             model_state_dict_load_mode=model_state_dict_load_mode,
         )
         server_args = self._build_server_args(

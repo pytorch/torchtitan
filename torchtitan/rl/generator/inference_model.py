@@ -27,6 +27,7 @@ from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
@@ -236,6 +237,53 @@ def route_tp_all_reduce(all_reduce: Callable[[torch.Tensor], torch.Tensor]) -> N
 
     spmd.redistribute = redistribute
     logger.info("Routed the model's TP sum all-reduces through the engine's all-reduce")
+
+
+def build_dist_moe_runtime(
+    model: Decoder,
+    runtime_config: DistMoeRuntime.Config | None,
+    *,
+    parallelism_context: ParallelismContext,
+    device: torch.device,
+    max_num_tokens_per_step: int,
+) -> DistMoeRuntime | None:
+    """Build the runtime the model's Dist-MoE experts run with, or None without them.
+
+    Dist-MoE experts refuse to run without a runtime. The trainer gets one from
+    ``TrainingEngine``; the generator builds its own, once, before any CUDA-graph
+    capture, so no per-forward Python work runs under capture or replay.
+
+    Args:
+        max_num_tokens_per_step: The most tokens a forward passes to the model on this
+            rank, which sizes the runtime's buffers.
+    """
+    if not any(isinstance(module, DistMoeRoutedExperts) for module in model.modules()):
+        if runtime_config is not None:
+            logger.warning(
+                "Ignoring dist_moe_runtime: the generator model has no "
+                "Dist-MoE routed experts."
+            )
+        return None
+    if runtime_config is None:
+        raise ValueError(
+            "The generator model uses Dist-MoE routed experts but no "
+            "dist_moe_runtime was set. Set Generator.Config.dist_moe_runtime to a "
+            "DistMoeRuntime.Config(inference=True)."
+        )
+    if not runtime_config.inference:
+        raise ValueError(
+            "dist_moe_runtime must set inference=True; got "
+            f"{runtime_config!r}. The generator runs no "
+            "backward, so a training context's activation slots would reserve "
+            "memory it can never use."
+        )
+    return runtime_config.build(
+        model_parts=[model],
+        parallelism_context=parallelism_context,
+        device=device,
+        num_tokens_per_microbatch_per_dp_rank=max_num_tokens_per_step,
+        pp_schedule=None,
+    )
 
 
 def load_initial_weights(
