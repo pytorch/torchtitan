@@ -72,7 +72,7 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
         LocalCompileConfig(regions=[]).apply()
         torch._dynamo.reset()
 
-    def _run(self, router, x, expert_bias_E=None):
+    def _run(self, router, x, expert_bias_E=None, padding_mask_T=None):
         router.tokens_per_expert_E.zero_()
         if router.aux_loss is not None:
             router.aux_loss._reset_accumulators()
@@ -80,6 +80,7 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
         topk_scores_TK, topk_ids_TK, routing_map_TE = router(
             x,
             expert_bias_E=expert_bias_E,
+            padding_mask_T=padding_mask_T,
             aux_loss_denominator=torch.tensor(float(TOKENS), device="cuda"),
         )
         # Compare per token in expert-id order: topk's id order is unspecified.
@@ -102,38 +103,46 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
         return values
 
     def test_flavor_routers_match_eager(self):
-        """Full-size flavor routers: compiled fwd + bwd matches eager."""
+        """Full-size flavor routers: compiled fwd + bwd matches eager, without and with padding."""
+        # Padding tokens are routed and dispatched, but left out of the statistics.
+        padded_T = torch.arange(TOKENS, device="cuda") % 11 == 0
+        for flavor, (build_router, uses_bias) in FLAVOR_ROUTERS.items():
+            for padding_mask_T in (None, padded_T):
+                with self.subTest(flavor=flavor, padded=padding_mask_T is not None):
+                    torch.manual_seed(0)
+                    router = build_router()
+                    dim = router.gate.weight.shape[1]
+                    x = torch.randn(TOKENS, dim, device="cuda", dtype=torch.bfloat16)
+                    expert_bias_E = (
+                        1e-3 * torch.randn(router.num_experts, device="cuda")
+                        if uses_bias
+                        else None
+                    )
+                    LocalCompileConfig(regions=[]).apply()
+                    eager = self._run(router, x, expert_bias_E, padding_mask_T)
+                    LocalCompileConfig(regions=["moe_router_topk"]).apply()
+                    compiled = self._run(router, x, expert_bias_E, padding_mask_T)
+                    torch._dynamo.reset()
+                    for actual, expected in zip(compiled, eager, strict=True):
+                        torch.testing.assert_close(actual, expected)
+                    # Values 4 and 5 are the input and gate weight grads. bf16's
+                    # rtol (1.6e-2) lets a 1% error pass, so bound their rel L2
+                    # (measured 2e-5 to 7e-5).
+                    for actual, expected in zip(compiled[4:6], eager[4:6], strict=True):
+                        error_l2 = (actual - expected).float().norm()
+                        self.assertLess(
+                            (error_l2 / expected.float().norm()).item(), 1e-3
+                        )
+
+    def test_flavor_router_scores_do_not_depend_on_batch_size(self):
+        """Bitwise: a token's router outputs equal its no-grad 16k outputs.
+
+        Checked at 1-256 tokens, and in 16k training calls, padded or not.
+        """
         for flavor, (build_router, uses_bias) in FLAVOR_ROUTERS.items():
             with self.subTest(flavor):
                 torch.manual_seed(0)
                 router = build_router()
-                dim = router.gate.weight.shape[1]
-                x = torch.randn(TOKENS, dim, device="cuda", dtype=torch.bfloat16)
-                expert_bias_E = (
-                    1e-3 * torch.randn(router.num_experts, device="cuda")
-                    if uses_bias
-                    else None
-                )
-                LocalCompileConfig(regions=[]).apply()
-                eager = self._run(router, x, expert_bias_E=expert_bias_E)
-                LocalCompileConfig(regions=["moe_router_topk", "moe_aux_loss"]).apply()
-                compiled = self._run(router, x, expert_bias_E=expert_bias_E)
-                torch._dynamo.reset()
-                for actual, expected in zip(compiled, eager, strict=True):
-                    torch.testing.assert_close(actual, expected)
-                # Values 4 and 5 are the input and gate weight grads. bf16's
-                # rtol (1.6e-2) lets a 1% error pass, so bound their rel L2
-                # (measured 2e-5 to 7e-5).
-                for actual, expected in zip(compiled[4:6], eager[4:6], strict=True):
-                    error_l2 = (actual - expected).float().norm()
-                    self.assertLess((error_l2 / expected.float().norm()).item(), 1e-3)
-
-    def test_flavor_router_scores_do_not_depend_on_batch_size(self):
-        """Bitwise: a token's router outputs at 1-256 tokens, and at 16k with grad on, equal its no-grad 16k outputs."""
-        for flavor, (build_router, uses_bias) in FLAVOR_ROUTERS.items():
-            with self.subTest(flavor):
-                torch.manual_seed(0)
-                router = build_router().eval()
                 LocalCompileConfig(regions=["moe_router_topk"]).apply()
                 gate_TE = torch.randn(16384, router.num_experts, device="cuda")
                 expert_bias_E = (
@@ -141,13 +150,19 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
                     if uses_bias
                     else None
                 )
-                # The trainer's graph first, as in training: grad on and a static 16k shape, so the
-                # compiled forward also saves tensors for backward.
-                trainer_outputs = router._score_and_select_experts(
-                    gate_TE.detach().requires_grad_(),
-                    expert_bias_E=expert_bias_E,
-                    padding_mask_T=None,
-                )
+                # The trainer's graphs first, as in training: train mode, grad on and a static 16k
+                # shape, so the compiled forward also saves tensors for backward. Without and with
+                # a padding mask (the RL batcher always passes one).
+                padding_mask_T = torch.arange(16384, device="cuda") % 11 == 0
+                trainer_outputs = [
+                    router._score_and_select_experts(
+                        gate_TE.detach().requires_grad_(),
+                        expert_bias_E=expert_bias_E,
+                        padding_mask_T=mask_T,
+                    )
+                    for mask_T in (None, padding_mask_T)
+                ]
+                router.eval()
                 with torch.no_grad():
                     # Largest first, as the generator compiles; T turns dynamic at 256.
                     outputs = {
@@ -159,15 +174,21 @@ class TestTokenChoiceRouterLocalCompile(unittest.TestCase):
                         for n in (16384, 256, 34, 3, 1)
                     }
                 torch._dynamo.reset()
+                # The per-token outputs. The statistics are None in eval mode, so only the
+                # trainer's calls return them.
+                per_token = slice(0, 4)
                 for n in (256, 34, 3, 1):
                     for actual, expected in zip(
-                        outputs[n], outputs[16384], strict=True
+                        outputs[n][per_token], outputs[16384][per_token], strict=True
                     ):
                         self.assertTrue(torch.equal(actual, expected[:n]))
-                for actual, expected in zip(
-                    trainer_outputs, outputs[16384], strict=True
-                ):
-                    self.assertTrue(torch.equal(actual.detach(), expected))
+                for trainer_output in trainer_outputs:
+                    for actual, expected in zip(
+                        trainer_output[per_token],
+                        outputs[16384][per_token],
+                        strict=True,
+                    ):
+                        self.assertTrue(torch.equal(actual.detach(), expected))
 
 
 if __name__ == "__main__":
