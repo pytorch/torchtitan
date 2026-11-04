@@ -51,6 +51,7 @@ from torchtitan.models.common.decoder_sharding import (
     residual_activation_placement,
     rope_cache_sharding_config,
     rowwise_sharding_config,
+    token_embedding_sharding_config,
 )
 from torchtitan.models.common.moe.sharding import shared_experts_sharding_config
 from torchtitan.models.common.nn_modules import LayerNorm
@@ -701,6 +702,7 @@ def _debugmodel_moe(
     *,
     seq_len: int,
     parallelism: ParallelismConfig,
+    with_vision: bool,
 ) -> Qwen35Model.Config:
     """Debug MoE config for Qwen3.5 with shared expert."""
     dim = 256
@@ -723,7 +725,13 @@ def _debugmodel_moe(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=(
+                multimodal_token_embedding_sharding_config()
+                if with_vision
+                else token_embedding_sharding_config(
+                    enable_sp=parallelism.enable_sequence_parallel
+                )
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -755,18 +763,22 @@ def _debugmodel_moe(
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,
-            has_vision_encoder=True,
+            has_vision_encoder=with_vision,
         ),
-        vision_encoder=_qwen35_vision_encoder_config(
-            dim=256,
-            ffn_dim=512,
-            num_layers=2,
-            num_heads=4,
-            patch_size=16,
-            temporal_patch_size=2,
-            spatial_merge_size=2,
-            out_hidden_size=256,
-            num_position_embeddings=1024,
+        vision_encoder=(
+            _qwen35_vision_encoder_config(
+                dim=256,
+                ffn_dim=512,
+                num_layers=2,
+                num_heads=4,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                out_hidden_size=256,
+                num_position_embeddings=1024,
+            )
+            if with_vision
+            else None
         ),
     )
 
@@ -1353,7 +1365,9 @@ def _397b_a17b(
 
 MODEL_FLAVORS = {
     "debugmodel": (_debugmodel, 4096),
-    "debugmodel_moe": (_debugmodel_moe, 4096),
+    "debugmodel_moe": (partial(_debugmodel_moe, with_vision=True), 4096),
+    # The debug MoE decoder without its vision encoder.
+    "debugmodel_moe_text": (partial(_debugmodel_moe, with_vision=False), 4096),
     "0.8B": (_0_8b, 262144),
     "2B": (_2b, 262144),
     "4B": (_4b, 262144),

@@ -302,7 +302,8 @@ GraphRuntime composability status:
 ### Supported Models
 
 GraphTrainer traces one static-shape training step, so multimodal models run
-text-only flavors without a vision encoder.
+text-only flavors without a vision encoder, and linear-attention models (Kimi K3,
+Qwen3.5) need `dataloader.max_num_documents` for fixed-capacity chunk metadata.
 
 | Model | Notes |
 | :-------- | :-------- |
@@ -313,6 +314,7 @@ text-only flavors without a vision encoder.
 | Kimi K3 | `debugmodel_text` flavor; FSDP, TP, and EP; no CP or PP |
 | GPT-OSS | FSDP, TP, and EP; no CP |
 | DeepSeek V4 | FSDP, TP, and EP; no MTP |
+| Qwen3.5, Qwen3.6, Qwen3.8 | Text-only flavors; FSDP, TP, EP, and PP; no CP |
 
 ### Citation
 
