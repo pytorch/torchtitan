@@ -101,7 +101,6 @@ def _qwen3_8_2_4t_a95b(
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,
-            has_vision_encoder=False,
         ),
     )
 

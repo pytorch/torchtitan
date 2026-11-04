@@ -89,7 +89,6 @@ from .sharding import (
     latent_routed_down_sharding_config,
     latent_routed_up_sharding_config,
     mla_attention_sharding_config,
-    multimodal_first_layer_sharding_config,
     tp_unsharded_weight_sharding_config,
 )
 from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
@@ -658,11 +657,6 @@ def _kimi_k3_config(
                 ffn_res_norm=residual_norm(),
                 ffn_res_proj=residual_proj(),
                 attention_residual=AttentionResidual.Config(),
-                sharding_config=(
-                    multimodal_first_layer_sharding_config(enable_sp=enable_sp)
-                    if multimodal and layer_idx == 0
-                    else None
-                ),
             )
         )
 

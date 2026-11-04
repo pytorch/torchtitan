@@ -43,6 +43,7 @@ from torchtitan.models.common.multimodal import (
     gather_vision_embeds,
     get_vision_positions,
     MultimodalModel,
+    replicated_to_residual_layout,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -252,8 +253,8 @@ class KimiK3Model(MultimodalModel):
         self.vision_encoder = (
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
-        # Fixed at build time, like layer 0's input layout. The RL generator drops
-        # ``vision_encoder`` after build but keeps the decoder's sharding.
+        # Fixed at build time: the RL generator drops ``vision_encoder`` after
+        # build, but the embedding gather and restore must still pair up.
         self._built_with_vision_encoder = config.vision_encoder is not None
 
     def parallelize(
@@ -352,10 +353,10 @@ class KimiK3Model(MultimodalModel):
 
     def _replicates_embeddings_for_vision(self) -> bool:
         """Whether the token embeddings are gathered to TP-``Replicate`` for the
-        vision scatter.
+        vision scatter, and restored to the residual layout after it.
 
-        Decided by the config, not by the runtime ``vision_encoder``, so it
-        always matches the input layout layer 0 was built with.
+        Decided by the config rather than the runtime ``vision_encoder``, which
+        the RL generator drops after build.
         """
         return self.tok_embeddings is not None and self._built_with_vision_encoder
 
@@ -469,6 +470,8 @@ class KimiK3Model(MultimodalModel):
                 ),
             )
 
+        if self._replicates_embeddings_for_vision():
+            h_TD = replicated_to_residual_layout(h_TD)
         if block_residual_TND is None:
             block_residual_TND = h_TD.unsqueeze(1)[:, :0]
         with spmd.no_typecheck():

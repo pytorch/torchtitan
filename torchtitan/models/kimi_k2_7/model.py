@@ -35,6 +35,7 @@ from torchtitan.models.common.multimodal import (
     build_dummy_vision_inputs,
     get_vision_positions,
     MultimodalModel,
+    replicated_to_residual_layout,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
@@ -93,8 +94,8 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         self.vision_encoder = (
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
-        # Fixed at build time, like layer 0's input layout. The RL generator drops
-        # ``vision_encoder`` after build but keeps the decoder's sharding.
+        # Fixed at build time: the RL generator drops ``vision_encoder`` after
+        # build, but the embedding gather and restore must still pair up.
         self._built_with_vision_encoder = config.vision_encoder is not None
 
     def parallelize(
@@ -169,10 +170,10 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
 
     def _replicates_embeddings_for_vision(self) -> bool:
         """Whether the token embeddings are gathered to TP-``Replicate`` for the
-        vision scatter.
+        vision scatter, and restored to the residual layout after it.
 
-        Decided by the config, not by the runtime ``vision_encoder``, so it
-        always matches the input layout layer 0 was built with.
+        Decided by the config rather than the runtime ``vision_encoder``, which
+        the RL generator drops after build.
 
         Without SP the stream already holds the full sequence on every TP rank,
         so only the SP shards need gathering.
@@ -311,6 +312,8 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
             # The scatter restores a token-aligned tensor, so text-model DP
             # resumes as global batch sharding after the multimodal region.
             spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
+        if self._replicates_embeddings_for_vision():
+            x = replicated_to_residual_layout(x)
 
         with spmd.no_typecheck():
             aux_loss_denominator = (

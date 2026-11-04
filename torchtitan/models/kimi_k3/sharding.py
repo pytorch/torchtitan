@@ -12,7 +12,6 @@ Nothing here touches a mesh or a device.
 """
 
 import spmd_types as spmd
-from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.sharding import ShardingConfig
@@ -105,35 +104,3 @@ def latent_routed_up_sharding_config() -> ShardingConfig:
     routed_up = tp_unsharded_weight_sharding_config(token_sharded=True)
     routed_up.out_src_shardings = dense_sequence_parallel_placement()
     return routed_up
-
-
-def _block_residual_placement(*, tp: spmd.PerMeshAxisSpmdType) -> SpmdType:
-    """Placement of the ``(tokens, entries, hidden)`` block-residual stack."""
-    if isinstance(tp, spmd.Shard):
-        return SpmdType(
-            {DP: spmd.V, TP: spmd.V},
-            partition_spec=spmd.PartitionSpec((DP, TP), None, None),
-        )
-    return SpmdType(
-        {DP: spmd.V, TP: tp}, partition_spec=spmd.PartitionSpec(DP, None, None)
-    )
-
-
-def multimodal_first_layer_sharding_config(*, enable_sp: bool) -> ShardingConfig:
-    """Layer 0 boundary after the TP-replicated multimodal scatter.
-
-    Restores the decoder's layout for the stream and the block-residual stack.
-    """
-    replicated = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-    return ShardingConfig(
-        in_src_shardings={
-            "x_TD": replicated,
-            "block_residual_TND": _block_residual_placement(tp=spmd.R),
-        },
-        in_dst_shardings={
-            "x_TD": residual_activation_placement(enable_sp=enable_sp),
-            "block_residual_TND": _block_residual_placement(
-                tp=spmd.S(0) if enable_sp else spmd.I
-            ),
-        },
-    )
