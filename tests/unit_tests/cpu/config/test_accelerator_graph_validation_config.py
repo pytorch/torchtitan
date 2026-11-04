@@ -113,6 +113,7 @@ def test_graph_engine_pp_does_not_initialize_eager_schedule():
         engine = GraphTrainingEngine(
             config,
             model_config=config.model,
+            precision=config.precision,
             max_num_documents=None,
             output_dir="",
         )

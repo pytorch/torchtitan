@@ -167,7 +167,6 @@ def test_validation_preprocessing_uses_validation_document_limit(monkeypatch):
         "parallelism_context": validator.parallelism_context,
         "parallelism": validator.parallelism,
         "max_num_documents": 4,
-        "max_context_length": validator.seq_len,
     }
     torch.testing.assert_close(preprocess.call_args.args[0]["input"], row.input)
 

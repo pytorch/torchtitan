@@ -13,7 +13,7 @@ from typing import Any
 import torch
 
 from torchtitan.components.data.types import TrainingMicrobatch
-from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.accelerator_graph import (
     accelerator_graphs_supported,
@@ -60,6 +60,7 @@ class GraphTrainingEngine(TrainingEngine):
         config: "GraphTrainer.Config",
         *,
         model_config: BaseModel.Config,
+        precision: PrecisionConfig,
         max_num_documents: int | None,
         output_dir: str,
     ) -> None:
@@ -80,21 +81,27 @@ class GraphTrainingEngine(TrainingEngine):
         super().__init__(
             config,
             model_config=model_config,
+            precision=precision,
             max_num_documents=max_num_documents,
             output_dir=output_dir,
         )
         self._pinned_pool_ctx = None
 
-    def _parallelize_compile_kwargs(self) -> dict[str, Any]:
-        """Return the compile kwargs ``model.parallelize``/``model.pipeline`` expect for this engine's models.
+    def _parallelize_kwargs(self) -> dict[str, Any]:
+        """Return the extra kwargs ``model.parallelize``/``model.pipeline`` expect for this engine's models.
 
-        Regular models expect ``local_compile`` (compiled regions); GraphTrainer overrides this to
-        return ``compile_config`` (whole-step compile).
+        GraphTrainer models expect ``compile_config`` (whole-step compile) instead of
+        ``local_compile``, and ``training`` in ``parallelize``: the token-budget check and
+        AutoParallel read it.
         """
         # TODO: apply local compile outside parallelize/pipeline (#5026 review). That needs
         # GraphTrainer to stop reading its compile config there first (apply_compile,
-        # EP-overlap chunking, enable_autoparallel, GraphPP runtime); then delete this hook.
-        return {"compile_config": self.config.compile}
+        # EP-overlap chunking, enable_autoparallel, GraphPP runtime).
+        kwargs: dict[str, Any] = {"compile_config": self.config.compile}
+        # The PP path already receives ``training`` from the core pipeline call.
+        if not self.parallelism_context.pp_enabled:
+            kwargs["training"] = self.config.training
+        return kwargs
 
     def _initialize_forward_backward(self) -> None:
         if self.config.parallelism.fsdp_defer_gradient_reduction:
@@ -129,7 +136,7 @@ class GraphTrainingEngine(TrainingEngine):
                     if graph_runtime is not None
                     else None
                 ),
-                wgrad_dtype=TORCH_DTYPE_MAP[self.config.training.mixed_precision_param],
+                wgrad_dtype=TORCH_DTYPE_MAP[self.precision.param_dtype],
             )
 
         if not self.parallelism_context.pp_enabled:
@@ -270,7 +277,6 @@ class GraphTrainingEngine(TrainingEngine):
                         parallelism_context=self.parallelism_context,
                         parallelism=self.config.parallelism,
                         max_num_documents=self.max_num_documents,
-                        max_context_length=self.config.training.max_context_length,
                         global_routing_token_counts=global_routing_token_counts,
                         **self.preprocess_inputs_kwargs,
                     )

@@ -12,7 +12,7 @@ import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
 
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
@@ -79,7 +79,6 @@ class Decoder(BaseModel):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config):
-        max_context_length: int
         dim: int
         vocab_size: int
         lm_head: Linear.Config
@@ -160,7 +159,7 @@ class Decoder(BaseModel):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
         from torchtitan.distributed.fsdp import (
@@ -174,10 +173,10 @@ class Decoder(BaseModel):
         apply_fsdp_to_decoder(
             self,
             dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
+            reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
             pp_enabled=parallelism_context.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
+            cpu_offload=parallelism.fsdp_enable_cpu_offloading,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             ep_degree=parallelism_context.ep,
             edp_mesh=edp_mesh,
@@ -342,7 +341,6 @@ class Decoder(BaseModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[
@@ -361,7 +359,6 @@ class Decoder(BaseModel):
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
             )
             input_dict["attention_metadata"] = attention_metadata
 
@@ -452,7 +449,6 @@ class Decoder(BaseModel):
         *,
         padding_mask: torch.Tensor | None = None,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
     ) -> AttentionMetadataMap:
         attention_metadata: dict[type[InnerAttention], AttentionMetadata] = {}
         for layer_config in self.config.layers:
@@ -466,7 +462,7 @@ class Decoder(BaseModel):
                     positions,
                     padding_mask=padding_mask,
                     max_num_documents=max_num_documents,
-                    max_context_length=max_context_length,
+                    max_context_length=self.config.max_context_length,
                 )
                 if metadata is not None:
                     attention_metadata[backend] = metadata

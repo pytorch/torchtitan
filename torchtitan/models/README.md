@@ -2,6 +2,8 @@ This note outlines the process of adding a new model in the `torchtitan` repo. I
 
 For offline explorations, we recommend the same steps, unless otherwise noted.
 
+For MoE models, see the [expert-parallel backend selection guide](common/moe/README.md).
+
 ## Adding the model
 
 Please refer to the [Llama 3 folder](llama3) as an example.
@@ -15,6 +17,7 @@ The folder should be organized as follows
     - `get_nparams_and_flops()` will be used to understand model size and compute throughput.
   - `__init__()` consumes the `Config` to build the model.
   - Parameter initialization is handled by the `param_init` system on each module's `Config`. Set `param_init` (a `dict[str, Callable]` mapping parameter names to init functions) on every sub-config in the model flavor builder. `init_states()` auto-recurses into all submodules, so manual recursive calls are not needed. Override `_init_self_buffers()` for device-aware buffer initialization (e.g., RoPE, MoE).
+  - List parameters whose numerics need master precision (e.g. ones the HF checkpoint stores in float32) in `preserve_dtype_params` on their module's `Config`; FSDP mixed precision, checkpoint export and RL weight sync never lower their precision. Default it on the component's `Config` when the component always needs it (e.g. GDN `A_log`), or set it in the flavor builder for one instance of a generic module (e.g. Qwen3.5's GDN `GatedRMSNorm`).
   - Add additional files to reduce the complexity of `model.py` if it grows too large or complex, e.g. moe.py to host the `MoE`, router, grouped-linear, and expert-activation modules.
 - `state_dict_adapter.py`
   - Inherit [`BaseStateDictAdapter`](/torchtitan/models/base/state_dict_adapter.py) to implement state dict mappings between `torchtitan` model definition and other model definitions (e.g. from HuggingFace so that we can save / load model checkpoints in HF formats).

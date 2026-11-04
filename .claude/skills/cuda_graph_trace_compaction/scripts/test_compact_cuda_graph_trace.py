@@ -13,6 +13,7 @@ package, so run it directly:
     pytest .claude/skills/cuda_graph_trace_compaction/scripts/
 """
 
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -24,6 +25,42 @@ from compact_cuda_graph_trace import compact_trace, merge_pp_traces
 
 
 class TestCompactCudaGraphTrace(unittest.TestCase):
+    def test_gpu_dependency_starts_at_source_end(self) -> None:
+        for source_timestamp in (12.0, math.nextafter(12.0, math.inf)):
+            with self.subTest(source_timestamp=source_timestamp):
+                source = self._flow(stream=1, timestamp=source_timestamp)
+                source["ph"] = "s"
+                trace = {
+                    "traceEvents": [
+                        self._kernel(
+                            "ncclDevKernel_AllGather",
+                            stream=1,
+                            timestamp=10,
+                            duration=2,
+                        ),
+                        self._kernel("compute", stream=1, timestamp=12),
+                        source,
+                        self._flow(stream=1, timestamp=12),
+                    ]
+                }
+
+                compacted, summary = compact_trace(trace)
+
+                kernels = [
+                    event
+                    for event in compacted["traceEvents"]
+                    if event.get("cat") == "kernel"
+                ]
+                flows = [
+                    event
+                    for event in compacted["traceEvents"]
+                    if event.get("cat") == "ac2g"
+                ]
+                self.assertEqual(kernels[0]["tid"], flows[0]["tid"])
+                self.assertEqual(kernels[1]["tid"], flows[1]["tid"])
+                self.assertEqual(source_timestamp, flows[0]["ts"])
+                self.assertEqual(2, summary["gpu_flow_endpoints_mapped"])
+
     def test_merges_aligned_pp_ranks_and_connects_send_recv(self) -> None:
         send_trace = self._rank_trace(
             rank=0,

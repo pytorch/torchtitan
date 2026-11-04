@@ -12,7 +12,7 @@ from pathlib import Path
 import torch
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
-from torchtitan.components.checkpointer import EMA, ModelWrapper
+from torchtitan.components.checkpointer import EMA, export_state_dict, ModelWrapper
 from torchtitan.components.optim import EMA as EMAContainer  # noqa: N811
 from torchtitan.components.optim.ema import parse_ema_key
 from torchtitan.config import TORCH_DTYPE_MAP
@@ -189,7 +189,10 @@ def convert_ema_to_hf(
         )
     state_dict.update(ema_state)
 
-    # convert state dict tt->hf
+    # apply export dtype, then convert state dict tt->hf
+    state_dict = export_state_dict(
+        state_dict, dtype=TORCH_DTYPE_MAP[export_dtype], model_parts=[model]
+    )
     hf_state_dict = sd_adapter.to_hf(state_dict)
 
     storage_writer = HuggingFaceStorageWriter(
@@ -199,11 +202,6 @@ def convert_ema_to_hf(
         enable_consolidation=True,
         thread_count_consolidation=5,
     )
-
-    # map and apply export dtype if needed
-    target_dtype = TORCH_DTYPE_MAP[export_dtype]
-    if target_dtype != torch.float32:
-        hf_state_dict = {k: v.to(target_dtype) for k, v in hf_state_dict.items()}
 
     dcp.save(
         hf_state_dict,

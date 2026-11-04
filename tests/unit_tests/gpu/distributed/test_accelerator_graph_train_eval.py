@@ -331,7 +331,6 @@ def test_varlen_eval_replays_different_document_counts():
                         parallelism_context=validator.parallelism_context,
                         parallelism=validator.parallelism,
                         max_num_documents=validator.dl_config.max_num_documents,
-                        max_context_length=validator.seq_len,
                     )
                 prepared = [(inputs, labels, model_kwargs)]
                 metadata = prepared[0][2]["attention_metadata"][VarlenInnerAttention]

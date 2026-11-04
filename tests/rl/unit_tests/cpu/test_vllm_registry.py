@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import (
     LinearAttention,
@@ -21,7 +22,8 @@ from torchtitan.models.deepseek_v3 import build_model_config as build_dsv3_confi
 from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_config
 from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
-from torchtitan.rl.generator.vllm import gdn, kda, registry
+from torchtitan.rl.generator.vllm import registry
+from torchtitan.rl.generator.vllm.attention import gdn, kda
 from torchtitan.rl.generator.vllm.registry import model_config_to_hf_config_dict
 
 from transformers import GenerationConfig, PretrainedConfig
@@ -48,7 +50,7 @@ def test_hf_config_adds_no_stop_token():
 
 def test_hf_config_uses_full_attention_after_sliding_attention(monkeypatch):
     from torchtitan.models.llama3 import build_model_config as build_llama3_config
-    from torchtitan.rl.generator.vllm import attention
+    from torchtitan.rl.generator.vllm.attention import attention
 
     config = build_llama3_config("debugmodel", parallelism=ParallelismConfig())
     config.layers[
@@ -244,7 +246,11 @@ def test_compressed_mla_configures_vllm_native_mla(monkeypatch, build_config):
         MODEL_ARCH_CONFIG_CONVERTORS, registry.TORCHTITAN_MODEL_TYPE, raising=False
     )
     registry.register_to_vllm(
-        config, parallelism=InferenceParallelismConfig(), checkpointer_config=None
+        config,
+        parallelism=InferenceParallelismConfig(),
+        precision=PrecisionConfig(),
+        checkpointer_config=None,
+        model_state_dict_load_mode="cpu_prefetch",
     )
     hf_config = PretrainedConfig.from_dict(hf)
     assert MODEL_ARCH_CONFIG_CONVERTORS[hf_config.model_type](
