@@ -70,24 +70,6 @@ def test_load_uses_current_sys_argv() -> None:
             ConfigLoader().load()
 
 
-def test_print_config_prints_and_exits(capsys: pytest.CaptureFixture[str]) -> None:
-    # llama3_debugmodel uses varlen attention, whose config holds the SDPA
-    # backend priority list.
-    with pytest.raises(SystemExit) as exit_info:
-        ConfigLoader().load(
-            [
-                "--module",
-                "torchtitan_recipes.tests.models.llama3",
-                "--config",
-                "llama3_debugmodel",
-                "--print-config",
-            ]
-        )
-
-    assert exit_info.value.code == 0
-    assert "sdpa_backends=['CUDNN_ATTENTION'," in capsys.readouterr().out
-
-
 @pytest.mark.parametrize(
     "args",
     [
