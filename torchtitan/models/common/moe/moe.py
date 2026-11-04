@@ -928,7 +928,7 @@ class MoE(FeedForward):
     def _maybe_all_reduce_moe_output_across_tp(
         self, out_TD: torch.Tensor, *, region_name: str = "tp_output_reduction"
     ) -> torch.Tensor:
-        """Reduce the combined partial output when dense SP is disabled.
+        """Reduce a TP-partial MoE output when dense SP is disabled.
 
         Args:
             region_name: The reduction's remat region.
