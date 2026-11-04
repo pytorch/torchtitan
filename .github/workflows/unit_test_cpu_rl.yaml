@@ -53,7 +53,7 @@ jobs:
         bash scripts/install_rl_env.sh --skip-base --flash-attn none \
           --constraint torchtitan/rl/examples/dapo_math/requirements.txt
 
-        # The shared HF cache is read-only and does not contain this tokenizer.
+        # The shared HF cache is read-only and does not contain these tokenizers.
         # Fetch only tokenizer files into a writable cache (no model weights).
         export MUSE_GLIMMER_TOKENIZER="$(python -c '
         import os
@@ -61,6 +61,16 @@ jobs:
 
         print(snapshot_download(
             "meta-models/Muse-Glimmer-30B",
+            cache_dir=os.path.join(os.environ["RUNNER_TEMP"], "rl-hf-cache"),
+            allow_patterns=["config.json", "tokenizer*.json", "chat_template.jinja"],
+        ))
+        ')"
+        export QWEN3_5_TOKENIZER="$(python -c '
+        import os
+        from huggingface_hub import snapshot_download
+
+        print(snapshot_download(
+            "Qwen/Qwen3.5-0.8B",
             cache_dir=os.path.join(os.environ["RUNNER_TEMP"], "rl-hf-cache"),
             allow_patterns=["config.json", "tokenizer*.json", "chat_template.jinja"],
         ))

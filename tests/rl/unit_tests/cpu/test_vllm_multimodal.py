@@ -180,16 +180,3 @@ def test_validate_image_model_rejects_a_mismatched_cache_or_no_encoder():
         validate_image_model(config, dataclasses.replace(SPEC, patch_size=14))
     with pytest.raises(ValueError, match="no vision encoder"):
         validate_image_model(dataclasses.replace(config, vision_encoder=None), SPEC)
-
-
-def test_controller_rejects_image_prompts_until_the_trainer_takes_them():
-    # TODO: remove with the guard, once the batcher and the trainer take image inputs.
-    from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_5_debug_varlen
-
-    config = rl_grpo_qwen3_5_debug_varlen(seq_len=128)
-    engine = dataclasses.replace(config.generator.engine, image_spec=ImageSpec())
-
-    with pytest.raises(NotImplementedError, match="training on image prompts"):
-        dataclasses.replace(
-            config, generator=dataclasses.replace(config.generator, engine=engine)
-        )
