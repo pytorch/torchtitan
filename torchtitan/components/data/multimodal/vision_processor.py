@@ -385,6 +385,24 @@ class VisionProcessor(Configurable):
         grid_thw = torch.tensor([T_patches, H_patches, W_patches])
         return patches, grid_thw
 
+    def grid_thw(self, height: int, width: int) -> tuple[int, int, int]:
+        """The patch grid ``(1, H, W)`` that ``resize_and_normalize`` gives a
+        ``height x width`` image, without decoding it.
+
+        For callers that know an image's size but not its pixels, e.g. a renderer that
+        reads the size from the file header to count the image's placeholder tokens
+        with ``num_placeholder_tokens(processor.grid_thw(height, width))``.
+        """
+        config = self.config
+        resize_h, resize_w, pad_h, pad_w = self.resize(
+            height,
+            width,
+            patch_size=config.patch_size,
+            merge_size=config.spatial_merge_size,
+        )
+        patch_size = config.patch_size
+        return 1, (resize_h + pad_h) // patch_size, (resize_w + pad_w) // patch_size
+
     def _resize(self, image: torch.Tensor, resize: ResizeRule) -> torch.Tensor:
         """Resize uint8 ``(..., C, H, W)`` pixels to ``resize``'s
         ``(resize_h, resize_w, pad_h, pad_w)``, then zero-pad right/bottom.
