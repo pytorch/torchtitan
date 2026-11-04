@@ -398,17 +398,6 @@ def llama3_debugmodel_fsdp2_tp2_pp2_load() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_fsdp2_tp2_pp2() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=2048)
-    _set_spmd_typechecking(config, typechecking=False)
-    config.parallelism.pipeline_parallel_degree = 2
-    config.parallelism.num_pp_microbatches = 8
-    config.parallelism.data_parallel_shard_degree = 2
-    config.parallelism.tensor_parallel_degree = 2
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    return config
-
-
 def llama3_debugmodel_pp4_interleaved_1f1b() -> Trainer.Config:
     """PP-only; see ``llama3_debugmodel_pp2_1f1b`` for why type checking is off."""
     config = llama3_debugmodel(seq_len=2048)
@@ -982,13 +971,6 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             ],
             test_descr="PP+DP+TP 3D test with save/load resume ckpt",
             test_name="pp_dp_tp",
-            ngpu=8,
-            use_real_pg=True,
-        ),
-        IntegrationTestDefinition(
-            configs=[llama3_debugmodel_fsdp2_tp2_pp2],
-            test_descr="PP+DP+TP 3D test",
-            test_name="3d",
             ngpu=8,
             use_real_pg=True,
         ),

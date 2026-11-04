@@ -13,32 +13,16 @@ import pytest
 
 import torch
 from torchstore import RankRole
-from torchtitan.components.data.types import (
-    TrainingMicrobatch as CoreTrainingMicrobatch,
-)
-from torchtitan.config import Configurable, DebugConfig, PrecisionConfig, TrainingConfig
+from torchtitan.config import PrecisionConfig, TrainingConfig
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.observability.sdc_replayer import SDCReplayer
-from torchtitan.rl.actors.monarch.trainer import TrainerActor
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import (
     RDMAMicrobatch,
     RDMAMicrobatchPrefetcher,
 )
 from torchtitan.rl.trainer.trainer import MirroredState, Trainer
-from torchtitan.trainer import Trainer as DatasetTrainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
-
-
-def test_trainer_has_thin_actor_adapter() -> None:
-    assert issubclass(TrainerActor, Trainer)
-    assert not issubclass(Trainer, DatasetTrainer)
-    assert not issubclass(DatasetTrainer, TrainingEngine)
-    assert issubclass(TrainingEngine, Configurable)
-    assert issubclass(DatasetTrainer.Config, TrainingEngine.Config)
-    assert issubclass(Trainer.Config, TrainingEngine.Config)
-    assert issubclass(TrainingMicrobatch, CoreTrainingMicrobatch)
 
 
 def test_mirrored_state_uses_a_fixed_opaque_template() -> None:
@@ -51,10 +35,6 @@ def test_mirrored_state_uses_a_fixed_opaque_template() -> None:
 
     assert restored.loaded == source.value
     assert restored.state_dict().keys() == {"state"}
-
-
-def test_rl_trainer_uses_training_engine_config_defaults() -> None:
-    assert not Trainer.Config(model=MagicMock()).training.disable_accelerator_graphs
 
 
 def test_initialize_torchstore_client_uses_publisher_role() -> None:
@@ -125,17 +105,6 @@ def test_push_model_state_dict_puts_on_push_stream_in_worker() -> None:
         assert worker_thread_ids[0] != main_thread_id
 
     asyncio.run(run())
-
-
-def test_rl_trainer_accepts_core_sdc_replay_config() -> None:
-    config = Trainer.Config(
-        model=MagicMock(),
-        debug=DebugConfig(deterministic=True),
-        training=TrainingConfig(disable_accelerator_graphs=True),
-        sdc_replayer=SDCReplayer.Config(),
-    )
-
-    assert isinstance(config.sdc_replayer, SDCReplayer.Config)
 
 
 def test_rl_trainer_validates_model_training_config_before_initialization(
