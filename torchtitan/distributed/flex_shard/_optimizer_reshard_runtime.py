@@ -90,8 +90,11 @@ def _reserve_tensor(
     dtype: torch.dtype,
     device: torch.device,
 ) -> Tensor:
+    """Prepare a tensor's fixed capacity without retaining backing storage."""
     if tensor is None or tensor.numel() < numel:
-        return torch.empty(numel, dtype=dtype, device=device)
+        tensor = torch.empty(numel, dtype=dtype, device=device)
+    if (storage := tensor.untyped_storage()).nbytes():
+        storage.resize_(0)
     return tensor
 
 
@@ -123,67 +126,70 @@ def _execute_packed_all_to_all(
 @dataclass(slots=True)
 class _BufferSlot:
     buffers: dict[_BufferKey, _ReservedBuffers] = field(default_factory=dict)
-    _recorded_compute_streams: set[torch.Stream] = field(default_factory=set)
+    _tensors: tuple[Tensor, ...] = ()
 
     def reserve(
         self,
         requirements: dict[_BufferKey, _BufferRequirements],
-        *,
-        device_handle: ModuleType,
-        compute_stream: torch.Stream,
     ) -> None:
-        # Allocate on the caller stream so released blocks can be reused by
-        # later eager caller work, not only by this runtime's transfer stream.
-        with device_handle.stream(compute_stream):
-            for (device, dtype), required in requirements.items():
-                reserved = self.buffers.setdefault((device, dtype), _ReservedBuffers())
-                if required.storage_exchange_numel is not None:
-                    reserved.storage_exchange = _reserve_tensor(
-                        reserved.storage_exchange,
-                        numel=required.storage_exchange_numel,
-                        dtype=dtype,
-                        device=device,
-                    )
-                if required.compute_exchange_numel is not None:
-                    reserved.compute_exchange = _reserve_tensor(
-                        reserved.compute_exchange,
-                        numel=required.compute_exchange_numel,
-                        dtype=dtype,
-                        device=device,
-                    )
-                if required.storage_scratch_numel is not None:
-                    reserved.storage_scratch = _reserve_tensor(
-                        reserved.storage_scratch,
-                        numel=required.storage_scratch_numel,
-                        dtype=dtype,
-                        device=device,
-                    )
-                if required.compute_scratch_numel is not None:
-                    reserved.compute_scratch = _reserve_tensor(
-                        reserved.compute_scratch,
-                        numel=required.compute_scratch_numel,
-                        dtype=dtype,
-                        device=device,
-                    )
-        self._recorded_compute_streams.clear()
-        self.record_compute_stream(compute_stream)
-
-    def record_compute_stream(self, stream: torch.Stream) -> None:
-        # run() orders transfer completion onto the caller before releasing
-        # tensors. Record all buffers if a later run uses a different caller
-        # than the allocation stream, so destruction still observes that wait.
-        if stream in self._recorded_compute_streams:
-            return
-        for reserved in self.buffers.values():
+        # Prepare capacities once; storage is grown on each run's caller stream.
+        for (device, dtype), required in requirements.items():
+            reserved = self.buffers.setdefault((device, dtype), _ReservedBuffers())
+            if required.storage_exchange_numel is not None:
+                reserved.storage_exchange = _reserve_tensor(
+                    reserved.storage_exchange,
+                    numel=required.storage_exchange_numel,
+                    dtype=dtype,
+                    device=device,
+                )
+            if required.compute_exchange_numel is not None:
+                reserved.compute_exchange = _reserve_tensor(
+                    reserved.compute_exchange,
+                    numel=required.compute_exchange_numel,
+                    dtype=dtype,
+                    device=device,
+                )
+            if required.storage_scratch_numel is not None:
+                reserved.storage_scratch = _reserve_tensor(
+                    reserved.storage_scratch,
+                    numel=required.storage_scratch_numel,
+                    dtype=dtype,
+                    device=device,
+                )
+            if required.compute_scratch_numel is not None:
+                reserved.compute_scratch = _reserve_tensor(
+                    reserved.compute_scratch,
+                    numel=required.compute_scratch_numel,
+                    dtype=dtype,
+                    device=device,
+                )
+        self._tensors = tuple(
+            tensor
+            for reserved in self.buffers.values()
             for tensor in (
                 reserved.storage_exchange,
                 reserved.compute_exchange,
                 reserved.compute_scratch,
                 reserved.storage_scratch,
+            )
+            if tensor is not None
+        )
+
+    def allocate(self) -> None:
+        """Regrow cached tensors on the current caller stream before use."""
+        for tensor in self._tensors:
+            size = tensor.numel() * tensor.element_size()
+            if (storage := tensor.untyped_storage()).nbytes() != size:
+                storage.resize_(size)
+
+    def release(self) -> None:
+        """Free accelerator storage, retaining host storage and tensor metadata."""
+        for tensor in self._tensors:
+            if (
+                tensor.device.type != "cpu"
+                and (storage := tensor.untyped_storage()).nbytes()
             ):
-                if tensor is not None and tensor.device.type != "cpu":
-                    tensor.record_stream(stream)
-        self._recorded_compute_streams.add(stream)
+                storage.resize_(0)
 
     def communication_buffers(
         self, plan: _RedistributionBucketPlan[Any]
@@ -294,10 +300,12 @@ def _include_compute_scratch_requirement(
 class _BucketedRedistributionRuntime(Generic[_ItemT]):
     """Execute bucket plans with a rolling communication prefetch window.
 
-    ``reserve_buffers`` must be called after planning, after any replan, and
-    after ``release_buffers``. It grows caller-stream tensors for two rolling
-    slots while retaining their cross-stream events. One slot holds the current
-    bucket and the other prefetches the next redistributed bucket.
+    ``reserve_buffers`` prepares fixed-capacity tensors after planning or a
+    replan. ``run`` allocates their backing storage on the caller stream, and
+    ``release_buffers`` frees accelerator storage after transfer completion is
+    ordered back to that caller; host storage stays allocated between updates.
+    Tensor metadata and cross-stream events stay alive. One slot holds the
+    current bucket and the other prefetches the next redistributed bucket.
 
     ``prepare`` writes an optimizer input into runtime-owned scratch, ``compute``
     updates its runtime-owned input in place, and ``finalize`` consumes a
@@ -330,7 +338,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
             [_ItemT], tuple[torch.Size, torch.dtype, torch.device]
         ],
     ) -> None:
-        """Eagerly grow runtime-owned tensors to the plans' maximum sizes."""
+        """Prepare tensor capacities and events once per plan, without storage."""
         context = self._context
         created_context = False
         if context is None and any(
@@ -397,23 +405,12 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
                     local_tensor_spec,
                 )
 
-        self._local_slot.reserve(
-            local_requirements,
-            device_handle=device_handle,
-            compute_stream=compute_stream,
-        )
+        self._local_slot.reserve(local_requirements)
         if context is not None:
             for slot, requirements in zip(
                 context.slots, slot_requirements, strict=True
             ):
-                slot.buffers.reserve(
-                    requirements,
-                    device_handle=device_handle,
-                    compute_stream=compute_stream,
-                )
-            # The allocation stream may differ from a later run's caller.
-            # Transfer work must observe prior uses of newly reserved blocks.
-            context.transfer_stream.wait_stream(compute_stream)
+                slot.buffers.reserve(requirements)
             if created_context:
                 for slot in context.slots:
                     slot.compute_input_ready.record(context.transfer_stream)
@@ -422,18 +419,16 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
             self._context = context
 
     def release_buffers(self) -> None:
-        """Release slot tensors after run() has ordered transfer completion.
+        """Release accelerator storage after run() orders transfer completion.
 
         Freed blocks can serve later eager allocations on their caller stream.
         This does not make them available to a separate CUDA-graph pool.
-        Communication resources and plans remain owned by the runtime.
+        Host storage, tensor metadata, communication resources, and plans remain owned.
         """
-        self._local_slot.buffers.clear()
-        self._local_slot._recorded_compute_streams.clear()
+        self._local_slot.release()
         if self._context is not None:
             for slot in self._context.slots:
-                slot.buffers.buffers.clear()
-                slot.buffers._recorded_compute_streams.clear()
+                slot.buffers.release()
 
     def run(
         self,
@@ -453,10 +448,10 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
             else torch.get_device_module(self._device)
         )
         caller = handle.current_stream(self._device)
-        self._local_slot.record_compute_stream(caller)
+        self._local_slot.allocate()
         if context is not None:
             for slot in context.slots:
-                slot.buffers.record_compute_stream(caller)
+                slot.buffers.allocate()
 
         transfer_stream: torch.Stream | None = None
         completed = False

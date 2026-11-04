@@ -171,11 +171,10 @@ def _initialize_dist_muon(
     optimizer._redistribution_runtime = _BucketedRedistributionRuntime[
         _ParameterComputeLayout
     ](tensor_device)
-    if optimizer._persistent_redistribution_buffers:
-        optimizer._redistribution_runtime.reserve_buffers(
-            optimizer._bucket_plans,
-            local_tensor_spec=optimizer._local_tensor_spec,
-        )
+    optimizer._redistribution_runtime.reserve_buffers(
+        optimizer._bucket_plans,
+        local_tensor_spec=optimizer._local_tensor_spec,
+    )
     optimizer.register_load_state_dict_post_hook(_after_load_state_dict, prepend=True)
 
 
@@ -192,14 +191,14 @@ class DistMuon(Optimizer):
     time, but bitwise equality across the two kernel schedules is not part of
     the contract.
 
-    ``persistent_redistribution_buffers=False`` reserves exchange and compute
-    scratch only for each step, then releases it. Construction and checkpoint
-    loading do not reserve scratch. Communication streams and events are created
-    on the first reservation and retained between steps, along with parameters,
-    optimizer state, and communicators. This policy targets fully eager training:
-    later forward/backward work on the same caller stream can reuse released
-    allocator blocks. It does not share scratch with a CUDA-graph private pool;
-    directly capturing optimizer updates is not supported.
+    Eager updates regrow accelerator exchange and compute scratch storage, then
+    release it while retaining tensor metadata. Host storage stays allocated
+    between updates. Construction and checkpoint loading prepare capacities and
+    communication events once per plan. Later
+    eager work on the caller stream can reuse the released blocks, including
+    another eager optimizer when forward/backward use CUDA graphs. This does not
+    share scratch with a separate CUDA-graph private pool. Parameters, optimizer
+    state, and communication resources remain owned.
 
     ``ns_device`` selects where Newton-Schulz runs. ``None`` keeps the storage
     device, where each parameter's local shard lives (the host under FSDP2 CPU
@@ -215,7 +214,6 @@ class DistMuon(Optimizer):
     _direction_row_scale_by_fqn: dict[str, Tensor]
     _redistribution_runtime: _BucketedRedistributionRuntime[_ParameterComputeLayout]
     _param_groups_frozen: bool
-    _persistent_redistribution_buffers: bool
 
     def __init__(
         self,
@@ -232,7 +230,6 @@ class DistMuon(Optimizer):
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
         ns_device: Literal["accelerator"] | None = None,
-        persistent_redistribution_buffers: bool = True,
     ) -> None:
         self._ns_device = self._resolve_ns_device(ns_device)
         defaults = {
@@ -247,7 +244,6 @@ class DistMuon(Optimizer):
         }
         self._first_step_validated = False
         self._param_groups_frozen = False
-        self._persistent_redistribution_buffers = persistent_redistribution_buffers
         super().__init__(_normalize_param_groups(params), defaults)
         self._validate_groups()
         self._param_groups_frozen = True
@@ -287,11 +283,6 @@ class DistMuon(Optimizer):
                 loss = closure()
 
         self._preflight_step()
-        if not self._persistent_redistribution_buffers:
-            self._redistribution_runtime.reserve_buffers(
-                self._bucket_plans,
-                local_tensor_spec=self._local_tensor_spec,
-            )
         self._redistribution_runtime.run(
             self._bucket_plans,
             local_tensor_spec=self._local_tensor_spec,
@@ -299,8 +290,7 @@ class DistMuon(Optimizer):
             compute=self._compute_update,
             finalize=self._apply_update,
         )
-        if not self._persistent_redistribution_buffers:
-            self._redistribution_runtime.release_buffers()
+        self._redistribution_runtime.release_buffers()
         return loss
 
     def add_param_group(self, param_group: dict[str, Any]) -> None:
@@ -2007,11 +1997,10 @@ def _after_load_state_dict(optimizer: Optimizer) -> None:
     muon._validate_groups()
     muon._initialize_plan(muon._parameter_compute_layouts)
     muon._validate_plan_across_ranks()
-    if muon._persistent_redistribution_buffers:
-        muon._redistribution_runtime.reserve_buffers(
-            muon._bucket_plans,
-            local_tensor_spec=muon._local_tensor_spec,
-        )
+    muon._redistribution_runtime.reserve_buffers(
+        muon._bucket_plans,
+        local_tensor_spec=muon._local_tensor_spec,
+    )
     # init_optim_state may have validated placeholder state before the load.
     muon._first_step_validated = False
 
