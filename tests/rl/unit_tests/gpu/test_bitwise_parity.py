@@ -886,7 +886,7 @@ class TestBitwiseParityQwen35Varlen(BitwiseParityTestBase):
     min_world_size = 2
 
 
-def _qwen3_5_debug_bitwise_config() -> Controller.Config:
+def qwen3_5_debug_bitwise_config() -> Controller.Config:
     """Build a two-GPU random-weight Qwen3.5 parity configuration."""
     config = rl_grpo_qwen3_5_debug_varlen_batch_invariant()
     config.trainer = dataclasses.replace(
@@ -903,7 +903,7 @@ class TestBitwiseParityQwen35DebugVarlen(BitwiseParityTestBase):
     """Qwen3.5 GDN parity with random weights and matched TP=2."""
 
     __test__ = True
-    config_fn = staticmethod(_qwen3_5_debug_bitwise_config)
+    config_fn = staticmethod(qwen3_5_debug_bitwise_config)
     attn_backend = "varlen"
     min_world_size = 2
     sync_weights_from_trainer = True

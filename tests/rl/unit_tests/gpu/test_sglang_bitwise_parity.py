@@ -14,13 +14,17 @@ Test bitwise parity between the SGLang generator and the TorchTitan trainer.
   2. test_sglang_decode_batch_invariance:
       A seeded request decodes the same tokens with the same logprobs alone and in
       a batch of mixed-length requests, after its prompt is cached.
-  3. test_trainer_vs_sglang_decode_after_model_state_dict_load:
+  3. test_trainer_vs_sglang_decode_after_cached_turn:
+      Test 1 for each session's next turn (its prompt extends the previous turn's
+      prompt and completion), which resumes the session's cached prefix: KV, and
+      the recurrent state of GDN layers.
+  4. test_trainer_vs_sglang_decode_after_model_state_dict_load:
       Test 1 after perturbed trainer weights are loaded into SGLang in place (CUDA
       graphs kept) and requests move to the next policy version's cache salt.
-  4. test_sglang_decode_across_model_state_dict_load:
+  5. test_sglang_decode_across_model_state_dict_load:
       Loading the same weights while requests decode leaves their tokens and
       logprobs unchanged.
-  5. test_context_length_limits (TestSGLangBitwiseParityVarlen only):
+  6. test_context_length_limits (TestSGLangBitwiseParityVarlen only):
       As in vLLM, a prompt of max_context_length - 1 tokens runs and stops at
       max_context_length tokens in total, and a prompt of max_context_length
       tokens is rejected.
@@ -61,7 +65,7 @@ from torchtitan.models.muse_glimmer import (
 )
 from torchtitan.rl.controller.controller import Controller
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
-from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
+from torchtitan.rl.generator.types import EngineRequest, FinishedRequest, SamplingConfig
 from torchtitan.tools.utils import activate_cuda_flash_attention_impl
 from torchtitan_recipes.rl.alphabet_sort import (
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
@@ -75,6 +79,7 @@ from tests.rl.unit_tests.gpu.test_bitwise_parity import (
     build_trainer_model,
     compute_trainer_prefill_logprobs,
     make_prompt_tokens,
+    qwen3_5_debug_bitwise_config,
 )
 
 # Each class runs under its own two-GPU torchrun launch.
@@ -97,9 +102,13 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
     BATCH_SIZE = 5
     PROMPT_LENGTH = 150
     MAX_GEN_TOKENS = 50
+    # Tokens a cached turn's prompt adds after the previous turn's completion. Even,
+    # which keeps that turn's packed batch even: the trainer's MoE at EP 2 splits it
+    # evenly over TP 2.
+    NEXT_TURN_SUFFIX_LENGTH = 8
     # The policy version of the engine's weights, which salts the requests' KV.
     policy_version = 0
-    # Off by default, so test 3 covers the cache salt.
+    # Off by default, so test 4 covers the cache salt.
     reset_kv_cache_on_model_state_dict_load = False
 
     @classmethod
@@ -167,11 +176,13 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         if dist.is_initialized():
             dist.barrier()
 
-    def _generate(self, prompt_ids: list[list[int]], *, load_at_step: int = -1):
-        """Sample a completion of each prompt at temperature 1, each with its own seed.
+    def _generate(
+        self, prompt_ids: list[list[int]], *, load_at_step: int = -1
+    ) -> list[FinishedRequest]:
+        """Sample a completion of each prompt at temperature 1, each with its own seed
+        and session, and return the results in prompt order.
 
         With ``load_at_step`` >= 0, load the trainer's weights before that step.
-        Returns ``(token_ids, logprobs)`` per prompt, in prompt order.
         """
         requests = []
         for i, ids in enumerate(prompt_ids):
@@ -200,11 +211,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
                 finished[result.request_id] = result
             num_steps += 1
         self.assertGreater(num_steps, load_at_step)
-        results = [finished[request.request_id] for request in requests]
-        return (
-            [result.token_ids for result in results],
-            [result.token_logprobs for result in results],
-        )
+        return [finished[request.request_id] for request in requests]
 
     def _assert_bitwise_equal(self, name, a, b) -> None:
         a = torch.as_tensor(a, dtype=torch.float32).cpu()
@@ -221,41 +228,65 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         with self.parallelism_context.activate_spmd(), torch.no_grad():
             return compute_trainer_prefill_logprobs(self.model, token_ids, self.device)
 
-    def test_trainer_vs_sglang_decode(self):
-        gen_ids, gen_lps = self._generate(self.prompt_ids)
-        sequences = [p + g for p, g in zip(self.prompt_ids, gen_ids, strict=True)]
+    def _check_trainer_vs_sglang_decode(
+        self, prompt_ids: list[list[int]]
+    ) -> list[FinishedRequest]:
+        """Generate from ``prompt_ids`` and check the completions' logprobs against the
+        trainer's prefill of prompt and completion; return the results."""
+        results = self._generate(prompt_ids)
+        sequences = [
+            prompt + result.token_ids
+            for prompt, result in zip(prompt_ids, results, strict=True)
+        ]
         trainer_lps = self._trainer_logprobs(sequences)
         if dist.get_rank() == 0:
-            for i, prompt in enumerate(self.prompt_ids):
+            for i, (prompt, result) in enumerate(zip(prompt_ids, results)):
                 self._assert_bitwise_equal(
                     f"seq {i}: trainer prefill vs SGLang decode",
                     trainer_lps[i][len(prompt) - 1 :],
-                    gen_lps[i],
+                    result.token_logprobs,
                 )
+        return results
+
+    def test_trainer_vs_sglang_decode(self):
+        self._check_trainer_vs_sglang_decode(self.prompt_ids)
 
     def test_sglang_decode_batch_invariance(self):
-        single_ids, single_lps = self._generate(self.prompt_ids[:1])
-        batched_ids, batched_lps = self._generate(self.prompt_ids)
+        (single,) = self._generate(self.prompt_ids[:1])
+        batched = self._generate(self.prompt_ids)[0]
         if dist.get_rank() == 0:
-            self.assertEqual(single_ids[0], batched_ids[0])
+            self.assertEqual(single.token_ids, batched.token_ids)
             self._assert_bitwise_equal(
                 "seq 0: SGLang decode(bsz=1) vs decode(bsz=5)",
-                single_lps[0],
-                batched_lps[0],
+                single.token_logprobs,
+                batched.token_logprobs,
             )
+
+    def test_trainer_vs_sglang_decode_after_cached_turn(self):
+        results = self._generate(self.prompt_ids)
+        # Each next turn: the history, then a few tokens standing in for a tool result.
+        next_prompt_ids = [
+            prompt + result.token_ids + prompt[: self.NEXT_TURN_SUFFIX_LENGTH]
+            for prompt, result in zip(self.prompt_ids, results, strict=True)
+        ]
+        next_results = self._check_trainer_vs_sglang_decode(next_prompt_ids)
+        if dist.get_rank() == 0:
+            for prompt, result in zip(self.prompt_ids, next_results):
+                # The cache covers the previous turn's completion too.
+                self.assertGreater(result.metrics_inputs.num_cached_tokens, len(prompt))
 
     def test_sglang_decode_across_model_state_dict_load(self):
         # The trainer's weights are still the ones the generator loaded, and step 10
         # is mid-decode: prefill takes a step or two of the 50 tokens.
-        expected_ids, expected_lps = self._generate(self.prompt_ids)
-        ids, lps = self._generate(self.prompt_ids, load_at_step=10)
+        expected = self._generate(self.prompt_ids)
+        results = self._generate(self.prompt_ids, load_at_step=10)
         if dist.get_rank() == 0:
-            for i in range(len(self.prompt_ids)):
-                self.assertEqual(ids[i], expected_ids[i])
+            for i, (result, expected_result) in enumerate(zip(results, expected)):
+                self.assertEqual(result.token_ids, expected_result.token_ids)
                 self._assert_bitwise_equal(
                     f"seq {i}: decode with vs without a load",
-                    lps[i],
-                    expected_lps[i],
+                    result.token_logprobs,
+                    expected_result.token_logprobs,
                 )
 
     def test_trainer_vs_sglang_decode_after_model_state_dict_load(self):
@@ -269,7 +300,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         )
         _load_trainer_weights(self.engine, self.model, self.precision)
         type(self).policy_version += 1
-        self.test_trainer_vs_sglang_decode()
+        self._check_trainer_vs_sglang_decode(self.prompt_ids)
 
 
 def _load_trainer_weights(engine, model, precision) -> None:
@@ -367,6 +398,15 @@ class TestSGLangBitwiseParityMoEEP(SGLangBitwiseParityTestBase):
     cuda_graph = "none"
 
 
+class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):
+    """Qwen3.5 debug model with random weights: GDN state slots across prefill, decode
+    and cached prefixes."""
+
+    __test__ = True
+    config_fn = staticmethod(qwen3_5_debug_bitwise_config)
+    sync_weights_from_trainer = True
+
+
 def _debug_model_config(build_model_config, **kwargs) -> Controller.Config:
     """A model's debug flavor at TP 2 on both sides, in the batch-invariant Qwen3 MoE
     debug recipe."""
@@ -454,8 +494,11 @@ class TestSGLangBitwiseParityDistMoE(SGLangBitwiseParityTestBase):
             model_parts=[cls.model],
             parallelism_context=cls.parallelism_context,
             device=cls.device,
+            # The longest trainer batch: test_trainer_vs_sglang_decode_after_cached_turn's.
             num_tokens_per_microbatch_per_dp_rank=cls.BATCH_SIZE
-            * (cls.PROMPT_LENGTH + cls.MAX_GEN_TOKENS),
+            * (
+                cls.PROMPT_LENGTH + 2 * cls.MAX_GEN_TOKENS + cls.NEXT_TURN_SUFFIX_LENGTH
+            ),
             pp_schedule=None,
         )
 
