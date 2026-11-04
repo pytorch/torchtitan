@@ -32,7 +32,7 @@ from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_graph_trainer_model,
-    maybe_register_blockmask_pytree_node,
+    maybe_register_attention_metadata_pytree_nodes,
 )
 from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
@@ -43,6 +43,9 @@ from torchtitan.experiments.graph_trainer.deepseek_v3 import (
 )
 from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
     maybe_apply_ep_overlap_eager_chunking,
+)
+from torchtitan.experiments.graph_trainer.kimi_k3 import (
+    build_model_config as build_kimi_k3_model_config,
 )
 from torchtitan.experiments.graph_trainer.llama3 import (
     build_model_config as build_llama3_model_config,
@@ -301,7 +304,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
             extra_kwargs["aux_loss_denominators"] = global_loss_token_counts.unsqueeze(
                 0
             )
-        maybe_register_blockmask_pytree_node()
+        maybe_register_attention_metadata_pytree_nodes()
 
         # Step 1: Trace the graph
         traced_result = minimal_fx_tracer(fwd_bwd_fn, module=model)(
@@ -817,6 +820,49 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
             # that pickle.dumps cannot serialize. The Varlen subclasses cover this
             # path with tensor-based sequence metadata.
             self.skipTest("FlexInnerAttention graphs contain unpicklable code objects")
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+        run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
+
+        self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
+
+    def test_numerics_changing_optim_run_to_run(self):
+        """Two runs with numerics_changing_optim produce bitwise identical results."""
+        run_a = self._run_steps(
+            copy.deepcopy(self.model),
+            GraphTrainer,
+            numerics_changing_optim=True,
+        )
+        run_b = self._run_steps(
+            copy.deepcopy(self.model),
+            GraphTrainer,
+            numerics_changing_optim=True,
+        )
+
+        self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
+
+
+@unittest.skipUnless(
+    has_cuda_capability(9, 0), "Attention Gym KDA requires CUDA capability 9.0+"
+)
+class TestKimiK3BitwiseDeterministic(BitwiseDeterministicBase):
+    """Bitwise determinism tests for the text-only Kimi K3 debug model.
+
+    Covers KDA and MLA attention layers, attention residuals, and LatentMoE.
+    """
+
+    build_model_config = staticmethod(build_kimi_k3_model_config)
+    model_flavor = "debugmodel_text"
+    annotate_model = staticmethod(annotate_graph_trainer_model)
+
+    def test_aot_fx_trace_vs_eager(self):
+        """aot_fx_trace and eager produce bitwise identical losses and grads."""
+        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+
+        self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
+
+    def test_precompile_vs_trace(self):
+        """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
 

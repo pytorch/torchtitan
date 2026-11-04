@@ -30,7 +30,7 @@ from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import apply_overrides, ConfigLoader, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import (
-    maybe_register_blockmask_pytree_node,
+    maybe_register_attention_metadata_pytree_nodes,
 )
 from torchtitan.experiments.graph_trainer.memory_policy import (
     validate_memory_policy_config,
@@ -280,7 +280,7 @@ def _precompile_aot_fx_trace(
         else contextlib.nullcontext()
     )
 
-    maybe_register_blockmask_pytree_node()
+    maybe_register_attention_metadata_pytree_nodes()
 
     logger.info("Tracing fwd+loss+bwd via make_fx...")
     with parallelism_context.activate_spmd(), loss_parallel_ctx:

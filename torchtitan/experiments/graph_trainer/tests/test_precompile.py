@@ -181,7 +181,8 @@ class TestPrecompileMain(unittest.TestCase):
                             precompile, "get_spmd_precompile_meshes", return_value=[]
                         ),
                         patch.object(
-                            precompile_main, "maybe_register_blockmask_pytree_node"
+                            precompile_main,
+                            "maybe_register_attention_metadata_pytree_nodes",
                         ),
                         self.assertRaisesRegex(RuntimeError, "stop before compilation"),
                     ):
@@ -531,7 +532,7 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
         from torch.nn.attention.flex_attention import create_block_mask
 
         from torchtitan.experiments.graph_trainer.common_utils import (
-            maybe_register_blockmask_pytree_node,
+            maybe_register_attention_metadata_pytree_nodes,
         )
         from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
         from torchtitan.experiments.graph_trainer.precompile import (
@@ -539,7 +540,7 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
         )
         from torchtitan.models.common.attention import get_causal_mask_mod
 
-        maybe_register_blockmask_pytree_node()
+        maybe_register_attention_metadata_pytree_nodes()
 
         mask_mod = get_causal_mask_mod()
         block_mask = create_block_mask(mask_mod, B=1, H=1, Q_LEN=128, KV_LEN=128)

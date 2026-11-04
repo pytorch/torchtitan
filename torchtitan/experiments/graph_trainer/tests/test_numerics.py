@@ -33,6 +33,7 @@ from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.experiments.graph_trainer import simple_fsdp
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
 from torchtitan.models.common.linear import GroupedLinear, Linear
+from torchtitan.tools.utils import has_cuda_capability
 
 
 STEPS = 20
@@ -379,6 +380,19 @@ def _run_qwen3_moe_loss_compare() -> bool:
     )
 
 
+def _run_kimi_k3_loss_compare() -> bool:
+    """Compare Kimi K3 eager and GraphTrainer with FSDP+TP+EP on four GPUs."""
+    return run_loss_compare(
+        baseline_module=NUMERICS_CONFIG_MODULE,
+        baseline_config="kimi_k3_eager_numerics",
+        test_module=NUMERICS_CONFIG_MODULE,
+        test_config="kimi_k3_graph_numerics",
+        baseline_ngpus=4,
+        test_ngpus=4,
+        metrics=("loss", "grad_norm"),
+    )
+
+
 def _run_autoparallel_llama3_loss_compare() -> bool:
     """Compare manual and AutoParallel Llama3 using Varlen attention."""
     return run_loss_compare_close(
@@ -443,6 +457,12 @@ class TestGraphTrainerNumerics(unittest.TestCase):
 
     def test_moe_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_qwen3_moe_loss_compare())
+
+    @unittest.skipUnless(
+        has_cuda_capability(9, 0), "Attention Gym KDA requires CUDA capability 9.0+"
+    )
+    def test_moe_kimi_k3_aot_fx_trace_vs_eager(self):
+        self.assertTrue(_run_kimi_k3_loss_compare())
 
 
 def _run_dist_moe_pp_loss_compare(

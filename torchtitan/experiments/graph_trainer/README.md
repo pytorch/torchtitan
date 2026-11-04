@@ -299,6 +299,19 @@ GraphRuntime composability status:
 |Micro-batch overlap| 🚧 |
 |Pre-compile| 🚧 |
 
+### Supported Models
+
+GraphTrainer traces one static-shape training step, so multimodal models run
+text-only flavors without a vision encoder.
+
+| Model | Notes |
+| :-------- | :-------- |
+| Llama 3 | |
+| DeepSeek V3 | |
+| Qwen3 (dense and MoE) | |
+| Muse Glimmer | Text-only flavors; no CP |
+| Kimi K3 | `debugmodel_text` flavor; FSDP, TP, and EP; no CP or PP |
+
 ### Citation
 
 If you find SimpleFSDP useful, please kindly consider citing the following paper:

@@ -25,7 +25,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     accumulate_param_grads_,
     disable_inplace_wgrad_accum,
     get_simple_fsdp_mesh,
-    maybe_register_blockmask_pytree_node,
+    maybe_register_attention_metadata_pytree_nodes,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _copy_fwd_metadata_to_bw_nodes,
@@ -1112,7 +1112,7 @@ class TestTraceModule(unittest.TestCase):
             flex_attention,
         )
 
-        maybe_register_blockmask_pytree_node()
+        maybe_register_attention_metadata_pytree_nodes()
 
         def make_mask_fn(attn_regions, document_ids):
             def mask_mod(b, h, q_idx, kv_idx):
@@ -1702,7 +1702,7 @@ class TestTraceModels(unittest.TestCase):
         fwd_kwargs = fwd_kwargs or {}
         train_step = make_train_step(model_ref, get_loss, fwd_kwargs=fwd_kwargs)
 
-        maybe_register_blockmask_pytree_node()
+        maybe_register_attention_metadata_pytree_nodes()
         traced: TracedResult = minimal_fx_tracer(train_step, module=model_ref)(
             *fwd_args, labels
         )
@@ -1980,7 +1980,7 @@ class TestTraceModels(unittest.TestCase):
         )(FlexInnerAttention.forward)
         try:
             train_step = make_train_step(model, get_loss)
-            maybe_register_blockmask_pytree_node()
+            maybe_register_attention_metadata_pytree_nodes()
             traced = minimal_fx_tracer(train_step, module=model)(
                 tokens, block_mask, labels
             )
@@ -2053,7 +2053,7 @@ class TestTraceModels(unittest.TestCase):
         positions = torch.arange(num_tokens, device=self.DEVICE)
         attention_metadata = model._get_attention_metadata(positions)
         aux_loss_denominators = torch.tensor([num_tokens], device=self.DEVICE)
-        maybe_register_blockmask_pytree_node()
+        maybe_register_attention_metadata_pytree_nodes()
 
         def forward(tokens, positions, attention_metadata, aux_loss_denominators):
             return model(
@@ -2161,7 +2161,7 @@ class TestTraceFSDP(FSDPTest):
         fwd_kwargs = fwd_kwargs or {}
         train_step = make_train_step(model_ref, get_loss, fwd_kwargs=fwd_kwargs)
 
-        maybe_register_blockmask_pytree_node()
+        maybe_register_attention_metadata_pytree_nodes()
         traced = minimal_fx_tracer(train_step, module=model_ref)(*fwd_args, labels)
 
         ag = sum(

@@ -16,7 +16,12 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate
 from torch.fx.traceback import annotate, annotate_fn
-from torch.utils._pytree import register_constant, register_pytree_node, tree_map
+from torch.utils._pytree import (
+    register_constant,
+    register_dataclass,
+    register_pytree_node,
+    tree_map,
+)
 
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelismContext
@@ -461,14 +466,18 @@ def register_blockmask_pytree_node():
         )
 
 
-def maybe_register_blockmask_pytree_node() -> None:
-    """Register flex-attention pytree helpers if they are missing."""
+def maybe_register_attention_metadata_pytree_nodes() -> None:
+    """Register attention-metadata pytree helpers if they are missing."""
     from torch.nn.attention.flex_attention import _MaskModWrapper, BlockMask
+
+    from torchtitan.models.common.attention import LinearAttentionMetadata
 
     if BlockMask not in torch.utils._pytree.SUPPORTED_NODES:
         register_blockmask_pytree_node()
     if _MaskModWrapper not in torch.utils._pytree.SUPPORTED_NODES:
         register_constant(_MaskModWrapper)
+    if LinearAttentionMetadata not in torch.utils._pytree.SUPPORTED_NODES:
+        register_dataclass(LinearAttentionMetadata)
 
 
 def end_with_pass(passes: list[Callable], names: list[str]) -> bool:
