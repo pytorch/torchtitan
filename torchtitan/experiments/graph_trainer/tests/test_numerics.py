@@ -445,6 +445,19 @@ def _run_qwen35_moe_loss_compare() -> bool:
     )
 
 
+def _run_muse_glimmer_loss_compare() -> bool:
+    """Compare Muse Glimmer eager and GraphTrainer with FSDP+TP on four GPUs."""
+    return run_loss_compare(
+        baseline_module=NUMERICS_CONFIG_MODULE,
+        baseline_config="muse_glimmer_eager_numerics",
+        test_module=NUMERICS_CONFIG_MODULE,
+        test_config="muse_glimmer_graph_numerics",
+        baseline_ngpus=4,
+        test_ngpus=4,
+        metrics=("loss", "grad_norm"),
+    )
+
+
 def _run_autoparallel_llama3_loss_compare() -> bool:
     """Compare manual and AutoParallel Llama3 using Varlen attention."""
     return run_loss_compare_close(
@@ -481,6 +494,9 @@ class TestGraphTrainerNumerics(unittest.TestCase):
 
     def test_dense_llama3_hsdp_graph_pp_vs_eager(self):
         self.assertTrue(_run_hsdp_llama3_pp_loss_compare())
+
+    def test_dense_muse_glimmer_aot_fx_trace_vs_eager(self):
+        self.assertTrue(_run_muse_glimmer_loss_compare())
 
     @unittest.skip(
         "Disabled: flaky single-rank crash in DSv3 MoE EP all-to-all. Losses "

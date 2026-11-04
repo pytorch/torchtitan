@@ -310,7 +310,7 @@ Qwen3.5) need `dataloader.max_num_documents` for fixed-capacity chunk metadata.
 | Llama 3 | |
 | DeepSeek V3 | |
 | Qwen3 (dense and MoE) | |
-| Muse Glimmer | Text-only flavors; no CP |
+| Muse Glimmer | Text-only flavors; FSDP, TP, and PP; no CP |
 | Kimi K3 | `debugmodel_text` flavor; FSDP, TP, and EP; no CP or PP |
 | Kimi K2.7 | `debugmodel_text` flavor; FSDP, TP, EP, and PP; no QK clipping or CP |
 | GPT-OSS | FSDP, TP, and EP; no CP |
