@@ -394,7 +394,10 @@ def test_pipeline_param_residency_limit(monkeypatch, configured_limit, expected_
     schedule = pipeline_parallel._build_pipeline_schedule(
         parallelism=parallelism,
         num_microbatches=4,
-        stages=[object(), object()],
+        stages=[
+            SimpleNamespace(submod=nn.Identity()),
+            SimpleNamespace(submod=nn.Identity()),
+        ],
         loss_fn=lambda: None,
     )
 
@@ -423,7 +426,10 @@ def test_schedule_loss_replaces_loss_metrics(monkeypatch):
             pipeline_parallel_schedule="Interleaved1F1B",
         ),
         num_microbatches=4,
-        stages=[object(), object()],
+        stages=[
+            SimpleNamespace(submod=nn.Identity()),
+            SimpleNamespace(submod=nn.Identity()),
+        ],
         loss_fn=loss_fn,
     )
     scalar_loss_fn = schedule.kwargs["loss_fn"]
@@ -495,7 +501,10 @@ def test_unshard_lookahead_is_forwarded_to_multistage_schedule(
     schedule = pipeline_parallel._build_pipeline_schedule(
         parallelism=parallelism,
         num_microbatches=4,
-        stages=[object(), object()],
+        stages=[
+            SimpleNamespace(submod=nn.Identity()),
+            SimpleNamespace(submod=nn.Identity()),
+        ],
         loss_fn=lambda: None,
     )
 
@@ -640,7 +649,10 @@ def test_build_pipeline_schedule_sets_deferred_reduce_grad_wait(
     _build_pipeline_schedule(
         parallelism=parallelism,
         num_microbatches=4,
-        stages=[object(), object()],
+        stages=[
+            SimpleNamespace(submod=nn.Identity()),
+            SimpleNamespace(submod=nn.Identity()),
+        ],
         loss_fn=lambda *args, **kwargs: (object(), object()),
         backward_requires_autograd=backward_requires_autograd,
     )
@@ -668,7 +680,10 @@ def test_build_pipeline_schedule_forwards_max_outstanding_sends(monkeypatch):
     _build_pipeline_schedule(
         parallelism=parallelism,
         num_microbatches=4,
-        stages=[object(), object()],
+        stages=[
+            SimpleNamespace(submod=nn.Identity()),
+            SimpleNamespace(submod=nn.Identity()),
+        ],
         loss_fn=lambda *args, **kwargs: (object(), object()),
     )
 
