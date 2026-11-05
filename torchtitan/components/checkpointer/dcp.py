@@ -270,6 +270,20 @@ class CheckpointManager(BaseCheckpointManager):
         if self.stager is not None:
             self.stager.close()
 
+    def _build_storage_writer(self, checkpoint_id: str) -> StorageWriter:
+        """Build the DCP writer for a non-HF save; a subclass may build its own.
+
+        Default: the writer DCP would pick for the path, with ``save_thread_count``
+        threads. A custom writer:
+        - must pickle: ``async_with_pinned_mem`` sends it to a subprocess;
+        - gets ``reset(checkpoint_id)`` from DCP before each save;
+        - leaves the folder readable by path: loads, step discovery and purge use it.
+        """
+        writer_class = (
+            FsspecWriter if filesystem.is_remote(checkpoint_id) else FileSystemWriter
+        )
+        return writer_class(checkpoint_id, thread_count=self.save_thread_count)
+
     def dcp_save(
         self,
         state_dict: dict[str, Any],
@@ -331,15 +345,7 @@ class CheckpointManager(BaseCheckpointManager):
             # `consolidate_safetensors_files_on_every_rank` is used later to manage
             # the multi-file merging process.
         else:
-            # The writer DCP picks for this path, with more threads.
-            writer_class = (
-                FsspecWriter
-                if filesystem.is_remote(checkpoint_id)
-                else FileSystemWriter
-            )
-            storage_writer = writer_class(
-                checkpoint_id, thread_count=self.save_thread_count
-            )
+            storage_writer = self._build_storage_writer(checkpoint_id)
 
         # Execution Dispatch
         checkpoint_save_id = (

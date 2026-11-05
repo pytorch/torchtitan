@@ -308,6 +308,20 @@ class TestCheckpointManager(unittest.TestCase):
                 {"w": torch.ones(4)}, checkpoint_id, AsyncMode.ASYNC
             ).result()
 
+    def test_subclass_storage_writer_writes_the_save(self):
+        class ThreeThreadCheckpointManager(CheckpointManager):
+            def _build_storage_writer(self, checkpoint_id):
+                return dist_checkpoint.FileSystemWriter(checkpoint_id, thread_count=3)
+
+        manager = ThreeThreadCheckpointManager.__new__(ThreeThreadCheckpointManager)
+        checkpoint_id = os.path.join(self.test_folder, "step-1")
+        state_dict = {f"w{i}": torch.full((4,), float(i)) for i in range(3)}
+
+        manager.dcp_save(state_dict, checkpoint_id, AsyncMode.DISABLED)
+
+        files = [f for f in os.listdir(checkpoint_id) if f.endswith(".distcp")]
+        self.assertEqual(len(files), 3)
+
     def setUp(self):
         self.base_temp_dir = tempfile.mkdtemp()
         self.test_folder = os.path.join(self.base_temp_dir, self._testMethodName)
