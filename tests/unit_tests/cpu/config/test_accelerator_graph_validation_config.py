@@ -241,6 +241,7 @@ def test_trainer_keeps_scheduled_eval_during_warmup(
     trainer.engine = engine
     trainer.validator = validator
     trainer.dataloader = []
+    trainer.metrics_processor = SimpleNamespace(commit=lambda: None)
     trainer.config = SimpleNamespace(
         validator=validator.config,
         checkpointer=object(),

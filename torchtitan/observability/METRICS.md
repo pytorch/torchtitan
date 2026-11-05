@@ -65,6 +65,8 @@ Custom exporters subclass `BaseLogger`, define a nested
 Their constructors receive their own config and the runtime arguments
 `log_dir`, `config_dict`, and `tag`. Set `Config.metrics_rank_only = True`
 when an exporter must only run on the metrics rank.
+Override `commit()` if the exporter holds a step's metrics, as `WandBLogger`
+does: trainers call it once per step, after training and validation have logged.
 
 The RL metrics processor accepts the same `loggers` list, builds it on the
 controller, and retains its own aggregation and console filters. RL uses the
