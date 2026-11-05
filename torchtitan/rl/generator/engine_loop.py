@@ -205,7 +205,7 @@ class EngineLoop:
         )
         return await asyncio.wrap_future(reply)
 
-    async def load_model_state_dict(self, version: int, *, drain: bool = False) -> None:
+    async def load_model_state_dict(self, version: int, *, drain: bool) -> None:
         """RANK 0: queue a model state dict load for `version` and wait until the loop has applied
         it. Loads queued together are applied once, at the highest version. With `drain`, the loop
         first finishes every admitted request and admits no new one until the load lands."""
@@ -597,7 +597,7 @@ class ModelStateDictLoadMessage:
 
     version: int
     reply: concurrent.futures.Future[None]
-    drain: bool = False
+    drain: bool
     """Apply only once no admitted request is running, and admit none until then."""
 
 
