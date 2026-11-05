@@ -47,7 +47,9 @@ class _ChooseRunGroupEndpoint:
         return RolloutGroup(group_id=kwargs["group_id"], rollouts=[])
 
 
-def test_rollout_worker_actor_builds_configured_worker(monkeypatch) -> None:
+def test_rollout_worker_actor_builds_its_worker_and_inits_its_logger(
+    monkeypatch,
+) -> None:
     async def run() -> None:
         worker = object()
         worker_config = SimpleNamespace(build=lambda: worker)

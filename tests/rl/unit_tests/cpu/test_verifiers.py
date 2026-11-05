@@ -44,6 +44,8 @@ from torchtitan.rl.rollout.types import Completion, Rollout, RolloutStatus
 
 # vLLM's wording, which the generation server keeps.
 _CONTEXT_OVERFLOW_MESSAGE = "This model's maximum context length is 8 tokens"
+# Verifiers' wording when the agent process exits non-zero.
+_AGENT_EXIT_MESSAGE = "harness 'terminus' exited 1: Traceback ..."
 
 
 def _recorded_error(
@@ -936,13 +938,29 @@ def test_rollout_status_maps_timeouts_to_error_timeout(
             1,
             RolloutStatus.ERROR,
         ),
-        ([_recorded_error("HarnessError")], [], 1, RolloutStatus.ERROR),
+        (
+            [_recorded_error("HarnessError", message=_AGENT_EXIT_MESSAGE)],
+            [],
+            1,
+            RolloutStatus.ERROR,
+        ),
         # A prompt past the context stays ERROR even before the first turn.
         (
             [_recorded_error("ProviderError", 400, _CONTEXT_OVERFLOW_MESSAGE)],
             [],
             0,
             RolloutStatus.ERROR,
+        ),
+        # An error in the harness's own code, even after the first turn, is not the agent's exit.
+        (
+            [
+                _recorded_error(
+                    "HarnessError", message="harness 'terminus' metric: KeyError: 'x'"
+                )
+            ],
+            [],
+            1,
+            RolloutStatus.ERROR_SYSTEM,
         ),
         # Any other generator 4xx is a bug in the code around the policy.
         (
@@ -952,7 +970,12 @@ def test_rollout_status_maps_timeouts_to_error_timeout(
             RolloutStatus.ERROR_SYSTEM,
         ),
         # The harness failed before the policy's first turn: the policy never ran.
-        ([_recorded_error("HarnessError")], [], 0, RolloutStatus.ERROR_SYSTEM),
+        (
+            [_recorded_error("HarnessError", message=_AGENT_EXIT_MESSAGE)],
+            [],
+            0,
+            RolloutStatus.ERROR_SYSTEM,
+        ),
         # The first error stopped the rollout; a later teardown error doesn't change it.
         (
             [
@@ -1069,7 +1092,9 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
     assert VERIFIERS_REWARD_KEY not in rollout.turns[-1].env_rewards
 
 
-# TODO: share the fake trace and rollouter of this test and the two above in one helper.
+# TODO: share one fake trace and rollouter between this test,
+# test_rollout_whose_first_model_call_failed_has_no_turns and
+# test_timed_out_rollout_is_logged_and_keeps_no_reward.
 def test_rollout_releases_every_trace_session_even_if_one_release_fails(caplog) -> None:
     """Each trace generated under its own id; another agent's trace has one too."""
     span = SimpleNamespace(duration=0.0)
