@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import itertools
 import os
 import unittest
 
@@ -26,13 +27,18 @@ from torchtitan.distributed.activation_remat import (
 )
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
 from torchtitan.models.base.module import Module, ModuleDict
-from torchtitan.models.common.activation import SwiGLU
+from torchtitan.models.common.activation import (
+    BinaryActivationFn,
+    ClampedSwiGLU,
+    SwiGLU,
+)
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.moe.token_dispatcher import (
     DeepEPTokenDispatcher,
     HybridEPTokenDispatcher,
 )
+from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 
 deep_ep = pytest.importorskip("deep_ep")
 
@@ -45,7 +51,14 @@ _TOP_K = 2
 
 
 class _EPBlock(Module):
-    def __init__(self, num_experts: int, dispatcher_config):
+    def __init__(
+        self,
+        num_experts: int,
+        dispatcher_config,
+        *,
+        grouped_linear_cls: type[GroupedLinear],
+        activation_fn: BinaryActivationFn.Config,
+    ):
         super().__init__()
         # RoutedExperts.forward runs after EP has selected this rank's local
         # expert-weight shard. This test bypasses parallelization, so construct
@@ -53,18 +66,18 @@ class _EPBlock(Module):
         num_local_experts = num_experts // torch.distributed.get_world_size()
         routed_experts = RoutedExperts.__new__(RoutedExperts)
         Module.__init__(routed_experts)
-        routed_experts.w13 = GroupedLinear.Config(
+        routed_experts.w13 = grouped_linear_cls.Config(
             group_size=num_local_experts,
             in_features=_MODEL_DIM,
             out_features=_MODEL_DIM,
             num_linears=2,
         ).build()
-        routed_experts.w2 = GroupedLinear.Config(
+        routed_experts.w2 = grouped_linear_cls.Config(
             group_size=num_local_experts,
             in_features=_MODEL_DIM,
             out_features=_MODEL_DIM,
         ).build()
-        routed_experts.activation_fn = SwiGLU.Config().build()
+        routed_experts.activation_fn = activation_fn.build()
         routed_experts.output_postprocess = None
         routed_experts.token_dispatcher = dispatcher_config.build()
         self.gate = torch.nn.Linear(_MODEL_DIM, num_experts, bias=False)
@@ -163,6 +176,9 @@ class _EPActivationCheckpointing(DTensorTestBase):
         num_dispatch_replays: int,
         num_combine_replays: int,
         dispatcher_config,
+        expert_configs: tuple[
+            tuple[type[GroupedLinear], BinaryActivationFn.Config], ...
+        ],
         buffer_type,
         dispatch_method: str,
         combine_method: str,
@@ -180,25 +196,45 @@ class _EPActivationCheckpointing(DTensorTestBase):
             dense_sp_enabled=False,
         )
         num_experts = 4 * self.world_size
-        for activation_remat in ac_configs:
+        for activation_remat, (grouped_linear_cls, activation_fn) in itertools.product(
+            ac_configs, expert_configs
+        ):
             with (
-                self.subTest(ac=type(activation_remat).__qualname__),
+                self.subTest(
+                    ac=type(activation_remat).__qualname__,
+                    linear=grouped_linear_cls.__name__,
+                ),
                 torch.autograd.set_multithreading_enabled(False),
                 set_current_spmd_mesh(mesh),
             ):
                 torch.manual_seed(42)
-                baseline = _Model(_EPBlock(num_experts, dispatcher_config)).to(
-                    self.device_type, torch.bfloat16
-                )
-                ac_model = _Model(_EPBlock(num_experts, dispatcher_config)).to(
-                    self.device_type, torch.bfloat16
-                )
+                baseline = _Model(
+                    _EPBlock(
+                        num_experts,
+                        dispatcher_config,
+                        grouped_linear_cls=grouped_linear_cls,
+                        activation_fn=activation_fn,
+                    )
+                ).to(self.device_type, torch.bfloat16)
+                ac_model = _Model(
+                    _EPBlock(
+                        num_experts,
+                        dispatcher_config,
+                        grouped_linear_cls=grouped_linear_cls,
+                        activation_fn=activation_fn,
+                    )
+                ).to(self.device_type, torch.bfloat16)
                 ac_model.load_state_dict(baseline.state_dict())
                 reference = None
                 if isinstance(dispatcher_config, DeepEPTokenDispatcher.Config):
-                    reference = _Model(_PostW2(num_experts, dispatcher_config)).to(
-                        self.device_type, torch.bfloat16
-                    )
+                    reference = _Model(
+                        _PostW2(
+                            num_experts,
+                            dispatcher_config,
+                            grouped_linear_cls=grouped_linear_cls,
+                            activation_fn=activation_fn,
+                        )
+                    ).to(self.device_type, torch.bfloat16)
                     reference.load_state_dict(baseline.state_dict())
                 activation_remat.apply(ac_model)
                 # As in training, the buffer is created after AC is applied. All
@@ -315,6 +351,10 @@ class TestDeepEPActivationCheckpointing(_EPActivationCheckpointing):
                 hidden_dim=_MODEL_DIM,
                 num_max_tokens_per_rank=_NUM_TOKENS,
             ),
+            expert_configs=(
+                (GroupedLinear, SwiGLU.Config()),
+                (GptOssGroupedLinear, ClampedSwiGLU.Config()),
+            ),
             buffer_type=deep_ep.ElasticBuffer,
             dispatch_method="dispatch",
             combine_method="combine",
@@ -379,6 +419,7 @@ class TestHybridEPActivationCheckpointing(_EPActivationCheckpointing):
                         num_max_tokens_per_rank=_NUM_TOKENS,
                         non_blocking_capacity_factor=capacity_factor,
                     ),
+                    expert_configs=((GroupedLinear, SwiGLU.Config()),),
                     buffer_type=deep_ep.HybridEPBuffer,
                     dispatch_method="dispatch_with_permute",
                     combine_method="combine_with_unpermute",

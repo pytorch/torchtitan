@@ -13,6 +13,18 @@ asset-path hints without shipping unverified full training recipes.
 - FSDP/HSDP, TP, EP, CP, PP
 - Grouped matrix multiplication for efficient computation
 
+With DeepEP, router scores scale both W2's input and its per-expert bias:
+
+```text
+s * (W2(h) + b2) = W2(s * h) + s * b2
+```
+
+W2 and its bias addition follow the configured remat policy. When selectively
+saving W2, save its `bias_add` region as well to avoid retaining W2's output
+for bias replay. Other dispatchers retain post-expert scoring. The equality
+holds in exact arithmetic; moving the scores changes BF16 rounding and can
+change outputs and gradients.
+
 CI already runs CP and PP on the debug model:
 - `gpt_oss_pp+fsdp+cp+ep+sacop` (`gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac`)
 - `gpt_oss_pp+fsdp+ep+sacop`

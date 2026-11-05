@@ -15,7 +15,6 @@
 
 import math
 from dataclasses import dataclass
-from typing import ClassVar
 
 import spmd_types as spmd
 import torch
@@ -30,6 +29,9 @@ from torchtitan.models.common.linear.inplace_wgrad_accum import (
     running_grad,
     uses_inplace_wgrad_accum,
 )
+
+# Shape suffix legend for grouped projections: R = routed rows, E = experts,
+# I = input features, O = flattened output features, including stacked projections.
 
 
 class Linear(nn.Linear, Module):
@@ -407,7 +409,6 @@ class GroupedLinear(Module):
         in_features: int
         out_features: int
         num_linears: int = 1
-        bias: ClassVar[bool] = False
 
     def __init__(self, config: Config):
         super().__init__()
@@ -424,17 +425,28 @@ class GroupedLinear(Module):
             torch.empty(config.group_size, *output_shape, config.in_features)
         )
 
-    def forward(self, input_RI: torch.Tensor, offsets_E: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input_RI: torch.Tensor,
+        offsets_E: torch.Tensor,
+        *,
+        routed_scores_R: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Apply each grouped linear to rows selected by cumulative offsets.
 
         Args:
             input_RI: Input rows grouped by the selected linear.
             offsets_E: Exclusive cumulative row end for each group.
+            routed_scores_R: Optional per-row scores absorbed into the input.
 
         Returns:
             Output rows with an optional ``num_linears`` axis before the output
             feature axis.
         """
+        if routed_scores_R is not None:
+            # The bare multiply reads scores produced by the dispatch region.
+            remat.recompute_needs_tensor(routed_scores_R)
+            input_RI = input_RI * routed_scores_R.to(input_RI.dtype).reshape(-1, 1)
         output_shape = self.weight.shape[1:-1]
         weight_EOI = self.weight.flatten(1, -2)
         output_RO = remat.region(
