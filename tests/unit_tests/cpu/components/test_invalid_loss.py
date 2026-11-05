@@ -13,7 +13,7 @@ from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.optim import GradientClipper, Optim
 from torchtitan.trainer import Trainer
-from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
+from torchtitan.training_engine import TrainingEngine
 
 
 class TestInvalidLoss(unittest.TestCase):
@@ -51,6 +51,7 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.garbage_collector = MagicMock()
         trainer._deferred_cuda_graph_options = None
         trainer.model_config = SimpleNamespace(mtp_layers=None)
+        trainer.flops_estimator = lambda inputs: inputs["input"].numel()
 
         parallelism_context = MagicMock()
         parallelism_context.dp_enabled = False
@@ -76,6 +77,7 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.optim = optim
 
         loop.engine = trainer
+        loop._local_num_flops_since_last_log = 0
         loop.config = trainer.config
         loop.gradient_accumulation_steps = 1
         loop.num_pp_microbatches = 1
@@ -83,7 +85,7 @@ class TestInvalidLoss(unittest.TestCase):
         loop.metrics_processor.should_log.return_value = should_log
 
         trainer._run_forward_backward = MagicMock(
-            return_value=ForwardBackwardResult(torch.tensor(loss_value), [[{}]])
+            return_value=(torch.tensor(loss_value), [[{}]])
         )
         return loop
 
@@ -102,9 +104,13 @@ class TestInvalidLoss(unittest.TestCase):
     def _run_step(self, loss_value: float, should_log: bool) -> Trainer:
         trainer = self._make_trainer(loss_value, should_log)
         # sl.* are logging side effects; clip_grad_norm_ needs real params.
-        with patch("torchtitan.training_engine.sl", MagicMock()), patch(
-            "torchtitan.components.optim.optim.dist_utils.clip_grad_norm_",
-            return_value=torch.tensor(1.0),
+        with (
+            patch("torchtitan.training_engine.sl", MagicMock()),
+            patch(
+                "torchtitan.components.optim.optim.dist_utils.clip_grad_norm_",
+                return_value=torch.tensor(1.0),
+            ),
+            patch("torchtitan.trainer.collect_aux_loss_metrics", return_value={}),
         ):
             trainer.train_step(self._data_iterator())
         return trainer
