@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Custom ops used by test_kernel_cache.py.
+"""Custom ops used by test_substitute_kernels.py.
 
 They live in their own module so that a generated ``reference.py`` can import
 it from a fresh process.
@@ -13,7 +13,7 @@ it from a fresh process.
 import torch
 
 
-@torch.library.custom_op("kc_test::scale", mutates_args=())
+@torch.library.custom_op("sk_test::scale", mutates_args=())
 def scale(x: torch.Tensor, s: float) -> torch.Tensor:
     return x * s
 
@@ -39,7 +39,7 @@ else:
         y = tl.load(y_ptr + offs, mask=mask)
         tl.store(out_ptr + offs, x + y, mask=mask)
 
-    @triton_op("kc_test::add", mutates_args=())
+    @triton_op("sk_test::add", mutates_args=())
     def add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         out = torch.empty_like(x)
         n = x.numel()
