@@ -60,6 +60,8 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.attention.cp_attention import (
     AllGatherKVFlexInnerAttention,
     AllGatherKVSlidingWindowFlexInnerAttention,
+    AllGatherKVSlidingWindowVarlenInnerAttention,
+    AllGatherKVVarlenInnerAttention,
     UlyssesFlexInnerAttention,
     UlyssesSlidingWindowFlexInnerAttention,
     UlyssesSlidingWindowVarlenInnerAttention,
@@ -111,6 +113,10 @@ def _muse_spark_kv_all_gather_context_parallel_transform() -> ContextParallelTra
             FlexInnerAttention: AllGatherKVFlexInnerAttention,
             SlidingWindowFlexInnerAttention: (
                 AllGatherKVSlidingWindowFlexInnerAttention
+            ),
+            VarlenInnerAttention: AllGatherKVVarlenInnerAttention,
+            SlidingWindowVarlenInnerAttention: (
+                AllGatherKVSlidingWindowVarlenInnerAttention
             ),
         },
     )
@@ -350,11 +356,13 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     expert_parallel_degree: int,
     fake_backend: bool,
     remat_save_regions: Sequence[str] = _MUSE_SPARK_DIST_MOE_SAVE_REGIONS,
+    attn_backend: str = "flex",
+    max_num_documents: int | None = None,
 ) -> Trainer.Config:
     """Build a long-context BF16 Dist-MoE SPMD recipe.
 
     The caller owns workload geometry and the activation-rematerialization
-    policy. This helper owns the common Muse Spark Open BF16 Dist-MoE, Flex-Flash,
+    policy. This helper owns the common Muse Spark Open BF16 Dist-MoE, attention,
     FSDP, and production-versus-FakePG integration.
 
     Args:
@@ -370,6 +378,10 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
             local geometry and memory validation.
         remat_save_regions: Named remat regions retained by activation remat.
             All other registered regions are recomputed.
+        attn_backend: ``"flex"`` for Flex-Flash attention or ``"varlen"`` for
+            FA4 varlen attention.
+        max_num_documents: Upper bound on documents per local microbatch.
+            Varlen attention needs it for CUDA graphs.
     """
     degrees = {
         "data_parallel_shard_degree": data_parallel_shard_degree,
@@ -399,8 +411,12 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     # MXFP8 long-context recipe would quantize only a minority of the critical
     # path while exposing TP communication. Keep MXFP8 coverage in the debug
     # recipe until those two execution paths exist.
+    base = _muse_spark_816b_a42b(seq_len=seq_len, attn_backend=attn_backend)
+    # Set before _with_dist_moe enables CUDA graphs, which Trainer.Config
+    # validation checks against varlen attention.
+    base.dataloader.max_num_documents = max_num_documents
     config = _with_dist_moe(
-        _muse_spark_816b_a42b(seq_len=seq_len),
+        base,
         expert_precision="bf16",
         activation_slot_capacity_factor=1.0,
         scratch_capacity_factor=32.0,
@@ -442,7 +458,8 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     if fake_backend:
         config.hf_assets_path = "./tests/assets/tokenizer"
         config.tokenizer = HuggingFaceTokenizer.Config()
-        config.dataloader = GrainDataLoader.Config(
+        config.dataloader = replace(
+            config.dataloader,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             shuffle=False,
         )
@@ -461,10 +478,11 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
             [_muse_spark_kv_all_gather_context_parallel_transform()],
         )
     # KV all-gather keeps queries sequence-sharded while making the complete KV
-    # sequence available to Flex-Flash. This preserves Muse global/sliding
-    # attention semantics without a query all-to-all; the global and sliding
-    # layers use independently tuned block-mask geometry.
-    _use_flex_flash_attention(cast(MuseSparkModel.Config, config.model))
+    # sequence available to attention. This preserves Muse global/sliding
+    # attention semantics without a query all-to-all. With Flex-Flash, the
+    # global and sliding layers use independently tuned block-mask geometry.
+    if attn_backend == "flex":
+        _use_flex_flash_attention(cast(MuseSparkModel.Config, config.model))
     if not fake_backend and tensor_parallel_degree > 1:
         config = apply_transforms(
             config,
@@ -479,6 +497,42 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     # then FakePG validates geometry and memory with synchronous TP; only
     # production recipes enable communication overlap.
     return config
+
+
+def _muse_spark_816b_dist_moe_bf16_spmd_64(*, fake_backend: bool) -> Trainer.Config:
+    """Configure 32K BF16 Dist-MoE SPMD on 64 GPUs: DP8, CP8, EP64.
+
+    It uses FA4 varlen attention with K/V all-gather CP and keeps the Adam
+    moments in pinned host memory.
+    """
+    config = _muse_spark_816b_dist_moe_bf16_spmd(
+        seq_len=32 * 1024,
+        global_batch_size=64,
+        data_parallel_shard_degree=8,
+        tensor_parallel_degree=1,
+        context_parallel_degree=8,
+        expert_parallel_degree=64,
+        fake_backend=fake_backend,
+        attn_backend="varlen",
+        max_num_documents=64,
+    )
+    # VarlenInnerAttention defaults to cuDNN first. Pin FA4.
+    for _, inner_attention, _, _ in config.model.traverse(VarlenInnerAttention.Config):
+        inner_attention.sdpa_backends = ["FLASH_ATTENTION"]
+    for optimizer in config.optim.optimizer.optimizers:
+        assert isinstance(optimizer, AdamW.Config)
+        optimizer.moment_location = "pinned_host"
+    return config
+
+
+def muse_spark_816b_a42b_dist_moe_bf16_spmd_64() -> Trainer.Config:
+    """Configure 32K BF16 Dist-MoE SPMD with varlen attention on 64 GPUs."""
+    return _muse_spark_816b_dist_moe_bf16_spmd_64(fake_backend=False)
+
+
+def muse_spark_816b_a42b_dist_moe_bf16_spmd_64_fake() -> Trainer.Config:
+    """Validate the logical-64 BF16 SPMD recipe with FakePG."""
+    return _muse_spark_816b_dist_moe_bf16_spmd_64(fake_backend=True)
 
 
 def muse_spark_816b_a42b_dist_moe_bf16_spmd_256() -> Trainer.Config:

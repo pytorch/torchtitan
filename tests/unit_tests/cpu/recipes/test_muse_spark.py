@@ -8,6 +8,8 @@ from unittest.mock import patch
 
 import pytest
 from torchtitan.models.common.attention.cp_attention import (
+    AllGatherKVSlidingWindowVarlenInnerAttention,
+    AllGatherKVVarlenInnerAttention,
     UlyssesSlidingWindowVarlenInnerAttention,
     UlyssesVarlenInnerAttention,
 )
@@ -24,6 +26,7 @@ from torchtitan_recipes.tests.models.muse_spark import (
 @pytest.mark.parametrize(
     "recipe",
     [
+        recipes.muse_spark_816b_a42b_dist_moe_bf16_spmd_64_fake,
         recipes.muse_spark_816b_a42b_dist_moe_bf16_spmd_256_fake,
         recipes.muse_spark_816b_a42b_dist_moe_bf16_spmd_512_fake,
     ],
@@ -66,6 +69,21 @@ def test_cp16_lora_recipe_uses_ulysses_varlen():
         )
         # Building raises if sdpa_backends holds anything but SDPBackend names.
         layer.attention.inner_attention.build()
+
+
+def test_dist_moe_64_recipe_uses_kv_all_gather_varlen_on_fa4():
+    # Building raises if the K/V all-gather CP map misses a varlen layer type.
+    config = recipes.muse_spark_816b_a42b_dist_moe_bf16_spmd_64_fake()
+    for layer in config.model.layers:
+        inner_attention = layer.attention.inner_attention
+        assert isinstance(
+            inner_attention,
+            (
+                AllGatherKVVarlenInnerAttention.Config,
+                AllGatherKVSlidingWindowVarlenInnerAttention.Config,
+            ),
+        )
+        assert inner_attention.sdpa_backends == ["FLASH_ATTENTION"]
 
 
 @pytest.mark.parametrize("recipe", [muse_spark_debugmodel, muse_spark_debugmodel_mm])
