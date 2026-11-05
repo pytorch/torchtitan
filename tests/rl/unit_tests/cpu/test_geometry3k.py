@@ -163,8 +163,8 @@ def test_lora_recipe_applies_one_lora_to_the_language_model_of_both_roles() -> N
     assert len(projections) == 108
     assert not any(fqn.startswith("vision_encoder") for fqn, _, _ in projections)
     assert lora_projections(config.generator.model) == projections
-    # The generators load the frozen base themselves; syncs carry only the adapters.
-    assert config.generator.checkpointer.initial_load_in_hf
+    # The generators read no checkpoint: the initial weight sync carries the base.
+    assert config.generator.checkpointer is None
 
 
 def test_recipe_rejects_a_generator_lora_that_differs_from_the_trainer() -> None:
@@ -186,13 +186,14 @@ def test_recipe_rejects_a_generator_lora_that_differs_from_the_trainer() -> None
 
 
 def test_recipe_rejects_a_generator_checkpoint_that_differs_from_the_trainer() -> None:
+    from torchtitan.components.checkpointer import CheckpointManager
     from torchtitan_recipes.rl.geometry3k import rl_grpo_qwen3_5_0_8b_geometry3k_lora
 
     config = rl_grpo_qwen3_5_0_8b_geometry3k_lora()
     generator = dataclasses.replace(
         config.generator,
-        checkpointer=dataclasses.replace(
-            config.generator.checkpointer, initial_load_path="/other/checkpoint"
+        checkpointer=CheckpointManager.Config(
+            initial_load_in_hf=True, initial_load_path="/other/checkpoint"
         ),
     )
 

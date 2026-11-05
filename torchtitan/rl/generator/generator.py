@@ -509,8 +509,8 @@ class Generator(Configurable):
             return
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
-        # strict=False reads only the published keys (only the trainable ones for a
-        # generator that loaded the checkpoint); the other buffers keep older values.
+        # strict=False reads only the published keys (only the trainable ones after the
+        # initial sync); the other buffers keep older values.
         prefetched = await ts.get_state_dict(
             "model_state_dict",
             user_state_dict=self._prefetched_model_state_dict,

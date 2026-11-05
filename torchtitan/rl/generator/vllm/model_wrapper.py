@@ -569,8 +569,8 @@ class VLLMModelWrapper(Module):
             vllm_config.scheduler_config.max_num_batched_tokens,
             cast(torch.device, vllm_config.device_config.device),
         )
-        # A generator that loads the checkpoint holds every weight from the start, so the
-        # trainer then sends only what trains (see `Controller`) and loads fill a subset.
+        # Once the generator holds every weight (from the checkpoint or its first load), the
+        # trainer sends only what trains (see `Controller`), and loads fill a subset.
         self._loads_fill_a_subset = checkpointer_config is not None
         self._model_path = vllm_config.model_config.model
         self._maybe_initial_load_weights()
@@ -635,11 +635,11 @@ class VLLMModelWrapper(Module):
           - Per group: modules from one `fully_shard` call share one FSDP state, so unsharding
             after `norm` would all-gather `lm_head` before it loads.
 
-        A generator that did not load the checkpoint must fill every parameter on every
-        load. One that did gets only the parameters that train (the trainer pushes
-        nothing else to it; see `Controller`), e.g. just the LoRA adapters; every other
-        parameter keeps its weight: its shard is copied back from the unsharded storage
-        before the group's unshard.
+        The first load of a generator that did not load the checkpoint must fill every
+        parameter. Later loads, and every load of one that did, get only the parameters
+        that train (see `Controller`), e.g. just the LoRA adapters; every other parameter
+        keeps its weight: its shard is copied back from the unsharded storage before the
+        group's unshard.
 
         Args:
             fetch: Fills each tensor of the given subset of `self.model.state_dict()`
@@ -682,6 +682,7 @@ class VLLMModelWrapper(Module):
             _unshard_and_free_sharded_params(module)
         if error is not None:
             raise error
+        self._loads_fill_a_subset = True
         # Buffers load after every FSDP collective, so a failure here cannot hang
         # peers. A fetch that skips unpublished keys (gpu_fetch) leaves them as is.
         if self._buffer_keys:
