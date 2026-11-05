@@ -970,6 +970,17 @@ def test_rollout_status_maps_timeouts_to_error_timeout(
             1,
             RolloutStatus.ERROR_SYSTEM,
         ),
+        (
+            [
+                _recorded_error(
+                    "HarnessError",
+                    message="harness 'terminus': RuntimeError: tmux exited 1: reset",
+                )
+            ],
+            [],
+            1,
+            RolloutStatus.ERROR_SYSTEM,
+        ),
         # Any other generator 4xx is a bug in the code around the policy.
         (
             [_recorded_error("ProviderError", 400, "missing X-Session-ID header")],
