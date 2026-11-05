@@ -1,0 +1,230 @@
+{
+ "setup": "DSv3 671B DistMoE MXFP8, FSDP 256, EP 64, fake PG, one GB300; 10 steps, profiled step 10",
+ "metric": "sum of GPU kernel time in the profiled step; excl_fake_comm drops all_gather_into_tensor*/reduce_scatter_tensor*/all_to_all* (emulated collectives)",
+ "runs": [
+  {
+   "run": "baseline",
+   "gpu": 0,
+   "plan": null,
+   "kernels_added": "none",
+   "gpu_ms_total": 758.8,
+   "gpu_ms_excl_fake_comm": 583.9,
+   "delta_vs_baseline_ms": 0.0,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.281303405761719,
+     "10": 12.479232788085938
+    },
+    "loss_metrics/global_max_loss": {
+     "1": 12.281303405761719,
+     "10": 12.479232788085938
+    },
+    "grad_norm": {
+     "1": 63.61985778808594,
+     "10": 4.849545478820801
+    },
+    "microbatch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "bitwise_equal_to_baseline": true
+  },
+  {
+   "run": "iter2",
+   "gpu": 0,
+   "plan": "plans/plan_iter2.txt",
+   "kernels_added": "none (lift only)",
+   "gpu_ms_total": 758.9,
+   "gpu_ms_excl_fake_comm": 583.4,
+   "delta_vs_baseline_ms": -0.5,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.281303405761719,
+     "10": 12.479232788085938
+    },
+    "loss_metrics/global_max_loss": {
+     "1": 12.281303405761719,
+     "10": 12.479232788085938
+    },
+    "grad_norm": {
+     "1": 63.61985778808594,
+     "10": 4.849545478820801
+    },
+    "microbatch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "bitwise_equal_to_baseline": true
+  },
+  {
+   "run": "iter3",
+   "gpu": 0,
+   "plan": "plans/plan_iter3.txt",
+   "kernels_added": "router bwd",
+   "gpu_ms_total": 746.2,
+   "gpu_ms_excl_fake_comm": 572.9,
+   "delta_vs_baseline_ms": -11.0,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.281303405761719,
+     "10": 12.479232788085938
+    },
+    "loss_metrics/global_max_loss": {
+     "1": 12.281303405761719,
+     "10": 12.479232788085938
+    },
+    "grad_norm": {
+     "1": 63.61985778808594,
+     "10": 4.849545478820801
+    },
+    "microbatch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "bitwise_equal_to_baseline": true
+  },
+  {
+   "run": "iter4",
+   "gpu": 0,
+   "plan": "plans/plan_iter4.txt",
+   "kernels_added": "+ router recompute",
+   "gpu_ms_total": 740.6,
+   "gpu_ms_excl_fake_comm": 567.4,
+   "delta_vs_baseline_ms": -16.5,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.281303405761719,
+     "10": 12.479232788085938
+    },
+    "loss_metrics/global_max_loss": {
+     "1": 12.281303405761719,
+     "10": 12.479232788085938
+    },
+    "grad_norm": {
+     "1": 63.61985778808594,
+     "10": 4.849545478820801
+    },
+    "microbatch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "bitwise_equal_to_baseline": true
+  },
+  {
+   "run": "iter5",
+   "gpu": 0,
+   "plan": "plans/plan_iter5.txt",
+   "kernels_added": "+ MLA kv-bwd/quant, 5 norm+quant",
+   "gpu_ms_total": 730.6,
+   "gpu_ms_excl_fake_comm": 554.7,
+   "delta_vs_baseline_ms": -29.2,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.281303405761719,
+     "10": 12.479232788085938
+    },
+    "loss_metrics/global_max_loss": {
+     "1": 12.281303405761719,
+     "10": 12.479232788085938
+    },
+    "grad_norm": {
+     "1": 63.61985778808594,
+     "10": 4.849545478820801
+    },
+    "microbatch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "bitwise_equal_to_baseline": true
+  },
+  {
+   "run": "iter6",
+   "gpu": 3,
+   "plan": "plans/plan_iter6.txt",
+   "kernels_added": "+ router fwd",
+   "gpu_ms_total": 702.0,
+   "gpu_ms_excl_fake_comm": 535.4,
+   "delta_vs_baseline_ms": -48.5,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.281303405761719,
+     "10": 12.479232788085938
+    },
+    "loss_metrics/global_max_loss": {
+     "1": 12.281303405761719,
+     "10": 12.479232788085938
+    },
+    "grad_norm": {
+     "1": 63.61985778808594,
+     "10": 4.849545478820801
+    },
+    "microbatch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "bitwise_equal_to_baseline": true
+  },
+  {
+   "run": "iter7",
+   "gpu": 3,
+   "plan": "plans/plan_iter7.txt",
+   "kernels_added": "+ bucket pack, 2 norm-bwd+quant, GEMM-output permute",
+   "gpu_ms_total": 681.2,
+   "gpu_ms_excl_fake_comm": 515.9,
+   "delta_vs_baseline_ms": -68.0,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.281303405761719,
+     "10": 12.479232788085938
+    },
+    "loss_metrics/global_max_loss": {
+     "1": 12.281303405761719,
+     "10": 12.479232788085938
+    },
+    "grad_norm": {
+     "1": 63.61985778808594,
+     "10": 4.849545478820801
+    },
+    "microbatch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "bitwise_equal_to_baseline": true
+  },
+  {
+   "run": "iter8",
+   "gpu": 0,
+   "plan": "plans/plan_iter8.txt",
+   "kernels_added": "+ routed-experts pack, 4 quant-before-GEMM",
+   "gpu_ms_total": 688.2,
+   "gpu_ms_excl_fake_comm": 514.2,
+   "delta_vs_baseline_ms": -69.8,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.281303405761719,
+     "10": 12.479232788085938
+    },
+    "loss_metrics/global_max_loss": {
+     "1": 12.281303405761719,
+     "10": 12.479232788085938
+    },
+    "grad_norm": {
+     "1": 63.61985778808594,
+     "10": 4.849545478820801
+    },
+    "microbatch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "bitwise_equal_to_baseline": true
+  }
+ ]
+}

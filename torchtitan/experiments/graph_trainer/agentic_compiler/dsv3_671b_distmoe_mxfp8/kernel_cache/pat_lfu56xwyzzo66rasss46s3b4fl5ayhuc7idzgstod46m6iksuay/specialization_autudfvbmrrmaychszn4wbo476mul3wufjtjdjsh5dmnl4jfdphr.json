@@ -1,0 +1,45 @@
+{
+  "kernel_name": "autudfvbmrrmaychszn4wbo476mul3wufjtjdjsh5dmnl4jfdphr.py",
+  "reference": "reference.py",
+  "signature": "def run(in0, in1, in2)",
+  "inputs": [
+    {
+      "shape": [4096, 24576],
+      "stride": [24576, 1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [24576, 1536],
+      "stride": [1536, 1],
+      "dtype": "float8_e4m3fn",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [12, 192, 32, 16],
+      "stride": [98304, 512, 16, 1],
+      "dtype": "float8_e8m0fnu",
+      "device": "cuda:0"
+    }
+  ],
+  "outputs": [
+    {
+      "shape": [4096, 1536],
+      "stride": [1536, 1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [24576, 128],
+      "stride": [128, 1],
+      "dtype": "float8_e8m0fnu",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [24576, 4096],
+      "stride": [4096, 1],
+      "dtype": "float8_e4m3fn",
+      "device": "cuda:0"
+    }
+  ]
+}

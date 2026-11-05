@@ -1,0 +1,44 @@
+{
+ "id": "G-061",
+ "title": "Single op (forward): feed_forward.routed_experts: dist_moe.prepare_mxfp8_weight",
+ "phases": [
+  "forward"
+ ],
+ "scope": [
+  "intra-module"
+ ],
+ "fusion_kind": "single-op rewrite",
+ "location": {
+  "module_fqn_pattern": "layers.*.feed_forward.routed_experts",
+  "graph_nodes_example": [
+   "prepare_mxfp8_weight_1"
+  ],
+  "source": "torchtitan/torchtitan/experiments/graph_trainer/simple_fsdp.py:268"
+ },
+ "ops": [
+  "dist_moe.prepare_mxfp8_weight.default"
+ ],
+ "kernels_per_instance": 1.0,
+ "instances_per_step": 58,
+ "shapes_dtypes": "float8_e4m3fn[4, 7168, 2048], float8_e8m0fnu[28672, 64], float8_e8m0fnu[8192, 224]",
+ "external_bytes_per_instance": 73400320,
+ "measured_us_per_instance": 45.07,
+ "measured_ms_total": 2.614,
+ "ideal_us_per_instance": 10.65,
+ "ideal_ms_total": 0.618,
+ "gap_ms_total": 1.996,
+ "gap_pct_of_step": 0.027,
+ "bitwise_tier": "T0",
+ "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+ "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+ "evidence": "measured",
+ "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #79, L1)",
+ "overlaps_with": [],
+ "notes": "",
+ "lift": {
+  "pass_name": "lift_fusion_region_g061",
+  "num_sites": 116,
+  "in_default_selection": true,
+  "not_liftable_reason": ""
+ }
+}

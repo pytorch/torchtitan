@@ -1,0 +1,44 @@
+{
+ "id": "G-028",
+ "title": "Single op (backward): feed_forward.routed_experts: bkt._pre_bucket_reduce_scatter",
+ "phases": [
+  "backward"
+ ],
+ "scope": [
+  "intra-module"
+ ],
+ "fusion_kind": "single-op rewrite",
+ "location": {
+  "module_fqn_pattern": "layers.*.feed_forward.routed_experts",
+  "graph_nodes_example": [
+   "_pre_bucket_reduce_scatter_119"
+  ],
+  "source": "(no torchtitan frame in stack_trace)"
+ },
+ "ops": [
+  "bucketing._pre_bucket_reduce_scatter.default"
+ ],
+ "kernels_per_instance": 2.0,
+ "instances_per_step": 58,
+ "shapes_dtypes": "bfloat16[176160768]",
+ "external_bytes_per_instance": 704643072,
+ "measured_us_per_instance": 174.66,
+ "measured_ms_total": 10.13,
+ "ideal_us_per_instance": 102.22,
+ "ideal_ms_total": 5.929,
+ "gap_ms_total": 4.201,
+ "gap_pct_of_step": 0.057,
+ "bitwise_tier": "T0",
+ "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+ "blockers": "the FSDP pack is a custom bucketing op; casts must fold into it or into the producer.",
+ "evidence": "measured",
+ "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #35, L1)",
+ "overlaps_with": [],
+ "notes": "",
+ "lift": {
+  "pass_name": "lift_fusion_region_g028",
+  "num_sites": 58,
+  "in_default_selection": true,
+  "not_liftable_reason": ""
+ }
+}

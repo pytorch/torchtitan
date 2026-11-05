@@ -1,0 +1,33 @@
+{
+  "kernel_name": "awlo7v2yvmhffvyyw6lkvqidsuwmypua65xlpl3763x4ezqmouzn.py",
+  "reference": "reference.py",
+  "signature": "def run(in0)",
+  "inputs": [
+    {
+      "shape": [117440512],
+      "stride": [1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    }
+  ],
+  "outputs": [
+    {
+      "shape": [4, 4096, 7168],
+      "stride": [29360128, 7168, 1],
+      "dtype": "float8_e4m3fn",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [16384, 224],
+      "stride": [224, 1],
+      "dtype": "float8_e8m0fnu",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [28672, 128],
+      "stride": [128, 1],
+      "dtype": "float8_e8m0fnu",
+      "device": "cuda:0"
+    }
+  ]
+}

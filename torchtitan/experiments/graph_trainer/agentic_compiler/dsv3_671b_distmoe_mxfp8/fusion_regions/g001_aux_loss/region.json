@@ -1,0 +1,79 @@
+{
+ "id": "G-001",
+ "title": "Cross-module (forward): feed_forward.routed_experts, feed_forward.router, feed_forward.router.aux_loss: sigmoid + add + topk + sum + ones_like + scatter_.value + masked_fill.Scalar + gather + di",
+ "phases": [
+  "forward"
+ ],
+ "scope": [
+  "cross-module"
+ ],
+ "fusion_kind": "selection (top-k/sort) + pointwise",
+ "location": {
+  "module_fqn_pattern": "layers.*.feed_forward.routed_experts, layers.*.feed_forward.router, layers.*.feed_forward.router.aux_loss",
+  "graph_nodes_example": [
+   "sigmoid_1",
+   "add_12",
+   "topk_3",
+   "sum_7",
+   "topk_4",
+   "ones_like_1",
+   "scatter__2",
+   "masked_fill_3",
+   "topk_5",
+   "gather_1",
+   "sum_8",
+   "add_13"
+  ],
+  "source": "torchtitan/torchtitan/models/common/moe/moe.py:256-606; torchtitan/torchtitan/distributed/local_compile.py:96; torchtitan/torchtitan/models/common/dist_moe/routed_experts.py:195-196"
+ },
+ "ops": [
+  "aten._to_copy.default",
+  "aten.add.Tensor",
+  "aten.add_.Tensor",
+  "aten.bitwise_and.Tensor",
+  "aten.bitwise_not.default",
+  "aten.clamp_min.default",
+  "aten.div.Tensor",
+  "aten.gather.default",
+  "aten.linalg_vector_norm.default",
+  "aten.masked_fill.Scalar",
+  "aten.mul.Tensor",
+  "aten.ones_like.default",
+  "aten.reciprocal.default",
+  "aten.scatter_.value",
+  "aten.sigmoid.default",
+  "aten.sum.default",
+  "aten.sum.dim_IntList",
+  "aten.topk.default",
+  "aten.zeros_like.default"
+ ],
+ "kernels_per_instance": 49.0,
+ "instances_per_step": 57,
+ "shapes_dtypes": "float32[4096, 8], float32[256], float32[4096, 256], float32[]",
+ "external_bytes_per_instance": 6036496,
+ "measured_us_per_instance": 321.29,
+ "measured_ms_total": 18.314,
+ "ideal_us_per_instance": 0.88,
+ "ideal_ms_total": 0.05,
+ "gap_ms_total": 18.264,
+ "gap_pct_of_step": 0.246,
+ "bitwise_tier": "T2",
+ "bitwise_notes": "order-sensitive data movement (scatter_.value, topk): accumulation / selection order must match eager exactly.",
+ "blockers": "top-k / sort selection: tie-breaking order must match; produces data-dependent indices.",
+ "evidence": "measured",
+ "how_found": "XM-max component: L1 components of one phase/layer/stage joined across module FQNs (barrier-free edges) (candidate #1, XM-max)",
+ "overlaps_with": [
+  "G-004",
+  "G-005",
+  "G-029",
+  "G-032",
+  "G-162"
+ ],
+ "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.1 ms",
+ "lift": {
+  "pass_name": "lift_fusion_region_g001",
+  "num_sites": 58,
+  "in_default_selection": true,
+  "not_liftable_reason": ""
+ }
+}

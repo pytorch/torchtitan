@@ -1,0 +1,111 @@
+{
+  "kernel_name": "ais6mzbj3amaccuitapcvapzxp64l36rg4k35gt3bkycgqeglygw.py",
+  "reference": "reference.py",
+  "signature": "def run(in0, in1, in2, in3, in4, in5, in6, in7, in8, in9, in10, in11, in12)",
+  "inputs": [
+    {
+      "shape": [4096, 8],
+      "stride": [8, 1],
+      "dtype": "float32",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [4096, 1],
+      "stride": [1, 1],
+      "dtype": "bool",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [],
+      "stride": [],
+      "dtype": "float32",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [],
+      "stride": [],
+      "dtype": "float32",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [256],
+      "stride": [1],
+      "dtype": "float32",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [4096, 1],
+      "stride": [1, 1],
+      "dtype": "bool",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [4096, 256],
+      "stride": [256, 1],
+      "dtype": "float32",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [4096, 256],
+      "stride": [1, 0],
+      "dtype": "float32",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [4096, 1],
+      "stride": [1, 1],
+      "dtype": "float32",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [4096, 8],
+      "stride": [8, 1],
+      "dtype": "float32",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [4096, 1],
+      "stride": [1, 1],
+      "dtype": "float32",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [4096, 8],
+      "stride": [8, 1],
+      "dtype": "int64",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [4096, 256],
+      "stride": [256, 1],
+      "dtype": "float32",
+      "device": "cuda:0"
+    }
+  ],
+  "outputs": [
+    {
+      "shape": [4096, 768],
+      "stride": [768, 1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [256, 4096],
+      "stride": [1, 768],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [256, 4096],
+      "stride": [1, 768],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [256, 4096],
+      "stride": [1, 768],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    }
+  ]
+}
