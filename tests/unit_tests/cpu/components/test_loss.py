@@ -31,6 +31,7 @@ from torchtitan.components.loss import (
     cross_entropy_and_logsumexp,
     cross_entropy_loss,
     CrossEntropyLoss,
+    divide_token_sum_metrics,
     GradAccumulator,
     IGNORE_INDEX,
     Loss,
@@ -414,6 +415,18 @@ class TestLoss(unittest.TestCase):
         ce, lse = cross_entropy_and_logsumexp(pred, labels)
         torch.testing.assert_close(ce, cross_entropy_loss(pred, labels))
         torch.testing.assert_close(lse, expected_lse.float())
+
+    def test_divide_token_sum_metrics(self):
+        metrics = {"loss/ratio_clipped_frac": 3.0, "trainer/entropy/mean": 10.0}
+        self.assertEqual(
+            divide_token_sum_metrics({**metrics, "x/max": 5.0}, num_loss_tokens=10),
+            {"loss/ratio_clipped_frac": 0.3, "trainer/entropy/mean": 1.0, "x/max": 5.0},
+        )
+        # A step without loss tokens has zero sums; they stay zero.
+        self.assertEqual(
+            divide_token_sum_metrics({"loss/mean": 0.0}, num_loss_tokens=0),
+            {"loss/mean": 0.0},
+        )
 
 
 class TestGradAccumulator(unittest.TestCase):
