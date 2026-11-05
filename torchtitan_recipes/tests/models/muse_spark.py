@@ -52,6 +52,7 @@ from torchtitan_recipes.models.muse_spark import (
     _ultradata_sft_dataloader,
     _with_dist_moe,
     MUSE_SPARK_SPECIAL_TOKENS,
+    MUSE_SPARK_VISION_PROCESSOR_KWARGS,
 )
 
 
@@ -199,6 +200,7 @@ def muse_spark_debugmodel_mm(
         MM_DATASETS,
         MMSamplePackingConfig,
     )
+    from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 
     from torchtitan_recipes.tests.datasets.synthetic_multimodal import (
         _audio_token_count,
@@ -216,6 +218,9 @@ def muse_spark_debugmodel_mm(
     )
     config.model = model_config
     config.tokenizer = MuseSparkTokenizer.Config(**MUSE_SPARK_DEBUG_SPECIAL_TOKENS)
+    config.vision_processor = VisionProcessor.Config(
+        **MUSE_SPARK_VISION_PROCESSOR_KWARGS
+    )
     image_dataset = _muse_spark_mm_dataloader(
         model_config, MM_DATASETS["cc12m-test"]
     ).dataset

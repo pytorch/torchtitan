@@ -20,6 +20,8 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpointer import DATALOADER
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
+
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.loss import combine_loss_metrics
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
@@ -73,6 +75,11 @@ class Trainer(Configurable):
         tokenizer: BaseTokenizer.Config = field(
             default_factory=HuggingFaceTokenizer.Config
         )
+        vision_processor: VisionProcessor.Config | None = None
+        """The model's image and video preprocessing, e.g.
+        ``VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS)`` with the
+        settings next to the model's special tokens. Built once and handed to
+        the dataloader, like the tokenizer. None: no image or video inputs."""
         dataloader: BaseDataLoader.Config = field(default_factory=BaseDataLoader.Config)
         validator: Validator.Config | None = None
         dump_folder: str = "./outputs"
@@ -151,6 +158,7 @@ class Trainer(Configurable):
     engine_cls: type[TrainingEngine] = TrainingEngine
 
     tokenizer: BaseTokenizer
+    vision_processor: VisionProcessor | None
     dataloader: BaseDataLoader
     validator: BaseValidator
     metrics_processor: MetricsProcessor
@@ -221,6 +229,11 @@ class Trainer(Configurable):
         )
 
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
+        self.vision_processor = (
+            config.vision_processor.build()
+            if config.vision_processor is not None
+            else None
+        )
         num_tokens_per_microbatch = (
             config.training.num_tokens_per_microbatch_per_dp_rank
         )
@@ -230,6 +243,7 @@ class Trainer(Configurable):
             tokenizer=self.tokenizer,
             max_context_length=config.model.max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
+            vision_processor=self.vision_processor,
         )
 
         try:
@@ -282,6 +296,7 @@ class Trainer(Configurable):
                 dp_world_size=dp_degree,
                 dp_rank=dp_rank,
                 tokenizer=self.tokenizer,
+                vision_processor=self.vision_processor,
                 parallelism_context=parallelism_context,
                 loss_fn=engine.loss_fn,
                 metrics_processor=self.metrics_processor,

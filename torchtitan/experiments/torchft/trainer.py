@@ -203,6 +203,11 @@ class FaultTolerantTrainer(Configurable):
             if config.tokenizer is not None
             else None
         )
+        self.vision_processor = (
+            config.vision_processor.build()
+            if config.vision_processor is not None
+            else None
+        )
 
         num_pp_microbatches = (
             config.parallelism.num_pp_microbatches
@@ -219,6 +224,7 @@ class FaultTolerantTrainer(Configurable):
             tokenizer=self.tokenizer,
             max_context_length=config.model.max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
+            vision_processor=self.vision_processor,
         )
 
         # metrics logging (FT addition: ft_enable, ft_replica_id)
@@ -310,6 +316,7 @@ class FaultTolerantTrainer(Configurable):
                 dp_world_size=dp_degree,
                 dp_rank=dp_rank,
                 tokenizer=self.tokenizer,
+                vision_processor=self.vision_processor,
                 parallelism_context=parallelism_context,
                 loss_fn=engine.loss_fn,
                 metrics_processor=self.metrics_processor,
