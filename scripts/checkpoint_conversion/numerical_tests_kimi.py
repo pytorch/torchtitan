@@ -187,7 +187,11 @@ def _force_hf_routing(model, expert_indices, device):
     return forced
 
 
-def _build_tt_model(model_flavor, dtype, vision_dtype):
+@torch.no_grad()
+def run_tt(model_flavor, checkpoint_path, ref, dtype, vision_dtype, force_hf_routing):
+    """torchtitan Kimi-VL: its own image processing + forward on the same image."""
+    device = torch.device("cuda")
+    print(f"Loading torchtitan Kimi-VL ({model_flavor}) on {device} ...")
     model_config = build_model_config(model_flavor, parallelism=ParallelismConfig())
     with torch.device("meta"):
         model = model_config.build()
@@ -196,15 +200,6 @@ def _build_tt_model(model_flavor, dtype, vision_dtype):
     model.vision_encoder.to(vision_dtype)
     model.to_empty(device="cpu")
     model.init_states(buffer_device=torch.device("cpu"))
-    return model
-
-
-@torch.no_grad()
-def run_tt(model_flavor, checkpoint_path, ref, dtype, vision_dtype, force_hf_routing):
-    """torchtitan Kimi-VL: its own image processing + forward on the same image."""
-    device = torch.device("cuda")
-    print(f"Loading torchtitan Kimi-VL ({model_flavor}) on {device} ...")
-    model = _build_tt_model(model_flavor, dtype, vision_dtype)
     state_dict = ModelWrapper(model)._get_state_dict()
     dcp.load(state_dict, checkpoint_id=checkpoint_path)
     model.to(device)

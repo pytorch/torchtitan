@@ -17,8 +17,6 @@ from scripts.checkpoint_conversion.utils import build_model_config_for_conversio
 from torchtitan.components.checkpointer import ModelWrapper
 from torchtitan.components.optim import EMA
 
-from tests.utils import restore_aux_loss_registry
-
 _SCRIPT = (
     Path(__file__).resolve().parents[4]
     / "scripts"
@@ -40,6 +38,26 @@ def _load_script():
     return module
 
 
+def _restore_aux_loss_registry(case: unittest.TestCase) -> None:
+    """Undo the process-global registration that building an MoE model does.
+
+    ``AuxLoss.__init__`` increments the class-level ``AuxLoss._group_counts``,
+    and ``collect_aux_loss_metrics`` later allocates on the accelerator for
+    every key in it. Building a MoE model here would therefore make unrelated
+    tests in the same process try to allocate CUDA memory, which fails on a
+    CPU-only build.
+    """
+    from torchtitan.models.common.aux_loss import AuxLoss
+
+    snapshot = dict(AuxLoss._group_counts)
+
+    def restore() -> None:
+        AuxLoss._group_counts.clear()
+        AuxLoss._group_counts.update(snapshot)
+
+    case.addCleanup(restore)
+
+
 class TestConvertEmaToHf(unittest.TestCase):
     """The export must carry the EMA value for every parameter, and the
     trained value for everything EMA does not track.
@@ -58,7 +76,7 @@ class TestConvertEmaToHf(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.module = _load_script()
-        restore_aux_loss_registry(self)
+        _restore_aux_loss_registry(self)
 
     def _write_checkpoint(self):
         """Save a checkpoint laid out the way CheckpointManager writes one:
@@ -340,7 +358,7 @@ class TestConvertEmaToHfMultipleCopies(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.module = _load_script()
-        restore_aux_loss_registry(self)
+        _restore_aux_loss_registry(self)
 
         model_config = build_model_config_for_conversion(
             self.model_name, self.model_flavor
@@ -425,7 +443,7 @@ class TestConvertEmaToHfFrozenParameters(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.module = _load_script()
-        restore_aux_loss_registry(self)
+        _restore_aux_loss_registry(self)
 
     def test_frozen_parameter_exports_the_trained_weights(self):
         from safetensors.torch import load_file
