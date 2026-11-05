@@ -116,9 +116,9 @@ class LeastLoadedRoutingStrategy(RoutingStrategy):
         session started from an idle state onto one candidate.
 
         The tie-break tracks per-candidate recency instead of cycling a counter
-        over the tied candidates, because generators drain for model state dict loads and
-        leave the candidate set: cycling by position over a list whose length
-        keeps changing can starve a candidate that is only sometimes present.
+        over the tied candidates, because which candidates tie changes with load:
+        cycling by position over a list whose members keep changing can starve a
+        candidate that is only sometimes tied.
         """
 
         del routing_ctx
@@ -183,9 +183,8 @@ class StickySessionRoutingStrategy(RoutingStrategy):
 
         - no ``session_id``: the fallback chooses; nothing is pinned.
         - new session: the fallback chooses; the session is pinned there.
-        - pinned session: reuse its candidate, unless that candidate is gone from
-          ``candidates`` or overloaded (``repin_load_ratio``); then the fallback
-          chooses and the session is re-pinned.
+        - pinned session: reuse its candidate, unless that candidate is overloaded
+          (``repin_load_ratio``); then the fallback chooses and the session is re-pinned.
 
         Keeps at most ``max_sessions`` pins; evicts the least-recently-used one.
         """
@@ -194,7 +193,7 @@ class StickySessionRoutingStrategy(RoutingStrategy):
         if routing_ctx.session_id is None:
             return self._fallback_strategy.choose(routing_ctx, candidates)
 
-        # Reuse the pinned candidate while it is still a candidate and not overloaded.
+        # Reuse the pinned candidate while it is not overloaded.
         sticky_candidate = self._sessions.get(routing_ctx.session_id)
         if sticky_candidate is not None:
             mean_load = sum(h.reserved_load for h in candidates) / len(candidates)
@@ -202,12 +201,12 @@ class StickySessionRoutingStrategy(RoutingStrategy):
                 self._repin_load_ratio is not None
                 and sticky_candidate.reserved_load > self._repin_load_ratio * mean_load
             )
-            if any(h is sticky_candidate for h in candidates) and not overloaded:
+            if not overloaded:
                 # End of the dict means it's the most-recently-used session.
                 self._sessions.move_to_end(routing_ctx.session_id)
                 return sticky_candidate
 
-        # New session, or the pinned candidate is gone or overloaded: (re)pin to the fallback's choice.
+        # New session, or the pinned candidate is overloaded: (re)pin to the fallback's choice.
         chosen = self._fallback_strategy.choose(routing_ctx, candidates)
         self._sessions[routing_ctx.session_id] = chosen
         # End of the dict means it's the most-recently-used session.
