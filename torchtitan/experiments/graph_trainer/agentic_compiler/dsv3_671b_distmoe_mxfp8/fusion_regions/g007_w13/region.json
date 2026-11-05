@@ -44,7 +44,7 @@
  "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 1.0 ms | GEMM _scaled_mm_v2_433: 66.9 us measured vs 57.9 us flops-ideal (GEMM-own gap 0.5 ms of this region's gap); glue part 183.5 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 10.6 ms. | estimated: ideal uses flops/peak for the GEMM",
  "lift": {
   "pass_name": "lift_fusion_region_g007",
-  "num_sites": 58,
+  "num_sites": 61,
   "in_default_selection": true,
   "not_liftable_reason": ""
  }

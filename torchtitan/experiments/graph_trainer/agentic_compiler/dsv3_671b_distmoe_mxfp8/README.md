@@ -178,6 +178,12 @@ Candidate sources are under `autokernel/run1/candidates/<problem>/<writer>/...`;
 exact paths. Promoted copies are `kernel_cache/pat_<key>*/<kernel_name>`. The sha256 prefixes above were taken
 from the files in `kernel_cache/` and match the verified candidates.
 
+**Current keys.** Cache keys no longer depend on the device index (substitute_kernels, `d89f7f53e`). erxi's
+region contains a device literal, so its entry is now
+`kernel_cache/pat_uu33hfreyzn473dzqocdqrbpqz2g3dyzp3xqfqvslrw66qjxcud/aja7qubrcdovq6ft262x33yxnf34l3sxh4ti6uxukos6kqjbb7ei.py`.
+It is the same file (sha256 `71b49b7f27a00aee`); its `reference.py` differs only in `device(type='cuda')`. The
+lift passes in `fusion_regions/` are regenerated with shape- and rank-agnostic matchers (`ae98eaac8`).
+
 **What every verifier checked** (details in each evidence directory):
 - **Contract:**
   - sha256 and the signature against the spec;

@@ -19,7 +19,7 @@ class Reference(torch.nn.Module):
         v25 = torch.ops.aten.div.Tensor(v20, in7);  v20 = in7 = None
         v26 = torch.ops.aten.sum.dim_IntList(v24, [1], True);  v24 = None
         v27 = torch.ops.aten.gt.Scalar(in8, 1e-12);  in8 = None
-        v28 = torch.ops.aten.scalar_tensor.default(0.0, dtype = torch.float32, layout = torch.strided, device = device(type='cuda', index=0))
+        v28 = torch.ops.aten.scalar_tensor.default(0.0, dtype = torch.float32, layout = torch.strided, device = device(type='cuda'))
         v29 = torch.ops.aten.where.self(v27, v26, v28);  v27 = v26 = v28 = None
         v30 = torch.ops.aten.sgn.default(in6);  in6 = None
         v31 = torch.ops.aten.mul.Tensor(v30, v29);  v30 = v29 = None
