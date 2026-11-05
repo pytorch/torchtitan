@@ -705,6 +705,28 @@ def test_generation_server_requires_group_id() -> None:
     asyncio.run(run_test())
 
 
+def test_generation_server_logs_each_request_at_debug_only(caplog) -> None:
+    async def run_test() -> None:
+        server = GenerationServer.Config(max_rollout_tokens=40960).build()
+        await server.start()
+        try:
+            async with ClientSession() as session:
+                response = await session.get(
+                    f"http://{server.host}:{server.port}/healthz"
+                )
+                assert response.status == 200
+        finally:
+            await server.close()
+
+    # One DEBUG record: no INFO line, and still logged. Set the level explicitly: imports can
+    # change the root level.
+    with caplog.at_level(logging.DEBUG, logger="aiohttp.access"):
+        asyncio.run(run_test())
+    access_records = [r for r in caplog.records if r.name == "aiohttp.access"]
+    assert [r.levelno for r in access_records] == [logging.DEBUG]
+    assert access_records[0].getMessage().startswith("GET /healthz 200 ")
+
+
 def test_generation_server_rejects_prompt_without_room_for_output() -> None:
     async def run_test() -> None:
         prompt_lengths = []
