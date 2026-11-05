@@ -44,6 +44,8 @@ from torchtitan.rl.rollout.types import Completion, Rollout, RolloutStatus
 
 # vLLM's wording, which the generation server keeps.
 _CONTEXT_OVERFLOW_MESSAGE = "This model's maximum context length is 8 tokens"
+# Verifiers' wording when the agent process exits non-zero.
+_AGENT_EXIT_MESSAGE = "harness 'terminus' exited 1: Traceback ..."
 
 
 def _recorded_error(
@@ -936,13 +938,29 @@ def test_rollout_status_maps_timeouts_to_error_timeout(
             1,
             RolloutStatus.ERROR,
         ),
-        ([_recorded_error("HarnessError")], [], 1, RolloutStatus.ERROR),
+        (
+            [_recorded_error("HarnessError", message=_AGENT_EXIT_MESSAGE)],
+            [],
+            1,
+            RolloutStatus.ERROR,
+        ),
         # A prompt past the context stays ERROR even before the first turn.
         (
             [_recorded_error("ProviderError", 400, _CONTEXT_OVERFLOW_MESSAGE)],
             [],
             0,
             RolloutStatus.ERROR,
+        ),
+        # An error in the harness's own code, even after the first turn, is not the agent's exit.
+        (
+            [
+                _recorded_error(
+                    "HarnessError", message="harness 'terminus' metric: KeyError: 'x'"
+                )
+            ],
+            [],
+            1,
+            RolloutStatus.ERROR_SYSTEM,
         ),
         # Any other generator 4xx is a bug in the code around the policy.
         (
@@ -952,7 +970,12 @@ def test_rollout_status_maps_timeouts_to_error_timeout(
             RolloutStatus.ERROR_SYSTEM,
         ),
         # The harness failed before the policy's first turn: the policy never ran.
-        ([_recorded_error("HarnessError")], [], 0, RolloutStatus.ERROR_SYSTEM),
+        (
+            [_recorded_error("HarnessError", message=_AGENT_EXIT_MESSAGE)],
+            [],
+            0,
+            RolloutStatus.ERROR_SYSTEM,
+        ),
         # The first error stopped the rollout; a later teardown error doesn't change it.
         (
             [
