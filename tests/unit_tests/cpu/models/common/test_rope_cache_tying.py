@@ -43,10 +43,24 @@ def _ropes(model: torch.nn.Module) -> list[RoPE]:
 
 class TestRoPECacheTying(unittest.TestCase):
     def test_caches_are_shared_after_build(self):
-        ropes = _ropes(Llama3Model(_make_config()))
+        class CustomRoPE(RoPE):
+            @dataclasses.dataclass(kw_only=True, slots=True)
+            class Config(RoPE.Config):
+                pass
+
+            def __init__(self, config):
+                super().__init__(config)
+                self.register_buffer("cache", torch.ones(4), persistent=False)
+
+        model = Llama3Model(_make_config())
+        ropes = _ropes(model)
         self.assertGreater(len(ropes), 1)
         for rope in ropes[1:]:
             self.assertIs(rope.cache, ropes[0].cache)
+        model.add_module("custom_rope_0", CustomRoPE.Config().build())
+        model.add_module("custom_rope_1", CustomRoPE.Config().build())
+        model.init_states()
+        self.assertIs(model.custom_rope_0.cache, model.custom_rope_1.cache)
 
     def test_caches_are_shared_after_to_empty_and_init_states(self):
         """Mirror the trainer: build on meta, ``to_empty()``, then ``init_states()``."""

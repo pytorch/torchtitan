@@ -48,7 +48,7 @@ class TestVisionAttention(unittest.TestCase):
         identity_attention = _IdentityAttention()
         attention.flex_attention = identity_attention
         self.assertIsInstance(attention.rope, RoPE)
-        self.assertIsInstance(IdentityRoPE.Config(), RoPE.Config)
+        self.assertIsInstance(attention.rope.config, RoPE.Config)
         self.assertEqual(list(attention.rope.named_buffers()), [])
 
         x_TD = torch.randn(num_tokens, dim)

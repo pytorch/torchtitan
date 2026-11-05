@@ -6,13 +6,15 @@
 
 import math
 from dataclasses import dataclass
-from typing import Literal
+from typing import Generic, Literal, TypeVar
 
 import spmd_types as spmd
 import torch
 
 from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.base.module import Module
+
+_ConfigT = TypeVar("_ConfigT", bound=Module.Config)
 
 __all__ = [
     "ComplexRoPE",
@@ -80,7 +82,7 @@ def _yarn_inv_freq(
     return inv_freq / rope_factor * ramp + inv_freq * (1 - ramp)
 
 
-class RoPE(Module):
+class RoPE(Module, Generic[_ConfigT]):
     """Configurable query/key positional transform, including the identity.
 
     Dependencies and overrides can target ``RoPE.Config`` without requiring a
@@ -92,8 +94,9 @@ class RoPE(Module):
     class Config(Module.Config):
         pass
 
-    def __init__(self, config: Config):
+    def __init__(self, config: _ConfigT):
         super().__init__()
+        self.config = config
 
     def forward(
         self,
@@ -107,7 +110,7 @@ class RoPE(Module):
         raise NotImplementedError
 
 
-class IdentityRoPE(RoPE):
+class IdentityRoPE(RoPE["IdentityRoPE.Config"]):
     """Leave query and optional key unchanged without allocating a cache."""
 
     @dataclass(kw_only=True, slots=True)
@@ -125,7 +128,7 @@ class IdentityRoPE(RoPE):
         return query if key is None else (query, key)
 
 
-class _CachedRoPE(RoPE):
+class _CachedRoPE(RoPE["_CachedRoPE.Config"]):
     """Shared cache lifecycle and lookup for the concrete rotary formats."""
 
     @dataclass(kw_only=True, slots=True)
@@ -148,7 +151,6 @@ class _CachedRoPE(RoPE):
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.config: _CachedRoPE.Config = config
         self.register_buffer("cache", self._precompute_cache(), persistent=False)
 
     def _precompute_cache(self) -> torch.Tensor:
