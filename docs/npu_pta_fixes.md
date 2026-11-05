@@ -63,7 +63,7 @@
 | 7 | | loss `_assert_async` 编译卡住 | 0 维 device assert 代码生成挂 | 编译期跳过 assert | [§7](#7-词表断言在编译期跳过) |
 | 8 | | FSDP 丢掉视觉输出 all-gather | 单帧 `cat` 是 view（FSDP 通用坑，非仅 910B） | `contiguous()` | [§8](#8-视觉-encoder-输出-contiguous) |
 | 9 | | 全局 `init_timeout=1800` 过猛 | 启动与训练超时混用 | init 保持 300；1800 只写配方 | [§9](#9-init-timeout-保持-300) |
-| 10 | | Dist-MoE 要 SM100 | CuTe 包 / 设备检查 | ascend：`patches/dist_moe/`（Titan 公共零 NPU 改动） | [§10](#10-dist-moe-bf16-在-910b-上的专家计算) |
+| 10 | | Dist-MoE 要 SM100 | CuTe 包 / 设备检查 | ascend `patches/dist_moe/`（仅 ascend 入口；Titan 零 NPU） | [§10](#10-dist-moe-bf16-在-910b-上的专家计算) |
 | 11 | | （已撤销）旧 torch 缺 PP liveness / `param_dtype_override_fn` | 仅 2.14 stable 现场需要 | **A2 的 2.15 已具备，兼容代码已删** | [§11](#11-旧-torch-上-dist-moe--fsdp-的兼容导入) |
 | 12 | Y | CP block mask → `simt_only` 失败 | 非 950 不支持 | heuristics 补丁 | [§12](#12-上下文并行的-block-mask-求和被编成-simt_only) |
 | 13 | | 第 4 行默认 100s 超时 | 视觉变长重编译 | `train_timeout_seconds=1800` | [§13](#13-第-4-行多模态配方的训练超时) |
@@ -403,7 +403,12 @@ return torch.cat(outputs).contiguous()
 2. **设备门** `runtime.py`：`device.type == "cuda"` 且 `get_device_capability(...)[0] >= 10`（SM100），否则 `ValueError: Dist-MoE requires an SM100-or-newer CUDA device`。
 3. **CUDA annex 前向**：`create_context(...)` + `routed_experts.forward` 调 `dist_moe.routed_experts`（fused dispatch / GEMM / combine）。
 
-NPU 专用路径 **只在** `torchtitan-ascend` 的 `patches/dist_moe/`：`ENTRYPOINT=torchtitan_ascend.train` 时 `setup()` → `apply_all()` wrap 公共 `DistMoeRuntime.__init__` / `DistMoeRoutedExperts.forward`。**本仓 Titan `models/common/dist_moe/` 保持上游零 NPU 改动**（不改 site-packages，也不在公共目录加 `npu.py`）。未经 ascend 入口的其它 Dist-MoE 模型不受影响。不做 mxfp8 假适配。
+**推荐边界（本仓 Titan 保持 upstream 干净）**：整段 NPU Dist-MoE 放 `torchtitan-ascend` 的 `patches/dist_moe/`。
+
+- 公共 Titan：零 NPU Dist-MoE 改动（不改 site-packages，也不在公共目录加 `npu.py`）
+- 仅 `ENTRYPOINT=torchtitan_ascend.train` 时 `setup()` → `apply_all()` wrap
+- Muse 用 ascend 配方；其它模型不经该入口不受影响
+- 不做任何 mxfp8 假适配（仅 bf16）
 
 ### `npu_dist_moe_forward` 实现要点
 
