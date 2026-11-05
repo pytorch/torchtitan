@@ -30,6 +30,10 @@ per 64-query tile, per 128-key tile of its window:
 teacher[q, b] = max over block b's tokens of sums[q, token] / H   -> [T, B]
 ```
 
+Under TP each rank holds a slice of the heads: it gathers the unpooled sums,
+all-reduces them over TP, then pools, since pooling each shard first changes
+the target.
+
 At 125B shapes: 4.3 ms per layer per microbatch with one query per program
 (selected keys gathered per query), 1.4-2.2 ms dense, depending on document
 lengths.
@@ -52,7 +56,10 @@ import torch_remat as remat
 import triton
 import triton.language as tl
 
+from torch.distributed._functional_collectives import all_reduce, wait_tensor
+
 from torchtitan.config import derive, override
+from torchtitan.distributed.spmd_types import spmd_mesh_group, spmd_mesh_size
 from torchtitan.models.common.attn_gym import AuxRequest, gather_attn
 from torchtitan.models.qwen3_8_flash_next.attention import (
     QSAAttention,
@@ -147,22 +154,25 @@ def qsa_teacher(
     compress_ratio: int,
     scale: float,
     max_context_length: int,
+    num_global_heads: int,
 ) -> torch.Tensor:
-    """Head-mean softmax over each query's block tokens, max-pooled per block.
+    """Head-summed softmax over each query's block tokens / ``num_global_heads``.
 
     ``lse_HT`` is each head's log-sum-exp over all selected tokens (blocks and
     tail). A query selects only tokens of its own document, at most
     ``max_context_length`` long, so each 64-query tile computes the head-summed
     probabilities of the window before it and gathers its selected block
-    tokens. Returns ``[T, num_blocks]``.
+    tokens. Returns the per-token probabilities
+    ``[T, num_blocks * compress_ratio]``, unpooled so TP can reduce them first.
     """
     num_tokens, num_heads, head_dim = query_THK.shape
     group = num_heads // key_THK.shape[1]
     assert head_dim == triton.next_power_of_2(head_dim)
     assert query_THK.stride(-1) == 1 and key_THK.stride(-1) == 1
-    out = query_THK.new_zeros(num_tokens, num_blocks, dtype=torch.float32)
     if num_tokens == 0:
-        return out
+        return query_THK.new_zeros(
+            num_tokens, num_blocks * compress_ratio, dtype=torch.float32
+        )
     # Block tokens only: the tail stays in the LSE but is not a block.
     block_tokens_TJ = selected_indices_TJ[:, : num_blocks * compress_ratio].long()
     num_tiles = triton.cdiv(num_tokens, _BLOCK_Q)
@@ -219,11 +229,10 @@ def qsa_teacher(
         "QSA teacher: a selected token is non-causal or lies before its tile's "
         "window (a document is longer than max_context_length)",
     )
-    probs_TJ = (
+    return (
         sums_TW.gather(1, column_TJ.clamp(0, width - 1)).masked_fill(~valid_TJ, 0.0)
-        / num_heads
+        / num_global_heads
     )
-    return probs_TJ.unflatten(-1, (num_blocks, compress_ratio)).amax(-1)
 
 
 class FusedTeacherQSAInnerAttention(QSAInnerAttention):
@@ -242,6 +251,26 @@ class FusedTeacherQSAInnerAttention(QSAInnerAttention):
     def __init__(self, config: Config):
         super().__init__(config)
         self.max_context_length = config.max_context_length
+
+    def _fused_teacher(
+        self, query_THK, key_THK, selected_indices_TJ, lse_HT, num_blocks, *, scale
+    ):
+        probs_TJ = qsa_teacher(
+            query_THK,
+            key_THK,
+            selected_indices_TJ,
+            lse_HT,
+            num_blocks=num_blocks,
+            compress_ratio=self.compress_ratio,
+            scale=scale,
+            max_context_length=self.max_context_length,
+            num_global_heads=query_THK.shape[1] * spmd_mesh_size("tp"),
+        )
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None:
+            # Pooling each head shard first would change the target.
+            probs_TJ = wait_tensor(all_reduce(probs_TJ, "sum", tp_group))
+        return probs_TJ.unflatten(-1, (num_blocks, self.compress_ratio)).amax(-1)
 
     # Mirrors QSAInnerAttention.forward except for the LSE request and the
     # teacher call; keep the two in sync.
@@ -293,18 +322,16 @@ class FusedTeacherQSAInnerAttention(QSAInnerAttention):
             # like the kernel's output, opaque to SPMD typechecking.
             with spmd.no_typecheck():
                 teacher_TB = remat.region(
-                    qsa_teacher, "indexer_teacher", recompute=False
+                    self._fused_teacher, "indexer_teacher", recompute=False
                 )(
                     query_THK.detach(),
                     key_THK.detach(),
                     selected_indices_TJ,
                     aux.lse.squeeze(0),
-                    num_blocks=num_blocks,
-                    compress_ratio=self.compress_ratio,
+                    num_blocks,
                     scale=scale,
-                    max_context_length=self.max_context_length,
                 )
-            # The target keeps the scores' token layout.
+            # The target is TP-reduced and keeps the scores' token layout.
             if spmd.is_type_checking():
                 spmd.assert_type(
                     teacher_TB,
@@ -315,6 +342,10 @@ class FusedTeacherQSAInnerAttention(QSAInnerAttention):
             raw_sum = self.indexer_loss.block_kl(scores_TB, teacher_TB)
         else:
             raw_sum = scores_TB.sum()
+        tp_degree = spmd_mesh_size("tp")
+        if tp_degree > 1:
+            # As in the parent: TP ranks share the replicated indexer.
+            raw_sum = raw_sum.detach() + (raw_sum - raw_sum.detach()) / tp_degree
         return self.indexer_loss.inject(
             raw_sum, carrier=output_THV, denominator=aux_loss_denominator
         )

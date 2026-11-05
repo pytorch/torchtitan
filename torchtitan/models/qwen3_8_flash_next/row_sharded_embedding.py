@@ -223,8 +223,9 @@ def row_sharded_embedding(
     """Look up owned rows and return vectors to the original requesters.
 
     ``weight_RD`` is a DTensor sharded ``Shard(0)`` on the row axis that
-    ``metadata.row_mesh`` routes over; its own mesh may carry further axes. The
-    output has shape ``[*metadata.input_ids.shape, D]`` and uses ``dtype``
+    ``metadata.row_mesh`` routes over; its other mesh axes (e.g. TP feature
+    columns) stay local, so D is the local feature width. The output has shape
+    ``[*metadata.input_ids.shape, D]`` and uses ``dtype``
     (the weight's dtype by default). Duplicate IDs are expanded on the requester
     with ``F.embedding`` so their gradients accumulate in the compute dtype,
     as in an ordinary mixed-precision embedding. Owners then sum the requester
