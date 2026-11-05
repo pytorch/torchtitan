@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict_saver import _stateful_to_state_dict
@@ -59,6 +58,7 @@ from torchtitan.tools.garbage_collector import GarbageCollector
 from .base import (
     BaseCheckpointManager,
     EMA,
+    export_state_dict,
     LR_SCHEDULER,
     MODEL,
     ModelWrapper,
@@ -478,7 +478,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
     def _is_valid_checkpoint(self, checkpoint_dir: str) -> bool:
         # Either published layout counts as valid:
         #
-        #   step-3/                     step-5/  (final HF export)
+        #   step-3/                     step-5/  (HF export)
         #   ├── metadata.pkl            ├── model.safetensors.index.json
         #   ├── model_0.pt              ├── model-00001-of-00002.safetensors
         #   ├── model_1.pt              ├── model-00002-of-00002.safetensors
@@ -489,6 +489,9 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         #
         # Without the HF shape, a finished export looks abandoned and
         # retention deletes it on the next run.
+        # Final model-only saves go under exports/, which retention does
+        # not scan, so an HF step-N here is an HF seed checkpoint (step-0)
+        # or an export left by an older TorchTitan version.
         # Exports this checkpointer writes are named after MODEL.
         return self._is_resumable_checkpoint(checkpoint_dir) or self._is_hf_checkpoint(
             checkpoint_dir, MODEL
@@ -522,22 +525,16 @@ class TorchCheckpointingManager(BaseCheckpointManager):
                 self._manager.close()
 
     def _save_last_step(self, curr_step: int) -> None:
+        checkpoint_id = self._create_last_step_id(curr_step)
         if self.last_save_model_only:
-            model_state = self.states[MODEL].state_dict()
-            # Cast floating-point tensors to the export dtype and preserve other
-            # buffers.
-            model_state = {
-                key: value.to(self.export_dtype)
-                if isinstance(value, torch.Tensor)
-                and value.is_floating_point()
-                and value.dtype != self.export_dtype
-                else value
-                for key, value in model_state.items()
-            }
+            model = self.states[MODEL]
+            model_state = export_state_dict(
+                model.state_dict(), dtype=self.export_dtype, model_parts=model.model
+            )
             states: dict[str, Any] = {MODEL: model_state}
             logger.info(
                 f"Saving a model only checkpoint in {self.export_dtype} "
-                f"at last step, step {curr_step}."
+                f"at last step, step {curr_step}, to {checkpoint_id}."
             )
         else:
             states = self.states
@@ -545,7 +542,6 @@ class TorchCheckpointingManager(BaseCheckpointManager):
 
         # The final save must land before the process exits, so retire the async
         # manager and write synchronously through a fresh one.
-        checkpoint_id = self._create_checkpoint_id(curr_step)
         self._manager.close()
         storage_config = self._manager_config.storage_config
         input_checkpoint_id = checkpoint_id

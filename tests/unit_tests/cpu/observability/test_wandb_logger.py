@@ -30,7 +30,7 @@ def test_wandb_run_tags_are_split(tmp_path, monkeypatch, env_value, expected):
     else:
         monkeypatch.setenv("WANDB_RUN_TAGS", env_value)
 
-    WandBLogger(log_dir=str(tmp_path))
+    WandBLogger.Config().build(log_dir=str(tmp_path))
 
     assert fake_wandb.init.call_args.kwargs["tags"] == expected
 
@@ -38,7 +38,7 @@ def test_wandb_run_tags_are_split(tmp_path, monkeypatch, env_value, expected):
 def test_wandb_commit_keeps_validation_in_the_training_row(tmp_path, monkeypatch):
     fake_wandb = MagicMock()
     monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
-    wandb_logger = WandBLogger(log_dir=str(tmp_path))
+    wandb_logger = WandBLogger.Config().build(log_dir=str(tmp_path))
 
     wandb_logger.log({"loss": 1.0}, step=10)
     wandb_logger.log({"validation/loss": 2.0}, step=10)

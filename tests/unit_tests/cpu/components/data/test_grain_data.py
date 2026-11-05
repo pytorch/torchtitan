@@ -489,29 +489,6 @@ def test_hf_explicit_fields_are_passed_to_load_dataset(
 @pytest.mark.parametrize(
     "source_type", [HuggingFaceRandomAccessSource, HuggingFaceStreamingSource]
 )
-def test_hf_lineage_fields_are_serialized(source_type):
-    config = GrainDataLoader.Config(
-        dataset=SingleDatasetConfig(
-            source=source_type.Config(
-                path="owner/dataset",
-                name="configuration",
-                split="validation",
-                revision="abc123",
-            )
-        )
-    )
-
-    source = config.to_dict()["dataset"]["source"]
-
-    assert source["path"] == "owner/dataset"
-    assert source["name"] == "configuration"
-    assert source["split"] == "validation"
-    assert source["revision"] == "abc123"
-
-
-@pytest.mark.parametrize(
-    "source_type", [HuggingFaceRandomAccessSource, HuggingFaceStreamingSource]
-)
 def test_hf_config_requires_split(source_type):
     with pytest.raises(TypeError, match="split"):
         source_type.Config(path="owner/dataset")

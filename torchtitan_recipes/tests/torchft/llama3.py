@@ -66,7 +66,6 @@ def llama3_torchft_debugmodel(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=100,
         ),
         dataloader=GrainDataLoader.Config(
