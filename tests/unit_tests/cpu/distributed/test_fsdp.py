@@ -4,23 +4,29 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 from unittest import mock
 
 import pytest
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.tensor import Shard
 
-from torchtitan.config.parallelism import FSDPSymmMemScope
+from torchtitan.config import PrecisionConfig
+from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     enable_fsdp_symm_mem,
     linear_param_shard_placements,
 )
+from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
+from torchtitan.models.llama3.flavors import build_model_config
 
 
 class _FSDPModule(nn.Module):
@@ -44,34 +50,43 @@ class _FSDPOutOfTreeBlock(_FSDPModule):
     pass
 
 
-def test_apply_fsdp_to_decoder_forwards_param_dtype_override_fn() -> None:
-    model = nn.Module()
-    model.enable_weight_tying = False
-    model.tok_embeddings = None
-    model.norm = None
-    model.lm_head = None
-    model.layers = nn.ModuleDict()
-    dp_mesh = mock.Mock(mesh_dim_names=("dp_shard",))
-
-    def param_dtype_override_fn(param: nn.Parameter) -> torch.dtype | None:
-        return torch.float32
-
-    with mock.patch("torchtitan.distributed.fsdp.fully_shard") as fully_shard:
-        apply_fsdp_to_decoder(
-            model,
-            dp_mesh,
-            param_dtype=torch.bfloat16,
-            reduce_dtype=torch.float32,
-            pp_enabled=False,
-            param_dtype_override_fn=param_dtype_override_fn,
+@pytest.mark.parametrize("preserve", [True, False])
+@mock.patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
+def test_fsdp_unshards_preserve_dtype_params_in_their_dtype(preserve: bool) -> None:
+    dist.init_process_group("gloo", store=dist.HashStore(), rank=0, world_size=1)
+    try:
+        parallelism = ParallelismConfig()
+        config = build_model_config("debugmodel", parallelism=parallelism)
+        if preserve:
+            config.norm = dataclasses.replace(
+                config.norm, preserve_dtype_params=("weight",)
+            )
+        model = config.build()
+        model._apply_fsdp(
+            parallelism_context=ParallelismContext(
+                dp_replicate=1,
+                dp_shard=1,
+                cp=1,
+                tp=1,
+                pp=1,
+                ep=1,
+                world_size=1,
+                enable_sequence_parallel=False,
+            ),
+            precision=PrecisionConfig(),
+            parallelism=parallelism,
         )
-
-    mp_policy = fully_shard.call_args.kwargs["mp_policy"]
-    assert mp_policy.param_dtype_override_fn is param_dtype_override_fn
+        model.norm.unshard()
+        assert model.norm.weight.dtype == (
+            torch.float32 if preserve else torch.bfloat16
+        )
+        assert model.lm_head.weight.dtype == torch.bfloat16
+    finally:
+        dist.destroy_process_group()
 
 
 def test_apply_fsdp_to_decoder_shards_an_moe_held_as_mlp() -> None:
-    model = nn.Module()
+    model = Module()
     model.enable_weight_tying = False
     model.tok_embeddings = None
     model.norm = None

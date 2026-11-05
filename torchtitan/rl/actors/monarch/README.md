@@ -5,8 +5,10 @@ This package runs the standalone RL services on
 implements the framework-agnostic `ActorSystem` (`rl/actors/system.py`), which
 the controller builds from `Controller.Config.actor_system` (default
 `MonarchActorSystem.Config()`) and spawns every service through. A launcher that
-allocates its own hosts builds `MonarchActorSystem` with `host_meshes` (and
-optionally `generator_env`) and passes it to `Controller.setup_async(actor_system=...)`.
+allocates its own hosts subclasses `Controller` and overrides
+`_build_actor_system` to build `MonarchActorSystem` with `host_meshes`. To get
+hosts from a cluster scheduler, use a launch recipe (see
+[Launchers](#launchers)).
 
 Each adapter is a thin Monarch `Actor` subclass of a service with no Monarch
 dependency of its own: it declares the service's methods as
@@ -24,12 +26,83 @@ dependency of its own: it declares the service's methods as
 | `rollout_worker.py` | `RolloutWorkerActor`, a rollout worker in the controller-host CPU pool. |
 | `provisioning.py` | Proc meshes: the trainer and generator GPU meshes (`spawn_proc_mesh`, `PerHostProvisioner`), CPU procs on the controller host (`spawn_cpu_procs`), and the Monarch client's `shutdown`. |
 | `torch_elastic.py` | Sets the torch-elastic env vars (`RANK`, `MASTER_PORT`, ...) on a proc mesh before `init_process_group`; rank 0 keeps its rendezvous store port open so no other socket takes it. |
+| `launcher/` | Scheduler launchers: `MonarchLauncher`, `MonarchControllerWithLauncher` and the shared layout planner (`base.py`), `SlurmLauncher` (`slurm.py`), and the submit command (`submit.py`). |
+
+## Launchers
+
+A launcher gets the job's hosts from a cluster scheduler. A launch recipe returns
+a `MonarchControllerWithLauncher.Config`: an RL recipe plus the launcher that
+runs it on one cluster, built with
+`MonarchControllerWithLauncher.Config.from_controller_config(config,
+launcher=...)`. `Controller.Config` itself has no launcher settings. Submit the
+launch recipe with `python -m torchtitan.rl.actors.monarch.launcher.submit`,
+which takes the same arguments as `torchtitan.rl.train`. The job runs
+`python -m torchtitan.rl.train` with them, which builds a
+`MonarchControllerWithLauncher`: it attaches to the job's hosts and passes them
+to `MonarchActorSystem` as `host_meshes`. Add `--dry-run` to print the planned
+nodes, roles and settings without submitting.
+To support another scheduler, subclass `MonarchLauncher` (`launcher/base.py`) in
+your own package.
+
+**Layout.** The launcher places the trainer first, then the generators, filling
+each node before the next:
+
+- A role smaller than a node goes on the node being filled if it fits, else on
+  the next node. It is never split across two nodes.
+- A role using a node or more gets whole nodes to itself. Its world size must be
+  a multiple of the node's GPU count.
+
+Examples with 8-GPU nodes ("generators" is the number of generators x GPUs per
+generator):
+
+| Trainer | Generators | Layout | Idle |
+| --- | --- | --- | --- |
+| 8 GPUs | 8 x 1 GPU | node 0: trainer; node 1: generator_0..7 | 0 |
+| 4 GPUs | 3 x 4 GPUs | node 0: trainer, generator_0; node 1: generator_1, generator_2 | 0 |
+| 16 GPUs | 2 x 8 GPUs | nodes 0-1: trainer; node 2: generator_0; node 3: generator_1 | 0 |
+| 6 GPUs | 2 x 4 GPUs | node 0: trainer; node 1: generator_0, generator_1 | 2 GPUs on node 0 |
+| 4 GPUs | 1 x 8 GPUs | node 0: trainer; node 1: generator | 4 GPUs on node 0 |
+| 12 GPUs | 1 x 4 GPUs | `ValueError`: 12 is not a multiple of 8 | |
+
+### SLURM
+
+Before you submit, set up the environment, model and dataset per the
+[Quick Start](../../README.md#quick-start), and make sure every node can access
+them at the same paths (see the
+[`SlurmLauncher` docstring for more details](./launcher/slurm.py)). Submit from
+the repository root, in the shell where the venv is active and `PYTHONPATH` is
+set. JIT caches (Triton, vLLM, FlashInfer) default to node-local
+`/tmp/torchtitan-<uid>`; set them in `launcher.env` or the submit shell to
+override.
+
+From a login node, this runs a complete example on two 4-GPU nodes: the trainer
+on node 0, and four 1-GPU generators sharing node 1 (set `gpus_per_node` in the
+recipe to your nodes' GPU count):
+
+```bash
+python -m torchtitan.rl.actors.monarch.launcher.submit \
+  --module torchtitan_recipes.rl.alphabet_sort --config rl_grpo_qwen3_0_6b_flex_slurm
+```
+
+Site settings such as the account and partition go in `slurm_args`, in your own
+launch recipe:
+
+```python
+def my_rl_slurm():
+    config = rl_grpo_qwen3_0_6b_flex_slurm()
+    config.launcher.slurm_args += ["--account=my-account", "--partition=gpu"]
+    return config
+```
+
+The launcher's `env` values are part of the config, which the controller may log
+and save (`print_config`, `save_config_file`), so don't put secrets there; set them
+in the submit shell, which the job inherits.
 
 ## Outside this package
 
 No module outside this package imports Monarch or this package, except the
-controller's default for `Controller.Config.actor_system`, which imports
-`MonarchActorSystem` lazily. The controller, the rollouter and `train.py` use
+controller's default for `Controller.Config.actor_system` and launch recipes,
+which import them lazily. The controller, the rollouter and `train.py` use
 the abstract `ActorSystem`.
 
 What remains outside is the call convention on the handles an actor system
