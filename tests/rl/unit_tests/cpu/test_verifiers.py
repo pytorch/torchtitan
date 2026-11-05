@@ -705,6 +705,28 @@ def test_generation_server_requires_group_id() -> None:
     asyncio.run(run_test())
 
 
+def test_generation_server_logs_each_request_at_debug_only(caplog) -> None:
+    async def run_test() -> None:
+        server = GenerationServer.Config(max_rollout_tokens=40960).build()
+        await server.start()
+        try:
+            async with ClientSession() as session:
+                response = await session.get(
+                    f"http://{server.host}:{server.port}/healthz"
+                )
+                assert response.status == 200
+        finally:
+            await server.close()
+
+    # One DEBUG record: no INFO line, and still logged. Set the level explicitly: imports can
+    # change the root level.
+    with caplog.at_level(logging.DEBUG, logger="aiohttp.access"):
+        asyncio.run(run_test())
+    access_records = [r for r in caplog.records if r.name == "aiohttp.access"]
+    assert [r.levelno for r in access_records] == [logging.DEBUG]
+    assert access_records[0].getMessage().startswith("GET /healthz 200 ")
+
+
 def test_generation_server_rejects_prompt_without_room_for_output() -> None:
     async def run_test() -> None:
         prompt_lengths = []
@@ -788,6 +810,7 @@ def test_rollout_whose_first_prompt_does_not_fit_is_flagged(caplog) -> None:
     with caplog.at_level(logging.WARNING):
         rollout = asyncio.run(
             rollouter._run_single_rollout(
+                release_session_fn=AsyncMock(),
                 sample=VerifiersTaskSample(verifiers_task_data={"name": "huge-task"}),
                 sampling=SamplingConfig(),
                 group_id=1,
@@ -872,6 +895,7 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
     with caplog.at_level(logging.WARNING):
         rollout = asyncio.run(
             rollouter._run_single_rollout(
+                release_session_fn=AsyncMock(),
                 sample=VerifiersTaskSample(verifiers_task_data={"name": "slow-task"}),
                 sampling=SamplingConfig(),
                 group_id=1,
@@ -882,6 +906,97 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
     assert rollout.status is RolloutStatus.ERROR_TIMEOUT
     assert "Verifiers rollout failed: trace=trace" in caplog.text
     assert VERIFIERS_REWARD_KEY not in rollout.turns[-1].env_rewards
+
+
+# TODO: share one fake trace and rollouter between this test,
+# test_rollout_whose_first_prompt_does_not_fit_is_flagged and
+# test_timed_out_rollout_is_logged_and_keeps_no_reward.
+def test_rollout_releases_every_trace_session_even_if_one_release_fails(caplog) -> None:
+    """Each trace generated under its own id; another agent's trace has one too."""
+    span = SimpleNamespace(duration=0.0)
+    traces = [
+        SimpleNamespace(
+            id=trace_id,
+            task=SimpleNamespace(key="task"),
+            agent=SimpleNamespace(trainable=trainable),
+            ok=True,
+            is_timeout=False,
+            is_truncated=False,
+            stop_condition=None,
+            errors=[],
+            timing=SimpleNamespace(
+                setup=span,
+                agent=SimpleNamespace(duration=0.0, model=span, harness=span),
+                scoring=span,
+            ),
+            calls=[],
+            nodes=[],
+            branches=[],
+        )
+        for trace_id, trainable in [("opponent", False), ("policy", True)]
+    ]
+    rollouter = object.__new__(VerifiersRollouter)
+    popped_trace_ids = []
+    rollouter._generation_server = SimpleNamespace(
+        model_id="model", pop_generation_metadata=popped_trace_ids.append
+    )
+    rollouter._verifiers_env_client = SimpleNamespace(
+        run=AsyncMock(
+            return_value=SimpleNamespace(
+                ok=True, is_timeout=False, errors=[], traces=traces
+            )
+        )
+    )
+    rollouter._verifiers_train_client_config = object()
+    release_session_fn = AsyncMock(side_effect=[RuntimeError("router down"), None])
+
+    with caplog.at_level(logging.ERROR):
+        rollout = asyncio.run(
+            rollouter._run_single_rollout(
+                release_session_fn=release_session_fn,
+                sample=VerifiersTaskSample(verifiers_task_data={"name": "task"}),
+                sampling=SamplingConfig(),
+                group_id=1,
+                rollout_id=0,
+            )
+        )
+
+    assert [call.kwargs for call in release_session_fn.call_args_list] == [
+        {"routing_session_id": "opponent"},
+        {"routing_session_id": "policy"},
+    ]
+    assert "releasing routing session opponent failed" in caplog.text
+    assert popped_trace_ids == ["opponent", "policy"]
+    assert rollout.group_id == 1
+
+
+def test_a_failing_rollout_fails_its_group_only_after_every_sibling_finished() -> None:
+    """The caller releases the group once this raises; no sibling may still be generating."""
+
+    async def run_test() -> list[int]:
+        finished = []
+
+        async def run_single_rollout(*, rollout_id: int, **kwargs) -> None:
+            if rollout_id == 0:
+                raise RuntimeError("rollout 0 failed")
+            await asyncio.sleep(0.01)
+            finished.append(rollout_id)
+
+        rollouter = object.__new__(VerifiersRollouter)
+        rollouter._generation_server = SimpleNamespace(set_generate_fn=lambda fn: None)
+        rollouter._run_single_rollout = run_single_rollout
+        with pytest.raises(RuntimeError, match="rollout 0 failed"):
+            await rollouter.run_group_rollouts(
+                generate_fn=AsyncMock(),
+                release_session_fn=AsyncMock(),
+                sample=None,
+                group_id=1,
+                group_size=2,
+                sampling=SamplingConfig(),
+            )
+        return finished
+
+    assert asyncio.run(run_test()) == [1]
 
 
 def test_parse_sampling_config_requires_stop_token_ids() -> None:

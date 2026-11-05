@@ -21,6 +21,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpointer import DATALOADER
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
+from torchtitan.components.loss import combine_loss_metrics, loss_metric_reduce_op
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validator import BaseValidator, Validator
 from torchtitan.config import (
@@ -380,8 +381,30 @@ class Trainer(Configurable):
         with sl.log_trace_span("collect_dist_metrics"):
             sl.log_trace_scalar({"global_valid_tokens": num_global_loss_tokens})
 
+            # Combine loss metrics over microbatches and loss-mesh ranks; under PP,
+            # ranks without the last stage have none. /mean and /frac metrics are
+            # token sums, so they are divided by the step's loss tokens like the loss.
+            # TODO(#4202): migrate loss-metric collection to the distributed
+            # tensor logging framework once it lands.
+            loss_mesh = parallelism_context.get_optional_mesh("loss")
+            loss_metrics = {
+                key: float(value.item())
+                / (
+                    max(num_global_loss_tokens, 1)
+                    if loss_metric_reduce_op(key) == "sum"
+                    else 1
+                )
+                for key, value in combine_loss_metrics(
+                    (
+                        microbatch_metrics
+                        for group_metrics in forward_backward_result.loss_metrics
+                        for microbatch_metrics in group_metrics
+                    ),
+                    mesh=loss_mesh,
+                ).items()
+            }
+
             if parallelism_context.dp_cp_enabled:
-                loss_mesh = parallelism_context.get_mesh("loss")
 
                 # global_avg_loss: the summed loss over all ranks / the step's loss tokens.
                 # global_max_loss: the max over ranks of this rank's mean loss.
@@ -424,6 +447,7 @@ class Trainer(Configurable):
             **collect_aux_loss_metrics(
                 parallelism_context, num_loss_tokens=num_global_loss_tokens
             ),
+            **loss_metrics,
         }
         self.metrics_processor.log(
             engine.num_completed_steps,
