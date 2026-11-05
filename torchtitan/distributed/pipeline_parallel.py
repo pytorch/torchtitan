@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 from torch.distributed._mesh_layout import _MeshLayout
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.fsdp import FSDPModule
 from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
@@ -28,7 +29,7 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from torchtitan.components.loss import ChunkedLossWrapper, LossFunction
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_remat import ActivationRematConfig
@@ -77,6 +78,7 @@ def pipeline_llm(
     *,
     parallelism_context: ParallelismContext,
     training: TrainingConfig,
+    precision: PrecisionConfig,
     parallelism: ParallelismConfig,
     local_compile: LocalCompileConfig,
     activation_remat: ActivationRematConfig | None,
@@ -120,6 +122,7 @@ def pipeline_llm(
             parallelism_context=parallelism_context,
             parallelism=parallelism,
             training=training,
+            precision=precision,
             model_config=model_config,
             lm_head_in_loss=isinstance(loss_fn, ChunkedLossWrapper),
         )
@@ -142,7 +145,7 @@ def pipeline_llm(
         # apply SPMD-style PT-D techniques
         m = m.parallelize(
             parallelism_context=parallelism_context,
-            training=training,
+            precision=precision,
             parallelism=parallelism,
             local_compile=local_compile,
             activation_remat=activation_remat,
@@ -513,6 +516,16 @@ def _build_pipeline_schedule(
         )
         schedule._load_csv(pp_schedule_csv)
 
+    # Chunked partial backwards preserve deferred-reduction policies during
+    # metadata inference, leaving unsharded gradients outside param.grad.
+    # TODO: Move this reset into PipelineStage's metadata cleanup.
+    # https://github.com/pytorch/pytorch/issues/203178
+    for stage in stages:
+        if isinstance(stage.submod, FSDPModule):
+            schedule.register_post_metadata_inference_cleanup(
+                stage.submod.reset_iter_state
+            )
+
     return schedule
 
 
@@ -766,6 +779,7 @@ def _build_decoder_stage_io(
     parallelism_context: ParallelismContext,
     parallelism: ParallelismConfig,
     training: TrainingConfig,
+    precision: PrecisionConfig,
     model_config: Decoder.Config,
     lm_head_in_loss: bool,
 ) -> _DecoderStageIO:
@@ -789,7 +803,7 @@ def _build_decoder_stage_io(
                 f"be divisible by TP ({parallelism_context.tp}) with sequence parallelism."
             )
 
-    dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]
+    dtype = TORCH_DTYPE_MAP[precision.param_dtype]
 
     def example(*shape: int, dtype: torch.dtype = dtype) -> torch.Tensor:
         return torch.empty(shape, dtype=dtype, device="meta")

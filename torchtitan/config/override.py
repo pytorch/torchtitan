@@ -502,6 +502,9 @@ def apply_overrides(
             f"whose `target` and `fqns` match nodes in the config tree."
         )
 
+    # Replacements are assigned after construction, so the first __post_init__
+    # did not see them. Configs with nothing to check inherit the base no-op.
+    config_root.__post_init__()
     return replacements
 
 

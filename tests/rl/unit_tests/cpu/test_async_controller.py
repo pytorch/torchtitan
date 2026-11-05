@@ -52,7 +52,7 @@ def test_controller_config_maybe_log(tmp_path, caplog) -> None:
     assert "Running with configs:" in caplog.text
     with open(tmp_path / "config.json") as file:
         saved_config = json.load(file)
-    assert saved_config["trainer"]["training"]["max_context_length"] == 128
+    assert saved_config["trainer"]["model"]["max_context_length"] == 128
 
 
 def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:
@@ -825,9 +825,7 @@ def _run_with_generator_watcher(watcher) -> None:
             ),
         ),
         trainer=SimpleNamespace(
-            training=SimpleNamespace(
-                num_tokens_per_microbatch_per_dp_rank=8, max_context_length=8
-            )
+            training=SimpleNamespace(num_tokens_per_microbatch_per_dp_rank=8)
         ),
     )
     controller.start_step = 0

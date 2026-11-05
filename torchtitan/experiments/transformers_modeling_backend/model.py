@@ -23,12 +23,12 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.flex_attention import flex_attention_forward
 from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.models.base.model import BaseModel
+from torchtitan.models.base.model import BaseModel, FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.attention import (
     create_attention_mask,
@@ -215,7 +215,7 @@ class HFTransformerModel(BaseModel):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
         from torchtitan.distributed.fsdp import (
@@ -230,10 +230,10 @@ class HFTransformerModel(BaseModel):
         apply_fsdp(
             self,
             dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
+            reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
             pp_enabled=parallelism_context.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
+            cpu_offload=parallelism.fsdp_enable_cpu_offloading,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             symm_mem_scope=parallelism.fsdp_symm_mem_scope,
             ep_degree=parallelism_context.ep,
@@ -268,6 +268,12 @@ class HFTransformerModel(BaseModel):
         label2id: dict | None = field(init=False, default=None)
         problem_type: str | None = field(init=False, default=None)
 
+        def __post_init__(self, **kwargs) -> None:
+            # Configurable.Config.__post_init__ is ahead of PretrainedConfig
+            # in the MRO and takes no extra arguments. HF passes leftover
+            # kwargs, including attn_implementation, to self.__post_init__.
+            PretrainedConfig.__post_init__(self, **kwargs)
+
         def __init__(
             self,
             model_config,
@@ -278,13 +284,14 @@ class HFTransformerModel(BaseModel):
             PretrainedConfig.__init__(
                 self, attn_implementation=_ATTN_IMPLEMENTATION, **kwargs
             )
-            # Set param_init and sharding_config before Module.Config.build()
-            # accesses them. PretrainedConfig.__getattribute__ doesn't
-            # recognize slots inherited from Module.Config.
+            # Set param_init, sharding_config and preserve_dtype_params before
+            # Module.Config.build() accesses them. PretrainedConfig.__getattribute__
+            # doesn't recognize slots inherited from Module.Config.
             self.param_init = (
                 None  # noqa: this sets Config.param_init, not Module._param_init
             )
             self.sharding_config = None
+            self.preserve_dtype_params = ()
             # HF modules run eager; the loss and the swapped-in TorchTitan MoE (SwiGLU) can compile.
             self.local_compile = LocalCompileConfig(
                 regions=["loss", "fused_binary_activation"]
@@ -510,6 +517,8 @@ class HFTransformerModel(BaseModel):
                 if key == "num_experts" and hasattr(self, "n_routed_experts"):
                     self.n_routed_experts = value
 
+            self.max_context_length = max_context_length
+            # Aliases HF's max_position_embeddings.
             self.max_seq_len = max_context_length
             self.deterministic = deterministic
 
@@ -568,8 +577,8 @@ class HFTransformerModel(BaseModel):
 
             return self
 
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
+        def _parameter_counts(
+            self, model: nn.Module, *, include_embeddings: bool
         ) -> tuple[int, int]:
             assert isinstance(model, HFTransformerModel)
             named_parameters = list(model.named_parameters())
@@ -578,17 +587,18 @@ class HFTransformerModel(BaseModel):
                 id(param): Fraction(1) for _, param in named_parameters
             }
 
-            lm_head = getattr(model, "lm_head", None)
-            lm_head_parameter_ids = (
-                {id(param) for param in lm_head.parameters()}
-                if isinstance(lm_head, nn.Module)
-                else set()
-            )
-            for module in model.modules():
-                if isinstance(module, nn.Embedding):
-                    for param in module.parameters(recurse=False):
-                        if id(param) not in lm_head_parameter_ids:
-                            parameter_weights[id(param)] = Fraction(0)
+            if not include_embeddings:
+                lm_head = getattr(model, "lm_head", None)
+                lm_head_parameter_ids = (
+                    {id(param) for param in lm_head.parameters()}
+                    if isinstance(lm_head, nn.Module)
+                    else set()
+                )
+                for module in model.modules():
+                    if isinstance(module, nn.Embedding):
+                        for param in module.parameters(recurse=False):
+                            if id(param) not in lm_head_parameter_ids:
+                                parameter_weights[id(param)] = Fraction(0)
 
             for layer in model.layers.values():
                 moe_params = getattr(layer, "_native_moe_params", None)
@@ -616,7 +626,15 @@ class HFTransformerModel(BaseModel):
                 for _, param in named_parameters
             )
             assert nparams_for_matmul.denominator == 1
-            active_nparams = nparams_for_matmul.numerator
+            return nparams, nparams_for_matmul.numerator
+
+        def get_parameter_counts(self, model: nn.Module) -> tuple[int, int]:
+            return self._parameter_counts(model, include_embeddings=True)
+
+        def build_flops_estimator(
+            self, model: nn.Module, *, seq_len: int
+        ) -> FlopsEstimator:
+            _, active_nparams = self._parameter_counts(model, include_embeddings=False)
 
             if all(
                 hasattr(self, name)
@@ -692,11 +710,7 @@ class HFTransformerModel(BaseModel):
                 )
 
             num_flops_per_token = 6 * active_nparams + attention_op_flops
-            logger.info(
-                f"Total parameter count: {nparams:,}, "
-                f"active parameters: {active_nparams:,}"
-            )
-            return nparams, num_flops_per_token
+            return lambda input_dict: num_flops_per_token * input_dict["input"].numel()
 
     def __init__(self, config: Config):
         super().__init__()
@@ -1227,11 +1241,10 @@ class HFTransformerModel(BaseModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         aux_loss_denominators: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Build the attention mask (when positions are present), CP-shard, return."""
-        del max_num_documents, max_context_length, aux_loss_denominators
+        del max_num_documents, aux_loss_denominators
         # Function-local import avoids a circular import.
         from torchtitan.distributed import context_parallel
         from torchtitan.distributed.spmd_types import annotate_input_spmd_types
