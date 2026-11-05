@@ -56,17 +56,18 @@
 | --- | --- | --- | --- | --- | --- |
 | 1 | | RoPE / 视觉 RoPE `aclnnIndex` complex64 | 910B index 无 complex64 | `rope.py` / `vision_encoder.py` NPU `view_as_real` | [§1](#1-rope--视觉-rope-的-complex64-下标) |
 | 2 | Y | packed-document mask：`Buffers cannot be created` / mask-out 编不过 | 间接 index 走 fallback 开临时 buffer；910B4 mask-out 核编挂 | `flex_attention.py.patch`：逐点 index + 非 950 关 mask-out | [§2](#2-packed-document-mask-的间接-index-与-mask-out) |
-| 3 | | SwiGLU / Helion CUDA 路径在 NPU 挂 | 融合 override 绑 CUDA | 非 CUDA `silu(gate)*up`；with_cp 清空 override | [§3](#3-融合-swiglu-没有-npu-实现) |
+| 3 | | SwiGLU / Helion CUDA 路径在 NPU 挂 | 融合 override 绑 CUDA | 非 CUDA `silu(gate)*up`；ascend `with_cp_npu` 清空 override | [§3](#3-融合-swiglu-没有-npu-实现) |
 | 4 | Y | flex 反向选块段错误（大 tile / 多 rank 并行 autotune） | 910B4 大分块 SIGSEGV；多进程同时选块竞态，一人崩则整组被 SIGTERM | 反向默认 tile=16；flex autotune 文件锁 | [§4](#4-flex-attention-反向选块与多-rank-锁) |
 | 5 | Y | 短视觉序列 → HCCL watchdog | flex decoding 另编核超时 | 非 950 关 decoding；配方 `train_timeout=1800` | [§5](#5-短视觉序列的-flex-decoding-和-训练超时) |
 | 6 | Y | 编译进程池 + flex 段错误 | 多线程编译不安全 | `COMPILE_THREADS=1` / `PRECOMPILE_THREADS=1` | [§6](#6-编译线程限制为-1) |
 | 7 | | loss `_assert_async` 编译卡住 | 0 维 device assert 代码生成挂 | 编译期跳过 assert | [§7](#7-词表断言在编译期跳过) |
 | 8 | | FSDP 丢掉视觉输出 all-gather | 单帧 `cat` 是 view（FSDP 通用坑，非仅 910B） | `contiguous()` | [§8](#8-视觉-encoder-输出-contiguous) |
 | 9 | | 全局 `init_timeout=1800` 过猛 | 启动与训练超时混用 | init 保持 300；1800 只写配方 | [§9](#9-init-timeout-保持-300) |
-| 10 | | Dist-MoE 要 SM100 | CuTe 包 / 设备检查 | `dist_moe/npu.py` 等，`fc3aa0cf` | [§10](#10-dist-moe-bf16-在-910b-上的专家计算) |
+| 10 | | Dist-MoE 要 SM100 | CuTe 包 / 设备检查 | ascend：`patches/dist_moe/`（Titan 公共零 NPU 改动） | [§10](#10-dist-moe-bf16-在-910b-上的专家计算) |
 | 11 | | （已撤销）旧 torch 缺 PP liveness / `param_dtype_override_fn` | 仅 2.14 stable 现场需要 | **A2 的 2.15 已具备，兼容代码已删** | [§11](#11-旧-torch-上-dist-moe--fsdp-的兼容导入) |
 | 12 | Y | CP block mask → `simt_only` 失败 | 非 950 不支持 | heuristics 补丁 | [§12](#12-上下文并行的-block-mask-求和被编成-simt_only) |
 | 13 | | 第 4 行默认 100s 超时 | 视觉变长重编译 | `train_timeout_seconds=1800` | [§13](#13-第-4-行多模态配方的训练超时) |
+| 14 | | remat 重算与 local compile 图不一致 | compile region 落在可重算区，NPU 特化图对不上 checkpoint | 配方收窄 `local_compile_regions` | [§14](#14-收窄-local_compile_regionscompile-与-remat) |
 
 ### 未做 / 不可做
 
@@ -86,7 +87,7 @@
 
 ### 本分支（`npu-muse-spark-r04-code-only`）代码落点
 
-上表 **#1–#13 的对应改动都在本分支**。形态分两类：本仓 Python / 配置，以及需打进当前环境的 site-packages 补丁与环境变量。
+上表 **#1–#9 / #12 的对应改动在本分支**；**#10（Dist-MoE NPU）与 #13 / #14（配方）已迁到 `torchtitan-ascend`**（`patches/dist_moe/`、`recipes/muse_spark.py`）。形态分两类：本仓 Python / 配置，以及需打进当前环境的 site-packages 补丁与环境变量。
 
 | # | 在本分支？ | 落点形态（检出后还要做什么） |
 | --- | --- | --- |
@@ -94,15 +95,16 @@
 | 2 | 是 | 补丁：`docs/npu_910b_patches/flex_attention.py.patch`（需 `apply_npu_910b_patches.sh`） |
 | 3 | 是 | 本仓：`torchtitan_recipes/overrides/fused_swiglu.py` |
 | 4 | 是 | 补丁：`flex_attention.py.patch` + `triton_heuristics.py.patch`（需 apply） |
-| 5 | 是 | 补丁关 flex decoding + 本仓配方 `train_timeout_seconds=1800` |
+| 5 | 部分 | 补丁关 flex decoding；配方 `train_timeout` 在 ascend `recipes/muse_spark.py` |
 | 6 | 是 | 环境变量：`docs/npu_910b_patches/env_npu_910b.sh`（需 `source`） |
 | 7 | 是 | 本仓：`torchtitan/components/loss.py` |
 | 8 | 是 | 本仓：`vision_encoder.py` 的 `contiguous()` |
 | 9 | 是 | 本仓：`CommConfig.init_timeout_seconds` 默认 300 |
-| 10 | 是 | 本仓：`dist_moe/npu.py` 等（`fc3aa0cf`） |
+| 10 | 否（迁至 ascend） | `torchtitan-ascend`：`torchtitan_ascend/patches/dist_moe/`（仅 `ENTRYPOINT=torchtitan_ascend.train`） |
 | 11 | 否（已删） | A2 `torch 2.15.0+cpu` 已有相关 API，不再保留兼容探测 |
 | 12 | 是 | 补丁：`triton_heuristics.py.patch`（需 apply） |
-| 13 | 是 | 本仓：`muse_spark.py` 等多模态配方 `train_timeout_seconds=1800` |
+| 13 | 本地 910B 测试 | 不进提交默认路径；本机用 gitignored `recipes/muse_spark_910b_local.py` 设 `train_timeout=1800` |
+| 14 | 本地 910B 测试 | 同上：本地 helper 收窄 `local_compile_regions`；A5 验收用干净 `recipes/muse_spark.py` |
 
 **#2 / #4 / #5（decoding）/ #6 / #12**：只拉分支不够，还要 apply 补丁并 source 环境变量，才会进当前 Python 的 `torch_npu`。  
 **不在本分支**（也不应合入本 PR）：E1 本地 UltraData JSONL；A1–A3（属 `torchtitan-ascend`）。
@@ -135,7 +137,7 @@
 | 关闭 flex decoding | `_use_flex_decoding()` → `false`，短 query 仍走 mask-in 主核 | `flex_attention.py.patch` | [§5](#5-短视觉序列的-flex-decoding-和-训练超时) |
 | 编译线程=1 | `TORCHINDUCTOR_COMPILE_THREADS=1`，`TORCHNPU_PRECOMPILE_THREADS=1` | `env_npu_910b.sh` | [§6](#6-编译线程限制为-1) |
 | 禁止 `simt_only` | `simd_simt_mix` 不再生成仅 950 支持的 `simt_only`（CP block mask 求和会踩） | `triton_heuristics.py.patch` | [§12](#12-上下文并行的-block-mask-求和被编成-simt_only) |
-| 训练超时放宽（配方） | 视觉变长重编译时避免 HCCL 100s watchdog；与 decoding 关闭配合 | 相关 muse_spark 配方 `train_timeout_seconds=1800` | [§5](#5-短视觉序列的-flex-decoding-和-训练超时)、[§13](#13-第-4-行多模态配方的训练超时) |
+| 训练超时放宽（配方） | 视觉变长重编译时避免 HCCL 100s watchdog；与 decoding 关闭配合 | 仅 910B 本地 helper；A5 提交配方不设 | [§5](#5-短视觉序列的-flex-decoding-和-训练超时)、[§13](#13-第-4-行多模态配方的训练超时) |
 
 ---
 
@@ -405,18 +407,18 @@ return torch.cat(outputs).contiguous()
 2. **设备门** `runtime.py`：`device.type == "cuda"` 且 `get_device_capability(...)[0] >= 10`（SM100），否则 `ValueError: Dist-MoE requires an SM100-or-newer CUDA device`。
 3. **CUDA annex 前向**：`create_context(...)` + `routed_experts.forward` 调 `dist_moe.routed_experts`（fused dispatch / GEMM / combine）。
 
-NPU 专用路径（本仓 `dist_moe/npu.py`；ascend 为 `patches/dist_moe/`）与上述 CUDA 包 **并列**，不改 site-packages。
+NPU 专用路径 **只在** `torchtitan-ascend` 的 `patches/dist_moe/`：`ENTRYPOINT=torchtitan_ascend.train` 时 `setup()` → `apply_all()` wrap 公共 `DistMoeRuntime.__init__` / `DistMoeRoutedExperts.forward`。**本仓 Titan `models/common/dist_moe/` 保持上游零 NPU 改动**（不改 site-packages，也不在公共目录加 `npu.py`）。未经 ascend 入口的其它 Dist-MoE 模型不受影响。不做 mxfp8 假适配。
 
 ### `npu_dist_moe_forward` 实现要点
 
-`routed_experts` 在 `x_TD.device.type == "npu"` 时进入，外层 `remat.region(..., recompute=False)`：
+ascend patch 在 `x_TD.device.type == "npu"` 时进入，外层 `remat.region(..., recompute=False)`：
 
 1. **上下文**：`_NpuDistMoeContext` 占位，**不** `dist_moe.create_context`。
 2. **数据流**：`_exchange`（all-to-all）→ `cumsum(counts)` → `_grouped_mm(w13)` → `_activate` → `_grouped_mm(w2)` → 可选 postprocess → `_combine` 回 `(T,D)`。
 3. **算子**：GEMM 用 `npu_grouped_matmul`（权重转布局，FSDP 先 `to_local()`）；SwiGLU 用 `npu_swiglu`。
 4. **remat**：公开 `dispatch()`/`combine()` 会再开 `recompute=True` 区，不能嵌在外层 SAVE 里；故有 EP 时直接调 **`_dispatch` / `_combine`**。
 
-配方侧：`disable_cuda_graphs=True`，收窄 `local_compile_regions`，`train_timeout_seconds=1800`（4 卡 `dp2×tp2×ep2`）。
+配方侧：`disable_cuda_graphs=True`，收窄 `local_compile_regions`（见 [§14](#14-收窄-local_compile_regionscompile-与-remat)），`train_timeout_seconds=1800`（4 卡 `dp2×tp2×ep2`）。
 
 ### 为啥只有 bf16
 
@@ -424,7 +426,7 @@ NPU 专用路径（本仓 `dist_moe/npu.py`；ascend 为 `patches/dist_moe/`）�
 
 - `_grouped_mm` 把 activation/weight **cast 成 bf16** 再调 `npu_grouped_matmul`；无 MXFP8 scale / prepared weight。
 - 只挂在 bf16 的 `DistMoeRoutedExperts` + 配方 `expert_precision="bf16"`。
-- mxfp8 走 `MXFP8DistMoeRoutedExperts` + `BlockScaledConfig` / `PreparedWeight` 等官方 annex API；`npu.py` 未实现，配置期就会卡在官方包依赖上。
+- mxfp8 走 `MXFP8DistMoeRoutedExperts` + `BlockScaledConfig` / `PreparedWeight` 等官方 annex API；ascend **不做** mxfp8 假适配，配置期仍会卡在官方包依赖上。
 
 要支持 mxfp8 需另开 NPU 的 block-scaled 权重准备与对应 GEMM，不能只扩现有 `npu_dist_moe_forward`。
 
@@ -470,13 +472,64 @@ ValueError: compile_mode="simt_only" is supported only on Ascend 950 targets.
 
 `muse_spark_debugmodel_mm` 是清单第 4 行：8 卡 `dp_shard=2, tp=2, cp=2, ep=2`，Ulysses。视觉 token 长度一变，flex attention 就要重新编译。第 2 行③那条 EP4、AllGatherKV 的变体已经把 `train_timeout_seconds` 设成 1800；清单上的这份配方原来没有。
 
-`torchtitan_recipes/tests/models/muse_spark.py` 的 `muse_spark_debugmodel_mm` 在返回前补上 `config.comm.train_timeout_seconds = 1800`。其它字段没改。
+A5 验收配方（提交）不设 1800。910B 本机测试用 gitignored `torchtitan_ascend/recipes/muse_spark_910b_local.py`。flex / `env_npu_910b` 同样只本地 apply，不进 A5 默认路径。
 
 2026-10-30 在 `179.173.2.3` 上，`NGPU=8` 连跑两次 10 步可对齐。逐步数字在 `docs/npu_debugmodel_verification.md` 第 4 行。
 
 （同波次 8 卡多模态在补丁齐全后可跑完 10 步，见 verification 文档；此处不另占编号。）
 
 ---
+
+## 14. 收窄 local_compile_regions（compile 与 remat）
+
+### 在干什么
+
+`model.local_compile_regions` 是一份 **函数名白名单**，不是整模 `torch.compile`。
+
+机制（`torchtitan/distributed/local_compile.py`）：
+
+1. 源码用 `@local_compile("名字")` 标出一小段函数（RoPE、RMSNorm、attention 前后处理、loss 等）。
+2. 启动时 `apply_local_compile(model.local_compile_regions)`：名字 **在名单里** → 对该函数 `torch.compile(..., fullgraph=True)`；**不在** → 保持 eager。
+3. 大块算子（GEMM、flex attention、MoE dispatch 等）一般不走这套，或另有路径。
+
+上游 Muse Spark（`release/0.4`，`muse_spark/model.py`）默认开得很宽，目的是把「胶水」融进 Inductor、少打 HBM：
+
+```text
+loss, fp32_to_bf16_split, rope,
+muse_spark_attention_qk, muse_spark_attention_output,
+muse_spark_input_scaled_rmsnorm, muse_spark_logit_postprocess,
+muse_spark_residual, muse_spark_rmsnorm
+```
+
+### 问题
+
+在 910B 上，上述 region（尤其 `rope` / `muse_spark_attention_qk` / norm / residual）常落在 **activation remat 可重算区** 里。反传重算会再走一遍已 compile 的图；这次特化出来的图和前向保存的 checkpoint **对不上**——保存的 NPU tensor 在重算路径里变成 CPU scalar 一类东西，checkpoint metadata 崩，训练走不下去。
+
+这是 **compile × remat 在 NPU 上的组合问题**，不是 Muse 数学要改名单。GPU 上默认长名单仍是性能向的。
+
+### 改法
+
+910B 本机用 gitignored `muse_spark_910b_local.py` 收窄到已验证能跑完一步的集合（**不进提交**；A5 用干净上游 region 名单）：
+
+```python
+config.model.local_compile_regions = ["loss", "fp32_to_bf16_split"]
+```
+
+落点：
+
+| 配方 | 为何再设一遍 |
+| --- | --- |
+| `muse_spark_debugmodel_npu`（910b_local） | 覆盖上游默认长名单 |
+| `muse_spark_debugmodel_dist_moe_bf16_npu`（910b_local） | Dist-MoE 路径同样避开 remat+compile |
+| `muse_spark_debugmodel_mm_npu`（910b_local） | `mm` 会 **换掉整个 `model_config`**，又把默认长名单带回来，必须再收窄 |
+
+不改 `muse_spark/model.py` 的 `default_factory`，也不改上游 `torchtitan_recipes` 社区用例；只在 ascend 的 910B 验收配方出口覆盖。
+
+### 边界
+
+- 用正确性换掉那部分 local-compile 加速；未做「NPU 上重新选可 compile 的 region」的性能回补。
+- 与 §10 配方侧的「收窄 local_compile_regions」是同一改动；细节以本节为准。
+- 与 A1（remat 空指针占位）不同：A1 是 placeholder storage；本节是 **哪些函数被 `torch.compile`**。
 
 ## A1. 反向重算里的空指针占位张量
 
