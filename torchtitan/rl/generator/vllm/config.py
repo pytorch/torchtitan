@@ -47,7 +47,8 @@ class VLLMCudaGraphConfig:
     - ``"FULL_DECODE_ONLY"``: graph pure-decode batches; prefill / mixed
       batches run eager. Cheap (no inductor compile).
     - ``"FULL"`` (default): graph the whole forward, prefill included, attention
-      captured too.
+      captured too. Pure-decode batches get their own graphs, captured with
+      decode-shaped attention metadata.
     """
 
     capture_sizes: list[int] | None = None
