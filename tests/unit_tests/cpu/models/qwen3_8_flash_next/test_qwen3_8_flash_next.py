@@ -7,6 +7,7 @@
 import hashlib
 import json
 import math
+from unittest import mock
 
 import pytest
 import torch
@@ -540,3 +541,92 @@ def test_block_passes_padding_mask_to_moe(config):
     finally:
         handle.remove()
     assert captured[0] is padding
+
+
+def test_qsa_teacher_sums_tp_head_shards_and_scales_indexer_gradient():
+    """TP=2 sums both head shards before max pooling and halves the KL gradient.
+
+    The teacher must match the full-head teacher, since pooling each shard
+    first changes the target. The indexer scores are TP-replicated, so each
+    rank contributes half of the KL gradient while the loss value is unchanged.
+    """
+    from torchtitan.models.qwen3_8_flash_next import attention as qsa
+
+    torch.manual_seed(42)
+    T, R, B, H, H_kv, K = 37, 4, 3, 4, 2, 8
+    indices = torch.full((T, B * R + R - 1), -1, dtype=torch.long)
+    for i in range(T):
+        complete = min((i + 1) // R, B)
+        indices[i, : complete * R] = torch.arange(complete * R)
+        tail = (i + 1) % R
+        indices[i, B * R : B * R + tail] = torch.arange(i + 1 - tail, i + 1)
+    indices[::11] = -1
+    query, key, value = (torch.randn(T, n, K) for n in (H, H_kv, H_kv))
+    scale = K**-0.5
+    inner = (
+        qsa.QSAInnerAttention.Config(
+            compress_ratio=R, indexer_loss=qsa.QSAIndexerLoss.Config(coeff=1.0)
+        )
+        .build()
+        .train()
+    )
+    with torch.no_grad():
+        expected_teacher = inner._teacher(query, key, indices, B, scale=scale)
+
+    shards = [(slice(0, H // 2), slice(0, 1)), (slice(H // 2, H), slice(1, 2))]
+    remote_teacher = []
+
+    def tp(all_reduce):
+        return (
+            mock.patch.object(qsa, "spmd_mesh_size", return_value=2),
+            mock.patch.object(qsa, "spmd_mesh_group", return_value=object()),
+            mock.patch.object(qsa, "all_reduce", side_effect=all_reduce),
+            mock.patch.object(qsa, "wait_tensor", side_effect=lambda t: t),
+        )
+
+    remote_heads, remote_kv = shards[1]
+    patches = tp(lambda t, op, group: remote_teacher.append(t) or t)
+    with patches[0], patches[1], patches[2], patches[3], torch.no_grad():
+        inner._teacher(
+            query[:, remote_heads], key[:, remote_kv], indices, B, scale=scale
+        )
+
+    local_heads, local_kv = shards[0]
+    scores = torch.randn(T, B).masked_fill(indices[:, : B * R : R] < 0, -torch.inf)
+    scores.requires_grad_()
+    captured = []
+    original_inject = inner.indexer_loss.inject
+    patches = tp(lambda t, op, group: t + remote_teacher[0])
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        patches[3],
+        mock.patch.object(
+            inner.indexer_loss,
+            "inject",
+            side_effect=lambda raw_sum, **kwargs: captured.append(raw_sum)
+            or original_inject(raw_sum, **kwargs),
+        ),
+    ):
+        inner(
+            query[:, local_heads],
+            key[:, local_kv],
+            value[:, local_kv],
+            selected_indices_TJ=indices,
+            scores_TB=scores,
+            scale=scale,
+            aux_loss_denominator=torch.tensor(float(T)),
+        )
+        with torch.no_grad():
+            tp_teacher = inner._teacher(
+                query[:, local_heads], key[:, local_kv], indices, B, scale=scale
+            )
+
+    torch.testing.assert_close(tp_teacher, expected_teacher, rtol=1e-6, atol=1e-7)
+    oracle_scores = scores.detach().clone().requires_grad_()
+    expected_raw_sum = qsa.QSAIndexerLoss.block_kl(oracle_scores, tp_teacher)
+    torch.testing.assert_close(captured[0], expected_raw_sum, atol=0, rtol=0)
+    (gradient,) = torch.autograd.grad(captured[0], scores)
+    (expected_gradient,) = torch.autograd.grad(expected_raw_sum / 2, oracle_scores)
+    torch.testing.assert_close(gradient, expected_gradient, atol=0, rtol=0)

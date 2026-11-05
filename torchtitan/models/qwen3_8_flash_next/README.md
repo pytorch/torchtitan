@@ -111,11 +111,23 @@ The multimodal recipe keeps vision on AdamW.
 | Feature | Notes |
 | --- | --- |
 | FSDP | Per-layer backbone sharding; persistent row ownership for PLE |
+| TP / SP | QSA heads and PLE feature columns; degree must divide the 2 QSA KV heads |
 | EP | Existing routed-expert placements and all-to-all dispatcher |
 
 EP shards experts independently of PLE: at FSDP8/EP4 each rank owns one eighth
 of the PLE rows and one fourth of the experts, with FSDP2 within each expert
-shard. CPU offload and deferred FSDP reduction for PLE are unsupported.
+shard. CPU offload and deferred FSDP reduction for PLE are unsupported. PP and
+CP are rejected at config time.
+
+TP keeps residual and PLE activations replicated, shards QSA heads and PLE
+feature columns in addition to DP row ownership, and all-reduces the indexer
+teacher's head probabilities before max pooling each block. The TP-replicated
+indexer contributes its KL gradient once across the TP ranks.
+
+```bash
+NGPU=2 MODULE=torchtitan_recipes.tests.models.qwen3_8_flash_next \
+  CONFIG=qwen38_flash_next_debugmodel_tp2 ./run_train.sh
+```
 
 ## Numerical Parity and Tests
 

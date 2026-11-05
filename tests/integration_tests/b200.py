@@ -27,6 +27,7 @@ from torchtitan_recipes.tests.models.multimodal import (
 from torchtitan_recipes.tests.models.qwen3_8_flash_next import (
     qwen38_flash_next_debugmodel,
     qwen38_flash_next_debugmodel_mm,
+    qwen38_flash_next_debugmodel_tp2,
 )
 
 from tests.integration_tests import IntegrationTestDefinition
@@ -264,6 +265,16 @@ def build_b200_tests_list() -> list[IntegrationTestDefinition]:
                 "and checkpoint resume"
             ),
             test_name="qwen3_8_flash_next_fsdp",
+            ngpu=2,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[qwen38_flash_next_debugmodel_tp2],
+            test_descr=(
+                "Qwen3.8-Flash-Next TP+SP and EP: QSA head shards, PLE feature "
+                "columns and the TP-reduced indexer teacher"
+            ),
+            test_name="qwen3_8_flash_next_tp_sp_ep",
             ngpu=2,
             use_real_pg=True,
         ),

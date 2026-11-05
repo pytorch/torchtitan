@@ -85,6 +85,12 @@ def make_dist_muon_optimizer(
     lr: float,
 ) -> OptimizersContainer.Config:
     """Build the report's decoder optimizer assignment for this parallelism."""
+    if parallelism.tensor_parallel_degree > 1:
+        # TODO: remove once DistMuon supports TP storage layouts:
+        # https://github.com/pytorch/torchtitan/pull/5678
+        raise ValueError(
+            "The Flash-Next DistMuon policy does not support tensor parallelism yet"
+        )
     owned = ComputeLayout(
         shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Owned()},
         compute_dtype=torch.bfloat16,
