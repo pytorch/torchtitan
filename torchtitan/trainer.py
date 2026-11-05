@@ -21,6 +21,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpointer import DATALOADER
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
+from torchtitan.components.loss import combine_loss_metrics
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validator import BaseValidator, Validator
 from torchtitan.config import (
@@ -422,8 +423,24 @@ class Trainer(Configurable):
                 {"global_valid_tokens": int(global_main_loss_token_count)}
             )
 
+            # Combine loss metrics over microbatches and loss-mesh ranks; under PP,
+            # ranks without the last stage have none.
+            # TODO(#4202): migrate loss-metric collection to the distributed
+            # tensor logging framework once it lands.
+            loss_mesh = parallelism_context.get_optional_mesh("loss")
+            loss_metrics = {
+                key: float(value.item())
+                for key, value in combine_loss_metrics(
+                    (
+                        microbatch_metrics
+                        for group_metrics in forward_backward_result.loss_metrics
+                        for microbatch_metrics in group_metrics
+                    ),
+                    mesh=loss_mesh,
+                ).items()
+            }
+
             if parallelism_context.dp_cp_enabled:
-                loss_mesh = parallelism_context.get_mesh("loss")
 
                 # For global_avg_loss, we want the average loss across all ranks:
                 # accumulated_loss = local_loss_sum / global_valid_tokens
@@ -472,6 +489,7 @@ class Trainer(Configurable):
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
             **collect_aux_loss_metrics(parallelism_context),
+            **loss_metrics,
         }
         self.metrics_processor.log(
             engine.num_completed_steps,
