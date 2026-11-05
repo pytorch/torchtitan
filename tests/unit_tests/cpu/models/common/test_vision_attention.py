@@ -18,7 +18,7 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.rope import ComplexRoPE, IdentityRoPE, RoPE
+from torchtitan.models.common.rope import IdentityRoPE, RoPE
 from torchtitan.models.common.vision_encoder import VisionAttention
 
 
@@ -61,7 +61,7 @@ class TestVisionAttention(unittest.TestCase):
 
         out_TD = attention(
             x_TD,
-            rope_cache=torch.empty(0),
+            positions=torch.zeros(num_tokens, 2, dtype=torch.long),
             attention_mask=attention_mask,
         )
 
@@ -78,14 +78,13 @@ def test_encoder_rope_and_attention_overrides_are_independent() -> None:
         def __init__(self, config):
             super().__init__()
             self.calls = 0
-            self.cache_is_complex = None
+            self.positions_shape = None
 
-        def forward(
-            self, query, key=None, positions=None, *, rope_cache=None, inverse=False
-        ):
+        def forward(self, query, key=None, positions=None, *, inverse=False):
             self.calls += 1
-            assert rope_cache is not None
-            self.cache_is_complex = rope_cache.is_complex()
+            assert positions is not None
+            assert positions.dtype == torch.long
+            self.positions_shape = positions.shape
             return torch.full_like(query, 42), key
 
     class MarkerAttention(FlexInnerAttention):
@@ -125,7 +124,6 @@ def test_encoder_rope_and_attention_overrides_are_independent() -> None:
                 )
                 .vision_encoder
             )
-            complex_cache = isinstance(config.block.attn.rope, ComplexRoPE.Config)
             replacements = apply_overrides(
                 OverrideConfig(
                     imports=[
@@ -155,7 +153,7 @@ def test_encoder_rope_and_attention_overrides_are_independent() -> None:
                 )
             for layer in encoder.layers.values():
                 assert layer.attn.rope.calls == 1
-                assert layer.attn.rope.cache_is_complex == complex_cache
+                assert layer.attn.rope.positions_shape == (16, 2)
                 assert layer.attn.flex_attention.calls == 1
 
 

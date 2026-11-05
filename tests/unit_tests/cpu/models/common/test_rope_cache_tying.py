@@ -7,6 +7,7 @@
 """``Decoder`` shares one RoPE cache across layers with equal RoPE configs."""
 
 import dataclasses
+import importlib
 import unittest
 
 import torch
@@ -49,16 +50,34 @@ class TestRoPECacheTying(unittest.TestCase):
 
     def test_caches_are_shared_after_to_empty_and_init_states(self):
         """Mirror the trainer: build on meta, ``to_empty()``, then ``init_states()``."""
-        with torch.device("meta"):
-            model = Llama3Model(_make_config())
-        model.to_empty(device="cpu")
-        model.init_states()
+        for family in (None, "kimi_k2_7", "qwen3_5", "muse_spark"):
+            with self.subTest(vision_family=family):
+                with torch.device("meta"):
+                    model = Llama3Model(_make_config())
+                    groups = [model.layers]
+                    if family is not None:
+                        config = importlib.import_module(
+                            f"torchtitan.models.{family}"
+                        ).build_model_config(
+                            "debugmodel_mm" if family == "muse_spark" else "debugmodel",
+                            seq_len=128,
+                            attn_backend="flex",
+                            parallelism=ParallelismConfig(),
+                        )
+                        encoder = config.vision_encoder.build()
+                        model.add_module("vision_encoder", encoder)
+                        groups.append(encoder)
+                model.to_empty(device="cpu")
+                model.init_states()
 
-        ropes = _ropes(model)
-        expected = ropes[0]._precompute_cache()
-        for rope in ropes:
-            self.assertIs(rope.cache, ropes[0].cache)
-        torch.testing.assert_close(ropes[0].cache, expected, rtol=0, atol=0)
+                for group in groups:
+                    ropes = _ropes(group)
+                    self.assertGreater(len(ropes), 1)
+                    self.assertGreater(ropes[0].cache.numel(), 0)
+                    expected = ropes[0]._precompute_cache()
+                    for rope in ropes:
+                        self.assertIs(rope.cache, ropes[0].cache)
+                    torch.testing.assert_close(ropes[0].cache, expected, rtol=0, atol=0)
 
     def test_different_configs_keep_separate_caches(self):
         config = _with_layer_theta(_make_config(), layer=1, theta=10000.0)

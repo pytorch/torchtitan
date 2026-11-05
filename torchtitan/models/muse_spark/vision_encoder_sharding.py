@@ -53,9 +53,3 @@ def navit_encoder_sharding_config() -> ShardingConfig:
         out_src_shardings=activation_invariant,
         out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I}),
     )
-
-
-def vision_rope_freq_sharding_config() -> ShardingConfig:
-    return ShardingConfig(
-        state_shardings={"inv_freq": SpmdType({DP: spmd.R, CP: spmd.I, TP: spmd.I})},
-    )

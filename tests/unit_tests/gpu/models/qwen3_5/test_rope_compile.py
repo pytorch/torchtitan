@@ -241,38 +241,6 @@ class TestRoPELocalCompile(unittest.TestCase):
         ):
             torch.testing.assert_close(compiled, eager, rtol=0, atol=0)
 
-    def test_compiled_accepts_prepared_cache(self):
-        torch.manual_seed(42)
-        query, key = (
-            torch.randn(
-                64, 8, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True
-            )
-            for _ in range(2)
-        )
-        positions = torch.randperm(128, device="cuda")[:64]
-        for rope_cls in (ComplexRoPE, CosSinRoPE):
-            rope = rope_cls.Config(dim=64, max_context_length=128).build().cuda()
-            cache = rope.cache[positions].unsqueeze(1)
-            rope_apply = rope_cls.Config(dim=64, max_context_length=0).build().cuda()
-            eager = rope_cls.apply_rotary_emb(query, key, cache)
-            torch.testing.assert_close(
-                rope_apply(query, key, rope_cache=cache), eager, rtol=0, atol=0
-            )
-            compiled = torch.compile(rope_apply, fullgraph=True)
-            expected = torch.compile(rope_cls.apply_rotary_emb, fullgraph=True)(
-                query, key, cache
-            )
-            actual = compiled(query, key, rope_cache=cache)
-            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-            grad_outputs = (torch.randn_like(query), torch.randn_like(key))
-            torch.testing.assert_close(
-                torch.autograd.grad(actual, (query, key), grad_outputs),
-                torch.autograd.grad(expected, (query, key), grad_outputs),
-                rtol=0,
-                atol=0,
-            )
-            torch.testing.assert_close(actual, eager)
-
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestComplexRoPELocalCompile(unittest.TestCase):
@@ -381,6 +349,23 @@ class TestComplexRoPELocalCompile(unittest.TestCase):
         )
         for whole, *parts in zip(full, first, second, strict=True):
             self.assertTrue(torch.equal(whole, torch.cat(parts)))
+
+    def test_compiled_accepts_complex_cache(self):
+        # Direct callers (the vision encoders) pass the complex cache, not the real view.
+        torch.manual_seed(42)
+        rope = ComplexRoPE.Config(dim=64, max_context_length=128).build().cuda()
+        query, key = (
+            torch.randn(64, 8, 64, device="cuda", dtype=torch.bfloat16)
+            for _ in range(2)
+        )
+        cache = rope.cache[torch.randperm(128, device="cuda")[:64]].unsqueeze(1)
+        compiled = torch.compile(ComplexRoPE.apply_rotary_emb, fullgraph=True)
+        for out, ref in zip(
+            compiled(query, key, cache),
+            ComplexRoPE.apply_rotary_emb(query, key, cache),
+            strict=True,
+        ):
+            torch.testing.assert_close(out, ref)
 
 
 if __name__ == "__main__":

@@ -4,27 +4,27 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from unittest.mock import patch
-
 import pytest
 import spmd_types as spmd
 import torch
 from spmd_types.checker import typecheck
 from torchtitan.models.common.rope import IdentityRoPE
 from torchtitan.models.muse_spark.flavors import muse_spark_navit_encoder_config
-from torchtitan.models.muse_spark.vision_encoder import VisionRopeFreq
+from torchtitan.models.muse_spark.vision_encoder import NaViTRoPE
 
 
 def test_rope_frequency_meta_initialization_matches_hf():
     with torch.device("meta"):
-        freq = VisionRopeFreq.Config(head_dim=96, rope_theta=10000.0).build()
-    assert freq.inv_freq.device.type == "meta"
-    freq.to_empty(device="cpu")
-    freq.init_states(buffer_device=torch.device("cpu"))
+        rope = NaViTRoPE.Config(dim=96, max_context_length=9, theta=10000.0).build()
+    assert rope.cache.device.type == "meta"
+    rope.to_empty(device="cpu")
+    rope.init_states(buffer_device=torch.device("cpu"))
     exponent = torch.arange(0, 48, 2, dtype=torch.float32) / 48
-    expected = 1.0 / (10000.0**exponent)
-    torch.testing.assert_close(freq.inv_freq, expected, rtol=0, atol=0)
-    assert not freq.state_dict()
+    inv_freq = 1.0 / (10000.0**exponent)
+    angles = torch.outer(torch.arange(9, dtype=torch.float32), inv_freq)
+    expected = torch.complex(angles.cos(), angles.sin())
+    torch.testing.assert_close(rope.cache, expected, rtol=0, atol=0)
+    assert not rope.state_dict()
 
 
 @pytest.mark.parametrize("grid_order", ["raster", "legacy_spark"])
@@ -43,6 +43,8 @@ def test_position_sampling_and_permutation_spmd_types(grid_order):
     config.pos_emb_grid_order = grid_order
     encoder = config.build()
     encoder.init_states()
+    rope = config.block.attn.rope.build()
+    rope.init_states()
     device = torch.device("cpu")
     expected = encoder._get_pos_emb(4, 6, device)
     expected.square().sum().backward()
@@ -60,14 +62,12 @@ def test_position_sampling_and_permutation_spmd_types(grid_order):
             encoder.positional_embedding_vlm,
             {"dp": spmd.R, "cp": spmd.I, "tp": spmd.I},
         )
-        spmd.assert_type(
-            encoder.rope_freq.inv_freq, {"dp": spmd.R, "cp": spmd.I, "tp": spmd.I}
-        )
+        spmd.assert_type(rope.cache, {"dp": spmd.R, "cp": spmd.I, "tp": spmd.R})
         positions = encoder._get_pos_emb(4, 6, device)
-        freqs = encoder._make_2d_rope(4, 6, device)
+        rope_positions = encoder._make_rope_positions(4, 6, device)
         permutation, _ = encoder._get_sparse_perm_and_slens(4, 6, device)
         spmd.assert_type(positions, activation)
-        spmd.assert_type(freqs[permutation], activation)
+        spmd.assert_type(rope_positions[permutation], activation)
         restored = positions[permutation][torch.argsort(permutation)]
         spmd.assert_type(restored, activation)
         # Explicit local gradients avoid implying a distributed scalar reduction.
@@ -83,18 +83,16 @@ def test_position_sampling_and_permutation_spmd_types(grid_order):
     assert isinstance(config.block.attn.rope, IdentityRoPE.Config)
     disabled_encoder = config.build()
     disabled_encoder.init_states()
-    with patch.object(disabled_encoder, "_make_2d_rope") as make_rope:
-        _, cache, *_ = disabled_encoder._embed_image(
-            torch.randn(24, config.conv1_linear.in_features),
-            4,
-            6,
-            device,
-            torch.float32,
-        )
-    make_rope.assert_not_called()
-    assert cache.shape == (24, 0)
+    _, rope_positions, *_ = disabled_encoder._embed_image(
+        torch.randn(24, config.conv1_linear.in_features),
+        4,
+        6,
+        device,
+        torch.float32,
+    )
+    assert rope_positions.shape == (24, 2)
     query, key = torch.randn(2, 24, 2, 16)
     rope = config.block.attn.rope.build()
-    rotated_query, rotated_key = rope(query, key, rope_cache=cache.unsqueeze(1))
+    rotated_query, rotated_key = rope(query, key, positions=rope_positions)
     assert rotated_query is query
     assert rotated_key is key

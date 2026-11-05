@@ -180,12 +180,3 @@ def vision_merger_sharding_config() -> ShardingConfig:
         out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I}),
         out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.R}),
     )
-
-
-def vision_rotary_embedding_sharding_config() -> ShardingConfig:
-    """Vision rotary embedding with a TP-invariant ``inv_freq``."""
-    state_placement = SpmdType({DP: spmd.R, CP: spmd.I, TP: spmd.I})
-    return ShardingConfig(
-        state_shardings={"inv_freq": state_placement},
-        out_src_shardings=state_placement,
-    )

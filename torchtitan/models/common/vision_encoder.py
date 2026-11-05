@@ -8,10 +8,9 @@
 block-diagonal FlexInnerAttention mask helper and the pre-norm transformer block
 (attention + MLP) over token-major visual patches.
 
-Each encoder prepares its model-specific ``rope_cache`` and passes it through
-the block to attention as a tensor, so config-based sharding can annotate it
-before it meets the head-sharded q/k. ``VisionAttention.Config.rope`` selects
-the module that applies these position coefficients.
+Each encoder passes spatial coordinates in patch order through the block to
+attention. ``VisionAttention.Config.rope`` selects the module that owns the
+position table and rotates the head-sharded query and key tensors.
 
 Shape suffixes:
 - T = packed visual tokens
@@ -156,7 +155,7 @@ class VisionAttention(Module):
     """Multi-head self-attention with FlexInnerAttention over visual patches.
 
     Separate q/k/v projections (clean per-head ColwiseParallel under TP). The
-    configured RoPE module applies the encoder-prepared position coefficients.
+    configured RoPE module applies the encoder-provided spatial positions.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -203,7 +202,7 @@ class VisionAttention(Module):
         self,
         x: torch.Tensor,
         *,
-        rope_cache: torch.Tensor,
+        positions: torch.Tensor,
         attention_mask: BlockMask,
     ) -> torch.Tensor:
         num_tokens = x.shape[0]
@@ -214,7 +213,7 @@ class VisionAttention(Module):
         q_THDh, k_THDh, v_THDh = self._qkv(x)
 
         remat.recompute_needs_tensor(q_THDh, k_THDh)
-        q_THDh, k_THDh = self.rope(q_THDh, k_THDh, rope_cache=rope_cache)
+        q_THDh, k_THDh = self.rope(q_THDh, k_THDh, positions=positions)
 
         out_THDh = remat.region(
             self.flex_attention,
@@ -248,12 +247,12 @@ class VisionTransformerBlock(Module):
         self,
         x: torch.Tensor,
         *,
-        rope_cache: torch.Tensor,
+        positions: torch.Tensor,
         attention_mask: BlockMask,
     ) -> torch.Tensor:
         attn_out = self.attn(
             self.norm1(x),
-            rope_cache=rope_cache,
+            positions=positions,
             attention_mask=attention_mask,
         )
         # The residual add reads the attention output with bare ops.

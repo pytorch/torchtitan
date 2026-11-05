@@ -96,7 +96,6 @@ class IdentityRoPE(Module):
         key: torch.Tensor | None = None,
         positions: torch.Tensor | None = None,
         *,
-        rope_cache: torch.Tensor | None = None,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return query if key is None else (query, key)
@@ -187,27 +186,9 @@ class RoPE(Module):
         key: torch.Tensor | None = None,
         positions: torch.Tensor | None = None,
         *,
-        rope_cache: torch.Tensor | None = None,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Apply a prepared cache, or look up positions in the internal cache."""
-        if rope_cache is not None:
-            if positions is not None:
-                raise ValueError(
-                    "positions and rope_cache cannot be supplied together."
-                )
-            # Vision applies prepared caches outside the text local_compile region.
-            return self.apply_rotary_emb(query, key, rope_cache, inverse=inverse)
-        return self._forward_cached(query, key, positions, inverse=inverse)
-
-    def _forward_cached(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor | None = None,
-        positions: torch.Tensor | None = None,
-        *,
-        inverse: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Apply rotary embeddings to query and optional key tensors."""
         reshaped_cache = self._reshape_cache(query, positions)
         return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
 
@@ -245,7 +226,7 @@ class ComplexRoPE(RoPE):
             "triton.autotune_pointwise": False,
         },
     )
-    def _forward_cached(
+    def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor | None = None,
@@ -253,7 +234,7 @@ class ComplexRoPE(RoPE):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return super()._forward_cached(query, key, positions, inverse=inverse)
+        return super().forward(query, key, positions, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
         """Precompute complex cis values.
@@ -429,7 +410,7 @@ class CosSinRoPE(RoPE):
         pass
 
     @local_compile("rope", batch_invariant=True)
-    def _forward_cached(
+    def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor | None = None,
@@ -437,7 +418,7 @@ class CosSinRoPE(RoPE):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return super()._forward_cached(query, key, positions, inverse=inverse)
+        return super().forward(query, key, positions, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
         """Precompute cos/sin values.

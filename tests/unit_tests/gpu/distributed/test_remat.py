@@ -345,7 +345,9 @@ class _VisionRematModel(Module):
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
         return self.layers["0"](
             x_TD,
-            rope_cache=x_TD.new_empty(0),
+            positions=torch.zeros(
+                x_TD.shape[0], 2, device=x_TD.device, dtype=torch.long
+            ),
             attention_mask=None,  # pyrefly: ignore [bad-argument-type]
         ).sum()
 
