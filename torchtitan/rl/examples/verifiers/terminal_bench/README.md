@@ -115,7 +115,13 @@ python -m torchtitan.rl.examples.verifiers.terminal_bench.prepare_tmax \
 - Each task must declare a pullable `[environment].docker_image`. Verifiers does not
   build Dockerfiles, and a single Dockerfile-only task makes the dataset fail to load.
   `prepare_tmax.py` writes each TMax task's published image.
-- The tasks' own timeouts are ignored; the timeouts in the recipe file apply.
+- Grading uses each task's verifier timeout from task.toml, or Harbor's 600 s when it
+  declares none. The setup and agent timeouts in the recipe file apply to every task.
+  Under training load each model call waits behind other rollouts, so the task's own
+  agent timeout (600-12,000 s in Terminal-Bench 2.1) would end rollouts early. Because
+  of this, validation scores are not directly comparable to `harbor run` results.
+- A task without a `workdir` in task.toml starts in the `WORKDIR` of its
+  `environment/Dockerfile`'s final build stage, as under `harbor run`.
 - The validation id has no `@ref`, so it uses whichever revision is in the cache. Pin a
   ref for numbers you want to compare; Terminal-Bench 2.0 and 2.1 are not
   interchangeable.
