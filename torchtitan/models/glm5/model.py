@@ -14,8 +14,8 @@ Read this file from the outside in:
    dense FFN or the common TorchTitan MoE implementation.
 3. ``Glm5Attention`` expands MLA's low-rank Q/KV representations, asks the
    frozen ``Glm5DsaIndexer`` which keys each query may attend to, and delegates
-   score/value computation to ``Glm5FlexAttention`` in ``dsa.py``.
-4. ``dsa.py`` contains the indexer and token-selected BlockMask construction.
+   score/value computation to ``Glm5SparseAttention`` in ``dsa.py``.
+4. ``dsa.py`` contains the indexer and selected-key gathering.
 
 The model uses token-first tensors because TorchTitan packs microbatches into a
 single token dimension before model forward. Distributed placement is declared
@@ -66,10 +66,6 @@ class Glm5Attention(DeepSeekMLAAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(DeepSeekMLAAttention.Config):
         indexer: Glm5DsaIndexer.Config | None
-
-        @property
-        def qk_head_dim(self) -> int:
-            return self.qk_nope_head_dim + self.qk_rope_head_dim
 
     def __init__(self, config: Config):
         super().__init__(config)
@@ -214,7 +210,7 @@ class Glm5TransformerBlock(DeepSeekV3TransformerBlock):
 
 
 class Glm5Model(DeepSeekV3Model):
-    """GLM-5 decoder with FlexAttention DSA attention.
+    """GLM-5 decoder with gathered DSA attention.
 
     The inherited decoder accepts token ids on the first PP stage and hidden
     states on later stages. A PP stage may own zero decoder layers, which is why

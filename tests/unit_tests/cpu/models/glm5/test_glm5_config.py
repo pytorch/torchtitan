@@ -12,11 +12,11 @@ import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import MLAAttention
-from torchtitan.models.common.attention.cp_mla import AllGatherKVMLAFlexAttention
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.glm5 import build_model_config, MODEL_FLAVORS
+from torchtitan.models.glm5.dsa import Glm5CPMLAAttention
 from torchtitan.models.glm5.model import Glm5Attention
 from torchtitan.models.glm5.mtp import Glm5MTPTransformerBlock
 
@@ -249,7 +249,7 @@ class TestGlm5Config(unittest.TestCase):
         )
         self.assertIsInstance(
             cp_config.layers[0].attention.inner_attention,
-            AllGatherKVMLAFlexAttention.Config,
+            Glm5CPMLAAttention.Config,
         )
         sharding_config = cp_config.layers[0].attention.inner_attention.sharding_config
         self.assertEqual(

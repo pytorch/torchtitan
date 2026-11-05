@@ -23,7 +23,6 @@ shared PyTorch-native components for distributed training.
 Available flavors are defined in `flavors.py`:
 
 - `debugmodel`: small development model
-- `dsa_debugmodel`: alias for the DSA development model
 - `shared_dsa_debugmodel`: development model exercising index sharing
 - `glm5_2_debugmodel`: small model preserving the released layer schedule
 - `glm5_2_debugmodel_mtp`: small model with one trainable NextN/MTP objective
@@ -50,13 +49,13 @@ CONFIG=glm5_debugmodel \
 
 The recipe defaults to 10 steps and uses TorchTitan's standard configuration
 overrides. An 8-GPU run combining FSDP, TP, CP, and EP is registered as the
-`glm5_fsdp+tp+cp+ep` integration test:
+`glm5_mtp_fsdp+tp+cp+ep` integration test, including the auxiliary objective:
 
 ```bash
 python -m tests.integration_tests.run_tests \
   ./outputs/glm5-integration \
   --test_suite models \
-  --test_name glm5_fsdp+tp+cp+ep \
+  --test_name glm5_mtp_fsdp+tp+cp+ep \
   --ngpu 8
 ```
 
@@ -66,11 +65,11 @@ python -m tests.integration_tests.run_tests \
 |---------|-------|
 | FSDP2 / HSDP | Transformer blocks are sharded through the common decoder lifecycle. |
 | Tensor / sequence parallelism | Attention, dense projections, routed experts, shared experts, and the DSA indexer use declarative sharding configs. |
-| Context parallelism | DSA gathers indexer keys before Top-K selection and uses the common compact MLA KV all-gather FlexAttention path. |
+| Context parallelism | DSA gathers indexer keys before Top-K selection and gathers compact MLA KV before expansion. |
 | Expert parallelism | Routed experts use TorchTitan's common MoE implementation; shared experts remain replicated across the EP axis. |
 | Pipeline parallelism | Decoder layers are split through the common pipeline lifecycle; shared DSA selections are forwarded when their consumer is on a later stage. |
 
-GLM-5.2 DSA is represented with a PyTorch FlexAttention `BlockMask`. It does
+DSA gathers the selected keys and values through Attention Gym. It does
 not use the packed-sequence `varlen` attention contract because DSA selects an
 arbitrary learned Top-K key set for each query.
 
@@ -83,11 +82,16 @@ indexer gathers query features and weights in addition to keys to satisfy
 Attention Gym's complete-document input contract, then returns local queries'
 selections. This currently repeats indexer selection across CP ranks.
 Attention uses the shared `MLAAttention` backend, or
-`AllGatherKVMLAFlexAttention` under CP. CP gathers normalized compressed KV
+the GLM compact-KV adapter under CP. CP gathers normalized compressed KV
 and the shared rotary key before KV expansion. Q/KV projections, RoPE,
 TP column/row projections, dense/MoE layer construction, routing, and MTP
 blocks reuse DeepSeek-V3 implementations. GLM retains its indexer,
-BlockMask construction, and cross-layer selection schedule.
+selection filtering, and cross-layer selection schedule. Gathered attention
+encodes queries as `[q, 0]` and the shared key/value pool as `[k, v]`, retaining
+the original query-key scale and returning the value tail. The CUDA backend
+uses Attention Gym's fused kernel; the reference implementation materializes
+selected slots and is intended for correctness checks rather than large-model
+training. Device-specific implementations belong in out-of-tree integrations.
 
 Native KV-up-projection parameters now live under
 `attention.inner_attention.wkv_b`; Hugging Face checkpoint names are unchanged.
@@ -170,11 +174,10 @@ strictly loads the converted state dict, compares MoE routing choices, and
 checks full-sequence logits with KL-divergence, cosine-similarity, and top-1
 agreement thresholds.
 
-The integration suite registers separate base and MTP training cases. Both use
-an 8-GPU FSDP2+TP2+CP2+EP2 configuration with a real process group:
+The integration suite registers an MTP training case, which also exercises the
+base decoder, using an 8-GPU FSDP2+TP2+CP2+EP2 configuration:
 
 ```text
-glm5_fsdp+tp+cp+ep
 glm5_mtp_fsdp+tp+cp+ep
 ```
 

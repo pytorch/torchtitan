@@ -56,8 +56,6 @@ class Glm5StateDictAdapter(DeepSeekV3StateDictAdapter):
     _HF_LAYER_KEY = re.compile(r"^model\.layers\.(\d+)\.(.+)$")
     _TITAN_LAYER_KEY = re.compile(r"^layers\.(\d+)\.(.+)$")
     _TITAN_MTP_KEY = re.compile(r"^mtp_layers\.(\d+)\.(.+)$")
-    _FUSED_GATE_UP = "mlp.experts.gate_up_proj"
-    _FUSED_DOWN = "mlp.experts.down_proj"
     _TITAN_GATE_UP = "feed_forward.routed_experts.w13.weight"
     _TITAN_DOWN = "feed_forward.routed_experts.w2.weight"
 

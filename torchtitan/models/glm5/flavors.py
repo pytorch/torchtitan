@@ -42,7 +42,7 @@ from torchtitan.models.deepseek_v3.flavors import (
     make_deepseek_v3_router_config,
     make_mla_attention_config,
 )
-from .dsa import DSAIndexerTopK, Glm5CPMLAAttention, Glm5DsaIndexer, Glm5FlexAttention
+from .dsa import DSAIndexerTopK, Glm5CPMLAAttention, Glm5DsaIndexer, Glm5SparseAttention
 
 from .model import Glm5Attention, Glm5Model, Glm5TransformerBlock
 from .mtp import Glm5MTPTransformerBlock
@@ -136,7 +136,6 @@ def make_glm5_attention_config(
     index_n_heads: int,
     index_head_dim: int,
     index_topk: int,
-    attention_dropout: float,
     mla_norm_eps: float,
     rope: ComplexRoPE.Config,
     enable_sp: bool,
@@ -163,9 +162,7 @@ def make_glm5_attention_config(
         depth_init=_depth_init,
         rope=rope,
         enable_sp=enable_sp,
-        attention_config_factory=lambda _: Glm5FlexAttention.Config(
-            attention_dropout=attention_dropout
-        ),
+        attention_config_factory=lambda _: Glm5SparseAttention.Config(),
     )
     base.q_norm.eps = mla_norm_eps
     base.kv_norm.eps = mla_norm_eps
@@ -190,12 +187,9 @@ def make_glm5_attention_config(
     return Glm5Attention.Config(
         **{field.name: getattr(base, field.name) for field in dataclasses.fields(base)},
         indexer=Glm5DsaIndexer.Config(
-            dim=dim,
-            q_lora_rank=q_lora_rank,
             n_heads=index_n_heads,
             head_dim=index_head_dim,
             qk_rope_head_dim=qk_rope_head_dim,
-            index_topk=index_topk,
             wq_b=Linear.Config(
                 in_features=q_lora_rank,
                 out_features=index_n_heads * index_head_dim,
@@ -218,6 +212,7 @@ def make_glm5_attention_config(
                 in_features=dim,
                 out_features=index_n_heads,
                 param_init=_LINEAR_INIT,
+                preserve_dtype_params=("weight",),
                 sharding_config=replicated_state_sharding_config("weight", "bias"),
             ),
             rope=dataclasses.replace(
@@ -256,7 +251,6 @@ def build_glm5_layers(
     index_n_heads: int,
     index_head_dim: int,
     index_topk: int,
-    attention_dropout: float,
     mla_norm_eps: float = 1e-6,
     norm_eps: float = 1e-5,
     rope: ComplexRoPE.Config,
@@ -333,7 +327,6 @@ def build_glm5_layers(
             index_n_heads=index_n_heads,
             index_head_dim=index_head_dim,
             index_topk=index_topk,
-            attention_dropout=attention_dropout,
             mla_norm_eps=mla_norm_eps,
             rope=rope,
             enable_sp=enable_sp,
@@ -416,7 +409,6 @@ def _debugmodel(
             index_n_heads=4,
             index_head_dim=64,
             index_topk=8,
-            attention_dropout=0.0,
             rope=rope,
             enable_sp=bool(parallelism and parallelism.enable_sequence_parallel),
             enable_cp=bool(parallelism and parallelism.context_parallel_degree > 1),
@@ -579,7 +571,6 @@ def _glm5_2_scaled_debugmodel(
             index_n_heads=8,
             index_head_dim=128,
             index_topk=512,
-            attention_dropout=0.0,
             mla_norm_eps=1e-5,
             norm_eps=1e-5,
             rope=rope,
@@ -651,7 +642,6 @@ def _glm5_2_744b_a40b(
         index_n_heads=32,
         index_head_dim=128,
         index_topk=2048,
-        attention_dropout=0.0,
         mla_norm_eps=1e-5,
         norm_eps=1e-5,
         rope=rope,
@@ -708,7 +698,6 @@ def _glm5_2_744b_a40b(
 MODEL_FLAVORS = {
     "744B-A40B": _glm5_2_744b_a40b,
     "debugmodel": _debugmodel,
-    "dsa_debugmodel": _debugmodel,
     "glm5_2_debugmodel": _glm5_2_debugmodel,
     "glm5_2_debugmodel_mtp": _glm5_2_debugmodel_mtp,
     "glm5_2_scaled_debugmodel": _glm5_2_scaled_debugmodel,

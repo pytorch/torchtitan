@@ -4,20 +4,22 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""GLM sparse attention with Attention Gym indexing and PyTorch block masks.
+"""GLM sparse attention with Attention Gym indexing and gathered attention.
 
 T/Q/K are token/query/key counts; S is selected keys per query; N is heads.
 D/H/R/P are model/head/latent-or-rotary/pass-through widths; V is value width.
 Document metadata is linear in tokens. Attention delegates to the common
-FlexAttention backend; Attention Gym owns the weighted-ReLU top-k selection.
+gathered backend; Attention Gym owns the weighted-ReLU top-k selection.
 """
 
 from dataclasses import dataclass
+from typing import Literal
 
 import spmd_types as spmd
 import torch
 import torch_remat as remat
-from torch.nn.attention.flex_attention import BlockMask
+
+from torchtitan.config import TORCH_DTYPE_MAP
 
 from torchtitan.distributed.context_parallel import cp_all_gather_tensors
 
@@ -25,9 +27,13 @@ from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.base.module import Module
 from torchtitan.models.common import ComplexRoPE, LayerNorm, Linear
-from torchtitan.models.common.attention import FlexInnerAttention
-from torchtitan.models.common.attention.cp_mla import AllGatherKVMLAFlexAttention
-from torchtitan.models.common.attn_gym import lightning_indexer, require_attn_gym
+from torchtitan.models.common.attention import InnerAttention, MLAAttention
+from torchtitan.models.common.attention.cp_attention import CPInnerAttention
+from torchtitan.models.common.attn_gym import (
+    gather_attn,
+    lightning_indexer,
+    require_attn_gym,
+)
 
 
 @dataclass(frozen=True)
@@ -51,12 +57,24 @@ class DsaMetadata:
         return cls(positions, (positions == 0).cumsum(0), valid, order, order)
 
 
-class Glm5CPMLAAttention(AllGatherKVMLAFlexAttention):
+class Glm5CPMLAAttention(CPInnerAttention[DsaMetadata, DsaMetadata], MLAAttention):
     """Reuse upstream compact KV communication with GLM document metadata."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(AllGatherKVMLAFlexAttention.Config):
-        pass
+    class Config(CPInnerAttention.Config, MLAAttention.Config):
+        reduce_dtype: Literal["float32", "bfloat16"] = "float32"
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
+
+    def forward(self, q_THK, kv_c_normed_TL, k_shared_TR, **kwargs):
+        kv_c_normed_TL, k_shared_TR = remat.region(
+            cp_all_gather_tensors,
+            self.remat_region_name("cp_all_gather"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )((kv_c_normed_TL, k_shared_TR), reduce_dtype=self.reduce_dtype)
+        return MLAAttention.forward(self, q_THK, kv_c_normed_TL, k_shared_TR, **kwargs)
 
     @staticmethod
     def prepare_cp_metadata(  # pyrefly: ignore[bad-override]
@@ -92,7 +110,7 @@ class DSAIndexerTopK(Module):
 
     Attention Gym processes complete packed documents and returns indices local
     to each document. Compact valid tokens before selection, then map selections
-    back to the global key sequence expected by FlexAttention. CP gathers query
+    back to the global key sequence consumed by gathered attention. CP gathers query
     features as well as keys because the indexer API requires complete documents.
     """
 
@@ -184,12 +202,9 @@ class Glm5DsaIndexer(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        dim: int
-        q_lora_rank: int
         n_heads: int
         head_dim: int
         qk_rope_head_dim: int
-        index_topk: int
         wq_b: Linear.Config
         wk: Linear.Config
         k_norm: LayerNorm.Config
@@ -202,7 +217,6 @@ class Glm5DsaIndexer(Module):
         self.n_heads = config.n_heads
         self.head_dim = config.head_dim
         self.qk_rope_head_dim = config.qk_rope_head_dim
-        self.index_topk = config.index_topk
         self.wq_b = config.wq_b.build()
         self.wk = config.wk.build()
         self.k_norm = config.k_norm.build()
@@ -213,14 +227,6 @@ class Glm5DsaIndexer(Module):
         # has no auxiliary indexer objective, so LM training must keep it fixed
         # and exclude its parameters from optimizer state.
         self.requires_grad_(False)
-
-    def _apply(self, fn, recurse: bool = True):
-        # ``model.to(dtype=...)`` visits frozen modules too. Restore this gate
-        # to FP32 after the generic transform because its boundary decisions
-        # are more sensitive than the surrounding BF16 attention projections.
-        super()._apply(fn, recurse=recurse)
-        self.weights_proj.float()
-        return self
 
     @torch.no_grad()
     def forward(
@@ -271,9 +277,10 @@ class Glm5DsaIndexer(Module):
 
         # The learned per-token head weights turn N head-specific similarities
         # into the scalar [T,T] ranking consumed by top-k.
-        weights_TN = self.weights_proj(
-            hidden_states_TD.to(self.weights_proj.weight.dtype)
-        )
+        with torch.autocast(device_type=hidden_states_TD.device.type, enabled=False):
+            weights_TN = self.weights_proj(
+                hidden_states_TD.to(self.weights_proj.weight.dtype)
+            )
         remat.recompute_needs_tensor(weights_TN)
         # Attention Gym applies the 1/sqrt(N*H) indexer normalization.
         if attention_mask_TK is None:
@@ -281,17 +288,15 @@ class Glm5DsaIndexer(Module):
         return self.topk(q_TNH, k_TH, weights_TN, metadata=attention_mask_TK)
 
 
-def build_dsa_block_mask(
+def filter_dsa_indices(
     indices_QS: torch.Tensor,
     metadata: DsaMetadata,
-    block_size: int = 128,
-) -> BlockMask:
-    """Build conservative KV block lists and an exact token-level predicate."""
-    Q, S = indices_QS.shape
+) -> torch.Tensor:
+    """Keep unique selected keys satisfying packed-document and padding rules."""
+    _, S = indices_QS.shape
     if S == 0:
         raise ValueError("DSA selection width must be positive")
     K = metadata.positions_T.numel()
-    B = block_size
     valid_QS = (indices_QS >= 0) & (indices_QS < K)
     safe_QS = indices_QS.clamp(0, K - 1).long()
     queries_Q = metadata.query_indices_Q
@@ -302,72 +307,35 @@ def build_dsa_block_mask(
     valid_QS = valid_QS & (
         metadata.positions_T[queries_Q, None] >= metadata.positions_T[safe_QS]
     )
-    num_q_blocks, num_k_blocks = (Q + B - 1) // B, (K + B - 1) // B
-    block_ids_QS = (
-        torch.arange(Q, device=indices_QS.device)[:, None] // B
-    ) * num_k_blocks + safe_QS // B
-    occupancy = torch.zeros(
-        num_q_blocks * num_k_blocks, device=indices_QS.device, dtype=torch.int32
-    )
-    occupancy.scatter_add_(
-        0, block_ids_QS.flatten(), valid_QS.flatten().to(torch.int32)
-    )
-    occupied = occupancy.view(1, 1, num_q_blocks, num_k_blocks) > 0
-    counts = occupied.sum(-1).to(torch.int32)
-    blocks = occupied.to(torch.float32).argsort(dim=-1, descending=True, stable=True)
-    # FlexAttention mask subgraphs are pointwise: membership must not reduce S.
-    # Invalid entries sort behind all real keys; duplicates retain set semantics.
     selected_QS = torch.where(valid_QS, indices_QS, K).sort(dim=-1).values
-
-    def mask_mod(b, h, q, k):
-        row = q.clamp(max=Q - 1)
-        lower = (q + k) * 0
-        upper = lower + S
-        for _ in range(S.bit_length()):
-            middle = (lower + upper) // 2
-            before = selected_QS[row, middle.clamp(max=S - 1)] < k
-            lower = torch.where(before, middle + 1, lower)
-            upper = torch.where(before, upper, middle)
-        return (
-            (q < Q)
-            & (k < K)
-            & (lower < S)
-            & (selected_QS[row, lower.clamp(max=S - 1)] == k)
-        )
-
-    return BlockMask.from_kv_blocks(
-        counts,
-        blocks.to(torch.int32),
-        BLOCK_SIZE=B,
-        mask_mod=mask_mod,
-        seq_lengths=(Q, K),
+    first_QS = torch.cat(
+        (
+            torch.ones_like(selected_QS[:, :1], dtype=torch.bool),
+            selected_QS[:, 1:] != selected_QS[:, :-1],
+        ),
+        dim=-1,
     )
+    return torch.where((selected_QS < K) & first_QS, selected_QS, -1)
 
 
-class Glm5FlexAttention(FlexInnerAttention):
-    """Expanded MLA Q/K/V with GLM token-selected block-sparse attention."""
+class Glm5SparseAttention(InnerAttention):
+    """Gather exactly the selected expanded MLA keys and values.
+
+    Attention Gym shares its K/V pool. Encoding query as [q, 0] and pool as
+    [k, v] preserves q @ k and returns the weighted values in the output tail.
+    """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(FlexInnerAttention.Config):
-        block_size: int | tuple[int, int] = 128
-        attention_dropout: float = 0.0
-
-        def __post_init__(self):
-            if not isinstance(self.block_size, int) or self.block_size <= 0:
-                raise ValueError(
-                    "GLM DSA requires a positive square integer block_size"
-                )
-            if self.attention_dropout != 0.0:
-                raise ValueError(
-                    "GLM FlexAttention currently requires attention_dropout=0"
-                )
+    class Config(InnerAttention.Config):
+        @property
+        def is_full_attention(self) -> bool:
+            return True
 
     def __init__(self, config):
-        super().__init__(config)
-        assert isinstance(config.block_size, int)
-        self.block_size = config.block_size
+        super().__init__()
+        require_attn_gym(gather_attn)
 
-    def forward(  # pyrefly: ignore[bad-override]
+    def forward(
         self,
         q_THK: torch.Tensor,
         k_THK: torch.Tensor,
@@ -375,11 +343,36 @@ class Glm5FlexAttention(FlexInnerAttention):
         *,
         attention_metadata: DsaMetadata,
         topk_indices_QS: torch.Tensor,
-        scale: float | None = None,
+        scale: float,
     ) -> torch.Tensor:
-        mask = build_dsa_block_mask(
-            topk_indices_QS, attention_metadata, self.block_size
-        )
-        return super().forward(
-            q_THK, k_THK, v_THV, attention_metadata=mask, scale=scale
-        )
+        indices_QS = filter_dsa_indices(topk_indices_QS, attention_metadata)
+        Q, H, _ = q_THK.shape
+        K, _, V = v_THV.shape
+        with spmd.no_typecheck():
+            query_1HQD = (
+                torch.cat((q_THK, q_THK.new_zeros(Q, H, V)), dim=-1)
+                .transpose(0, 1)
+                .unsqueeze(0)
+            )
+            pool_1HKD = torch.cat((k_THK, v_THV), dim=-1).transpose(0, 1).unsqueeze(0)
+            # No local window: real document/causal rules are already in indices.
+            # Explicit offsets select the gathered (not dense) reference path.
+            output_1HQD = gather_attn(
+                query_1HQD,
+                query_1HQD.new_zeros(()).expand_as(query_1HQD),
+                pool_1HKD,
+                indices_QS.unsqueeze(0),
+                sliding_window_size=0,
+                cu_seqlens=torch.tensor([0, Q], dtype=torch.int32, device=q_THK.device),
+                cu_seqlens_k=torch.tensor(
+                    [0, K], dtype=torch.int32, device=q_THK.device
+                ),
+                scale=scale,
+                impl="fused" if q_THK.device.type == "cuda" else "reference",
+            )
+            output_THV = output_1HQD[..., -V:].squeeze(0).transpose(0, 1)
+        if spmd.is_type_checking():
+            spmd.assert_type(
+                output_THV, spmd.get_local_type(q_THK), spmd.get_partition_spec(q_THK)
+            )
+        return output_THV

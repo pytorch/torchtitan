@@ -12,10 +12,11 @@ import torch
 
 from torchtitan.models.common.attn_gym import lightning_indexer
 from torchtitan.models.glm5.dsa import (
-    build_dsa_block_mask,
     DSAIndexerTopK,
     DsaMetadata,
+    filter_dsa_indices,
     Glm5CPMLAAttention,
+    Glm5SparseAttention,
 )
 from torchtitan.models.glm5.sharding import glm5_indexer_topk_sharding_config
 
@@ -311,7 +312,9 @@ class TestGlm5Dsa(unittest.TestCase):
         )
         torch.testing.assert_close(actual, expected)
 
-    def test_block_mask_matches_dense_reference_with_permuted_padding(self) -> None:
+    def test_gather_matches_dense_output_and_gradients_with_permuted_padding(
+        self,
+    ) -> None:
         positions = torch.tensor([0, 1, 2, 3, 0, 1, 2, 3])
         padding = torch.tensor([False, False, False, True, False, False, True, True])
         order = torch.tensor([0, 7, 1, 6, 2, 5, 3, 4])
@@ -326,10 +329,9 @@ class TestGlm5Dsa(unittest.TestCase):
         indices = torch.tensor(
             [[0, 0, 2, -1], [3, 6, 99, -1], [4, 2, 0, 7], [5, 7, 1, -2]]
         )
-        block_mask = build_dsa_block_mask(indices, metadata, block_size=2)
-        q = torch.arange(4)[:, None]
+        selected = filter_dsa_indices(indices, metadata)
         k = torch.arange(8)[None, :]
-        actual = block_mask.mask_mod(torch.tensor(0), torch.tensor(0), q, k)
+        actual = (selected[:, :, None] == k).any(dim=1)
         queries = metadata.query_indices_Q
         legal = (
             metadata.valid_T[queries, None]
@@ -339,19 +341,29 @@ class TestGlm5Dsa(unittest.TestCase):
         )
         expected = (indices[:, :, None] == k).any(dim=1) & legal
         torch.testing.assert_close(actual, expected)
-        # Every allowed token pair must also be present in the conservative block list.
-        for row, col in actual.nonzero().tolist():
-            count = block_mask.kv_num_blocks[0, 0, row // 2]
-            self.assertIn(
-                col // 2, block_mask.kv_indices[0, 0, row // 2, :count].tolist()
-            )
-        # A reduction in mask_mod passes eager tests but fails Flex subgraph lowering.
-        from torch.fx.experimental.proxy_tensor import make_fx
-
-        traced = make_fx(block_mask.mask_mod)(torch.tensor(0), torch.tensor(0), q, k)
-        self.assertFalse(
-            any(node.target == torch.ops.aten.any.dim for node in traced.graph.nodes)
+        torch.manual_seed(42)
+        q = torch.randn(4, 2, 8, requires_grad=True)
+        k = torch.randn(8, 2, 8, requires_grad=True)
+        v = torch.randn(8, 2, 4, requires_grad=True)
+        reference = [tensor.detach().clone().requires_grad_() for tensor in (q, k, v)]
+        output = Glm5SparseAttention.Config().build()(
+            q, k, v, attention_metadata=metadata, topk_indices_QS=indices, scale=0.25
         )
+        logits = torch.einsum("qhd,khd->hqk", reference[0], reference[1]) * 0.25
+        probabilities = logits.masked_fill(~expected[None], -torch.inf).softmax(-1)
+        probabilities = probabilities.nan_to_num()
+        dense = torch.einsum("hqk,khv->qhv", probabilities, reference[2])
+        torch.testing.assert_close(output, dense, atol=1e-6, rtol=1e-5)
+        output.sum().backward()
+        # Empty rows must not feed NaN derivatives through the oracle softmax.
+        safe_logits = logits.masked_fill(~expected[None], -1e30)
+        safe_probabilities = safe_logits.softmax(-1) * expected.any(-1)[None, :, None]
+        safe_dense = torch.einsum("hqk,khv->qhv", safe_probabilities, reference[2])
+        safe_dense.sum().backward()
+        for actual_tensor, expected_tensor in zip((q, k, v), reference, strict=True):
+            torch.testing.assert_close(
+                actual_tensor.grad, expected_tensor.grad, atol=1e-6, rtol=1e-5
+            )
 
     def test_padding_mask_excludes_queries_and_keys(self) -> None:
         mask = create_dsa_causal_mask(
