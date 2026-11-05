@@ -951,7 +951,9 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
     assert VERIFIERS_REWARD_KEY not in rollout.turns[-1].env_rewards
 
 
-# TODO: share the fake trace and rollouter of this test and the two above in one helper.
+# TODO: share one fake trace and rollouter between this test,
+# test_rollout_whose_first_prompt_does_not_fit_is_flagged and
+# test_timed_out_rollout_is_logged_and_keeps_no_reward.
 def test_rollout_releases_every_trace_session_even_if_one_release_fails(caplog) -> None:
     """Each trace generated under its own id; another agent's trace has one too."""
     span = SimpleNamespace(duration=0.0)
