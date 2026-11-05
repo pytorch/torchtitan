@@ -124,7 +124,7 @@ class TestGlm5Dsa(unittest.TestCase):
                             q,
                             k,
                             weights,
-                            DsaMetadata.from_positions(
+                            metadata=DsaMetadata.from_positions(
                                 positions, None if valid is None else ~valid
                             ),
                         )
@@ -154,7 +154,7 @@ class TestGlm5Dsa(unittest.TestCase):
             q,
             k,
             weights,
-            DsaMetadata.from_positions(
+            metadata=DsaMetadata.from_positions(
                 torch.arange(4), torch.tensor([False, True, False, False])
             ),
         )
@@ -169,11 +169,14 @@ class TestGlm5Dsa(unittest.TestCase):
         weights = torch.ones(4, 2, requires_grad=True)
         mask = create_dsa_causal_mask(torch.arange(4), dtype=torch.float32)
         indexer = DSAIndexerTopK.Config(index_topk=2).build()
+        # Exercise the same local-region construction as distributed parallelize().
+        indexer._sharding_config = glm5_indexer_topk_sharding_config()
+        indexer.forward = indexer._maybe_wrap_with_local_region(indexer.forward)
         with patch(
             "torchtitan.models.glm5.dsa.lightning_indexer", wraps=lightning_indexer
         ) as kernel:
             indices = indexer(
-                q, k, weights, DsaMetadata.from_positions(torch.arange(4))
+                q, k, weights, metadata=DsaMetadata.from_positions(torch.arange(4))
             )
         kernel.assert_called_once()
         self.assertFalse(kernel.call_args.args[0].requires_grad)
@@ -200,7 +203,7 @@ class TestGlm5Dsa(unittest.TestCase):
                     q,
                     k,
                     weights,
-                    DsaMetadata.from_positions(
+                    metadata=DsaMetadata.from_positions(
                         positions, None if valid is None else ~valid
                     ),
                 ),
@@ -208,7 +211,7 @@ class TestGlm5Dsa(unittest.TestCase):
                     q,
                     k,
                     weights,
-                    DsaMetadata.from_positions(
+                    metadata=DsaMetadata.from_positions(
                         positions, None if valid is None else ~valid
                     ),
                 ),
@@ -219,7 +222,7 @@ class TestGlm5Dsa(unittest.TestCase):
         q, k, weights = torch.randn(16, 4, 8), torch.randn(16, 8), torch.randn(16, 4)
         metadata = DsaMetadata.from_positions(torch.arange(8).repeat(2))
         indexer = DSAIndexerTopK.Config(index_topk=4).build()
-        expected = indexer(q, k, weights, metadata)
+        expected = indexer(q, k, weights, metadata=metadata)
         # Head-tail style permutation, mixing tokens from both documents.
         order = torch.tensor([0, 1, 14, 15, 2, 3, 12, 13, 4, 5, 10, 11, 6, 7, 8, 9])
         for rank in range(2):
@@ -249,7 +252,7 @@ class TestGlm5Dsa(unittest.TestCase):
                 ),
             ):
                 actual = indexer(
-                    q[order][local], k[order], weights[order][local], permuted
+                    q[order][local], k[order], weights[order][local], metadata=permuted
                 )
             # Compare token-level membership; top-k ties need not have equal order.
             actual_original = torch.where(
@@ -273,7 +276,7 @@ class TestGlm5Dsa(unittest.TestCase):
                 torch.ones(2, 1, 8),
                 torch.ones(4, 8),
                 torch.ones(2, 1),
-                DsaMetadata.from_positions(torch.arange(4)),
+                metadata=DsaMetadata.from_positions(torch.arange(4)),
             )
 
     def test_packed_document_causal_mask(self) -> None:

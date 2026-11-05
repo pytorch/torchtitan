@@ -111,6 +111,7 @@ class DSAIndexerTopK(Module):
         q_QNH: torch.Tensor,
         k_KH: torch.Tensor,
         weights_QN: torch.Tensor,
+        *,
         metadata: DsaMetadata,
     ) -> torch.Tensor:
         K = metadata.positions_T.numel()
@@ -277,7 +278,7 @@ class Glm5DsaIndexer(Module):
         # Attention Gym applies the 1/sqrt(N*H) indexer normalization.
         if attention_mask_TK is None:
             attention_mask_TK = DsaMetadata.from_positions(positions_T)
-        return self.topk(q_TNH, k_TH, weights_TN, attention_mask_TK)
+        return self.topk(q_TNH, k_TH, weights_TN, metadata=attention_mask_TK)
 
 
 def build_dsa_block_mask(
