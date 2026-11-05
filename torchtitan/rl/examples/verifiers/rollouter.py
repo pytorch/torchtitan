@@ -151,6 +151,8 @@ class VerifiersRollouter(Rollouter):
                     self.training_dataloader.dataset.verifiers_taskset
                 ),
             )
+            # One pass, so ValidationConfig(steps=-1) ends and no task is scored twice.
+            self.validation_dataset = replace(self.validation_dataset, repeat=False)
             if self.renderer_multiplex <= 0:
                 raise ValueError("renderer_multiplex must be positive")
             if self.connection_timeout_sec <= 0:
