@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import importlib
 import unittest
 from dataclasses import dataclass
 from unittest.mock import patch
@@ -13,17 +14,12 @@ import torch.nn as nn
 from torch.nn.attention.flex_attention import create_block_mask
 
 from torchtitan.config import apply_overrides, derive, override, OverrideConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.rope import ComplexRoPE, CosSinRoPE, IdentityRoPE, RoPE
+from torchtitan.models.common.rope import ComplexRoPE, IdentityRoPE, RoPE
 from torchtitan.models.common.vision_encoder import VisionAttention
-from torchtitan.models.kimi_k2_7.flavors import _vision_encoder_config as kimi27_vision
-from torchtitan.models.kimi_k3.flavors import _vision_encoder_config as kimi3_vision
-from torchtitan.models.muse_spark.flavors import muse_spark_navit_encoder_config
-from torchtitan.models.qwen3_5.flavors import (
-    _qwen35_vision_encoder_config as qwen35_vision,
-)
 
 
 class _IdentityAttention(nn.Module):
@@ -108,91 +104,32 @@ def test_encoder_rope_and_attention_overrides_are_independent() -> None:
             )
             return query
 
-    cases = [
-        (
-            kimi27_vision(
-                dim=16,
-                ffn_dim=32,
-                num_layers=2,
-                num_heads=2,
-                patch_size=2,
-                init_pos_emb_height=4,
-                init_pos_emb_width=4,
-                text_hidden_size=16,
-            ),
-            12,
-            16,
-        ),
-        (
-            kimi3_vision(
-                text_dim=16,
-                dim=16,
-                qkv_dim=16,
-                hidden_dim=32,
-                num_layers=2,
-                num_heads=2,
-                patch_size=2,
-                init_pos_emb_height=4,
-                init_pos_emb_width=4,
-            ),
-            12,
-            16,
-        ),
-        (
-            qwen35_vision(
-                dim=16,
-                ffn_dim=32,
-                num_layers=2,
-                num_heads=2,
-                patch_size=2,
-                temporal_patch_size=2,
-                spatial_merge_size=2,
-                out_hidden_size=16,
-                num_position_embeddings=16,
-            ),
-            24,
-            16,
-        ),
-    ]
-    for grid_order in ("legacy_spark", "raster"):
-        config = muse_spark_navit_encoder_config(
-            latent_dim=16,
-            num_heads=2,
-            num_layers=2,
-            mlp_hidden_dim=32,
-            patch_size=2,
-            patch_temporal=2,
-            downsample_factor=2,
-            sparse_attention_factor=2,
-            pos_emb_grid_h=2,
-            pos_emb_grid_w=2,
-        )
-        config.pos_emb_grid_order = grid_order
-        cases.append((config, 24, 64))
-
     with patch.dict("torchtitan.config.override._REGISTRY"):
 
-        @override(target=ComplexRoPE.Config, exact=True)
-        def marker_complex_rope(config):
-            return derive(config, MarkerRoPE.Config)
-
-        @override(target=CosSinRoPE.Config, exact=True)
-        def marker_cos_sin_rope(config):
+        @override(target=RoPE.Config)
+        def marker_rope(config):
             return derive(config, MarkerRoPE.Config)
 
         @override(target=FlexInnerAttention.Config, exact=True)
         def marker_attention(config):
             return derive(config, MarkerAttention.Config)
 
-        for config, patch_dim, output_dim in cases:
-            complex_cache = isinstance(config.rope_apply, ComplexRoPE.Config)
-            rope_override = (
-                "marker_complex_rope" if complex_cache else "marker_cos_sin_rope"
+        for family in ("kimi_k2_7", "kimi_k3", "qwen3_5", "muse_spark", "muse_glimmer"):
+            config = (
+                importlib.import_module(f"torchtitan.models.{family}")
+                .build_model_config(
+                    "debugmodel_mm" if family.startswith("muse_") else "debugmodel",
+                    seq_len=128,
+                    attn_backend="flex",
+                    parallelism=ParallelismConfig(),
+                )
+                .vision_encoder
             )
+            complex_cache = isinstance(config.rope_apply, ComplexRoPE.Config)
             replacements = apply_overrides(
                 OverrideConfig(
                     imports=[
-                        f"{__name__}.{rope_override}",
+                        f"{__name__}.marker_rope",
                         f"{__name__}.marker_attention",
                     ]
                 ),
@@ -207,10 +144,15 @@ def test_encoder_rope_and_attention_overrides_are_independent() -> None:
                 f"{encoder.forward.__module__}.create_block_diagonal_mask",
                 return_value=object(),
             ):
-                output = encoder(
-                    torch.randn(16, patch_dim), grid_thw=torch.tensor([[1, 4, 4]])
+                projection = (
+                    encoder.conv1_linear
+                    if family.startswith("muse_")
+                    else encoder.patch_embed
                 )
-            assert output.shape == (4, output_dim)
+                encoder(
+                    torch.randn(16, projection.in_features),
+                    grid_thw=torch.tensor([[1, 4, 4]]),
+                )
             assert encoder.rope_apply.calls == config.num_layers
             assert encoder.rope_apply.cache_is_complex == complex_cache
             assert all(

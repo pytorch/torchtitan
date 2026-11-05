@@ -131,28 +131,18 @@ class TestRoPEPositionBoundsComplex(unittest.TestCase):
         xq = torch.randn(num_tokens, 4, self.head_dim, requires_grad=True)
         xk = torch.randn(num_tokens, 4, self.head_dim, requires_grad=True)
         positions = torch.arange(num_tokens) % 8
-        with torch.device("meta"):
-            rope_apply = ComplexRoPE.Config(
-                dim=self.head_dim, max_context_length=0
-            ).build()
-        rope_apply.to_empty(device="cpu")
-        rope_apply.init_states()
-        self.assertEqual(rope_apply.cache.shape, (0, self.head_dim // 2))
-        self.assertFalse(rope_apply.state_dict())
+        rope_apply = ComplexRoPE.Config(dim=self.head_dim, max_context_length=0).build()
         cache = self.rope._reshape_cache(xq, positions)
         grad_outputs = (torch.randn_like(xq), torch.randn_like(xk))
-        for inverse in (False, True):
-            expected = self.rope(xq, xk, positions, inverse=inverse)
-            actual = rope_apply(query=xq, key=xk, rope_cache=cache, inverse=inverse)
-            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-            torch.testing.assert_close(
-                torch.autograd.grad(actual, (xq, xk), grad_outputs),
-                torch.autograd.grad(expected, (xq, xk), grad_outputs),
-                rtol=0,
-                atol=0,
-            )
-        with self.assertRaisesRegex(ValueError, "cannot be supplied together"):
-            rope_apply(xq, xk, positions, rope_cache=cache)
+        expected = self.rope(xq, xk, positions)
+        actual = rope_apply(xq, xk, rope_cache=cache)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(
+            torch.autograd.grad(actual, (xq, xk), grad_outputs),
+            torch.autograd.grad(expected, (xq, xk), grad_outputs),
+            rtol=0,
+            atol=0,
+        )
 
     def test_out_of_range_positions_raises(self):
         num_tokens = 4

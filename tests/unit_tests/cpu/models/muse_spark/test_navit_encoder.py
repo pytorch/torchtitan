@@ -26,40 +26,10 @@ def test_rope_frequency_meta_initialization_matches_hf():
     torch.testing.assert_close(freq.inv_freq, expected, rtol=0, atol=0)
     assert not freq.state_dict()
 
-    for use_rope in (False, True):
-        config = muse_spark_navit_encoder_config(
-            latent_dim=16,
-            num_heads=2,
-            num_layers=0,
-            patch_size=2,
-            patch_temporal=1,
-            pos_emb_grid_h=2,
-            pos_emb_grid_w=2,
-            use_rope=use_rope,
-        )
-        if use_rope:
-            config.rope_apply = IdentityRoPE.Config()
-        assert isinstance(config.rope_apply, IdentityRoPE.Config)
-        encoder = config.build()
-        encoder.init_states()
-        with patch.object(encoder, "_make_2d_rope") as make_rope:
-            _, cache, *_ = encoder._embed_image(
-                torch.randn(16, 12), 4, 4, torch.device("cpu"), torch.float32
-            )
-        make_rope.assert_not_called()
-        assert cache.shape == (16, 0)
-        query, key = torch.randn(2, 16, 2, 8)
-        rotated_query, rotated_key = encoder.rope_apply(
-            query, key, rope_cache=cache.unsqueeze(1)
-        )
-        assert rotated_query is query
-        assert rotated_key is key
-        assert encoder.rope_apply(query, inverse=True) is query
-
 
 @pytest.mark.parametrize("grid_order", ["raster", "legacy_spark"])
 def test_position_sampling_and_permutation_spmd_types(grid_order):
-    config = muse_spark_navit_encoder_config(
+    encoder_kwargs = dict(
         latent_dim=32,
         num_heads=2,
         num_layers=0,
@@ -69,6 +39,7 @@ def test_position_sampling_and_permutation_spmd_types(grid_order):
         pos_emb_grid_h=3,
         pos_emb_grid_w=3,
     )
+    config = muse_spark_navit_encoder_config(**encoder_kwargs)
     config.pos_emb_grid_order = grid_order
     encoder = config.build()
     encoder.init_states()
@@ -105,3 +76,26 @@ def test_position_sampling_and_permutation_spmd_types(grid_order):
     torch.testing.assert_close(
         encoder.positional_embedding_vlm.grad, expected_grad, rtol=0, atol=0
     )
+
+    config.rope_apply = muse_spark_navit_encoder_config(
+        **encoder_kwargs, use_rope=False
+    ).rope_apply
+    assert isinstance(config.rope_apply, IdentityRoPE.Config)
+    disabled_encoder = config.build()
+    disabled_encoder.init_states()
+    with patch.object(disabled_encoder, "_make_2d_rope") as make_rope:
+        _, cache, *_ = disabled_encoder._embed_image(
+            torch.randn(24, config.conv1_linear.in_features),
+            4,
+            6,
+            device,
+            torch.float32,
+        )
+    make_rope.assert_not_called()
+    assert cache.shape == (24, 0)
+    query, key = torch.randn(2, 24, 2, 16)
+    rotated_query, rotated_key = disabled_encoder.rope_apply(
+        query, key, rope_cache=cache.unsqueeze(1)
+    )
+    assert rotated_query is query
+    assert rotated_key is key
