@@ -30,6 +30,7 @@ from torch.distributed.elastic.utils.distributed import get_free_port
 from torch.distributed.tensor import DTensor
 
 from torchtitan.components.loss import ChunkedLossWrapper
+from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.utils import get_local_tensor
 from torchtitan.models.common.aux_loss import aux_loss_denominators
@@ -50,7 +51,9 @@ _NUM_TOKENS_PER_MICROBATCH = 64
 _NUM_LOSS_TOKENS = 509
 
 
-def _trainer_config(parallelism: ParallelismConfig) -> Trainer.Config:
+def _trainer_config(
+    parallelism: ParallelismConfig,
+) -> tuple[Trainer.Config, PrecisionConfig]:
     trainer_model, _ = build_rl_model_configs(
         build_model_config,
         "debugmodel",
@@ -60,14 +63,13 @@ def _trainer_config(parallelism: ParallelismConfig) -> Trainer.Config:
         attn_backend="varlen",
     )
     config = rl_grpo_qwen3_0_6b_varlen_no_compile(seq_len=_NUM_TOKENS_PER_MICROBATCH)
-    return dataclasses.replace(
+    trainer_config = dataclasses.replace(
         config.trainer,
         model=trainer_model,
         parallelism=parallelism,
         training=dataclasses.replace(
             config.trainer.training,
             num_tokens_per_microbatch_per_dp_rank=_NUM_TOKENS_PER_MICROBATCH,
-            max_context_length=_NUM_TOKENS_PER_MICROBATCH,
         ),
         loss=ChunkedLossWrapper.Config(
             num_chunks=2,
@@ -75,6 +77,7 @@ def _trainer_config(parallelism: ParallelismConfig) -> Trainer.Config:
         ),
         checkpointer=None,
     )
+    return trainer_config, config.precision
 
 
 def _training_sample_group(rng: np.random.Generator) -> TrainingSampleGroup:
@@ -160,8 +163,12 @@ def _run_dp_ranks_on_one_or_two_gpus(
         LOCAL_RANK=str(rank),
         WORLD_SIZE=str(world_size),
     )
+    trainer_config, precision = _trainer_config(parallelism)
     trainer = Trainer(
-        _trainer_config(parallelism), max_num_documents=None, output_dir=output_dir
+        trainer_config,
+        precision=precision,
+        max_num_documents=None,
+        output_dir=output_dir,
     )
     model = trainer.engine.model_parts[0]
     batch = _pack_batch(dp_degree=2)
