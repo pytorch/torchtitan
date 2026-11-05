@@ -7,11 +7,10 @@
 """DeepSeek V4 model configurations used by tests."""
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch.distributed.tensor import Shard
-
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
@@ -275,6 +274,18 @@ def _dist_muon_optimizer(
 class _DeepSeekV4TrainerConfig(Trainer.Config):
     def __post_init__(self) -> None:
         Trainer.Config.__post_init__(self)
+        alignment = cast(DeepSeekV4Model.Config, self.model).document_alignment
+        if alignment is not None:
+            for loader in (
+                self.dataloader,
+                self.validator.dataloader if self.validator is not None else None,
+            ):
+                if loader is not None:
+                    if not isinstance(loader, GrainDataLoader.Config):
+                        raise ValueError("Aligned DeepSeek V4 requires GrainDataLoader")
+                    loader.document_alignment = alignment
+                    if loader.max_num_documents is None:
+                        loader.max_num_documents = 64
         if (
             self.parallelism.tensor_parallel_degree > 1
             or self.parallelism.pipeline_parallel_degree > 1
@@ -295,6 +306,7 @@ def deepseek_v4_debugmodel(
     parallelism: ParallelismConfig | None = None,
     muon_ns_steps: int = 10,
     muon_ns_coefficients: _NSCoefficientSchedule = _DEFAULT_NS_COEFFICIENTS,
+    align_documents: bool = False,
 ) -> Trainer.Config:
     if parallelism is None:
         parallelism = ParallelismConfig(
@@ -303,6 +315,8 @@ def deepseek_v4_debugmodel(
     model_config = build_model_config(
         "debugmodel", seq_len=seq_len, parallelism=parallelism
     )
+    model_config.align_documents = align_documents
+    model_config.__post_init__()
     return _DeepSeekV4TrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -368,6 +382,7 @@ def deepseek_v4_mtp_debugmodel(
     *,
     muon_ns_steps: int = 10,
     muon_ns_coefficients: _NSCoefficientSchedule = _DEFAULT_NS_COEFFICIENTS,
+    align_documents: bool = False,
 ) -> Trainer.Config:
     num_mtp_layers = 1
     parallelism = ParallelismConfig(expert_parallel_degree=1)
@@ -377,6 +392,8 @@ def deepseek_v4_mtp_debugmodel(
         n_mtp_layers=num_mtp_layers,
         parallelism=parallelism,
     )
+    model_config.align_documents = align_documents
+    model_config.__post_init__()
     return _DeepSeekV4TrainerConfig(
         loss=MTPCrossEntropyLoss.Config(
             global_vocab_size=decoder_vocab_size(model_config),
@@ -425,11 +442,14 @@ def deepseek_v4_flash(
     *,
     muon_ns_steps: int = 10,
     muon_ns_coefficients: _NSCoefficientSchedule = _DEFAULT_NS_COEFFICIENTS,
+    align_documents: bool = False,
 ) -> Trainer.Config:
     parallelism = ParallelismConfig(expert_parallel_degree=1)
     model_config = build_model_config(
         "deepseek_v4_flash", seq_len=seq_len, parallelism=parallelism
     )
+    model_config.align_documents = align_documents
+    model_config.__post_init__()
     return _DeepSeekV4TrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -479,11 +499,14 @@ def deepseek_v4_pro(
     *,
     muon_ns_steps: int = 10,
     muon_ns_coefficients: _NSCoefficientSchedule = _DEFAULT_NS_COEFFICIENTS,
+    align_documents: bool = False,
 ) -> Trainer.Config:
     parallelism = ParallelismConfig(expert_parallel_degree=1)
     model_config = build_model_config(
         "deepseek_v4_pro", seq_len=seq_len, parallelism=parallelism
     )
+    model_config.align_documents = align_documents
+    model_config.__post_init__()
     return _DeepSeekV4TrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
