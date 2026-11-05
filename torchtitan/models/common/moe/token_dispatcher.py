@@ -935,10 +935,12 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         del x_TD
         from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
 
-        # With scores already absorbed, backward needs routing indices, not W2's
-        # output. Save unpermute and combine together so replay skips both without
-        # retaining or rebuilding that output. Compact mode retains R int64 indices:
-        # 8R bytes (256 KiB at R=32768).
+        # In compact mode, replaying unpermute's scatter-add reads W2's output,
+        # requiring it to be retained or rebuilt even after score absorption.
+        # Wrap all of combine_tokens (unpermute + DeepEP combine) in one
+        # recompute=False region to skip replay and remove this dependency.
+        # Unpermute backward only needs R int64 routing indices: 8R bytes
+        # (256 KiB at R=32768).
         combined_TD = remat.region(
             combine_tokens,
             self.remat_region_name("ep_communication.combine"),
