@@ -443,15 +443,6 @@ def _glm5_2_debugmodel(
     )
 
 
-def _glm5_3_debugmodel(
-    *,
-    seq_len: int = 128,
-    parallelism: ParallelismConfig | None = None,
-) -> Glm5Model.Config:
-    """Build the GLM-5.3 debug model with the shared GLM-MoE-DSA design."""
-    return _glm5_2_debugmodel(seq_len=seq_len, parallelism=parallelism)
-
-
 def _glm5_2_debugmodel_mtp(
     *,
     seq_len: int = 128,
@@ -478,15 +469,6 @@ def _glm5_2_debugmodel_mtp(
             enable_sp=enable_sp,
         ),
     )
-
-
-def _glm5_3_debugmodel_mtp(
-    *,
-    seq_len: int = 128,
-    parallelism: ParallelismConfig | None = None,
-) -> Glm5Model.Config:
-    """Build the GLM-5.3 debug model with one NextN/MTP block."""
-    return _glm5_2_debugmodel_mtp(seq_len=seq_len, parallelism=parallelism)
 
 
 def _glm5_2_scaled_debugmodel(
@@ -579,15 +561,6 @@ def _glm5_2_scaled_debugmodel(
             enable_ep=bool(parallelism and parallelism.expert_parallel_degree > 1),
         ),
     )
-
-
-def _glm5_3_scaled_debugmodel(
-    *,
-    seq_len: int = 4096,
-    parallelism: ParallelismConfig | None = None,
-) -> Glm5Model.Config:
-    """Build the shared scaled validation model under the GLM-5.3 name."""
-    return _glm5_2_scaled_debugmodel(seq_len=seq_len, parallelism=parallelism)
 
 
 def _glm5_2_744b_a40b(
@@ -702,9 +675,9 @@ MODEL_FLAVORS = {
     "glm5_2_debugmodel_mtp": _glm5_2_debugmodel_mtp,
     "glm5_2_scaled_debugmodel": _glm5_2_scaled_debugmodel,
     "glm5_3_744b_a40b": _glm5_2_744b_a40b,
-    "glm5_3_debugmodel": _glm5_3_debugmodel,
-    "glm5_3_debugmodel_mtp": _glm5_3_debugmodel_mtp,
-    "glm5_3_scaled_debugmodel": _glm5_3_scaled_debugmodel,
+    "glm5_3_debugmodel": _glm5_2_debugmodel,
+    "glm5_3_debugmodel_mtp": _glm5_2_debugmodel_mtp,
+    "glm5_3_scaled_debugmodel": _glm5_2_scaled_debugmodel,
     "shared_dsa_debugmodel": _shared_dsa_debugmodel,
 }
 
