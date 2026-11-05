@@ -10,13 +10,13 @@ import unittest
 from copy import deepcopy
 from dataclasses import dataclass
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import patch, PropertyMock
 
 import grain.python as grain
 import numpy as np
 import torch
 from datasets import Dataset
-from renderers import Qwen3RendererConfig
+from renderers import Qwen3Renderer, Qwen3RendererConfig
 from torch.nn.attention.flex_attention import and_masks
 from torchtitan.components.data.collators import TextCollator
 
@@ -366,7 +366,19 @@ class TestMultiTurnChatProcessor(unittest.TestCase):
             {"role": "user", "content": "What is 2+2?"},
             {"role": "assistant", "reasoning_content": "Add two.", "content": "4"},
             {"role": "user", "content": "And 3+3?"},
-            {"role": "assistant", "reasoning_content": "Add three.", "content": "6"},
+            {
+                "role": "assistant",
+                "reasoning_content": "Use the tool.",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "function": {"name": "add", "arguments": {"a": 3, "b": 3}},
+                    }
+                ],
+            },
+            {"role": "tool", "content": "6"},
+            {"role": "assistant", "reasoning_content": "Report it.", "content": "6"},
         ]
         self.config = ChatProcessor.Config(
             messages_fn=lambda _: self.messages,
@@ -386,30 +398,65 @@ class TestMultiTurnChatProcessor(unittest.TestCase):
 
     def test_assistant_masks_follow_rendered_history(self):
         context = _runtime(256)
-        sequence = self.config.build(context=context)({}, np.random.default_rng(0))
-        # Qwen3 drops earlier reasoning but still trains both assistant answers.
-        # The final think opener and both assistant terminators are model output.
-        segments = [
-            ("<|im_start|>system\nBe brief.<|im_end|>\n", False),
-            ("<|im_start|>user\nWhat is 2+2?<|im_end|>\n", False),
-            ("<|im_start|>assistant\n", False),
-            ("4<|im_end|>", True),
-            ("\n<|im_start|>user\nAnd 3+3?<|im_end|>\n", False),
-            ("<|im_start|>assistant\n", False),
-            ("<think>\nAdd three.\n</think>\n\n6<|im_end|>", True),
-            ("\n", False),
-        ]
-        expected_tokens = []
-        expected_labels = []
-        for text, supervised in segments:
-            tokens = context.tokenizer.encode(text, add_bos=False, add_eos=False)
-            expected_tokens.extend(tokens)
-            expected_labels.extend(
-                tokens if supervised else [IGNORE_INDEX] * len(tokens)
-            )
+        inline_think = deepcopy(self.messages)
+        for message in inline_think:
+            if reasoning := message.pop("reasoning_content", None):
+                answer = message["content"]
+                message["content"] = f"<think>\n{reasoning}\n</think>\n\n{answer}"
+        # Qwen3 drops the first turn's reasoning from the history, so that turn
+        # is context: training "4" would teach an answer without its reasoning.
+        # The tool cycle after the last user message keeps its reasoning.
+        # A renderer that declares prefix stability (like DeepSeek-V3) masks nothing.
+        for name, messages, is_prefix_stable, first_turn_trained in (
+            ("reasoning_content", self.messages, False, False),
+            ("inline <think>", inline_think, False, False),
+            ("prefix-stable renderer", self.messages, True, True),
+        ):
+            with self.subTest(name), patch.object(
+                Qwen3Renderer,
+                "is_prefix_stable",
+                new_callable=PropertyMock,
+                return_value=is_prefix_stable,
+            ):
+                config = ChatProcessor.Config(
+                    messages_fn=lambda _, messages=messages: messages,
+                    renderer=from_renderers(Qwen3RendererConfig()),
+                )
+                sequence = config.build(context=context)({}, np.random.default_rng(0))
+                segments = [
+                    ("<|im_start|>system\nBe brief.<|im_end|>\n", False),
+                    ("<|im_start|>user\nWhat is 2+2?<|im_end|>\n", False),
+                    ("<|im_start|>assistant\n", False),
+                    ("4<|im_end|>", first_turn_trained),
+                    ("\n<|im_start|>user\nAnd 3+3?<|im_end|>\n", False),
+                    ("<|im_start|>assistant\n", False),
+                    (
+                        "<think>\nUse the tool.\n</think>\n\n<tool_call>\n"
+                        '{"name": "add", "arguments": {"a": 3, "b": 3}}\n'
+                        "</tool_call><|im_end|>",
+                        True,
+                    ),
+                    (
+                        "\n<|im_start|>user\n<tool_response>\n6\n</tool_response>"
+                        "<|im_end|>\n<|im_start|>assistant\n",
+                        False,
+                    ),
+                    ("<think>\nReport it.\n</think>\n\n6<|im_end|>", True),
+                    ("\n", False),
+                ]
+                expected_tokens = []
+                expected_labels = []
+                for text, supervised in segments:
+                    tokens = context.tokenizer.encode(
+                        text, add_bos=False, add_eos=False
+                    )
+                    expected_tokens.extend(tokens)
+                    expected_labels.extend(
+                        tokens if supervised else [IGNORE_INDEX] * len(tokens)
+                    )
 
-        np.testing.assert_array_equal(sequence.input_ids, expected_tokens[:-1])
-        np.testing.assert_array_equal(sequence.labels, expected_labels[1:])
+                np.testing.assert_array_equal(sequence.input_ids, expected_tokens[:-1])
+                np.testing.assert_array_equal(sequence.labels, expected_labels[1:])
 
     def test_context_length_counts_next_token_pairs(self):
         sequence = self.config.build(context=_runtime(256))(
@@ -437,7 +484,11 @@ class TestMultiTurnChatProcessor(unittest.TestCase):
         np.testing.assert_array_equal(packed.labels, np.tile(sequence.labels, 2))
 
     def test_passes_per_sample_tools_to_renderer(self):
-        sample = {"messages": self.messages, "tools": [{"name": "lookup"}]}
+        messages = [
+            {"role": "user", "content": "What is 2+2?"},
+            {"role": "assistant", "content": "4"},
+        ]
+        sample = {"messages": messages, "tools": [{"name": "lookup"}]}
         renderer = object()
         config = ChatProcessor.Config(
             messages_fn=lambda row: row["messages"],
@@ -460,9 +511,10 @@ class TestMultiTurnChatProcessor(unittest.TestCase):
 
         build_training_sample.assert_called_once_with(
             renderer,
-            self.messages,
+            messages,
             tools=sample["tools"],
             ensure_final_stop=True,
+            message_loss_mask=[True, True],
         )
         np.testing.assert_array_equal(sequence.input_ids, [1, 2])
         np.testing.assert_array_equal(sequence.labels, [IGNORE_INDEX, 3])
