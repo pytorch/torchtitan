@@ -398,6 +398,7 @@ class FaultTolerantTrainer(Configurable):
         # Losses are sums; divide by the step's loss tokens (at least 1, so a
         # step with none logs 0).
         num_global_loss_tokens = int(engine.global_loss_token_count)
+        loss_token_divisor = max(num_global_loss_tokens, 1)
         loss_sum = forward_backward_result.loss
         mean_num_flops = self._local_num_flops_since_last_log
         # FT addition: use ft_manager.loss_sync_pg for extra process group
@@ -424,9 +425,7 @@ class FaultTolerantTrainer(Configurable):
                     ft_pg,
                 ),
             )
-            # The count covers the participating replicas too (_sum_loss_token_count), so the
-            # logged loss does not jump when replicas leave or rejoin.
-            global_avg_loss = global_loss_sum / max(num_global_loss_tokens, 1)
+            global_avg_loss = global_loss_sum / loss_token_divisor
             dp_mesh = parallelism_context.get_optional_mesh("dp")
             if dp_mesh is not None or ft_pg is not None:
                 mean_num_flops = dist_utils.dist_sum(
@@ -442,8 +441,8 @@ class FaultTolerantTrainer(Configurable):
             if ft_pg is not None:
                 mean_num_flops /= ft_pg.size()
         else:
-            global_avg_loss = global_max_loss = float(loss_sum.item()) / max(
-                num_global_loss_tokens, 1
+            global_avg_loss = global_max_loss = (
+                float(loss_sum.item()) / loss_token_divisor
             )
             global_ntokens_seen = engine.ntokens_seen
 

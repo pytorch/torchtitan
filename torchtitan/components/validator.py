@@ -22,7 +22,7 @@ from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.loss import (
     combine_loss_metrics,
-    loss_metric_reduce_op,
+    divide_token_sum_metrics,
     LossFunction,
 )
 from torchtitan.components.tokenizer import BaseTokenizer
@@ -397,18 +397,14 @@ class Validator(BaseValidator):
                 global_loss_sum = float(accumulated_loss.item())
             global_avg_loss = global_loss_sum / num_global_valid_tokens
 
-            # The loss runs without token counts here, so /mean and /frac
-            # metrics are raw sums; normalize them like the loss above. Under
-            # PP, ranks without the last stage have none.
+            # Under PP, ranks without the last stage have no loss metrics.
             global_metrics = combine_loss_metrics([accumulated_metrics], mesh=loss_mesh)
             extra_metrics = {
-                f"validation_metrics/{key}": value.item()
-                / (
-                    num_global_valid_tokens
-                    if loss_metric_reduce_op(key) == "sum"
-                    else 1
-                )
-                for key, value in global_metrics.items()
+                f"validation_metrics/{key}": value
+                for key, value in divide_token_sum_metrics(
+                    {key: value.item() for key, value in global_metrics.items()},
+                    num_global_valid_tokens,
+                ).items()
             }
 
             self.metrics_processor.log_validation(
