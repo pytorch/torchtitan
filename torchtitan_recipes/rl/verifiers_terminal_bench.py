@@ -83,32 +83,41 @@ from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 _ENV_SERVER_WORKERS = 16
 
 
-def _terminal_bench_rollouter_config(
+def terminal_bench_rollouter_config(
     train_dataset: str,
     validation_dataset: str,
     *,
     max_context_length: int,
     max_turns: int,
     max_concurrent_rollouts: int,
+    taskset_config_cls: type[TerminalTasksetConfig] = TerminalTasksetConfig,
 ) -> VerifiersRollouter.Config:
-    """Select Harbor datasets by id.
+    """Build the Terminal-Bench rollouter: Harbor datasets by id, local Docker, in-sandbox Terminus-2.
 
-    ``max_context_length`` is the generator's sequence length; the generation
-    server caps each rollout at it. ``max_turns`` is the agent turn limit,
-    which Verifiers enforces. ``max_concurrent_rollouts`` sizes the env server;
-    set it to the number of rollouts the controller keeps in flight, or the
-    excess queues in the env server and the generators idle.
+    Args:
+        train_dataset: Harbor dataset id for training, e.g. ``"local/tmax@v1"``.
+        validation_dataset: Harbor dataset id for validation; must differ from ``train_dataset``.
+        max_context_length: The generator's sequence length; the generation server caps
+            each rollout at it.
+        max_turns: The agent turn limit, which Verifiers enforces.
+        max_concurrent_rollouts: Sizes the env server. Set it to the number of rollouts
+            the controller keeps in flight, or the excess queues in the env server and
+            the generators idle.
+        taskset_config_cls: ``TerminalTasksetConfig`` or a subclass. Every env-server worker
+            imports its module, which must export a Taskset bound to it and an Env (e.g.
+            ``HarborEnv``), like ``terminal_bench/taskset.py``. Runtime and harness are
+            fields of the returned config.
     """
     if train_dataset == validation_dataset:
         raise ValueError(
             "Training and Terminal-Bench evaluation must use different datasets"
         )
 
-    taskset_id = register_local_taskset_alias(TerminalTasksetConfig.__module__)
+    taskset_id = register_local_taskset_alias(taskset_config_cls.__module__)
     return VerifiersRollouter.Config(
         training_dataloader=IterableRolloutDataLoader.Config(
             dataset=VerifiersTaskDataset.Config(
-                verifiers_taskset=TerminalTasksetConfig(
+                verifiers_taskset=taskset_config_cls(
                     id=taskset_id, dataset=train_dataset, ignore_timeouts=False
                 ),
                 seed=42,
@@ -116,7 +125,7 @@ def _terminal_bench_rollouter_config(
             ),
         ),
         validation_dataset=VerifiersTaskDataset.Config(
-            verifiers_taskset=TerminalTasksetConfig(
+            verifiers_taskset=taskset_config_cls(
                 id=taskset_id, dataset=validation_dataset, ignore_timeouts=False
             ),
             seed=99,
@@ -192,7 +201,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             filter=KeepExtremeRewardsFilter.Config(keep_errors=True)
         ),
         async_loop=async_loop,
-        rollouter=_terminal_bench_rollouter_config(
+        rollouter=terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
@@ -335,7 +344,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             filter=KeepExtremeRewardsFilter.Config(keep_errors=True)
         ),
         async_loop=async_loop,
-        rollouter=_terminal_bench_rollouter_config(
+        rollouter=terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
@@ -455,7 +464,7 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
             filter=KeepExtremeRewardsFilter.Config(keep_errors=True)
         ),
         async_loop=async_loop,
-        rollouter=_terminal_bench_rollouter_config(
+        rollouter=terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,

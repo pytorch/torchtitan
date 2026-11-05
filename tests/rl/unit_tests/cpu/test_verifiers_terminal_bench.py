@@ -7,6 +7,7 @@
 """CPU checks for the Terminal-Bench Verifiers recipe."""
 
 import asyncio
+import importlib
 import itertools
 import pickle
 import subprocess
@@ -33,7 +34,7 @@ from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
     TerminalBenchTerminusHarnessConfig,
 )
 from torchtitan_recipes.rl.verifiers_terminal_bench import (
-    _terminal_bench_rollouter_config,
+    terminal_bench_rollouter_config,
 )
 from verifiers.v1.agent import resolve_rollout_timeouts
 from verifiers.v1.runtimes import ProgramResult
@@ -49,13 +50,14 @@ MAX_TURNS = 64
 MAX_CONCURRENT_ROLLOUTS = 64
 
 
-def _rollouter_config(train_dataset: str, validation_dataset: str):
-    return _terminal_bench_rollouter_config(
+def _rollouter_config(train_dataset: str, validation_dataset: str, **options):
+    return terminal_bench_rollouter_config(
         train_dataset,
         validation_dataset,
         max_context_length=MAX_CONTEXT_LENGTH,
         max_turns=MAX_TURNS,
         max_concurrent_rollouts=MAX_CONCURRENT_ROLLOUTS,
+        **options,
     )
 
 
@@ -152,6 +154,29 @@ def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
     assert isinstance(
         load_harness(worker_config.agent.harness), TerminalBenchTerminusHarness
     )
+
+
+def test_taskset_config_cls_module_is_the_env_server_plugin(
+    tmp_path, monkeypatch
+) -> None:
+    """The env server's plugin module is the module of the taskset class passed in."""
+    (tmp_path / "caller_pkg").mkdir()
+    (tmp_path / "caller_pkg" / "__init__.py").write_text("")
+    (tmp_path / "caller_pkg" / "terminal_bench.py").write_text(
+        "from torchtitan.rl.examples.verifiers.terminal_bench.taskset import (\n"
+        "    TerminalTasksetConfig,\n"
+        ")\n\n\n"
+        "class RemoteSandboxTasksetConfig(TerminalTasksetConfig):\n"
+        "    pass\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    caller = importlib.import_module("caller_pkg.terminal_bench")
+    rollouter = _rollouter_config(
+        TRAIN_DATASET,
+        EVAL_DATASET,
+        taskset_config_cls=caller.RemoteSandboxTasksetConfig,
+    )
+    assert rollouter.verifiers_env_server.local_taskset_module == caller.__name__
 
 
 def test_env_server_workers_skip_the_trainer_imports(monkeypatch) -> None:
