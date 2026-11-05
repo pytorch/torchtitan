@@ -848,6 +848,38 @@ def test_cuda_graph_none_mode_preserves_sequence_parallel_config():
     assert compilation_config.pass_config.sp_min_token_num == 1
 
 
+def test_vision_encoder_cuda_graph_needs_decoder_graphs_and_image_prompts(tmp_path):
+    cfg = VLLMCudaGraphConfig(vision_encoder=True).get_vllm_compilation_config(
+        max_num_seqs=8,
+        max_model_len=4096,
+        expert_sequence_parallel_size=1,
+        enable_sequence_parallel=False,
+    )
+
+    assert cfg.cudagraph_mm_encoder
+    with pytest.raises(ValueError, match='mode other than "NONE"'):
+        VLLMCudaGraphConfig(mode="NONE", vision_encoder=True)
+    with pytest.raises(ValueError, match="set Controller.Config.vision_processor too"):
+        VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(vision_encoder=True)).build(
+            model=_MODEL_CONFIG,
+            parallelism=_PARALLELISM,
+            model_path="unused",
+            max_num_seqs=8,
+            precision=PrecisionConfig(),
+            gpu_memory_limit=0.9,
+            max_num_batched_tokens=None,
+            checkpointer=None,
+            dist_moe_runtime=None,
+            debug=DebugConfig(),
+            reset_kv_cache_on_model_state_dict_load=False,
+            model_state_dict_load_mode="cpu_prefetch",
+            vision_processor=None,
+            rank=0,
+            generator_name="generator",
+            output_dir=str(tmp_path),
+        )
+
+
 def test_expert_sequence_parallel_padding_filters_cuda_graph_sizes():
     parallelism = InferenceParallelismConfig(
         tensor_parallel_degree=4,

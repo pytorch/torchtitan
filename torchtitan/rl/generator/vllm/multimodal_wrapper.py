@@ -48,13 +48,19 @@ from __future__ import annotations
 
 import functools
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Hashable, Mapping, Sequence
 from typing import Any, ClassVar
 
 import renderers
 import torch
+from torch.distributed.fsdp import FSDPModule
+from vllm.config import VllmConfig
 from vllm.inputs import mm_input, MultiModalInput
-from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
+from vllm.model_executor.models.interfaces import (
+    SupportsEncoderCudaGraph,
+    SupportsMRoPE,
+    SupportsMultiModal,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -70,10 +76,17 @@ from vllm.multimodal.processing import (
     ProcessorInputs,
     TimingContext,
 )
+from vllm.v1.worker.encoder_cudagraph_defs import (
+    EncoderCudaGraphCaptureInputs,
+    EncoderCudaGraphConfig,
+    EncoderCudaGraphReplayBuffers,
+    EncoderItemSpec,
+)
 
 from torchtitan.components.data.multimodal.mrope import get_mrope_positions
 
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
+from torchtitan.models.qwen3_5.vision_encoder import Qwen35VisionEncoder
 from torchtitan.rl.generator.vllm.model_wrapper import VLLMModelWrapper
 from torchtitan.rl.rollout.types import Prompt, PromptImage
 
@@ -118,6 +131,18 @@ def _keep_mm_features(
     uses_mrope: bool = False,
 ) -> list[MultiModalFeatureSpec]:
     return mm_features
+
+
+def _image_grids(mm_kwargs: dict[str, Any]) -> list[list[int]]:
+    """The batch's raw patch grids ``[t, h, w]`` as host ints."""
+    grids = mm_kwargs["image_grid_thw"]
+    return grids if isinstance(grids, list) else grids.tolist()
+
+
+def _pad_segment_ids(buffer: torch.Tensor, segment_ids: torch.Tensor) -> None:
+    """Fill an encoder graph's ``segment_ids`` buffer: padding patches belong to no image (-1)."""
+    buffer.fill_(-1)
+    buffer[: segment_ids.shape[0]].copy_(segment_ids)
 
 
 def image_prompt_to_engine_input(
@@ -345,7 +370,9 @@ class _ImageMultiModalProcessor(BaseMultiModalProcessor[_ImageProcessingInfo]):
         return image_prompt_to_engine_input(prompt, [pixel_values] * num_images)
 
 
-class VLLMMultimodalModelWrapper(VLLMModelWrapper, SupportsMultiModal, SupportsMRoPE):
+class VLLMMultimodalModelWrapper(
+    VLLMModelWrapper, SupportsMultiModal, SupportsMRoPE, SupportsEncoderCudaGraph
+):
     """`VLLMModelWrapper` that keeps the vision encoder and serves image prompts.
 
     Implements vLLM's multimodal (`embed_multimodal`, `embed_input_ids`) and M-RoPE
@@ -355,6 +382,10 @@ class VLLMMultimodalModelWrapper(VLLMModelWrapper, SupportsMultiModal, SupportsM
     positions like text (vLLM then never calls `get_mrope_input_positions`). vLLM feeds
     multimodal models embeddings, also for text-only steps.
 
+    Also implements vLLM's encoder CUDA graph interface, used when
+    ``VLLMCudaGraphConfig.vision_encoder`` is set: vLLM captures
+    `encoder_cudagraph_forward` once per token budget and replays it for each step's new
+    images, packed into the smallest budget that fits and padded to it.
     """
 
     def __init__(self, *, vision_processor: VisionProcessor, **kwargs: Any) -> None:
@@ -389,6 +420,151 @@ class VLLMMultimodalModelWrapper(VLLMModelWrapper, SupportsMultiModal, SupportsM
                 packed_pixel_values, grid_thw=image_grid_thw
             )
         return vision_embeds.split(num_tokens.tolist())
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        """vLLM required API for encoder CUDA graphs: the buffers each graph reads. vLLM
+        calls it at startup when ``VLLMCudaGraphConfig.vision_encoder`` is set."""
+        # TODO: capture other vision encoders, e.g. Muse Spark's NaViT, which has no
+        #   padded forward yet.
+        if not isinstance(self.model.vision_encoder, Qwen35VisionEncoder):
+            raise NotImplementedError(
+                "cuda_graph.vision_encoder captures Qwen3.5's vision encoder only "
+                "(Qwen35VisionEncoder.forward_padded), got "
+                f"{type(self.model.vision_encoder).__qualname__}."
+            )
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=["pixel_values", "learned_pos", "rope_cache", "segment_ids"],
+            out_hidden_size=self.model.vision_encoder.merger.linear_fc2.weight.shape[0],
+            padding_logics={"segment_ids": _pad_segment_ids},
+        )
+
+    def get_encoder_cudagraph_budget_range(
+        self, vllm_config: VllmConfig
+    ) -> tuple[int, int]:
+        """vLLM required API for encoder CUDA graphs: the smallest and largest token
+        budgets to capture. vLLM captures powers of 2 in between."""
+        processor = self._vision_processor
+        # The smallest image the processor produces: a 1 x 1 image, resized up.
+        min_tokens = processor.num_placeholder_tokens(processor.grid_thw(1, 1))
+        max_tokens = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            vllm_config.model_config.max_model_len,
+        )
+        return min_tokens, max(min_tokens, max_tokens)
+
+    def get_encoder_cudagraph_item_specs(
+        self, mm_kwargs: dict[str, Any]
+    ) -> list[EncoderItemSpec]:
+        """vLLM required API for encoder CUDA graphs: each image's patches and tokens."""
+        merge_unit = self._vision_processor.config.spatial_merge_size**2
+        return [
+            EncoderItemSpec(input_size=t * h * w, output_tokens=t * h * w // merge_unit)
+            for t, h, w in _image_grids(mm_kwargs)
+        ]
+
+    def select_encoder_cudagraph_items(
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> dict[str, Any]:
+        """vLLM required API for encoder CUDA graphs: the images at ``indices``."""
+        pixel_values, grids = mm_kwargs["pixel_values"], _image_grids(mm_kwargs)
+        return {
+            "pixel_values": [pixel_values[i] for i in indices],
+            "image_grid_thw": [grids[i] for i in indices],
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ) -> EncoderCudaGraphCaptureInputs:
+        """vLLM required API for encoder CUDA graphs: a budget's buffers, holding one
+        zero image of exactly ``token_budget`` tokens."""
+        encoder = self.model.vision_encoder
+        merge = self._vision_processor.config.spatial_merge_size
+        num_patches = token_budget * merge**2
+        pixel_values = torch.zeros(
+            num_patches, encoder.patch_embed.in_features, device=device
+        )
+        return EncoderCudaGraphCaptureInputs(
+            values=self._encoder_graph_inputs(
+                pixel_values, [[1, merge, token_budget * merge]]
+            )
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ) -> EncoderCudaGraphReplayBuffers:
+        """vLLM required API for encoder CUDA graphs: the batch's unpadded inputs, which
+        vLLM copies into the graph's buffers (zero-padded; ``segment_ids`` with -1)."""
+        packed_pixel_values = torch.cat(list(mm_kwargs["pixel_values"]))
+        return EncoderCudaGraphReplayBuffers(
+            values=self._encoder_graph_inputs(
+                packed_pixel_values, _image_grids(mm_kwargs)
+            )
+        )
+
+    def encoder_cudagraph_forward(
+        self, inputs: dict[str, torch.Tensor], path: str = "default"
+    ) -> torch.Tensor:
+        """vLLM required API for encoder CUDA graphs: the forward vLLM captures."""
+        encoder = self._unsharded_vision_encoder()
+        with self.parallelism_context.activate_spmd():
+            return encoder.forward_padded(
+                inputs["pixel_values"],
+                learned_pos=inputs["learned_pos"],
+                rope_cache=inputs["rope_cache"],
+                segment_ids=inputs["segment_ids"],
+            )
+
+    def encoder_eager_forward(
+        self, mm_kwargs: dict[str, Any], path: str = "default"
+    ) -> torch.Tensor:
+        """vLLM required API for encoder CUDA graphs: images larger than every budget."""
+        pixel_values = mm_kwargs["pixel_values"]
+        grid_thw = torch.tensor(_image_grids(mm_kwargs), device=pixel_values[0].device)
+        return torch.cat(
+            self.embed_multimodal(pixel_values=pixel_values, image_grid_thw=grid_thw)
+        )
+
+    def _encoder_graph_inputs(
+        self, pixel_values: torch.Tensor, grids: list[list[int]]
+    ) -> dict[str, torch.Tensor]:
+        """`Qwen35VisionEncoder.forward_padded`'s inputs for ``grids``, unpadded."""
+        encoder = self._unsharded_vision_encoder()
+        with self.parallelism_context.activate_spmd():
+            learned_pos, rope_cache = encoder.compute_position_embeddings(grids)
+        segment_ids = torch.repeat_interleave(
+            torch.arange(len(grids), dtype=torch.int32),
+            torch.tensor([t * h * w for t, h, w in grids]),
+        )
+        return {
+            "pixel_values": pixel_values.to(encoder.patch_embed.weight.dtype),
+            "learned_pos": learned_pos,
+            "rope_cache": rope_cache,
+            "segment_ids": segment_ids.to(pixel_values.device),
+        }
+
+    def _unsharded_vision_encoder(self) -> Any:
+        """The vision encoder with its parameters unsharded.
+
+        FSDP unshards a module around its ``forward`` only, and these methods use other
+        entries. The generator never reshards, and weight loads unshard into the same
+        buffers, so this is a no-op once vLLM's startup profiling has run the encoder.
+        """
+        encoder = self.model.vision_encoder
+        assert isinstance(encoder, FSDPModule)
+        encoder.unshard()
+        return encoder
 
     def embed_input_ids(
         self,

@@ -56,6 +56,19 @@ class VLLMCudaGraphConfig:
     model's ``max_context_length``). When expert sequence parallelism is enabled,
     capture sizes that are not multiples of its degree are removed."""
 
+    vision_encoder: bool = False
+    """Also capture the vision encoder of a generator that serves image prompts
+    (``Controller.Config.vision_processor`` set; vLLM's ``cudagraph_mm_encoder``). vLLM captures
+    one graph per power-of-2 token budget, from the smallest image up to
+    ``max_num_batched_tokens``, packs each step's new images into the smallest budget that
+    fits and runs larger ones eagerly. Needs ``mode`` other than ``"NONE"``."""
+
+    def __post_init__(self) -> None:
+        if self.vision_encoder and self.mode == "NONE":
+            raise ValueError(
+                'cuda_graph.vision_encoder needs cuda_graph.mode other than "NONE".'
+            )
+
     # TODO: Validate CUDA graph capture with MoE / Expert Parallelism.
     # MoE routing produces dynamic shapes that may conflict with full
     # CUDA graph capture despite being torch.compile-compatible
@@ -166,6 +179,7 @@ class VLLMCudaGraphConfig:
             cudagraph_mode=self.mode,
             mode=CompilationMode.NONE,
             cudagraph_capture_sizes=sizes,
+            cudagraph_mm_encoder=self.vision_encoder,
             pass_config=PassConfig(
                 enable_sp=enable_sequence_parallel,
                 sp_min_token_num=1 if enable_sequence_parallel else None,
