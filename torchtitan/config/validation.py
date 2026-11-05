@@ -25,6 +25,52 @@ __all__ = [
 ]
 
 
+def _validate_model_parallel_capabilities(
+    model: "BaseModel.Config",
+    *,
+    parallelism: "ParallelismConfig",
+) -> None:
+    """Reject parallelism degrees a model does not implement.
+
+    ``ParallelismConfig`` exposes ``tensor_parallel_degree`` and
+    ``expert_parallel_degree`` for every model, but tensor/expert parallelism
+    in TorchTitan is implemented per model (colwise/rowwise sharding in each
+    model's ``_parallelize``). Models that never consume these degrees
+    silently ignore them: the run neither errors nor shards, and full
+    (unsharded) weights are materialized on every rank, which typically fails
+    later as an out-of-memory during model construction instead of a clear
+    config error up front.
+
+    Models opt out by setting ``supports_tensor_parallel = False`` (and, for
+    dense models, EP has no effect and is likewise rejected).
+    """
+    owner = getattr(type(model), "_owner", None)
+    tp = parallelism.tensor_parallel_degree
+    ep = parallelism.expert_parallel_degree
+
+    if tp > 1 and owner is not None and not owner.supports_tensor_parallel:
+        raise ValueError(
+            f"{owner.__name__} does not implement tensor parallelism "
+            f"(supports_tensor_parallel = False), but parallelism."
+            f"tensor_parallel_degree = {tp}. The degree would be silently "
+            "ignored and full weights would be materialized on every rank. "
+            "Remove the tensor_parallel_degree override or shard with FSDP "
+            "(data_parallel_shard_degree) instead."
+        )
+
+    if ep > 1:
+        from torchtitan.models.common.moe import MoE
+
+        has_experts = bool(list(model.traverse(MoE.Config)))
+        if not has_experts:
+            raise ValueError(
+                f"{type(model).__name__} has no MoE (expert) layers, but "
+                f"parallelism.expert_parallel_degree = {ep}. The degree "
+                "would be silently ignored (no-op). Remove the "
+                "expert_parallel_degree override."
+            )
+
+
 def validate_model_training_config(
     model: BaseModel.Config,
     *,
@@ -44,6 +90,8 @@ def validate_model_training_config(
         HybridEPTokenDispatcher,
         LocalTokenDispatcher,
     )
+
+    _validate_model_parallel_capabilities(model, parallelism=parallelism)
 
     if isinstance(model, Decoder.Config):
         if model.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
