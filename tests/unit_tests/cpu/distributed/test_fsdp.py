@@ -19,6 +19,7 @@ from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     enable_fsdp_symm_mem,
     linear_param_shard_placements,
+    store_frozen_params_in_param_dtype_,
 )
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.base.module import Module
@@ -171,3 +172,34 @@ def test_enable_fsdp_symm_mem_scope(
     assert sparse.symm_mem_enabled == sparse_enabled
     assert other.force_sum_enabled == dense_enabled
     assert other.symm_mem_enabled == dense_enabled
+
+
+class _MixedFrozenModel(Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.trainable = nn.Linear(4, 4)
+        self.frozen = nn.Linear(4, 4).requires_grad_(False)
+        self.tied = nn.Linear(4, 4, bias=False)
+        self.tied.weight = self.frozen.weight
+        self.preserved = nn.Parameter(torch.ones(4), requires_grad=False)
+        self._preserve_dtype_params = ("preserved",)
+
+
+def test_store_frozen_params_in_param_dtype() -> None:
+    model = _MixedFrozenModel()
+    frozen_weight = model.frozen.weight
+    frozen_weight.custom_attr = "kept"
+    expected = frozen_weight.detach().to(torch.bfloat16)
+
+    store_frozen_params_in_param_dtype_(model, torch.bfloat16)
+
+    assert model.frozen.weight is frozen_weight
+    assert model.tied.weight is frozen_weight
+    assert frozen_weight.dtype == torch.bfloat16
+    assert not frozen_weight.requires_grad
+    assert frozen_weight.custom_attr == "kept"
+    torch.testing.assert_close(frozen_weight, expected, rtol=0, atol=0)
+    assert model.frozen.bias.dtype == torch.bfloat16
+    assert model.trainable.weight.dtype == torch.float32
+    assert model.trainable.bias.dtype == torch.float32
+    assert model.preserved.dtype == torch.float32

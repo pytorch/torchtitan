@@ -38,6 +38,7 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.distributed.fsdp import store_frozen_params_in_param_dtype_
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.base.module import Module
@@ -481,20 +482,8 @@ class VLLMModelWrapper(Module):
         # with requires_grad.
         self.model.requires_grad_(False)
         # Hold the other parameters in `precision.param_dtype`, the dtype the trainer
-        # computes with and sends, so the FSDP below casts none of them. Swap each
-        # parameter's tensor rather than assigning `param.data`, which keeps a
-        # quantized tensor subclass's inner tensor in the old dtype; keep the
-        # parameter's attributes (e.g. its SPMD type).
-        preserved = {param for _, param in self.model.named_preserve_dtype_params()}
-        for param in self.model.parameters():
-            if param in preserved or param.dtype == param_dtype:
-                continue
-            new_param = nn.Parameter(
-                param.detach().to(param_dtype), requires_grad=False
-            )
-            for name, value in param.__dict__.items():
-                new_param.__dict__.setdefault(name, value)
-            torch.utils.swap_tensors(param, new_param)
+        # computes with and sends, so the FSDP below casts none of them.
+        store_frozen_params_in_param_dtype_(self.model, param_dtype)
         self.model._skip_lm_head = True
         if getattr(self.model, "vision_encoder", None) is not None:
             self.model.vision_encoder = None

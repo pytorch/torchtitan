@@ -108,6 +108,8 @@ class PrecisionConfig:
     precision training, setting dtype=bfloat16 will put all parameters, gradients, and
     optimizer states in bfloat16, without an extra copy of fp32 weights.
     In the case of full bf16 training, RoPE calculations and logits will still be in fp32.
+    Frozen parameters, except preserve_dtype_params, are stored in param_dtype when
+    it is narrower than dtype.
     """
 
     param_dtype: Literal["bfloat16", "float32"] = "bfloat16"
