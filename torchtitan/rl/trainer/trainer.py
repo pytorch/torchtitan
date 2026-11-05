@@ -324,6 +324,8 @@ class Trainer(Configurable):
         if not engine.pp_has_last_stage:
             return None
         microbatch_metrics: list[dict[str, float]] = []
+        # TODO: pick the cross-rank reduce with loss_metric_reduce_op, so /min keys take
+        # the min across ranks too (no RL loss emits /min today).
         for group_metrics in result.loss_metrics:
             for loss_metrics in group_metrics:
                 microbatch_metrics.append(
