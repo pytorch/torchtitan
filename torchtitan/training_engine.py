@@ -558,7 +558,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 modules=self.model_parts,
                 device=self.device,
             )
-        self._forward_backward_captures_whole_step = False
 
         if self.parallelism_context.pp_enabled:
             self._pp_loss_sentinel_on_non_last_stage = torch.full(

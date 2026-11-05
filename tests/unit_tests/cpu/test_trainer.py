@@ -926,6 +926,8 @@ def test_training_engine_replays_one_accelerator_graph_per_microbatch_group() ->
             ),
             parallelism_context=SimpleNamespace(pp_enabled=False),
             _forward_backward_body=MagicMock(),
+            # Set by TrainingEngine.__init__.
+            _forward_backward_captures_whole_step=False,
         ),
     )
 
@@ -985,6 +987,8 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
             ),
             parallelism_context=SimpleNamespace(pp_enabled=False),
             _forward_backward_body=eager_forward_backward,
+            # Set by TrainingEngine.__init__.
+            _forward_backward_captures_whole_step=False,
         ),
     )
 
