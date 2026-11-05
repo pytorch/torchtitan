@@ -935,6 +935,10 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         del x_TD
         from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
 
+        # Replaying unpermute requires retaining or rebuilding W2's output. Wrap
+        # all of combine_tokens in one SAVE region to avoid that replay, saving
+        # only R int64 routing indices for unpermute backward: 8R bytes
+        # (~256 KiB at R=32768).
         combined_TD = remat.region(
             combine_tokens,
             self.remat_region_name("ep_communication.combine"),
@@ -947,8 +951,10 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
 class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
     """Token dispatcher using HybridEP for efficient token dispatch/combine.
 
-    Uses HybridEP library kernels (GB200/NVLink72) instead of standard
-    all-to-all collectives.
+    Uses HybridEP library kernels instead of standard all-to-all collectives.
+    Dispatch and combine follow one remat policy, ``ep_communication``, because
+    backward consumes the forward dispatch handle. HybridEP's prefix scans
+    preserve token order when communication is replayed.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -995,8 +1001,7 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
         self.hidden_dim = config.hidden_dim
         self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
 
-        # Import to register custom ops so SAC saves communication outputs
-        # instead of recomputing them. This must happen before apply_ac.
+        # Register the custom ops before compilation and activation remat.
         from torchtitan.distributed.deepep import hybridep  # noqa: F401
 
     def init_buffer(self) -> None:
@@ -1046,6 +1051,8 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
             num_local_experts,
             self.num_experts,
             ep_group,
+            remat_region_name=self.remat_region_name("ep_communication.dispatch"),
+            recompute=self.remat_should_recompute("ep_communication"),
             non_blocking_expert_capacity_factor=self.non_blocking_capacity_factor,
             pad_multiple=self.pad_multiple,
         )
@@ -1070,6 +1077,8 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
         combined_TD = hybridep.combine_tokens(
             routed_output_RD,
             metadata.state,  # pyrefly: ignore [bad-argument-type]
+            remat_region_name=self.remat_region_name("ep_communication.combine"),
+            recompute=self.remat_should_recompute("ep_communication"),
             pad_multiple=self.pad_multiple,
         )
         return combined_TD

@@ -151,6 +151,7 @@ class TestPrecompileMain(unittest.TestCase):
                         )
                     ]
                     model_config.vocab_size = 16
+                    model_config.max_context_length = 8
                     model_config.traverse.return_value = iter(())
                     model_config.first_moe = None
                     model = MagicMock()
@@ -160,7 +161,6 @@ class TestPrecompileMain(unittest.TestCase):
                         loss=MagicMock(),
                         training=SimpleNamespace(
                             num_tokens_per_microbatch_per_dp_rank=16,
-                            max_context_length=8,
                         ),
                     )
                     parallelism_context = MagicMock(

@@ -163,7 +163,7 @@ class TestSwiGLULocalCompile(unittest.TestCase):
 
     def test_gpt_oss_forward_and_backward_match_reference(self):
         limit = 2.0
-        swiglu = ClampedSwiGLU.Config(swiglu_limit=limit).build()
+        swiglu = ClampedSwiGLU.Config(limit=limit).build()
         gate = torch.randn(
             64,
             128,
