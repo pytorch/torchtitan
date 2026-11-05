@@ -20,8 +20,9 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.graph_trainer.substitute_kernels import (
-    _load_run,
     cache_keys,
+    load_run,
+    register_kernel_store,
     substitute_with_kernels_pass,
 )
 from torchtitan.experiments.graph_trainer.tests import _substitute_kernels_ops
@@ -32,6 +33,28 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 _lib = torch.library.Library("sk_test_lib", "DEF")
 _lib.define("neg(Tensor x) -> Tensor")
 _lib.impl("neg", lambda x: -x, "CompositeExplicitAutograd")
+
+
+def _load_run(path):
+    return load_run(path.read_text())
+
+
+class _MemoryKernelStore:
+    """In-memory ``memtest://<name>`` store; ``stores[name]`` maps path -> bytes."""
+
+    stores: dict[str, dict[str, bytes]] = {}
+
+    def __init__(self, location):
+        self.files = self.stores.setdefault(location, {})
+
+    def get(self, path):
+        return self.files.get(path)
+
+    def put(self, path, data):
+        self.files[path] = data
+
+
+register_kernel_store("memtest", _MemoryKernelStore)
 
 
 def _swiglu(x, w1, w2):
@@ -288,6 +311,10 @@ def run(*args):
         self.assertEqual(gm.graph.find_nodes(op="call_module"), [])
         self.assertFalse(hasattr(gm, "layer0") or hasattr(gm, "layer1"))
         self.assertEqual(gm(*args), torch.full((8, 16), 42.0))
+        # The kernel file is imported once and shared by both layers.
+        targets = {n.target for n in gm.graph.nodes if n.op == "call_function"}
+        targets.discard(torch.ops.aten.add.Tensor)
+        self.assertEqual(len(targets), 1)
 
     def test_specialization_kernel_name_selects_kernel_file(self):
         args = _inputs()
@@ -627,6 +654,50 @@ def run(*args):
         gm = substitute_with_kernels_pass(gm, cache_dir=self.cache)
         self.assertEqual(len(gm.graph.find_nodes(op="call_module")), 1)
         self.assertEqual(self._patterns(), [])
+
+    def test_registered_store_scheme_serves_cache_dir(self):
+        args = _inputs()
+        make_gm = lambda: _parent([_layer()], args)  # noqa: E731
+        ((l1, l2),) = _keys(make_gm())
+        files = _MemoryKernelStore.stores.setdefault("bucket/prefix", {})
+        files.clear()
+
+        gm = substitute_with_kernels_pass(
+            make_gm(), cache_dir="memtest://bucket/prefix"
+        )
+        self.assertEqual(len(gm.graph.find_nodes(op="call_module")), 1)
+        self.assertEqual(
+            sorted(files), [f"{l1}/reference.py", f"{l1}/specialization_{l2}.json"]
+        )
+        self.assertEqual(self._patterns(), [])  # nothing written locally
+
+        files[f"{l1}/{l2}.py"] = (
+            b"import torch\n"
+            b"def run(x, w1, w2):\n"
+            b"    return torch.full((x.shape[0], w1.shape[1]), 5.0)\n"
+        )
+        gm = substitute_with_kernels_pass(
+            make_gm(), cache_dir="memtest://bucket/prefix"
+        )
+        self.assertEqual(gm(*args), torch.full((8, 16), 5.0))
+
+    def test_unknown_store_scheme_raises(self):
+        gm = _parent([_layer()], _inputs())
+        with self.assertRaisesRegex(ValueError, "no kernel store registered"):
+            substitute_with_kernels_pass(gm, cache_dir="nosuchscheme://x")
+
+    def test_manifold_cache_dir_requires_internal_pytorch(self):
+        try:
+            import torch._inductor.fb.remote_cache  # noqa: F401
+        except ImportError:
+            pass
+        else:
+            self.skipTest("internal PyTorch build: Manifold is available")
+        gm = _parent([_layer()], _inputs())
+        with self.assertRaisesRegex(ImportError, "requires an internal build"):
+            substitute_with_kernels_pass(
+                gm, cache_dir="manifold://torchtitan_kernel_cache/test"
+            )
 
     def test_non_graph_module_and_missing_meta_val_call_modules_are_skipped(self):
         args = _inputs()
