@@ -109,6 +109,7 @@ from torchtitan.config import (
     OverrideConfig,
     PrecisionConfig,
 )
+from torchtitan.models.common.lora import lora_projections
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.system import ActorSystem, TrainerHandle
 from torchtitan.rl.controller.metrics import (
@@ -374,15 +375,39 @@ class Controller(Configurable):
                     f"{trainer_model_cls.__qualname__} and "
                     f"{generator_model_cls.__qualname__}."
                 )
+            # Weight syncs copy the trainer's parameters into the generator by name.
+            mismatched_lora = sorted(
+                set(lora_projections(self.trainer.model))
+                ^ set(lora_projections(self.generator.model))
+            )
+            if mismatched_lora:
+                raise ValueError(
+                    "The trainer and generator must apply the same LoRATransform; their "
+                    f"LoRA projections differ at {len(mismatched_lora)} (fqn, rank, "
+                    f"alpha) entries, e.g. {mismatched_lora[:3]}."
+                )
             if self.num_generators < 1:
                 raise ValueError(
                     f"num_generators must be at least 1, got {self.num_generators}"
                 )
-            if self.generator.checkpointer is not None:
+            generator_checkpointer = self.generator.checkpointer
+            trainer_checkpointer = self.trainer.checkpointer
+            # A generator that loads the checkpoint keeps what it loaded for the parameters
+            # that do not train (weight syncs then carry only the trainable ones), so it must
+            # load the trainer's initial HF checkpoint.
+            if generator_checkpointer is not None and not (
+                trainer_checkpointer is not None
+                and generator_checkpointer.initial_load_in_hf
+                and trainer_checkpointer.initial_load_in_hf
+                and generator_checkpointer.initial_load_path
+                == trainer_checkpointer.initial_load_path
+            ):
                 raise ValueError(
-                    "Generator checkpoint must be disabled in the RL loop "
-                    "(weights are synced from the trainer via TorchStore). "
-                    "Set generator.checkpointer=None."
+                    "generator.checkpointer must load the trainer's initial checkpoint: "
+                    "initial_load_in_hf=True on both and the same initial_load_path; got "
+                    f"{generator_checkpointer} for the generator and "
+                    f"{trainer_checkpointer} for the trainer. Or set it to None: every "
+                    "weight sync then carries the whole model."
                 )
             if (
                 self.trainer.dist_moe_runtime is not None
@@ -484,6 +509,14 @@ class Controller(Configurable):
         self.actor_system: ActorSystem | None = None
         self.trainer: TrainerHandle | None = None
         self.generator_router: InterGeneratorRouter | None = None
+        # Generators that load the checkpoint themselves already hold the parameters that
+        # do not train (e.g. a LoRA base), so every weight sync, the initial one included,
+        # carries only the trainable ones (for LoRA, the adapters). Otherwise every sync
+        # carries the whole model.
+        # TODO: every generator replica then reads the checkpoint from storage at once (80
+        # reads with 10 nodes x 8 GPUs at DP=1). Send the frozen parameters once in the
+        # initial weight sync instead, and only the trainable ones after it.
+        self._push_only_trainable_parameters = config.generator.checkpointer is not None
         # The batcher's single-actor handle.
         self.batcher: Any | None = None
         # Resume step (0 = fresh); set in setup_async from the loaded checkpoint.
@@ -752,9 +785,12 @@ class Controller(Configurable):
         with sl.log_trace_span("generator_start_engine_loop"):
             await self.generator_router.start_engine_loop.call_one()
 
-        # Initial push and pull: only the trainer loads weights; generators pull them at start_step.
+        # Initial push and pull: generators pull the trainer's weights at start_step (all of
+        # them, or only the trainable ones if they loaded the checkpoint).
         with sl.log_trace_span("trainer_push_model_state_dict"):
-            await self.trainer.all_ranks.push_model_state_dict.call()
+            await self.trainer.all_ranks.push_model_state_dict.call(
+                trainable_only=self._push_only_trainable_parameters
+            )
         with sl.log_trace_span("generator_pull_model_state_dict"):
             await self.generator_router.pull_model_state_dict.call_one(self.start_step)
 
@@ -1324,7 +1360,9 @@ class Controller(Configurable):
         """Push the trainer's model state dict to TorchStore; returns its wall time in seconds."""
         with sl.log_trace_span("trainer_push_model_state_dict"):
             start = time.perf_counter()
-            await self.trainer.all_ranks.push_model_state_dict.call()
+            await self.trainer.all_ranks.push_model_state_dict.call(
+                trainable_only=self._push_only_trainable_parameters
+            )
             return time.perf_counter() - start
 
     async def _pull_model_state_dict_and_release_groups(

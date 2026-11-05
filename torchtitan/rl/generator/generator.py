@@ -303,6 +303,8 @@ class Generator(Configurable):
             )
 
         self._prefetched_model_state_dict = engine.prefetched_model_state_dict
+        # The keys the last prefetch filled: the ones its version published.
+        self._prefetched_keys: frozenset[str] = frozenset()
         # Set by `initialize_torchstore_client`: the event loop TorchStore reads run on.
         self._torchstore_loop: asyncio.AbstractEventLoop | None = None
 
@@ -507,24 +509,29 @@ class Generator(Configurable):
             return
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
-        await ts.get_state_dict(
+        # strict=False reads only the published keys (only the trainable ones for a
+        # generator that loaded the checkpoint); the other buffers keep older values.
+        prefetched = await ts.get_state_dict(
             "model_state_dict",
             user_state_dict=self._prefetched_model_state_dict,
             strict=False,
             direct_rdma=False,
         )
+        self._prefetched_keys = frozenset(prefetched)
 
     def _copy_prefetched_model_state_dict(
         self, state_dict: dict[str, torch.Tensor]
     ) -> Iterable[str]:
-        """Copy `state_dict`'s weights in place from the prefetched pinned CPU buffers.
+        """Copy `state_dict`'s weights the last prefetch filled in place from the pinned CPU
+        buffers, and return their keys.
 
         Called on the engine loop thread during a load.
         """
+        keys = state_dict.keys() & self._prefetched_keys
         with torch.no_grad():
-            for key, tensor in state_dict.items():
-                tensor.copy_(self._prefetched_model_state_dict[key])
-        return state_dict.keys()
+            for key in keys:
+                state_dict[key].copy_(self._prefetched_model_state_dict[key])
+        return keys
 
     def _fetch_model_state_dict_from_storage_volume(
         self, state_dict: dict[str, torch.Tensor]

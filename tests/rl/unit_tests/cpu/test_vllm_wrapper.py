@@ -165,11 +165,12 @@ class _Wrapper:
 
     load_model_state_dict = VLLMModelWrapper.load_model_state_dict
 
-    def __init__(self, model: nn.Module):
+    def __init__(self, model: nn.Module, *, loaded_checkpoint: bool = False):
         self.model = model
         self._fsdp_load_groups, self._buffer_keys = model_wrapper._fsdp_load_groups(
             model
         )
+        self._loads_fill_a_subset = loaded_checkpoint
 
 
 def _copy_from(new_state_dict: dict[str, torch.Tensor]):
@@ -184,10 +185,25 @@ def _copy_from(new_state_dict: dict[str, torch.Tensor]):
     return fetch
 
 
-def test_load_model_state_dict_requires_every_param(tmp_path) -> None:
-    """Raise when fetch skips a parameter, whose storage was just reallocated; an
-    unfilled buffer (e.g. a vLLM attention scale the trainer does not publish) keeps
-    its value."""
+def _copy_published(new_state_dict: dict[str, torch.Tensor], published: set[str]):
+    """A fetch that fills only the ``published`` keys, as a TorchStore read of a push
+    that left the others out."""
+    copy = _copy_from(new_state_dict)
+
+    def fetch(state_dict: dict[str, torch.Tensor]) -> list[str]:
+        return copy({k: v for k, v in state_dict.items() if k in published})
+
+    return fetch
+
+
+@pytest.mark.parametrize("loaded_checkpoint", [False, True])
+def test_load_model_state_dict_fills_a_subset_only_after_a_checkpoint_load(
+    tmp_path, loaded_checkpoint: bool
+) -> None:
+    """Without a checkpoint load every load must fill every parameter, whose storage was
+    just reallocated. A generator that loaded the checkpoint gets only the trainable
+    parameters (e.g. LoRA adapters) and keeps the ones a load leaves out. An unfilled
+    buffer (e.g. a vLLM attention scale the trainer does not publish) keeps its value."""
     dist.init_process_group(
         "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
     )
@@ -200,23 +216,32 @@ def test_load_model_state_dict_requires_every_param(tmp_path) -> None:
             fully_shard(block, mesh=mesh, reshard_after_forward=False)
         fully_shard(model, mesh=mesh, reshard_after_forward=False)
         model.set_keep_unsharded_storage(True)
-        wrapper = _Wrapper(model)
-        for module in model.modules():  # as after the initial load
+        initial_state_dict = {
+            k: v.detach().clone() for k, v in model.state_dict().items()
+        }
+        wrapper = _Wrapper(model, loaded_checkpoint=loaded_checkpoint)
+        for module in model.modules():  # as after model setup
             if isinstance(module, FSDPModule):
                 model_wrapper._unshard_and_free_sharded_params(module)
-
-        def fetch_published(published: set[str]):
-            def fetch(state_dict: dict[str, torch.Tensor]) -> list[str]:
-                return [key for key in state_dict if key in published]
-
-            return fetch
-
         params = {name for name, _ in model.named_parameters()}
-        wrapper.load_model_state_dict(fetch_published(params))
-        assert model.scale.equal(torch.ones(4))
+        loaded = {k: v + 1 for k, v in initial_state_dict.items()}
 
-        with pytest.raises(RuntimeError, match="did not fill 1 weights.*layers.1.bias"):
-            wrapper.load_model_state_dict(fetch_published(params - {"layers.1.bias"}))
+        wrapper.load_model_state_dict(_copy_published(loaded, params))
+        if not loaded_checkpoint:
+            with pytest.raises(
+                RuntimeError, match="did not fill 1 weights.*layers.1.bias"
+            ):
+                wrapper.load_model_state_dict(
+                    _copy_published(loaded, params - {"layers.1.bias"})
+                )
+            return
+        later = {k: v + 2 for k, v in initial_state_dict.items()}
+        wrapper.load_model_state_dict(_copy_published(later, {"layers.0.weight"}))
+
+        for name, param in model.named_parameters():
+            expected = later if name == "layers.0.weight" else loaded
+            assert param.equal(expected[name].full_tensor()), name
+        assert model.scale.equal(torch.ones(4))
     finally:
         dist.destroy_process_group()
 
@@ -349,6 +374,37 @@ class TestLoadModelStateDictTwoRanks(DTensorTestBase):
             for name, param in model.named_parameters(remove_duplicate=False):
                 self.assertEqual(param, new_state_dict[name].full_tensor(), msg=name)
             self.assertEqual(model.scale, new_state_dict["scale"])
+
+    @with_comms
+    def test_partial_load_keeps_the_shards_it_leaves_out(self) -> None:
+        """For a generator that loaded the checkpoint, a load that fills only some
+        parameters (LoRA adapters) keeps every other parameter on every rank: each rank
+        refills its own (uneven) shard from the unsharded weight before the group's
+        all-gather."""
+        model = nn.Module()
+        model.layers = nn.ModuleList(nn.Linear(16, 15) for _ in range(2))
+        mesh = init_device_mesh("cpu", (self.world_size,))
+        for block in model.layers:
+            fully_shard(block, mesh=mesh, reshard_after_forward=False)
+        fully_shard(model, mesh=mesh, reshard_after_forward=False)
+        model.set_keep_unsharded_storage(True)
+        initial_state_dict = {
+            k: v.detach().clone() for k, v in model.state_dict().items()
+        }
+        wrapper = _Wrapper(model, loaded_checkpoint=True)
+        for module in model.modules():  # as after model setup
+            if isinstance(module, FSDPModule):
+                model_wrapper._unshard_and_free_sharded_params(module)
+        params = {name for name, _ in model.named_parameters()}
+        first = {k: v + 1 for k, v in initial_state_dict.items()}
+        second = {k: v + 2 for k, v in initial_state_dict.items()}
+
+        wrapper.load_model_state_dict(_copy_published(first, params))
+        wrapper.load_model_state_dict(_copy_published(second, {"layers.1.weight"}))
+
+        for name, param in model.named_parameters():
+            expected = second if name == "layers.1.weight" else first
+            self.assertEqual(param, expected[name].full_tensor(), msg=name)
 
     @with_comms
     def test_unshards_every_group_after_fetch_error(self) -> None:

@@ -85,7 +85,7 @@ def test_push_model_state_dict_puts_on_push_stream_in_worker() -> None:
             new_callable=AsyncMock,
             side_effect=put_state_dict,
         ) as put:
-            await trainer.push_model_state_dict()
+            await trainer.push_model_state_dict(trainable_only=False)
 
         put.assert_awaited_once_with(
             ANY,
@@ -103,6 +103,32 @@ def test_push_model_state_dict_puts_on_push_stream_in_worker() -> None:
         assert len(worker_thread_ids) == 2
         assert worker_thread_ids[0] == worker_thread_ids[1]
         assert worker_thread_ids[0] != main_thread_id
+
+    asyncio.run(run())
+
+
+def test_push_model_state_dict_skips_frozen_params_when_asked() -> None:
+    """trainable_only skips the frozen parameters (e.g. a LoRA base) and keeps the
+    buffers; otherwise the push publishes the whole model."""
+
+    async def run() -> None:
+        trainer = object.__new__(Trainer)
+        model_part = Module()
+        model_part.base = torch.nn.Parameter(torch.ones(2, 2), requires_grad=False)
+        model_part.lora_a = torch.nn.Parameter(torch.ones(1, 2))
+        model_part.register_buffer("expert_bias", torch.zeros(2))
+        trainer.engine = SimpleNamespace(model_parts=[model_part])
+        trainer._transfer_dtype = None
+        trainer._push_model_state_dict_stream = None
+        with patch(
+            "torchtitan.rl.trainer.trainer.ts.put_state_dict", new_callable=AsyncMock
+        ) as put:
+            await trainer.push_model_state_dict(trainable_only=False)
+            await trainer.push_model_state_dict(trainable_only=True)
+
+        whole, trainable = (set(call.args[0]) for call in put.await_args_list)
+        assert whole == {"base", "lora_a", "expert_bias"}
+        assert trainable == {"lora_a", "expert_bias"}
 
     asyncio.run(run())
 

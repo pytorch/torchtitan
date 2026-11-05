@@ -187,6 +187,35 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
     asyncio.run(main())
 
 
+def test_copy_prefetched_model_state_dict_copies_only_the_prefetched_keys():
+    """After the trainer's first push it publishes only trainable weights (e.g. LoRA
+    adapters): a load copies only what the last prefetch read, and reports just those."""
+
+    async def main():
+        staging_state_dict = {"base": torch.zeros(2), "lora": torch.zeros(2)}
+        generator = Generator.__new__(Generator)
+        generator.config = SimpleNamespace(model_state_dict_load_mode="cpu_prefetch")
+        generator._prefetched_model_state_dict = staging_state_dict
+
+        def fill_published(*args, **kwargs):
+            staging_state_dict["lora"].fill_(1)
+            return {"lora": staging_state_dict["lora"]}
+
+        with patch.object(
+            generator_module.ts,
+            "get_state_dict",
+            AsyncMock(side_effect=fill_published),
+        ):
+            await generator.prefetch_model_state_dict()
+        weights = {"base": torch.full((2,), 7.0), "lora": torch.zeros(2)}
+
+        assert generator._copy_prefetched_model_state_dict(weights) == {"lora"}
+        assert torch.equal(weights["base"], torch.full((2,), 7.0))
+        assert torch.equal(weights["lora"], torch.ones(2))
+
+    asyncio.run(main())
+
+
 def _dispatcher(*, rank=0, dp_degree=1, tp_degree=1, dp_routing_strategy=None):
     """A bare RequestDispatcher; broadcast_group is unused unless ``setup`` runs."""
     return RequestDispatcher(

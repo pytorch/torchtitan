@@ -33,6 +33,7 @@ __all__ = [
     "get_lora_dist_moe_routed_experts",
     "get_lora_grouped_linear",
     "get_lora_linear",
+    "lora_projections",
 ]
 
 
@@ -320,6 +321,15 @@ def _create_lora_class(
     LoRAProjection.__name__ = f"LoRA{parent_cls.__name__}"
     LoRAProjection.__qualname__ = f"LoRA{parent_cls.__name__}"
     return LoRAProjection
+
+
+def lora_projections(model: Module.Config) -> list[tuple[str, int, float]]:
+    """Return ``(fqn, rank, alpha)`` of every LoRA projection config in ``model``."""
+    return [
+        (fqn, config.rank, config.alpha)
+        for fqn, config, _, _ in model.traverse(Module.Config, recurse=True)
+        if config._owner is not None and issubclass(config._owner, _LoRAMixin)
+    ]
 
 
 @functools.cache
