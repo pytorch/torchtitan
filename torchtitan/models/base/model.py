@@ -7,14 +7,15 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Self, TYPE_CHECKING
 
 import torch
 
-from torchtitan.config import TrainingConfig
+from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 
 from .module import Module
@@ -24,6 +25,9 @@ if TYPE_CHECKING:
     from torchtitan.distributed.activation_remat import ActivationRematConfig
 
     from .state_dict_adapter import BaseStateDictAdapter
+
+
+FlopsEstimator = Callable[[Mapping[str, Any]], int]
 
 
 class BaseModel(Module, ABC):
@@ -54,22 +58,27 @@ class BaseModel(Module, ABC):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[
         torch.Tensor | tuple[torch.Tensor, ...],
         torch.Tensor | tuple[torch.Tensor, ...],
         dict[str, Any],
+        dict[str, Any],
     ]:
-        """Prepare the forward inputs from a dataloader batch.
+        """Prepare the forward and loss inputs from a dataloader batch.
 
         Models driven by the standard trainer/validator forward path implement
         this to build any attention masks, apply context-parallel sharding and
         SPMD annotation as needed, and split ``input``/``labels`` out of the
         batch. ``input_dict`` is the batch with ``labels`` folded in; return
-        ``(inputs, labels, extra_kwargs)``. Models with aligned multi-output
-        objectives may return tuples of input and label tensors.
+        ``(inputs, labels, model_kwargs, loss_kwargs)``. Models with aligned
+        multi-output objectives may return tuples of input and label tensors.
+
+        ``input_dict["loss_kwargs"]``, if present, holds per-microbatch loss
+        arguments, e.g. RL advantages. Its tensors share the ``labels`` token
+        dimension and are CP-sharded and SPMD-annotated like ``labels``;
+        non-tensor values pass through. They are returned as ``loss_kwargs``.
 
         Additional keyword arguments may provide model-specific preprocessing
         dependencies that are owned outside the trainable model. The trainer
@@ -90,15 +99,28 @@ class BaseModel(Module, ABC):
         Subclasses define model-specific hyperparameters.
         """
 
-        local_compile_regions: list[str] = field(default_factory=list)
-        """``@local_compile`` regions this model compiles; ``[]`` runs them all eager.
+        max_context_length: int
+        """Longest sequence the model trains or serves. The data pipeline splits
+        documents at this length, attention metadata is built for it, and the
+        RL generator uses it as vLLM's ``max_model_len``."""
 
-        FlexAttention manages its own compilation and is not controlled by this list.
+        local_compile: LocalCompileConfig = field(default_factory=LocalCompileConfig)
+        """Configuration for named regions, FlexAttention, and block-mask helpers.
+
+        An empty ``regions`` list runs named regions eagerly.
         """
 
         @abstractmethod
-        def get_nparams_and_flops(self, model: Module, seq_len: int) -> tuple[int, int]:
-            pass
+        def get_parameter_counts(self, model: Module) -> tuple[int, int]:
+            """Return unique total and architecturally active parameter counts."""
+            raise NotImplementedError
+
+        @abstractmethod
+        def build_flops_estimator(
+            self, model: Module, *, seq_len: int
+        ) -> FlopsEstimator:
+            """Build a CPU estimator for one raw training microbatch."""
+            raise NotImplementedError
 
     state_dict_adapter_cls: ClassVar[type[BaseStateDictAdapter] | None] = None
     pipeline_first_stage_module_fqns: ClassVar[tuple[str, ...]] = ()
@@ -134,22 +156,22 @@ class BaseModel(Module, ABC):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
-        local_compile_regions: list[str],
+        local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
         dump_folder: str,
     ) -> Self:
         """Apply the ordered model-level parallelization lifecycle."""
         # Bind local implementations early; torch.compile traces on first use.
-        apply_local_compile(local_compile_regions)
+        local_compile.apply()
         with parallelism_context.activate_spmd():
             self._parallelize(parallelism_context)
             if activation_remat is not None:
                 activation_remat.apply(self)
             self._apply_fsdp(
                 parallelism_context=parallelism_context,
-                training=training,
+                precision=precision,
                 parallelism=parallelism,
             )
         return self
@@ -159,7 +181,7 @@ class BaseModel(Module, ABC):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
         pass

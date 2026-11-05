@@ -16,12 +16,15 @@ from torchtitan_recipes.tests.rl.alphabet_sort import (
     rl_grpo_0_6b_tp4_batch_invariant,
     rl_grpo_checkpoint_resume,
     rl_grpo_checkpoint_save,
+    rl_grpo_cp2_fsdp2_gen_tp2,
+    rl_grpo_deepseek_v3_debug,
     rl_grpo_fsdp2_gen_tp2_compile,
     rl_grpo_fsdp2_gen_tp2_no_compile,
     rl_grpo_kimi_k3_debug_batch_invariant,
     rl_grpo_moe_debug_dist_moe_tp2_ep4,
     rl_grpo_moe_debug_tp4_ep4,
     rl_grpo_moe_debug_tp4_ep4_batch_invariant,
+    rl_grpo_pp2_interleaved1f1b_fsdp2_gen_tp2,
     rl_grpo_qwen3_5_debug_tp2_batch_invariant,
 )
 
@@ -49,9 +52,21 @@ def build_rl_test_list() -> list[IntegrationTestDefinition]:
             ngpu=8,
         ),
         _rl_test(
+            configs=[rl_grpo_cp2_fsdp2_gen_tp2],
+            test_descr="RL GRPO trainer FSDP=2 + Ulysses varlen CP=2 + gen TP=2",
+            test_name="rl_grpo_cp2_fsdp2_gen_tp2",
+            ngpu=8,
+        ),
+        _rl_test(
             configs=[rl_grpo_fsdp2_gen_tp2_compile],
             test_descr="RL GRPO trainer FSDP=2 + gen TP=2 compile",
             test_name="rl_grpo_fsdp2_gen_tp2_compile",
+            ngpu=8,
+        ),
+        _rl_test(
+            configs=[rl_grpo_pp2_interleaved1f1b_fsdp2_gen_tp2],
+            test_descr="RL GRPO trainer PP=2 Interleaved1F1B FSDP=2 + gen TP=2",
+            test_name="rl_grpo_pp2_interleaved1f1b_fsdp2_gen_tp2",
             ngpu=8,
         ),
         _rl_test(
@@ -98,8 +113,8 @@ def build_rl_test_list() -> list[IntegrationTestDefinition]:
     ]
 
 
-def build_rl_kda_test_list() -> list[IntegrationTestDefinition]:
-    """Build RL integration tests for Attention Gym KDA, which requires SM90+."""
+def build_h100_rl_test_list() -> list[IntegrationTestDefinition]:
+    """Build RL integration tests for Attention Gym KDA and vLLM's native MLA, which require SM90+."""
     return [
         _rl_test(
             configs=[rl_grpo_kimi_k3_debug_batch_invariant],
@@ -107,12 +122,18 @@ def build_rl_kda_test_list() -> list[IntegrationTestDefinition]:
             test_name="rl_grpo_kimi_k3_debug_batch_invariant",
             ngpu=4,
         ),
+        _rl_test(
+            configs=[rl_grpo_deepseek_v3_debug],
+            test_descr="RL GRPO DeepSeek V3 compressed MLA cache + decode CUDA graphs",
+            test_name="rl_grpo_deepseek_v3_debug",
+            ngpu=4,
+        ),
     ]
 
 
 def build_b200_rl_test_list() -> list[IntegrationTestDefinition]:
-    """Build the B200 RL integration tests: KDA, plus Dist-MoE, which requires SM100+."""
-    return build_rl_kda_test_list() + [
+    """Build the B200 RL integration tests: the H100 tests, plus Dist-MoE, which requires SM100+."""
+    return build_h100_rl_test_list() + [
         _rl_test(
             configs=[rl_grpo_moe_debug_dist_moe_tp2_ep4],
             test_descr=(

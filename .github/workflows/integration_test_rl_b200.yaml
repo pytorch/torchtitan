@@ -83,6 +83,7 @@ jobs:
           RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded/rl" \
             torchrun --nproc-per-node=1 -m pytest \
             tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityKimiK3DebugVarlen \
+            tests/rl/unit_tests/gpu/test_generator_dist_moe_mxfp8.py \
             tests/rl/unit_tests/cpu/test_rl_dist_moe_recipe.py \
             -v
 

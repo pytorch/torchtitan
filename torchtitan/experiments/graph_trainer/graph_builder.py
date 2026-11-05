@@ -305,7 +305,7 @@ class GraphTrainerStageGraphProvider:
             self._overlap_graphs = _build_graph_pp_overlap_graphs(
                 schedule,
                 compile_config=self.config.compile,
-                use_cuda_graph=not self.config.training.disable_cuda_graphs,
+                use_cuda_graph=not self.config.training.disable_accelerator_graphs,
             )
             overlap_graphs = dict(self._overlap_graphs)
         else:
@@ -323,6 +323,6 @@ class GraphTrainerStageGraphProvider:
             _compile_stage_graphs(
                 stage,
                 compile_config=self.config.compile,
-                use_cuda_graph=not self.config.training.disable_cuda_graphs,
+                use_cuda_graph=not self.config.training.disable_accelerator_graphs,
             )
         return overlap_graphs

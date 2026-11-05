@@ -86,8 +86,9 @@ def download_hf_assets(
         "config": ["config.json", "generation_config.json"],
     }
 
-    if isinstance(asset_types, str):
-        asset_types = [asset_types]
+    # Copy so that appending "additional_patterns" below never mutates the
+    # caller's list; a reused list would otherwise fail the next call.
+    asset_types = [asset_types] if isinstance(asset_types, str) else list(asset_types)
 
     if download_all:
         print("Downloading all files from repository...")
@@ -99,11 +100,11 @@ def download_hf_assets(
                 total_patterns.extend(ASSET_PATTERNS[asset_type])
             else:
                 raise ValueError(
-                    "Unknown asset type {}. Available uses: --assets {} \n".format(
-                        asset_type, " ".join(ASSET_PATTERNS.keys())
-                    ),
-                    "Or specify exact patterns to download. Example: --additional_patterns '*.safetensors' README.md '*.json' \n",
-                    "Or use --all to download all files",
+                    f"Unknown asset type {asset_type}. Available uses: --assets "
+                    f"{' '.join(ASSET_PATTERNS.keys())}\n"
+                    "Or specify exact patterns to download. Example: "
+                    "--additional_patterns '*.safetensors' README.md '*.json'\n"
+                    "Or use --all to download all files"
                 )
 
         # Add additional patterns if provided

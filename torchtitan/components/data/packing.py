@@ -367,13 +367,17 @@ def _text_sequence_to_packing_input(
 ) -> dict[str, np.ndarray]:
     """Convert a `TextSequence` to the array dictionary expected by text packing.
 
-    Missing positions become `0..num_tokens-1`.
+    Positions restart at each document start (a zero position) and every
+    `max_context_length` tokens after it, matching how the other packers split
+    long documents. Missing positions mean the sample is one document.
     """
-    positions = text_sequence.positions
-    if positions is None:
-        positions = (
-            np.arange(len(text_sequence.input_ids), dtype=np.int64) % max_context_length
+    token_indices = np.arange(len(text_sequence.input_ids), dtype=np.int64)
+    document_starts = 0
+    if text_sequence.positions is not None:
+        document_starts = np.maximum.accumulate(
+            np.where(np.asarray(text_sequence.positions) == 0, token_indices, 0)
         )
+    positions = (token_indices - document_starts) % max_context_length
     padding_mask = text_sequence.padding_mask
     if padding_mask is None:
         padding_mask = np.zeros(len(text_sequence.input_ids), dtype=np.bool_)

@@ -9,8 +9,8 @@ from .flavors import (
     DeepSeekV3Model,
     DeepSeekV3Router,
     MODEL_FLAVORS,
+    MTPCrossEntropyLoss,
     MTPDecoder,
-    MTPLoss,
     MTPTransformerBlock,
 )
 
@@ -18,7 +18,7 @@ __all__ = [
     "DeepSeekV3Model",
     "DeepSeekV3Router",
     "MODEL_FLAVORS",
-    "MTPLoss",
+    "MTPCrossEntropyLoss",
     "MTPDecoder",
     "MTPTransformerBlock",
     "build_model_config",

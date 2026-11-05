@@ -17,11 +17,13 @@ import torchstore as ts
 from monarch.actor import ProcMesh
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.monarch.batcher import BatcherActor
 from torchtitan.rl.actors.monarch.generator import GeneratorActor
 from torchtitan.rl.actors.monarch.provisioning import (
     compute_generator_world_size,
     compute_trainer_world_size,
+    generator_role_names,
     HostMeshes,
     shutdown,
     spawn_cpu_procs,
@@ -47,14 +49,15 @@ class MonarchActorSystem(ActorSystem):
 
     The trainer and each generator get their own GPU proc mesh: on this host,
     partitioned with ``CUDA_VISIBLE_DEVICES``, or on the ``host_meshes`` a
-    launcher passes in. ``generator_env`` adds environment variables to the
-    generator procs. The router, the batcher and the rollout worker pool get CPU
-    procs on this host.
+    launcher passes in (e.g. ``MonarchControllerWithLauncher`` in
+    ``launcher/base.py``, with the hosts of a submitted job). The router, the
+    batcher and the rollout worker pool get CPU procs on this host.
 
-    Example:
-        # A launcher that allocates its own hosts (e.g. from a Slurm job)
-        actor_system = config.actor_system.build(host_meshes=host_meshes)
-        await config.build().setup_async(actor_system=actor_system)
+    Example: a ``Controller`` subclass that allocated its hosts as
+    ``self.host_meshes``::
+
+        async def _build_actor_system(self) -> MonarchActorSystem:
+            return self.config.actor_system.build(host_meshes=self.host_meshes)
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -66,11 +69,9 @@ class MonarchActorSystem(ActorSystem):
         config: Config,
         *,
         host_meshes: HostMeshes | None = None,
-        generator_env: dict[str, str] | None = None,
     ):
         self.config = config
         self._host_meshes = host_meshes
-        self._generator_env = generator_env
         self._trainer_mesh: ProcMesh | None = None
         self._generator_meshes: list[ProcMesh] = []
         self._router_mesh: ProcMesh | None = None
@@ -91,7 +92,6 @@ class MonarchActorSystem(ActorSystem):
             compute_generator_world_size(generator_parallelism),
             host_meshes=self._host_meshes,
             num_generators=num_generators,
-            generator_env=self._generator_env,
         )
         # One process, so the router is a singleton and every caller reaches
         # it with `call_one`. It gets its own mesh rather than sharing the
@@ -113,12 +113,15 @@ class MonarchActorSystem(ActorSystem):
         trainer = self._trainer_mesh.spawn("trainer", TrainerActor, config, **kwargs)
         self._trainer = trainer
         # Torch ranks follow this mesh's order and the trainer lays them out as
-        # (dp, cp, tp) with no PP, so each DP rank's cp * tp ranks are consecutive.
-        trainer_dp_cp_tp = trainer.flatten("rank").split(
-            rank=("dp", "cp_tp"), dp=dp_degree
+        # (pp, dp, cp, tp), so each DP rank owns cp * tp consecutive ranks in
+        # every pipeline stage.
+        trainer_pp_dp_cp_tp = trainer.flatten("rank").split(
+            rank=("pp", "dp", "cp_tp"),
+            pp=config.parallelism.pipeline_parallel_degree,
+            dp=dp_degree,
         )
         trainer_by_dp_rank = [
-            trainer_dp_cp_tp.slice(dp=dp_rank) for dp_rank in range(dp_degree)
+            trainer_pp_dp_cp_tp.slice(dp=dp_rank) for dp_rank in range(dp_degree)
         ]
         # Check that layout once: if it drifts, one TP group's ranks get different columns.
         for dp_rank, trainer_at_dp_rank in enumerate(trainer_by_dp_rank):
@@ -129,7 +132,7 @@ class MonarchActorSystem(ActorSystem):
                 raise RuntimeError(
                     f"Trainer ranks at DP rank {dp_rank} report DP ranks "
                     f"{reported_dp_ranks}; the actor system assumes the trainer orders "
-                    "ranks as (dp, cp, tp)."
+                    "ranks as (pp, dp, cp, tp)."
                 )
         return TrainerHandle(
             all_ranks=trainer,
@@ -145,10 +148,8 @@ class MonarchActorSystem(ActorSystem):
         **generator_kwargs: Any,
     ) -> Any:
         assert self._router_mesh is not None, "provision before spawning"
-        for idx, generator_mesh in enumerate(self._generator_meshes):
-            actor_name = (
-                "generator" if len(self._generator_meshes) == 1 else f"generator_{idx}"
-            )
+        actor_names = generator_role_names(len(self._generator_meshes))
+        for actor_name, generator_mesh in zip(actor_names, self._generator_meshes):
             generator = generator_mesh.spawn(
                 actor_name, GeneratorActor, generator_config, **generator_kwargs
             )
@@ -178,6 +179,7 @@ class MonarchActorSystem(ActorSystem):
             RolloutWorkerActor,
             worker_config=config,
             num_threads=num_threads,
+            structured_logger_init_fn=sl.get_structured_logger_subprocess_init_fn(),
         )
 
     async def stop_rollout_workers(self) -> None:

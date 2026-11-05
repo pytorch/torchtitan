@@ -313,6 +313,7 @@ def test_static_decoder_stage_metadata_is_complete(
         training=pipeline_parallel.TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=128
         ),
+        precision=pipeline_parallel.PrecisionConfig(),
         model_config=model_config,
         lm_head_in_loss=True,
     )
@@ -343,6 +344,7 @@ def test_static_decoder_stage_metadata_describes_logits_output():
         training=pipeline_parallel.TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=128
         ),
+        precision=pipeline_parallel.PrecisionConfig(),
         model_config=model_config,
         lm_head_in_loss=False,
     )
@@ -392,13 +394,62 @@ def test_pipeline_param_residency_limit(monkeypatch, configured_limit, expected_
     schedule = pipeline_parallel._build_pipeline_schedule(
         parallelism=parallelism,
         num_microbatches=4,
-        stages=[object(), object()],
+        stages=[
+            SimpleNamespace(submod=nn.Identity()),
+            SimpleNamespace(submod=nn.Identity()),
+        ],
         loss_fn=lambda: None,
     )
 
     assert schedule.kwargs["max_active_stages"] == expected_limit
     assert schedule.kwargs["unshard_lookahead"] == "auto"
     assert "reuse_recv_buffers" not in schedule.kwargs
+
+
+def test_schedule_loss_replaces_loss_metrics(monkeypatch):
+    class CapturingSchedule(pipeline_parallel.PipelineScheduleMulti):
+        __slots__ = ("kwargs",)
+
+        def __init__(self, *args, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        pipeline_parallel, "get_schedule_class", lambda _: CapturingSchedule
+    )
+
+    def loss_fn(pred, target, *, scale):
+        return pred * scale, {"loss/mean": target * scale}
+
+    schedule = pipeline_parallel._build_pipeline_schedule(
+        parallelism=ParallelismConfig(
+            pipeline_parallel_degree=2,
+            pipeline_parallel_schedule="Interleaved1F1B",
+        ),
+        num_microbatches=4,
+        stages=[
+            SimpleNamespace(submod=nn.Identity()),
+            SimpleNamespace(submod=nn.Identity()),
+        ],
+        loss_fn=loss_fn,
+    )
+    scalar_loss_fn = schedule.kwargs["loss_fn"]
+
+    # Stage metadata inference calls the loss once before the microbatch.
+    loss_metrics = {"stale/max": torch.tensor(9.0)}
+    for scale in (2.0, 3.0):
+        loss = scalar_loss_fn(
+            torch.tensor(1.0),
+            torch.tensor(5.0),
+            scale=scale,
+            loss_metrics=loss_metrics,
+        )
+
+    torch.testing.assert_close(loss, torch.tensor(3.0))
+    assert loss_metrics == {"loss/mean": torch.tensor(15.0)}
+    torch.testing.assert_close(
+        scalar_loss_fn(torch.tensor(1.0), torch.tensor(5.0), scale=1.0),
+        torch.tensor(1.0),
+    )
 
 
 @pytest.mark.parametrize("limit", [0, -1])
@@ -450,7 +501,10 @@ def test_unshard_lookahead_is_forwarded_to_multistage_schedule(
     schedule = pipeline_parallel._build_pipeline_schedule(
         parallelism=parallelism,
         num_microbatches=4,
-        stages=[object(), object()],
+        stages=[
+            SimpleNamespace(submod=nn.Identity()),
+            SimpleNamespace(submod=nn.Identity()),
+        ],
         loss_fn=lambda: None,
     )
 
@@ -595,7 +649,10 @@ def test_build_pipeline_schedule_sets_deferred_reduce_grad_wait(
     _build_pipeline_schedule(
         parallelism=parallelism,
         num_microbatches=4,
-        stages=[object(), object()],
+        stages=[
+            SimpleNamespace(submod=nn.Identity()),
+            SimpleNamespace(submod=nn.Identity()),
+        ],
         loss_fn=lambda *args, **kwargs: (object(), object()),
         backward_requires_autograd=backward_requires_autograd,
     )
@@ -623,7 +680,10 @@ def test_build_pipeline_schedule_forwards_max_outstanding_sends(monkeypatch):
     _build_pipeline_schedule(
         parallelism=parallelism,
         num_microbatches=4,
-        stages=[object(), object()],
+        stages=[
+            SimpleNamespace(submod=nn.Identity()),
+            SimpleNamespace(submod=nn.Identity()),
+        ],
         loss_fn=lambda *args, **kwargs: (object(), object()),
     )
 

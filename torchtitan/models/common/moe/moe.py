@@ -19,6 +19,7 @@ import torch_remat as remat
 from torch.optim import Optimizer
 
 from torchtitan.distributed import ParallelismContext
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import (
@@ -107,7 +108,7 @@ class RoutedExperts(Module):
         x_TD: torch.Tensor,
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
-        num_local_tokens_per_expert_E: torch.Tensor,
+        routing_map_TE: torch.Tensor,
         *,
         padding_mask_T: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -131,7 +132,7 @@ class RoutedExperts(Module):
             x_TD,
             topk_scores_TK,
             topk_expert_ids_TK,
-            num_local_tokens_per_expert_E,
+            routing_map_TE,
         )
         offsets_E = torch.cumsum(
             num_global_tokens_per_local_expert_e,
@@ -809,16 +810,43 @@ class MoE(FeedForward):
             aux_loss_denominator=aux_loss_denominator,
             **router_kwargs,
         )
-        num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
 
         out_TD = self.routed_experts(
             routed_x_TD,
             topk_scores_TK,
             topk_expert_ids_TK,
-            num_local_tokens_per_expert_E,
+            routing_map_TE,
             padding_mask_T=routed_padding_mask_T,
         )
-        out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
+        return self._add_shared_experts_and_reduce_across_tp(out_TD, x_TD)
+
+    def _add_shared_experts_and_reduce_across_tp(
+        self, routed_out_TD: torch.Tensor, x_TD: torch.Tensor
+    ) -> torch.Tensor:
+        """Add the shared experts' output of ``x_TD`` to the routed output and
+        materialize the MoE output across TP.
+
+        Args:
+            routed_out_TD: The routed branch's output, of the routed tokens.
+            x_TD: The MoE input.
+        """
+        if self.shared_experts is not None and is_in_batch_invariant_mode():
+            # Adding a token's routed output to its TP rank's shared-expert partial
+            # sum (below) makes the reduced sum depend on which rank owns the token,
+            # which moves with the token count. Reduce the routed output (exact: the
+            # other ranks add zeros) and the shared partials separately, then add:
+            # one more all-reduce with EP over TP.
+            routed_out_TD = self._maybe_all_reduce_moe_output_across_tp(
+                self._maybe_zero_fill_routed_output_to_tp_partial(routed_out_TD),
+                region_name="tp_routed_reduction",
+            )
+            shared_TD = self._maybe_all_reduce_moe_output_across_tp(
+                self.shared_experts(x_TD)
+            )
+            return remat.region(
+                torch.add, self.remat_region_name("shared_add"), recompute=False
+            )(routed_out_TD, shared_TD)
+        out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(routed_out_TD)
         if self.shared_experts is not None:
             shared_TD = self.shared_experts(x_TD)
             # Trailing add, always saved: it saves nothing for backward, so replay skips
@@ -898,9 +926,13 @@ class MoE(FeedForward):
         )
 
     def _maybe_all_reduce_moe_output_across_tp(
-        self, out_TD: torch.Tensor
+        self, out_TD: torch.Tensor, *, region_name: str = "tp_output_reduction"
     ) -> torch.Tensor:
-        """Reduce the combined partial output when dense SP is disabled."""
+        """Reduce a TP-partial MoE output when dense SP is disabled.
+
+        Args:
+            region_name: The reduction's remat region.
+        """
         if spmd_dense_sp_enabled():
             return out_TD
         tp_group = spmd_mesh_group(MeshAxisName.TP)
@@ -910,8 +942,8 @@ class MoE(FeedForward):
         # shared/routed branch addition separate it from either w2 computation.
         out_TD = remat.region(
             spmd.redistribute,
-            self.remat_region_name("tp_output_reduction"),
-            recompute=self.remat_should_recompute("tp_output_reduction"),
+            self.remat_region_name(region_name),
+            recompute=self.remat_should_recompute(region_name),
         )(
             out_TD,
             tp_group,
@@ -961,7 +993,6 @@ def register_moe_load_balancing_hook(
         model_parts: List of model parts that may contain MoE layers.
         parallelism_context: Parallel dimensions for distributed communication.
     """
-    from torchtitan.models.common.decoder import TransformerBlock
 
     def _iter_moe_layers(
         model_parts: list[nn.Module],
@@ -979,10 +1010,9 @@ def register_moe_load_balancing_hook(
             for layers in layer_containers:
                 assert isinstance(layers, (nn.ModuleDict, nn.ModuleList))
                 for transformer_block in layers.children():
-                    if isinstance(transformer_block, TransformerBlock) and isinstance(
-                        moe := transformer_block.feed_forward, MoE
-                    ):
-                        yield transformer_block, cast(_MoELike, moe)
+                    for moe in transformer_block.children():
+                        if isinstance(moe, MoE):
+                            yield transformer_block, cast(_MoELike, moe)
 
     # for MoE auxiliary-loss-free load balancing
     def _update_expert_bias(

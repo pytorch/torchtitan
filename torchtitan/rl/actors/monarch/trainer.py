@@ -33,8 +33,8 @@ class _TrainerActorEndpoints:
         return self.dp_rank
 
     @concurrent_endpoint
-    async def get_controller_state(self) -> dict[str, Any] | None:
-        return await super().get_controller_state()
+    async def get_resume_state(self) -> dict[str, Any] | None:
+        return await super().get_resume_state()
 
     @concurrent_endpoint
     async def close(self) -> None:
@@ -47,23 +47,23 @@ class _TrainerActorEndpoints:
     @concurrent_endpoint
     async def forward_backward(
         self,
-        microbatches: list[TrainingMicrobatch] | list[RDMAMicrobatch],
+        microbatch_groups: (
+            list[list[TrainingMicrobatch]] | list[list[RDMAMicrobatch]]
+        ),
         global_loss_token_counts: torch.Tensor,
         global_routing_token_counts: torch.Tensor,
-    ) -> dict[str, float]:
+    ) -> dict[str, float] | None:
         return await super().forward_backward(
-            microbatches,
+            microbatch_groups,
             global_loss_token_counts,
             global_routing_token_counts,
         )
 
     @concurrent_endpoint
     async def optim_step(
-        self, *, controller_state: dict[str, Any], last_step: bool = False
+        self, *, resume_state: dict[str, Any], last_step: bool = False
     ) -> OptimizerStepOutput:
-        return await super().optim_step(
-            controller_state=controller_state, last_step=last_step
-        )
+        return await super().optim_step(resume_state=resume_state, last_step=last_step)
 
     @concurrent_endpoint
     async def push_model_state_dict(self) -> None:

@@ -29,6 +29,7 @@ from torchtitan.models.common.attention import (
     FlexInnerAttention,
     InnerAttention,
     SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.attention.cp_attention import (
@@ -36,6 +37,7 @@ from torchtitan.models.common.attention.cp_attention import (
     AllGatherKVSlidingWindowFlexInnerAttention,
     UlyssesFlexInnerAttention,
     UlyssesSlidingWindowFlexInnerAttention,
+    UlyssesSlidingWindowVarlenInnerAttention,
     UlyssesVarlenInnerAttention,
 )
 from torchtitan.models.common.config_utils import decoder_vocab_size
@@ -75,7 +77,6 @@ def muse_glimmer_30b(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=1000,
         ),
         parallelism=parallelism,
@@ -87,9 +88,9 @@ def muse_glimmer_30b(
 def muse_glimmer_30b_bf16_optimizer_states() -> Trainer.Config:
     """Use BF16 optimizer states with FP32 parameters and reduction."""
     config = muse_glimmer_30b()
-    config.training.dtype = "float32"
-    config.training.mixed_precision_param = "bfloat16"
-    config.training.mixed_precision_reduce = "float32"
+    config.precision.dtype = "float32"
+    config.precision.param_dtype = "bfloat16"
+    config.precision.reduce_dtype = "float32"
     config.optim.optimizer = OptimizersContainer.Config(
         optimizers=[AdamW.Config(pattern=r".*", moment_dtype="bfloat16")]
     )
@@ -157,7 +158,12 @@ def muse_glimmer_30b_ulysses_varlen_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={VarlenInnerAttention: UlyssesVarlenInnerAttention}
+                inner_attention_map={
+                    VarlenInnerAttention: UlyssesVarlenInnerAttention,
+                    SlidingWindowVarlenInnerAttention: (
+                        UlyssesSlidingWindowVarlenInnerAttention
+                    ),
+                }
             )
         ],
     )

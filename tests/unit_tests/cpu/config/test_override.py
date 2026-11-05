@@ -80,6 +80,19 @@ class TwoBlocks(Configurable):
         self.config = config
 
 
+class CheckedComponent(Configurable):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        bad: bool = False
+
+        def __post_init__(self) -> None:
+            if self.bad:
+                raise ValueError("bad flag")
+
+    def __init__(self, config: Config):
+        self.config = config
+
+
 class DerivedComponent(ComponentA):
     """A replacement that subclasses the target Config and adds a field.
 
@@ -384,6 +397,13 @@ class TestOverride(_IsolatedRegistryTestCase):
         self.assertEqual(len(_REGISTRY), 1)
         clear_overrides()
         self.assertEqual(len(_REGISTRY), 0)
+
+    def test_revalidates_after_assignment(self):
+        # A field set after construction is invisible to the first __post_init__.
+        config = CheckedComponent.Config()
+        config.bad = True
+        with self.assertRaisesRegex(ValueError, "bad flag"):
+            apply_overrides(OverrideConfig(), config)
 
     def test_no_overrides_is_noop(self):
         parent_cfg = ParentComponent.Config(child=ComponentA.Config(dim=100))

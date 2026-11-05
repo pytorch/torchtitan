@@ -38,7 +38,7 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.config import OverrideConfig, TrainingConfig
+from torchtitan.config import OverrideConfig, PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
@@ -85,17 +85,9 @@ _MUSE_GLIMMER_MAX_IMAGE_TOKENS = 4096
 _MUSE_SPARK_FUSED_SWIGLU_OVERRIDE = (
     "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"
 )
-_MUSE_SPARK_HELION_ROPE_OVERRIDE = (
-    "torchtitan_recipes.overrides.helion_rope.helion_complex_rope"
-)
 _MUSE_SPARK_DIST_MOE_SAVE_REGIONS = [
     "attention.inner_attention",
     "feed_forward.routed_experts.dist_moe",
-]
-_MUSE_SPARK_SCALE_LOCAL_COMPILE_REGIONS = [
-    "muse_spark_input_scaled_rmsnorm",
-    "muse_spark_logit_postprocess",
-    "muse_spark_residual",
 ]
 
 
@@ -158,7 +150,7 @@ def _with_dist_moe(
             name="dist_moe",
         ) from error
 
-    config.training.disable_cuda_graphs = False
+    config.training.disable_accelerator_graphs = False
     # Activation remat retains the expensive attention and effectful Dist-MoE
     # regions. Projections, routing preparation, norms, and pool/unpool boundaries
     # are cheaper to replay and provide the activation-memory reduction.
@@ -186,9 +178,9 @@ def _with_dist_moe(
     )
     # The standard Muse override fuses SwiGLU inside stock routed experts.
     # Dist-MoE replaces every debug and 816B expert and owns that fusion, so
-    # retaining the override would leave no legitimate target. The independent
-    # attention RoPE override remains applicable.
-    config.override.imports = [_MUSE_SPARK_HELION_ROPE_OVERRIDE]
+    # retaining the override would leave no legitimate target. RoPE is compiled
+    # with the q/k norms in the muse_spark_attention_qk region.
+    config.override.imports = []
     return config
 
 
@@ -392,15 +384,14 @@ def _muse_spark_816b_a42b(
             ),
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
+        precision=PrecisionConfig(
+            dtype="float32", param_dtype="bfloat16", reduce_dtype="float32"
+        ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
             num_tokens_per_train_step=32 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=120,
-            dtype="float32",
-            mixed_precision_param="bfloat16",
-            mixed_precision_reduce="float32",
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=cast(
@@ -416,10 +407,7 @@ def _muse_spark_816b_a42b(
         ),
         activation_remat=DefaultActivationRematConfig(),
         override=OverrideConfig(
-            imports=[
-                _MUSE_SPARK_FUSED_SWIGLU_OVERRIDE,
-                _MUSE_SPARK_HELION_ROPE_OVERRIDE,
-            ],
+            imports=[_MUSE_SPARK_FUSED_SWIGLU_OVERRIDE],
         ),
     )
 
@@ -490,8 +478,8 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
         scratch_capacity_factor=32.0,
         vmm_capacity_factor=None,
         expert_activation=ClampedSwiGLU.Config(
-            swiglu_alpha=1.702,
-            swiglu_limit=7.0,
+            alpha=1.702,
+            limit=7.0,
         ),
         remat_save_regions=remat_save_regions,
     )
@@ -503,11 +491,11 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     )
     config.training.num_tokens_per_microbatch_per_dp_rank = seq_len
     config.training.num_tokens_per_train_step = global_batch_size * seq_len
-    config.training.mixed_precision_reduce = "float32"
+    config.precision.reduce_dtype = "float32"
     # Non-deferred reduction makes every outer-accumulation group identical.
     # Capture one group and replay it instead of unrolling all eight groups into
     # one graph; persistent sharded gradients accumulate across those replays.
-    config.training.cuda_graph_per_microbatch_group = True
+    config.training.accelerator_graph_per_microbatch_group = True
 
     p = config.parallelism
     p.data_parallel_replicate_degree = 1
@@ -523,14 +511,6 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     p.num_pp_microbatches = 1
     p.fsdp_reshard_after_forward = "always"
 
-    # Compile only the elementwise regions with measured fusion wins. Activation
-    # remat saves the expensive inner-attention and effectful Dist-MoE outputs
-    # while recomputing projections, routing preparation, norms, and pool/unpool.
-    config.model.local_compile_regions.extend(
-        region
-        for region in _MUSE_SPARK_SCALE_LOCAL_COMPILE_REGIONS
-        if region not in config.model.local_compile_regions
-    )
     if fake_backend:
         config.hf_assets_path = "./tests/assets/tokenizer"
         config.tokenizer = HuggingFaceTokenizer.Config()
@@ -545,7 +525,7 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     else:
         config.checkpointer = replace(
             config.checkpointer,
-            folder=("muse_spark_816b_a42b_dist_moe_bf16_spmd_" f"{logical_world_size}"),
+            folder=(f"muse_spark_816b_a42b_dist_moe_bf16_spmd_{logical_world_size}"),
         )
     if context_parallel_degree > 1:
         config = apply_transforms(
@@ -791,21 +771,20 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
         IndexedJsonlSource.Config(patterns=(jsonl_pattern,))
     )
     config.optim = _ultradata_lora_sft_optim(warmup_steps=100)
-    config.optim.enable_cuda_graph = False
+    config.optim.enable_accelerator_graph = False
     config.optim.lr_scheduler.total_steps = 1000
     config.training = TrainingConfig(
         num_tokens_per_microbatch_per_dp_rank=seq_len,
         num_tokens_per_train_step=seq_len,
-        max_context_length=seq_len,
         steps=1000,
-        dtype="bfloat16",
-        mixed_precision_param="bfloat16",
-        mixed_precision_reduce="float32",
-        disable_cuda_graphs=False,
+        disable_accelerator_graphs=False,
+    )
+    config.precision = PrecisionConfig(
+        dtype="bfloat16", param_dtype="bfloat16", reduce_dtype="float32"
     )
     config.comm.init_timeout_seconds = 1800
     config.comm.train_timeout_seconds = 1800
-    config.model.local_compile_regions = ["loss"]
+    config.model.local_compile.regions = ["loss"]
     config.debug.seed = 42
     config.activation_remat = ActivationRematConfig(
         save_regions=list(_MUSE_SPARK_DIST_MOE_SAVE_REGIONS),

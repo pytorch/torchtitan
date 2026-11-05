@@ -62,7 +62,8 @@ _buffer: ElasticBuffer | None = None
 # SAC saves the handle_id tensor; we use it to retrieve the non-tensor handle.
 # Combine removes the entry it uses. If a dispatch never reaches its combine (a recomputed
 # dispatch whose combine region is saved), a finalizer in _dispatch_op_impl removes it.
-# TODO: return an opaque handle from the ops (like hybridep.DispatchHandle) and delete this cache.
+# TODO: Return opaque handles and delete this cache once upstream supports them:
+# https://github.com/meta-pytorch/remat/issues/10
 _handle_cache: dict = {}
 _handle_counter: int = 0
 

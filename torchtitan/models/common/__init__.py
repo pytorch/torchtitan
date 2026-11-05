@@ -7,6 +7,7 @@
 from .activation import (
     BinaryActivationFn,
     ClampedSwiGLU,
+    LimitedSwiGLU,
     Sigmoid,
     SiLU,
     SiTUGLU,
@@ -32,6 +33,7 @@ from .attention import (
     LinearAttentionMetadata,
     QKVLinear,
     SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
@@ -64,6 +66,7 @@ __all__ = [
     "FlexAttentionMetadata",
     "FlexInnerAttention",
     "HiMidLoLinear",
+    "LimitedSwiGLU",
     "QKVLinear",
     "GELU",
     "GatedRMSNorm",
@@ -88,6 +91,7 @@ __all__ = [
     "RoPE",
     "RowParallelLinear",
     "SlidingWindowFlexInnerAttention",
+    "SlidingWindowVarlenInnerAttention",
     "Sigmoid",
     "SiLU",
     "BinaryActivationFn",

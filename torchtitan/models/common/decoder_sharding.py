@@ -289,6 +289,43 @@ def inner_attention_local_spmd_sharding_config() -> ShardingConfig:
     )
 
 
+def mla_attention_local_spmd_sharding_config() -> ShardingConfig:
+    """Localize compact MLA inputs without changing their placements."""
+    head_placement = attention_activation_placement()
+    headless_placement = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    inputs = {
+        "q_THK": head_placement,
+        "kv_c_normed_TL": headless_placement,
+        "k_shared_TR": headless_placement,
+    }
+    return ShardingConfig(
+        in_src_shardings=inputs,
+        in_dst_shardings=inputs,
+        out_src_shardings=head_placement,
+        local_spmd=True,
+    )
+
+
+def mla_kv_projection_sharding_config(
+    *, cp: spmd.PerMeshAxisSpmdType
+) -> ShardingConfig:
+    """Shard MLA projection weights on TP and assert the backend's CP layout.
+
+    The projection takes replicated CP inputs after latent all-gather, or
+    token-sharded CP inputs before Ulysses all-to-all.
+    """
+    return ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.S(0)),
+            "bias": dense_param_placement(tp=spmd.S(0)),
+        },
+        in_src_shardings={
+            "input": dense_activation_placement(tp=spmd.R, cp=cp),
+        },
+        out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=cp),
+    )
+
+
 def feed_forward_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Dense FFN boundary: ``x`` in and out in the residual layout."""
     layout = residual_activation_placement(enable_sp=enable_sp)

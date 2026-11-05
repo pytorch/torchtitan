@@ -75,5 +75,5 @@ def test_batch_invariant_configs_disable_local_compile(module_name, factory_name
     factory = getattr(importlib.import_module(module_name), factory_name)
     config = factory()
 
-    assert config.trainer.model.local_compile_regions == []
-    assert config.generator.model.local_compile_regions == []
+    assert config.trainer.model.local_compile.regions == []
+    assert config.generator.model.local_compile.regions == []

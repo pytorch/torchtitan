@@ -155,7 +155,7 @@ def routed_experts_sharding_config() -> ShardingConfig:
             "x_TD": experts_input_layout,
             "topk_scores_TK": experts_input_layout,
             "topk_expert_ids_TK": experts_input_layout,
-            "num_local_tokens_per_expert_E": _tokens_per_expert_placement(),
+            "routing_map_TE": experts_input_layout,
         },
         out_src_shardings=experts_input_layout,
         local_spmd=True,
