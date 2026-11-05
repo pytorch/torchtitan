@@ -528,8 +528,7 @@ class Trainer(Configurable):
           progresses while forward/backward launches its GPU work and blocks
           this actor's event loop.
         - forward_backward frees the event loop while it waits for the GPU, so this
-          push can also start then. That is safe: it issues no collectives, and its
-          put runs on the push stream.
+          push can also start then. That is safe: it issues no collectives.
         - The controller awaits this push before the next optimizer step mutates
           the model, and awaits the generators' pull of it before the next push
           overwrites the TorchStore key.
