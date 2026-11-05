@@ -12,7 +12,6 @@ from typing import Any
 
 import grain.python as grain
 import torch
-
 from torchtitan.components.tokenizer import BaseTokenizer
 
 
@@ -94,6 +93,7 @@ class DatasetBuildContext:
     read_options: grain.ReadOptions
     max_num_documents: int | None = None
     num_mtp_layers: int = 0
+    document_alignment: int | None = None
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

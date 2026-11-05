@@ -14,7 +14,6 @@ from typing import Any
 import grain.python as grain
 from grain import experimental as grain_experimental
 from torch.distributed.checkpoint.stateful import Stateful
-
 from torchtitan.components.data.collators import Collator, TextCollator
 from torchtitan.components.data.dataset import DatasetConfig
 from torchtitan.components.data.types import (
@@ -71,6 +70,8 @@ class GrainDataLoader(BaseDataLoader):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseDataLoader.Config):
         dataset: DatasetConfig
+        document_alignment: int | None = None
+        """Pad document segments to this multiple; requires document-aware packing."""
         collator: Collator.Config = field(default_factory=TextCollator.Config)
         seed: int = 42
         shuffle: bool = True
@@ -94,6 +95,16 @@ class GrainDataLoader(BaseDataLoader):
         **kwargs: Any,
     ) -> None:
         del kwargs
+        if config.document_alignment is not None:
+            alignment = config.document_alignment
+            if (
+                alignment <= 0
+                or max_context_length % alignment
+                or num_tokens_per_microbatch % alignment
+            ):
+                raise ValueError(
+                    "document_alignment must be positive and divide max_context_length and num_tokens_per_microbatch"
+                )
         # Validate the run policy.
         # TODO(data-finite-dp): Support finite distributed datasets with a global
         # remainder policy. Simple map datasets can truncate or pad before DP
@@ -118,6 +129,7 @@ class GrainDataLoader(BaseDataLoader):
             read_options=read_options,
             max_num_documents=config.max_num_documents,
             num_mtp_layers=config.num_mtp_layers,
+            document_alignment=config.document_alignment,
         )
         dataset_iteration_policy = DatasetIterationPolicy(
             seed=config.seed,
