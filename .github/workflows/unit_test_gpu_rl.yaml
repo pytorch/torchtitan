@@ -113,3 +113,8 @@ jobs:
           tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityQwen35DebugVarlen -v
         torchrun --nproc-per-node=4 -m pytest \
           tests/rl/unit_tests/gpu/test_generator_uneven_decode.py -v
+
+        # KV offload tests spawn their own generator processes (eight GPUs total).
+        python -m pytest -q \
+          'tests/rl/unit_tests/gpu/test_kv_offload.py::test_cpu_kv_and_weight_version_isolation[cpu-tp2-dp2-ep4]' \
+          'tests/rl/unit_tests/gpu/test_kv_offload.py::test_cpu_kv_and_weight_version_isolation[cpu-hybrid-tail-tp2]'

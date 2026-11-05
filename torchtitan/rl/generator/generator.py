@@ -153,6 +153,8 @@ class Generator(Configurable):
         cache salt pinned when this generator first admitted it, so its rollouts and
         later turns reuse its KV across model state dict loads, while new groups use the current
         version.
+        CPU KV offload instead salts by the loaded weights: after an update,
+        requests cannot reuse the group's older KV.
         Enable this to clear prefix-cache entries and preempt running requests; the engine
         then recomputes their KV under the new weights when they resume."""
 
@@ -433,8 +435,7 @@ class Generator(Configurable):
         self._engine_loop.release_groups(group_ids)
 
     async def release_sessions(self, session_ids: list[str]) -> None:
-        """Release the held KV of sessions whose rollout ended (rank 0; a no-op unless the
-        engine holds session KV).
+        """Release retained GPU KV and hint CPU eviction for finished sessions.
 
         Args:
             session_ids: Routing session ids with no more generation calls.

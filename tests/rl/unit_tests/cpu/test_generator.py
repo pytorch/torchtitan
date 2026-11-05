@@ -14,6 +14,7 @@ metrics that ride with it), the SamplingParams contract, and the vLLM metric tim
 
 import asyncio
 import concurrent.futures
+import copy
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import cast
@@ -47,6 +48,7 @@ from torchtitan.rl.generator.vllm.engine import (
     VLLMEngine,
 )
 from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
+from torchtitan.rl.generator.vllm.simple_cpu_offload import SimpleCPUOffloadConnector
 from torchtitan.rl.generator.vllm.worker import (
     TorchTitanCudagraphDispatcher,
     TorchTitanGPUModelRunner,
@@ -60,9 +62,11 @@ from vllm.config import (
     CompilationMode,
     CUDAGraphMode,
     DeviceConfig,
+    KVTransferConfig,
     SchedulerConfig,
     VllmConfig,
 )
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
@@ -91,6 +95,7 @@ class _FakeLLMEngine:
         self.add_requests = []
         self.reset_prefix_cache_calls = []
         self.renderer = _FakeRenderer()
+        self.output_processor = SimpleNamespace(has_unfinished_requests=lambda: False)
 
     def add_request(self, *args, **kwargs):
         self.add_requests.append((args, kwargs))
@@ -133,10 +138,19 @@ def _request_output(
     )
 
 
-def _vllm_engine(*, reset_kv_cache_on_model_state_dict_load=False, model=None):
+def _vllm_engine(
+    *,
+    reset_kv_cache_on_model_state_dict_load=False,
+    model=None,
+    kv_transfer_config=None,
+):
     """A `VLLMEngine` around a fake `LLMEngine` (no engine build)."""
     engine = VLLMEngine.__new__(VLLMEngine)
     engine._engine = _FakeLLMEngine()
+    engine.config = VLLMEngine.Config(kv_transfer_config=kv_transfer_config)
+    engine._uses_kv_offload = kv_transfer_config is not None
+    engine._coordinate_kv_offload = False
+    engine._loaded_policy_version = None
     engine._reset_kv_cache_on_model_state_dict_load = (
         reset_kv_cache_on_model_state_dict_load
     )
@@ -329,9 +343,11 @@ def _engine_request(request_id: str, *, min_policy_version: int, group_id: int =
     return request
 
 
-def test_admission_passes_group_id_as_priority_and_arrival_time():
+@pytest.mark.parametrize("coordinate_kv_offload", [False, True])
+def test_admission_preserves_priority_arrival_time_and_shared_id(coordinate_kv_offload):
     # Priority is the group id (3), not the pinned version (6); every validation id shares -1.
     engine = _vllm_engine()
+    engine._coordinate_kv_offload = coordinate_kv_offload
     engine.add_requests(
         [
             _engine_request("train", min_policy_version=6, group_id=3),
@@ -344,6 +360,14 @@ def test_admission_passes_group_id_as_priority_and_arrival_time():
     added_kwargs = [kwargs for _, kwargs in llm_engine.add_requests]
     assert [kwargs["priority"] for kwargs in added_kwargs] == [3, -1, -1]
     assert [kwargs["arrival_time"] for kwargs in added_kwargs] == [1.5] * 3
+    for kwargs in added_kwargs:
+        extra = kwargs["params"].extra_args
+        if coordinate_kv_offload:
+            assert (
+                extra["kv_transfer_params"]["shared_request_id"] == kwargs["request_id"]
+            )
+        else:
+            assert extra is None
 
 
 def test_session_kv_holder_tracks_admitted_requests_and_releases_sessions():
@@ -510,7 +534,7 @@ def test_reset_kv_cache_on_model_state_dict_load_controls_cache_reset(
         reset_kv_cache_on_model_state_dict_load=reset_kv_cache, model=model
     )
 
-    engine.load_model_state_dict(lambda state_dict: state_dict.keys())
+    engine.load_model_state_dict(lambda state_dict: state_dict.keys(), policy_version=1)
 
     expected = [((), {"reset_running_requests": True})] if reset_kv_cache else []
     assert cast(_FakeLLMEngine, engine._engine).reset_prefix_cache_calls == expected
@@ -519,6 +543,63 @@ def test_reset_kv_cache_on_model_state_dict_load_controls_cache_reset(
 def test_sampling_config_rejects_top_p_below_one():
     with pytest.raises(ValueError, match="top_p must be 1.0, got 0.95"):
         SamplingConfig(top_p=0.95)
+
+
+def test_kv_offload_uses_loaded_weights_not_group_version():
+    model = SimpleNamespace(load_model_state_dict=Mock())
+    engine = _vllm_engine(
+        model=model,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="SimpleCPUOffloadConnector", kv_role="kv_both"
+        ),
+    )
+    request = _engine_request("r0", min_policy_version=3)
+
+    # Random initial weights must not populate the shared trainer namespace.
+    assert len(engine.add_requests([request])) == 1
+    assert engine._engine.add_requests == []
+    engine.load_model_state_dict(lambda state_dict: state_dict.keys(), policy_version=5)
+    assert engine.add_requests([request]) == []
+    assert engine._engine.add_requests[-1][1]["prompt"]["cache_salt"] == "5"
+
+    engine.load_model_state_dict(lambda state_dict: state_dict.keys(), policy_version=6)
+    assert engine.add_requests([request]) == []
+    assert engine._engine.add_requests[-1][1]["prompt"]["cache_salt"] == "6"
+    assert engine._engine.reset_prefix_cache_calls == []
+
+
+def test_kv_offload_rejects_weight_swap_during_generation():
+    model = SimpleNamespace(load_model_state_dict=Mock())
+    engine = _vllm_engine(
+        model=model,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="SimpleCPUOffloadConnector", kv_role="kv_both"
+        ),
+    )
+    engine._engine.output_processor.has_unfinished_requests = lambda: True
+    with pytest.raises(RuntimeError, match="hot_swap=False"):
+        engine.load_model_state_dict(
+            lambda state_dict: state_dict.keys(), policy_version=2
+        )
+    model.load_model_state_dict.assert_not_called()
+    assert engine._loaded_policy_version is None
+
+
+def test_kv_offload_failed_load_does_not_advance_cache_version():
+    model = SimpleNamespace(
+        load_model_state_dict=Mock(side_effect=RuntimeError("load failed")),
+    )
+    engine = _vllm_engine(
+        model=model,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="SimpleCPUOffloadConnector", kv_role="kv_both"
+        ),
+    )
+    with pytest.raises(RuntimeError, match="load failed"):
+        engine.load_model_state_dict(
+            lambda state_dict: state_dict.keys(), policy_version=2
+        )
+    assert engine._loaded_policy_version is None
 
 
 # --- vLLM metric timing math (the `_prepare_generation_request_metrics` helper) ---
@@ -639,7 +720,13 @@ def test_qwen36_27b_perf_config():
 # --- vLLM engine kwargs (what VLLMEngine passes to EngineArgs) ---
 
 
-def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dict:
+def _build_engine_kwargs(
+    monkeypatch,
+    tmp_path,
+    config: Generator.Config,
+    *,
+    generator_name="generator",
+) -> dict:
     """Build ``config.engine`` as the generator does, with vLLM's ``EngineArgs``,
     ``LLMEngine`` and model registration mocked; return the ``EngineArgs`` kwargs."""
     engine_args = Mock()
@@ -661,7 +748,7 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dic
         reset_kv_cache_on_model_state_dict_load=False,
         model_state_dict_load_mode="cpu_prefetch",
         rank=0,
-        generator_name="generator",
+        generator_name=generator_name,
         output_dir=str(tmp_path),
     )
     return engine_args.call_args.kwargs
@@ -680,6 +767,61 @@ def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
     assert engine_kwargs["scheduling_policy"] == "priority"
 
 
+@pytest.mark.parametrize("hold_sessions", [False, True])
+def test_simple_cpu_offload_uses_shared_coordination_without_store_settings(
+    monkeypatch, tmp_path, hold_sessions
+):
+    transfer = KVTransferConfig(
+        kv_connector="SimpleCPUOffloadConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"cpu_bytes_to_use_per_rank": 1 << 30},
+    )
+    original = copy.deepcopy(transfer)
+    holder_build = Mock()
+    monkeypatch.setattr(VLLMSessionKVHolder.Config, "build", holder_build)
+    kwargs = _build_engine_kwargs(
+        monkeypatch,
+        tmp_path,
+        Generator.Config(
+            model=_MODEL_CONFIG,
+            parallelism=InferenceParallelismConfig(tensor_parallel_degree=2),
+            engine=VLLMEngine.Config(
+                kv_transfer_config=transfer,
+                session_kv_holder=(
+                    VLLMSessionKVHolder.Config() if hold_sessions else None
+                ),
+            ),
+        ),
+    )
+    resolved = kwargs["kv_transfer_config"]
+    assert KVConnectorFactory.get_connector_class(resolved) is SimpleCPUOffloadConnector
+    assert kwargs["scheduler_cls"].endswith(
+        "cpu_kv_offload.create_kv_offload_scheduler"
+    )
+    assert resolved.kv_connector_extra_config == original.kv_connector_extra_config
+    assert transfer == original
+    if hold_sessions:
+        scheduler = (
+            vllm_engine_module.LLMEngine.from_engine_args.return_value.engine_core.engine_core.scheduler
+        )
+        holder_build.assert_called_once_with(
+            scheduler=scheduler, offload_connector=scheduler.connector
+        )
+    else:
+        holder_build.assert_not_called()
+
+
+def test_custom_kv_connector_rejected_before_engine_creation():
+    with pytest.raises(ValueError, match="custom kv_connector_module_path"):
+        VLLMEngine.Config(
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="SimpleCPUOffloadConnector",
+                kv_role="kv_both",
+                kv_connector_module_path="custom.cpu_offload_connector",
+            )
+        )
+
+
 @pytest.mark.parametrize(
     "key, match",
     [
@@ -691,6 +833,7 @@ def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
             r"use Generator\.Config\.max_num_batched_tokens",
         ),
         ("seed", r"use Generator\.Config\.debug\.seed"),
+        ("kv_transfer_config", r"use VLLMEngine\.Config\.kv_transfer_config"),
     ],
 )
 def test_extra_engine_args_rejects_torchtitan_owned_keys(key, match):

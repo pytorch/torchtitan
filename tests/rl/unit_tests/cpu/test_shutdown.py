@@ -287,6 +287,7 @@ def _set_generator_router(rl_trainer, generators):
         InterGeneratorRouter(
             InterGeneratorRouter.Config(),
             generators=[_service(generator) for generator in generators],
+            holds_session_kv=False,
         )
     )
 
