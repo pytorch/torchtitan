@@ -21,7 +21,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpointer import DATALOADER
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
-from torchtitan.components.loss import combine_loss_metrics, loss_metric_reduce_op
+from torchtitan.components.loss import combine_loss_metrics, divide_token_sum_metrics
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validator import BaseValidator, Validator
 from torchtitan.config import (
@@ -375,6 +375,7 @@ class Trainer(Configurable):
         # Losses are sums; divide by the step's loss tokens (at least 1, so a
         # step with none logs 0).
         num_global_loss_tokens = int(engine.global_loss_token_count)
+        loss_token_divisor = max(num_global_loss_tokens, 1)
         loss_sum = forward_backward_result.loss
         mean_num_flops = self._local_num_flops_since_last_log
 
@@ -382,27 +383,24 @@ class Trainer(Configurable):
             sl.log_trace_scalar({"global_valid_tokens": num_global_loss_tokens})
 
             # Combine loss metrics over microbatches and loss-mesh ranks; under PP,
-            # ranks without the last stage have none. /mean and /frac metrics are
-            # token sums, so they are divided by the step's loss tokens like the loss.
+            # ranks without the last stage have none.
             # TODO(#4202): migrate loss-metric collection to the distributed
             # tensor logging framework once it lands.
             loss_mesh = parallelism_context.get_optional_mesh("loss")
-            loss_metrics = {
-                key: float(value.item())
-                / (
-                    max(num_global_loss_tokens, 1)
-                    if loss_metric_reduce_op(key) == "sum"
-                    else 1
-                )
-                for key, value in combine_loss_metrics(
-                    (
-                        microbatch_metrics
-                        for group_metrics in forward_backward_result.loss_metrics
-                        for microbatch_metrics in group_metrics
-                    ),
-                    mesh=loss_mesh,
-                ).items()
-            }
+            loss_metrics = divide_token_sum_metrics(
+                {
+                    key: float(value.item())
+                    for key, value in combine_loss_metrics(
+                        (
+                            microbatch_metrics
+                            for group_metrics in forward_backward_result.loss_metrics
+                            for microbatch_metrics in group_metrics
+                        ),
+                        mesh=loss_mesh,
+                    ).items()
+                },
+                num_global_loss_tokens,
+            )
 
             if parallelism_context.dp_cp_enabled:
 
@@ -421,7 +419,7 @@ class Trainer(Configurable):
                         loss_mesh,
                     ),
                 )
-                global_avg_loss = global_loss_sum / max(num_global_loss_tokens, 1)
+                global_avg_loss = global_loss_sum / loss_token_divisor
                 if parallelism_context.dp_enabled:
                     dp_mesh = parallelism_context.get_mesh("dp")
                     mean_num_flops = (
@@ -436,8 +434,8 @@ class Trainer(Configurable):
                         / dp_mesh.size()
                     )
             else:
-                global_avg_loss = global_max_loss = float(loss_sum.item()) / max(
-                    num_global_loss_tokens, 1
+                global_avg_loss = global_max_loss = (
+                    float(loss_sum.item()) / loss_token_divisor
                 )
                 global_ntokens_seen = engine.ntokens_seen
 

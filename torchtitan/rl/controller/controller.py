@@ -105,6 +105,7 @@ from typing import Any
 # and in train.py; see the note there.
 import torch
 
+from torchtitan.components.loss import divide_token_sum_metrics
 from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import (
@@ -121,7 +122,6 @@ from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
     compute_rollout_metrics,
-    divide_token_sums,
     forward_backward_wait_and_busy_seconds,
     MetricsTimer,
 )
@@ -1247,11 +1247,11 @@ class Controller(Configurable):
                 step_num_loss_tokens = sum(
                     batch.num_loss_tokens for batch in step_batches
                 )
-                fwd_bwd_metrics = divide_token_sums(
+                fwd_bwd_metrics = divide_token_sum_metrics(
                     combine_microbatch_metrics(
                         [metrics for metrics, _ in forward_backward_results]
                     ),
-                    num_loss_tokens=step_num_loss_tokens,
+                    step_num_loss_tokens,
                 )
                 if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
                     logger.error("Loss is NaN/Inf; training diverged")

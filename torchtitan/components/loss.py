@@ -680,6 +680,23 @@ def loss_metric_reduce_op(key: str) -> Literal["sum", "max", "min"]:
     )
 
 
+def divide_token_sum_metrics(
+    metrics: dict[str, float], num_loss_tokens: int
+) -> dict[str, float]:
+    """Divide the token-sum metrics (``/mean``, ``/frac``) by the loss-token count.
+
+    Example:
+        divide_token_sum_metrics({"loss/mean": 3.0, "x/max": 5.0}, num_loss_tokens=10)
+        # -> {"loss/mean": 0.3, "x/max": 5.0}
+    """
+    # A step with no loss tokens has all-zero sums; dividing by 1 keeps them zero.
+    divisor = max(num_loss_tokens, 1)
+    return {
+        key: value / divisor if loss_metric_reduce_op(key) == "sum" else value
+        for key, value in metrics.items()
+    }
+
+
 _LOCAL_REDUCE_FNS = {"sum": torch.add, "max": torch.maximum, "min": torch.minimum}
 _DIST_REDUCE_OPS = {
     "sum": dist.ReduceOp.SUM.name,
@@ -740,7 +757,7 @@ class ChunkedLossWrapper(Loss[LossInput]):
     2. Split each hidden state and its labels into N chunks along seq dim
     3. Detach each hidden-state chunk at the lm_head boundary
     4. Disable FSDP reshard on lm_head across all outputs and chunks
-    5. For each chunk: lm_head on each output -> loss_fn(logits, labels, gvt) -> backward()
+    5. For each chunk: lm_head on each output -> loss_fn(logits, labels) -> backward()
     6. Assemble one full gradient [T, D] per output via GradAccumulator
     7. Backward through the decoder once with all accumulated gradients
 
