@@ -19,7 +19,7 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torchstore import RankRole
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
-from torchtitan.config import Configurable, TORCH_DTYPE_MAP
+from torchtitan.config import Configurable, PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import maybe_apply_numa_binding, utils as dist_utils
 from torchtitan.models.base.model import BaseModel
@@ -75,11 +75,11 @@ class Trainer(Configurable):
 
     Args:
         config: Trainer.Config with all model/optimizer/parallelism settings.
+        precision: Parameter, compute, and gradient-reduction dtypes, from
+            ``Controller.Config.precision``.
         max_num_documents: Fixed varlen metadata capacity configured by the batcher.
         hf_assets_path: Path to HF assets folder for checkpoint loading.
             Shared with the generator (both load from the same HF checkpoint).
-        generator_dtype: Generator dtype (e.g. "bfloat16"). Needed to cast weights to generator dtype
-            if generator dtype differs from training dtype. If None, no cast is performed.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -93,9 +93,9 @@ class Trainer(Configurable):
         self,
         config: Config,
         *,
+        precision: PrecisionConfig,
         max_num_documents: int | None,
         hf_assets_path: str = "",
-        generator_dtype: str = "",
         output_dir: str,
     ):
         init_logger()
@@ -122,6 +122,7 @@ class Trainer(Configurable):
         self.engine = TrainingEngine(
             config,
             model_config=config.model,
+            precision=precision,
             max_num_documents=max_num_documents,
             output_dir=output_dir,
         )
@@ -129,10 +130,13 @@ class Trainer(Configurable):
         self._resume_state = MirroredState()
         maybe_apply_numa_binding(engine.device.index, engine.device.type)
 
-        # Only cast when the generator and training dtypes differ.
-        training_dtype = TORCH_DTYPE_MAP[config.training.dtype]
-        gen_dtype = TORCH_DTYPE_MAP[generator_dtype] if generator_dtype else None
-        self._transfer_dtype = gen_dtype if gen_dtype != training_dtype else None
+        # Send parameters in the dtype the generator computes with, as FSDP casts
+        # them for the trainer's forward. Only cast when it differs.
+        self._transfer_dtype = (
+            TORCH_DTYPE_MAP[precision.param_dtype]
+            if precision.param_dtype != precision.dtype
+            else None
+        )
 
         self.gpu_peak_flops = utils.get_peak_flops(
             engine.device_memory_monitor.device_name
@@ -317,6 +321,7 @@ class Trainer(Configurable):
             global_loss_token_counts=global_loss_token_counts,
             global_routing_token_counts=global_routing_token_counts,
         )
+        self._num_flops = result.num_flops
         if not engine.pp_has_last_stage:
             return None
         microbatch_metrics: list[dict[str, float]] = []
@@ -372,11 +377,24 @@ class Trainer(Configurable):
 
         # TODO: Move performance, LR, and auxiliary-loss reporting into a shared
         # trainer metrics interface while preserving controller-side aggregation.
+        mean_num_flops = self._num_flops
+        if engine.parallelism_context.dp_enabled:
+            dp_mesh = engine.parallelism_context.get_mesh("dp")
+            mean_num_flops = (
+                dist_utils.dist_sum(
+                    torch.tensor(
+                        mean_num_flops, dtype=torch.float64, device=engine.device
+                    ),
+                    dp_mesh,
+                )
+                / dp_mesh.size()
+            )
+
         performance = compute_training_performance_metrics(
             num_tokens=self._step_num_tokens_per_dp_rank,
             elapsed_time=time.perf_counter() - self._step_compute_start,
             non_data_parallel_size=engine.parallelism_context.non_data_parallel_size,
-            num_flops_per_token=engine.num_flops_per_token,
+            num_flops=mean_num_flops,
             gpu_peak_flops=self.gpu_peak_flops,
             has_quantization=engine.has_quantization,
         )
@@ -444,13 +462,13 @@ class Trainer(Configurable):
         await asyncio.to_thread(
             self._put_model_state_dict,
             model_state_dict,
-            self._model_buffer_names(model_state_dict),
+            self._preserve_dtype_keys(model_state_dict),
         )
 
     def _put_model_state_dict(
         self,
         model_state_dict: dict[str, torch.Tensor],
-        buffer_names: frozenset[str],
+        preserve_dtype_keys: frozenset[str],
     ) -> None:
         """Publish without blocking the actor event loop."""
         # The current stream is thread-local; set it in this worker so TorchStore
@@ -466,8 +484,9 @@ class Trainer(Configurable):
                     "model_state_dict",
                     direct_rdma=False,
                     transfer_dtype=self._transfer_dtype,
-                    # Buffers keep their registered dtype when weights are cast.
-                    preserve_dtype_keys=buffer_names,
+                    # Buffers and `preserve_dtype_params` keep their dtype when
+                    # weights are cast.
+                    preserve_dtype_keys=preserve_dtype_keys,
                 )
             )
 
@@ -483,17 +502,21 @@ class Trainer(Configurable):
             for name, tensor in model_part.state_dict().items()
         }
 
-    def _model_buffer_names(
+    def _preserve_dtype_keys(
         self, model_state_dict: dict[str, torch.Tensor]
     ) -> frozenset[str]:
-        """Return the `model_state_dict` keys of this rank's buffers.
+        """Return the `model_state_dict` keys sent in their own dtype: this rank's
+        buffers and `preserve_dtype_params`.
 
         Non-persistent buffers (e.g. RoPE caches) are not in the state dict.
         """
         return frozenset(
             canonical_fqn(name)
             for model_part in self.engine.model_parts
-            for name, _ in model_part.named_buffers()
+            for name, _ in (
+                *model_part.named_buffers(),
+                *model_part.named_preserve_dtype_params(),
+            )
         ).intersection(model_state_dict)
 
     async def initialize_torchstore_client(self) -> None:

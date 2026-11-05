@@ -4,18 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Convert kernel span ring steps into a Chrome trace for Perfetto.
+"""Convert recorded kernel span steps into a Chrome trace for Perfetto.
 
-Reads the step files ``Profiler.Config.kernel_span_ring`` writes (see
-``torchtitan/observability/kernel_span_ring.py``) and joins each kernel span to
+Reads the step files ``Profiler.Config.kernel_spans`` writes (see
+``torchtitan/observability/kernel_spans.py``) and joins each kernel span to
 its CUDA graph node, so slices carry the kernel name and the node's graph
 annotations. Ranks become processes and CUDA streams become threads; each step
 also gets a slice on a ``steps`` track spanning its kernels.
 
 Example::
 
-    python scripts/kernel_span_ring_to_trace.py \\
-        outputs/profiling/kernel_span_ring --steps 150-152 --ranks 0,1 \\
+    python scripts/kernel_spans_to_trace.py \\
+        outputs/profiling/kernel_spans --steps 150-152 --ranks 0,1 \\
         --output trace.json.gz
 
 Open the output in https://ui.perfetto.dev.
@@ -53,16 +53,16 @@ def _demangle(name: str) -> str:
     return demangle(name)
 
 
-def _rank_dirs(ring_dir: str, ranks: list[int] | None) -> dict[int, str]:
+def _rank_dirs(spans_dir: str, ranks: list[int] | None) -> dict[int, str]:
     found = {}
-    for path in glob.glob(os.path.join(ring_dir, "rank*")):
+    for path in glob.glob(os.path.join(spans_dir, "rank*")):
         if (match := _RANK_DIR_RE.search(path)) and os.path.isdir(path):
             found[int(match.group(1))] = path
     if ranks is None:
         return dict(sorted(found.items()))
     missing = [rank for rank in ranks if rank not in found]
     if missing:
-        raise ValueError(f"no rank directories for ranks {missing} under {ring_dir}")
+        raise ValueError(f"no rank directories for ranks {missing} under {spans_dir}")
     return {rank: found[rank] for rank in ranks}
 
 
@@ -163,7 +163,7 @@ def _rank_events(rank: int, rank_dir: str, steps: set[int]) -> tuple[list, set[i
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("ring_dir", help="kernel span ring folder holding rank*/ dirs")
+    parser.add_argument("spans_dir", help="kernel spans folder holding rank*/ dirs")
     parser.add_argument(
         "--steps", required=True, help='steps to convert, e.g. "150-152,160"'
     )
@@ -174,11 +174,11 @@ def main() -> None:
     steps = set(_parse_int_list(args.steps))
     ranks = None if args.ranks is None else _parse_int_list(args.ranks)
     events: list[dict] = []
-    for rank, rank_dir in _rank_dirs(args.ring_dir, ranks).items():
+    for rank, rank_dir in _rank_dirs(args.spans_dir, ranks).items():
         rank_events, found = _rank_events(rank, rank_dir, steps)
         if missing := sorted(steps - found):
             print(
-                f"rank {rank}: steps {missing} are not in the ring (evicted or not reached)"
+                f"rank {rank}: steps {missing} are not on disk (evicted or not reached)"
             )
         events.extend(rank_events)
 

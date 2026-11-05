@@ -38,7 +38,6 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.deepseek_v4 import build_model_config, DeepSeekV4Model
 from torchtitan.models.deepseek_v4.mtp import MTPCrossEntropyLoss
 from torchtitan.observability.metrics import MetricsProcessor
-from torchtitan.observability.profiler import Profiler
 from torchtitan.trainer import Trainer
 
 _NSCoefficients = tuple[float, float, float]
@@ -309,12 +308,6 @@ def deepseek_v4_debugmodel(
                 global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
-        profiler=Profiler.Config(
-            enable_profiling=False,
-            profile_freq=10,
-            profiler_active=10,
-            profiler_warmup=0,
-        ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
@@ -342,7 +335,6 @@ def deepseek_v4_debugmodel(
             # cannot run under CUDA graphs.
             disable_accelerator_graphs=parallelism.expert_parallel_degree > 1,
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=parallelism,
@@ -382,12 +374,6 @@ def deepseek_v4_mtp_debugmodel(
         loss=MTPCrossEntropyLoss.Config(
             global_vocab_size=decoder_vocab_size(model_config),
         ),
-        profiler=Profiler.Config(
-            enable_profiling=False,
-            profile_freq=10,
-            profiler_active=10,
-            profiler_warmup=0,
-        ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
@@ -413,7 +399,6 @@ def deepseek_v4_mtp_debugmodel(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=parallelism,
@@ -438,12 +423,6 @@ def deepseek_v4_flash(
                 global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
-        profiler=Profiler.Config(
-            enable_profiling=False,
-            profile_freq=10,
-            profiler_active=10,
-            profiler_warmup=0,
-        ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
@@ -468,7 +447,6 @@ def deepseek_v4_flash(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=parallelism,
@@ -493,12 +471,6 @@ def deepseek_v4_pro(
                 global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
-        profiler=Profiler.Config(
-            enable_profiling=False,
-            profile_freq=10,
-            profiler_active=10,
-            profiler_warmup=0,
-        ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
@@ -523,7 +495,6 @@ def deepseek_v4_pro(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=parallelism,

@@ -5,14 +5,15 @@
 Configure profiling in the selected recipe:
 
 ```python
+from torchtitan.observability.profiler import MemorySnapshotProfiler
 from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
 
 def my_debug_recipe() -> Trainer.Config:
     config = llama3_debugmodel()
-    config.profiler.enable_memory_snapshot = True
-    config.profiler.save_memory_snapshot_folder = "memory_snapshot"
-    config.profiler.memory_snapshot_freq = 3
+    config.profiler.memory_snapshot = MemorySnapshotProfiler.Config(
+        save_folder="memory_snapshot", freq=3
+    )
     return config
 ```
 
@@ -20,17 +21,16 @@ Launch it with `MODULE=my_project.recipes CONFIG=my_debug_recipe
 ./run_train.sh`. In case of an OOM, the snapshot is written under
 `step_{step:012d}_exit`; regular snapshots use `step_{step:012d}`.
 
-* `profiler.enable_memory_snapshot`: enables memory profiling.
-* `profiler.save_memory_snapshot_folder`: configures the output folder.
-* `profiler.memory_snapshot_freq`: controls how often regular snapshots are
-  taken and defaults to `profiler.profile_freq` when unset.
+* `save_folder`: configures the output folder.
+* `freq`: controls how often regular snapshots are taken (default 10).
+* `max_entries`: caps the recorded alloc/free history.
 
 You can find the saved pickle files in your output folder.
 To visualize a snapshot file, you can drag and drop it to <https://pytorch.org/memory_viz>. To learn more details on memory profiling, please visit this [tutorial](https://pytorch.org/blog/understanding-gpu-memory-1/).
 
 ## Profile CUDA with Cuspy
 
-Configuring `Profiler.Config.cuspy` in your TorchTitan job enables the Cuspy profiler backend, PyTorch's in-process CUPTI collector, instead of Kineto. On top of what Kineto records, it can add:
+Setting `profiler.trace` to `CuspyTraceProfiler` instead of `KinetoTraceProfiler` collects CUDA activity with Cuspy, PyTorch's in-process CUPTI collector, instead of Kineto. On top of what Kineto records, it can add:
 
 * GPU performance metrics sampled with CUPTI PM sampling, e.g. SM activity, DRAM and NVLink bandwidth.
 * GPU power, clock and thermal counters (`enable_environment_counters`).
@@ -51,14 +51,13 @@ Enable it in a Python recipe:
 
 ```python
 from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
-from torchtitan.observability.profiler import CuspyProfilerConfig
+from torchtitan.observability.profiler import CuspyTraceProfiler
 
 
 def llama3_debugmodel_cuspy():
     config = llama3_debugmodel()
-    config.profiler.enable_profiling = True
-    config.profiler.cuspy = CuspyProfilerConfig(
-        performance_metrics=["sm__cycles_active.avg"],
+    config.profiler.trace = CuspyTraceProfiler.Config(
+        performance_metrics=["sm__cycles_active.avg"]
     )
     return config
 ```
@@ -88,19 +87,19 @@ The sample buffer is held in process memory while profiling, not written to the 
 
 ## Always-on kernel spans
 
-`Profiler.Config.kernel_span_ring` records every CUDA kernel's GPU start and end
-time on every training step with Cuspy, so a slow step can be inspected after the
-fact without having scheduled a profiling window for it. Each rank keeps the most
-recent `num_steps_retained` steps (default 1000) on disk:
+`Profiler.Config.kernel_spans` records every CUDA kernel's GPU start and
+end time on every training step with Cuspy, so a slow step can be inspected
+after the fact without having scheduled a profiling window for it. Each rank
+keeps the most recent `num_steps_retained` steps (default 1000) on disk:
 
 ```python
-from torchtitan.observability.profiler import KernelSpanRingConfig
+from torchtitan.observability.kernel_spans import KernelSpanRecorder
 
-config.profiler.kernel_span_ring = KernelSpanRingConfig(num_steps_retained=1000)
+config.profiler.kernel_spans = KernelSpanRecorder.Config(num_steps_retained=1000)
 ```
 
 ```
-<dump_folder>/profiling/kernel_span_ring/
+<dump_folder>/profiling/kernel_spans/
   rank0/
     steps_000000000901_000000001000.npz   # one file per steps_per_file (100) steps, oldest deleted first
     steps_000000001001_000000001100.npz
@@ -109,10 +108,12 @@ config.profiler.kernel_span_ring = KernelSpanRingConfig(num_steps_retained=1000)
 ```
 
 Kernels are named from the CUDA graph nodes they were replayed from, so this
-requires accelerator graphs (the default). Each file carries the kernel names and
+requires accelerator graphs (the default). It holds Cuspy's CUPTI subscription,
+so it can run alongside a `CuspyTraceProfiler` trace but not
+`KinetoTraceProfiler`. Each file carries the kernel names and
 graph annotations (`mark_kernels` regions, c10d collective metadata) of the graphs
 its steps ran; eager kernels outside graphs are recorded without names. See
-[`kernel_span_ring.py`](kernel_span_ring.py) for the file format.
+[`kernel_spans.py`](kernel_spans.py) for the file format.
 
 Requirements are the Cuspy ones above, plus CUDA graph node ids: a CUDA 13.1 or
 newer driver, or cuda-compat 13.1 or newer on `LD_LIBRARY_PATH` (see
@@ -121,8 +122,8 @@ newer driver, or cuda-compat 13.1 or newer on `LD_LIBRARY_PATH` (see
 Convert steps into a Chrome trace and open it in <https://ui.perfetto.dev>:
 
 ```bash
-python scripts/kernel_span_ring_to_trace.py \
-    outputs/profiling/kernel_span_ring --steps 1050-1052 --ranks 0-3 \
+python scripts/kernel_spans_to_trace.py \
+    outputs/profiling/kernel_spans --steps 1050-1052 --ranks 0-3 \
     --output trace.json.gz
 ```
 

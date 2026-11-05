@@ -17,7 +17,7 @@ How data flows, per rank:
 
 - KernelSpanRecorder receives kernel records from CUPTI and works out which
   training step each kernel belongs to.
-- _KernelSpanRing buffers finished steps, writes them to files, and deletes old
+- _KernelSpanFiles buffers finished steps, writes them to files, and deletes old
   files so that about num_steps_retained steps stay on disk.
 
 Each file, named steps_<first step>_<last step>.npz, holds one row per kernel:
@@ -27,35 +27,37 @@ step_offsets marks where each step's rows begin. The file also stores a node
 table, recorded when each CUDA graph was instantiated, that maps graph node ids
 to kernel names and graph annotations (mark_kernels regions, c10d collective
 metadata). Node ids are only meaningful within one process, so every file
-carries its own table. scripts/kernel_span_ring_to_trace.py turns chosen steps
+carries its own table. scripts/kernel_spans_to_trace.py turns chosen steps
 into a Chrome/Perfetto trace.
 
 Caveats: steps are cut at the moment each step ends on the host. The host
 usually runs ahead of the GPU, so a step can include the tail of earlier steps.
 Steps not yet written to a file are lost if the process is killed.
 
-Imported lazily by torchtitan.observability.profiler.Profiler, since it needs
-Cuspy and the cupti-python package.
+Cuspy and the cupti-python package are imported only when a recorder is built,
+so the config can be imported without them.
 """
 
 import json
+import logging
 import os
 from collections import deque
+
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import torch
 
-# TODO: these are private torch APIs; move to a public per-step span observer once
-# torch exposes one.
-from cupti.cupti import ActivityKind
-from torch.profiler._cuspy.observers.node_timer import NodeTimerObserver
+from torchtitan.config import Configurable
+from torchtitan.observability import structured_logger as sl
 
-from torchtitan.observability.profiler import (
-    cuspy_unavailable_reasons,
-    CuspyProfilerConfig,
+logger = logging.getLogger(__name__)
+
+KERNEL_SPANS_DIR = (
+    "profiling/kernel_spans"  # KernelSpanRecorder.Config.save_folder default
 )
-
+KERNEL_SPANS_RANK_DIR = "rank{rank}"  # KERNEL_SPANS_DIR/{KERNEL_SPANS_RANK_DIR}
 STEPS_FILE = "steps_{first_step:012d}_{last_step:012d}.npz"
 
 # One row per kernel. Times are unix nanoseconds; graph_node_id is 0 for eager
@@ -70,7 +72,7 @@ _SPAN_DTYPE = np.dtype(
 )
 
 
-class KernelSpanRecorder(NodeTimerObserver):
+class KernelSpanRecorder(Configurable):
     """Receives kernel records from CUPTI and files each kernel into the training
     step it ran in.
 
@@ -89,49 +91,86 @@ class KernelSpanRecorder(NodeTimerObserver):
     Each step() call records the step's end, flushes CUPTI (without a device
     sync) to collect newly reported kernels, and cuts the unfiled kernels at the
     step ends of every finished step (see _close_steps). Finished steps go to a
-    _KernelSpanRing, which writes them to disk. Kernels are named from the CUDA
+    _KernelSpanFiles, which writes them to disk. Kernels are named from the CUDA
     graph nodes they ran as, so training must run in CUDA graphs; kernels
     launched outside graphs are recorded without names.
 
-    Args:
-        ring_dir: Directory for this rank's step files. Files already there (e.g.
-            from before a restart) are left alone and never deleted.
-        global_step: The last completed training step; the first :meth:`step`
-            call ends step ``global_step + 1``.
-        num_steps_retained: Number of steps to keep on disk, rounded up to whole
-            files.
-        steps_per_file: Number of complete steps written per file.
+    Step files already on disk from before a restart are left alone and never
+    deleted.
     """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        save_folder: str = KERNEL_SPANS_DIR
+        """Step file location, relative to the run's output folder."""
+
+        num_steps_retained: int = 1000
+        """Number of steps to keep on disk per rank, rounded up to whole files. A step
+        takes about 32 bytes per kernel, e.g. 1.6 MB for a step of 50k kernels, so the
+        default keeps about 1.6 GB per rank at that size."""
+
+        steps_per_file: int = 100
+        """Number of steps buffered in host memory and written together, on the
+        training thread. Steps not yet written are lost if the process is killed.
+        Writing every step costs up to ~0.5 ms/step at 50k-200k kernels/step; batching
+        100 steps about halves that, and a 100-step file of ~5k-kernel steps takes
+        ~20 ms to write."""
+
+        def __post_init__(self) -> None:
+            if self.num_steps_retained <= 0:
+                raise ValueError(
+                    "profiler.kernel_spans.num_steps_retained must be positive, got "
+                    f"{self.num_steps_retained}."
+                )
+            if self.steps_per_file <= 0:
+                raise ValueError(
+                    "profiler.kernel_spans.steps_per_file must be positive, got "
+                    f"{self.steps_per_file}."
+                )
 
     def __init__(
         self,
-        ring_dir: str,
+        config: Config,
         *,
         global_step: int,
-        num_steps_retained: int,
-        steps_per_file: int,
+        base_folder: str,
+        leaf_folder: str,
+        rank: int,
     ) -> None:
+        # Imported here: they need Cuspy and cupti-python, and profiler.py imports
+        # this module for the config.
+        # TODO: these are private torch APIs; move to a public per-step span
+        # observer once torch exposes one.
+        from cupti.cupti import ActivityKind
+        from torch.profiler._cuspy.observers.node_timer import NodeTimerObserver
+
+        from torchtitan.observability.profiler import (
+            cuspy_unavailable_reasons,
+            CuspyTraceProfiler,
+        )
+
         if not torch.cuda.is_available():
             raise ValueError(
-                "profiler.kernel_span_ring is set, but no CUDA device is available."
+                "profiler.kernel_spans is set, but no CUDA device is available."
             )
-        if reasons := cuspy_unavailable_reasons(CuspyProfilerConfig()):
+        if reasons := cuspy_unavailable_reasons(CuspyTraceProfiler.Config()):
             raise ValueError(
-                "profiler.kernel_span_ring is set, but Cuspy cannot run here:\n  - "
+                "profiler.kernel_spans is set, but Cuspy cannot run here:\n  - "
                 + "\n  - ".join(reasons)
             )
         if not torch.cuda.graph_annotations.is_available():
             raise ValueError(
-                "profiler.kernel_span_ring needs CUDA graph node ids, which are "
+                "profiler.kernel_spans needs CUDA graph node ids, which are "
                 "unavailable here; see torch.cuda.graph_annotations.is_available for "
                 "the driver and cuda.bindings requirements."
             )
-        super().__init__([ActivityKind.CONCURRENT_KERNEL])
-        if not self.available:
+        self._observer = NodeTimerObserver([ActivityKind.CONCURRENT_KERNEL])
+        if not self._observer.available:
             raise RuntimeError(
-                "profiler.kernel_span_ring could not register a Cuspy observer; "
+                "profiler.kernel_spans could not register a Cuspy observer; "
                 "see the preceding 'Cuspy observer unavailable' warning."
             )
+        # The last completed training step; the first step() call ends the next.
         self._step = global_step
         # (step, time the step ended on the host, unix ns) of each ended step whose
         # kernels may not all have arrived yet, oldest first.
@@ -144,22 +183,38 @@ class KernelSpanRecorder(NodeTimerObserver):
         self._instantiate_hook = torch.cuda.graphs.register_graph_instantiate_hook(
             self._record_graph_nodes
         )
-        self._ring = _KernelSpanRing(
-            ring_dir,
-            num_steps_retained=num_steps_retained,
-            steps_per_file=steps_per_file,
+        files_dir = os.path.join(
+            base_folder,
+            config.save_folder,
+            leaf_folder,
+            KERNEL_SPANS_RANK_DIR.format(rank=rank),
+        )
+        self._files = _KernelSpanFiles(
+            files_dir,
+            num_steps_retained=config.num_steps_retained,
+            steps_per_file=config.steps_per_file,
             graph_nodes=self._graph_nodes,
+        )
+        logger.info(
+            f"Kernel span recording active. Keeping the last "
+            f"{config.num_steps_retained} steps at {files_dir}"
         )
 
     def step(self) -> None:
         """End the current training step: record when it ended on the host, flush
         CUPTI without a device sync, and file the delivered kernels into steps."""
-        self._step += 1
-        self._open_step_ends.append(
-            (self._step, self.convert_time(self.now_record_ns()))
-        )
-        self._cuspy.flush(sync=False)
-        self._close_steps(close_all=False)
+        with sl.log_trace_span("kernel_span_recorder_step_call"):
+            self._step += 1
+            self._open_step_ends.append(
+                (
+                    self._step,
+                    self._observer.convert_time(self._observer.now_record_ns()),
+                )
+            )
+            # TODO: _cuspy is private; flush through a public observer API once
+            # torch has one.
+            self._observer._cuspy.flush(sync=False)
+            self._close_steps(close_all=False)
 
     def close(self) -> None:
         """Write every ended step and stop collecting.
@@ -168,10 +223,10 @@ class KernelSpanRecorder(NodeTimerObserver):
         """
         self._instantiate_hook.remove()
         # Fenced flush: blocks until every kernel that has run is delivered.
-        self._cuspy.flush(sync=True)
+        self._observer._cuspy.flush(sync=True)
         self._close_steps(close_all=True)
-        self._ring.write_remaining()
-        super().close()
+        self._files.write_remaining()
+        self._observer.close()
 
     def _record_graph_nodes(self, graph: torch.cuda.CUDAGraph) -> None:
         """Record the kernel name, launch geometry and annotations of every node of
@@ -196,7 +251,7 @@ class KernelSpanRecorder(NodeTimerObserver):
 
     def _close_steps(self, *, close_all: bool) -> None:
         """Cut the kernel timeline at each step's end and hand the finished steps to
-        the ring.
+        the step files.
 
         There are two timelines. The step ends, which step() records the moment each
         step ends on the host. And the kernels, which CUPTI reports late and in
@@ -210,7 +265,7 @@ class KernelSpanRecorder(NodeTimerObserver):
         and its own. Kernels arrive in the order they ran, so a step is finished
         once some kernel that started after its end has arrived. Each finished
         step's kernels are then cut off the front of the list and handed to the
-        ring; the rest wait for the next call.
+        step files; the rest wait for the next call.
 
         Args:
             close_all: Treat every step as finished. Used at shutdown, after a
@@ -227,7 +282,7 @@ class KernelSpanRecorder(NodeTimerObserver):
         self._open_step_ends = self._open_step_ends[len(complete_steps) :]
         for step, step_end_ns in complete_steps:
             num_in_step = np.searchsorted(self._unfiled_spans["start_ns"], step_end_ns)
-            self._ring.add_step(step, self._unfiled_spans[:num_in_step])
+            self._files.add_step(step, self._unfiled_spans[:num_in_step])
             self._unfiled_spans = self._unfiled_spans[num_in_step:]
 
     def _drain_spans(self) -> None:
@@ -238,36 +293,36 @@ class KernelSpanRecorder(NodeTimerObserver):
         can deliver a kernel that started before one already delivered on another
         stream, so the merged kernels are re-sorted.
         """
-        graph_node_id, start_ns, end_ns, stream_id = self.drain()
+        graph_node_id, start_ns, end_ns, stream_id = self._observer.drain()
         delivered = np.empty(len(start_ns), dtype=_SPAN_DTYPE)
         delivered["graph_node_id"] = graph_node_id
-        delivered["start_ns"] = self.convert_time_array(start_ns)
-        delivered["end_ns"] = self.convert_time_array(end_ns)
+        delivered["start_ns"] = self._observer.convert_time_array(start_ns)
+        delivered["end_ns"] = self._observer.convert_time_array(end_ns)
         delivered["stream_id"] = stream_id
         self._unfiled_spans = np.sort(
             np.concatenate([self._unfiled_spans, delivered]), order="start_ns"
         )
 
 
-class _KernelSpanRing:
+class _KernelSpanFiles:
     """Buffers complete steps and writes them ``steps_per_file`` at a time to one
     file, deleting the oldest files once the newer ones still hold
     ``num_steps_retained`` steps.
 
     Only files written by this instance are tracked and deleted; files already in
-    ``ring_dir`` (e.g. from before a restart) are left alone.
+    ``files_dir`` (e.g. from before a restart) are left alone.
     """
 
     def __init__(
         self,
-        ring_dir: str,
+        files_dir: str,
         *,
         num_steps_retained: int,
         steps_per_file: int,
         graph_nodes: dict[int, dict[int, dict[str, Any]]],
     ) -> None:
-        os.makedirs(ring_dir, exist_ok=True)
-        self._dir = ring_dir
+        os.makedirs(files_dir, exist_ok=True)
+        self._dir = files_dir
         self._num_steps_retained = num_steps_retained
         self._steps_per_file = steps_per_file
         # Filled by the recorder; read here to embed node tables.

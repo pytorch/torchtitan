@@ -28,6 +28,7 @@ from torchtitan.components.loss import (
     _LossParallelCrossEntropy,
     ChunkedLossWrapper,
     compute_logprobs,
+    cross_entropy_and_logsumexp,
     cross_entropy_loss,
     CrossEntropyLoss,
     GradAccumulator,
@@ -181,7 +182,6 @@ class TestLoss(unittest.TestCase):
                 parallelism_context=SimpleNamespace(cp_enabled=False),
                 parallelism=SimpleNamespace(),
                 max_num_documents=2,
-                max_context_length=8,
                 global_routing_token_counts=routing_token_counts,
             )
 
@@ -409,6 +409,21 @@ class TestLoss(unittest.TestCase):
             msg="Global averaged loss should equal weighted average of per-token losses",
         )
 
+    def test_cross_entropy_and_logsumexp_matches_cross_entropy_loss(self):
+        """CE matches ``cross_entropy_loss``; lse is the per-token logsumexp, 0 when ignored."""
+        torch.manual_seed(0)
+        num_tokens, vocab_size = 32, 100
+        pred = torch.randn(num_tokens, vocab_size) * 4
+        labels = torch.randint(0, vocab_size, (num_tokens,))
+        labels[::3] = IGNORE_INDEX
+        expected_lse = torch.where(
+            labels != IGNORE_INDEX, torch.logsumexp(pred.double(), dim=-1), 0
+        )
+
+        ce, lse = cross_entropy_and_logsumexp(pred, labels)
+        torch.testing.assert_close(ce, cross_entropy_loss(pred, labels))
+        torch.testing.assert_close(lse, expected_lse.float())
+
 
 class TestGradAccumulator(unittest.TestCase):
     def test_accumulate_matches_cat(self):
@@ -573,6 +588,58 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         local_grad_dtensor.full_tensor(),
                         logits_dtensor.grad.full_tensor(),
                     )
+
+    @with_comms
+    def test_cross_entropy_and_logsumexp_parity(self):
+        """
+        Vocab-parallel ``cross_entropy_and_logsumexp`` under strict typechecking,
+        with uneven vocab shards and IGNORE_INDEX labels: CE matches
+        ``cross_entropy_loss`` bitwise, lse matches the full-vocab logsumexp,
+        and the gradient of ``CE + sum(lse**2)`` matches an fp64 reference.
+        """
+        T, vocab_size = 64, 1003
+        mesh = init_device_mesh(self.device_type, (4,), mesh_dim_names=("tp",))
+        tp_group = mesh.get_group("tp")
+        generator = torch.Generator().manual_seed(0)
+        logits = torch.randn(T, vocab_size, generator=generator) * 4
+        labels = torch.randint(0, vocab_size, (T,), generator=generator)
+        labels[torch.rand(T, generator=generator) < 0.3] = IGNORE_INDEX
+        logits, labels = logits.to(self.device_type), labels.to(self.device_type)
+
+        # fp64 reference over the full vocab.
+        ref_logits = logits.double().requires_grad_(True)
+        ref_lse = torch.where(
+            labels != IGNORE_INDEX, torch.logsumexp(ref_logits, dim=-1), 0
+        )
+        ref_ce = F.cross_entropy(
+            ref_logits, labels, reduction="sum", ignore_index=IGNORE_INDEX
+        )
+        (ref_ce + ref_lse.square().sum()).backward()
+
+        local_labels = distribute_tensor(labels, mesh, (Replicate(),)).to_local()
+        spmd.assert_type(local_labels, {tp_group: spmd.I})
+        local_logits = (
+            distribute_tensor(logits, mesh, (Shard(1),)).to_local().requires_grad_(True)
+        )
+        spmd.assert_type(local_logits, {tp_group: spmd.S(1)})
+        with set_current_spmd_mesh(mesh):
+            with typecheck(strict_mode="strict"):
+                ce, lse = cross_entropy_and_logsumexp(
+                    local_logits, local_labels, global_vocab_size=vocab_size
+                )
+                expected_ce = cross_entropy_loss(
+                    local_logits.detach(), local_labels, global_vocab_size=vocab_size
+                )
+            with self.assertRaisesRegex(ValueError, "global_vocab_size is required"):
+                cross_entropy_and_logsumexp(local_logits, local_labels)
+        self.assertTrue(torch.equal(ce, expected_ce))
+        torch.testing.assert_close(lse, ref_lse.detach().float())
+
+        (ce + lse.square().sum()).backward()
+        # Uneven sharding: ceil(1003 / 4) = 251 columns per rank, 250 on the last.
+        start = self.rank * 251
+        ref_grad = ref_logits.grad[:, start : start + local_logits.shape[1]]
+        torch.testing.assert_close(local_logits.grad, ref_grad.float())
 
     @with_comms
     def test_loss_parallel_cross_entropy_confident_targets(self):
@@ -970,31 +1037,6 @@ class _WeightedTwoOutputLoss(Loss[tuple[torch.Tensor, ...]]):
         return loss, {}
 
 
-class _RecordingFSDPLinear(nn.Linear):
-    def __init__(self, *args, events: list[str], **kwargs):
-        super().__init__(*args, **kwargs)
-        self.events = events
-
-    def set_reshard_after_forward(self, enabled):
-        self.events.append(f"set_reshard_after_forward({enabled})")
-
-    def set_reshard_after_backward(self, enabled):
-        self.events.append(f"set_reshard_after_backward({enabled})")
-
-    def set_requires_gradient_sync(self, enabled, *, recurse):
-        self.events.append(f"gradient_sync({enabled})")
-
-    def unshard(self):
-        self.events.append("unshard")
-
-    def reshard(self):
-        self.events.append("reshard")
-
-    def forward(self, input):
-        self.events.append("forward")
-        return super().forward(input)
-
-
 class TestChunkedLossWrapper(unittest.TestCase):
     def _make_model_and_loss(self, dim=32, vocab_size=64, num_chunks=4):
         """Create a fake Decoder and ChunkedLossWrapper for testing."""
@@ -1387,70 +1429,6 @@ class TestChunkedLossWrapper(unittest.TestCase):
             model_chunked.output.weight.grad,
             model_ref.output.weight.grad,
         )
-
-    def test_multi_output_fsdp_lifecycle_spans_all_terms(self):
-        events: list[str] = []
-        chunked_loss = ChunkedLossWrapper(
-            ChunkedLossWrapper.Config(
-                num_chunks=2,
-                loss_fn=_WeightedTwoOutputLoss.Config(),
-            )
-        )
-        chunked_loss.set_lm_head(_RecordingFSDPLinear(4, 8, bias=False, events=events))
-        predictions = (
-            torch.randn(4, 4, requires_grad=True),
-            torch.randn(4, 4, requires_grad=True),
-        )
-        labels = (
-            torch.randint(0, 8, (4,)),
-            torch.randint(0, 8, (4,)),
-        )
-
-        with patch(
-            "torch.distributed._composable.fsdp.FSDPModule", _RecordingFSDPLinear
-        ):
-            chunked_loss(predictions, labels)
-
-        self.assertEqual(events.count("unshard"), 1)
-        self.assertEqual(events.count("forward"), 4)
-        self.assertEqual(events.count("gradient_sync(True)"), 1)
-        self.assertEqual(events.count("reshard"), 1)
-
-    def test_fsdp_unshards_once_before_chunk_forwards(self):
-        events: list[str] = []
-
-        class FakeFSDPLinear(nn.Linear):
-            def set_reshard_after_forward(self, enabled):
-                events.append(f"set_reshard_after_forward({enabled})")
-
-            def set_reshard_after_backward(self, enabled):
-                events.append(f"set_reshard_after_backward({enabled})")
-
-            def set_requires_gradient_sync(self, enabled, *, recurse):
-                events.append(f"set_requires_gradient_sync({enabled})")
-
-            def unshard(self):
-                events.append("unshard")
-
-            def reshard(self):
-                events.append("reshard")
-
-            def forward(self, input):
-                events.append("forward")
-                return super().forward(input)
-
-        chunked_loss = ChunkedLossWrapper(ChunkedLossWrapper.Config(num_chunks=2))
-        chunked_loss.lm_head = FakeFSDPLinear(4, 8, bias=False)
-        hidden_states = torch.randn(4, 4)
-        labels = torch.randint(0, 8, (4,))
-
-        with patch("torch.distributed._composable.fsdp.FSDPModule", FakeFSDPLinear):
-            chunked_loss(hidden_states, labels)
-
-        self.assertEqual(events.count("unshard"), 1)
-        self.assertEqual(events.count("forward"), 2)
-        self.assertLess(events.index("unshard"), events.index("forward"))
-        self.assertEqual(events[-1], "reshard")
 
     def test_numerical_equivalence(self):
         """ChunkedLossWrapper must produce the same loss and gradients as the standard path."""

@@ -173,7 +173,6 @@ def _qwen3_4b_verifiers_config(
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
-                max_context_length=max_total_tokens,
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -193,7 +192,6 @@ def _qwen3_4b_verifiers_config(
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             checkpointer=None,

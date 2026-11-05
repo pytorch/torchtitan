@@ -31,6 +31,7 @@ import os
 from typing import Any, TYPE_CHECKING
 
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.config import PrecisionConfig
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
@@ -42,6 +43,7 @@ from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
+from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 
 if TYPE_CHECKING:
@@ -196,8 +198,10 @@ def register_to_vllm(
     model_config: Decoder.Config,
     *,
     parallelism: InferenceParallelismConfig,
+    precision: PrecisionConfig,
     checkpointer_config: CheckpointManager.Config | None,
     dist_moe_runtime: DistMoeRuntime.Config | None = None,
+    model_state_dict_load_mode: ModelStateDictLoadMode,
 ) -> None:
     """Register the TorchTitan model class and the TorchTitan config parser with vLLM.
 
@@ -207,7 +211,7 @@ def register_to_vllm(
       1. ``VLLMModelFromSpec`` (subclass of ``VLLMModelWrapper``)
          with vLLM's ``ModelRegistry`` under the name ``VLLM_MODEL_NAME``.
          The dynamic subclass closes over
-         ``model_config``/``parallelism``/``checkpointer_config``
+         ``model_config``/``parallelism``/``precision``/``checkpointer_config``
          and forwards them when vLLM constructs the model.
       2. ``TorchTitanConfigParser`` (subclass of ``ConfigParserBase``)
          with vLLM's parser registry under ``TORCHTITAN_CONFIG_FORMAT``. This
@@ -230,11 +234,15 @@ def register_to_vllm(
             ``ParallelismContext``; the caller is responsible for translating the
             relevant fields (TP, EP) to ``EngineArgs`` so vLLM's own world
             layout matches.
+        precision: The trainer's dtypes, which the wrapper's model mirrors. The
+            caller passes ``precision.param_dtype`` as ``EngineArgs.dtype``.
         checkpointer_config: Optional CheckpointManager configuration for
             initial weight loading. Pass ``None`` for the RL loop, where
             weights arrive from TorchStore.
         dist_moe_runtime: ``DistMoeRuntime.Config(inference=True)`` for models
             with Dist-MoE routed experts; ``None`` otherwise.
+        model_state_dict_load_mode: ``Generator.Config``'s field; ``"cpu_prefetch"``
+            allocates the pinned CPU copy model state dicts are prefetched into.
     """
     has_gdn = any(
         isinstance(layer.attention, GDN.Config) for layer in model_config.layers
@@ -269,10 +277,12 @@ def register_to_vllm(
             super().__init__(
                 model_config=model_config,
                 parallelism=parallelism,
+                precision=precision,
                 checkpointer_config=checkpointer_config,
                 vllm_config=vllm_config,
                 prefix=prefix,
                 dist_moe_runtime=dist_moe_runtime,
+                model_state_dict_load_mode=model_state_dict_load_mode,
             )
 
     VLLMModelFromSpec.__name__ = VLLM_MODEL_NAME

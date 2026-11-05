@@ -20,7 +20,11 @@ from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLo
 from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.data.types import TrainingMicrobatch
-from torchtitan.components.loss import LossFunction
+from torchtitan.components.loss import (
+    combine_loss_metrics,
+    loss_metric_reduce_op,
+    LossFunction,
+)
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable
 from torchtitan.config.parallelism import ParallelismConfig
@@ -235,6 +239,8 @@ class Validator(BaseValidator):
             if self.parallelism_context.pp_enabled:
                 assert self.pp_schedule is not None
                 losses = [] if self.pp_has_last_stage else None
+                # The last stage's loss fills one dict per microbatch.
+                loss_metrics: list[dict[str, torch.Tensor]] = [{} for _ in prepared]
                 self.pp_schedule.eval(
                     arg_mbs=[(inputs,) for inputs, _, _ in prepared]
                     if self.pp_has_first_stage
@@ -243,6 +249,7 @@ class Validator(BaseValidator):
                     target_mbs=[labels for _, labels, _ in prepared]
                     if self.pp_has_last_stage
                     else None,
+                    loss_kwarg_mbs=[{"loss_metrics": m} for m in loss_metrics],
                     losses=losses,
                     return_outputs=False,
                 )
@@ -261,10 +268,11 @@ class Validator(BaseValidator):
                 assert len(prepared) == len(model_parts) == 1
                 inputs, labels, kwargs = prepared[0]
                 predictions = model_parts[0](inputs, **kwargs)
-                loss_sum, _ = self.loss_fn(predictions, labels)
+                loss_sum, metrics = self.loss_fn(predictions, labels)
+                loss_metrics = [metrics]
                 del predictions
             post_validate_fsdp_for_accelerator_graph(model_parts)
-        return loss_sum.detach()
+        return loss_sum.detach(), loss_metrics
 
     @sl.log_trace_span("eval")
     @torch.no_grad()
@@ -285,6 +293,7 @@ class Validator(BaseValidator):
             parallelism_context = self.parallelism_context
 
             accumulated_loss: torch.Tensor | None = None
+            accumulated_metrics: dict[str, torch.Tensor] = {}
             evaluate = None
             device_type = utils.device_type
             total_global_valid_tokens = torch.zeros(
@@ -347,17 +356,23 @@ class Validator(BaseValidator):
                             parallelism_context=parallelism_context,
                             parallelism=self.parallelism,
                             max_num_documents=self.dl_config.max_num_documents,
-                            max_context_length=self.seq_len,
                         )
                     prepared.append((inputs, labels, kwargs))
                 if evaluate is None:
                     evaluate = self._init_validate_fn(model_parts)
-                loss_sum = evaluate(prepared)
+                loss_sum, step_metrics = evaluate(prepared)
 
                 if accumulated_loss is None:
                     accumulated_loss = loss_sum.clone()
                 else:
                     accumulated_loss.add_(loss_sum)
+                # Clone: graph replay overwrites the output tensors.
+                accumulated_metrics = combine_loss_metrics(
+                    [
+                        accumulated_metrics,
+                        *({k: v.clone() for k, v in m.items()} for m in step_metrics),
+                    ]
+                )
                 total_global_valid_tokens.add_(global_valid_tokens)
                 num_steps += 1
 
@@ -377,15 +392,30 @@ class Validator(BaseValidator):
                     "validation loss. Ensure the validation batches contain unmasked "
                     "labels."
                 )
-            if parallelism_context.dp_cp_enabled:
-                global_loss_sum = dist_utils.dist_sum(
-                    accumulated_loss, parallelism_context.get_optional_mesh("loss")
-                )
+            loss_mesh = parallelism_context.get_optional_mesh("loss")
+            if loss_mesh is not None:
+                global_loss_sum = dist_utils.dist_sum(accumulated_loss, loss_mesh)
             else:
                 global_loss_sum = float(accumulated_loss.item())
             global_avg_loss = global_loss_sum / num_global_valid_tokens
 
-            self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
+            # The loss runs without token counts here, so /mean and /frac
+            # metrics are raw sums; normalize them like the loss above. Under
+            # PP, ranks without the last stage have none.
+            global_metrics = combine_loss_metrics([accumulated_metrics], mesh=loss_mesh)
+            extra_metrics = {
+                f"validation_metrics/{key}": value.item()
+                / (
+                    num_global_valid_tokens
+                    if loss_metric_reduce_op(key) == "sum"
+                    else 1
+                )
+                for key, value in global_metrics.items()
+            }
+
+            self.metrics_processor.log_validation(
+                loss=global_avg_loss, step=step, extra_metrics=extra_metrics
+            )
         finally:
             for module, training in modes:
                 module.training = training
