@@ -45,8 +45,14 @@ else:
 # These imports must remain after _dist_moe is defined because the child modules
 # import the proxy from this partially initialized package.
 from .mxfp8 import MXFP8DistMoeRoutedExperts  # noqa: E402
+from .nvfp4_fwd_bf16_bwd import NVFP4FwdBF16BwdDistMoeRoutedExperts  # noqa: E402
 from .routed_experts import DistMoeRoutedExperts  # noqa: E402
 from .runtime import DistMoeRuntime  # noqa: E402
 
 
-__all__ = ["DistMoeRoutedExperts", "DistMoeRuntime", "MXFP8DistMoeRoutedExperts"]
+__all__ = [
+    "DistMoeRoutedExperts",
+    "DistMoeRuntime",
+    "MXFP8DistMoeRoutedExperts",
+    "NVFP4FwdBF16BwdDistMoeRoutedExperts",
+]

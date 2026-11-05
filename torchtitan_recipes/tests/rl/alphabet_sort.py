@@ -13,6 +13,7 @@ verified recipes live in ``torchtitan_recipes.rl.alphabet_sort``.
 
 import dataclasses
 import os
+from typing import Literal
 
 from renderers import Qwen3RendererConfig
 
@@ -1075,6 +1076,116 @@ def rl_grpo_deepseek_v3_debug() -> Controller.Config:
     )
 
 
+def _configure_rl_dist_moe(
+    config: Controller.Config,
+    *,
+    scratch_capacity_factor: float,
+    expert_precision: Literal["bf16", "mxfp8", "nvfp4_fwd_bf16_bwd"] = "bf16",
+) -> Controller.Config:
+    """Enable Dist-MoE on both roles of an RL debug configuration."""
+    from torchtitan_recipes.models.deepseek_v3 import _require_dist_moe
+
+    _require_dist_moe()
+    from torchtitan.config.transform.dist_moe import DistMoeTransform
+    from torchtitan.distributed.activation_remat import ActivationRematConfig
+    from torchtitan.models.common.dist_moe import DistMoeRuntime
+
+    # Full activation checkpointing would replay dist_moe's forward in backward and
+    # corrupt its activation planner; ActivationRematConfig with no saved regions does not.
+    config.trainer.activation_remat = ActivationRematConfig(save_regions=[])
+    config.trainer.dist_moe_runtime = DistMoeRuntime.Config(
+        scratch_capacity_factor=scratch_capacity_factor
+    )
+    config.generator.dist_moe_runtime = DistMoeRuntime.Config(
+        scratch_capacity_factor=scratch_capacity_factor, inference=True
+    )
+    # The standard MoE dispatcher cannot be captured in a CUDA graph; Dist-MoE can,
+    # prefill and decode steps alike.
+    assert isinstance(config.generator.engine, VLLMEngine.Config)
+    config.generator.engine.cuda_graph.mode = "FULL"
+    config = _configure_ci(
+        config,
+        steps=3,
+        num_tokens_per_microbatch=4096,
+        max_generated_tokens=128,
+        use_hf_assets_from_env=False,
+    )
+    config.trainer = apply_transforms(
+        config.trainer, [DistMoeTransform(expert_precision=expert_precision)]
+    )
+    if expert_precision == "mxfp8":
+        from dist_moe import BlockScaledConfig
+
+        generator_transform = DistMoeTransform(
+            expert_precision="mxfp8",
+            block_scaled_config=BlockScaledConfig(pipeline="mega"),
+            mxfp8_mega_fused_inference=True,
+        )
+    else:
+        generator_transform = DistMoeTransform(expert_precision=expert_precision)
+    config.generator = apply_transforms(config.generator, [generator_transform])
+    return config
+
+
+def _rl_grpo_moe_debug_dist_moe_tp1_ep2_config(
+    *,
+    expert_precision: Literal["bf16", "mxfp8", "nvfp4_fwd_bf16_bwd"],
+) -> Controller.Config:
+    """Build the four-GPU Dist-MoE RL configuration."""
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_shard_degree=2,
+        tensor_parallel_degree=1,
+        data_parallel_replicate_degree=1,
+        expert_parallel_degree=2,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=2,
+        tensor_parallel_degree=1,
+        expert_parallel_degree=2,
+    )
+    config = rl_grpo_qwen3_moe_debug_varlen()
+    config.trainer.parallelism = trainer_parallelism
+    config.generator.parallelism = generator_parallelism
+    # Rebuild both model configs because their expert sharding depends on the
+    # final role-specific meshes.
+    config.trainer.model, config.generator.model = build_rl_model_configs(
+        build_model_config,
+        "debugmodel_moe",
+        seq_len=config.trainer.training.max_context_length,
+        attn_backend="varlen",
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
+    )
+    config = _configure_rl_dist_moe(
+        config,
+        scratch_capacity_factor=2.0,
+        expert_precision=expert_precision,
+    )
+    config.async_loop.validation = ValidationConfig(steps=0)
+    return config
+
+
+def rl_grpo_moe_debug_dist_moe_tp1_ep2() -> Controller.Config:
+    """Four-GPU BF16 Dist-MoE RL loop with two trainer and two generator GPUs.
+
+    The trainer uses FSDP=2 and EP=2. The generator uses vLLM DP=2 and EP=2,
+    preserving uneven request scheduling across its two DP ranks.
+    """
+    return _rl_grpo_moe_debug_dist_moe_tp1_ep2_config(expert_precision="bf16")
+
+
+def rl_grpo_moe_debug_dist_moe_mxfp8_tp1_ep2() -> Controller.Config:
+    """Four-GPU MXFP8 Dist-MoE RL loop with two trainer and two generator GPUs."""
+    return _rl_grpo_moe_debug_dist_moe_tp1_ep2_config(expert_precision="mxfp8")
+
+
+def rl_grpo_moe_debug_dist_moe_nvfp4_fwd_bf16_bwd_tp1_ep2() -> Controller.Config:
+    """Four-GPU NVFP4-forward/BF16-backward Dist-MoE RL loop."""
+    return _rl_grpo_moe_debug_dist_moe_tp1_ep2_config(
+        expert_precision="nvfp4_fwd_bf16_bwd"
+    )
+
+
 def rl_grpo_moe_debug_dist_moe_tp2_ep4() -> Controller.Config:
     """Dist-MoE on both RL roles, with generator CUDA graphs and uneven DP load.
 
@@ -1086,31 +1197,6 @@ def rl_grpo_moe_debug_dist_moe_tp2_ep4() -> Controller.Config:
     the plan holds faults instead of raising. Needs an SM100+ GPU and the optional
     ``dist_moe`` package.
     """
-    from torchtitan_recipes.models.deepseek_v3 import _require_dist_moe
-
-    _require_dist_moe()
-    from torchtitan.config.transform.dist_moe import DistMoeTransform
-    from torchtitan.distributed.activation_remat import ActivationRematConfig
-    from torchtitan.models.common.dist_moe import DistMoeRuntime
-
-    config = rl_grpo_qwen3_moe_debug_varlen()
-    # Full activation checkpointing would replay dist_moe's forward in backward and
-    # corrupt its activation planner; ActivationRematConfig with no saved regions does not.
-    config.trainer.activation_remat = ActivationRematConfig(save_regions=[])
-    config.trainer.dist_moe_runtime = DistMoeRuntime.Config(scratch_capacity_factor=4.0)
-    config.generator.dist_moe_runtime = DistMoeRuntime.Config(
-        scratch_capacity_factor=4.0, inference=True
+    return _configure_rl_dist_moe(
+        rl_grpo_qwen3_moe_debug_varlen(), scratch_capacity_factor=4.0
     )
-    # The standard MoE dispatcher cannot be captured in a CUDA graph; Dist-MoE can,
-    # prefill and decode steps alike.
-    config.generator.engine.cuda_graph.mode = "FULL"
-    config = _configure_ci(
-        config,
-        steps=3,
-        num_tokens_per_microbatch=4096,
-        max_generated_tokens=128,
-        use_hf_assets_from_env=False,
-    )
-    config.trainer = apply_transforms(config.trainer, [DistMoeTransform()])
-    config.generator = apply_transforms(config.generator, [DistMoeTransform()])
-    return config

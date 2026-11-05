@@ -18,6 +18,7 @@ from torchtitan.models.common.dist_moe import (
     _dist_moe as dist_moe,
     DistMoeRoutedExperts,
     MXFP8DistMoeRoutedExperts,
+    NVFP4FwdBF16BwdDistMoeRoutedExperts,
 )
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
@@ -88,7 +89,7 @@ def _replace_routed_experts(
 
 @dataclass(kw_only=True, slots=True)
 class DistMoeTransform(ModelConfigTransform):
-    """Replace stock routed experts with BF16 or MXFP8 Dist-MoE execution.
+    """Replace stock routed experts with a selected Dist-MoE precision.
 
     Expert activation semantics come from each source
     ``RoutedExperts.Config.activation_fn``. The transform translates supported
@@ -97,15 +98,17 @@ class DistMoeTransform(ModelConfigTransform):
 
     Args:
         expert_precision: Expert compute precision. BF16 is the high-precision
-            default; MXFP8 selects the annex's asynchronous block-scaled path.
+            default. MXFP8 uses native block-scaled forward and backward;
+            NVFP4 forward with BF16 backward uses cached NVFP4 forward weights
+            and the annex's BF16 STE backward.
         inplace_wgrad_accum: Whether Dist-MoE writes W13/W2 gradients directly
             into existing standard ``parameter.grad`` buffers. This is enabled
             by default; Dist-MoE derives the owners from the logical expert
             weights and exposes the destination to graph tracing.
         bf16_grouped_gemm_preset: Optional expert override for the annex BF16
             FPROP/DGRAD grouped-GEMM schedule. ``None`` uses production defaults.
-        block_scaled_config: MXFP8 kernel policy. ``None`` selects the annex
-            defaults when ``expert_precision`` is ``"mxfp8"``.
+        block_scaled_config: Block-scaled kernel policy. ``None`` selects the
+            format-specific defaults for MXFP8 or NVFP4.
         mxfp8_mega_fused_inference: Prepare MXFP8 weights in the
             gate/up interleaved format so the Mega kernel can fuse SwiGLU into
             the W13 GEMM, for inference only. Quantized weights and scales match
@@ -113,7 +116,7 @@ class DistMoeTransform(ModelConfigTransform):
             ``expert_precision="mxfp8"`` and ``block_scaled_config.pipeline="mega"``.
     """
 
-    expert_precision: Literal["bf16", "mxfp8"] = "bf16"
+    expert_precision: Literal["bf16", "mxfp8", "nvfp4_fwd_bf16_bwd"] = "bf16"
     inplace_wgrad_accum: bool = True
     bf16_grouped_gemm_preset: dist_moe.Bf16GroupedGemmPreset | None = None
     block_scaled_config: dist_moe.BlockScaledConfig | None = None
@@ -123,22 +126,41 @@ class DistMoeTransform(ModelConfigTransform):
         if self.expert_precision == "bf16":
             if self.block_scaled_config is not None:
                 raise ValueError(
-                    "block_scaled_config requires expert_precision='mxfp8'"
+                    "block_scaled_config requires a block-scaled expert precision"
                 )
             if self.mxfp8_mega_fused_inference:
                 raise ValueError(
                     "mxfp8_mega_fused_inference requires " "expert_precision='mxfp8'"
                 )
-        elif self.expert_precision == "mxfp8":
+        elif self.expert_precision in ("mxfp8", "nvfp4_fwd_bf16_bwd"):
             if self.bf16_grouped_gemm_preset is not None:
                 raise ValueError(
                     "bf16_grouped_gemm_preset requires expert_precision='bf16'"
                 )
             block_scaled_config = (
-                self.block_scaled_config or dist_moe.BlockScaledConfig()
+                self.block_scaled_config
+                or dist_moe.BlockScaledConfig(
+                    format=(
+                        dist_moe.BlockScaledFormat.MXFP8_E4M3
+                        if self.expert_precision == "mxfp8"
+                        else dist_moe.BlockScaledFormat.NVFP4
+                    )
+                )
             )
-            if block_scaled_config.format is not dist_moe.BlockScaledFormat.MXFP8_E4M3:
-                raise ValueError("Dist-MoE MXFP8 requires the MXFP8_E4M3 format")
+            expected_format = (
+                dist_moe.BlockScaledFormat.MXFP8_E4M3
+                if self.expert_precision == "mxfp8"
+                else dist_moe.BlockScaledFormat.NVFP4
+            )
+            if block_scaled_config.format is not expected_format:
+                raise ValueError(
+                    f"Dist-MoE {self.expert_precision} requires the "
+                    f"{expected_format.name} format"
+                )
+            if self.mxfp8_mega_fused_inference and self.expert_precision != "mxfp8":
+                raise ValueError(
+                    "mxfp8_mega_fused_inference requires " "expert_precision='mxfp8'"
+                )
             if (
                 self.mxfp8_mega_fused_inference
                 and block_scaled_config.pipeline != "mega"
@@ -161,12 +183,22 @@ class DistMoeTransform(ModelConfigTransform):
                 inplace_wgrad_accum=self.inplace_wgrad_accum,
                 bf16_grouped_gemm_preset=self.bf16_grouped_gemm_preset,
             )
+        if self.expert_precision == "mxfp8":
+            return _replace_routed_experts(
+                model,
+                MXFP8DistMoeRoutedExperts,
+                inplace_wgrad_accum=self.inplace_wgrad_accum,
+                block_scaled_config=(
+                    self.block_scaled_config or dist_moe.BlockScaledConfig()
+                ),
+                mega_fused_inference=self.mxfp8_mega_fused_inference,
+            )
         return _replace_routed_experts(
             model,
-            MXFP8DistMoeRoutedExperts,
+            NVFP4FwdBF16BwdDistMoeRoutedExperts,
             inplace_wgrad_accum=self.inplace_wgrad_accum,
             block_scaled_config=(
-                self.block_scaled_config or dist_moe.BlockScaledConfig()
+                self.block_scaled_config
+                or dist_moe.BlockScaledConfig(format=dist_moe.BlockScaledFormat.NVFP4)
             ),
-            mega_fused_inference=self.mxfp8_mega_fused_inference,
         )

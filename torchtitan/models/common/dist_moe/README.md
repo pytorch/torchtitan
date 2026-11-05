@@ -6,9 +6,8 @@ in TorchTitan and produces top-k expert IDs and scores. Dist-MoE owns token
 dispatch, grouped expert computation, activation storage, scratch storage, and
 combine as one ordered operation.
 
-TorchTitan supports BF16 and asynchronous MXFP8 Dist-MoE training on NVIDIA
-SM100 or newer. The annex also provides NVFP4 inference, which TorchTitan does
-not expose yet. Dist-MoE requires
+TorchTitan supports BF16, asynchronous MXFP8, and NVFP4-forward/BF16-backward
+Dist-MoE training on NVIDIA SM100 or newer. Dist-MoE requires
 `training.mixed_precision_param="bfloat16"` because FSDP unshards its persistent
 parameters in BF16.
 
@@ -22,6 +21,9 @@ Dist-MoE recipe:
 python -m pip install \
   "git+https://github.com/meta-pytorch/dist_moe.git@main"
 ```
+
+The NVFP4-forward/BF16-backward mode requires a Dist-MoE revision whose
+`prepare_block_scaled_weight(..., out=...)` supports NVFP4 operands.
 
 Ordinary TorchTitan imports and recipes do not import Dist-MoE. A selected
 Dist-MoE recipe performs a guarded import and reports a focused error when the
@@ -79,6 +81,30 @@ config = apply_transforms(
 )
 ```
 
+For an NVFP4 forward with BF16 STE backward, select the explicit precision
+name. The default policy uses the staged pipeline and standard NVFP4 scaling:
+
+```python
+import dist_moe
+
+config = apply_transforms(
+    config,
+    [
+        DistMoeTransform(
+            expert_precision="nvfp4_fwd_bf16_bwd",
+            block_scaled_config=dist_moe.BlockScaledConfig(
+                format=dist_moe.BlockScaledFormat.NVFP4,
+                pipeline="staged",
+            ),
+        )
+    ],
+)
+```
+
+Only the expert forward GEMMs use NVFP4. Dist-MoE dequantizes the cached
+forward weights and runs its existing BF16 STE backward; this mode does not
+provide FP4 DGRAD or WGRAD GEMMs.
+
 For an MXFP8 RL generator, the fused-SwiGLU Mega kernel needs the inference
 weight format and an inference runtime:
 
@@ -121,8 +147,8 @@ MXFP8 recipes also convert dense projections and the language-model head.
 ## Configuration Ownership
 
 `DistMoeTransform` replaces each stock `RoutedExperts.Config` directly with the
-selected BF16 or MXFP8 implementation. The replacement keeps TorchTitan's
-structured `GroupedLinear` parameter layout:
+selected BF16, MXFP8, or NVFP4-forward/BF16-backward implementation. The
+replacement keeps TorchTitan's structured `GroupedLinear` parameter layout:
 
 - `w13.weight` has shape `[E, 2, F, D]`.
 - `w2.weight` has shape `[E, D, F]`.
@@ -136,10 +162,10 @@ Per-layer settings belong to the transform:
 
 | Setting | Meaning |
 | --- | --- |
-| `expert_precision` | Select `"bf16"` (default) or the asynchronous `"mxfp8"` expert path. |
-| `inplace_wgrad_accum` | Let annex WGRAD kernels accumulate directly into standard `parameter.grad` storage. This is enabled by default for BF16 and MXFP8 experts. GraphTrainer recipes temporarily disable it because tracing functionalizes parameters into graph inputs; a graph pass must bind those inputs to their leaf `parameter.grad` destinations before enabling accumulation. |
+| `expert_precision` | Select `"bf16"` (default), `"mxfp8"`, or `"nvfp4_fwd_bf16_bwd"`. |
+| `inplace_wgrad_accum` | Let annex WGRAD kernels accumulate directly into standard `parameter.grad` storage. This is enabled by default for every expert precision. GraphTrainer recipes temporarily disable it because tracing functionalizes parameters into graph inputs; a graph pass must bind those inputs to their leaf `parameter.grad` destinations before enabling accumulation. |
 | `bf16_grouped_gemm_preset` | Optional BF16 FPROP/DGRAD schedule override for expert users. `None` uses the annex's shape-aware production defaults. BF16 WGRAD has its own production schedule. |
-| `block_scaled_config` | MXFP8-only annex policy. `pipeline="staged"` uses separate expert kernels; `pipeline="mega"` uses the fused chunk-pipelined implementation. `fast_math` selects approximate fused-SwiGLU sigmoid math, and `kernel_config` is an expert-only CuTe tuning override. |
+| `block_scaled_config` | MXFP8 or NVFP4 annex policy. `pipeline="staged"` uses separate expert kernels; `pipeline="mega"` uses the fused chunk-pipelined implementation. Format-specific options are validated by Dist-MoE. |
 | `mxfp8_mega_fused_inference` | MXFP8 RL generator only; requires `pipeline="mega"`. Prepare weights in the interleaved format so the Mega kernel can fuse SwiGLU into the W13 GEMM, for inference only. Quantized weights and scales match training numerics exactly. |
 
 One `DistMoeRuntime.Config` owns rank-wide resources shared by every local
@@ -270,17 +296,29 @@ prefetch lifecycle, which overlaps physical VMM allocation with communication-
 buffer initialization during context creation without changing capacity,
 steady-state placement, kernel behavior, or execution-time synchronization.
 
-## FSDP, MXFP8, And Rematerialization
+## FSDP, Block-Scaled Weights, And Rematerialization
 
-BF16 weights use the ordinary FSDP lifecycle. MXFP8 experts reuse TorchTitan's
-prepared-weight tensor lifecycle:
+BF16 weights use the ordinary FSDP lifecycle. MXFP8 and
+NVFP4-forward/BF16-backward experts reuse TorchTitan's prepared-weight tensor
+lifecycle:
 
 1. FSDP all-gathers the persistent high-precision shard in BF16.
-2. The post-all-gather hook prepares grouped 32x32 MXFP8 qdata and FPROP/DGRAD
-   scale layouts.
+2. The post-all-gather hook calls Dist-MoE's preparation utility to build the
+   selected qdata and scale layouts.
 3. FSDP releases the temporary BF16 communication storage.
 4. Dist-MoE consumes the prepared operands for that unshard lifetime.
 5. FSDP releases prepared storage at the normal reshard boundary.
+
+The NVFP4 training lifecycle is:
+
+```text
+FSDP BF16 all-gather
+  -> cached NVFP4 qdata and scales
+  -> NVFP4 forward
+  -> cached weight dequantization
+  -> BF16 STE backward
+  -> logical parameter gradient
+```
 
 With `reshard_after_forward=False`, pipeline microbatches reuse one prepared
 weight through backward. With `reshard_after_forward=True`, forward and

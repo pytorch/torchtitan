@@ -33,6 +33,9 @@ _OPTIONAL_PACKAGES = {"math_verify", "verifiers"}
 # Recipes that need an optional package: torchao nightly (MXFP8) and dist_moe.
 _OPTIONAL_PACKAGE_RECIPES = {
     "rl_grpo_qwen3_0_6b_varlen_mxfp8",
+    "rl_grpo_moe_debug_dist_moe_mxfp8_tp1_ep2",
+    "rl_grpo_moe_debug_dist_moe_nvfp4_fwd_bf16_bwd_tp1_ep2",
+    "rl_grpo_moe_debug_dist_moe_tp1_ep2",
     "rl_grpo_moe_debug_dist_moe_tp2_ep4",
     "rl_dapo_qwen3_30b_a3b_math_8k_mxfp8",
 }

@@ -34,6 +34,10 @@ from torchtitan.models.common.dist_moe import (  # noqa: E402
     MXFP8DistMoeRoutedExperts,
 )
 from torchtitan.models.common.dist_moe.mxfp8 import _prepare_mxfp8_weight  # noqa: E402
+from torchtitan.models.common.dist_moe.nvfp4_fwd_bf16_bwd import (  # noqa: E402
+    _DistMoeNVFP4W2ShardedTensor,
+    _prepare_nvfp4_weight,
+)
 from torchtitan.models.common.linear import GroupedLinear  # noqa: E402
 from torchtitan.models.common.moe import RoutedExperts  # noqa: E402
 from torchtitan.models.common.moe.token_dispatcher import (  # noqa: E402
@@ -523,6 +527,96 @@ class TestMXFP8InferenceWeights(unittest.TestCase):
             torch.testing.assert_close(
                 actual.view(torch.uint8), expected.view(torch.uint8), rtol=0, atol=0
             )
+
+
+@unittest.skipUnless(
+    torch.cuda.is_available()
+    and torch.cuda.get_device_capability() in ((10, 0), (10, 3)),
+    "Dist-MoE requires an SM100 or SM103 GPU",
+)
+class TestNVFP4PreparedWeights(unittest.TestCase):
+    def test_dist_moe_preparation_and_fsdp_refill_are_bitwise_identical(self) -> None:
+        """FSDP-owned operands match Dist-MoE and retain storage on refill."""
+        generator = torch.Generator(device="cuda").manual_seed(0)
+        weight_EOI = torch.randn(
+            2,
+            256,
+            256,
+            device="cuda",
+            dtype=torch.bfloat16,
+            generator=generator,
+        )
+        expected = dist_moe.prepare_block_scaled_weight(
+            weight_EOI,
+            dist_moe.BlockScaledConfig(format=dist_moe.BlockScaledFormat.NVFP4),
+        )
+        operands = _prepare_nvfp4_weight(
+            weight_EOI,
+            use_four_over_six=False,
+        )
+
+        for actual, reference in (
+            (operands.qdata, expected.fprop_data),
+            (operands.fprop_scale, expected.fprop_scale),
+            (operands.global_scale, expected.global_scale),
+            (operands.global_scale_inv, expected.global_scale_inv),
+        ):
+            assert reference is not None
+            torch.testing.assert_close(
+                actual.view(torch.uint8),
+                reference.view(torch.uint8),
+                rtol=0,
+                atol=0,
+            )
+        prepared = operands.prepared(weight_EOI)
+        assert prepared.dgrad_data is None
+        assert prepared.dgrad_scale is None
+
+        wrapper = _DistMoeNVFP4W2ShardedTensor(weight_EOI)
+        first_unshard = wrapper.fsdp_post_all_gather(
+            (weight_EOI,),
+            weight_EOI.shape,
+            torch.bfloat16,
+        )
+        assert first_unshard is not None
+        unsharded, managed = first_unshard
+        original_operands = unsharded.operands
+        original_objects = tuple(managed)
+        original_pointers = tuple(tensor.data_ptr() for tensor in managed)
+        original_qdata = original_operands.qdata.clone()
+        reloaded_weight_EOI = torch.randn(
+            weight_EOI.shape,
+            device="cuda",
+            dtype=torch.bfloat16,
+            generator=generator,
+        )
+
+        wrapper.fsdp_post_all_gather(
+            (reloaded_weight_EOI,),
+            reloaded_weight_EOI.shape,
+            torch.bfloat16,
+            out=unsharded,
+        )
+
+        refilled = unsharded.operands
+        refilled_tensors = (
+            refilled.qdata,
+            refilled.fprop_scale,
+            refilled.global_scale,
+            refilled.global_scale_inv,
+        )
+        assert all(
+            previous is current
+            for previous, current in zip(
+                original_objects,
+                refilled_tensors,
+                strict=True,
+            )
+        )
+        assert original_pointers == tuple(
+            tensor.data_ptr() for tensor in refilled_tensors
+        )
+        assert not torch.equal(original_qdata, refilled.qdata)
 
 
 if __name__ == "__main__":

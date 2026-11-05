@@ -39,6 +39,7 @@ from torchtitan.models.common.dist_moe import (
     DistMoeRoutedExperts,
     DistMoeRuntime,
     MXFP8DistMoeRoutedExperts,
+    NVFP4FwdBF16BwdDistMoeRoutedExperts,
 )
 from torchtitan.models.common.dist_moe.runtime import _DistMoeForwardContext
 from torchtitan.models.common.linear import Linear
@@ -58,10 +59,10 @@ def _parameter_initializers() -> dict[str, Any]:
     }
 
 
-def _stock_config(*, dim: int = 32) -> RoutedExperts.Config:
+def _stock_config(*, dim: int = 32, hidden_dim: int = 64) -> RoutedExperts.Config:
     return make_routed_experts_config(
         dim=dim,
-        hidden_dim=64,
+        hidden_dim=hidden_dim,
         num_experts=4,
         top_k=2,
         param_init=_parameter_initializers(),
@@ -318,13 +319,20 @@ def test_bf16_transform_preserves_parameter_layout() -> None:
         torch.testing.assert_close(value, stock.state_dict()[key], rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("expert_precision", ["bf16", "mxfp8"])
+@pytest.mark.parametrize(
+    "expert_precision",
+    ["bf16", "mxfp8", "nvfp4_fwd_bf16_bwd"],
+)
 def test_transform_propagates_clamped_swiglu_to_annex_config(
-    expert_precision: Literal["bf16", "mxfp8"],
+    expert_precision: Literal["bf16", "mxfp8", "nvfp4_fwd_bf16_bwd"],
 ) -> None:
     """The source expert activation reaches the shared annex context."""
+    nvfp4 = expert_precision == "nvfp4_fwd_bf16_bwd"
     source = replace(
-        _stock_config(dim=64),
+        _stock_config(
+            dim=256 if nvfp4 else 64,
+            hidden_dim=256 if nvfp4 else 64,
+        ),
         activation_fn=ClampedSwiGLU.Config(
             alpha=1.75,
             limit=8.0,
@@ -504,13 +512,23 @@ def test_dist_moe_lora_rejects_inplace_wgrad() -> None:
         )
 
 
-def test_dist_moe_lora_rejects_mxfp8_before_build() -> None:
-    """Prepared MXFP8 operands are rejected at config transformation time."""
-    with pytest.raises(ValueError, match="MXFP8DistMoeRoutedExperts"):
+@pytest.mark.parametrize(
+    ("expert_precision", "owner_name"),
+    [
+        ("mxfp8", "MXFP8DistMoeRoutedExperts"),
+        ("nvfp4_fwd_bf16_bwd", "NVFP4FwdBF16BwdDistMoeRoutedExperts"),
+    ],
+)
+def test_dist_moe_lora_rejects_prepared_weights_before_build(
+    expert_precision: Literal["mxfp8", "nvfp4_fwd_bf16_bwd"],
+    owner_name: str,
+) -> None:
+    """Prepared expert weights are rejected at config transformation time."""
+    with pytest.raises(ValueError, match=owner_name):
         transform_api.transform_model_config_(
             _stock_config(),
             [
-                DistMoeTransform(expert_precision="mxfp8"),
+                DistMoeTransform(expert_precision=expert_precision),
                 LoRATransform(target_modules=["w13"]),
             ],
         )
@@ -523,6 +541,10 @@ def test_dist_moe_lora_rejects_mxfp8_before_build() -> None:
         (
             DistMoeTransform(expert_precision="mxfp8"),
             MXFP8DistMoeRoutedExperts,
+        ),
+        (
+            DistMoeTransform(expert_precision="nvfp4_fwd_bf16_bwd"),
+            NVFP4FwdBF16BwdDistMoeRoutedExperts,
         ),
     ],
 )
@@ -636,6 +658,36 @@ def test_mxfp8_transform_is_independent_and_uses_prepared_weights() -> None:
     assert isinstance(module.w13.weight, _ShardedFSDPTensor)
     assert isinstance(module.w2.weight, _ShardedFSDPTensor)
     assert list(module.state_dict()) == ["w13.weight", "w2.weight"]
+
+
+def test_nvfp4_transform_uses_cached_forward_weights() -> None:
+    """The explicit mixed-precision mode installs FSDP-prepared weights."""
+    transformed = DistMoeTransform(expert_precision="nvfp4_fwd_bf16_bwd").transform(
+        _stock_config()
+    )
+    assert isinstance(transformed, NVFP4FwdBF16BwdDistMoeRoutedExperts.Config)
+    assert transformed.block_scaled_config.format is dist_moe.BlockScaledFormat.NVFP4
+    assert transformed.block_scaled_config.pipeline == "staged"
+
+    module = transformed.build()
+    assert isinstance(module, NVFP4FwdBF16BwdDistMoeRoutedExperts)
+    assert isinstance(module.w13.weight, _ShardedFSDPTensor)
+    assert isinstance(module.w2.weight, _ShardedFSDPTensor)
+    assert list(module.state_dict()) == ["w13.weight", "w2.weight"]
+
+
+def test_nvfp4_transform_requires_matching_policy() -> None:
+    """The explicit precision name cannot silently select another format."""
+    with pytest.raises(ValueError, match="requires the NVFP4 format"):
+        DistMoeTransform(
+            expert_precision="nvfp4_fwd_bf16_bwd",
+            block_scaled_config=dist_moe.BlockScaledConfig(),
+        )
+    with pytest.raises(ValueError, match="expert_precision='mxfp8'"):
+        DistMoeTransform(
+            expert_precision="nvfp4_fwd_bf16_bwd",
+            mxfp8_mega_fused_inference=True,
+        )
 
 
 def test_mxfp8_mega_fused_inference_builds_inference_weights() -> None:

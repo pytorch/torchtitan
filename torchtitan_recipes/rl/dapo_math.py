@@ -50,6 +50,7 @@ from torchtitan.models.muse_spark import (
 from torchtitan.models.muse_spark.renderer import MuseSparkRendererConfig
 from torchtitan.models.muse_spark.tokenizer import MuseSparkTokenizer
 from torchtitan.models.qwen3 import build_model_config
+from torchtitan.observability.profiler import Profiler
 from torchtitan.rl.controller.controller import (
     AsyncLoopConfig,
     Controller,
@@ -404,25 +405,29 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
 
 
 def _qwen3_30b_a3b_dapo_math_8k_config(
-    *, expert_precision: Literal["bf16", "mxfp8"]
+    *,
+    expert_precision: Literal["bf16", "mxfp8"],
+    trainer_world_size: int,
+    generator_world_size: int,
+    num_rollouts_per_microbatch: int,
 ) -> Controller.Config:
     """Build the shared Qwen3-30B-A3B-Base DAPO-Math configuration with Dist-MoE experts.
 
-    One node: trainer FSDP4 / EP4 on 4 GPUs and one generator DP4 / EP4 on 4 GPUs,
-    8K responses, 32 prompts x 16 samples per step.
+    The trainer uses FSDP and EP across ``trainer_world_size`` GPUs, and the
+    generator uses DP and EP across ``generator_world_size`` GPUs.
     """
     max_response_tokens = 8192
     max_total_tokens = 10240
     trainer_parallelism = ParallelismConfig(
         data_parallel_replicate_degree=1,
-        data_parallel_shard_degree=4,
+        data_parallel_shard_degree=trainer_world_size,
         tensor_parallel_degree=1,
-        expert_parallel_degree=4,
+        expert_parallel_degree=trainer_world_size,
     )
     generator_parallelism = InferenceParallelismConfig(
-        data_parallel_degree=4,
+        data_parallel_degree=generator_world_size,
         tensor_parallel_degree=1,
-        expert_parallel_degree=4,
+        expert_parallel_degree=generator_world_size,
     )
     trainer_model, generator_model = build_rl_model_configs(
         build_model_config,
@@ -482,9 +487,10 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
             ),
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
-                # Pack several rollouts per microbatch (a multiple of
-                # max_total_tokens).
-                num_tokens_per_microbatch_per_dp_rank=4 * max_total_tokens,
+                # Keep the token budget a multiple of max_total_tokens.
+                num_tokens_per_microbatch_per_dp_rank=(
+                    num_rollouts_per_microbatch * max_total_tokens
+                ),
                 max_context_length=max_total_tokens,
                 dtype="bfloat16",
             ),
@@ -541,7 +547,61 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
 
 def rl_dapo_qwen3_30b_a3b_math_8k() -> Controller.Config:
     """Qwen3-30B-A3B-Base, 8K responses, 32 prompts x 16 samples per step, BF16 Dist-MoE experts."""
-    return _qwen3_30b_a3b_dapo_math_8k_config(expert_precision="bf16")
+    return _qwen3_30b_a3b_dapo_math_8k_config(
+        expert_precision="bf16",
+        trainer_world_size=4,
+        generator_world_size=4,
+        num_rollouts_per_microbatch=4,
+    )
+
+
+def rl_dapo_qwen3_30b_a3b_math_8k_bf16_4gpu() -> Controller.Config:
+    """Run the BF16 Dist-MoE baseline on two trainer and two generator GPUs."""
+    config = _qwen3_30b_a3b_dapo_math_8k_config(
+        expert_precision="bf16",
+        trainer_world_size=2,
+        generator_world_size=2,
+        num_rollouts_per_microbatch=1,
+    )
+    config.dump_folder = "outputs/rl/qwen3_30b_a3b_dapo_math_8k_bf16_4gpu"
+    config.async_loop.validation = ValidationConfig(steps=0)
+    assert config.trainer.checkpointer is not None
+    config.trainer.checkpointer.load_only = True
+    return config
+
+
+def rl_dapo_qwen3_30b_a3b_math_8k_50_steps() -> Controller.Config:
+    """Run 50 DAPO-Math steps on 8 GPUs with W&B and no held-out validation."""
+    config = rl_dapo_qwen3_30b_a3b_math_8k()
+    config.metrics.enable_wandb = True
+    config.async_loop.num_training_steps = 50
+    config.async_loop.validation = ValidationConfig(steps=0)
+    config.trainer.checkpointer.load_only = True
+    config.trainer.profiler = Profiler.Config(
+        enable_profiling=True,
+        profile_freq=10,
+        profiler_repeat=1,
+        profiler_warmup=1,
+        profiler_active=1,
+    )
+    return config
+
+
+def rl_dapo_qwen3_30b_a3b_math_8k_bf16_50_steps() -> Controller.Config:
+    """Run the 50-step BF16 Dist-MoE baseline with one trainer profiling capture."""
+    config = rl_dapo_qwen3_30b_a3b_math_8k()
+    config.metrics.enable_wandb = True
+    config.async_loop.num_training_steps = 50
+    config.async_loop.validation = ValidationConfig(steps=0)
+    config.trainer.checkpointer.load_only = True
+    config.trainer.profiler = Profiler.Config(
+        enable_profiling=True,
+        profile_freq=10,
+        profiler_repeat=1,
+        profiler_warmup=1,
+        profiler_active=1,
+    )
+    return config
 
 
 def rl_dapo_qwen3_30b_a3b_math_8k_mxfp8() -> Controller.Config:
@@ -549,4 +609,9 @@ def rl_dapo_qwen3_30b_a3b_math_8k_mxfp8() -> Controller.Config:
 
     The generator uses the Mega pipeline with fused SwiGLU inference weights.
     """
-    return _qwen3_30b_a3b_dapo_math_8k_config(expert_precision="mxfp8")
+    return _qwen3_30b_a3b_dapo_math_8k_config(
+        expert_precision="mxfp8",
+        trainer_world_size=4,
+        generator_world_size=4,
+        num_rollouts_per_microbatch=4,
+    )
