@@ -747,7 +747,7 @@ def test_generation_server_requires_group_id() -> None:
     asyncio.run(run_test())
 
 
-def test_generation_server_does_not_log_each_request(caplog) -> None:
+def test_generation_server_logs_each_request_at_debug_only(caplog) -> None:
     async def run_test() -> None:
         server = GenerationServer.Config(max_rollout_tokens=40960).build()
         await server.start()
@@ -760,10 +760,16 @@ def test_generation_server_does_not_log_each_request(caplog) -> None:
         finally:
             await server.close()
 
-    # aiohttp skips the access log above INFO, and imports can change the root level.
+    # Set the level explicitly: imports can change the root level.
     with caplog.at_level(logging.INFO, logger="aiohttp.access"):
         asyncio.run(run_test())
     assert "aiohttp.access" not in [record.name for record in caplog.records]
+
+    with caplog.at_level(logging.DEBUG, logger="aiohttp.access"):
+        asyncio.run(run_test())
+    access_records = [r for r in caplog.records if r.name == "aiohttp.access"]
+    assert [r.levelno for r in access_records] == [logging.DEBUG]
+    assert access_records[0].getMessage().startswith("GET /healthz 200 ")
 
 
 def test_generation_server_rejects_prompt_without_room_for_output() -> None:

@@ -26,6 +26,32 @@ _SESSION_ID_HEADER = "X-Session-ID"
 # Stands in for the logprobs content list; the handler splices the real list in.
 _LOGPROBS_CONTENT_PLACEHOLDER = "<logprobs content>"
 
+
+class _DebugAccessLogger(web.AbstractAccessLogger):
+    """Log each request at DEBUG on the ``aiohttp.access`` logger.
+
+    aiohttp's default logs one INFO line per request, most of the controller's log lines. To see them:
+    ``logging.getLogger("aiohttp.access").setLevel(logging.DEBUG)``.
+    """
+
+    @property
+    def enabled(self) -> bool:
+        # False skips the per-request timing and formatting.
+        return self.logger.isEnabledFor(logging.DEBUG)
+
+    def log(
+        self, request: web.BaseRequest, response: web.StreamResponse, time: float
+    ) -> None:
+        self.logger.debug(
+            "%s %s %d %.3fs session=%s",
+            request.method,
+            request.path,
+            response.status,
+            time,
+            request.headers.get(_SESSION_ID_HEADER),
+        )
+
+
 GROUP_ID_SAMPLING_PARAM = "torchtitan_group_id"
 """Sampling parameter carrying a request's rollout group id.
 
@@ -119,9 +145,7 @@ class GenerationServer(Configurable):
         app.router.add_get("/healthz", self._handle_health_request)
         app.router.add_get("/v1/models", self._handle_models_request)
         app.router.add_post("/inference/v1/generate", self._handle_generate_request)
-        # aiohttp logs one INFO line per request: most of the controller's log lines. The rollouts
-        # still carry each call's prompt and completion.
-        runner = web.AppRunner(app, access_log=None)
+        runner = web.AppRunner(app, access_log_class=_DebugAccessLogger)
         await runner.setup()
         site = web.TCPSite(runner, self.host, self.requested_port)
         await site.start()

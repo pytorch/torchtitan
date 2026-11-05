@@ -346,12 +346,15 @@ class VerifiersRollouter(Rollouter):
             trace.id: self._generation_server.pop_generation_metadata(trace.id)
             for trace in verifiers_episode.traces
         }
-        for trace in verifiers_episode.traces:
+
+        async def release(session_id: str) -> None:
             try:
-                await release_session_fn(routing_session_id=trace.id)
+                await release_session_fn(routing_session_id=session_id)
             except Exception:
                 # Not fatal: `max_sessions` evicts an unreleased session.
-                logger.exception("releasing routing session %s failed", trace.id)
+                logger.exception("releasing routing session %s failed", session_id)
+
+        await asyncio.gather(*(release(trace.id) for trace in verifiers_episode.traces))
         traces = [trace for trace in verifiers_episode.traces if trace.agent.trainable]
         if len(traces) != 1:
             raise ValueError(
