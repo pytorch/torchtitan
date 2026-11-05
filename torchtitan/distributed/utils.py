@@ -101,6 +101,22 @@ def dist_sum(
     )
 
 
+def dist_mean(x: torch.Tensor, mesh: DeviceMesh) -> float:
+    """Average a scalar over the mesh.
+
+    Divides by the number of values the all-reduce summed, not by the mesh size.
+    A fake process group's all-reduce changes nothing, so this returns the local
+    value.
+    """
+    total, count = _dist_reduce_tensor(
+        torch.stack((x, torch.ones_like(x))),
+        reduceOp=c10d.ReduceOp.SUM.name,
+        mesh=mesh,
+        extra_pg=None,
+    ).tolist()
+    return total / count
+
+
 def dist_sum_tensor(
     x: torch.Tensor,
     mesh: DeviceMesh | None = None,

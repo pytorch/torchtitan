@@ -469,17 +469,11 @@ class Trainer(Configurable):
                     ),
                 )
                 if parallelism_context.dp_enabled:
-                    dp_mesh = parallelism_context.get_mesh("dp")
-                    mean_num_flops = (
-                        dist_utils.dist_sum(
-                            torch.tensor(
-                                mean_num_flops,
-                                dtype=torch.float64,
-                                device=engine.device,
-                            ),
-                            dp_mesh,
-                        )
-                        / dp_mesh.size()
+                    mean_num_flops = dist_utils.dist_mean(
+                        torch.tensor(
+                            mean_num_flops, dtype=torch.float64, device=engine.device
+                        ),
+                        parallelism_context.get_mesh("dp"),
                     )
             else:
                 global_avg_loss = global_max_loss = float(accumulated_loss.item())
