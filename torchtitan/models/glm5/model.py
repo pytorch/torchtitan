@@ -231,7 +231,7 @@ class Glm5Model(DeepSeekV3Model):
         local_compile: LocalCompileConfig = field(default_factory=LocalCompileConfig)
 
         def build_flops_estimator(self, model, *, seq_len, excluded_submodules=()):
-            base = super().build_flops_estimator(
+            base = super(Glm5Model.Config, self).build_flops_estimator(
                 model, seq_len=seq_len, excluded_submodules=excluded_submodules
             )
             excluded_ids = {
