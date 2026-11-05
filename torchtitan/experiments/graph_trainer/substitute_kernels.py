@@ -17,6 +17,7 @@ exists::
         <l2>.py                   # optimized kernel for that specialization
 
 The level-2 key is the AOTAutograd cache key of the submodule on its inputs.
+Neither key depends on the device index, so every rank finds the same kernels.
 ``specialization_<l2>.json`` is written when a specialization is first seen::
 
     {
@@ -121,18 +122,31 @@ def default_cache_dir() -> Path:
 
 
 def normalize_names(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
-    """Return a copy of ``gm`` with nodes renamed by position.
+    """Return a copy of ``gm`` with nodes renamed by position and device indices dropped.
 
     Node names end up in the generated code that both cache keys hash, so two
     copies of the same region whose nodes were named differently by the
     enclosing graph (``mm`` vs. ``mm_17``) would otherwise get different keys.
+    Likewise for device literals: every rank traces the same region on its own
+    device (``device=cuda:3``), and all ranks must find the same kernels. Without
+    the index (``device=cuda``), ``reference.py`` runs on the current device.
     """
     graph = torch.fx.Graph()
     env: dict[torch.fx.Node, torch.fx.Node] = {}
+    indices: set[tuple[str, int]] = set()
+
+    def key_arg(a: Any) -> Any:
+        if isinstance(a, torch.fx.Node):
+            return env[a]
+        if isinstance(a, torch.device) and a.index is not None:
+            indices.add((a.type, a.index))
+            return torch.device(a.type)
+        return a
+
     n_in = 0
     for i, node in enumerate(gm.graph.nodes):
-        args = torch.fx.map_arg(node.args, lambda n: env[n])
-        kwargs = torch.fx.map_arg(node.kwargs, lambda n: env[n])
+        args = torch.fx.node.map_aggregate(node.args, key_arg)
+        kwargs = torch.fx.node.map_aggregate(node.kwargs, key_arg)
         if node.op == "placeholder":
             new = graph.placeholder(f"in{n_in}")
             n_in += 1
@@ -146,6 +160,10 @@ def normalize_names(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
             new = graph.create_node(node.op, node.target, args, kwargs, name=f"v{i}")
         new.meta = dict(node.meta)
         env[node] = new
+    if len(indices) != len({t for t, _ in indices}):
+        raise ValueError(
+            f"submodule uses several devices of one type: {sorted(indices)}"
+        )
     return torch.fx.GraphModule(torch.nn.Module(), graph)
 
 
@@ -210,11 +228,27 @@ def pattern_key(gm: torch.fx.GraphModule, op_deps: OpDeps = ()) -> str:
 
 
 def spec_key(gm: torch.fx.GraphModule, example_inputs: list[Any]) -> str:
-    """Level-2 key: the AOTAutograd cache key for ``gm`` on ``example_inputs``."""
+    """Level-2 key: the AOTAutograd cache key for ``gm`` on ``example_inputs``.
+
+    Inputs are keyed on device index 0, so every rank computes the same key
+    (``normalize_names`` drops the index of device literals).
+    """
     # The FX graph cache validator requires an active ShapeEnv.
     fake_mode = FakeTensorMode(shape_env=ShapeEnv())
+    inputs = []
+    for v in example_inputs:
+        if isinstance(v, torch.Tensor) and v.device.index:
+            with fake_mode:
+                v = torch.empty_strided(
+                    v.shape,
+                    v.stride(),
+                    dtype=v.dtype,
+                    device=torch.device(v.device.type, 0),
+                    requires_grad=v.requires_grad,
+                )
+        inputs.append(v)
     with torch._guards.tracing(torch._guards.TracingContext(fake_mode)):
-        key, _ = autograd_cache_key(gm, example_inputs, _AOT_CONFIG)
+        key, _ = autograd_cache_key(gm, inputs, _AOT_CONFIG)
     return key
 
 

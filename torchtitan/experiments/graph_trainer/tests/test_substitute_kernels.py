@@ -164,6 +164,20 @@ class TestSubstituteWithKernelsPass(TestCase):
         fake = _keys(_parent([_layer()], args, fake=True))
         self.assertEqual(real, fake)
 
+    def test_device_index_does_not_change_keys(self):
+        # Every rank traces its regions on its own device; all ranks must find
+        # the same kernels.
+        def fn(x):
+            return x + torch.ops.aten.scalar_tensor.default(1.0, device=x.device)
+
+        keys = []
+        for device in ("cuda:0", "cuda:1"):
+            with FakeTensorMode():
+                x = torch.empty(8, 16, device=device)
+            gm = make_fx(fn, tracing_mode="fake")(x)
+            keys.append(cache_keys(gm, [x])[:2])
+        self.assertEqual(keys[0], keys[1])
+
     def test_miss_keeps_call_module_and_writes_reference_and_specialization(self):
         args = _inputs()
         gm = _parent([_layer(), _layer(name_suffix="_17")], args)
