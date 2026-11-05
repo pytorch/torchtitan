@@ -64,43 +64,12 @@ def cross_entropy_loss(
     takes ``pred`` as is and upcasts internally, so the compiled region can save
     the low-precision input for backward instead of an fp32 copy.
     """
-    # fp32 CE is memory-bound, so a fast exp would only add error there.
-    if pred.dtype == torch.float32:
-        return _fp32_cross_entropy_loss(
-            pred, labels, global_vocab_size=global_vocab_size, reduction=reduction
-        )
-    return _low_precision_cross_entropy_loss(
-        pred, labels, global_vocab_size=global_vocab_size, reduction=reduction
+    region = (
+        _fast_exp_cross_entropy_loss
+        if pred.dtype == torch.bfloat16
+        else _accurate_exp_cross_entropy_loss
     )
-
-
-# Two compiles of one body under one region name, with different Inductor options;
-# separate functions, so each gets its own graph cache and recompile limit.
-@local_compile("loss", batch_invariant=False)
-def _fp32_cross_entropy_loss(
-    pred: torch.Tensor,
-    labels: torch.Tensor,
-    *,
-    global_vocab_size: int | None,
-    reduction: Literal["sum", "none"],
-) -> torch.Tensor:
-    return _cross_entropy_loss(
-        pred, labels, global_vocab_size=global_vocab_size, reduction=reduction
-    )
-
-
-# With bf16 logits, the compiled CE kernels are slowed by the accurate exp (libdevice.exp).
-# use_fast_math makes Inductor emit a faster approximate exp (tl_math.exp) instead.
-# Not bitwise vs the accurate exp, but the same error vs fp64.
-@local_compile("loss", batch_invariant=False, options={"use_fast_math": True})
-def _low_precision_cross_entropy_loss(
-    pred: torch.Tensor,
-    labels: torch.Tensor,
-    *,
-    global_vocab_size: int | None,
-    reduction: Literal["sum", "none"],
-) -> torch.Tensor:
-    return _cross_entropy_loss(
+    return region(
         pred, labels, global_vocab_size=global_vocab_size, reduction=reduction
     )
 
@@ -112,7 +81,7 @@ def _cross_entropy_loss(
     global_vocab_size: int | None,
     reduction: Literal["sum", "none"],
 ) -> torch.Tensor:
-    """The body of ``cross_entropy_loss``, compiled by both regions above."""
+    """The body of ``cross_entropy_loss``, compiled by both regions below."""
     if reduction not in ("sum", "none"):
         raise ValueError(f"Unsupported cross-entropy reduction: {reduction}")
     if spmd_mesh_size("tp") > 1:
@@ -134,6 +103,17 @@ def _cross_entropy_loss(
         reduction=reduction,
         ignore_index=IGNORE_INDEX,
     )
+
+
+# On bf16 logits the accurate exp (libdevice.exp) limits the CE kernels (GB300).
+# use_fast_math emits a faster approximate exp (tl_math.exp): same error vs fp64, not bitwise (GB300).
+# fp32 CE is memory-bound (GB300), so every other dtype keeps the accurate exp.
+_fast_exp_cross_entropy_loss = local_compile(
+    "loss", batch_invariant=False, options={"use_fast_math": True}
+)(_cross_entropy_loss)
+_accurate_exp_cross_entropy_loss = local_compile("loss", batch_invariant=False)(
+    _cross_entropy_loss
+)
 
 
 # Target probability at and above which the target gradient is -p_non_target.

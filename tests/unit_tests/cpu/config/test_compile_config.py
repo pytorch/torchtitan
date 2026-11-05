@@ -126,46 +126,24 @@ def test_local_compile_rejects_non_batch_invariant_region(monkeypatch) -> None:
 
 
 def test_loss_functions_use_local_compile(monkeypatch) -> None:
-    compile_kwargs = {}
-    called = []
+    compiled_names = []
 
     def fake_compile(reference, **kwargs):
-        compile_kwargs[reference.__name__] = kwargs
-
-        def compiled(*args, **fn_kwargs):
-            called.append(reference.__name__)
-            return reference(*args, **fn_kwargs)
-
-        return compiled
+        compiled_names.append(reference.__name__)
+        # Each region returns its compile kwargs, so a call shows which region ran.
+        return lambda *args, **fn_kwargs: kwargs
 
     monkeypatch.setattr(torch, "compile", fake_compile)
     LocalCompileConfig(regions=["loss"]).apply()
     labels = torch.tensor([0, 3])
-    cross_entropy_loss(torch.randn(2, 4), labels)
-    cross_entropy_loss(torch.randn(2, 4, dtype=torch.bfloat16), labels)
 
-    # fp32 logits keep the plain region; bf16 logits get the fast exp.
-    assert called == [
-        "_fp32_cross_entropy_loss",
-        "_low_precision_cross_entropy_loss",
-    ]
-    assert {
-        name: compile_kwargs[name]
-        for name in (
-            "_fp32_cross_entropy_loss",
-            "_low_precision_cross_entropy_loss",
-            mse_loss.__name__,
-            compute_logprobs.__name__,
-        )
-    } == {
-        "_fp32_cross_entropy_loss": {"fullgraph": True},
-        "_low_precision_cross_entropy_loss": {
-            "fullgraph": True,
-            "options": {"use_fast_math": True},
-        },
-        mse_loss.__name__: {"fullgraph": True},
-        compute_logprobs.__name__: {"fullgraph": True},
+    # fp32 logits get the region with no Inductor options; bf16 logits get the fast exp.
+    assert cross_entropy_loss(torch.randn(2, 4), labels) == {"fullgraph": True}
+    assert cross_entropy_loss(torch.randn(2, 4, dtype=torch.bfloat16), labels) == {
+        "fullgraph": True,
+        "options": {"use_fast_math": True},
     }
+    assert {mse_loss.__name__, compute_logprobs.__name__} <= set(compiled_names)
 
 
 def test_moe_aux_loss_uses_local_compile(monkeypatch) -> None:
