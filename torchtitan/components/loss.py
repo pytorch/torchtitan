@@ -105,9 +105,10 @@ def _cross_entropy_loss(
     )
 
 
-# On bf16 logits the accurate exp (libdevice.exp) limits the CE kernels (GB300).
-# use_fast_math emits a faster approximate exp (tl_math.exp): same error vs fp64, not bitwise (GB300).
-# fp32 CE is memory-bound (GB300), so every other dtype keeps the accurate exp.
+# Measured on GB300: with bf16 logits, the accurate exp (libdevice.exp) limits the CE kernels.
+# use_fast_math emits a faster approximate exp (tl_math.exp): same error vs fp64, not bitwise.
+# fp32 CE is memory-bound, and other dtypes are unmeasured, so they keep the accurate exp.
+# Two compiles of one function keep separate graphs and share one recompile limit.
 _fast_exp_cross_entropy_loss = local_compile(
     "loss", batch_invariant=False, options={"use_fast_math": True}
 )(_cross_entropy_loss)
