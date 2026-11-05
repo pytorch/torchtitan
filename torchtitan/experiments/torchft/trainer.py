@@ -405,7 +405,8 @@ class FaultTolerantTrainer(Configurable):
         ft_pg = engine.ft_manager.loss_sync_pg
 
         # The step's count covers the replicas in ft_pg (_sum_loss_token_count),
-        # so the loss sum must cover them too, even without DP or CP.
+        # so the loss sum must cover them too, even without DP or CP. Counting
+        # over replicas keeps the logged loss from jumping when replicas leave or rejoin.
         if parallelism_context.dp_cp_enabled or ft_pg is not None:
             loss_mesh = parallelism_context.get_optional_mesh("loss")
 
