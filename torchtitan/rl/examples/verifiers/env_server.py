@@ -45,6 +45,13 @@ def _run_env_server_process(
     no_proxy = ",".join(filter(None, (no_proxy, "127.0.0.1", "localhost")))
     os.environ["no_proxy"] = no_proxy
     os.environ["NO_PROXY"] = no_proxy
+    # Pool workers read these when they start.
+    # 2 malloc pools, since a worker mostly runs one event loop; assigned to override the controller host's cap.
+    os.environ["MALLOC_ARENA_MAX"] = "2"
+    # Blocks of 64 KB or more get their own mmap, so a finished episode's memory goes back to the OS.
+    os.environ.setdefault("MALLOC_MMAP_THRESHOLD_", "65536")
+    # Give free memory at the top of each heap back to the OS at once (glibc's default keeps up to 128 KB).
+    os.environ.setdefault("MALLOC_TRIM_THRESHOLD_", "0")
 
     # Registered here too: resolve_env_config imports the taskset before serve_env runs log_setup.
     if local_taskset_module is not None:
