@@ -451,7 +451,7 @@ class Generator(Configurable):
         self._torchstore_loop = asyncio.get_running_loop()
 
     @sl.log_trace_span("load_model_state_dict")
-    async def load_model_state_dict(self, version: int, *, drain: bool = False) -> None:
+    async def load_model_state_dict(self, version: int, *, drain: bool) -> None:
         """Queues a model state dict load for `version` and blocks until the engine loop has finished loading.
         Loads queued together are applied once, at the highest version.
 
