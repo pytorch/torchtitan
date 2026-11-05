@@ -13,7 +13,7 @@ import unittest
 import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.rope import RoPE
+from torchtitan.models.common.rope import IdentityRoPE, RoPE
 from torchtitan.models.deepseek_v4 import build_model_config as build_dsv4_config
 from torchtitan.models.llama3 import MODEL_FLAVORS
 from torchtitan.models.llama3.model import Llama3Model
@@ -54,6 +54,7 @@ class TestRoPECacheTying(unittest.TestCase):
             with self.subTest(vision_family=family):
                 with torch.device("meta"):
                     model = Llama3Model(_make_config())
+                    model.add_module("identity_rope", IdentityRoPE.Config().build())
                     groups = [model.layers]
                     if family is not None:
                         config = importlib.import_module(
@@ -69,6 +70,8 @@ class TestRoPECacheTying(unittest.TestCase):
                         groups.append(encoder)
                 model.to_empty(device="cpu")
                 model.init_states()
+                self.assertIsInstance(model.identity_rope, RoPE)
+                self.assertEqual(list(model.identity_rope.named_buffers()), [])
 
                 for group in groups:
                     ropes = _ropes(group)

@@ -27,7 +27,6 @@ from torchtitan.models.common import (
     HiMidLoLinear,
     Linear,
     RMSNorm,
-    RoPE,
     RowParallelLinear,
     Sigmoid,
     Softmax,
@@ -163,7 +162,7 @@ def make_mla_attention_config(
     linear_init: dict[str, Callable],
     norm_init: dict[str, Callable],
     depth_init: Callable[[int], dict[str, Callable]],
-    rope: RoPE.Config,
+    rope: ComplexRoPE.Config,
     attention_config_factory: Callable[
         [str], InnerAttention.Config
     ] = get_attention_config,
@@ -291,7 +290,7 @@ def build_mla_moe_layers(
     norm_init: dict[str, Callable],
     depth_init: Callable[[int], dict[str, Callable]],
     depth_experts_init: Callable[[int], dict[str, Callable]],
-    rope: RoPE.Config,
+    rope: ComplexRoPE.Config,
     attention_config_factory: Callable[
         [str], InnerAttention.Config
     ] = get_attention_config,

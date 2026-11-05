@@ -35,7 +35,7 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
-from torchtitan.models.common.rope import IdentityRoPE, RoPE
+from torchtitan.models.common.rope import RoPE
 
 compiled_create_block_mask = compile(create_block_mask)
 
@@ -166,7 +166,7 @@ class VisionAttention(Module):
         wk: Linear.Config
         wv: Linear.Config
         proj: Linear.Config
-        rope: RoPE.Config | IdentityRoPE.Config
+        rope: RoPE.Config
         inner_attention: Module.Config = field(
             default_factory=FlexInnerAttention.Config
         )

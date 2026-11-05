@@ -80,8 +80,13 @@ def _yarn_inv_freq(
     return inv_freq / rope_factor * ramp + inv_freq * (1 - ramp)
 
 
-class IdentityRoPE(Module):
-    """Leave query and optional key unchanged."""
+class RoPE(Module):
+    """Configurable query/key positional transform, including the identity.
+
+    Dependencies and overrides can target ``RoPE.Config`` without requiring a
+    position table. Implementations that use rotary dimensions or scaling
+    inherit the corresponding ``ComplexRoPE.Config`` or ``CosSinRoPE.Config``.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -98,19 +103,33 @@ class IdentityRoPE(Module):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Transform query and optional key using the supplied positions."""
+        raise NotImplementedError
+
+
+class IdentityRoPE(RoPE):
+    """Leave query and optional key unchanged without allocating a cache."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(RoPE.Config):
+        pass
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return query if key is None else (query, key)
 
 
-class RoPE(Module):
-    """Shared Rotary Position Embedding module.
-
-    Common base for concrete RoPE formats. Use ``ComplexRoPE.Config`` for
-    complex exponential caches and ``CosSinRoPE.Config`` for concatenated
-    cosine/sine caches.
-    """
+class _CachedRoPE(RoPE):
+    """Shared cache lifecycle and lookup for the concrete rotary formats."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(RoPE.Config):
         dim: int
         max_context_length: int
         theta: float = 10000.0
@@ -128,8 +147,8 @@ class RoPE(Module):
         truncate: bool = True
 
     def __init__(self, config: Config):
-        super().__init__()
-        self.config = config
+        super().__init__(config)
+        self.config: _CachedRoPE.Config = config
         self.register_buffer("cache", self._precompute_cache(), persistent=False)
 
     def _precompute_cache(self) -> torch.Tensor:
@@ -202,9 +221,9 @@ class RoPE(Module):
             self.cache = self._precompute_cache()
 
 
-class ComplexRoPE(RoPE):
+class ComplexRoPE(_CachedRoPE):
     @dataclass(kw_only=True, slots=True)
-    class Config(RoPE.Config):
+    class Config(_CachedRoPE.Config):
         pass
 
     # Cat options: only fp32/fp16 inputs reach the stack (bf16 writes int32 pairs); they write
@@ -404,9 +423,9 @@ class _RotatePairs(torch.autograd.Function):
         return torch.stack((real, imag), dim=-1).flatten(-2)
 
 
-class CosSinRoPE(RoPE):
+class CosSinRoPE(_CachedRoPE):
     @dataclass(kw_only=True, slots=True)
-    class Config(RoPE.Config):
+    class Config(_CachedRoPE.Config):
         pass
 
     @local_compile("rope", batch_invariant=True)

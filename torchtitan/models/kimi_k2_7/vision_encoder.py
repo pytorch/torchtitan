@@ -33,7 +33,7 @@ from torchtitan.models.common import Linear
 
 from torchtitan.models.common.flops import active_parameter_flops_per_token
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
-from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE, RoPE
+from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     get_packed_vision_grids,
@@ -332,7 +332,7 @@ class MoonViTEncoder(Module):
         rope_config = self.config.block.attn.rope
         max_hw = max(max(h, w) for _, h, w in grids)
         if (
-            isinstance(rope_config, RoPE.Config)
+            isinstance(rope_config, ComplexRoPE.Config)
             and max_hw > rope_config.max_context_length
         ):
             raise ValueError(

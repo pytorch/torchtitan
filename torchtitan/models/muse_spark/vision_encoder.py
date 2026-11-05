@@ -35,7 +35,7 @@ from torchtitan.models.base.module import Module, ModuleDict
 
 from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
-from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE, RoPE
+from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     get_packed_vision_grids,
@@ -250,7 +250,7 @@ class NaViTEncoder(Module):
         self.pos_emb_grid_w = config.pos_emb_grid_w
         self.max_rope_positions = (
             config.block.attn.rope.max_context_length
-            if isinstance(config.block.attn.rope, RoPE.Config)
+            if isinstance(config.block.attn.rope, ComplexRoPE.Config)
             else None
         )
         self.grid_sample_mode = config.grid_sample_mode

@@ -31,7 +31,7 @@ from torchtitan.models.common.attention.cp_attention import UlyssesInnerAttentio
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.common.rope import RoPE
+from torchtitan.models.common.rope import CosSinRoPE
 
 from .state_dict_adapter import GptOssStateDictAdapter
 
@@ -63,7 +63,7 @@ class GptOssAttention(Attention):
         )
         sliding_window_size: int | None = None
         """Per-layer causal sliding-window size"""
-        rope: RoPE.Config
+        rope: CosSinRoPE.Config
 
         @property
         def softmax_scale(self) -> float:

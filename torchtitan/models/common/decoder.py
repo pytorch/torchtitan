@@ -277,30 +277,33 @@ class Decoder(BaseModel):
             assert self.tok_embeddings is not None and self.lm_head is not None
             self.tok_embeddings.weight = self.lm_head.weight
         super().init_states(buffer_device=buffer_device)
-        # ``to_empty()`` and ``RoPE._init_self_buffers()`` give every layer its
+        # ``to_empty()`` and RoPE buffer initialization give every layer its
         # own cache again; point identical RoPEs back at one tensor.
         self._tie_rope_caches()
 
     def _tie_rope_caches(self) -> None:
         """Share one cache tensor across RoPE modules with equal configs.
 
-        Every attention layer builds its own ``(max_context_length, ...)`` fp32
-        RoPE cache, identical across layers with the same config; at long
-        context these add up to GiBs per rank. The cache is a non-persistent,
-        read-only buffer, so sharing it does not change numerics or checkpoints.
+        Cache-backed RoPE modules build their own position tables, identical
+        across layers with the same config; at long context these add up to
+        GiBs per rank. The cache is a non-persistent, read-only buffer, so sharing
+        it does not change numerics or checkpoints.
 
         Sharing only holds after ``init_states``: any later ``_apply`` (e.g.
         ``model.to(...)``) gives every RoPE its own copy again. That costs
         memory but not correctness.
         """
         # TODO: this lowers steady-state memory only. ``to_empty()`` and each
-        # ``RoPE._init_self_buffers()`` still materialize one cache per RoPE
+        # RoPE buffer initialization still materializes one cache per RoPE
         # before they are tied here. If init-time peak memory becomes a problem,
         # have ``_init_self_buffers`` reuse a cache already built for an equal
         # config during the same ``init_states`` pass.
         representatives: list[RoPE] = []
         for module in self.modules():
             if not isinstance(module, RoPE):
+                continue
+            # Identity and buffer-free overrides have no cache to share.
+            if "cache" not in dict(module.named_buffers(recurse=False)):
                 continue
             rep = next(
                 (
@@ -313,7 +316,7 @@ class Decoder(BaseModel):
             if rep is None:
                 representatives.append(module)
             else:
-                module.cache = rep.cache
+                module.cache = rep.get_buffer("cache")
 
     def forward(
         self,

@@ -22,7 +22,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.common.rope import _RotatePairs, ComplexRoPE, RoPE
+from torchtitan.models.common.rope import _RotatePairs, ComplexRoPE
 
 __all__ = ["DeepSeekMLAAttention"]
 
@@ -45,7 +45,7 @@ class DeepSeekMLAAttention(Attention):
         qk_nope_head_dim: int = 128
         qk_rope_head_dim: int = 64
         v_head_dim: int = 128
-        rope: RoPE.Config
+        rope: ComplexRoPE.Config
         inner_attention: MLAAttention.Config  # pyrefly: ignore[bad-override]
         mscale: float = 1.0
 

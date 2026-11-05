@@ -25,7 +25,6 @@ from torchtitan.models.common import (
     HiMidLoLinear,
     Linear,
     RMSNorm,
-    RoPE,
     RowParallelLinear,
     Softmax,
     TransformerBlock,
@@ -98,7 +97,7 @@ def _make_gptoss_attn_config(
     n_kv_heads: int = 8,
     head_dim: int = 64,
     sliding_window_size: int | None = None,
-    rope: RoPE.Config,
+    rope: CosSinRoPE.Config,
     enable_sp: bool,
 ) -> GptOssAttention.Config:
     """Build a fully-specified, sharded GptOssAttention.Config for a layer.
@@ -221,7 +220,7 @@ def _build_gptoss_layers(
     top_k: int,
     load_balance_coeff: float | None,
     attn_backend: str = "varlen",
-    rope: RoPE.Config,
+    rope: CosSinRoPE.Config,
     enable_sp: bool,
     enable_ep: bool,
 ) -> list[TransformerBlock.Config]:

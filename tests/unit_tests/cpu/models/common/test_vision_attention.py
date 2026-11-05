@@ -15,7 +15,6 @@ from torch.nn.attention.flex_attention import create_block_mask
 
 from torchtitan.config import apply_overrides, derive, override, OverrideConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import IdentityRoPE, RoPE
@@ -48,6 +47,9 @@ class TestVisionAttention(unittest.TestCase):
         )
         identity_attention = _IdentityAttention()
         attention.flex_attention = identity_attention
+        self.assertIsInstance(attention.rope, RoPE)
+        self.assertIsInstance(IdentityRoPE.Config(), RoPE.Config)
+        self.assertEqual(list(attention.rope.named_buffers()), [])
 
         x_TD = torch.randn(num_tokens, dim)
         attention_mask = create_block_mask(
@@ -70,13 +72,13 @@ class TestVisionAttention(unittest.TestCase):
 
 
 def test_encoder_rope_and_attention_overrides_are_independent() -> None:
-    class MarkerRoPE(Module):
+    class MarkerRoPE(RoPE):
         @dataclass(kw_only=True, slots=True)
         class Config(RoPE.Config):
             pass
 
         def __init__(self, config):
-            super().__init__()
+            super().__init__(config)
             self.calls = 0
             self.positions_shape = None
 
@@ -113,7 +115,14 @@ def test_encoder_rope_and_attention_overrides_are_independent() -> None:
         def marker_attention(config):
             return derive(config, MarkerAttention.Config)
 
-        for family in ("kimi_k2_7", "kimi_k3", "qwen3_5", "muse_spark", "muse_glimmer"):
+        for family, enabled in (
+            ("kimi_k2_7", True),
+            ("kimi_k3", True),
+            ("qwen3_5", True),
+            ("muse_spark", True),
+            ("muse_glimmer", True),
+            ("muse_spark", False),
+        ):
             config = (
                 importlib.import_module(f"torchtitan.models.{family}")
                 .build_model_config(
@@ -124,6 +133,8 @@ def test_encoder_rope_and_attention_overrides_are_independent() -> None:
                 )
                 .vision_encoder
             )
+            if not enabled:
+                config.block.attn.rope = IdentityRoPE.Config()
             replacements = apply_overrides(
                 OverrideConfig(
                     imports=[
@@ -152,6 +163,8 @@ def test_encoder_rope_and_attention_overrides_are_independent() -> None:
                     grid_thw=torch.tensor([[1, 4, 4]]),
                 )
             for layer in encoder.layers.values():
+                assert isinstance(layer.attn.rope, RoPE)
+                assert not list(layer.attn.rope.named_buffers())
                 assert layer.attn.rope.calls == 1
                 assert layer.attn.rope.positions_shape == (16, 2)
                 assert layer.attn.flex_attention.calls == 1
