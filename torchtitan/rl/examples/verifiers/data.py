@@ -45,6 +45,10 @@ class VerifiersTaskDataset(RLDataset):
         shuffle: bool = True
         """Whether to shuffle the materialized task order before repetition."""
 
+        repeat: bool = True
+        """Cycle through the tasks without end. ``VerifiersRollouter`` turns it off for
+        its validation dataset: a validation pass reads each task once."""
+
         def __post_init__(self) -> None:
             if self.num_tasks is not None and self.num_tasks <= 0:
                 raise ValueError("num_tasks must be positive")
@@ -55,6 +59,7 @@ class VerifiersTaskDataset(RLDataset):
                 "num_tasks": self.num_tasks,
                 "seed": self.seed,
                 "shuffle": self.shuffle,
+                "repeat": self.repeat,
             }
 
     def __init__(self, config: Config) -> None:
@@ -90,7 +95,9 @@ class VerifiersTaskDataset(RLDataset):
             for task in tasks
         ]
         dataset = grain.MapDataset.source(samples)
-        self._iterator = iter(dataset.repeat().to_iter_dataset())
+        if config.repeat:
+            dataset = dataset.repeat()
+        self._iterator = iter(dataset.to_iter_dataset())
 
     def __iter__(self) -> Iterator[VerifiersTaskSample]:
         return self

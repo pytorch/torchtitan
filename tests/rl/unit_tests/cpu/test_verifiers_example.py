@@ -94,6 +94,22 @@ def test_verifiers_task_dataset_keeps_the_first_num_tasks(monkeypatch) -> None:
     assert task_indices == [0, 1, 0, 1]
 
 
+def test_validation_pass_reads_each_task_once(monkeypatch) -> None:
+    """``ValidationConfig(steps=-1)`` asks for one pass over the validation tasks."""
+    samples = [
+        DapoMathSample(prompt=f"problem {i}", ground_truth="1") for i in range(3)
+    ]
+    monkeypatch.setattr(data, "_load_math_dataset", lambda name: (iter(samples), 3))
+    rollouter = _verifiers_math_rollouter_config(max_rollout_tokens=1024).build()
+
+    # Bounded first: a repeating source returns 4 samples here instead of hanging below.
+    assert len(rollouter.get_validation_samples(4)) == 3
+    assert len(rollouter.get_validation_samples(-1)) == 3
+    # A 4th training sample from 3 tasks: training still cycles.
+    for _ in range(4):
+        rollouter.get_training_sample()
+
+
 def test_verifiers_environment_uses_no_sandbox() -> None:
     rollouter_config = _verifiers_math_rollouter_config(max_rollout_tokens=10240)
     config = rollouter_config.verifiers_env_server
