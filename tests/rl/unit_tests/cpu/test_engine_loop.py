@@ -150,8 +150,10 @@ def _message(engine_request: EngineRequest) -> GenerationMessage:
     )
 
 
-def _load(version: int) -> ModelStateDictLoadMessage:
-    return ModelStateDictLoadMessage(version=version, reply=concurrent.futures.Future())
+def _load(version: int, *, drain: bool = False) -> ModelStateDictLoadMessage:
+    return ModelStateDictLoadMessage(
+        version=version, reply=concurrent.futures.Future(), drain=drain
+    )
 
 
 async def _put(
@@ -368,6 +370,29 @@ def test_loads_taken_off_the_queue_together_coalesce_at_the_highest_version(
         and decision.load_version == 5
     )
     assert pending_load_messages == queued
+
+
+def test_draining_load_at_an_idle_engine_applies_at_once(runner) -> None:
+    engine_loop = _bare_loop(event_loop=runner.get_loop())
+    load = _load(5, drain=True)
+    decision = _decide(runner, engine_loop, [], load)
+    assert (
+        decision.action is LoopAction.LOAD_MODEL_STATE_DICT
+        and decision.load_version == 5
+    )
+
+
+def test_session_releases_during_a_drain_ride_the_step_decision(runner) -> None:
+    engine_loop = _bare_loop(event_loop=runner.get_loop(), inflight=True)
+    decision = _decide(
+        runner,
+        engine_loop,
+        [],
+        SessionReleaseMessage(session_ids=["s0"], group_ids=[3]),
+        pending_load_messages=[_load(5, drain=True)],
+    )
+    assert decision.action is LoopAction.STEP and decision.requests_per_dp_rank == [[]]
+    assert (decision.released_session_ids, decision.released_group_ids) == (["s0"], [3])
 
 
 def test_calls_cancelled_on_the_queue_are_skipped(runner) -> None:
@@ -815,7 +840,9 @@ def test_load_runs_on_the_engine_thread(engine_thread, monkeypatch) -> None:
         endpoint_context.set("endpoint")
         engine_loop.start()
 
-        await asyncio.wait_for(engine_loop.load_model_state_dict(4), _TIMEOUT_S)
+        await asyncio.wait_for(
+            engine_loop.load_model_state_dict(4, drain=False), _TIMEOUT_S
+        )
         assert engine_loop.policy_version == 4
         assert reads == [
             (engine_loop.engine_thread.thread, engine_loop._event_loop, "endpoint")
@@ -909,7 +936,9 @@ def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
         gate.release()
         await asyncio.wait_for(first, _TIMEOUT_S)
         # The load applies the prefetched weights without reading TorchStore again.
-        await asyncio.wait_for(generator.load_model_state_dict(4), _TIMEOUT_S)
+        await asyncio.wait_for(
+            generator.load_model_state_dict(4, drain=False), _TIMEOUT_S
+        )
         assert reads == [actor_loop]
         assert generator.policy_version == 4
 
@@ -953,7 +982,9 @@ def test_gpu_fetch_reads_torchstore_on_the_actor_loop_during_the_load(
         await asyncio.wait_for(generator.prefetch_model_state_dict(), _TIMEOUT_S)
         assert reads == []
 
-        await asyncio.wait_for(generator.load_model_state_dict(4), _TIMEOUT_S)
+        await asyncio.wait_for(
+            generator.load_model_state_dict(4, drain=False), _TIMEOUT_S
+        )
         assert reads == [
             (
                 threading.current_thread(),
@@ -985,7 +1016,7 @@ def test_load_replies_only_after_every_rank_finished_fetching(
     async def run() -> None:
         engine_loop = engine_thread(_FakeEngine())
         engine_loop.start()
-        load = asyncio.create_task(engine_loop.load_model_state_dict(3))
+        load = asyncio.create_task(engine_loop.load_model_state_dict(3, drain=False))
         assert await asyncio.to_thread(reducing.wait, _TIMEOUT_S)
 
         # Other ranks may still be fetching, so the load must not resolve.
@@ -1027,7 +1058,9 @@ def test_load_fails_on_every_rank_when_any_rank_fails(
             else "failed on another generator rank"
         )
         with pytest.raises(RuntimeError, match=error):
-            await asyncio.wait_for(engine_loop.load_model_state_dict(3), _TIMEOUT_S)
+            await asyncio.wait_for(
+                engine_loop.load_model_state_dict(3, drain=False), _TIMEOUT_S
+            )
         # A failing rank still joins the all-reduce, so the other ranks don't hang.
         assert reduced == [int(failing_rank == "this")]
         assert engine_loop.policy_version == 0
@@ -1053,11 +1086,11 @@ def test_loads_queued_during_a_load_are_applied_together_after_it(
     async def run() -> None:
         engine_loop = engine_thread(_loading_engine(monkeypatch, load_pre_hook))
         engine_loop.start()
-        first = asyncio.create_task(engine_loop.load_model_state_dict(3))
+        first = asyncio.create_task(engine_loop.load_model_state_dict(3, drain=False))
         assert await asyncio.to_thread(reading[0].wait, _TIMEOUT_S)
 
         later = [
-            asyncio.create_task(engine_loop.load_model_state_dict(version))
+            asyncio.create_task(engine_loop.load_model_state_dict(version, drain=False))
             for version in (4, 5)
         ]
         await asyncio.sleep(0)  # both put their call on the queue
@@ -1080,6 +1113,71 @@ def test_loads_queued_during_a_load_are_applied_together_after_it(
     asyncio.run(run())
 
 
+def test_draining_load_finishes_admitted_requests_then_admits_held_ones(
+    engine_thread,
+) -> None:
+    stepping = threading.Event()
+    engine = _HeldEngine(stepping.set)
+
+    async def run() -> None:
+        engine_loop = engine_thread(engine)
+        # (request id, policy version at admission)
+        admitted: list[tuple[str, int]] = []
+        admit = engine.admit
+        engine.admit = lambda request: (
+            admitted.append((request.request_id, engine_loop.policy_version)),
+            admit(request),
+        )
+        engine_loop.start()
+        running = _generate(engine_loop, "r0")
+        assert await asyncio.to_thread(stepping.wait, _TIMEOUT_S)  # r0 is admitted
+
+        load = asyncio.create_task(engine_loop.load_model_state_dict(2, drain=True))
+        # A fresh group, so no older salt pin keeps its min policy version below the new one.
+        held = _generate(engine_loop, "r1", group_id=9)
+        await asyncio.sleep(0)  # both put their call on the queue
+        # Queued on the engine loop behind both puts, so the loop has taken them off once it returns.
+        await _on_engine_loop(engine_loop, lambda: None)
+        await _on_engine_loop(engine_loop, lambda: None)
+        assert not load.done() and not held.done()
+        assert admitted == [("r0", 0)]  # r1 waits for the load
+
+        # r0 finishes, the load lands, and r1 is admitted on the new weights with no further message.
+        engine.finish.set()
+        await asyncio.wait_for(asyncio.gather(running, load), _TIMEOUT_S)
+        completion = await asyncio.wait_for(held, _TIMEOUT_S)
+        assert admitted == [("r0", 0), ("r1", 2)]
+        assert (completion.min_policy_version, completion.max_policy_version) == (2, 2)
+
+        await asyncio.wait_for(engine_loop.close(), _TIMEOUT_S)
+
+    asyncio.run(run())
+
+
+def test_close_during_a_drain_fails_the_load_and_every_request(engine_thread) -> None:
+    stepping = threading.Event()
+    engine = _HeldEngine(stepping.set)
+
+    async def run() -> None:
+        engine_loop = engine_thread(engine)
+        engine_loop.start()
+        running = _generate(engine_loop, "r0")
+        assert await asyncio.to_thread(stepping.wait, _TIMEOUT_S)  # r0 is admitted
+        load = asyncio.create_task(engine_loop.load_model_state_dict(2, drain=True))
+        held = _generate(engine_loop, "r1")
+        await asyncio.sleep(0)  # both put their call on the queue
+        await _on_engine_loop(engine_loop, lambda: None)
+        await _on_engine_loop(engine_loop, lambda: None)
+
+        await asyncio.wait_for(engine_loop.close(), _TIMEOUT_S)
+        # The admitted request, the parked one and the pending load all fail; none hangs.
+        for call in (running, held, load):
+            with pytest.raises(RuntimeError):
+                await asyncio.wait_for(call, _TIMEOUT_S)
+
+    asyncio.run(run())
+
+
 def test_crash_fails_outstanding_and_queued_calls_and_later_calls(
     engine_thread, monkeypatch
 ) -> None:
@@ -1093,14 +1191,16 @@ def test_crash_fails_outstanding_and_queued_calls_and_later_calls(
     async def run() -> None:
         engine_loop = engine_thread(_loading_engine(monkeypatch, load_pre_hook))
         engine_loop.start()
-        failing_load = asyncio.create_task(engine_loop.load_model_state_dict(3))
+        failing_load = asyncio.create_task(
+            engine_loop.load_model_state_dict(3, drain=False)
+        )
         assert await asyncio.to_thread(reading.wait, _TIMEOUT_S)
 
         # A session release (no reply) queued ahead of the calls must not stop them from failing.
         engine_loop._queue.put(SessionReleaseMessage(session_ids=["s"]))
         queued = [
             _generate(engine_loop, "r0"),
-            asyncio.create_task(engine_loop.load_model_state_dict(4)),
+            asyncio.create_task(engine_loop.load_model_state_dict(4, drain=False)),
         ]
         await asyncio.sleep(0)  # both put their call on the queue
         # Queued on the engine loop behind both puts, so both are on the queue once it returns.
@@ -1219,7 +1319,9 @@ def test_close_fails_outstanding_requests_and_later_calls(engine_thread) -> None
         in_flight = _generate(engine_loop, "r0")
         assert await asyncio.to_thread(gate.entered.wait, _TIMEOUT_S)
         queued = _generate(engine_loop, "r1")
-        queued_load = asyncio.create_task(engine_loop.load_model_state_dict(4))
+        queued_load = asyncio.create_task(
+            engine_loop.load_model_state_dict(4, drain=False)
+        )
         closing = asyncio.create_task(engine_loop.close())
         # Runs after `close` has closed the queue, while the loop still runs, so the guard rejects it
         # before it reaches the queue.
@@ -1253,7 +1355,9 @@ def test_close_fails_outstanding_requests_and_later_calls(engine_thread) -> None
         with pytest.raises(RuntimeError, match="generator is closed"):
             await asyncio.wait_for(_generate(engine_loop, "r3"), _TIMEOUT_S)
         with pytest.raises(RuntimeError, match="generator is closed"):
-            await asyncio.wait_for(engine_loop.load_model_state_dict(4), _TIMEOUT_S)
+            await asyncio.wait_for(
+                engine_loop.load_model_state_dict(4, drain=False), _TIMEOUT_S
+            )
         await asyncio.wait_for(engine_loop.close(), _TIMEOUT_S)
 
     asyncio.run(run())
