@@ -81,6 +81,9 @@ document-local indices are mapped back to global key indices. Under CP, the
 indexer gathers query features and weights in addition to keys to satisfy
 Attention Gym's complete-document input contract, then returns local queries'
 selections. This currently repeats indexer selection across CP ranks.
+The learned indexer is loaded from the checkpoint and remains frozen during
+continued training; this implementation does not train a new indexer with an
+auxiliary distillation loss from random initialization.
 Attention uses the shared `MLAAttention` backend, or
 the GLM compact-KV adapter under CP. CP gathers normalized compressed KV
 and the shared rotary key before KV expansion. Q/KV projections, RoPE,

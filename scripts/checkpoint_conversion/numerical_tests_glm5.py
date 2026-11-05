@@ -8,7 +8,7 @@
 """Forward parity for TorchTitan GLM-5 and Hugging Face GLM-MoE-DSA.
 
 The released model is too large for a single-device correctness test. This
-script instead reduces the Hugging Face configuration to TorchTitan's
+script instead reduces a pinned released Hugging Face configuration to
 ``glm5_2_debugmodel``, initializes TorchTitan deterministically, converts its
 state dict to Hugging Face format, and compares logits for identical tokens.
 The strict Hugging Face load also validates every checkpoint mapping.
@@ -30,9 +30,6 @@ import torch
 import torch.nn.functional as F
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.feed_forward import DenseFeedForward
-from torchtitan.models.common.moe import MoE
-from torchtitan.models.deepseek_v3.moe import DeepSeekV3Router
 from torchtitan.models.glm5 import build_model_config
 from torchtitan.models.glm5.state_dict_adapter import Glm5StateDictAdapter
 from transformers import GlmMoeDsaConfig, GlmMoeDsaForCausalLM
@@ -43,75 +40,42 @@ _DEFAULT_FLAVOR = "glm5_2_debugmodel"
 
 
 def _build_hf_config(tt_config) -> GlmMoeDsaConfig:
-    """Translate the TorchTitan debug architecture into an HF config."""
-    attention = tt_config.layers[0].attention
-    dense_ffn = next(
-        layer.feed_forward
-        for layer in tt_config.layers
-        if isinstance(layer.feed_forward, DenseFeedForward.Config)
+    """Reduce an independently pinned released config, not the TT definition."""
+    config = GlmMoeDsaConfig.from_pretrained(
+        "zai-org/GLM-5.2",
+        revision="cf457fa734ab149ffef225f80893eb38c6ff5cdc",
     )
-    moe = next(
-        layer.feed_forward
-        for layer in tt_config.layers
-        if isinstance(layer.feed_forward, MoE.Config)
-    )
-    if moe.shared_experts is None:
-        raise ValueError("GLM-5 numerical parity requires shared experts.")
-    if not isinstance(moe.router, DeepSeekV3Router.Config):
-        raise ValueError("GLM-5 numerical parity requires the GLM group router.")
-
-    routed_hidden_dim = moe.routed_experts.w13.out_features
-    shared_hidden_dim = moe.shared_experts.w13.out_features
-    if shared_hidden_dim % routed_hidden_dim:
-        raise ValueError(
-            "shared-expert hidden size must be a multiple of routed hidden size"
-        )
-
-    mlp_layer_types = [
-        "sparse" if isinstance(layer.feed_forward, MoE.Config) else "dense"
-        for layer in tt_config.layers
-    ]
-    indexer_types = [
-        "full" if source == layer_idx else "shared"
-        for layer_idx, source in enumerate(tt_config.index_sources)
-    ]
-    assert moe.router.num_expert_groups is not None
-    assert moe.router.num_limited_groups is not None
-    config = GlmMoeDsaConfig(
-        vocab_size=tt_config.vocab_size,
-        hidden_size=tt_config.dim,
-        intermediate_size=dense_ffn.w13.out_features,
-        moe_intermediate_size=routed_hidden_dim,
-        num_hidden_layers=len(tt_config.layers),
-        num_attention_heads=attention.n_heads,
-        num_key_value_heads=attention.n_heads,
-        n_shared_experts=shared_hidden_dim // routed_hidden_dim,
-        n_routed_experts=moe.num_experts,
-        routed_scaling_factor=moe.router.route_scale,
-        kv_lora_rank=attention.kv_lora_rank,
-        q_lora_rank=attention.q_lora_rank,
-        qk_rope_head_dim=attention.qk_rope_head_dim,
-        v_head_dim=attention.v_head_dim,
-        qk_nope_head_dim=attention.qk_nope_head_dim,
-        n_group=moe.router.num_expert_groups,
-        topk_group=moe.router.num_limited_groups,
-        num_experts_per_tok=moe.router.top_k,
-        norm_topk_prob=moe.router.route_norm,
-        max_position_embeddings=tt_config.max_context_length,
-        rms_norm_eps=tt_config.norm.eps,
-        rope_parameters={
-            "rope_type": "default",
-            "rope_theta": attention.rope.theta,
-        },
-        mlp_layer_types=mlp_layer_types,
-        index_topk=attention.indexer.topk.index_topk,
-        index_head_dim=attention.indexer.head_dim,
-        index_n_heads=attention.indexer.n_heads,
-        indexer_types=indexer_types,
-        first_k_dense_replace=mlp_layer_types.count("dense"),
-        attention_dropout=0.0,
-        use_cache=False,
-        tie_word_embeddings=False,
+    # Only dimensions and the context window shrink. Keep released normalization,
+    # routing, RoPE, interleaving, and the first eight layers' sharing semantics.
+    config.update(
+        {
+            "vocab_size": 2048,
+            "pad_token_id": None,
+            "eos_token_id": 2,
+            "hidden_size": 256,
+            "intermediate_size": 1024,
+            "moe_intermediate_size": 256,
+            "num_hidden_layers": 8,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 8,
+            "n_routed_experts": 8,
+            "num_experts_per_tok": 2,
+            "q_lora_rank": 128,
+            "kv_lora_rank": 64,
+            "qk_nope_head_dim": 32,
+            "qk_rope_head_dim": 32,
+            "qk_head_dim": 64,
+            "v_head_dim": 64,
+            "head_dim": 32,
+            "index_n_heads": 4,
+            "index_head_dim": 64,
+            "index_topk": 8,
+            "max_position_embeddings": tt_config.max_context_length,
+            "mlp_layer_types": config.mlp_layer_types[:8],
+            "indexer_types": config.indexer_types[:8],
+            "num_nextn_predict_layers": 0,
+            "use_cache": False,
+        }
     )
     return config
 
@@ -215,7 +179,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Compare TorchTitan and Hugging Face GLM-5 logits."
     )
-    parser.add_argument("--model_flavor", default=_DEFAULT_FLAVOR)
+    parser.add_argument(
+        "--model_flavor",
+        choices=("glm5_2_debugmodel", "glm5_3_debugmodel"),
+        default=_DEFAULT_FLAVOR,
+    )
     parser.add_argument("--seq_len", type=int, default=16)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
