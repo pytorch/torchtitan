@@ -103,8 +103,8 @@ class _GenerateFn:
     def __init__(self) -> None:
         self.calls = []
 
-    async def __call__(self, prompt_token_ids, **kwargs) -> Completion:
-        self.calls.append((prompt_token_ids, kwargs))
+    async def __call__(self, prompt, **kwargs) -> Completion:
+        self.calls.append((prompt, kwargs))
         return Completion(
             min_policy_version=3,
             max_policy_version=3,
@@ -127,6 +127,7 @@ def test_worker_executes_group_without_actor_mesh() -> None:
             message_env=_MessageEnvConfig(),
             token_env=token_env_config,
             advantage=_Config(_AdvantageEstimator()),
+            rdma_min_prompt_bytes=None,
         )
         worker = _CustomWorker(worker_config)
         released = []
@@ -249,11 +250,12 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
             message_env=None,
             token_env=None,
             advantage=_Config(None),
+            rdma_min_prompt_bytes=None,
         )
     )
     builder = TrainingSampleBuilder.Config().build()
 
-    async def generate_fn(prompt_token_ids, **kwargs) -> Completion:
+    async def generate_fn(prompt, **kwargs) -> Completion:
         token_ids = [rng.randrange(100) for _ in range(rng.randint(1, 3))]
         return Completion(
             min_policy_version=1,

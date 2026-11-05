@@ -17,6 +17,10 @@ from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.observability import structured_logger as sl
+from torchtitan.rl.actors.monarch.rdma import (
+    create_cuda_context_to_silence_monarch_log,
+    MonarchRDMAObject,
+)
 from torchtitan.rl.rollout.rollouter import RolloutWorker
 from torchtitan.rl.rollout.types import RolloutGroup
 
@@ -38,7 +42,12 @@ class RolloutWorkerActor(Actor):
         asyncio.get_running_loop().set_default_executor(
             ThreadPoolExecutor(max_workers=num_threads)
         )
-        self._worker = worker_config.build()
+        if worker_config.rdma_min_prompt_bytes is not None:
+            # On the event loop's thread, where `run_group` registers the prompts.
+            create_cuda_context_to_silence_monarch_log()
+        self._worker = worker_config.build(
+            register_rdma_object=MonarchRDMAObject.register
+        )
 
     @concurrent_endpoint
     async def setup_async(

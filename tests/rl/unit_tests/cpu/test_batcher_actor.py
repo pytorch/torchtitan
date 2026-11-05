@@ -14,7 +14,7 @@ import pytest
 import torch
 from monarch.actor import ActorError, this_host
 from torchtitan.rl.actors.monarch.batcher import BatcherActor
-from torchtitan.rl.actors.monarch.rdma_microbatch import _TensorRef
+from torchtitan.rl.actors.monarch.rdma import _TensorRef
 from torchtitan.rl.rollout.types import (
     Rollout,
     RolloutGroup,
@@ -132,10 +132,9 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
     batch_b = results[4][0]
     assert [results[2][0].group_ids, batch_b.group_ids] == [[0, 1, 2], [3, 4]]
     # int64 fields (2 KiB) cross processes by ref; the token counts go by value.
-    assert isinstance(batch_b.microbatch_groups[0][0][0].fields["input"], _TensorRef)
-    assert isinstance(
-        batch_b.microbatch_groups[0][0][0].fields["loss_token_counts"], torch.Tensor
-    )
+    registered = batch_b.microbatch_groups[0][0][0].microbatch.value
+    assert isinstance(registered.input, _TensorRef)
+    assert isinstance(registered.loss_token_counts, torch.Tensor)
 
     def comparable(batch) -> dict:
         # assert_close can't compare metric objects; every other field must match exactly.
