@@ -174,8 +174,6 @@ class TokenChoiceTopKRouter(Module):
     routed to top K experts based on the router scores.
     """
 
-    _dtype_pinned_buffers = frozenset({"tokens_per_expert_E"})
-
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int
@@ -407,8 +405,6 @@ class QuantileBalancer(Module):
     micro-batch is accumulated into uniform bins over that interval.
     """
 
-    _dtype_pinned_buffers = frozenset({"required_bias_histogram_EB"})
-
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int
@@ -622,10 +618,6 @@ class BatchWiseLoadBalanceLoss(AuxLoss):
     their additive contributions.
     """
 
-    _dtype_pinned_buffers = AuxLoss._dtype_pinned_buffers | frozenset(
-        {"_cumulative_expert_counts_E"}
-    )
-
     @dataclass(kw_only=True, slots=True)
     class Config(AuxLoss.Config):
         num_experts: int
@@ -731,8 +723,6 @@ class MoE(FeedForward):
     3. Shared experts compute their output.
     4. Routed and shared expert outputs are summed.
     """
-
-    _dtype_pinned_buffers = frozenset({"expert_bias_E"})
 
     @dataclass(kw_only=True, slots=True)
     class Config(FeedForward.Config):

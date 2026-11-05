@@ -87,8 +87,6 @@ class RoPE(Module):
     cosine/sine caches.
     """
 
-    _dtype_pinned_buffers = frozenset({"cache"})
-
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         dim: int

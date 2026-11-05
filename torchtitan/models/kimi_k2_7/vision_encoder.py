@@ -242,8 +242,6 @@ class VisionRotaryEmbedding2D(Module):
     ``head_dim`` must be divisible by 4.
     """
 
-    _dtype_pinned_buffers = frozenset({"inv_freq"})
-
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         head_dim: int

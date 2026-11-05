@@ -11,7 +11,7 @@ import inspect
 from collections.abc import Callable, Iterator, Sequence, ValuesView
 from dataclasses import dataclass
 from fnmatch import fnmatch
-from typing import Any, ClassVar, Generic, TYPE_CHECKING, TypeVar
+from typing import Any, Generic, TYPE_CHECKING, TypeVar
 
 import spmd_types as spmd
 import torch
@@ -43,13 +43,13 @@ class Module(nn.Module, Configurable):
     ordering (e.g., weight tying before init). Override ``_init_self_buffers``
     for buffer initialization.
 
-    Materialized buffers named in ``_dtype_pinned_buffers`` reject dtype changes.
+    All materialized buffers owned by this module reject dtype changes.
+    This default prevents silent corruption when a new buffer is added.
+    An unsupported cast fails immediately instead of silently changing state.
     Cast meta models before ``to_empty`` and ``init_states``. The guard preserves
     the current dtype, not a canonical dtype after direct assignment or loading.
     Failed conversions may leave earlier parameters or children changed.
     """
-
-    _dtype_pinned_buffers: ClassVar[frozenset[str]] = frozenset()
 
     _param_init: dict[str, Callable] | None = None
     _sharding_config: ShardingConfig | None = None
@@ -181,7 +181,7 @@ class Module(nn.Module, Configurable):
             self._init_self_buffers(buffer_device=buffer_device)
 
     def _apply(self, fn, recurse=True):
-        """Preserve SPMD annotations and reject dtype changes to pinned buffers.
+        """Preserve SPMD annotations and reject dtype changes to materialized buffers.
 
         Check each conversion result before PyTorch installs it. The conversion
         runs once per tensor, with no rollback of earlier changes. Functions that
@@ -192,7 +192,7 @@ class Module(nn.Module, Configurable):
             for name, buffer in self.named_buffers(
                 recurse=False, remove_duplicate=False
             )
-            if name in self._dtype_pinned_buffers and not buffer.is_meta
+            if not buffer.is_meta
         }
 
         def checked_fn(tensor):
