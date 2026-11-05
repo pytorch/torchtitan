@@ -61,6 +61,11 @@ class ParallelismConfig:
     fsdp_defer_gradient_reduction: bool = False
     """Defer FSDP gradient reduction until the last accumulation step."""
 
+    fsdp_enable_cpu_offloading: bool = False
+    """
+    Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP
+    """
+
     fsdp_symm_mem_scope: FSDPSymmMemScope = None
     """
     Which FSDP modules use symmetric-memory communication. None disables it.
@@ -208,6 +213,12 @@ class ParallelismConfig:
     """
 
     def __post_init__(self):
+        layers_per_stage = self.pipeline_parallel_layers_per_stage
+        if layers_per_stage is not None and layers_per_stage < 1:
+            raise ValueError(
+                "parallelism.pipeline_parallel_layers_per_stage must be positive "
+                f"when set; got {layers_per_stage}."
+            )
         if (
             self.pipeline_parallel_module_fqns_per_model_part is not None
             and self.pipeline_parallel_layers_per_stage is not None

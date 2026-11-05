@@ -28,7 +28,7 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.components.tokenizer import MultiModalTokenizer
-from torchtitan.config import TrainingConfig
+from torchtitan.config import PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.distributed.flex_shard import (
@@ -130,12 +130,11 @@ def kimi_k3_debugmodel(
                 min_lr_factor=0.0,
             ),
         ),
+        precision=PrecisionConfig(dtype="bfloat16"),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
-            dtype="bfloat16",
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=None,
@@ -325,6 +324,12 @@ def _dist_muon_optimizer(
                 lr=muon_lr,
                 weight_decay=0.1,
                 adjust_lr_fn="match_rms_adamw",
+                ns_device="accelerator",
+                # Start with 8 CTAs to reduce all-to-all memory without limiting
+                # FSDP. At 64 ranks and ~12 MiB per peer/channel, the 32-to-8
+                # channel connection-state estimate falls from ~23.6 to ~5.9 GiB
+                # per rank; revisit the cap if redistribution is bandwidth-bound.
+                max_nccl_ctas_for_comms=8,
             ),
             # The remaining parameters are embeddings, norms, biases, the LM
             # head, the KDA scalars/convolutions, and the vision tower.

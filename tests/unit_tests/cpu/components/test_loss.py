@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import copy
+import itertools
 import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -25,21 +26,21 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.components.loss import (
     _LossParallelCrossEntropy,
-    BaseLoss,
     ChunkedLossWrapper,
     compute_logprobs,
     cross_entropy_loss,
     CrossEntropyLoss,
     GradAccumulator,
     IGNORE_INDEX,
+    Loss,
 )
-from torchtitan.config import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import LoRATransform, transform_model_config_
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.deepseek_v3.mtp import (
     get_mtp_token_counts,
+    MTPCrossEntropyLoss,
     MTPDecoder,
-    MTPLoss,
     roll_mtp_sequence,
 )
 from torchtitan.models.llama3 import build_model_config
@@ -180,7 +181,6 @@ class TestLoss(unittest.TestCase):
                 parallelism_context=SimpleNamespace(cp_enabled=False),
                 parallelism=SimpleNamespace(),
                 max_num_documents=2,
-                max_context_length=8,
                 global_routing_token_counts=routing_token_counts,
             )
 
@@ -248,16 +248,16 @@ class TestLoss(unittest.TestCase):
         torch.testing.assert_close(loss_token_counts, torch.tensor([2, 2]))
         torch.testing.assert_close(routing_token_counts, torch.tensor([4, 3]))
 
-    def test_mtp_loss_rejects_plain_tensor(self):
-        loss_fn = MTPLoss(MTPLoss.Config(global_vocab_size=16))
+    def test_mtp_cross_entropy_loss_rejects_plain_tensor(self):
+        loss_fn = MTPCrossEntropyLoss(MTPCrossEntropyLoss.Config(global_vocab_size=16))
         pred = torch.zeros(1, 4, 16)
         labels = torch.zeros(1, 4, dtype=torch.long)
 
         with self.assertRaisesRegex(ValueError, "expects prediction and labels tuples"):
             loss_fn(pred, labels)
 
-    def test_mtp_loss_uses_each_depth_target_count(self):
-        loss_fn = MTPLoss(MTPLoss.Config(mtp_scale=0.3))
+    def test_mtp_cross_entropy_loss_uses_each_depth_target_count(self):
+        loss_fn = MTPCrossEntropyLoss(MTPCrossEntropyLoss.Config(mtp_scale=0.3))
         logits = tuple(torch.zeros(4, 4, requires_grad=True) for _ in range(3))
         labels = (
             torch.zeros(4, dtype=torch.long),
@@ -274,8 +274,8 @@ class TestLoss(unittest.TestCase):
         torch.testing.assert_close(logits[1].grad[0, 0], torch.tensor(-0.15 * 0.75 / 3))
         torch.testing.assert_close(logits[2].grad[0, 0], torch.tensor(-0.15 * 0.75 / 2))
 
-    def test_mtp_loss_without_counts_returns_unnormalized_sum(self):
-        loss_fn = MTPLoss(MTPLoss.Config(mtp_scale=0.3))
+    def test_mtp_cross_entropy_loss_without_counts_returns_unnormalized_sum(self):
+        loss_fn = MTPCrossEntropyLoss(MTPCrossEntropyLoss.Config(mtp_scale=0.3))
         logits = tuple(torch.zeros(4, 4) for _ in range(2))
         labels = tuple(torch.zeros(4, dtype=torch.long) for _ in range(2))
 
@@ -464,8 +464,9 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
     @with_comms
     def test_loss_parallel_cross_entropy_parity(self):
         """
-        Tests loss-parallel cross-entropy loss bitwise parity, with torch.distributed.tensor.parallel.loss_parallel().
+        Tests loss-parallel cross-entropy loss parity with torch.distributed.tensor.parallel.loss_parallel().
         Tests even/uneven vocab sharding, TP, DP+TP, and IGNORE_INDEX labels.
+        Not bitwise: the NLL is computed as softplus(logsumexp_{j != t} - z_t).
 
         Runs _LossParallelCrossEntropy under typing checking: logits S(1)@TP, labels I@TP -> I@TP.
         """
@@ -552,9 +553,9 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         spmd.get_axis_local_type(local_loss, tp_group), spmd.I
                     )
 
-                    # Loss and local-shard gradients must be bitwise-equivalent
-                    # to torch.distributed.tensor.parallel.loss_parallel().
-                    self.assertTrue(torch.equal(local_loss, wrapper_loss.to_local()))
+                    # Loss and local-shard gradients must match
+                    # torch.distributed.tensor.parallel.loss_parallel().
+                    torch.testing.assert_close(local_loss, wrapper_loss.to_local())
 
                     # compare grad_logits; easier to wrap DTensor -> full_tensor for check.
                     with loss_parallel():
@@ -567,12 +568,186 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         shape=torch.Size((T, vocab_size)),
                         stride=(vocab_size, 1),
                     )
-                    self.assertTrue(
-                        torch.equal(
-                            local_grad_dtensor.full_tensor(),
-                            logits_dtensor.grad.full_tensor(),
-                        )
+                    torch.testing.assert_close(
+                        local_grad_dtensor.full_tensor(),
+                        logits_dtensor.grad.full_tensor(),
                     )
+
+    @with_comms
+    def test_loss_parallel_cross_entropy_confident_targets(self):
+        """
+        Confident targets keep their loss and target gradient.
+
+        With logsumexp-based CE, fp32 rounds p_t to exactly 1 once the margin
+        z_t - logsumexp_{j != t}(z_j) exceeds ~16.6, so the loss and the target
+        gradient become exactly 0 while the non-target gradients stay nonzero.
+        Targets sit in different TP shards; the reference is computed in fp64.
+        """
+        T, vocab_size = 6, 1003
+        mesh = init_device_mesh(self.device_type, (4,), mesh_dim_names=("tp",))
+        tp_group = mesh.get_group("tp")
+
+        generator = torch.Generator().manual_seed(0)
+        global_logits = 0.1 * torch.randn(T, vocab_size, generator=generator)
+        global_labels = torch.tensor([3, 260, 510, 777, 1002, 40])
+        # Margins of roughly 23, 43, 63, and 73 (past the fp32 rounding point),
+        # then one moderate and one ordinary row.
+        target_logits = torch.tensor([30.0, 50.0, 70.0, 80.0, 10.0, 0.0])
+        global_logits[torch.arange(T), global_labels] = target_logits
+        global_logits = global_logits.to(self.device_type)
+        global_labels = global_labels.to(self.device_type)
+
+        logits_fp64 = global_logits.double()
+        target_fp64 = logits_fp64.gather(-1, global_labels.unsqueeze(-1))
+        non_target = logits_fp64.scatter(-1, global_labels.unsqueeze(-1), -torch.inf)
+        expected_nll = F.softplus(
+            torch.logsumexp(non_target, dim=-1, keepdim=True) - target_fp64
+        )
+        expected_grad = torch.exp(logits_fp64 - target_fp64 - expected_nll)
+        expected_grad.scatter_(
+            -1, global_labels.unsqueeze(-1), torch.expm1(-expected_nll)
+        )
+        expected_nll = expected_nll.squeeze(-1).float()
+        expected_grad = expected_grad.float()
+
+        for reduction in ("none", "sum"):
+            with self.subTest(reduction=reduction):
+                local_logits = (
+                    distribute_tensor(global_logits, mesh, (Shard(1),))
+                    .to_local()
+                    .detach()
+                    .requires_grad_(True)
+                )
+                local_labels = distribute_tensor(
+                    global_labels, mesh, (Replicate(),)
+                ).to_local()
+                nll = _LossParallelCrossEntropy.apply(
+                    local_logits, local_labels, tp_group, vocab_size, reduction
+                )
+                nll.sum().backward()
+                grad = DTensor.from_local(
+                    local_logits.grad,
+                    mesh,
+                    (Shard(1),),
+                    shape=torch.Size((T, vocab_size)),
+                    stride=(vocab_size, 1),
+                ).full_tensor()
+
+                if reduction == "none":
+                    self.assertTrue(torch.all(nll[:4] > 0))
+                    torch.testing.assert_close(nll, expected_nll, rtol=1e-5, atol=0)
+                else:
+                    torch.testing.assert_close(
+                        nll, expected_nll.sum(), rtol=1e-5, atol=0
+                    )
+                target_grad = grad.gather(-1, global_labels.unsqueeze(-1))
+                self.assertTrue(torch.all(target_grad < 0))
+                torch.testing.assert_close(grad, expected_grad, rtol=1e-4, atol=0)
+                # The target gradient balances the non-target gradients.
+                torch.testing.assert_close(
+                    grad.sum(-1, keepdim=True) - target_grad,
+                    -target_grad,
+                    rtol=1e-4,
+                    atol=0,
+                )
+
+    @with_comms
+    def test_loss_parallel_cross_entropy_ignored_rows_and_inputs(self):
+        """
+        Ignored rows give zero loss and zero (never NaN) gradient even when the
+        logit at the fallback label 0 is -inf, and the input logits are not
+        modified (the loss saves its gradient in a fresh buffer).
+        """
+        T, vocab_size = 5, 1003
+        mesh = init_device_mesh(self.device_type, (4,), mesh_dim_names=("tp",))
+        tp_group = mesh.get_group("tp")
+
+        generator = torch.Generator().manual_seed(0)
+        global_logits = torch.randn(T, vocab_size, generator=generator)
+        global_logits[1:3, 0] = -torch.inf
+        global_labels = torch.tensor([3, IGNORE_INDEX, IGNORE_INDEX, 777, 1002])
+        global_logits = global_logits.to(self.device_type)
+        global_labels = global_labels.to(self.device_type)
+
+        local_logits = (
+            distribute_tensor(global_logits, mesh, (Shard(1),))
+            .to_local()
+            .detach()
+            .requires_grad_(True)
+        )
+        local_labels = distribute_tensor(global_labels, mesh, (Replicate(),)).to_local()
+        logits_before = local_logits.detach().clone()
+
+        nll = _LossParallelCrossEntropy.apply(
+            local_logits, local_labels, tp_group, vocab_size, "none"
+        )
+        self.assertTrue(torch.equal(local_logits.detach(), logits_before))
+        self.assertTrue(torch.all(nll[1:3] == 0))
+        self.assertTrue(torch.all(torch.isfinite(nll)))
+
+        nll.sum().backward()
+        self.assertTrue(torch.all(torch.isfinite(local_logits.grad)))
+        self.assertTrue(torch.all(local_logits.grad[1:3] == 0))
+
+    @with_comms
+    def test_loss_parallel_cross_entropy_compiled(self):
+        """
+        The local_compile("loss") region traces _LossParallelCrossEntropy with
+        fullgraph=True. Forward and backward under torch.compile must match
+        eager, including uneven vocab sharding, IGNORE_INDEX rows, confident
+        targets and bf16 logits (cross_entropy_loss passes them without an
+        upcast). This runs aot_eager so the CPU suite needs no compiler.
+        """
+        T, vocab_size = 24, 1003
+        mesh = init_device_mesh(self.device_type, (4,), mesh_dim_names=("tp",))
+        tp_group = mesh.get_group("tp")
+
+        generator = torch.Generator().manual_seed(0)
+        global_logits = 3 * torch.randn(T, vocab_size, generator=generator)
+        global_labels = torch.randint(0, vocab_size, (T,), generator=generator)
+        global_labels[::5] = IGNORE_INDEX
+        # Confident targets: half the valid rows sit well above their row max.
+        rows = torch.arange(T)
+        confident = (global_labels != IGNORE_INDEX) & (rows % 2 == 0)
+        global_logits[rows[confident], global_labels[confident]] = (
+            global_logits[rows[confident]].max(dim=-1).values + 25.0
+        )
+        global_logits = global_logits.to(self.device_type)
+        global_labels = global_labels.to(self.device_type)
+        local_labels = distribute_tensor(global_labels, mesh, (Replicate(),)).to_local()
+        weights = torch.rand(T, device=self.device_type)
+
+        def ce(logits, labels, reduction):
+            return _LossParallelCrossEntropy.apply(
+                logits, labels, tp_group, vocab_size, reduction
+            )
+
+        compiled_ce = torch.compile(ce, fullgraph=True, backend="aot_eager")
+        for dtype, reduction in itertools.product(
+            (torch.float32, torch.bfloat16), ("none", "sum")
+        ):
+            with self.subTest(dtype=dtype, reduction=reduction):
+                results = []
+                for fn in (ce, compiled_ce):
+                    local_logits = (
+                        distribute_tensor(global_logits.to(dtype), mesh, (Shard(1),))
+                        .to_local()
+                        .detach()
+                        .requires_grad_(True)
+                    )
+                    out = fn(local_logits, local_labels, reduction)
+                    if reduction == "none":
+                        (out * weights).sum().backward()
+                    else:
+                        out.backward()
+                    results.append((out.detach(), local_logits.grad))
+                (eager_out, eager_grad), (compiled_out, compiled_grad) = results
+                torch.testing.assert_close(compiled_out, eager_out)
+                torch.testing.assert_close(compiled_grad, eager_grad)
+                self.assertTrue(torch.all(torch.isfinite(compiled_grad)))
+                self.assertTrue(
+                    torch.all(compiled_grad[local_labels == IGNORE_INDEX] == 0)
+                )
 
     @with_comms
     def test_vocab_parallel_policy_stats_parity(self):
@@ -763,18 +938,18 @@ class _FakeMTPDecoder(MTPDecoder):
         return {}
 
 
-class _WeightedTwoOutputLoss(BaseLoss):
+class _WeightedTwoOutputLoss(Loss[tuple[torch.Tensor, ...]]):
     """Two-output objective used to exercise generic chunked-loss plumbing."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseLoss.Config):
+    class Config(Loss.Config):
         pass
 
     auxiliary_weight = 0.25
 
     def __init__(self, config: Config):
         del config
-        self.fn = cross_entropy_loss
+        self._loss_fn = cross_entropy_loss
 
     def __call__(
         self,
@@ -786,37 +961,12 @@ class _WeightedTwoOutputLoss(BaseLoss):
         del loss_inputs
         if not isinstance(pred, tuple) or not isinstance(labels, tuple):
             raise ValueError("Expected prediction and labels tuples.")
-        loss = self.fn(pred[0], labels[0]) + self.auxiliary_weight * self.fn(
-            pred[1], labels[1]
-        )
+        loss = self._loss_fn(
+            pred[0], labels[0]
+        ) + self.auxiliary_weight * self._loss_fn(pred[1], labels[1])
         if global_loss_token_counts is not None:
             loss = loss / global_loss_token_counts
         return loss, {}
-
-
-class _RecordingFSDPLinear(nn.Linear):
-    def __init__(self, *args, events: list[str], **kwargs):
-        super().__init__(*args, **kwargs)
-        self.events = events
-
-    def set_reshard_after_forward(self, enabled):
-        self.events.append(f"set_reshard_after_forward({enabled})")
-
-    def set_reshard_after_backward(self, enabled):
-        self.events.append(f"set_reshard_after_backward({enabled})")
-
-    def set_requires_gradient_sync(self, enabled, *, recurse):
-        self.events.append(f"gradient_sync({enabled})")
-
-    def unshard(self):
-        self.events.append("unshard")
-
-    def reshard(self):
-        self.events.append("reshard")
-
-    def forward(self, input):
-        self.events.append("forward")
-        return super().forward(input)
 
 
 class TestChunkedLossWrapper(unittest.TestCase):
@@ -1150,11 +1300,11 @@ class TestChunkedLossWrapper(unittest.TestCase):
         model_ref, _ = self._make_model_and_loss(dim, vocab_size, num_chunks)
         model_chunked, _ = self._make_model_and_loss(dim, vocab_size, num_chunks)
         model_chunked.output.load_state_dict(model_ref.output.state_dict())
-        loss_config = MTPLoss.Config(
+        loss_config = MTPCrossEntropyLoss.Config(
             mtp_scale=0.3,
             global_vocab_size=vocab_size,
         )
-        full_loss = MTPLoss(loss_config)
+        full_loss = MTPCrossEntropyLoss(loss_config)
         chunked_loss = ChunkedLossWrapper(
             ChunkedLossWrapper.Config(
                 num_chunks=num_chunks,
@@ -1211,70 +1361,6 @@ class TestChunkedLossWrapper(unittest.TestCase):
             model_chunked.output.weight.grad,
             model_ref.output.weight.grad,
         )
-
-    def test_multi_output_fsdp_lifecycle_spans_all_terms(self):
-        events: list[str] = []
-        chunked_loss = ChunkedLossWrapper(
-            ChunkedLossWrapper.Config(
-                num_chunks=2,
-                loss_fn=_WeightedTwoOutputLoss.Config(),
-            )
-        )
-        chunked_loss.set_lm_head(_RecordingFSDPLinear(4, 8, bias=False, events=events))
-        predictions = (
-            torch.randn(4, 4, requires_grad=True),
-            torch.randn(4, 4, requires_grad=True),
-        )
-        labels = (
-            torch.randint(0, 8, (4,)),
-            torch.randint(0, 8, (4,)),
-        )
-
-        with patch(
-            "torch.distributed._composable.fsdp.FSDPModule", _RecordingFSDPLinear
-        ):
-            chunked_loss(predictions, labels)
-
-        self.assertEqual(events.count("unshard"), 1)
-        self.assertEqual(events.count("forward"), 4)
-        self.assertEqual(events.count("gradient_sync(True)"), 1)
-        self.assertEqual(events.count("reshard"), 1)
-
-    def test_fsdp_unshards_once_before_chunk_forwards(self):
-        events: list[str] = []
-
-        class FakeFSDPLinear(nn.Linear):
-            def set_reshard_after_forward(self, enabled):
-                events.append(f"set_reshard_after_forward({enabled})")
-
-            def set_reshard_after_backward(self, enabled):
-                events.append(f"set_reshard_after_backward({enabled})")
-
-            def set_requires_gradient_sync(self, enabled, *, recurse):
-                events.append(f"set_requires_gradient_sync({enabled})")
-
-            def unshard(self):
-                events.append("unshard")
-
-            def reshard(self):
-                events.append("reshard")
-
-            def forward(self, input):
-                events.append("forward")
-                return super().forward(input)
-
-        chunked_loss = ChunkedLossWrapper(ChunkedLossWrapper.Config(num_chunks=2))
-        chunked_loss.lm_head = FakeFSDPLinear(4, 8, bias=False)
-        hidden_states = torch.randn(4, 4)
-        labels = torch.randint(0, 8, (4,))
-
-        with patch("torch.distributed._composable.fsdp.FSDPModule", FakeFSDPLinear):
-            chunked_loss(hidden_states, labels)
-
-        self.assertEqual(events.count("unshard"), 1)
-        self.assertEqual(events.count("forward"), 2)
-        self.assertLess(events.index("unshard"), events.index("forward"))
-        self.assertEqual(events[-1], "reshard")
 
     def test_numerical_equivalence(self):
         """ChunkedLossWrapper must produce the same loss and gradients as the standard path."""

@@ -1,6 +1,6 @@
 # Validation and Evaluation
 
-`torchtitan` provides direct and indirect support for validation to support user's training goals. Direct support is provided by the `Validator` class which interacts directly with the training loop, and indirect support is provided through [HuggingFace checkpoint conversion](../torchtitan/components/checkpointer/README.md#huggingface) for users who want to do evaluation using external tools such as ELeutherAI's `lm_eval`.
+`torchtitan` provides direct and indirect support for validation to support user's training goals. Direct support is provided by the `Validator` class which interacts directly with the training loop, and indirect support is provided through [HuggingFace checkpoint conversion](../torchtitan/components/checkpointer/README.md#huggingface) for users who want to do evaluation using external tools such as EleutherAI's `lm_eval`.
 
 ## Validation
 For users who want to perform validation directly during the training loop, we provide the `Validator` class which can be conveniently configured via `Validator.Config` in your recipe function. The validator class has access to and reuses many of the trainer's functions such as its parallelization, including pipelining.
@@ -29,8 +29,15 @@ validator=Validator.Config(
 
 Omitting `dataloader` uses this configuration by default.
 
-Validation follows `training.disable_cuda_graphs` and shares the training graph pool.
-See [CUDA graphs](../torchtitan/distributed/CUDA_GRAPH.md) for capture order and tensor lifetimes.
+`Validator.Config.steps` controls how long validation runs:
+
+- `steps=-1` consumes the finite validation dataset once (`dataloader.repeat=False`). Ranks stop independently when their shard is exhausted, so this mode requires data-parallel degree 1; with DP > 1, ranks can finish at different steps and hang on validation collectives. `Validator` raises if you combine `steps=-1` with DP > 1.
+- A positive `steps` value runs that many validation steps on every rank. The validator forces `dataloader.repeat=True` so each rank sees the same step count.
+
+Use a positive `steps` whenever data-parallel degree is greater than 1.
+
+Validation follows `training.disable_accelerator_graphs` and shares the training graph pool.
+See [accelerator graphs](../torchtitan/distributed/ACCELERATOR_GRAPH.md) for capture order and tensor lifetimes.
 
 ## Third-Party Evaluation
 With `./scripts/checkpoint_conversion/convert_to_hf.py`, `torchtitan` offers support for converting checkpoints from DCP to safetensors format. Using this script, users can perform efficient evaluation separate from their training using external libraries that support HuggingFace e.g. `lm_eval` with `vllm` backend.
@@ -42,7 +49,7 @@ Note that pip installing `lm-eval` may result in breaking `torchtitan` dev envir
 ```bash
 pip install "lm-eval[vllm]"
 lm_eval --model vllm \
-    --model_args pretrained=./outputs/checkpoint/step-1000,tensor_parallel_size=8,dtype=auto,gpu_memory_utilization=0.8, \
+    --model_args pretrained=./outputs/checkpoint/exports/step-1000,tensor_parallel_size=8,dtype=auto,gpu_memory_utilization=0.8, \
     --tasks mmlu \
     --batch_size auto
 ```

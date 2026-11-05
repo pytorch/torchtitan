@@ -170,6 +170,7 @@ def supports_cp_inner_attention(
     from torchtitan.models.common.attention.cp_attention import (
         AllGatherKVFlexInnerAttention,
         AllGatherKVSlidingWindowFlexInnerAttention,
+        AllGatherKVVarlen,
     )
     from torchtitan.models.common.attention.cp_mla import AllGatherKVMLAFlexAttention
 
@@ -178,6 +179,7 @@ def supports_cp_inner_attention(
             AllGatherKVFlexInnerAttention,
             AllGatherKVSlidingWindowFlexInnerAttention,
             AllGatherKVMLAFlexAttention,
+            AllGatherKVVarlen,
         ),
         PTRRFlexAttentionCPLoadBalancer: (
             AllGatherKVFlexInnerAttention,

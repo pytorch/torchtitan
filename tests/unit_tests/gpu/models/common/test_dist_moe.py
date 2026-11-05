@@ -176,10 +176,9 @@ class TestDistMoeNumerics(DTensorTestBase):
         topk_expert_ids_TK = (
             global_token_ids_T[:, None] * _K + torch.arange(_K, device=device)[None, :]
         ) % num_experts
-        num_local_tokens_per_expert_E = torch.bincount(
-            topk_expert_ids_TK.flatten(),
-            minlength=num_experts,
-        )
+        routing_map_TE = torch.zeros(
+            _T, num_experts, dtype=torch.bool, device=device
+        ).scatter_(1, topk_expert_ids_TK, True)
         return (
             mesh,
             num_experts,
@@ -190,7 +189,7 @@ class TestDistMoeNumerics(DTensorTestBase):
             w2_EDF,
             topk_scores_TK,
             topk_expert_ids_TK,
-            num_local_tokens_per_expert_E,
+            routing_map_TE,
         )
 
     @with_comms
@@ -206,7 +205,7 @@ class TestDistMoeNumerics(DTensorTestBase):
             w2_EDF,
             topk_scores_TK,
             topk_expert_ids_TK,
-            num_local_tokens_per_expert_E,
+            routing_map_TE,
         ) = self._set_up_ep_inputs()
         grad_out_TD = 0.02 * torch.randn(
             _T,
@@ -228,7 +227,7 @@ class TestDistMoeNumerics(DTensorTestBase):
                 stock_x_TD,
                 stock_scores_TK,
                 topk_expert_ids_TK,
-                num_local_tokens_per_expert_E,
+                routing_map_TE,
             )
         stock_out_TD.backward(grad_out_TD)
 
@@ -283,7 +282,7 @@ class TestDistMoeNumerics(DTensorTestBase):
                 annex_x_TD,
                 annex_scores_TK,
                 topk_expert_ids_TK,
-                num_local_tokens_per_expert_E,
+                routing_map_TE,
             )
             annex_out_TD.backward(grad_out_TD)
         finally:

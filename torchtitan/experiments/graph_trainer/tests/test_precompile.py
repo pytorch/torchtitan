@@ -80,7 +80,7 @@ class TestDiskStorageAdapter(unittest.TestCase):
 
 @dataclass
 class _StubCompileConfig:
-    passes: list = field(default_factory=list)
+    extra_passes: list = field(default_factory=list)
     memory_policy: str = "default"
     full_recompute_save_ops: str = ""
     ep_overlap: EpOverlapConfig = field(default_factory=EpOverlapConfig)
@@ -151,6 +151,7 @@ class TestPrecompileMain(unittest.TestCase):
                         )
                     ]
                     model_config.vocab_size = 16
+                    model_config.max_context_length = 8
                     model_config.traverse.return_value = iter(())
                     model_config.first_moe = None
                     model = MagicMock()
@@ -160,7 +161,6 @@ class TestPrecompileMain(unittest.TestCase):
                         loss=MagicMock(),
                         training=SimpleNamespace(
                             num_tokens_per_microbatch_per_dp_rank=16,
-                            max_context_length=8,
                         ),
                     )
                     parallelism_context = MagicMock(
@@ -325,8 +325,8 @@ class TestConfigFingerprint(unittest.TestCase):
 
         dims = _StubParallelismContext()
 
-        cfg_a = _StubCompileConfig(passes=["pass_a"])
-        cfg_b = _StubCompileConfig(passes=["pass_a", "pass_b"])
+        cfg_a = _StubCompileConfig(extra_passes=["pass_a"])
+        cfg_b = _StubCompileConfig(extra_passes=["pass_a", "pass_b"])
         fp_a = compute_config_fingerprint(_make_stub_model(), cfg_a, dims)
         fp_b = compute_config_fingerprint(_make_stub_model(), cfg_b, dims)
         self.assertNotEqual(fp_a, fp_b)
@@ -354,8 +354,8 @@ class TestConfigFingerprint(unittest.TestCase):
 
         dims = _StubParallelismContext()
 
-        cfg_ab = _StubCompileConfig(passes=["a", "b"])
-        cfg_ba = _StubCompileConfig(passes=["b", "a"])
+        cfg_ab = _StubCompileConfig(extra_passes=["a", "b"])
+        cfg_ba = _StubCompileConfig(extra_passes=["b", "a"])
         fp_ab = compute_config_fingerprint(_make_stub_model(), cfg_ab, dims)
         fp_ba = compute_config_fingerprint(_make_stub_model(), cfg_ba, dims)
         self.assertNotEqual(fp_ab, fp_ba)
@@ -623,14 +623,14 @@ class TestCudaGraphPass(unittest.TestCase):
             cuda_graph_pass(plain_fn, (torch.zeros(4),), static_input_indices=[0])
 
     def test_graphmodule_wraps_forward(self):
-        """cuda_graph_pass wraps gm.forward with CUDAGraphWrapper."""
+        """cuda_graph_pass wraps gm.forward with AcceleratorGraphWrapper."""
         from torchtitan.experiments.graph_trainer.cuda_graph import cuda_graph_pass
 
         gm = torch.fx.GraphModule(torch.nn.Module(), torch.fx.Graph())
         example_inputs = (torch.zeros(4),)
 
         with patch(
-            "torchtitan.experiments.graph_trainer.cuda_graph.CUDAGraphWrapper"
+            "torchtitan.experiments.graph_trainer.cuda_graph.AcceleratorGraphWrapper"
         ) as MockWrapper:
             mock_instance = MagicMock()
             MockWrapper.return_value = mock_instance

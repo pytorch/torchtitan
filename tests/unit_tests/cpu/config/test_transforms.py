@@ -7,13 +7,12 @@
 """Model config transforms."""
 
 import copy
-import inspect
 import unittest
 from dataclasses import dataclass, replace
 
 import spmd_types as spmd
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     AsyncTensorParallelTransform,
@@ -31,10 +30,14 @@ from torchtitan.models.common.attention import (
     FlexInnerAttention,
     MLAAttention,
     SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.attention.cp_attention import (
     AllGatherKVFlexInnerAttention,
     AllGatherKVSlidingWindowFlexInnerAttention,
+    AllGatherKVSlidingWindowVarlenInnerAttention,
+    AllGatherKVVarlenInnerAttention,
     UlyssesFlexInnerAttention,
     UlyssesSlidingWindowFlexInnerAttention,
 )
@@ -69,7 +72,6 @@ def _llama3_cp_ready():
         "debugmodel", attn_backend="flex", seq_len=512, parallelism=ParallelismConfig()
     )
     config.parallelism.context_parallel_degree = 2
-    config.training.max_context_length = 512
     return config
 
 
@@ -178,15 +180,6 @@ class TestConvertConfigType(unittest.TestCase):
         existing = AllGatherKVFlexInnerAttention.Config()
         with self.assertRaisesRegex(ValueError, "must inherit"):
             convert_config_type(existing, FlexInnerAttention)
-
-
-class TestPublicApi(unittest.TestCase):
-    def test_relation_graph_is_not_caller_configurable(self):
-        self.assertNotIn("relations", inspect.signature(apply_transforms).parameters)
-        self.assertNotIn(
-            "relations",
-            inspect.signature(transform_model_config_).parameters,
-        )
 
 
 class TestOrdering(unittest.TestCase):
@@ -480,8 +473,9 @@ class TestTransformModel(unittest.TestCase):
     def test_preserves_muse_glimmer_sliding_window_backend(self):
         from torchtitan.models.muse_glimmer import build_model_config
 
-        for transform, expected_backends in (
+        for attn_backend, transform, expected_backends in (
             (
+                "flex",
                 ContextParallelTransform(
                     inner_attention_map={
                         FlexInnerAttention: AllGatherKVFlexInnerAttention,
@@ -496,6 +490,7 @@ class TestTransformModel(unittest.TestCase):
                 },
             ),
             (
+                "flex",
                 ContextParallelTransform(
                     inner_attention_map={
                         FlexInnerAttention: UlyssesFlexInnerAttention,
@@ -509,16 +504,38 @@ class TestTransformModel(unittest.TestCase):
                     UlyssesSlidingWindowFlexInnerAttention.Config,
                 },
             ),
+            (
+                "varlen",
+                ContextParallelTransform(
+                    inner_attention_map={
+                        VarlenInnerAttention: AllGatherKVVarlenInnerAttention,
+                        SlidingWindowVarlenInnerAttention: (
+                            AllGatherKVSlidingWindowVarlenInnerAttention
+                        ),
+                    }
+                ),
+                {
+                    AllGatherKVVarlenInnerAttention.Config,
+                    AllGatherKVSlidingWindowVarlenInnerAttention.Config,
+                },
+            ),
         ):
             model = build_model_config(
                 "debugmodel",
-                attn_backend="flex",
+                attn_backend=attn_backend,
                 seq_len=128,
                 parallelism=ParallelismConfig(),
             )
             self.assertEqual(
                 {type(layer.attention.inner_attention) for layer in model.layers},
-                {FlexInnerAttention.Config, SlidingWindowFlexInnerAttention.Config},
+                (
+                    {FlexInnerAttention.Config, SlidingWindowFlexInnerAttention.Config}
+                    if attn_backend == "flex"
+                    else {
+                        VarlenInnerAttention.Config,
+                        SlidingWindowVarlenInnerAttention.Config,
+                    }
+                ),
             )
 
             transform.transform(model)

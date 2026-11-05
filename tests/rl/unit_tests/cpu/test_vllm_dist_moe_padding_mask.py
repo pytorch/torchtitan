@@ -156,6 +156,7 @@ class _Model:
 def _runner(model) -> TorchTitanGPUModelRunner:
     runner = cast(Any, object.__new__(TorchTitanGPUModelRunner))
     runner.get_model = lambda: model  # type: ignore[method-assign]
+    runner.attn_groups = []
     return runner
 
 

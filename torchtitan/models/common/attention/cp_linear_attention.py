@@ -29,6 +29,51 @@ if not is_missing_kernel(_ContextParallelChunk):
 
 
 @dataclass(frozen=True, slots=True)
+class UlyssesLinearAttentionMetadata(LinearAttentionMetadata):
+    """Token order shared with load-balanced full-attention layers."""
+
+    permutation: torch.Tensor
+    inverse_permutation: torch.Tensor
+
+    _PERMUTATION_SPMD_TYPE = spmd.SpmdType(
+        {
+            MeshAxisName.DP: spmd.V,
+            MeshAxisName.CP: spmd.R,
+            MeshAxisName.TP: spmd.R,
+        },
+        partition_spec=spmd.PartitionSpec(MeshAxisName.DP),
+    )
+
+    def annotate_spmd_types(self) -> None:
+        """Annotate global token orders replicated across CP and TP."""
+        LinearAttentionMetadata.annotate_spmd_types(self)
+        spmd.assert_type(self.permutation, self._PERMUTATION_SPMD_TYPE)
+        spmd.assert_type(self.inverse_permutation, self._PERMUTATION_SPMD_TYPE)
+
+
+def prepare_ulysses_linear_attention_metadata(
+    attention_metadata: LinearAttentionMetadata,
+    *,
+    permutation: torch.Tensor | None,
+) -> LinearAttentionMetadata:
+    """Build Ulysses metadata for computation in original token order."""
+    if permutation is None:
+        return attention_metadata
+    if permutation.ndim != 2 or permutation.shape[0] != 1:
+        raise ValueError(
+            "Ulysses linear attention requires a packed-token permutation "
+            "with shape [1, num_tokens]."
+        )
+    permutation_T = permutation[0]
+    return UlyssesLinearAttentionMetadata(
+        varlen=attention_metadata.varlen,
+        num_conv_history_tokens=attention_metadata.num_conv_history_tokens,
+        permutation=permutation_T,
+        inverse_permutation=permutation_T.argsort(),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class ContextParallelLinearAttentionMetadata(LinearAttentionMetadata):
     """Linear-attention metadata with rank-local context-parallel routing."""
 
@@ -50,7 +95,7 @@ class ContextParallelLinearAttentionMetadata(LinearAttentionMetadata):
                 spmd.assert_type(value, self._ROUTING_SPMD_TYPE)
 
 
-def prepare_linear_attention_cp_metadata(
+def prepare_cp_linear_attention_metadata(
     attention_metadata: LinearAttentionMetadata,
     *,
     permutation: torch.Tensor | None,

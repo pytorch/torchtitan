@@ -266,9 +266,7 @@ class TestGatedDeltaNetContextParallel(unittest.TestCase):
             ),
         ):
             output_THV = inner_gdn(
-                torch.randn(num_tokens, channels),
-                torch.randn(num_tokens, channels),
-                torch.randn(num_tokens, channels),
+                torch.randn(num_tokens, 3 * channels),
                 torch.randn(num_tokens, num_heads),
                 torch.randn(num_tokens, num_heads),
                 torch.randn(channels, 1, 4),
@@ -377,6 +375,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
 
         key_dim = num_key_heads * key_head_dim
         value_dim = num_value_heads * value_head_dim
+        in_proj_dim = 2 * key_dim + 2 * value_dim + 2 * num_value_heads
 
         def linear(out_features: int) -> Linear.Config:
             return Linear.Config(
@@ -398,13 +397,9 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             n_heads=num_value_heads,
             key_head_dim=key_head_dim,
             value_head_dim=value_head_dim,
+            n_key_heads=num_key_heads,
             conv_kernel_size=conv_kernel_size,
-            in_proj_q=linear(key_dim),
-            in_proj_k=linear(key_dim),
-            in_proj_v=linear(value_dim),
-            in_proj_z=linear(value_dim),
-            in_proj_a=linear(num_value_heads),
-            in_proj_b=linear(num_value_heads),
+            in_proj=linear(in_proj_dim),
             conv_q=conv(key_dim),
             conv_k=conv(key_dim),
             conv_v=conv(value_dim),
@@ -473,18 +468,26 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
                 .transpose(0, 1)
             )
 
-        query_THK = causal_conv(model.in_proj_q(x_TD), model.conv_q).reshape(
+        # The six projections' weights, taken from in_proj's rows (grouped by key head).
+        split_sizes = model.in_proj_split_sizes
+        w_q, w_k, w_v, w_z, w_a, w_b = (
+            weight.flatten(0, 1)
+            for weight in model.in_proj.weight.unflatten(
+                0, (-1, sum(split_sizes))
+            ).split(split_sizes, dim=1)
+        )
+        query_THK = causal_conv(F.linear(x_TD, w_q), model.conv_q).reshape(
             num_tokens, -1, model.key_head_dim
         )
-        key_THK = causal_conv(model.in_proj_k(x_TD), model.conv_k).reshape(
+        key_THK = causal_conv(F.linear(x_TD, w_k), model.conv_k).reshape(
             num_tokens, -1, model.key_head_dim
         )
-        value_THV = causal_conv(model.in_proj_v(x_TD), model.conv_v).reshape(
+        value_THV = causal_conv(F.linear(x_TD, w_v), model.conv_v).reshape(
             num_tokens, -1, model.value_head_dim
         )
-        gate_THV = model.in_proj_z(x_TD).reshape(num_tokens, -1, model.value_head_dim)
-        a_TH = model.in_proj_a(x_TD)
-        b_TH = model.in_proj_b(x_TD)
+        gate_THV = F.linear(x_TD, w_z).reshape(num_tokens, -1, model.value_head_dim)
+        a_TH = F.linear(x_TD, w_a)
+        b_TH = F.linear(x_TD, w_b)
         decay_TH = -torch.exp(model.A_log.float()) * F.softplus(
             a_TH.float() + model.dt_bias
         )
@@ -502,7 +505,8 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
 
     def test_extracted_forward_matches_main(self):
         torch.manual_seed(42)
-        model = self._make_deltanet()
+        # Two key heads with two value heads each, so in_proj has two row groups.
+        model = self._make_deltanet(num_key_heads=2, num_value_heads=4)
         x_TD = torch.randn(10, 4)
         positions = torch.tensor(
             [0, 1, 0, 1, 2, 0, 1, 2, 0, 1],
@@ -525,7 +529,9 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
                 )
                 actual = model(x_TD, metadata)
             expected = self._main_forward_reference(model, x_TD, masks)
-            self.assertTrue(torch.equal(actual, expected))
+            # One in_proj GEMM vs six: cuBLAS may pick other kernels (A10G does), so
+            # compare at fp32 tolerance rather than bitwise.
+            torch.testing.assert_close(actual, expected)
 
     def _assert_packed_run_matches_per_document(self, model, x, positions, masks):
         """Packed forward under ``masks`` must equal stitched per-doc forwards.

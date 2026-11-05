@@ -179,8 +179,8 @@ class GenerationServer(Configurable):
             prompt_token_ids = _validate_token_ids(
                 body.get("token_ids"), field_name="token_ids"
             )
-            # vLLM needs room for one output token. Verifiers reads this wording as an
-            # overlong prompt and ends the rollout as context_length.
+            # vLLM needs room for one output token. Keep vLLM's wording: Verifiers'
+            # harnesses match it as a context overflow.
             if len(prompt_token_ids) >= self.max_rollout_tokens:
                 raise ValueError(
                     f"This model's maximum context length is {self.max_rollout_tokens} "

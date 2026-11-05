@@ -382,7 +382,7 @@ class Batcher(Configurable):
         # Keep every group, including groups made empty by rollout, builder, or
         # batcher filtering. Empty groups do not count toward the trainable-group
         # target, but they ride with the next training batch so its `group_ids`
-        # covers every terminal input. The controller acknowledges those IDs only
+        # covers every terminal input. The controller commits those IDs only
         # at the optimizer/checkpoint boundary; dropping an empty group here would
         # leave its dataloader entry pending forever.
         self._groups_for_next_batch.append(training_sample_group)

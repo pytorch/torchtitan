@@ -7,15 +7,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import DataParallelMeshDims
 
-from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX, Loss
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
@@ -24,7 +24,8 @@ from torchtitan.distributed.spmd_types import (
     spmd_dense_sp_enabled,
     spmd_mesh_group,
 )
-from torchtitan.models.base.module import ModuleList
+from torchtitan.models.base.model import FlopsEstimator
+from torchtitan.models.base.module import Module, ModuleList
 from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     FlexAttentionMetadata,
@@ -201,6 +202,27 @@ class MTPDecoder(Decoder):
     class Config(Decoder.Config):
         mtp_layers: list = field(default_factory=list)
 
+        def build_flops_estimator(
+            self,
+            model: Module,
+            *,
+            seq_len: int,
+            excluded_submodules: tuple[Module | None, ...] = (),
+        ) -> FlopsEstimator:
+            decoder_estimate = super(MTPDecoder.Config, self).build_flops_estimator(
+                model, seq_len=seq_len, excluded_submodules=excluded_submodules
+            )
+            model = cast(MTPDecoder, model)
+            repeated_head_flops_per_token = (
+                6
+                * len(self.mtp_layers)
+                * sum(param.numel() for param in model.lm_head.parameters())
+            )
+            return lambda input_dict: (
+                decoder_estimate(input_dict)
+                + repeated_head_flops_per_token * input_dict["input"].numel()
+            )
+
     def __init__(self, config: Config):
         super().__init__(config)
         if not config.mtp_layers:
@@ -220,7 +242,7 @@ class MTPDecoder(Decoder):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
         from torchtitan.distributed.fsdp import (
@@ -233,10 +255,10 @@ class MTPDecoder(Decoder):
         apply_fsdp_to_mtp_decoder(
             self,
             dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
+            reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
             pp_enabled=parallelism_context.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
+            cpu_offload=parallelism.fsdp_enable_cpu_offloading,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             ep_degree=parallelism_context.ep,
             edp_mesh=edp_mesh,
@@ -253,7 +275,6 @@ class MTPDecoder(Decoder):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[
@@ -309,7 +330,6 @@ class MTPDecoder(Decoder):
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
             )
             input_dict["attention_metadata"] = attention_metadata
 
@@ -503,50 +523,56 @@ def apply_fsdp_to_mtp_decoder(
             del model.layers[key]
 
 
-class MTPLoss(CrossEntropyLoss):
+class MTPCrossEntropyLoss(Loss[tuple[torch.Tensor, ...]]):
     """DeepSeek-V3 weighted multi-term cross-entropy objective."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(CrossEntropyLoss.Config):
+    class Config(Loss.Config):
         mtp_scale: float = 0.3
+        global_vocab_size: int | None = None
 
     def __init__(self, config: Config):
-        super().__init__(config)
+        self.cross_entropy_loss = CrossEntropyLoss(
+            CrossEntropyLoss.Config(global_vocab_size=config.global_vocab_size)
+        )
         self.mtp_scale = config.mtp_scale
 
     def __call__(
         self,
-        pred: torch.Tensor | tuple[torch.Tensor, ...],
-        labels: torch.Tensor | tuple[torch.Tensor, ...],
+        pred: tuple[torch.Tensor, ...],
+        labels: tuple[torch.Tensor, ...],
         global_loss_token_counts: torch.Tensor | None = None,
         **loss_inputs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute the weighted objective from aligned prediction/label pairs."""
         del loss_inputs
         if not isinstance(pred, tuple) or not isinstance(labels, tuple):
-            raise ValueError("MTPLoss expects prediction and labels tuples.")
+            raise ValueError(
+                "MTPCrossEntropyLoss expects prediction and labels tuples."
+            )
         if len(pred) != len(labels):
             raise ValueError(
-                "MTPLoss requires one labels tensor per prediction, "
+                "MTPCrossEntropyLoss requires one labels tensor per prediction, "
                 f"got {len(pred)} predictions and {len(labels)} labels."
             )
         num_mtp_layers = len(pred) - 1
         if num_mtp_layers <= 0:
             raise ValueError(
-                "MTPLoss expects a main prediction and at least one auxiliary "
+                "MTPCrossEntropyLoss expects a main prediction and at least one auxiliary "
                 "prediction."
             )
         mtp_weight = self.mtp_scale / num_mtp_layers
         if global_loss_token_counts is not None and global_loss_token_counts.ndim != 1:
             raise ValueError(
-                "MTPLoss requires a per-objective global_loss_token_counts vector."
+                "MTPCrossEntropyLoss requires a per-objective "
+                "global_loss_token_counts vector."
             )
         if (
             global_loss_token_counts is not None
             and global_loss_token_counts.numel() != len(pred)
         ):
             raise ValueError(
-                "MTPLoss requires one denominator per prediction, "
+                "MTPCrossEntropyLoss requires one denominator per prediction, "
                 f"got {global_loss_token_counts.numel()} for {len(pred)} predictions."
             )
         if global_loss_token_counts is None:
@@ -556,7 +582,7 @@ class MTPLoss(CrossEntropyLoss):
                 loss_token_counts = tuple(
                     count.clamp_min(1) for count in global_loss_token_counts.unbind()
                 )
-        main_loss, _ = super().__call__(pred[0], labels[0], loss_token_counts[0])
+        main_loss, _ = self.cross_entropy_loss(pred[0], labels[0], loss_token_counts[0])
         mtp_loss = pred[0].new_zeros((), dtype=torch.float32)
         if spmd.is_type_checking():
             mtp_loss = spmd.mutate_type(
@@ -567,7 +593,7 @@ class MTPLoss(CrossEntropyLoss):
         for depth, (mtp_pred, mtp_labels) in enumerate(
             zip(pred[1:], labels[1:], strict=True), 1
         ):
-            depth_loss, _ = super().__call__(
+            depth_loss, _ = self.cross_entropy_loss(
                 mtp_pred,
                 mtp_labels,
                 loss_token_counts[depth],

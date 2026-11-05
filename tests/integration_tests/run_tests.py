@@ -41,7 +41,7 @@ _TEST_SUITES = {
     "h100": ("tests.integration_tests.h100", "build_h100_tests_list"),
     "b200": ("tests.integration_tests.b200", "build_b200_tests_list"),
     "rl": ("tests.integration_tests.rl", "build_rl_test_list"),
-    "rl_kda": ("tests.integration_tests.rl", "build_rl_kda_test_list"),
+    "rl_h100": ("tests.integration_tests.rl", "build_h100_rl_test_list"),
     "rl_b200": ("tests.integration_tests.rl", "build_b200_rl_test_list"),
 }
 
@@ -52,7 +52,7 @@ def _build_test_list(test_suite: str) -> list[IntegrationTestDefinition]:
 
 
 # Suites that need hardware-specific kernels or a real multi-process runtime.
-_REAL_PG_ONLY_SUITES = frozenset({"h100", "b200", "rl", "rl_kda", "rl_b200"})
+_REAL_PG_ONLY_SUITES = frozenset({"h100", "b200", "rl", "rl_h100", "rl_b200"})
 
 # Held while a test writes its captured output so concurrent tests do not
 # interleave their lines.

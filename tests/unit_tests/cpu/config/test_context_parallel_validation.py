@@ -7,7 +7,7 @@
 import importlib
 import inspect
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from unittest import mock
 
 from torchtitan.config.transform import ContextParallelTransform
@@ -17,6 +17,7 @@ from torchtitan.models.common.attention import (
     InnerAttention,
     LinearAttention,
     MLAAttention,
+    VarlenInnerAttention,
 )
 
 
@@ -72,8 +73,56 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
         config = self._config(cp=1)
         config.__post_init__()
 
+    def test_load_balancer_compatibility(self):
+        from torchtitan.distributed.context_parallel import (
+            HeadTailCPLoadBalancer,
+            PTRRFlexAttentionCPLoadBalancer,
+        )
+        from torchtitan.models.common.attention.cp_attention import (
+            AllGatherKVSlidingWindowFlexInnerAttention,
+            AllGatherKVSlidingWindowVarlenInnerAttention,
+            AllGatherKVVarlenInnerAttention,
+        )
+
+        sliding_flex = AllGatherKVSlidingWindowFlexInnerAttention.Config(
+            sliding_window_size=128
+        )
+        full_varlen = AllGatherKVVarlenInnerAttention.Config()
+        sliding_varlen = AllGatherKVSlidingWindowVarlenInnerAttention.Config(
+            sliding_window_size=128
+        )
+        head_tail = HeadTailCPLoadBalancer.Config()
+        ptrr = PTRRFlexAttentionCPLoadBalancer.Config()
+        for backend, load_balancer, should_raise in (
+            (sliding_flex, head_tail, False),
+            (sliding_flex, ptrr, False),
+            (full_varlen, head_tail, False),
+            (full_varlen, ptrr, True),
+            (sliding_varlen, head_tail, False),
+            (sliding_varlen, ptrr, True),
+        ):
+            with self.subTest(backend=backend, load_balancer=load_balancer):
+                config = self._config(
+                    cp=2, varlen=isinstance(backend, VarlenInnerAttention.Config)
+                )
+                for layer in config.model.layers:
+                    layer.attention.inner_attention = replace(
+                        backend,
+                        sharding_config=layer.attention.inner_attention.sharding_config,
+                    )
+                config.parallelism.context_parallel_load_balancer = load_balancer
+                self.assertEqual(
+                    config.model.first_full_attention is not None,
+                    backend.is_full_attention,
+                )
+                if should_raise:
+                    with self.assertRaisesRegex(ValueError, "does not support"):
+                        config.__post_init__()
+                else:
+                    config.__post_init__()
+
     def test_hybrid_linear_attention_requires_cp_transform(self):
-        from torchtitan.config import ParallelismConfig
+        from torchtitan.config.parallelism import ParallelismConfig
         from torchtitan.config.validation import validate_context_parallel
         from torchtitan.models.common.attention.cp_attention import (
             AllGatherKVFlexInnerAttention,
@@ -202,7 +251,7 @@ class TestUlyssesConfigValidation(unittest.TestCase):
         assert isinstance(model, Decoder.Config)
         for layer in model.layers:
             layer.attention.inner_attention = (
-                UlyssesSlidingWindowFlexInnerAttention.Config(window_size=128)
+                UlyssesSlidingWindowFlexInnerAttention.Config(sliding_window_size=128)
             )
         self.assertIsNone(model.first_full_attention)
         config.__post_init__()
@@ -257,6 +306,7 @@ class TestGptOssUlysses(unittest.TestCase):
     def _parallelize(self, inner_attention):
         from types import SimpleNamespace
 
+        from torchtitan.distributed.local_compile import LocalCompileConfig
         from torchtitan.models.gpt_oss.model import GptOssModel
 
         with self.assertRaisesRegex(NotImplementedError, "Ulysses CP"):
@@ -273,9 +323,9 @@ class TestGptOssUlysses(unittest.TestCase):
                     )
                 ),
                 parallelism_context=SimpleNamespace(cp_enabled=True),
-                training=None,
+                precision=None,
                 parallelism=None,
-                local_compile_regions=[],
+                local_compile=LocalCompileConfig(),
                 activation_remat=None,
                 dump_folder="",
             )

@@ -479,7 +479,7 @@ def test_qwen3_recipes_resolve(monkeypatch, recipe):
         assert isinstance(dataset.source, HuggingFaceRandomAccessSource.Config)
         assert dataset.source.path == "openai/gsm8k"
         assert config.checkpointer.initial_load_in_hf
-        assert config.model.local_compile_regions == [
+        assert config.model.local_compile.regions == [
             "loss",
             "fused_binary_activation",
             "rope",
@@ -995,7 +995,7 @@ def test_deepseek_nvfp4_recipes_preserve_quantization_and_routing(
         if bf16_tail_fraction == 0
         else len(config.model.layers) // 2
     )
-    assert config.model.local_compile_regions == ["loss"]
+    assert config.model.local_compile.regions == ["loss"]
     grouped = list(config.model.traverse(GroupedLinear.Config))
     assert grouped
     quantized_cls = _get_nvfp4_grouped_linear_cls(GroupedLinear)

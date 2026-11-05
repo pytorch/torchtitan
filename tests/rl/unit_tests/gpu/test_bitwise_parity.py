@@ -134,15 +134,15 @@ def build_trainer_model(
     with (
         parallelism_context.activate_spmd(),
         torch.device("meta"),
-        utils.set_default_dtype(TORCH_DTYPE_MAP[trainer_config.training.dtype]),
+        utils.set_default_dtype(TORCH_DTYPE_MAP[config.precision.dtype]),
     ):
         model = model_config.build()
 
     model = model.parallelize(
         parallelism_context=parallelism_context,
-        training=trainer_config.training,
+        precision=config.precision,
         parallelism=parallelism,
-        local_compile_regions=model_config.local_compile_regions,
+        local_compile=model_config.local_compile,
         activation_remat=trainer_config.activation_remat,
         dump_folder=config.dump_folder,
     )
@@ -226,7 +226,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         # Build the model config from torchtitan's model config via the custom
         # parser registered by register_to_vllm, instead of reading config.json.
         config_format=TORCHTITAN_CONFIG_FORMAT,
-        dtype=gen_config.model_dtype,
+        dtype=config.precision.param_dtype,
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
         data_parallel_size=gen_config.parallelism.data_parallel_degree,
         enable_expert_parallel=enable_ep,
@@ -275,9 +275,13 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
 
     wrapper = engine.model_executor.driver_worker.get_model()
     trainer_sd = trainer_model.state_dict()
-    # As a model state dict load: fill the pinned CPU copy, then load it with load_state_dict.
+    # As a model state dict load: fill the pinned CPU copy, then load from it.
     vllm_sd = wrapper._prefetched_model_state_dict
 
+    trainer_buffers = {name for name, _ in trainer_model.named_buffers()}
+    trainer_preserve_dtype_params = {
+        name for name, _ in trainer_model.named_preserve_dtype_params()
+    }
     missing = []
     for name, vparam in vllm_sd.items():
         tparam = trainer_sd.get(name)
@@ -285,6 +289,14 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
             missing.append(name)
             continue
         full = tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
+        # Weight sync over RDMA copies bytes, so the receive dtype is what the trainer sends:
+        # parameters in the generator dtype (precision.param_dtype), buffers and
+        # preserve_dtype_params in their own.
+        if name in trainer_buffers or name in trainer_preserve_dtype_params:
+            sent_dtype = full.dtype
+        else:
+            sent_dtype = engine.model_config.dtype
+        assert vparam.dtype == sent_dtype, (name, vparam.dtype, sent_dtype)
         with torch.inference_mode():
             if isinstance(vparam, DTensor):
                 vparam.copy_(
@@ -293,7 +305,13 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
             else:
                 vparam.copy_(full)
 
-    wrapper.load_state_dict(vllm_sd)
+    def fetch(state_dict: dict[str, torch.Tensor]) -> list[str]:
+        with torch.no_grad():
+            for key, tensor in state_dict.items():
+                tensor.copy_(vllm_sd[key])
+        return list(state_dict)
+
+    wrapper.load_model_state_dict(fetch)
 
     if dist.get_rank() == 0 and missing:
         logger.warning("vLLM params not present in trainer state_dict: %s", missing)
@@ -650,7 +668,9 @@ class BitwiseParityTestBase(unittest.TestCase):
         register_to_vllm(
             config.generator.model,
             parallelism=config.generator.parallelism,
+            precision=config.precision,
             checkpointer_config=generator_checkpointer,
+            model_state_dict_load_mode="cpu_prefetch",
         )
 
         # Test runs trainer and generator in the same process, so limit
@@ -903,6 +923,62 @@ class TestBitwiseParityQwen35DebugVarlen(BitwiseParityTestBase):
         """vLLM prefill and decode must not depend on batch composition."""
         self._check_vllm_prefill_and_decode_batch_invariance()
 
+    def test_reload_after_generate(self):
+        """Reload changed weights after generation has replayed the captured graphs."""
+        engine = self.engine
+
+        def reload() -> None:
+            _sync_trainer_weights_to_vllm(self.model, engine)
+            # As the generator does after a load: drop KV computed with the old weights.
+            engine.reset_prefix_cache(reset_running_requests=True)
+
+        vllm_generate(engine, self.prompt_ids, self.MAX_GEN_TOKENS)
+        before_lps = vllm_prefill(engine, self.prompt_ids)
+        params = list(self.model.parameters())
+        originals = [p.detach().clone() for p in params]
+        # Every rank runs every collective before rank 0 asserts, so a mismatch
+        # fails instead of hanging the other rank.
+        try:
+            with torch.no_grad():
+                for p in params:
+                    p.mul_(0.5)
+            reload()
+            with type(self).parallelism_context.activate_spmd(), torch.no_grad():
+                trainer_lps = compute_trainer_prefill_logprobs(
+                    self.model,
+                    self.prompt_ids,
+                    self.device,
+                    attn_backend=self.attn_backend,
+                )
+            vllm_lps = vllm_prefill(engine, self.prompt_ids)
+            gen_ids, decode_lps = vllm_generate(
+                engine, self.prompt_ids, self.MAX_GEN_TOKENS
+            )
+            prefill_2nd_lps = vllm_2nd_pass_prefill(engine, self.prompt_ids, gen_ids)
+        finally:
+            with torch.no_grad():
+                for p, original in zip(params, originals):
+                    p.copy_(original)
+            reload()
+
+        if dist.get_rank() == 0:
+            self.assertNotEqual(before_lps[0], vllm_lps[0])
+            for i in range(len(self.prompt_ids)):
+                self._assert_logprobs_equal(
+                    f"seq {i}: Trainer prefill vs vLLM prefill after reload",
+                    trainer_lps[i],
+                    vllm_lps[i],
+                    "Trainer",
+                    "vLLM",
+                )
+                self._assert_logprobs_equal(
+                    f"seq {i}: vLLM decode vs 2nd-pass prefill after reload",
+                    decode_lps[i],
+                    prefill_2nd_lps[i],
+                    "Decode",
+                    "2ndPrefill",
+                )
+
 
 @unittest.skipUnless(
     torch.cuda.is_available()
@@ -934,7 +1010,6 @@ def _kimi_k3_debug_bitwise_config() -> Controller.Config:
     return config
 
 
-@unittest.skip("MLA attention is not supported by the TorchTitan vLLM wrapper yet.")
 class TestBitwiseParityKimiK3DebugVarlen(KimiK3BitwiseParityTestBase):
     """Kimi K3 KDA/MLA parity with random weights and matched TP=1."""
 

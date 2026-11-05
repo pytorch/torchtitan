@@ -32,6 +32,7 @@ for MoE models. Generator sequence parallelism was disabled.
 |---|---|
 | Llama 3 | ✅ Supported |
 | Muse Glimmer | ✅ Supported |
+| Muse Spark | ✅ Supported (text only) |
 | Qwen 3 | ✅ Supported |
 | Qwen 3.5/3.6/3.8 | ✅ Supported (text only) |
 | GPT-OSS | ✅ Supported |
@@ -115,7 +116,7 @@ Most experiments configure four pieces:
 
 ```python
 rollouter = Rollouter.Config(
-    training_dataloader=IterableRLDataLoader.Config(dataset=MyDataset.Config()),
+    training_dataloader=IterableRolloutDataLoader.Config(dataset=MyDataset.Config()),
     validation_dataset=MyValidationDataset.Config(),
     worker=RolloutWorker.Config(
         message_env=MyEnv.Config(),
@@ -246,8 +247,12 @@ python -m torchtitan.rl.train \
 **NOTE:** The DAPO Math README documents checkpoint paths, expected outputs, and configuration variants.
 
 **Metrics:** W&B is on by default. Run `wandb login` first, or set
-`config.metrics.enable_wandb = False` in your recipe. Set
-`config.metrics.enable_tensorboard = True` to write TensorBoard metrics.
+`config.metrics.loggers = []` in your recipe. Append
+`TensorBoardLogger.Config()` to `config.metrics.loggers` to also write TensorBoard metrics.
+
+## Run on SLURM
+
+See [Launchers](./actors/monarch/README.md#launchers).
 
 ## Trainer/generator consistency
 
@@ -267,8 +272,8 @@ TitanRL exposes four complementary views of a run:
 Together these answer four different debugging questions: what the distributed system was doing, how the run was learning, how the inference engine was performing, and what the model actually produced.
 
 Reference recipes enable W&B by default. Run `wandb login` before launch, or
-disable it in the recipe with `config.metrics.enable_wandb = False`. Set
-`config.metrics.enable_tensorboard = True` to write TensorBoard metrics under
+disable it in the recipe with `config.metrics.loggers = []`. Append
+`TensorBoardLogger.Config()` to `config.metrics.loggers` to also write TensorBoard metrics under
 the output directory.
 
 The trainer supports the core `Profiler.Config`, including Kineto traces and

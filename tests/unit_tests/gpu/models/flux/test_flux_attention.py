@@ -51,7 +51,7 @@ class TestFluxVarlenContextParallel(DTensorTestBase):
             enable_sequence_parallel=False,
         )
         config = VarlenInnerAttention.Config(
-            window_size=(-1, -1), sharding_config=flux_inner_attention_sharding_config()
+            sharding_config=flux_inner_attention_sharding_config()
         )
         attention = config.build()
         with parallelism_context.activate_spmd():

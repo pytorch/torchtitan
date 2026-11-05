@@ -11,15 +11,15 @@ https://github.com/sgl-project/sglang/blob/e0c0c0a45cb1bda90392bfa2bba4184f5b063
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import spmd_types as spmd
 import torch
-from torch import nn
 
-from torchtitan.config import TrainingConfig
+from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -36,10 +36,7 @@ from torchtitan.models.common.multimodal import (
     scatter_vision_embeds,
 )
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
-from torchtitan.models.deepseek_v3.model import (
-    DeepSeekV3Model,
-    get_deepseek_v3_nparams_and_flops as get_kimi_k2_7_nparams_and_flops,
-)
+from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder
 
 from .state_dict_adapter import KimiK25StateDictAdapter
@@ -76,19 +73,8 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(DeepSeekV3Model.Config):
+    class Config(MultimodalModel.Config, DeepSeekV3Model.Config):
         vision_encoder: KimiK25VisionEncoder.Config | None = None
-
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
-            kimi_model = cast("KimiK25Model", model)
-            return get_kimi_k2_7_nparams_and_flops(
-                self,
-                model,
-                seq_len,
-                modules_excluded_from_active_params=(kimi_model.vision_encoder,),
-            )
 
     def __init__(self, config: Config):
         tp = spmd_mesh_size("tp")
@@ -110,9 +96,9 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
-        local_compile_regions: list[str],
+        local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
         dump_folder: str,
     ) -> KimiK25Model:
@@ -124,9 +110,9 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
 
         return super().parallelize(
             parallelism_context=parallelism_context,
-            training=training,
+            precision=precision,
             parallelism=parallelism,
-            local_compile_regions=local_compile_regions,
+            local_compile=local_compile,
             activation_remat=activation_remat,
             dump_folder=dump_folder,
         )
@@ -138,7 +124,6 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
@@ -152,7 +137,6 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
             )
 
         input_shardings = {

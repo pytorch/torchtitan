@@ -9,7 +9,7 @@ import unittest
 
 import torch
 
-from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.rope import ComplexRoPE, CosSinRoPE
 from torchtitan.models.qwen3_5.rope import MRoPE
 
@@ -17,10 +17,10 @@ from torchtitan.models.qwen3_5.rope import MRoPE
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestRoPELocalCompile(unittest.TestCase):
     def setUp(self):
-        apply_local_compile(["rope"])
+        LocalCompileConfig(regions=["rope"]).apply()
 
     def tearDown(self):
-        apply_local_compile([])
+        LocalCompileConfig().apply()
         torch._dynamo.reset()
 
     def test_forward_and_backward_emit_triton(self):
@@ -90,7 +90,7 @@ class TestRoPELocalCompile(unittest.TestCase):
             (grad_query_out, grad_key_out),
         )
 
-        apply_local_compile([])
+        LocalCompileConfig().apply()
         eager_rope = (
             CosSinRoPE.Config(
                 dim=128,
@@ -223,7 +223,7 @@ class TestRoPELocalCompile(unittest.TestCase):
             (grad_query_out, grad_key_out),
         )
 
-        apply_local_compile([])
+        LocalCompileConfig().apply()
         eager_rope = config.build().cuda()
         eager_query = query.detach().clone().requires_grad_()
         eager_key = key.detach().clone().requires_grad_()
@@ -245,7 +245,7 @@ class TestRoPELocalCompile(unittest.TestCase):
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestComplexRoPELocalCompile(unittest.TestCase):
     def tearDown(self):
-        apply_local_compile([])
+        LocalCompileConfig().apply()
         torch._dynamo.reset()
 
     def _run(self, rope, query_base, key, positions, inverse):
@@ -281,11 +281,11 @@ class TestComplexRoPELocalCompile(unittest.TestCase):
             key = torch.randn(64, 1, 64, device="cuda", dtype=dtype)
             with self.subTest(dtype=dtype, query_dim=query_dim, inverse=inverse):
                 torch._dynamo.reset()  # 8 cases: stay clear of the 8-graph limit
-                apply_local_compile([])
+                LocalCompileConfig().apply()
                 eager_outputs, eager_grads = self._run(
                     rope, query_base, key, positions, inverse
                 )
-                apply_local_compile(["rope"])
+                LocalCompileConfig(regions=["rope"]).apply()
                 outputs, grads = self._run(rope, query_base, key, positions, inverse)
                 for compiled, eager in zip(
                     (*outputs, *grads), (*eager_outputs, *eager_grads), strict=True
@@ -312,15 +312,15 @@ class TestComplexRoPELocalCompile(unittest.TestCase):
             )
             return (*outputs, *grads)
 
-        apply_local_compile([])
+        LocalCompileConfig().apply()
         eager = run()
-        apply_local_compile(["rope"])
+        LocalCompileConfig(regions=["rope"]).apply()
         for compiled, expected in zip(run(), eager, strict=True):
             torch.testing.assert_close(compiled, expected)
 
     def test_compiled_is_batch_invariant(self):
         torch.manual_seed(42)
-        apply_local_compile(["rope"])
+        LocalCompileConfig(regions=["rope"]).apply()
         rope = ComplexRoPE.Config(dim=64, max_context_length=128).build().cuda()
         query = torch.randn(64, 8, 64, device="cuda", dtype=torch.bfloat16)
         key = torch.randn(64, 1, 64, device="cuda", dtype=torch.bfloat16)

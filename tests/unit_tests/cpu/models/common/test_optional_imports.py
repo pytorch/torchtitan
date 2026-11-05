@@ -55,7 +55,7 @@ for kernel in (
         kernel()
     except ModuleNotFoundError as error:
         assert error.name == "attn_gym"
-        assert "attn-gym[linear,cudnn]==0.0.16" in str(error)
+        assert "attn-gym[linear,cudnn]==0.0.17" in str(error)
     else:
         raise AssertionError("A missing Attention Gym kernel ran")
 
@@ -158,7 +158,7 @@ try:
 except ModuleNotFoundError as error:
     assert error.name == missing_package
     if missing_package == "attn_gym":
-        assert "attn-gym[linear,cudnn]==0.0.16" in str(error)
+        assert "attn-gym[linear,cudnn]==0.0.17" in str(error)
     else:
         assert str(error) == "blocked dependency"
 else:
@@ -444,23 +444,36 @@ facade.require_attn_gym(Kernel, OtherKernel)
     assert result.returncode == 0, result.stderr
 
 
+# Each case breaks one attn_gym module, or one export a module resolves on
+# first access (attn_gym.linear._lazy), on a backend of its own, and names the
+# modules whose build must then fail with it. Breaking one export at a time
+# makes every entry of the require_attn_gym lists load-bearing: drop an export
+# from a list and its module builds in the case that breaks that export.
+_BUILD_FAILURE_CASES = [
+    ("attn_gym.linear.short_conv", "inner_kda,inner_gdn,cp_inner_kda,cp_inner_gdn"),
+    ("causal_conv1d", "inner_kda,inner_gdn,cp_inner_kda,cp_inner_gdn"),
+    ("chunk_kda", "kda_kernel,inner_kda,cp_inner_kda"),
+    ("bound_gate", "kda_kernel,inner_kda,cp_inner_kda"),
+    (
+        "l2norm",
+        "kda_kernel,gdn_kernel,inner_kda,inner_gdn,cp_inner_kda,cp_inner_gdn",
+    ),
+    ("chunk_gdn", "gdn_kernel,inner_gdn,cp_inner_gdn"),
+    ("recurrent_gdn", "gdn_kernel,inner_gdn,cp_inner_gdn"),
+    ("context_parallel_kda", "cp_inner_kda"),
+    ("context_parallel_gdn", "cp_inner_gdn"),
+    ("context_parallel_conv_history", "cp_inner_kda,cp_inner_gdn"),
+    ("ContextParallelRouting", "cp_inner_kda,cp_inner_gdn"),
+]
+
+
 @pytest.mark.parametrize(
-    "broken_modules, missing_backend",
-    [
-        (("attn_gym.linear.short_conv",), "cutlass"),
-        (
-            (
-                "attn_gym.linear.context_parallel",
-                "attn_gym.linear.gdn.context_parallel",
-                "attn_gym.linear.kda.context_parallel",
-            ),
-            "triton",
-        ),
-    ],
-    ids=["short_conv", "context_parallel"],
+    "broken, failing",
+    _BUILD_FAILURE_CASES,
+    ids=[broken for broken, _ in _BUILD_FAILURE_CASES],
 )
 def test_attention_modules_report_their_own_backend_at_build(
-    broken_modules: tuple[str, ...], missing_backend: str
+    broken: str, failing: str
 ) -> None:
     """A module fails at build when an export it calls lacks its backend."""
     script = r"""
@@ -468,17 +481,24 @@ import importlib.abc
 import importlib.util
 import sys
 
-broken_modules = sys.argv[1].split(",")
-missing_backend = sys.argv[2]
+broken = sys.argv[1]
+failing = set(sys.argv[2].split(","))
+missing_backend = broken.rsplit(".", 1)[-1] + "_backend"
+
+
+def blocked():
+    return ModuleNotFoundError("blocked dependency", name=missing_backend)
 
 
 class FakeAttentionGym(importlib.abc.MetaPathFinder, importlib.abc.Loader):
-    # Every attn_gym module imports and exports a class under any name, except
-    # the broken ones, whose backend is missing.
+    # Every attn_gym module imports and exports a class under any name. The
+    # broken module fails to import on its backend. The broken export fails on
+    # its backend when first accessed, as attn_gym.linear._lazy does, with the
+    # backend's error chained to an ImportError.
 
     def find_spec(self, fullname, path, target=None):
-        if fullname in broken_modules:
-            raise ModuleNotFoundError("blocked dependency", name=missing_backend)
+        if fullname == broken:
+            raise blocked()
         if fullname == "attn_gym" or fullname.startswith("attn_gym."):
             return importlib.util.spec_from_loader(fullname, self, is_package=True)
         return None
@@ -490,6 +510,8 @@ class FakeAttentionGym(importlib.abc.MetaPathFinder, importlib.abc.Loader):
         def export(name):
             if name.startswith("__"):
                 raise AttributeError(name)
+            if name == broken:
+                raise ImportError(f"{name} needs {missing_backend}") from blocked()
             return type(name, (), {})
 
         module.__getattr__ = export
@@ -497,18 +519,44 @@ class FakeAttentionGym(importlib.abc.MetaPathFinder, importlib.abc.Loader):
 
 sys.meta_path.insert(0, FakeAttentionGym())
 
+import torchtitan.models.common.attn_gym as facade
 from torchtitan.models.common.attention import cp_gdn, cp_kda, gdn, kda
-from torchtitan.models.common.attn_gym import is_missing_kernel
+
+# The placeholder is named after what failed: the module, or the export.
+if broken in facade._EXPORTS:
+    export, placeholder_name = broken, f"{facade._EXPORTS[broken]}.{broken}"
+else:
+    export = next(name for name, module in facade._EXPORTS.items() if module == broken)
+    placeholder_name = broken
+placeholder = getattr(facade, export)
+assert facade.is_missing_kernel(placeholder), placeholder
+assert placeholder.__name__ == f"_MissingKernel[{placeholder_name}]", placeholder
 
 kda_kernel = kda.KDAKernel.Config()
 gdn_kernel = gdn.GDNKernel.Config()
-inner_kda = kda.InnerKDA.Config(head_dim=128, conv_kernel_size=4, kernel=kda_kernel)
-inner_gdn = gdn.InnerGDN.Config(conv_kernel_size=4, kernel=gdn_kernel)
-cp_inner_kda = cp_kda.ContextParallelInnerKDA.Config(
-    head_dim=128, conv_kernel_size=4, kernel=kda_kernel
-)
-cp_inner_gdn = cp_gdn.ContextParallelInnerGDN.Config(
-    conv_kernel_size=4, kernel=gdn_kernel
+configs = {
+    "kda_kernel": kda_kernel,
+    "gdn_kernel": gdn_kernel,
+    "inner_kda": kda.InnerKDA.Config(
+        head_dim=128, conv_kernel_size=4, kernel=kda_kernel
+    ),
+    "inner_gdn": gdn.InnerGDN.Config(conv_kernel_size=4, kernel=gdn_kernel),
+    "cp_inner_kda": cp_kda.ContextParallelInnerKDA.Config(
+        head_dim=128, conv_kernel_size=4, kernel=kda_kernel
+    ),
+    "cp_inner_gdn": cp_gdn.ContextParallelInnerGDN.Config(
+        conv_kernel_size=4, kernel=gdn_kernel
+    ),
+}
+assert failing <= set(configs), failing
+
+
+# A broken export keeps attn_gym's message, which names the backend; a broken
+# module reports the backend's own error.
+expected_message = (
+    f"{broken} needs {missing_backend}"
+    if broken in facade._EXPORTS
+    else "blocked dependency"
 )
 
 
@@ -516,33 +564,109 @@ def backend_of(config):
     try:
         config.build()
     except ModuleNotFoundError as error:
-        assert str(error) == "blocked dependency", error
+        assert str(error) == expected_message, error
         return error.name
     return None
 
 
-# The kernels' own exports imported, so they build whichever module is broken.
-assert backend_of(kda_kernel) is None
-assert backend_of(gdn_kernel) is None
-
-if "attn_gym.linear.short_conv" in broken_modules:
-    # causal_conv1d is a placeholder: the inner modules that call it fail at
-    # build, and so do their CP variants, which build on them.
-    assert is_missing_kernel(kda.causal_conv1d)
-    for config in (inner_kda, inner_gdn, cp_inner_kda, cp_inner_gdn):
-        assert backend_of(config) == missing_backend, config
-else:
-    # Only the CP exports are placeholders: the inner modules build, and
-    # their CP variants fail with the CP modules' backend.
-    assert not is_missing_kernel(kda.causal_conv1d)
-    assert is_missing_kernel(cp_kda.context_parallel_kda)
-    assert backend_of(inner_kda) is None
-    assert backend_of(inner_gdn) is None
-    assert backend_of(cp_inner_kda) == missing_backend
-    assert backend_of(cp_inner_gdn) == missing_backend
+# A module fails with the broken backend if and only if it, or a module it
+# builds, lists the broken export; every other module builds.
+for name, config in configs.items():
+    backend = backend_of(config)
+    expected = missing_backend if name in failing else None
+    assert backend == expected, (name, backend, expected)
 """
     result = subprocess.run(
-        [sys.executable, "-c", script, ",".join(broken_modules), missing_backend],
+        [sys.executable, "-c", script, broken, failing],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_attention_gym_lazy_exports_with_missing_backend() -> None:
+    """Exports attn_gym resolves on first access defer like a failing module."""
+    script = r"""
+import importlib
+from types import ModuleType
+from unittest.mock import Mock
+
+import spmd_types as spmd
+import torchtitan.models.common.attn_gym as facade
+from torchtitan.models.common.attention import gdn
+
+
+def lazy_export(name):
+    # attn_gym.linear._lazy imports the owning module on first access and wraps
+    # its error in an ImportError chained from the backend's ModuleNotFoundError.
+    if name == "causal_conv1d":
+        cause = ModuleNotFoundError("No module named 'cutlass'", name="cutlass")
+    elif name == "causal_conv1d_decode":
+        cause = ModuleNotFoundError(
+            "No module named 'attn_gym.linear.short_conv.cute'",
+            name="attn_gym.linear.short_conv.cute",
+        )
+    elif name == "paged_causal_conv1d":
+        raise ImportError("cannot import name 'paged_causal_conv1d'")
+    else:
+        raise AttributeError(name)
+    raise ImportError(f"{name} requires the optional CuTeDSL backend") from cause
+
+
+short_conv = ModuleType("attn_gym.linear.short_conv")
+short_conv.__getattr__ = lazy_export
+available = {
+    "attn_gym": ModuleType("attn_gym"),
+    "attn_gym.linear.short_conv": short_conv,
+}
+
+
+def load_module(name):
+    if name in available:
+        return available[name]
+    raise ModuleNotFoundError("blocked dependency", name="triton")
+
+
+facade.import_module = load_module
+facade._BACKEND_ERRORS.clear()
+facade._BACKEND_KERNELS.clear()
+for name in facade._EXPORTS:
+    facade.__dict__.pop(name, None)
+spmd.register_local_autograd_function = Mock()
+
+importlib.reload(gdn)
+
+assert gdn.causal_conv1d is facade.causal_conv1d
+assert facade.is_missing_kernel(facade.causal_conv1d)
+assert facade.causal_conv1d is not facade._MissingKernel
+recorded = facade._BACKEND_ERRORS["attn_gym.linear.short_conv.causal_conv1d"]
+assert recorded.name == "cutlass", recorded
+# attn_gym's message is kept, and the backend's own error stays in the chain.
+assert str(recorded) == "causal_conv1d requires the optional CuTeDSL backend", recorded
+assert str(recorded.__cause__.__cause__) == "No module named 'cutlass'", recorded
+for use in (facade.causal_conv1d, lambda: facade.require_attn_gym(facade.causal_conv1d)):
+    try:
+        use()
+    except ModuleNotFoundError as error:
+        assert error.name == "cutlass", error
+        assert str(error) == "causal_conv1d requires the optional CuTeDSL backend", error
+    else:
+        raise AssertionError("A kernel with a missing backend ran")
+
+# A missing attn_gym module, or an ImportError that is not a missing module,
+# is breakage and stays loud.
+for name in ("causal_conv1d_decode", "paged_causal_conv1d"):
+    try:
+        getattr(facade, name)
+    except ImportError as error:
+        assert not isinstance(error, ModuleNotFoundError), error
+        assert name not in facade.__dict__
+    else:
+        raise AssertionError(f"{name} got a placeholder for an attn_gym error")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
         check=False,
         capture_output=True,
         text=True,
