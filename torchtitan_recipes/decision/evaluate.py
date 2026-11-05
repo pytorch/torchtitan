@@ -13,7 +13,7 @@ error budget.
 
 Usage:
   python -m torchtitan_recipes.decision.evaluate \
-    --hf-assets ./assets/hf/Qwen3-1.7B-Base [--checkpoint outputs/.../step-600]
+    --hf-assets ./assets/hf/Qwen3-1.7B-Base [--checkpoint outputs/.../exports/step-600]
 """
 
 import argparse

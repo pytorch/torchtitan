@@ -381,6 +381,7 @@ def _make_v4_attn_config(
             out_features=n_heads,
             bias=False,
             param_init=_LINEAR_INIT,
+            preserve_dtype_params=("weight",),
             sharding_config=attn_sink_sharding_config(),
         ),
         compressor=compressor_cfg,
@@ -427,11 +428,9 @@ def _make_v4_moe_config(
         else None
     )
     if swiglu_limit is not None:
-        routed_experts.activation_fn = LimitedSwiGLU.Config(swiglu_limit=swiglu_limit)
+        routed_experts.activation_fn = LimitedSwiGLU.Config(limit=swiglu_limit)
         if shared_experts is not None:
-            shared_experts.activation_fn = LimitedSwiGLU.Config(
-                swiglu_limit=swiglu_limit
-            )
+            shared_experts.activation_fn = LimitedSwiGLU.Config(limit=swiglu_limit)
 
     return MoE.Config(
         num_experts=num_experts,

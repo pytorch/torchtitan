@@ -204,19 +204,7 @@ _recurrent_gdn_fwd.register_autograd(
 )
 
 
-@spmd.local_map(
-    # split_sizes is a list of six ints.
-    in_types=(spmd.PartitionSpec(("dp", "cp"), "tp"), [None] * 6, None),
-    out_types=(
-        # Nominal tp S(1): each rank holds its own [q | k | v]; never redistribute or gather it.
-        spmd.PartitionSpec(("dp", "cp"), "tp"),  # mixed_qkv_TC
-        spmd.PartitionSpec(("dp", "cp"), "tp"),  # a_TH
-        spmd.PartitionSpec(("dp", "cp"), "tp"),  # b_TH
-        spmd.PartitionSpec(("dp", "cp"), "tp", None),  # gate_THV
-    ),
-)
-@local_compile("gdn_split_in_proj", batch_invariant=True)
-def _split_in_proj(
+def _split_grouped_in_proj(
     projected_TC: torch.Tensor,
     split_sizes: list[int],
     value_head_dim: int,
@@ -247,6 +235,59 @@ def _split_in_proj(
         b.flatten(1).contiguous(),
         gate_THV.contiguous(),
     )
+
+
+# Two compiles of the same split under one region name, with different Inductor options;
+# separate functions, so each gets its own graph cache and recompile limit.
+# Training: the backward cats six gradients (q, k, v, z, a, b) into the grouped layout.
+# Both cat limits at 0 make Inductor copy each piece into its slice, not one kernel that
+# picks a source per element; combo_kernels launches the remaining copies as one kernel.
+@local_compile(
+    "gdn_split_in_proj",
+    batch_invariant=True,
+    options={
+        "max_pointwise_cat_inputs": 0,
+        "max_complex_pointwise_cat_inputs": 0,
+        "combo_kernels": True,
+    },
+)
+def _split_in_proj_with_grad(
+    projected_TC: torch.Tensor, split_sizes: list[int], value_head_dim: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return _split_grouped_in_proj(projected_TC, split_sizes, value_head_dim)
+
+
+# No backward (generator, no_grad): the q|k|v cat and the a, b, gate copies run as one
+# combo kernel. Per-input cat copies would add launches, which dominate at decode sizes.
+@local_compile(
+    "gdn_split_in_proj", batch_invariant=True, options={"combo_kernels": True}
+)
+def _split_in_proj_no_grad(
+    projected_TC: torch.Tensor, split_sizes: list[int], value_head_dim: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return _split_grouped_in_proj(projected_TC, split_sizes, value_head_dim)
+
+
+@spmd.local_map(
+    # split_sizes is a list of six ints.
+    in_types=(spmd.PartitionSpec(("dp", "cp"), "tp"), [None] * 6, None),
+    out_types=(
+        # Nominal tp S(1): each rank holds its own [q | k | v]; never redistribute or gather it.
+        spmd.PartitionSpec(("dp", "cp"), "tp"),  # mixed_qkv_TC
+        spmd.PartitionSpec(("dp", "cp"), "tp"),  # a_TH
+        spmd.PartitionSpec(("dp", "cp"), "tp"),  # b_TH
+        spmd.PartitionSpec(("dp", "cp"), "tp", None),  # gate_THV
+    ),
+)
+def _split_in_proj(
+    projected_TC: torch.Tensor,
+    split_sizes: list[int],
+    value_head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run ``_split_grouped_in_proj`` compiled for training if a backward will run."""
+    if projected_TC.requires_grad:
+        return _split_in_proj_with_grad(projected_TC, split_sizes, value_head_dim)
+    return _split_in_proj_no_grad(projected_TC, split_sizes, value_head_dim)
 
 
 class GDNKernel(Module):
@@ -527,6 +568,8 @@ class GDN(LinearAttention):
         # Query/key heads; n_heads counts value heads.
         n_key_heads: int
         conv_kernel_size: int = 4
+        # The gate reads A_log and dt_bias in float32.
+        preserve_dtype_params: tuple[str, ...] = ("A_log", "dt_bias")
 
         # Sub-module configs
         # One projection for q, k, v, z, a and b, with rows grouped by key head
@@ -567,6 +610,15 @@ class GDN(LinearAttention):
                     f"in_proj.out_features ({self.in_proj.out_features}) must be "
                     f"n_key_heads * sum(in_proj_split_sizes) ({in_proj_rows})"
                 )
+
+        def flops_per_token(self, seq_len: int) -> int:
+            from torchtitan.models.common.flops import delta_rule_flops_per_token
+
+            return delta_rule_flops_per_token(
+                num_heads=self.n_heads,
+                key_head_dim=self.key_head_dim,
+                v_head_dim=self.value_head_dim,
+            )
 
     def __init__(self, config: Config):
         super().__init__()

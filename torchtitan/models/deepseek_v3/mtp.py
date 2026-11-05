@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import spmd_types as spmd
 import torch
@@ -15,7 +15,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import DataParallelMeshDims
 
 from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX, Loss
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
@@ -24,7 +24,8 @@ from torchtitan.distributed.spmd_types import (
     spmd_dense_sp_enabled,
     spmd_mesh_group,
 )
-from torchtitan.models.base.module import ModuleList
+from torchtitan.models.base.model import FlopsEstimator
+from torchtitan.models.base.module import Module, ModuleList
 from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     FlexAttentionMetadata,
@@ -201,6 +202,27 @@ class MTPDecoder(Decoder):
     class Config(Decoder.Config):
         mtp_layers: list = field(default_factory=list)
 
+        def build_flops_estimator(
+            self,
+            model: Module,
+            *,
+            seq_len: int,
+            excluded_submodules: tuple[Module | None, ...] = (),
+        ) -> FlopsEstimator:
+            decoder_estimate = super(MTPDecoder.Config, self).build_flops_estimator(
+                model, seq_len=seq_len, excluded_submodules=excluded_submodules
+            )
+            model = cast(MTPDecoder, model)
+            repeated_head_flops_per_token = (
+                6
+                * len(self.mtp_layers)
+                * sum(param.numel() for param in model.lm_head.parameters())
+            )
+            return lambda input_dict: (
+                decoder_estimate(input_dict)
+                + repeated_head_flops_per_token * input_dict["input"].numel()
+            )
+
     def __init__(self, config: Config):
         super().__init__(config)
         if not config.mtp_layers:
@@ -220,7 +242,7 @@ class MTPDecoder(Decoder):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
         from torchtitan.distributed.fsdp import (
@@ -233,10 +255,10 @@ class MTPDecoder(Decoder):
         apply_fsdp_to_mtp_decoder(
             self,
             dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
+            reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
             pp_enabled=parallelism_context.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
+            cpu_offload=parallelism.fsdp_enable_cpu_offloading,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             ep_degree=parallelism_context.ep,
             edp_mesh=edp_mesh,
@@ -252,7 +274,6 @@ class MTPDecoder(Decoder):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[
@@ -308,7 +329,6 @@ class MTPDecoder(Decoder):
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
             )
             input_dict["attention_metadata"] = attention_metadata
 
