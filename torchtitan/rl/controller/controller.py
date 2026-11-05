@@ -608,21 +608,18 @@ class Controller(Configurable):
             trainer_parallelism.data_parallel_replicate_degree * dp_shard
         )
 
-        generator_dp_degree = max(config.generator.parallelism.data_parallel_degree, 1)
-        num_generator_dp_shards = config.num_generators * generator_dp_degree
-
-        # Ceiling (not target) for the generator's max_num_seqs: the per-generator
-        # upper bound on concurrently scheduled sequences. vLLM may admit fewer if KV
-        # is tight; this also sets CUDA-graph capture sizes.
-        max_num_seqs = min(
-            math.ceil(rollout_concurrency / num_generator_dp_shards), 512
-        )
+        # Ceiling (not target) for each generator DP rank's max_num_seqs, vLLM's cap on
+        # concurrently running sequences: vLLM queues requests above it even when KV has
+        # room. Sticky routing can send a rank more than an even share, so size it for
+        # every rollout sequence and let the KV budget limit admission. Capped at 512,
+        # vLLM's default largest CUDA graph capture size, to bound per-request buffers;
+        # this also sets CUDA-graph capture sizes.
+        max_num_seqs = min(rollout_concurrency, 512)
 
         logger.info(
-            "max_num_seqs=%d per generator (rollout_concurrency=%d / generator_dp_shards=%d)",
+            "max_num_seqs=%d per generator DP rank (rollout_concurrency=%d)",
             max_num_seqs,
             rollout_concurrency,
-            num_generator_dp_shards,
         )
 
         with sl.log_trace_span("mesh_spawn"):
