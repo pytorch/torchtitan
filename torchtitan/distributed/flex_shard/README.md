@@ -14,10 +14,11 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   `Owned`, and optionally the order in which several axes shard one tensor
   dimension.
 - `ComputeLayout.compute_dtype` is the dtype the optimizer computes in for
-  that parameter; `None` keeps the storage dtype. DistMuon runs Newton-Schulz
-  in BF16 and accepts only `torch.bfloat16`, so every FP32 parameter sets it.
-  Inputs are sent to the compute ranks and directions are sent back in this
-  dtype.
+  that parameter; `None` keeps the storage dtype. Inputs are sent to the
+  compute ranks and directions are sent back in this dtype. DistMuon's
+  exchange buffers accept only `torch.bfloat16`, so every FP32 parameter sets
+  it. DistMuon's `ns_dtype` selects the Newton-Schulz iteration's dtype
+  (`torch.bfloat16` or `torch.float16`).
 - `BlockShard` shards complete contiguous blocks along one tensor dimension. It
   preserves the tensor's rank and global shape and never creates a tensor view.
 - `Owned` assigns a complete subgroup-local logical tensor to one dynamically

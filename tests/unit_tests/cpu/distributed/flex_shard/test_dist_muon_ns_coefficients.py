@@ -44,3 +44,27 @@ def test_dist_muon_applies_shared_or_per_step_ns_coefficients() -> None:
     assert _valid_ns_coefficients(shared, ns_steps=2)
     assert _valid_ns_coefficients(per_step, ns_steps=2)
     assert not _valid_ns_coefficients(per_step, ns_steps=3)
+
+
+def test_float16_newton_schulz_tracks_float32_reference() -> None:
+    # Low-rank momentum at a tiny scale. A float16 cast before the normalization
+    # flushes it to zero; a BF16 division rounds the normalized entries again.
+    generator = torch.Generator().manual_seed(0)
+    left = torch.randn(256, 8, generator=generator)
+    right = torch.randn(8, 512, generator=generator)
+    update = ((left * torch.logspace(0, -3, 8)) @ right * 1e-9).to(torch.bfloat16)
+
+    def newton_schulz(ns_dtype: torch.dtype) -> torch.Tensor:
+        return _zeropower_via_newtonschulz(
+            update,
+            ns_coefficients=(3.4445, -4.7750, 2.0315),
+            ns_steps=5,
+            eps=1e-7,
+            ns_dtype=ns_dtype,
+        ).float()
+
+    reference = newton_schulz(torch.float32)
+    bf16_error = (newton_schulz(torch.bfloat16) - reference).abs().mean()
+    fp16_error = (newton_schulz(torch.float16) - reference).abs().mean()
+
+    assert fp16_error < bf16_error / 3
