@@ -12,16 +12,20 @@ fusion over a full token sequence. ``build_vision_bank_indices`` and
 packed-bank row for every placeholder token.
 """
 
-from typing import Self
+from dataclasses import dataclass
+from typing import cast, Self
 
 import spmd_types as spmd
 import torch
 
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
+
+from torchtitan.models.base.model import FlopsEstimator
+from torchtitan.models.base.module import Module
 
 from .decoder import Decoder
 
@@ -31,11 +35,45 @@ class MultimodalModel(Decoder):
 
     multimodal_encoder_fqns: tuple[str, ...] = ()
 
+    @dataclass(kw_only=True, slots=True)
+    class Config(Decoder.Config):
+        def build_flops_estimator(
+            self,
+            model: Module,
+            *,
+            seq_len: int,
+            excluded_submodules: tuple[Module | None, ...] = (),
+        ) -> FlopsEstimator:
+            model = cast(MultimodalModel, model)
+            encoder_modules = []
+            encoder_estimates = []
+            for encoder_fqn in model.multimodal_encoder_fqns:
+                encoder = getattr(model, encoder_fqn)
+                encoder_modules.append(encoder)
+                if encoder is None:
+                    continue
+                encoder_config = getattr(self, encoder_fqn)
+                estimate = encoder_config.build_flops_estimator(encoder)
+                encoder_estimates.append(estimate)
+            decoder_estimate = super(
+                MultimodalModel.Config, self
+            ).build_flops_estimator(
+                model,
+                seq_len=seq_len,
+                excluded_submodules=(
+                    *encoder_modules,
+                    *excluded_submodules,
+                ),
+            )
+            return lambda input_dict: decoder_estimate(input_dict) + sum(
+                estimate(input_dict) for estimate in encoder_estimates
+            )
+
     def parallelize(
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
         local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
@@ -57,7 +95,7 @@ class MultimodalModel(Decoder):
 
             self._apply_fsdp(
                 parallelism_context=parallelism_context,
-                training=training,
+                precision=precision,
                 parallelism=parallelism,
             )
         return self
@@ -66,7 +104,7 @@ class MultimodalModel(Decoder):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
         from torchtitan.distributed.fsdp import (
@@ -86,16 +124,16 @@ class MultimodalModel(Decoder):
                 apply_fsdp_to_multimodal_encoder(
                     encoder,
                     dp_mesh,
-                    param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-                    reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+                    param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
+                    reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
                     reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
                     pp_enabled=parallelism_context.pp_enabled,
-                    cpu_offload=training.enable_cpu_offload,
+                    cpu_offload=parallelism.fsdp_enable_cpu_offloading,
                     dp_mesh_dims=dp_mesh_dims,
                 )
         super()._apply_fsdp(
             parallelism_context=parallelism_context,
-            training=training,
+            precision=precision,
             parallelism=parallelism,
         )
 

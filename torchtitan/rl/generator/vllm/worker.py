@@ -18,7 +18,7 @@ from vllm.v1.worker import gpu_model_runner as vllm_gpu_model_runner
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker as GPUWorker
 
-from torchtitan.rl.generator.vllm.linear_attention import (
+from torchtitan.rl.generator.vllm.attention.linear_attention import (
     TorchTitanLinearAttentionBackend,
 )
 

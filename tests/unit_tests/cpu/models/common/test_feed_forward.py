@@ -225,6 +225,6 @@ def test_limited_swiglu_clamps_gate_above_and_up_on_both_sides():
         [[10.0, -10.0, 2.0]]
     )
 
-    actual_TF = LimitedSwiGLU.Config(swiglu_limit=10.0).build()(gate_up_T2F)
+    actual_TF = LimitedSwiGLU.Config(limit=10.0).build()(gate_up_T2F)
 
     torch.testing.assert_close(actual_TF, expected_TF)

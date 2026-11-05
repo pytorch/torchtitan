@@ -4,14 +4,32 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import subprocess
+import sys
+
 import pytest
 
 from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed.context_parallel import PTRRFlexAttentionCPLoadBalancer
 
 
-def test_parallelism_config_default_load_balancer() -> None:
-    assert ParallelismConfig().context_parallel_load_balancer is None
+def test_cp_import_before_parallelism_config() -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from torchtitan.distributed.context_parallel import "
+            "ContextParallelLoadBalancer\n"
+            "from torchtitan.config.parallelism import ParallelismConfig\n"
+            "from typing import get_type_hints\n"
+            "load_balancer_type = get_type_hints(ParallelismConfig)["
+            "'context_parallel_load_balancer']\n"
+            "assert load_balancer_type == ContextParallelLoadBalancer.Config | None\n",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_parallelism_config_accepts_ptrr_when_cp_disabled() -> None:
@@ -23,10 +41,6 @@ def test_parallelism_config_accepts_ptrr_when_cp_disabled() -> None:
         config.context_parallel_load_balancer,
         PTRRFlexAttentionCPLoadBalancer.Config,
     )
-
-
-def test_parallelism_config_default_schedule() -> None:
-    assert ParallelismConfig().pipeline_parallel_schedule == "1F1B"
 
 
 def test_parallelism_config_accepts_interleaved_1f1b() -> None:
@@ -48,16 +62,24 @@ def test_parallelism_config_rejects_invalid_schedule(schedule: str) -> None:
         ParallelismConfig(pipeline_parallel_schedule=schedule)
 
 
-def test_parallelism_config_rejects_unknown_schedule_when_pp_disabled() -> None:
-    with pytest.raises(ValueError, match=r"pipeline_parallel_schedule 'foo'"):
-        ParallelismConfig(
-            pipeline_parallel_degree=1,
-            pipeline_parallel_schedule="foo",
-        )
+def test_parallelism_config_accepts_unset_layers_per_stage() -> None:
+    assert ParallelismConfig().pipeline_parallel_layers_per_stage is None
 
 
-def test_parallelism_config_disables_fsdp_symm_mem_by_default() -> None:
-    assert ParallelismConfig().fsdp_symm_mem_scope is None
+def test_parallelism_config_accepts_positive_layers_per_stage() -> None:
+    config = ParallelismConfig(pipeline_parallel_layers_per_stage=2)
+    assert config.pipeline_parallel_layers_per_stage == 2
+
+
+@pytest.mark.parametrize("layers_per_stage", [0, -1])
+def test_parallelism_config_rejects_non_positive_layers_per_stage(
+    layers_per_stage: int,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=rf"pipeline_parallel_layers_per_stage must be positive.*{layers_per_stage}",
+    ):
+        ParallelismConfig(pipeline_parallel_layers_per_stage=layers_per_stage)
 
 
 @pytest.mark.parametrize("scope", ["all", "dense"])

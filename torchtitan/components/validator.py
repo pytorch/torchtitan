@@ -347,7 +347,6 @@ class Validator(BaseValidator):
                             parallelism_context=parallelism_context,
                             parallelism=self.parallelism,
                             max_num_documents=self.dl_config.max_num_documents,
-                            max_context_length=self.seq_len,
                         )
                     prepared.append((inputs, labels, kwargs))
                 if evaluate is None:
