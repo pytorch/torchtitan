@@ -18,7 +18,10 @@ from torchtitan.experiments.graph_trainer.llama3 import (
 
 from torchtitan.experiments.graph_trainer.llama3.model import GraphTrainerLlama3Model
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
-from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.models.common.config_utils import (
+    decoder_vocab_size,
+    DEFAULT_DEBUG_MODEL_SEQ_LEN,
+)
 from torchtitan.models.llama3 import build_model_config as build_llama3_model_config
 from torchtitan.observability.sdc_replayer import SDCReplayer
 
@@ -51,7 +54,7 @@ def graph_trainer_llama3_debugmodel_mxfp8() -> GraphTrainer.Config:
     base = llama3_debugmodel()
     base.model = build_llama3_model_config(
         "debugmodel_mxfp8",
-        seq_len=base.training.max_context_length,
+        seq_len=base.model.max_context_length,
         converters=[
             llama3_mxfp8_linear_converter_config(),
         ],
@@ -62,13 +65,15 @@ def graph_trainer_llama3_debugmodel_mxfp8() -> GraphTrainer.Config:
     return config
 
 
-def graph_trainer_llama3_debugmodel_varlen() -> GraphTrainer.Config:
+def graph_trainer_llama3_debugmodel_varlen(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> GraphTrainer.Config:
     """Debug model using Varlen attention for graph machinery tests."""
-    base = llama3_debugmodel_varlen_attn()
+    base = llama3_debugmodel_varlen_attn(seq_len=seq_len)
     base.parallelism.context_parallel_load_balancer = HeadTailCPLoadBalancer.Config()
     base.model = build_graph_llama3_model_config(
         "debugmodel",
-        seq_len=base.training.max_context_length,
+        seq_len=base.model.max_context_length,
         attn_backend="varlen",
         parallelism=base.parallelism,
     )

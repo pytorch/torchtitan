@@ -24,7 +24,7 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.components.renderer import from_renderers
-from torchtitan.config import TrainingConfig
+from torchtitan.config import PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 
 from torchtitan.config.transform import (
@@ -50,6 +50,8 @@ from torchtitan.models.muse_spark import (
 from torchtitan.models.muse_spark.renderer import MuseSparkRendererConfig
 from torchtitan.models.muse_spark.tokenizer import MuseSparkTokenizer
 from torchtitan.models.qwen3 import build_model_config
+
+from torchtitan.observability.metrics import WandBLogger
 from torchtitan.rl.controller.controller import (
     AsyncLoopConfig,
     Controller,
@@ -152,7 +154,7 @@ def _qwen3_4b_dapo_math_config(
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=True)),
         num_generators=6,
         metrics=MetricsProcessor.Config(
-            enable_wandb=True,
+            loggers=[WandBLogger.Config()],
             console_log_keys_validation=[
                 "validation_reward/_mean",
                 "validation_reward/_max",
@@ -182,7 +184,6 @@ def _qwen3_4b_dapo_math_config(
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
-                max_context_length=max_total_tokens,
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -202,7 +203,6 @@ def _qwen3_4b_dapo_math_config(
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             checkpointer=None,
@@ -314,6 +314,7 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
         rollouter=rollouter,
         renderer=MuseSparkRendererConfig(reasoning_effort="low"),
         num_generators=1,
+        precision=PrecisionConfig(dtype="float32", param_dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -335,9 +336,6 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
-                max_context_length=max_total_tokens,
-                dtype="float32",
-                mixed_precision_param="bfloat16",
             ),
             parallelism=trainer_parallelism,
             # Factor EP=16 keeps the worst case (every token routed to one rank)
@@ -366,7 +364,6 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             # vLLM's profiling dummy batch can route every token to one expert.
@@ -453,7 +450,7 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=True)),
         num_generators=1,
         metrics=MetricsProcessor.Config(
-            enable_wandb=True,
+            loggers=[WandBLogger.Config()],
             console_log_keys_validation=[
                 "validation_reward/_mean",
                 "validation_reward/_max",
@@ -461,6 +458,7 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
                 "timing/validate",
             ],
         ),
+        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -485,8 +483,6 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
                 # Pack several rollouts per microbatch (a multiple of
                 # max_total_tokens).
                 num_tokens_per_microbatch_per_dp_rank=4 * max_total_tokens,
-                max_context_length=max_total_tokens,
-                dtype="bfloat16",
             ),
             dist_moe_runtime=DistMoeRuntime.Config(scratch_capacity_factor=4.0),
             parallelism=trainer_parallelism,
@@ -507,7 +503,6 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             dist_moe_runtime=DistMoeRuntime.Config(

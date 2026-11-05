@@ -8,7 +8,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import timedelta
 from functools import partial
-from typing import Any, cast, NamedTuple, Protocol, TYPE_CHECKING
+from typing import Any, cast, NamedTuple, Protocol, TYPE_CHECKING, TypeAlias
 
 import spmd_types as spmd
 import torch
@@ -20,7 +20,12 @@ from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.loss import ChunkedLossWrapper, Loss
 from torchtitan.components.optim import Optim
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
-from torchtitan.config.configs import CommConfig, DebugConfig, TrainingConfig
+from torchtitan.config.configs import (
+    CommConfig,
+    DebugConfig,
+    PrecisionConfig,
+    TrainingConfig,
+)
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.accelerator_graph import (
@@ -39,6 +44,7 @@ from torchtitan.distributed.pipeline_parallel import (
     prepare_pipeline_schedule_for_accelerator_graph,
 )
 from torchtitan.models.base import BaseModel
+from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.common.aux_loss import aux_loss_denominators, AuxLoss
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import (
@@ -66,6 +72,19 @@ class ForwardBackwardResult(NamedTuple):
     loss_metrics: list[list[dict[str, torch.Tensor]]]
     """Loss metrics, one list per microbatch group with one dict per
     microbatch. Under PP, they are empty on ranks without the last stage."""
+    num_flops: int
+    """FLOPs of this DP rank's raw microbatches, before any reduction.
+
+    Counts the whole logical model, not this rank's TP/PP/EP shard, and is
+    identical across CP ranks. Trainers average it over the DP mesh; CP ranks
+    hold the same value, so CP is not reduced.
+    """
+
+
+# Graphable computation returns only loss and its metrics. FLOPs are estimated
+# during preprocessing, outside capture/replay, and added to ForwardBackwardResult
+# by the outer engine method after computation completes.
+LossAndMetrics: TypeAlias = tuple[torch.Tensor, list[list[dict[str, torch.Tensor]]]]
 
 
 class _ForwardBackwardFn(Protocol):
@@ -74,7 +93,7 @@ class _ForwardBackwardFn(Protocol):
         microbatch_groups: list[Any],
         *,
         preprocess_microbatch_groups_lazily: bool,
-    ) -> ForwardBackwardResult:
+    ) -> LossAndMetrics:
         """Run the groups; with ``preprocess_microbatch_groups_lazily`` they are raw microbatches."""
         ...
 
@@ -144,11 +163,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
         def __post_init__(self) -> None:
             if (
-                self.dist_moe_runtime is not None
-                and self.training.mixed_precision_param != "bfloat16"
-            ):
-                raise ValueError("Dist-MoE requires mixed_precision_param='bfloat16'")
-            if (
                 self.debug.spmd_typechecking
                 and self.parallelism.pipeline_parallel_degree > 1
             ):
@@ -160,11 +174,11 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 )
 
             if (
-                self.training.enable_cpu_offload
+                self.parallelism.fsdp_enable_cpu_offloading
                 and "dp_shard" not in self.debug.distinct_seed_mesh_axes
             ):
                 raise ValueError(
-                    "training.enable_cpu_offload requires 'dp_shard' in "
+                    "parallelism.fsdp_enable_cpu_offloading requires 'dp_shard' in "
                     "debug.distinct_seed_mesh_axes; otherwise every FSDP shard "
                     "is initialized with the same CPU RNG stream."
                 )
@@ -241,6 +255,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     parallelism_context: ParallelismContext
     model_parts: list[BaseModel]
     model_config: BaseModel.Config
+    precision: PrecisionConfig
     output_dir: str
     loss_fn: Loss[Any]
     optim: Optim
@@ -251,7 +266,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     ntokens_seen: int
     sdc_replayer: SDCReplayer | None
     model_param_count: int
-    num_flops_per_token: int
+    flops_estimator: FlopsEstimator
+    _forward_backward_num_flops: int
+    """Logical FLOPs accumulated during preprocessing for the current invocation."""
     has_quantization: bool
     loss: torch.Tensor
     """The step's summed loss over its ``forward_backward`` calls; ``optim_step`` checks it
@@ -279,6 +296,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         config: Config,
         *,
         model_config: BaseModel.Config,
+        precision: PrecisionConfig,
         max_num_documents: int | None,
         output_dir: str,
     ) -> None:
@@ -286,6 +304,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
         self.config = config
         self.model_config = model_config
+        self.precision = precision
         self.max_num_documents = max_num_documents
         self.output_dir = output_dir
         self.has_quantization = has_quantization(model_config)
@@ -297,6 +316,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         # zeroes the gradients, and optim_step divides each step's gradients once.
         self._step_started = False
         self._forward_backward_captures_whole_step = False
+        self._forward_backward_num_flops = 0
         self.sdc_replayer = None
         self._forward_backward_accelerator_graph_enabled = False
         self._accelerator_graph_per_microbatch_group_enabled = False
@@ -324,7 +344,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         with sl.log_trace_span("torch_distributed_init"):
             topology = dist_utils.init_distributed(
                 config.comm,
-                enable_cpu_backend=config.training.enable_cpu_offload,
+                enable_cpu_backend=config.parallelism.fsdp_enable_cpu_offloading,
                 base_folder=self.output_dir,
                 pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
             )
@@ -380,7 +400,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         if create_seed_checkpoint:
             init_device = "cpu"
             buffer_device = None
-        elif self.config.training.enable_cpu_offload:
+        elif self.config.parallelism.fsdp_enable_cpu_offloading:
             init_device = "cpu"
             buffer_device = torch.device(self.device.type)
         else:
@@ -390,7 +410,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         with (
             self.parallelism_context.activate_spmd(),
             torch.device("meta"),
-            utils.set_default_dtype(TORCH_DTYPE_MAP[self.config.training.dtype]),
+            utils.set_default_dtype(TORCH_DTYPE_MAP[self.precision.dtype]),
         ):
             model = self.model_config.build()
         self.model_cls = type(model)
@@ -402,9 +422,15 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         )
         (
             self.model_param_count,
-            self.num_flops_per_token,
-        ) = self.model_config.get_nparams_and_flops(
-            model, self.config.training.max_context_length
+            model_active_param_count,
+        ) = self.model_config.get_parameter_counts(model)
+        logger.info(
+            f"Model {type(self.model_config).__qualname__} size: "
+            f"{self.model_param_count:,} total parameters, "
+            f"{model_active_param_count:,} architecturally active parameters"
+        )
+        self.flops_estimator = self.model_config.build_flops_estimator(
+            model, seq_len=self.model_config.max_context_length
         )
         config = self.config
         if self.parallelism_context.pp_enabled:
@@ -416,24 +442,25 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             ) = model.pipeline(
                 parallelism_context=self.parallelism_context,
                 training=config.training,
+                precision=self.precision,
                 parallelism=config.parallelism,
                 activation_remat=config.activation_remat,
                 dump_folder=self.output_dir,
                 device=self.device,
                 model_config=self.model_config,
                 loss_fn=self.loss_fn,
-                **self._parallelize_compile_kwargs(),
+                **self._parallelize_kwargs(),
             )
             del model
         else:
             if not create_seed_checkpoint:
                 model = model.parallelize(
                     parallelism_context=self.parallelism_context,
-                    training=config.training,
+                    precision=self.precision,
                     parallelism=config.parallelism,
                     activation_remat=config.activation_remat,
                     dump_folder=self.output_dir,
-                    **self._parallelize_compile_kwargs(),
+                    **self._parallelize_kwargs(),
                 )
             self.model_parts = [model]
             self.pp_has_first_stage = True
@@ -463,20 +490,15 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self.loss_fn.set_lm_head(lm_head)
             model_with_lm_head._skip_lm_head = True
 
-        logger.info(
-            f"Model {type(self.model_config).__qualname__} size: "
-            f"{self.model_param_count:,} total parameters"
-        )
-
-    def _parallelize_compile_kwargs(self) -> dict[str, Any]:
-        """Return the compile kwargs ``model.parallelize``/``model.pipeline`` expect for this engine's models.
+    def _parallelize_kwargs(self) -> dict[str, Any]:
+        """Return the engine-specific kwargs ``model.parallelize``/``model.pipeline`` expect.
 
         Regular models expect ``local_compile`` (compiled regions); GraphTrainer overrides this to
-        return ``compile_config`` (whole-step compile).
+        return ``compile_config`` (whole-step compile) and ``training``.
         """
         # TODO: apply local compile outside parallelize/pipeline (#5026 review). That needs
         # GraphTrainer to stop reading its compile config there first (apply_compile,
-        # EP-overlap chunking, enable_autoparallel, GraphPP runtime); then delete this hook.
+        # EP-overlap chunking, enable_autoparallel, GraphPP runtime).
         return {"local_compile": self.model_config.local_compile}
 
     def _initialize_optim(self) -> None:
@@ -594,15 +616,15 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 microbatch_groups: list[tuple[Any, ...]],
                 *,
                 preprocess_microbatch_groups_lazily: bool,
-            ) -> ForwardBackwardResult:
+            ) -> LossAndMetrics:
                 accumulated_loss: torch.Tensor | None = None
                 loss_metrics: list[list[dict[str, torch.Tensor]]] = []
                 for microbatch_group in microbatch_groups:
-                    result = graph_group_runner(
+                    group_loss, group_loss_metrics = graph_group_runner(
                         [microbatch_group],
                         preprocess_microbatch_groups_lazily=preprocess_microbatch_groups_lazily,
                     )
-                    group_loss = result.loss.clone()
+                    group_loss = group_loss.clone()
                     if accumulated_loss is None:
                         accumulated_loss = group_loss
                     else:
@@ -612,10 +634,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                             {key: value.clone() for key, value in metrics.items()}
                             for metrics in group_metrics
                         ]
-                        for group_metrics in result.loss_metrics
+                        for group_metrics in group_loss_metrics
                     )
                 assert accumulated_loss is not None
-                return ForwardBackwardResult(accumulated_loss, loss_metrics)
+                return accumulated_loss, loss_metrics
 
             self._accelerator_graph_per_microbatch_group_enabled = True
             self._run_forward_backward = run_forward_backward_groups
@@ -677,6 +699,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self._aux_loss_denominators = aux_loss_denominators.to(
             self.device, non_blocking=True
         )
+        self._forward_backward_num_flops = 0
         # A checked call runs several times, so it preprocesses its groups once, up front.
         preprocess_lazily = (
             self.config.training.preprocess_microbatch_groups_lazily
@@ -696,17 +719,19 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             preprocess_microbatch_groups_lazily=preprocess_lazily,
         )
         if self.sdc_replayer is not None:
-            result = self.sdc_replayer.run_fwd_bwd(
+            loss, loss_metrics = self.sdc_replayer.run_fwd_bwd(
                 run_forward_backward,
                 step=self.num_completed_steps + 1,
-                get_loss=lambda result: result.loss,
+                get_loss=lambda output: output[0],
             )
         else:
-            result = run_forward_backward()
+            loss, loss_metrics = run_forward_backward()
 
-        self.loss = self.loss + result.loss if self._step_started else result.loss
+        self.loss = self.loss + loss if self._step_started else loss
         self._step_started = True
-        return result
+        return ForwardBackwardResult(
+            loss, loss_metrics, num_flops=self._forward_backward_num_flops
+        )
 
     def _preprocess_microbatch_groups(
         self,
@@ -726,6 +751,11 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         ``(arg_mbs, kwarg_mbs, target_mbs, loss_kwarg_mbs)``."""
         prepared_microbatches: list[tuple[Any, ...]] = []
         for microbatch in microbatch_group:
+            # Preprocessing sees unsharded CPU inputs and runs outside graph
+            # capture and SDC replay, so each microbatch is counted once.
+            self._forward_backward_num_flops += self.flops_estimator(
+                microbatch.as_input_dict()
+            )
             with (
                 sl.log_trace_span("preprocess_inputs"),
                 self.parallelism_context.activate_spmd(),
@@ -736,7 +766,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                         parallelism_context=self.parallelism_context,
                         parallelism=self.config.parallelism,
                         max_num_documents=self.max_num_documents,
-                        max_context_length=self.config.training.max_context_length,
                         aux_loss_denominators=self._aux_loss_denominators,
                         **self.preprocess_inputs_kwargs,
                     )
@@ -771,7 +800,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         *,
         defer_fsdp_gradient_reduction: bool,
         preprocess_microbatch_groups_lazily: bool = False,
-    ) -> ForwardBackwardResult:
+    ) -> LossAndMetrics:
         """Run all microbatch groups in one graphable call."""
 
         accumulated_loss: torch.Tensor | None = None
@@ -832,7 +861,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             )
 
         assert accumulated_loss is not None
-        return ForwardBackwardResult(accumulated_loss, loss_metrics)
+        return accumulated_loss, loss_metrics
 
     def _non_pp_forward_backward_microbatch(
         self,

@@ -24,7 +24,12 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.components.renderer import from_renderers
-from torchtitan.config import DebugConfig, OverrideConfig, TrainingConfig
+from torchtitan.config import (
+    DebugConfig,
+    OverrideConfig,
+    PrecisionConfig,
+    TrainingConfig,
+)
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
@@ -43,6 +48,8 @@ from torchtitan.models.deepseek_v3 import (
 from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss_model_config
 from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_model_config
 from torchtitan.models.qwen3 import build_model_config
+
+from torchtitan.observability.metrics import WandBLogger
 from torchtitan.rl.controller.controller import (
     AsyncLoopConfig,
     Controller,
@@ -119,7 +126,7 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         # needs gpt-oss special tokens absent here, so use the qwen3 renderer
         # like the other debug configs.
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -134,7 +141,6 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=None,
@@ -147,7 +153,6 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -171,7 +176,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
     """Small GPT-OSS debug config in deterministic + batch-invariant mode.
 
     Trainer keeps fp32 master weights; FSDP mixed precision
-    (mixed_precision_param="bfloat16", the default) casts them to bf16 for the
+    (precision.param_dtype="bfloat16", the default) casts them to bf16 for the
     forward (even at data_parallel_shard_degree=1), matching the bf16 generator.
     """
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
@@ -223,7 +228,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
         # needs gpt-oss special tokens absent here, so use the qwen3 renderer
         # like the other debug configs.
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -236,11 +241,10 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
                 ),
             ),
             # fp32 master weights; FSDP mixed precision casts to bf16 for the
-            # forward (mixed_precision_param="bfloat16" is the default).
+            # forward (precision.param_dtype="bfloat16" is the default).
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=None,
@@ -254,7 +258,6 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             # TODO: use FULL CUDA graphs once a CUDA-graph-compatible
             # distributed MoE token dispatcher is enabled for GPT-OSS.
@@ -313,7 +316,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -328,7 +331,6 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=None,
@@ -421,7 +423,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
 
     Parity: trainer FSDP2 TP2 EP4 matches generator DP2 TP2 EP4 bitwise
     (verified ``bit_wise/logprob_diff/max == 0``). The trainer holds fp32 master
-    weights; FSDP mixed precision (``training.mixed_precision_param ==
+    weights; FSDP mixed precision (``precision.param_dtype ==
     "bfloat16"``, the default) all-gathers the full params in bf16 before the
     forward, so the forward is numerically identical to the generator's
     replicated bf16 dense DP.
@@ -469,7 +471,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -482,11 +484,10 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
                 ),
             ),
             # fp32 master weights; FSDP mixed precision casts to bf16 for the
-            # forward (mixed_precision_param="bfloat16" is the default).
+            # forward (precision.param_dtype="bfloat16" is the default).
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=None,
@@ -500,7 +501,6 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             parallelism=generator_parallelism,
             checkpointer=None,
@@ -548,7 +548,8 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
+        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -563,8 +564,6 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
-                max_context_length=seq_len,
-                dtype="bfloat16",
             ),
             parallelism=trainer_parallelism,
             checkpointer=None,  # random-init weights
@@ -577,7 +576,6 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             # vLLM models FULL-graph capture warmup as one sequence, so keep
             # its synthetic sequence within the GDN model's context length.
             max_num_batched_tokens=seq_len,
@@ -682,7 +680,8 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
+        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -697,8 +696,6 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
-                max_context_length=seq_len,
-                dtype="bfloat16",
             ),
             # Kimi K3 currently supports FSDP data parallelism but not TP.
             parallelism=trainer_parallelism,
@@ -712,7 +709,6 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             engine=VLLMEngine.Config(
                 cuda_graph=VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY")
             ),
@@ -748,7 +744,7 @@ def _set_kimi_k3_batch_invariant(config: Controller.Config) -> Controller.Config
     )
     config.trainer.model, config.generator.model = _kimi_k3_rl_model_configs(
         "debugmodel",
-        seq_len=config.trainer.training.max_context_length,
+        seq_len=config.trainer.model.max_context_length,
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
     )
@@ -796,7 +792,7 @@ def rl_grpo_deepseek_v3_debug_varlen(*, seq_len: int = 2048) -> Controller.Confi
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -811,7 +807,6 @@ def rl_grpo_deepseek_v3_debug_varlen(*, seq_len: int = 2048) -> Controller.Confi
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=None,
@@ -855,7 +850,7 @@ def _configure_ci(
     )
     config.generator.sampling.max_tokens = max_generated_tokens
     config.generator.gpu_memory_limit = 0.8
-    config.metrics.enable_wandb = False
+    config.metrics.loggers = []
     config.rollouter.worker.token_env.max_rollout_tokens = (
         config.trainer.model.max_context_length
     )

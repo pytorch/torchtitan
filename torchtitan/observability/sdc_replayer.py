@@ -114,11 +114,12 @@ def _hash_tensor(tensor: torch.Tensor) -> torch.Tensor:
     """
     local = _local_tensor(tensor).detach()
     if local.numel() == 0:
-        return torch.zeros((), dtype=torch.uint64, device=local.device)
+        return torch.zeros((), dtype=torch.int64, device=local.device)
     if local.is_complex():
         # for RoPE caches
         local = torch.view_as_real(local)
-    return torch.hash_tensor(local)
+    # Some backends lack uint64 comparisons; int64 keeps all bits for equality.
+    return torch.hash_tensor(local).view(torch.int64)
 
 
 def _clone_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -439,7 +440,7 @@ class SDCReplayer(Configurable):
                     if buffer is None:
                         schema.append((f"{name}:none", (), "none", "none"))
                         digests.append(
-                            torch.zeros((), dtype=torch.uint64, device=digest_device)
+                            torch.zeros((), dtype=torch.int64, device=digest_device)
                         )
                     else:
                         add_tensor(name, buffer)
@@ -456,7 +457,7 @@ class SDCReplayer(Configurable):
                         (f"gradient:{module_index}:{name}:none", (), "none", "none")
                     )
                     digests.append(
-                        torch.zeros((), dtype=torch.uint64, device=digest_device)
+                        torch.zeros((), dtype=torch.int64, device=digest_device)
                     )
                     continue
                 add_tensor(f"gradient:{module_index}:{name}", grad)
