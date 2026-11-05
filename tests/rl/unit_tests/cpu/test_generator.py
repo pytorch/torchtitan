@@ -164,6 +164,7 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
         generator = Generator.__new__(Generator)
         generator.config = SimpleNamespace(model_state_dict_load_mode="cpu_prefetch")
         generator._prefetched_model_state_dict = staging_state_dict
+        generator._model_state_dict_delta_reader = None
 
         def fill_state_dict(*args, **kwargs):
             assert kwargs["user_state_dict"] is staging_state_dict
