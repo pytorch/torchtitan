@@ -18,7 +18,7 @@ them.
 
 ```text
 +------------------------- GPU actors (Monarch) -------------------------+
-|  router -> vLLM generators  <-- new weights --  trainer (GRPO loss)    |
+|  router -> vLLM generators  <-- new weights --  trainer (RL loss)      |
 +-------^-----------------------------------------------------^----------+
         | 4. generate                                         | 7. batch
 +-------|-------- controller process (torchtitan.rl.train) ---|----------+
@@ -87,11 +87,22 @@ There is no CLI flag for the path.
 | Config | Model | GPUs |
 | --- | --- | --- |
 | `rl_grpo_qwen35_9b_terminal_bench` | Qwen3.5-9B | 8 trainer, 8 generators x 1 |
-| `rl_grpo_qwen35_35b_a3b_terminal_bench` | Qwen3.5-35B-A3B | 8 trainer, 2 generators x 4 |
+| `rl_dapo_qwen35_35b_a3b_terminal_bench_dist_moe` | Qwen3.5-35B-A3B | 4 trainer, 16 generators x 1 (Dist-MoE) |
 
-`torchtitan.rl.train` places every process on the local host, so either recipe needs a
-16-GPU host as written; there is no multi-host launcher example yet. The 35B-A3B recipe
-has not been run end to end.
+`torchtitan.rl.train` places every process on the local host, so the 9B recipe needs a
+16-GPU host as written. The 35B-A3B recipe uses Dist-MoE, which needs SM100+ GPUs. It needs
+20 GPUs on several hosts, and its 4-GPU trainer holds 140 GB of model state per GPU, so it
+needs 288 GB GPUs (GB300, B300). On B200 (180 GB), set the trainer's
+`data_parallel_shard_degree=4` (8 GPUs). Wrap it in
+`MonarchControllerWithLauncher.Config.from_controller_config` with a launcher, as
+`rl_grpo_qwen3_0_6b_flex_slurm` in `torchtitan_recipes/rl/alphabet_sort.py` does. It has not
+been run end to end.
+
+With the default local Docker runtime, every rollout in flight is a container on the
+controller host, and a task asks for at least 1 CPU and 2 GB (21 of the 89 Terminal-Bench
+2.1 tasks ask for 4-8 GB). The 9B recipe keeps 1,536 rollouts in flight and the 35B-A3B
+recipe 1,280: at least 1,280-1,536 CPUs and 2.6-3.1 TB of RAM on one host. For runs this
+size, set a remote sandbox as the `runtime` (below).
 
 ## Datasets
 
