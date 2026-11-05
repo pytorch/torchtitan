@@ -72,7 +72,8 @@ from torchtitan.rl.generator.types import (
 
 logger = logging.getLogger(__name__)
 
-# The ServerArgs SGLangEngine sets itself, which extra_server_args cannot set.
+# The ServerArgs SGLangEngine sets or overrides itself, which extra_server_args cannot
+# set (e.g. cuda_graph_config overrides cuda_graph_backend_prefill).
 _TORCHTITAN_SERVER_ARGS = frozenset(
     {
         "model_path",
@@ -90,6 +91,7 @@ _TORCHTITAN_SERVER_ARGS = frozenset(
         "disable_cuda_graph",
         "disable_prefill_cuda_graph",
         "cuda_graph_backend_prefill",
+        "cuda_graph_config",
         "skip_server_warmup",
         "log_level",
         "chunked_prefill_size",
@@ -125,8 +127,9 @@ class SGLangEngine(GenerationEngine):
         - ``"none"``: everything runs eagerly.
         - ``"decode"``: decode batches; prefill runs eagerly. Starts faster.
         - ``"decode_and_prefill"`` (default): also prefill batches, as SGLang's
-          breakable CUDA graphs, which run attention eagerly between graph segments.
-          Without them, prefill is bound by the eager model's CPU overhead.
+          full prefill CUDA graphs. Without them, prefill is bound by the eager
+          model's CPU overhead. Linear attention models get SGLang's breakable
+          prefill graphs, which run attention eagerly between graph segments.
         """
 
         extra_server_args: dict[str, Any] = field(default_factory=dict)
@@ -231,8 +234,13 @@ class SGLangEngine(GenerationEngine):
             dist_moe_runtime=dist_moe_runtime,
             model_state_dict_load_mode=model_state_dict_load_mode,
         )
+        has_linear_attention = any(
+            isinstance(layer.attention, LinearAttention.Config)
+            for layer in model.layers
+        )
         server_args = self._build_server_args(
             model,
+            has_linear_attention=has_linear_attention,
             parallelism=parallelism,
             model_path=model_path,
             max_num_seqs=max_num_seqs,
@@ -273,12 +281,7 @@ class SGLangEngine(GenerationEngine):
         # Without the extra_buffer strategy (see register_to_sglang), SGLang's radix
         # cache of linear attention states disables overlap scheduling; every other
         # model runs with it.
-        self._init_event_loop(
-            needs_overlap=not any(
-                isinstance(layer.attention, LinearAttention.Config)
-                for layer in model.layers
-            )
-        )
+        self._init_event_loop(needs_overlap=not has_linear_attention)
         # Exclude the ~1.5M objects SGLang's modules and the build created from garbage
         # collection, as SGLang's freeze_gc does: each full collection (e.g. the engine
         # loop's after a model state dict load) otherwise traverses them for ~1s.
@@ -289,6 +292,7 @@ class SGLangEngine(GenerationEngine):
         self,
         model: Decoder.Config,
         *,
+        has_linear_attention: bool,
         parallelism: InferenceParallelismConfig,
         model_path: str,
         max_num_seqs: int,
@@ -330,7 +334,20 @@ class SGLangEngine(GenerationEngine):
             log_level="warning",
         )
         if self.config.cuda_graph == "decode_and_prefill":
-            server_kwargs["cuda_graph_backend_prefill"] = "breakable"
+            if has_linear_attention:
+                # TODO(https://github.com/sgl-project/sglang/issues/48593): SGLang's
+                # hybrid linear attention backend fails to capture full prefill graphs.
+                prefill_graphs = {"backend": "breakable"}
+            else:
+                # Full graphs also capture attention, whose eager CPU cost otherwise
+                # dominates small prefills. A request slot per running request, so
+                # no prefill batch has too many requests for the graphs (it would run
+                # eagerly).
+                prefill_graphs = {
+                    "backend": "full",
+                    "full_prefill_max_req": max_num_seqs,
+                }
+            server_kwargs["cuda_graph_config"] = {"prefill": prefill_graphs}
         else:
             server_kwargs["disable_prefill_cuda_graph"] = True
         if max_num_batched_tokens is not None:
