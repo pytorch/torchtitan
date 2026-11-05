@@ -53,10 +53,10 @@ class TestKVAllGatherVarlenInnerAttention(TestCase):
         cu_seq = torch.tensor(offsets, device="cuda", dtype=torch.int32)
         lengths = torch.diff(cu_seq)
         global_metadata = VarlenAttentionMetadata(
-            cu_seq,
-            cu_seq,
-            int(lengths.max().item()),
-            int(lengths.max().item()),
+            cu_seq_q=cu_seq,
+            cu_seq_k=cu_seq,
+            max_q=int(lengths.max().item()),
+            max_k=int(lengths.max().item()),
             window_size=window_size,
         )
         return AllGatherKVVarlen.prepare_cp_metadata(
@@ -124,10 +124,10 @@ class TestKVAllGatherVarlenInnerAttention(TestCase):
                 q_THK,
                 k_THK,
                 v_THV,
-                metadata.varlen_metadata.cu_seq_q,
-                metadata.varlen_metadata.cu_seq_k,
-                metadata.varlen_metadata.max_q,
-                metadata.varlen_metadata.max_k,
+                metadata.cu_seq_q,
+                metadata.cu_seq_k,
+                metadata.max_q,
+                metadata.max_k,
                 window_size=window_size,
                 enable_gqa=True,
             )
@@ -209,7 +209,7 @@ class TestKVAllGatherVarlenInnerAttention(TestCase):
                 new_offsets = torch.tensor(
                     [0, 2, 6, 10, 14, 16, 16], device="cuda", dtype=torch.int32
                 )
-                metadata.varlen_metadata.cu_seq_q.copy_(new_offsets)
+                metadata.cu_seq_q.copy_(new_offsets)
                 graph.replay()
                 torch.cuda.synchronize()
 
@@ -223,8 +223,8 @@ class TestKVAllGatherVarlenInnerAttention(TestCase):
                 v_THV,
                 new_offsets,
                 new_offsets,
-                metadata.varlen_metadata.max_q,
-                metadata.varlen_metadata.max_k,
+                metadata.max_q,
+                metadata.max_k,
                 window_size=(-1, 0),
                 enable_gqa=True,
             )

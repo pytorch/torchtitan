@@ -25,7 +25,7 @@ pass-specific arguments.
 
 ## Pass Tiers
 
-Graph passes are structured into two tiers:
+Graph passes are structured into three tiers:
 
 1. **Default passes** (`passes.py`, `remove_noop_passes.py`, etc.) — always
    applied. These are numerics-preserving: cleanup, memory policy, bucketing,
@@ -36,9 +36,17 @@ Graph passes are structured into two tiers:
    `config.compile.numerics_changing_optim = True`. These improve performance but may change numerics
    compared to the uncompiled path (e.g. RMSNorm Inductor fusion).
 
+3. **Registered passes** -- opt-in by name via `config.compile.extra_passes`.
+   Registered with `@register_graph_pass` (`registry.py`) from any module,
+   including outside torchtitan. They run on the joint graph after the other
+   GraphTrainer passes and before Inductor compilation. Use them for model-
+   or shape-specialized rewrites such as replacing a subgraph with a
+   handwritten kernel.
+
 When adding a new pass, put it in `performance_passes.py` if it changes
 numerics; otherwise put it in `passes.py` or a dedicated file like
-`remove_noop_passes.py`.
+`remove_noop_passes.py`. Model- or kernel-specific rewrites that only some
+recipes want are registered passes.
 
 ## Memory Policy Framework
 
