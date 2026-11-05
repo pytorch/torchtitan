@@ -289,7 +289,6 @@ def _make_v4_attn_config(
             reduce_mesh="loss",
             softmax_scale=softmax_scale,
             num_heads=n_heads,
-            compress_ratio=compress_ratio,
         )
         if compress_ratio == 4
         else None

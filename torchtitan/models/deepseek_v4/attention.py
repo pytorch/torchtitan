@@ -24,7 +24,13 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 
-from .compressor import compressed_cu_seqlens, Compressor, Indexer, SparseIndexerLoss
+from .compressor import (
+    compressed_cu_seqlens,
+    compressed_gather_indices,
+    Compressor,
+    Indexer,
+    SparseIndexerLoss,
+)
 
 
 def _packed_cu_seqlens(
@@ -136,13 +142,15 @@ class DSV4InnerAttention(InnerAttention):
                     raise RuntimeError(
                         "SparseIndexerLoss requires aux_loss_denominator."
                     )
+                selected_indices_TK = compressed_gather_indices(
+                    cmp_topk_TK, cu_seqlens, self.compress_ratio
+                ).masked_fill(cmp_topk_TK < 0, -1)
                 out_THD = aux_loss(
                     q_THD.detach(),
-                    cmp_k_SD.detach(),
-                    cmp_topk_TK,
+                    cmp_k_SD.detach().unsqueeze(1),
+                    selected_indices_TK.unsqueeze(-1),
                     topk_scores_TK,
                     aux.lse.squeeze(0).transpose(0, 1).detach(),
-                    cu_seqlens,
                     carrier=out_THD,
                     denominator=aux_loss_denominator,
                     padding_mask_T=padding_mask_T,

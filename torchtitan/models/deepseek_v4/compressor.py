@@ -24,7 +24,8 @@ from torchtitan.models.common.rope import RoPE
 from torchtitan.tools.utils import has_cuda_capability
 
 # Shape suffixes: T = tokens, H = heads, D = head width, K = selected slots,
-# G = compressed groups, R = compression ratio, S = compressed pool size.
+# G = compressed groups, R = compression ratio, S = key pool size,
+# N = key heads, M = query heads per key head, B = key rows per selected slot.
 
 
 @cache
@@ -327,7 +328,7 @@ class Indexer(Module):
 
 
 class SparseIndexerLoss(AuxLoss):
-    """Distill selected compressed attention using the main kernel's LSE.
+    """Distill selected attention using the main kernel's LSE.
 
     The head-aggregated, L1-normalized target follows DeepSeek-V3.2 Sec. 2.1
     (https://arxiv.org/html/2512.02556v1#S2.SS1.SSS1), inherited by V4's CSA.
@@ -336,6 +337,15 @@ class SparseIndexerLoss(AuxLoss):
     This weighting is an implementation choice, not a claim about the paper's
     objective. The default is unweighted normalized KL; set mass_weighted=True
     to enable mass weighting explicitly.
+
+    Selections are explicit key-pool row indices of shape [T, K, B], with -1
+    marking unused rows. Callers resolve document offsets and padding before
+    passing indices; rows in a block need not be consecutive. DSV4 uses B=1
+    over compressed keys; QSA uses B=4 over selected raw token keys, e.g.
+    [0, 2, 3, 4] when token 1 is padding. Query heads share key heads in
+    contiguous groups. Head-aggregated probabilities are max-pooled over B.
+    The supplied LSE includes every attended key and any incomplete tail,
+    window, or sink.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -344,21 +354,17 @@ class SparseIndexerLoss(AuxLoss):
 
         softmax_scale: float
         num_heads: int
-        compress_ratio: int = 4
         chunk_size: int = 128
         mass_weighted: bool = False
 
         def __post_init__(self):
-            if self.num_heads <= 0 or self.chunk_size <= 0 or self.compress_ratio <= 0:
-                raise ValueError(
-                    "num_heads, chunk_size and compress_ratio must be positive."
-                )
+            if self.num_heads <= 0 or self.chunk_size <= 0:
+                raise ValueError("num_heads and chunk_size must be positive.")
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.softmax_scale = config.softmax_scale
         self.num_heads = config.num_heads
-        self.compress_ratio = config.compress_ratio
         self.chunk_size = config.chunk_size
         self.mass_weighted = config.mass_weighted
 
@@ -366,40 +372,52 @@ class SparseIndexerLoss(AuxLoss):
     def _teacher(
         self,
         q_THD: torch.Tensor,
-        cmp_k_SD: torch.Tensor,
-        topk_indices_TK: torch.Tensor,
+        keys_SND: torch.Tensor,
+        selected_indices_TKB: torch.Tensor,
         attn_lse_TH: torch.Tensor,
-        cu_seqlens: torch.Tensor | None,
         padding_mask_T: torch.Tensor | None = None,
     ) -> torch.Tensor:
         tp_size = spmd_mesh_size("tp")
         if q_THD.size(1) * tp_size != self.num_heads:
             raise ValueError("Teacher head count does not match the TP-sharded query.")
-        gather_TK = compressed_gather_indices(
-            topk_indices_TK, cu_seqlens, self.compress_ratio
-        )
+        num_tokens, num_local_heads, head_dim = q_THD.shape
+        num_kv_heads = keys_SND.size(1)
+        if num_local_heads % num_kv_heads != 0:
+            raise ValueError(
+                f"Query heads ({num_local_heads}) must be a multiple of key heads "
+                f"({num_kv_heads})."
+            )
+        q_TNMD = q_THD.view(num_tokens, num_kv_heads, -1, head_dim)
+        lse_TNM = attn_lse_TH.view(num_tokens, num_kv_heads, -1)
         targets = []
         # Bound gathered keys and fp32 logits by chunk_size, not context length.
         with torch.autocast(device_type=q_THD.device.type, enabled=False):
-            for start in range(0, q_THD.size(0), self.chunk_size):
+            for start in range(0, num_tokens, self.chunk_size):
                 stop = start + self.chunk_size
-                valid_TK = topk_indices_TK[start:stop] >= 0
+                indices_TKB = selected_indices_TKB[start:stop]
+                valid_TKB = indices_TKB >= 0
                 if padding_mask_T is not None:
-                    valid_TK = valid_TK & ~padding_mask_T[start:stop, None]
-                keys_TKD = cmp_k_SD[gather_TK[start:stop]].float()
-                logits_THK = (
-                    torch.einsum("thd,tkd->thk", q_THD[start:stop].float(), keys_TKD)
+                    valid_TKB = valid_TKB & ~padding_mask_T[start:stop, None, None]
+                keys_TKBND = keys_SND[indices_TKB.clamp_min(0)].float()
+                logits_TNMKB = (
+                    torch.einsum(
+                        "tnmd,tkbnd->tnmkb", q_TNMD[start:stop].float(), keys_TKBND
+                    )
                     * self.softmax_scale
                 )
                 # The main kernel includes window, compressed slots and sink.
-                logits_THK = logits_THK - attn_lse_TH[start:stop, :, None].float()
-                logits_THK = logits_THK.masked_fill(~valid_TK[:, None], -torch.inf)
-                targets.append(logits_THK.exp().sum(dim=1) / self.num_heads)
-        p_TK = torch.cat(targets)
+                logits_TNMKB = (
+                    logits_TNMKB - lse_TNM[start:stop, :, :, None, None].float()
+                )
+                logits_TNMKB = logits_TNMKB.masked_fill(
+                    ~valid_TKB[:, None, None], -torch.inf
+                )
+                targets.append(logits_TNMKB.exp().sum(dim=(1, 2)) / self.num_heads)
+        p_TKB = torch.cat(targets)
         tp_group = spmd_mesh_group("tp")
         if tp_group is not None:
-            p_TK = wait_tensor(all_reduce(p_TK, "sum", tp_group))
-        return p_TK
+            p_TKB = wait_tensor(all_reduce(p_TKB, "sum", tp_group))
+        return p_TKB.amax(dim=-1)
 
     def _logged_kl(
         self,
@@ -422,11 +440,10 @@ class SparseIndexerLoss(AuxLoss):
     def forward(
         self,
         q_THD: torch.Tensor,
-        cmp_k_SD: torch.Tensor,
-        topk_indices_TK: torch.Tensor,
+        keys_SND: torch.Tensor,
+        selected_indices_TKB: torch.Tensor,
         topk_scores_TK: torch.Tensor,
         attn_lse_TH: torch.Tensor,
-        cu_seqlens: torch.Tensor | None,
         *,
         carrier: torch.Tensor,
         denominator: torch.Tensor,
@@ -438,10 +455,9 @@ class SparseIndexerLoss(AuxLoss):
 
         p_TK = self._teacher(
             q_THD,
-            cmp_k_SD,
-            topk_indices_TK,
+            keys_SND,
+            selected_indices_TKB,
             attn_lse_TH,
-            cu_seqlens,
             padding_mask_T,
         )
         tiny = torch.finfo(torch.float32).tiny
