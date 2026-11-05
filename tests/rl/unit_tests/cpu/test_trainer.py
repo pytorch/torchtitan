@@ -14,7 +14,9 @@ import pytest
 import torch
 from torchstore import RankRole
 from torchtitan.config import PrecisionConfig, TrainingConfig
+from torchtitan.config.transform import LoRATransform
 from torchtitan.models.base.module import Module
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import (
@@ -105,6 +107,38 @@ def test_push_model_state_dict_puts_on_push_stream_in_worker() -> None:
         assert worker_thread_ids[0] != main_thread_id
 
     asyncio.run(run())
+
+
+def test_push_model_state_dict_carries_the_trainable_params_and_the_buffers() -> None:
+    """A push leaves out the frozen parameters, which generators load from the
+    checkpoint: the LoRA base, or a router gate with freeze_gate."""
+
+    async def push(model_part: Module) -> set[str]:
+        model_part.register_buffer("expert_bias", torch.zeros(2))
+        trainer = object.__new__(Trainer)
+        trainer.engine = SimpleNamespace(model_parts=[model_part])
+        trainer._transfer_dtype = None
+        trainer._push_model_state_dict_stream = None
+        with patch(
+            "torchtitan.rl.trainer.trainer.ts.put_state_dict", new_callable=AsyncMock
+        ) as put:
+            await trainer.push_model_state_dict()
+        return set(put.await_args.args[0])
+
+    lora_part = (
+        LoRATransform(rank=1, alpha=1.0)
+        .transform(Linear.Config(in_features=2, out_features=2))
+        .build()
+    )
+    frozen_part = Module()
+    frozen_part.gate = torch.nn.Parameter(torch.ones(2, 2), requires_grad=False)
+
+    assert asyncio.run(push(lora_part)) == {
+        "lora_a.weight",
+        "lora_b.weight",
+        "expert_bias",
+    }
+    assert asyncio.run(push(frozen_part)) == {"expert_bias"}
 
 
 def test_rl_trainer_validates_model_training_config_before_initialization(

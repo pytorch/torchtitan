@@ -12,8 +12,11 @@ use: the renderer reads each image's header from its file, and the generator and
 trainer decode the image file the prompt carries. Answers are graded by Math-Verify on the
 last ``\\boxed{}``.
 
-Run with ``--module torchtitan_recipes.rl.geometry3k --config rl_grpo_qwen3_5_0_8b_geometry3k``.
+Run with ``--module torchtitan_recipes.rl.geometry3k --config rl_grpo_qwen3_5_0_8b_geometry3k``
+(or ``rl_grpo_qwen3_5_0_8b_geometry3k_lora``).
 """
+
+import dataclasses
 
 from renderers import CustomRendererConfig
 
@@ -29,6 +32,7 @@ from torchtitan.components.optim import (
 from torchtitan.components.renderer import from_renderers
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform import apply_transforms, LoRATransform
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3_5 import (
     build_model_config as build_qwen3_5_model_config,
@@ -148,3 +152,38 @@ def rl_grpo_qwen3_5_0_8b_geometry3k() -> Controller.Config:
             sampling=SamplingConfig(temperature=1.0, max_tokens=1024),
         ),
     )
+
+
+def rl_grpo_qwen3_5_0_8b_geometry3k_lora() -> Controller.Config:
+    """`rl_grpo_qwen3_5_0_8b_geometry3k` with LoRA on the language model.
+
+    Rank-32 adapters on the attention, GatedDeltaNet and MLP projections; the base
+    weights and the vision tower stay frozen. The generators load the base from the HF
+    checkpoint, so every weight sync sends only the adapters. The learning rate is 10x
+    the full fine-tuning one, which "LoRA Without Regret" (Thinking Machines, 2025) found
+    optimal for LoRA.
+    """
+    config = rl_grpo_qwen3_5_0_8b_geometry3k()
+    lora = LoRATransform(
+        rank=32,
+        alpha=64.0,
+        target_modules=[
+            # Full attention.
+            "attention.wq",
+            "attention.wk",
+            "attention.wv",
+            "attention.wo",
+            # GatedDeltaNet.
+            "attention.in_proj",
+            "attention.out_proj",
+            "feed_forward.w13",
+            "feed_forward.w2",
+        ],
+    )
+    trainer = apply_transforms(config.trainer, [lora])
+    trainer.optim.optimizer.optimizers = [AdamW.Config(pattern=r".*", lr=2e-5)]
+    generator = apply_transforms(config.generator, [lora])
+    # The generators load the frozen base from the HF checkpoint, as the trainer does, so
+    # weight syncs carry only the adapters.
+    generator.checkpointer = CheckpointManager.Config(initial_load_in_hf=True)
+    return dataclasses.replace(config, trainer=trainer, generator=generator)
