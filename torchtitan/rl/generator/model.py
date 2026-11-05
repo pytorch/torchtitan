@@ -24,6 +24,7 @@ from torch.distributed._state_dict_utils import _create_cpu_state_dict
 from torchtitan.components import loss as _loss  # noqa: F401
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
+from torchtitan.distributed.fsdp import maybe_store_frozen_params_in_param_dtype_
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.common.decoder import Decoder
@@ -101,7 +102,6 @@ def build_inference_model(
         enable_sequence_parallel=training_parallelism.enable_sequence_parallel,
     )
 
-    param_dtype = TORCH_DTYPE_MAP[precision.param_dtype]
     # Build model on meta device to avoid allocating full model on every GPU.
     # Build in the trainer's master dtype (`precision.dtype`), so buffers and
     # `preserve_dtype_params` get the dtypes the trainer has and sends.
@@ -115,19 +115,9 @@ def build_inference_model(
     # hold mixed dtypes, and Dist-MoE's inference context rejects any operand
     # with requires_grad.
     model.requires_grad_(False)
-    # Hold the other parameters in `precision.param_dtype`, the dtype the trainer
-    # computes with and sends, so the FSDP below casts none of them. Swap each
-    # parameter's tensor rather than assigning `param.data`, which keeps a
-    # quantized tensor subclass's inner tensor in the old dtype; keep the
-    # parameter's attributes (e.g. its SPMD type).
-    preserved = {param for _, param in model.named_preserve_dtype_params()}
-    for param in model.parameters():
-        if param in preserved or param.dtype == param_dtype:
-            continue
-        new_param = nn.Parameter(param.detach().to(param_dtype), requires_grad=False)
-        for name, value in param.__dict__.items():
-            new_param.__dict__.setdefault(name, value)
-        torch.utils.swap_tensors(param, new_param)
+    # Store the parameters as the trainer stores its frozen ones. The trainer
+    # sends weights in `precision.param_dtype`, so the FSDP below casts none of them.
+    maybe_store_frozen_params_in_param_dtype_(model, precision)
     model._skip_lm_head = True
     if not keep_vision_encoder and getattr(model, "vision_encoder", None) is not None:
         model.vision_encoder = None
