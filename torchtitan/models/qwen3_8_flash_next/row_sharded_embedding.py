@@ -151,8 +151,10 @@ def row_sharded_embedding(
 ) -> torch.Tensor:
     """Look up owned rows and return vectors to the original requesters.
 
-    ``weight_RD`` is a ``Shard(0)`` DTensor over ``metadata.row_mesh``. The
-    output has shape ``[*metadata.input_ids.shape, D]`` and uses ``dtype``
+    ``weight_RD`` is a DTensor whose rows are ``Shard(0)`` over
+    ``metadata.row_mesh``; other mesh axes (e.g. TP feature columns) stay
+    local, so D is the local feature width. The output has shape
+    ``[*metadata.input_ids.shape, D]`` and uses ``dtype``
     (the weight's dtype by default). Duplicate IDs are expanded on the requester
     with ``F.embedding`` so their gradients accumulate in the compute dtype,
     as in an ordinary mixed-precision embedding. Owners then sum the requester

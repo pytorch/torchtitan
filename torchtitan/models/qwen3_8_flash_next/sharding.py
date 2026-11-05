@@ -80,13 +80,18 @@ def ngram_table_sharding() -> ShardingConfig:
     hashes = SpmdType(
         {DP: spmd.V, CP: spmd.V, TP: spmd.R}, spmd.PartitionSpec((DP, CP), None)
     )
-    replicated = SpmdType(
-        {DP: spmd.V, CP: spmd.V, TP: spmd.R}, spmd.PartitionSpec((DP, CP), None, None)
+    output = SpmdType(
+        {DP: spmd.V, CP: spmd.V, TP: spmd.V},
+        spmd.PartitionSpec((DP, CP), None, TP),
     )
     return ShardingConfig(
-        state_shardings={"weight": SpmdType({DP: spmd.S(0), CP: spmd.R, TP: spmd.R})},
+        # DP owns rows; TP gathers only the selected feature vectors.
+        state_shardings={
+            "weight": SpmdType({DP: spmd.S(0), CP: spmd.R, TP: spmd.S(1)})
+        },
         input_shardings={"input": hashes},
-        output_shardings=replicated,
+        # NGramEmbedding gathers the feature shards to TP-Replicate.
+        output_shardings=output,
         local_spmd=True,
     )
 

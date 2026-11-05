@@ -560,13 +560,18 @@ def build_model_config(
     The checkpoint reference defines selection but supplies no KL coefficient.
     Training recipes select that objective independently of the architecture.
     """
-    if (
-        parallelism.tensor_parallel_degree > 1
-        or parallelism.pipeline_parallel_degree > 1
-    ):
-        raise ValueError("Flash-Next supports FSDP and EP; TP and PP are not supported")
+    if parallelism.pipeline_parallel_degree > 1:
+        raise ValueError("Flash-Next does not support pipeline parallelism")
     if parallelism.context_parallel_degree > 1:
         raise ValueError("Flash-Next QSA and PLE do not support context parallelism")
+    if (
+        parallelism.tensor_parallel_degree > 1
+        and not parallelism.enable_sequence_parallel
+    ):
+        # Only TP with SP is implemented: without SP the residual stream is
+        # TP-invariant, and SPMD typechecking reports "tp: I vs V" where the
+        # blocks expect varying activations.
+        raise ValueError("Flash-Next tensor parallelism requires sequence parallelism")
     if parallelism.fsdp_enable_cpu_offloading:
         raise ValueError(
             "Row-owned PLE requires device-resident parameters; CPU offload is unsupported"
@@ -582,6 +587,24 @@ def build_model_config(
     config = factory(
         seq_len=context, parallelism=parallelism, indexer_loss=indexer_loss
     )
+    if parallelism.tensor_parallel_degree > 1 and isinstance(
+        config, Qwen38FlashNextMultimodalModel.Config
+    ):
+        # TODO: the shared Qwen3.5 vision encoder fails SPMD typechecking under
+        # TP (its 2-D rotary cache); use a text-only flavor such as 125B-A6B-text.
+        raise ValueError(
+            "Flash-Next tensor parallelism supports text-only flavors only"
+        )
+    for layer in config.layers:
+        attention = layer.attention
+        if (
+            isinstance(attention, QSAAttention.Config)
+            and attention.n_kv_heads % parallelism.tensor_parallel_degree != 0
+        ):
+            raise ValueError(
+                f"Flash-Next tensor parallel degree ({parallelism.tensor_parallel_degree}) "
+                f"must divide QSA KV heads ({attention.n_kv_heads})"
+            )
     if converters is not None:
         validate_converter_compatibility(converters)
         for converter in converters:
