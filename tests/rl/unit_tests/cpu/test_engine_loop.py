@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -54,6 +55,7 @@ from torchtitan.rl.generator.types import (
     RequestMetricsInputs,
     SamplingConfig,
 )
+from torchtitan.rl.rollout.types import Prompt
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.rl.routing.strategies import (
     LeastLoadedRoutingStrategy,
@@ -849,7 +851,7 @@ def test_generate_endpoint_queues_a_request_with_the_default_sampling(
         waiting = asyncio.create_task(generator.wait_engine_loop())
         with pytest.raises(AssertionError, match="stop_token_ids must be set"):
             await generator.generate(
-                [1, 2],
+                Prompt(token_ids=np.array([1, 2], dtype=np.int32)),
                 request_id="r0",
                 group_id=4,
                 routing_session_id="s0",
@@ -858,7 +860,10 @@ def test_generate_endpoint_queues_a_request_with_the_default_sampling(
 
         completion = await asyncio.wait_for(
             generator.generate(
-                [1, 2, 3], request_id="r1", group_id=4, routing_session_id="s1"
+                Prompt(token_ids=np.array([1, 2, 3], dtype=np.int32)),
+                request_id="r1",
+                group_id=4,
+                routing_session_id="s1",
             ),
             _TIMEOUT_S,
         )

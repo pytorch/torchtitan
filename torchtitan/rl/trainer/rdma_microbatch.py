@@ -4,11 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Opt-in RDMA path for trainer microbatches (`Batcher.Config.rdma_min_tensor_bytes`): the process
-that registers them keeps the large tensors, and each trainer rank reads its own column.
+"""Opt-in RDMA path for trainer microbatches (`Batcher.Config.rdma_min_tensor_bytes`): the batcher
+keeps the large tensors, and each trainer rank reads its own column.
 
-The actor system implements `RDMAMicrobatch` (e.g. `actors/monarch/rdma_microbatch.py`); the batcher and
-the trainer use only this interface.
+The batcher registers each microbatch with the actor system's `RegisterRDMAObject` (e.g.
+`MonarchRDMAObject.register`); the batcher and the trainer use only `RDMAMicrobatch`.
 """
 
 from __future__ import annotations
@@ -19,64 +19,51 @@ import time
 from collections import deque
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Protocol, runtime_checkable, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from torchtitan.observability import structured_logger as sl
 
 if TYPE_CHECKING:
+    from torchtitan.rl.actors.rdma import RDMAObject
     from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 
 
-@runtime_checkable
-class RDMAMicrobatch(Protocol):
-    """A `TrainingMicrobatch` whose large tensors stay in its owner, the process that registered it.
+@dataclass(frozen=True, slots=True)
+class RDMAMicrobatch:
+    """A `TrainingMicrobatch` whose large tensors stay in its owner, the batcher, and where it belongs
+    in the batch.
 
     Example:
-        rdma_microbatch = register_rdma_microbatch(  # owner
-            microbatch, min_bytes=1024, batch_index=0, dp_rank=1, microbatch_index=2
+        rdma_microbatch = RDMAMicrobatch(  # owner
+            microbatch=register_rdma_object(microbatch, min_bytes=1024),
+            batch_index=0,
+            dp_rank=1,
+            microbatch_index=2,
         )
         microbatch = await rdma_microbatch.read()  # trainer rank
         await rdma_microbatch.drop()               # owner, after every rank has read it
     """
 
-    @property
-    def batch_index(self) -> int:
-        """How many batches the owner registered before this one."""
-        ...
+    microbatch: RDMAObject[TrainingMicrobatch]
+    """The microbatch, registered for RDMA reads."""
 
-    @property
-    def dp_rank(self) -> int:
-        """The trainer DP rank that should read it."""
-        ...
+    batch_index: int
+    """How many batches the owner registered before this one."""
 
-    @property
-    def microbatch_index(self) -> int:
-        """Its position in that rank's column."""
-        ...
+    dp_rank: int
+    """The trainer DP rank that should read it."""
+
+    microbatch_index: int
+    """Its position in that rank's column."""
 
     async def read(self) -> TrainingMicrobatch:
         """Read the microbatch from its owner."""
-        ...
+        return await self.microbatch.read()
 
     async def drop(self) -> None:
         """Free the owner's buffers; on the owner, after every rank has read it."""
-        ...
-
-
-class RegisterRDMAMicrobatch(Protocol):
-    """Registers a microbatch's tensors of at least `min_bytes` for RDMA reads, e.g.
-    `MonarchRDMAMicrobatch.register`."""
-
-    def __call__(
-        self,
-        microbatch: TrainingMicrobatch,
-        *,
-        min_bytes: int,
-        batch_index: int,
-        dp_rank: int,
-        microbatch_index: int,
-    ) -> RDMAMicrobatch:
-        ...
+        await self.microbatch.drop()
 
 
 # Reads queued behind the one the engine waits on. A rank holds at most 4 microbatches on
