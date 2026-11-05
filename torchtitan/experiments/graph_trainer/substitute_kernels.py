@@ -69,6 +69,7 @@ from torch._functorch._aot_autograd.autograd_cache import (
 from torch._functorch._aot_autograd.schemas import AOTConfig
 from torch._inductor.codecache import FxGraphCachePickler
 from torch._inductor.runtime.cache_dir_utils import cache_dir as inductor_cache_dir
+from torch._library import simple_registry
 from torch._library.custom_ops import OPDEFS
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
@@ -148,15 +149,33 @@ def normalize_names(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
     return torch.fx.GraphModule(torch.nn.Module(), graph)
 
 
+def _module_of_file(path: str) -> str | None:
+    for name, module in list(sys.modules.items()):
+        if getattr(module, "__file__", None) == path:
+            return name
+    return None
+
+
 def _op_modules(op: torch._ops.OpOverload) -> set[str]:
-    """Non-torch modules defining ``op``'s implementation and fake kernel."""
+    """Modules to import so that ``op`` and its fake kernel are registered."""
     opdef = OPDEFS.get(op._schema.name)
-    if opdef is None:
-        raise ValueError(f"{op} is not a torch.library.custom_op / triton_op")
-    fns = [opdef._init_fn, opdef._abstract_fn, *opdef._backend_fns.values()]
-    modules = {inspect.unwrap(fn).__module__ for fn in fns if fn is not None}
-    # triton_op wraps the user function in a torch-internal backend function.
-    modules = {m for m in modules if m != "torch" and not m.startswith("torch.")}
+    if opdef is not None:
+        fns = [opdef._init_fn, opdef._abstract_fn, *opdef._backend_fns.values()]
+        modules = {inspect.unwrap(fn).__module__ for fn in fns if fn is not None}
+    else:
+        # An op defined with torch.library.Library (e.g. a C++ kernel plus a Python
+        # fake kernel): the module that registers the fake kernel defines the op.
+        kernel = simple_registry.singleton.find(op._schema.name).fake_impl.kernel
+        module = kernel and _module_of_file(kernel.source.rsplit(":", 1)[0])
+        modules = {module} if module else set()
+    # custom_op / triton_op wrap the user function in torch.library helpers.
+    modules = {
+        m for m in modules if not m.startswith(("torch.library", "torch._library"))
+    }
+    # Ops defined inside torch (e.g. Inductor's bucketing ops) keep their torch module.
+    modules = {
+        m for m in modules if m != "torch" and not m.startswith("torch.")
+    } or modules
     if not modules or "__main__" in modules:
         raise ValueError(f"{op} is not defined in an importable module")
     return modules
