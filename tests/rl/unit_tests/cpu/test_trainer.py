@@ -163,13 +163,12 @@ def test_forward_backward_uses_global_token_count() -> None:
         _preprocess_microbatch_groups=MagicMock(
             return_value=[("input", "labels", {}, {}) for _ in range(3)]
         ),
-        _run_forward_backward=MagicMock(
-            return_value=ForwardBackwardResult(torch.tensor(1.0), [])
-        ),
+        _run_forward_backward=MagicMock(return_value=(torch.tensor(1.0), [])),
         _accelerator_graph_per_microbatch_group_enabled=False,
         sdc_replayer=None,
+        flops_estimator=lambda inputs: inputs["input"].numel(),
     )
-    microbatch_groups = [[object()], [object()], [object()]]
+    microbatch_groups = [[_rl_microbatch(token)] for token in range(3)]
 
     result = TrainingEngine.forward_backward(
         engine,
@@ -256,6 +255,7 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
                         }
                     ],
                 ],
+                num_flops=0,
             )
         )
         trainer.engine = engine
@@ -379,7 +379,7 @@ def test_forward_backward_without_last_pipeline_stage_returns_no_metrics() -> No
         engine = SimpleNamespace(num_completed_steps=0, pp_has_last_stage=False)
         engine.forward_backward = MagicMock(
             return_value=ForwardBackwardResult(
-                loss=torch.tensor(-1.0), loss_metrics=[[{}, {}], [{}, {}]]
+                loss=torch.tensor(-1.0), loss_metrics=[[{}, {}], [{}, {}]], num_flops=0
             )
         )
         trainer.engine = engine
@@ -433,12 +433,18 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
                     )
                 )
             ),
-            parallelism_context=SimpleNamespace(non_data_parallel_size=1),
+            parallelism_context=SimpleNamespace(
+                non_data_parallel_size=1,
+                dp_enabled=False,
+                dp_cp_enabled=False,
+                dp_replicate=1,
+                dp_shard=1,
+                get_optional_mesh=lambda _: None,
+            ),
             num_completed_steps=4,
             ntokens_seen=12,
-            num_flops_per_token=200,
             has_quantization=False,
-            device=torch.device("cuda", 0),
+            device=torch.device("cpu"),
             device_memory_monitor=device_memory_monitor,
             optim_step=MagicMock(return_value=torch.tensor(2.0)),
             save_checkpoint=MagicMock(),
@@ -453,6 +459,7 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
         trainer.gpu_peak_flops = 1000
         trainer._step_compute_start = 0.0
         trainer._step_num_tokens_per_dp_rank = 10
+        trainer._num_flops = 2000
         trainer._push_model_state_dict_stream = MagicMock()
         compute_stream = MagicMock()
 
@@ -508,7 +515,7 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
             num_tokens=10,
             elapsed_time=2.0,
             non_data_parallel_size=1,
-            num_flops_per_token=200,
+            num_flops=2000.0,
             gpu_peak_flops=1000,
             has_quantization=False,
         )
