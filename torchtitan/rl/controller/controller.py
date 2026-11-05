@@ -101,6 +101,7 @@ from typing import Any
 # and in train.py; see the note there.
 import torch
 
+from torchtitan.components.loss import divide_token_sum_metrics
 from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import (
@@ -116,7 +117,6 @@ from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
     compute_rollout_metrics,
-    divide_token_sums,
     MetricsTimer,
 )
 from torchtitan.rl.controller.work_buffer import (
@@ -1175,13 +1175,13 @@ class Controller(Configurable):
                         )
                         # Under PP, only trainer ranks holding the last stage
                         # compute the loss; the others return None.
-                        fwd_bwd_metrics = divide_token_sums(
+                        fwd_bwd_metrics = divide_token_sum_metrics(
                             next(
                                 rank_metrics
                                 for rank_metrics in fwd_bwd_results[0].values()
                                 if rank_metrics is not None
                             ),
-                            num_loss_tokens=packed.num_loss_tokens,
+                            packed.num_loss_tokens,
                         )
                     finally:
                         # With RDMA, every rank has read its column (or the step failed).
