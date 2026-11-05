@@ -462,6 +462,8 @@ def _vision_encoder_config(
         attn=VisionAttention.Config(
             dim=qkv_dim,
             num_heads=num_heads,
+            # The encoder supplies the 2D cache, so no internal positions are needed.
+            rope=ComplexRoPE.Config(dim=head_dim, max_context_length=0),
             wq=_linear(
                 dim,
                 qkv_dim,
@@ -512,8 +514,6 @@ def _vision_encoder_config(
         rotary_pos_emb=VisionRotaryEmbedding2D.Config(
             head_dim=head_dim, sharding_config=moonvit_rotary_sharding_config()
         ),
-        # The encoder supplies the 2D cache, so no internal positions are needed.
-        rope_apply=ComplexRoPE.Config(dim=head_dim, max_context_length=0),
         block=block,
         final_norm=vision_norm,
         projector=KimiK3VisionProjector.Config(

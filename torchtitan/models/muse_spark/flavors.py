@@ -553,10 +553,12 @@ def _muse_spark_navit_attention_config(
     *,
     latent_dim: int,
     num_heads: int,
+    rope: ComplexRoPE.Config | IdentityRoPE.Config,
 ) -> VisionAttention.Config:
     return VisionAttention.Config(
         dim=latent_dim,
         num_heads=num_heads,
+        rope=rope,
         inner_attention=FlexInnerAttention.Config(
             sharding_config=vision_inner_attention_sharding_config(),
         ),
@@ -647,11 +649,6 @@ def muse_spark_navit_encoder_config(
             rope_theta=rope_theta,
             sharding_config=vision_rope_freq_sharding_config(),
         ),
-        rope_apply=(
-            ComplexRoPE.Config(dim=head_dim, max_context_length=0)
-            if use_rope
-            else IdentityRoPE.Config()
-        ),
         conv1_linear=Linear.Config(
             in_features=patch_input_dim,
             out_features=latent_dim,
@@ -674,6 +671,11 @@ def muse_spark_navit_encoder_config(
             attn=_muse_spark_navit_attention_config(
                 latent_dim=latent_dim,
                 num_heads=num_heads,
+                rope=(
+                    ComplexRoPE.Config(dim=head_dim, max_context_length=0)
+                    if use_rope
+                    else IdentityRoPE.Config()
+                ),
             ),
             mlp=_muse_spark_navit_mlp_config(
                 latent_dim=latent_dim,

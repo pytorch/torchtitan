@@ -77,10 +77,10 @@ def test_position_sampling_and_permutation_spmd_types(grid_order):
         encoder.positional_embedding_vlm.grad, expected_grad, rtol=0, atol=0
     )
 
-    config.rope_apply = muse_spark_navit_encoder_config(
+    config.block.attn.rope = muse_spark_navit_encoder_config(
         **encoder_kwargs, use_rope=False
-    ).rope_apply
-    assert isinstance(config.rope_apply, IdentityRoPE.Config)
+    ).block.attn.rope
+    assert isinstance(config.block.attn.rope, IdentityRoPE.Config)
     disabled_encoder = config.build()
     disabled_encoder.init_states()
     with patch.object(disabled_encoder, "_make_2d_rope") as make_rope:
@@ -94,8 +94,7 @@ def test_position_sampling_and_permutation_spmd_types(grid_order):
     make_rope.assert_not_called()
     assert cache.shape == (24, 0)
     query, key = torch.randn(2, 24, 2, 16)
-    rotated_query, rotated_key = disabled_encoder.rope_apply(
-        query, key, rope_cache=cache.unsqueeze(1)
-    )
+    rope = config.block.attn.rope.build()
+    rotated_query, rotated_key = rope(query, key, rope_cache=cache.unsqueeze(1))
     assert rotated_query is query
     assert rotated_key is key

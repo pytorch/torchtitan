@@ -253,6 +253,8 @@ def _qwen35_vision_encoder_config(
             attn=VisionAttention.Config(
                 dim=dim,
                 num_heads=num_heads,
+                # The encoder supplies the model-specific 2D cache.
+                rope=CosSinRoPE.Config(dim=head_dim, max_context_length=0),
                 wq=_linear(
                     dim,
                     dim,
@@ -286,8 +288,6 @@ def _qwen35_vision_encoder_config(
             theta=rope_theta,
             sharding_config=vision_rotary_embedding_sharding_config(),
         ),
-        # The encoder supplies the model-specific 2D cache.
-        rope_apply=CosSinRoPE.Config(dim=head_dim, max_context_length=0),
         merger=PatchMerger.Config(
             spatial_merge_size=spatial_merge_size,
             merged_hidden_size=merged_hidden_size,

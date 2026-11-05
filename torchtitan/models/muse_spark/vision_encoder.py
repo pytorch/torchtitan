@@ -30,7 +30,7 @@ import torch.nn.functional as F
 from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 
-from torchtitan.models.common import ComplexRoPE, IdentityRoPE, Linear
+from torchtitan.models.common import IdentityRoPE, Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
@@ -136,7 +136,6 @@ class NaViTEncoder(Module):
         pos_emb_grid_h: int
         pos_emb_grid_w: int
         rope_freq: VisionRopeFreq.Config
-        rope_apply: ComplexRoPE.Config | IdentityRoPE.Config
         conv1_linear: Linear.Config
         ln_pre: LayerNorm.Config
         block: VisionTransformerBlock.Config
@@ -222,12 +221,11 @@ class NaViTEncoder(Module):
         self.sparse_attention_factor = config.sparse_attention_factor
         self.pos_emb_grid_h = config.pos_emb_grid_h
         self.pos_emb_grid_w = config.pos_emb_grid_w
-        self.use_rope = not isinstance(config.rope_apply, IdentityRoPE.Config)
+        self.use_rope = not isinstance(config.block.attn.rope, IdentityRoPE.Config)
         self.grid_sample_mode = config.grid_sample_mode
         self.pos_emb_grid_order = config.pos_emb_grid_order
 
         self.rope_freq = config.rope_freq.build()
-        self.rope_apply = config.rope_apply.build()
         self.conv1_linear = config.conv1_linear.build()
         self.positional_embedding_vlm = nn.Parameter(
             torch.empty(
@@ -473,7 +471,6 @@ class NaViTEncoder(Module):
             x_TD = layer(
                 x_TD,
                 rope_cache=rope_cache,
-                rope_apply=self.rope_apply,
                 attention_mask=attention_mask,
             )
 

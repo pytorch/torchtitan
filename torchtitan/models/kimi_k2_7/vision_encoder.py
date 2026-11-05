@@ -30,7 +30,6 @@ from torchtitan.models.common import Linear
 
 from torchtitan.models.common.flops import active_parameter_flops_per_token
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
-from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     get_packed_vision_grids,
@@ -345,7 +344,6 @@ class MoonViTEncoder(Module):
         block: VisionTransformerBlock.Config
         final_norm: LayerNorm.Config | RMSNorm.Config
         projector: Module.Config
-        rope_apply: ComplexRoPE.Config
 
     def __init__(self, config: Config):
         super().__init__()
@@ -361,7 +359,6 @@ class MoonViTEncoder(Module):
             )
         )
         self.rotary_pos_emb = config.rotary_pos_emb.build()
-        self.rope_apply = config.rope_apply.build()
         self._cached_freq_table: torch.Tensor | None = None
         self.layers = ModuleDict(
             {str(idx): config.block.build() for idx in range(config.num_layers)}
@@ -459,7 +456,6 @@ class MoonViTEncoder(Module):
             x = block(
                 x,
                 rope_cache=rope_cache,
-                rope_apply=self.rope_apply,
                 attention_mask=attention_mask,
             )
 

@@ -43,6 +43,7 @@ class TestVisionAttention(unittest.TestCase):
                 wk=Linear.Config(in_features=dim, out_features=dim),
                 wv=Linear.Config(in_features=dim, out_features=dim),
                 proj=Linear.Config(in_features=dim, out_features=dim),
+                rope=IdentityRoPE.Config(),
             )
         )
         identity_attention = _IdentityAttention()
@@ -61,7 +62,6 @@ class TestVisionAttention(unittest.TestCase):
         out_TD = attention(
             x_TD,
             rope_cache=torch.empty(0),
-            rope_apply=IdentityRoPE.Config().build(),
             attention_mask=attention_mask,
         )
 
@@ -125,7 +125,7 @@ def test_encoder_rope_and_attention_overrides_are_independent() -> None:
                 )
                 .vision_encoder
             )
-            complex_cache = isinstance(config.rope_apply, ComplexRoPE.Config)
+            complex_cache = isinstance(config.block.attn.rope, ComplexRoPE.Config)
             replacements = apply_overrides(
                 OverrideConfig(
                     imports=[
@@ -136,7 +136,7 @@ def test_encoder_rope_and_attention_overrides_are_independent() -> None:
                 config,
             )
             assert len(replacements) == 2
-            assert isinstance(config.rope_apply, MarkerRoPE.Config)
+            assert isinstance(config.block.attn.rope, MarkerRoPE.Config)
             assert isinstance(config.block.attn.inner_attention, MarkerAttention.Config)
             encoder = config.build()
             encoder.init_states()
@@ -153,12 +153,10 @@ def test_encoder_rope_and_attention_overrides_are_independent() -> None:
                     torch.randn(16, projection.in_features),
                     grid_thw=torch.tensor([[1, 4, 4]]),
                 )
-            assert encoder.rope_apply.calls == config.num_layers
-            assert encoder.rope_apply.cache_is_complex == complex_cache
-            assert all(
-                layer.attn.flex_attention.calls == 1
-                for layer in encoder.layers.values()
-            )
+            for layer in encoder.layers.values():
+                assert layer.attn.rope.calls == 1
+                assert layer.attn.rope.cache_is_complex == complex_cache
+                assert layer.attn.flex_attention.calls == 1
 
 
 if __name__ == "__main__":
