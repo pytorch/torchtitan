@@ -26,18 +26,21 @@ from torchtitan.models.qwen3_5.flavors import (
     _offset_norm,
     _output_linear_init,
     Qwen35Model,
+    QWEN3_5_IMAGE_PROCESSOR,
     QWEN3_5_SPECIAL_TOKENS,
 )
 from torchtitan.models.qwen3_5.rope import MRoPE
 
 __all__ = [
     "build_model_config",
+    "QWEN3_8_IMAGE_PROCESSOR",
     "QWEN3_8_SPECIAL_TOKENS",
     "Qwen35Model",
     "MODEL_FLAVORS",
 ]
 
 QWEN3_8_SPECIAL_TOKENS = dict(QWEN3_5_SPECIAL_TOKENS)
+QWEN3_8_IMAGE_PROCESSOR = dict(QWEN3_5_IMAGE_PROCESSOR)
 
 
 def _qwen3_8_2_4t_a95b(

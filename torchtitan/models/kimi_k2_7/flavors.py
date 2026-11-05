@@ -8,10 +8,14 @@
 
 from collections.abc import Callable
 from functools import partial
+from typing import Any
 
 import spmd_types as spmd
 import torch.nn as nn
 
+from torchtitan.components.data.multimodal.utils.resize import (
+    resize_to_navit_patch_grid,
+)
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
@@ -73,6 +77,7 @@ __all__ = [
     "VisionRotaryEmbedding2D",
     "build_model_config",
     "MODEL_FLAVORS",
+    "KIMI_K2_5_IMAGE_PROCESSOR",
     "KIMI_K2_5_SPECIAL_TOKENS",
 ]
 
@@ -83,6 +88,26 @@ KIMI_K2_5_SPECIAL_TOKENS = {
     "vision_start_token": "<|media_begin|>",
     "vision_end_token": "<|media_end|>",
     "pad_token": "[PAD]",
+}
+
+# ``ImageProcessor.Config`` fields, used like the special tokens:
+# ``ImageProcessor.Config(**KIMI_K2_5_IMAGE_PROCESSOR)``. The values match
+# ``media_proc_cfg`` in the Hugging Face ``preprocessor_config.json``
+# (``in_patch_limit``, ``patch_limit_on_one_side``, ``merge_kernel_size``);
+# MoonViT3d patches one frame at a time (``temporal_patch_size=1``). Two fields
+# are not in the Hugging Face config: ``resize_fn`` reimplements the NaViT
+# patch-grid resize in the processor's code, and ``patch_order`` is the raster
+# layout MoonViT3d expects.
+KIMI_K2_5_IMAGE_PROCESSOR: dict[str, Any] = {
+    "patch_size": 14,
+    "temporal_patch_size": 1,
+    "spatial_merge_size": 2,
+    "image_mean": (0.5, 0.5, 0.5),
+    "image_std": (0.5, 0.5, 0.5),
+    "resize_fn": resize_to_navit_patch_grid,
+    "patch_order": "raster",
+    "max_patches": 16_384,
+    "max_patches_per_side": 512,
 }
 
 

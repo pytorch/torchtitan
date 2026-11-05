@@ -18,8 +18,9 @@ Data flow::
     | Sample processor                                           |
     |                                                            |
     | VisionProcessor -> configured callback                     |
-    |   decode, resize, and normalize image or video tensors     |
-    |   -> ordered pixel_values / pixel_values_videos lists      |
+    |   decode and resize images / video frames with the         |
+    |   trainer's ImageProcessor / VideoProcessor                |
+    |   -> ordered uint8 pixel_values / pixel_values_videos      |
     |                                                            |
     | AudioProcessor -> configured callback                      |
     |   decode, resample, and truncate channels-last waveforms   |
@@ -42,7 +43,8 @@ Data flow::
     |                                                            |
     | Concatenate and pad text to one token microbatch           |
     |   -> input_ids, labels, positions, and padding_mask        |
-    | Convert image and video tensors to concatenated patches    |
+    | Normalize and patchify images and videos with the          |
+    | trainer's ImageProcessor / VideoProcessor                  |
     |   -> pixel_values / pixel_values_videos and per-item grids |
     | Independently pad audio clips, then concatenate them       |
     |   -> waveforms, waveform_lengths, waveform_padded_lengths  |
@@ -64,7 +66,6 @@ from typing import Any, cast
 import grain.python as grain
 import numpy as np
 import torch
-import torchvision.transforms.v2.functional as TVF
 
 from torchtitan.components.data.dataset import (
     DatasetConfig as GrainDatasetConfig,
@@ -76,10 +77,10 @@ from torchtitan.components.data.types import DatasetBuildContext, DatasetIterati
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
 
+from .image_processor import ImageProcessor
 from .utils.audio import resample_waveform
-from .utils.image import calculate_vision_tokens, process_image, resize_to_pixel_budget
 from .utils.text import insert_vision_placeholders
-from .utils.video import process_video
+from .video_processor import VideoProcessor
 
 
 logger = logging.getLogger(__name__)
@@ -173,41 +174,14 @@ def _process_video_text_sample(
     text: str,
     frames: torch.Tensor,
     tokenizer: MultiModalTokenizer,
-    patch_size: int,
-    temporal_patch_size: int,
-    spatial_merge_size: int,
-    min_pixels: int,
-    max_pixels: int,
-    image_mean: tuple[float, ...],
-    image_std: tuple[float, ...],
-    resize_fn: Callable[..., tuple[int, int, int, int]],
-    max_patches: int,
-    max_patches_per_side: int,
-    *,
-    image_interpolation_mode: TVF.InterpolationMode = TVF.InterpolationMode.BICUBIC,
+    video_processor: VideoProcessor | None,
 ) -> dict[str, Any] | None:
     """Process one paired frame sequence and caption."""
-    processed_video = process_video(
-        frames,
-        patch_size=patch_size,
-        merge_size=spatial_merge_size,
-        min_pixels=min_pixels,
-        max_pixels=max_pixels,
-        image_mean=image_mean,
-        image_std=image_std,
-        resize_fn=resize_fn,
-        image_interpolation_mode=image_interpolation_mode,
-        max_patches=max_patches,
-        max_patches_per_side=max_patches_per_side,
-    )
-    num_video_tokens, _, _ = calculate_vision_tokens(
-        num_frames=processed_video.shape[0],
-        height=processed_video.shape[1],
-        width=processed_video.shape[2],
-        patch_size=patch_size,
-        spatial_merge_size=spatial_merge_size,
-        temporal_patch_size=temporal_patch_size,
-    )
+    if video_processor is None:
+        raise ValueError("Video samples require Trainer.Config.video_processor.")
+    processed_video = video_processor.resize_video(frames)
+    num_frames, height, width, _ = processed_video.shape
+    num_video_tokens = video_processor.num_placeholder_tokens(num_frames, height, width)
     if num_video_tokens <= 0:
         raise ValueError("video preprocessing must produce a positive token count")
 
@@ -238,18 +212,7 @@ def _process_mm_sample(
     texts: list[str | None],
     images: list[bytes | None],
     tokenizer: MultiModalTokenizer,
-    patch_size: int,
-    temporal_patch_size: int,
-    spatial_merge_size: int,
-    min_pixels: int,
-    max_pixels: int,
-    image_mean: tuple[float, ...],
-    image_std: tuple[float, ...],
-    resize_fn: Callable[..., tuple[int, int, int, int]],
-    max_patches: int,
-    max_patches_per_side: int,
-    image_interpolation_mode: TVF.InterpolationMode = TVF.InterpolationMode.BICUBIC,
-    **kwargs,
+    image_processor: ImageProcessor | None,
 ) -> dict[str, Any] | None:
     """Common processing logic for multimodal samples.
 
@@ -257,16 +220,14 @@ def _process_mm_sample(
         texts: List of strings with None indicating image positions
         images: List of image bytes with None for text positions
         tokenizer: Tokenizer for text processing
-        patch_size: Size of image patches
-        spatial_merge_size: merge 2D image patches to reduce LLM's sequence length.
-            - if 1 (default): no merge, effectively NoOp
-            - if 2: 2x2=4 image patches will be reduced to 1 LLM visual token
+        image_processor: The model's image preprocessing; required when the
+            sample has images
 
     Returns:
         Dict with:
             - input_ids: Tensor of token IDs
             - labels: Tensor of label IDs
-            - pixel_values: List of processed image tensors
+            - pixel_values: List of resized uint8 (1, H, W, C) images
 
     Example:
         Interleaved format:
@@ -284,38 +245,23 @@ def _process_mm_sample(
     num_image_tokens = []
 
     for idx, img in enumerate(images):
-        if img is not None:
-            # Resize (to multiples of patch_size x merge_size) and normalize images
-            processed_img = process_image(
-                img,
-                patch_size=patch_size,
-                merge_size=spatial_merge_size,
-                min_pixels=min_pixels,
-                max_pixels=max_pixels,
-                image_mean=image_mean,
-                image_std=image_std,
-                resize_fn=resize_fn,
-                image_interpolation_mode=image_interpolation_mode,
-                max_patches=max_patches,
-                max_patches_per_side=max_patches_per_side,
-            )
-            if processed_img is not None:
-                num_tokens, _, _ = calculate_vision_tokens(
-                    num_frames=1,
-                    height=processed_img.shape[1],
-                    width=processed_img.shape[2],
-                    patch_size=patch_size,
-                    spatial_merge_size=spatial_merge_size,
-                    temporal_patch_size=temporal_patch_size,
-                )
-                processed_images.append(processed_img)
-                num_image_tokens.append(num_tokens)
-                # Keep the accepted image at this aligned position as a placeholder.
-                texts[idx] = None
-
-    if len(processed_images) != len([_ for _ in images if _ is not None]):
-        logger.warning("Cannot process all images for sample. Dropping")
-        return None
+        if img is None:
+            continue
+        if image_processor is None:
+            raise ValueError("Image samples require Trainer.Config.image_processor.")
+        try:
+            processed_img = image_processor.decode_and_resize(img)
+        except Exception as e:
+            # Pretraining data skips a sample with an unreadable image.
+            logger.warning(f"Dropping sample, error processing image: {e}")
+            return None
+        _, height, width, _ = processed_img.shape
+        processed_images.append(processed_img)
+        num_image_tokens.append(
+            image_processor.num_placeholder_tokens(1, height, width)
+        )
+        # Keep the accepted image at this aligned position as a placeholder.
+        texts[idx] = None
 
     # Replace image placeholders (None) with image token sequences
     processed_text = insert_vision_placeholders(
@@ -340,13 +286,7 @@ def _process_mm_sample(
 def _process_obelics_sample(
     sample: dict[str, Any],
     tokenizer: MultiModalTokenizer,
-    patch_size: int,
-    temporal_patch_size: int,
-    spatial_merge_size: int,
-    min_pixels: int,
-    max_pixels: int,
-    image_mean: tuple[float, ...],
-    image_std: tuple[float, ...],
+    image_processor: ImageProcessor | None,
     **kwargs,
 ) -> dict[str, Any] | None:
     """Process a sample from the OBELICS dataset (interleaved text and images)."""
@@ -354,27 +294,14 @@ def _process_obelics_sample(
         texts=sample.get("texts", []),
         images=sample.get("images", []),
         tokenizer=tokenizer,
-        patch_size=patch_size,
-        temporal_patch_size=temporal_patch_size,
-        spatial_merge_size=spatial_merge_size,
-        min_pixels=min_pixels,
-        max_pixels=max_pixels,
-        image_mean=image_mean,
-        image_std=image_std,
-        **kwargs,
+        image_processor=image_processor,
     )
 
 
 def _process_cc12_wd_sample(
     sample: dict[str, Any],
     tokenizer: MultiModalTokenizer,
-    patch_size: int,
-    temporal_patch_size: int,
-    spatial_merge_size: int,
-    min_pixels: int,
-    max_pixels: int,
-    image_mean: tuple[float, ...],
-    image_std: tuple[float, ...],
+    image_processor: ImageProcessor | None,
     **kwargs,
 ) -> dict[str, Any] | None:
     """Process a sample from the CC12-WD dataset (text-image pairs)."""
@@ -392,14 +319,7 @@ def _process_cc12_wd_sample(
         texts=texts,
         images=images,
         tokenizer=tokenizer,
-        patch_size=patch_size,
-        temporal_patch_size=temporal_patch_size,
-        spatial_merge_size=spatial_merge_size,
-        min_pixels=min_pixels,
-        max_pixels=max_pixels,
-        image_mean=image_mean,
-        image_std=image_std,
-        **kwargs,
+        image_processor=image_processor,
     )
 
 
@@ -418,26 +338,26 @@ def _filter_overlong_sample(
 
 
 class VisionProcessor(SampleProcessor):
-    """Processes image-text and video-text rows for Grain."""
+    """Processes image-text and video-text rows for Grain.
+
+    ``sample_processor`` gets the row, the tokenizer, and the trainer's
+    ``image_processor`` and ``video_processor`` (None when not configured).
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
         sample_processor: Callable
-        patch_size: int = 16
-        temporal_patch_size: int = 2
-        spatial_merge_size: int = 2
-        min_pixels: int = 65_536
-        max_pixels: int = 16_777_216
-        image_mean: tuple[float, ...] = (0.5, 0.5, 0.5)
-        image_std: tuple[float, ...] = (0.5, 0.5, 0.5)
-        resize_fn: Callable[..., tuple[int, int, int, int]] = resize_to_pixel_budget
-        image_interpolation_mode: TVF.InterpolationMode = TVF.InterpolationMode.BICUBIC
-        max_patches: int = 4096
-        max_patches_per_side: int = 512
 
     def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
+        if context.image_processor is None and context.video_processor is None:
+            raise ValueError(
+                "VisionProcessor requires Trainer.Config.image_processor or "
+                "Trainer.Config.video_processor."
+            )
         self._config = config
         self._tokenizer = context.tokenizer
+        self._image_processor = context.image_processor
+        self._video_processor = context.video_processor
         self._max_context_length = context.max_context_length
 
     def __call__(
@@ -449,17 +369,8 @@ class VisionProcessor(SampleProcessor):
         processed = self._config.sample_processor(
             sample=sample,
             tokenizer=self._tokenizer,
-            patch_size=self._config.patch_size,
-            temporal_patch_size=self._config.temporal_patch_size,
-            spatial_merge_size=self._config.spatial_merge_size,
-            min_pixels=self._config.min_pixels,
-            max_pixels=self._config.max_pixels,
-            image_mean=self._config.image_mean,
-            image_std=self._config.image_std,
-            resize_fn=self._config.resize_fn,
-            image_interpolation_mode=self._config.image_interpolation_mode,
-            max_patches=self._config.max_patches,
-            max_patches_per_side=self._config.max_patches_per_side,
+            image_processor=self._image_processor,
+            video_processor=self._video_processor,
         )
         return _filter_overlong_sample(
             processed,

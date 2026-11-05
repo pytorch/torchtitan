@@ -6,6 +6,7 @@
 
 from .flavors import (
     build_model_config,
+    KIMI_K3_IMAGE_PROCESSOR,
     KIMI_K3_SPECIAL_TOKENS,
     KimiK3Model,
     KimiK3VisionEncoder,
@@ -13,6 +14,7 @@ from .flavors import (
 )
 
 __all__ = [
+    "KIMI_K3_IMAGE_PROCESSOR",
     "KIMI_K3_SPECIAL_TOKENS",
     "KimiK3Model",
     "KimiK3VisionEncoder",

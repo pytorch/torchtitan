@@ -8,7 +8,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, cast, Literal
+from typing import Any, cast
 
 import torch
 
@@ -21,11 +21,14 @@ from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
 
-from .utils.image import vision_to_patches
-
 
 class MultiModalCollator(Collator):
-    """Prepare text and optional image, video, or audio model inputs."""
+    """Prepare text and optional image, video, or audio model inputs.
+
+    Images and videos arrive as uint8 ``(T, H, W, C)`` items resized by the
+    sample processor; the trainer's ``ImageProcessor`` / ``VideoProcessor``
+    normalizes and patches them here.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Collator.Config):
@@ -36,11 +39,7 @@ class MultiModalCollator(Collator):
         """
 
         max_images_per_microbatch: int = 128
-        patch_size: int = 16
-        temporal_patch_size: int = 2
-        spatial_merge_size: int = 2
         build_mrope_positions: bool = False
-        patch_order: Literal["block", "raster"] = "block"
         waveform_pad_multiple: int | None = None
         audio_input_channels: int | None = None
 
@@ -62,46 +61,21 @@ class MultiModalCollator(Collator):
         self._max_context_length = context.max_context_length
         self._num_mtp_layers = context.num_mtp_layers
         self.max_images_per_microbatch = config.max_images_per_microbatch
-        self.patch_size = config.patch_size
-        self.temporal_patch_size = config.temporal_patch_size
-        self.spatial_merge_size = config.spatial_merge_size
+        self.image_processor = context.image_processor
+        self.video_processor = context.video_processor
+        if config.build_mrope_positions:
+            # MRoPE position IDs are laid out in block order; a raster patch
+            # order would desync them from the patch sequence.
+            for processor in (self.image_processor, self.video_processor):
+                if processor is not None and processor.config.patch_order != "block":
+                    raise ValueError(
+                        "MRoPE requires patch_order='block', got "
+                        f"{processor.config.patch_order!r}."
+                    )
         self.tokenizer = cast(MultiModalTokenizer, context.tokenizer)
         self.build_mrope_positions = config.build_mrope_positions
-        self.patch_order = config.patch_order
         self.waveform_pad_multiple = config.waveform_pad_multiple
         self.audio_input_channels = config.audio_input_channels
-
-    def collate_images(
-        self, all_images: list[torch.Tensor]
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Process image/video tensors into packed patches and grid dimensions.
-
-        Args:
-            all_images: Non-empty list of image/video tensors, each of shape (T, H, W, C)
-
-        Returns:
-            pixel_values: Packed patches (num_patches, patch_dim)
-            grid_thw: Grid dimensions (num_images, 3) with [T, H_patches, W_patches]
-
-        ``grid_thw.prod(-1)`` gives each item's length in the patch sequence.
-        """
-        results = [
-            vision_to_patches(
-                img,
-                self.patch_size,
-                self.temporal_patch_size,
-                self.spatial_merge_size,
-                patch_order=self.patch_order,
-            )
-            for img in all_images
-        ]
-        all_patches = [r[0] for r in results]
-        grid_thw_list = [r[1] for r in results]
-
-        packed_patches = torch.cat(all_patches, dim=0)
-        grid_thw = torch.stack(grid_thw_list, dim=0)  # (num_images, 3)
-
-        return packed_patches, grid_thw
 
     def collate_text(
         self,
@@ -213,19 +187,10 @@ class MultiModalCollator(Collator):
         Returns:
             (num_tokens, 3) MRoPE position IDs.
         """
-        # MRoPE position IDs are laid out in block order; a raster patch order
-        # would desync them from the patch sequence.
-        if self.patch_order != "block":
-            raise ValueError(
-                f"MRoPE requires patch_order='block', got {self.patch_order!r}."
-            )
-
         # Transformers splits Qwen3.5 video grids into per-frame entries because
         # timestamps split its video tokens into matching modality runs. Our data
         # pipeline emits one contiguous placeholder run per video instead, so each
         # run must consume the original [T, H, W] grid as a single 3D region.
-
-        spatial_merge_size = self.spatial_merge_size
 
         tokens = tokens.unsqueeze(0)
         positions = positions.unsqueeze(0) if positions is not None else None
@@ -288,10 +253,14 @@ class MultiModalCollator(Collator):
                         # pyrefly: ignore [unsupported-operation]
                         t, h, w = grid_thw[image_index]
                         image_index += 1
+                        processor = self.image_processor
                     else:
                         # pyrefly: ignore [unsupported-operation]
                         t, h, w = grid_thw_videos[video_index]
                         video_index += 1
+                        processor = self.video_processor
+                    assert processor is not None
+                    spatial_merge_size = processor.config.spatial_merge_size
 
                     llm_grid_t, llm_grid_h, llm_grid_w = (
                         int(t.item()),
@@ -370,23 +339,6 @@ class MultiModalCollator(Collator):
         if all_waveforms and not audio_enabled:
             raise ValueError("audio rows cannot be collated when audio is disabled")
 
-        # Count vision entries in each sample.
-        images_per_sample: list[int] = []
-        for sample in rows:
-            num_images = len(sample.get("pixel_values", []))
-            for vid in sample.get("pixel_values_videos", []):
-                num_images += (
-                    vid.shape[0] + self.temporal_patch_size - 1
-                ) // self.temporal_patch_size
-            images_per_sample.append(num_images)
-
-        total_images = sum(images_per_sample)
-        if total_images > self.max_images_per_microbatch:
-            raise ValueError(
-                f"multimodal microbatch has {total_images} vision entries, exceeding "
-                f"max_images_per_microbatch={self.max_images_per_microbatch}"
-            )
-
         # Collate image and video patches.
         all_images = [
             img
@@ -394,7 +346,12 @@ class MultiModalCollator(Collator):
             if "pixel_values" in sample
             for img in sample["pixel_values"]
         ]
-        patches, grids = self.collate_images(all_images) if all_images else (None, None)
+        # The sample processor requires the trainer's processor before it
+        # emits media, so it is set whenever images or videos are present.
+        patches, grids = None, None
+        if all_images:
+            assert self.image_processor is not None
+            patches, grids = self.image_processor.normalize_and_patchify(all_images)
 
         all_videos = [
             vid
@@ -402,9 +359,22 @@ class MultiModalCollator(Collator):
             if "pixel_values_videos" in sample
             for vid in sample["pixel_values_videos"]
         ]
-        video_patches, video_grids = (
-            self.collate_images(all_videos) if all_videos else (None, None)
+        video_patches, video_grids = None, None
+        if all_videos:
+            assert self.video_processor is not None
+            video_patches, video_grids = self.video_processor.normalize_and_patchify(
+                all_videos
+            )
+
+        # Each image is one vision entry; each video is one per temporal patch.
+        total_images = len(all_images) + (
+            int(video_grids[:, 0].sum()) if video_grids is not None else 0
         )
+        if total_images > self.max_images_per_microbatch:
+            raise ValueError(
+                f"multimodal microbatch has {total_images} vision entries, exceeding "
+                f"max_images_per_microbatch={self.max_images_per_microbatch}"
+            )
 
         # Pad text.
         input_ids, labels, positions, padding_mask = self.collate_text(rows)

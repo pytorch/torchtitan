@@ -36,14 +36,15 @@ from torch.nn.attention import sdpa_kernel, SDPBackend
 torch._dynamo.config.disable = True
 
 from torchtitan.components.checkpointer import ModelWrapper
+from torchtitan.components.data.multimodal.image_processor import ImageProcessor
 from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
-from torchtitan.components.data.multimodal.utils.image import (
-    process_image,
-    vision_to_patches,
-)
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import InnerAttention
-from torchtitan.models.qwen3_5 import build_model_config, QWEN3_5_SPECIAL_TOKENS
+from torchtitan.models.qwen3_5 import (
+    build_model_config,
+    QWEN3_5_IMAGE_PROCESSOR,
+    QWEN3_5_SPECIAL_TOKENS,
+)
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
 
@@ -100,6 +101,7 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
     patch_size = encoder_config.patch_size
     temporal_patch_size = encoder_config.temporal_patch_size
     merge_size = encoder_config.spatial_merge_size
+    image_processor = ImageProcessor.Config(**QWEN3_5_IMAGE_PROCESSOR).build()
 
     image_token_id = processor.tokenizer.convert_tokens_to_ids(
         QWEN3_5_SPECIAL_TOKENS["image_token"]
@@ -108,11 +110,10 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
         QWEN3_5_SPECIAL_TOKENS["video_token"]
     )
     special_tokens = {"image_id": image_token_id, "video_id": video_token_id}
-    # The collator reads patch_order before building ids. Training defaults it
-    # to "block", which is the layout vision_to_patches uses here.
+    # The collator reads the merge size from its image processor.
     mrope_builder = types.SimpleNamespace(
-        spatial_merge_size=merge_size,
-        patch_order="block",
+        image_processor=image_processor,
+        video_processor=None,
     )
 
     hf_inputs, tt_inputs, pixel_comparisons = [], [], []
@@ -146,21 +147,14 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
         hf_inputs.append(hf_in)
 
         # --- TT path ---
-        img_tensor = process_image(
-            pil_image, patch_size=patch_size, merge_size=merge_size
+        patches, grid_thw_13 = image_processor.normalize_and_patchify(
+            [image_processor.decode_and_resize(pil_image)]
         )
-        assert img_tensor is not None, f"process_image failed for sample {i}"
-        patches, grid_thw = vision_to_patches(
-            img_tensor,
-            patch_size,
-            temporal_patch_size,
-            merge_size,
-        )
-        # One document. vision_to_patches returns patches (N, P) and grid_thw
-        # (3,). The packed forward wants tokens (S,), those patches, grid
+        # One document. normalize_and_patchify returns patches (N, P) and
+        # grid_thw (1, 3).
+        # The packed forward wants tokens (S,), those patches, grid
         # (num_images, 3), and MRoPE positions (S, 3).
         input_ids_S = hf_in["input_ids"].squeeze(0)
-        grid_thw_13 = grid_thw.unsqueeze(0)
         mrope_positions = MultiModalCollator._build_mrope_positions(
             mrope_builder,  # pyrefly: ignore [bad-argument-type]
             input_ids_S,
@@ -176,7 +170,7 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
         # Reshape patches back to image space for pixel-level comparison.
         # Only compare frame 0 (actual image); frame 1 is temporal padding.
         hf_pv = hf_in["pixel_values"]
-        t_p, h_p, w_p = grid_thw.tolist()
+        t_p, h_p, w_p = grid_thw_13[0].tolist()
         pattern = "(t bh bw m n) (c pt ph pw) -> (t pt) (bh m ph) (bw n pw) c"
         kwargs = dict(
             t=t_p,

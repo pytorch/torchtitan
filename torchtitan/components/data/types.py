@@ -8,12 +8,18 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import grain.python as grain
 import torch
 
 from torchtitan.components.tokenizer import BaseTokenizer
+
+if TYPE_CHECKING:
+    # Imported for annotations only: the image processor needs the optional
+    # torchvision dependency, which text-only training does not install.
+    from torchtitan.components.data.multimodal.image_processor import ImageProcessor
+    from torchtitan.components.data.multimodal.video_processor import VideoProcessor
 
 
 class TrainingMicrobatch(ABC):
@@ -94,6 +100,10 @@ class DatasetBuildContext:
     read_options: grain.ReadOptions
     max_num_documents: int | None = None
     num_mtp_layers: int = 0
+    image_processor: "ImageProcessor | None" = None
+    """The model's image preprocessing. None: no image inputs."""
+    video_processor: "VideoProcessor | None" = None
+    """The model's video preprocessing. None: no video inputs."""
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

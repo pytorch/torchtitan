@@ -11,8 +11,6 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-import torchvision.transforms.v2.functional as TVF
-
 from torchtitan.components.data.dataset import SingleDatasetConfig
 from torchtitan.components.data.multimodal.mm_datasets import (
     _process_audio_text_sample,
@@ -22,6 +20,7 @@ from torchtitan.components.data.multimodal.mm_datasets import (
 )
 from torchtitan.components.data.multimodal.utils.audio import load_pcm_waveform
 from torchtitan.components.data.multimodal.utils.video import load_npy_video_frames
+from torchtitan.components.data.multimodal.video_processor import VideoProcessor
 from torchtitan.components.data.sources import IndexedJsonlSource
 from torchtitan.components.tokenizer import MultiModalTokenizer
 
@@ -61,36 +60,17 @@ def _process_synthetic_audio_text_sample(
 def _process_synthetic_video_text_sample(
     sample: dict[str, Any],
     tokenizer: MultiModalTokenizer,
-    patch_size: int,
-    temporal_patch_size: int,
-    spatial_merge_size: int,
-    min_pixels: int,
-    max_pixels: int,
-    image_mean: tuple[float, ...],
-    image_std: tuple[float, ...],
-    resize_fn: Callable[..., tuple[int, int, int, int]],
-    max_patches: int,
-    max_patches_per_side: int,
+    video_processor: VideoProcessor | None,
     *,
     video_root: Path,
-    image_interpolation_mode: TVF.InterpolationMode = TVF.InterpolationMode.BICUBIC,
+    **kwargs,
 ) -> dict[str, Any] | None:
     frames = load_npy_video_frames(video_root / sample["video_path"])
     return _process_video_text_sample(
         text=sample["text"],
         frames=frames,
         tokenizer=tokenizer,
-        patch_size=patch_size,
-        temporal_patch_size=temporal_patch_size,
-        spatial_merge_size=spatial_merge_size,
-        min_pixels=min_pixels,
-        max_pixels=max_pixels,
-        image_mean=image_mean,
-        image_std=image_std,
-        resize_fn=resize_fn,
-        image_interpolation_mode=image_interpolation_mode,
-        max_patches=max_patches,
-        max_patches_per_side=max_patches_per_side,
+        video_processor=video_processor,
     )
 
 

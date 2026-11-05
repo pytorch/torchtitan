@@ -6,13 +6,11 @@
 
 """Image preprocessing and vision utilities for multimodal datasets.
 
-Handles image decoding, resizing, normalization, and patch extraction for the
-vision encoder.
+Handles image decoding, vision token counts, and patch extraction for the
+vision encoder; ``ImageProcessor`` resizes and normalizes.
 """
 
-import logging
 import math
-from collections.abc import Callable
 
 import einops as E
 import requests
@@ -25,10 +23,7 @@ import torchvision.transforms.v2.functional as TVF
 from PIL import Image
 
 
-logger = logging.getLogger(__name__)
-
-
-def _decode_image(image: str | bytes | Image.Image) -> torch.Tensor:
+def decode_image(image: str | bytes | Image.Image) -> torch.Tensor:
     """Decode an image to a (C, H, W) uint8 RGB tensor.
 
     Uses torchvision.io.decode_image for bytes/paths (faster SIMD decode),
@@ -47,239 +42,6 @@ def _decode_image(image: str | bytes | Image.Image) -> torch.Tensor:
         if image.mode != "RGB":
             image = image.convert("RGB")
         return TVF.pil_to_tensor(image)
-
-
-def smart_resize(
-    height: int,
-    width: int,
-    factor: int,
-    min_pixels: int,
-    max_pixels: int,
-) -> tuple[int, int]:
-    """Compute target (height, width) that satisfy per-frame pixel budget.
-
-    Both output dimensions are rounded to multiples of ``factor``.  The spatial
-    pixel count ``h * w`` is kept within [min_pixels, max_pixels].
-
-    Args:
-        height: Original height.
-        width: Original width.
-        factor: Spatial rounding factor (``patch_size * merge_size``).
-        min_pixels: Minimum spatial pixels per frame.
-        max_pixels: Maximum spatial pixels per frame.
-
-    Returns:
-        (resized_height, resized_width)
-    """
-    if max(height, width) / min(height, width) > 200:
-        raise ValueError(
-            f"Absolute aspect ratio must be smaller than 200, "
-            f"got {max(height, width) / min(height, width):.1f}"
-        )
-
-    # Round spatial dims to nearest multiple of factor
-    h_bar = max(round(height / factor) * factor, factor)
-    w_bar = max(round(width / factor) * factor, factor)
-
-    if h_bar * w_bar > max_pixels:
-        beta = math.sqrt((height * width) / max_pixels)
-        h_bar = max(math.floor(height / beta / factor) * factor, factor)
-        w_bar = max(math.floor(width / beta / factor) * factor, factor)
-    elif h_bar * w_bar < min_pixels:
-        beta = math.sqrt(min_pixels / (height * width))
-        h_bar = math.ceil(height * beta / factor) * factor
-        w_bar = math.ceil(width * beta / factor) * factor
-
-    return h_bar, w_bar
-
-
-def resize_to_pixel_budget(
-    height: int,
-    width: int,
-    *,
-    patch_size: int,
-    merge_size: int,
-    min_pixels: int,
-    max_pixels: int,
-    **_: object,
-) -> tuple[int, int, int, int]:
-    """Resize so the spatial pixel count lands in ``[min_pixels, max_pixels]``,
-    with both dims rounded to a ``patch_size * merge_size`` multiple (Qwen-VL
-    convention). Content is rescaled to the grid, so no padding is needed.
-
-    A resize strategy (``resize_fn``) for ``process_image`` -- extra budget
-    kwargs (e.g. ``max_patches``) are accepted and ignored via ``**_``.
-
-    Args:
-        height: Original height in pixels.
-        width: Original width in pixels.
-        patch_size: Spatial patch size.
-        merge_size: Spatial merge factor.
-        min_pixels: Lower spatial-pixel budget.
-        max_pixels: Upper spatial-pixel budget.
-
-    Returns:
-        ``(resize_h, resize_w, 0, 0)`` -- trailing zeros are padding (always 0
-        here), kept for a uniform interface with ``resize_to_navit_patch_grid``.
-    """
-    factor = patch_size * merge_size
-    # Ensure both dims >= factor so the rounding has a valid starting point.
-    if height < factor or width < factor:
-        scale = max(factor / width, factor / height)
-        width, height = int(width * scale), int(height * scale)
-
-    if max(height, width) / min(height, width) > 200:
-        raise ValueError(
-            f"Absolute aspect ratio must be smaller than 200, "
-            f"got {max(height, width) / min(height, width):.1f}"
-        )
-
-    h_bar = max(round(height / factor) * factor, factor)
-    w_bar = max(round(width / factor) * factor, factor)
-    if h_bar * w_bar > max_pixels:
-        beta = math.sqrt((height * width) / max_pixels)
-        h_bar = max(math.floor(height / beta / factor) * factor, factor)
-        w_bar = max(math.floor(width / beta / factor) * factor, factor)
-    elif h_bar * w_bar < min_pixels:
-        beta = math.sqrt(min_pixels / (height * width))
-        h_bar = math.ceil(height * beta / factor) * factor
-        w_bar = math.ceil(width * beta / factor) * factor
-    return h_bar, w_bar, 0, 0
-
-
-def resize_to_navit_patch_grid(
-    height: int,
-    width: int,
-    *,
-    patch_size: int,
-    merge_size: int,
-    max_patches: int,
-    max_patches_per_side: int,
-    **_: object,
-) -> tuple[int, int, int, int]:
-    """Apply pre-padding total and per-side raw-patch budgets while preserving
-    aspect ratio, then pad right/bottom to a ``patch_size * merge_size`` grid.
-    Small images within both limits are not upscaled. Grid padding can make the
-    final raw-patch count exceed ``max_patches``.
-
-    A resize strategy (``resize_fn``) for ``process_image`` -- extra budget
-    kwargs (e.g. ``min_pixels`` / ``max_pixels``) are accepted and ignored via
-    ``**_``.
-
-    Args:
-        height: Original height in pixels.
-        width: Original width in pixels.
-        patch_size: Spatial patch size.
-        merge_size: Spatial merge factor.
-        max_patches: Pre-padding raw-patch budget used to calculate resize scale.
-        max_patches_per_side: Pre-padding per-side raw-patch limit.
-
-    Returns:
-        ``(resize_h, resize_w, pad_h, pad_w)`` -- resize to the first two, then
-        pad right/bottom by the last two.
-    """
-    num_patches_h = max(1.0, height // patch_size)
-    num_patches_w = max(1.0, width // patch_size)
-    num_patches = num_patches_h * num_patches_w
-
-    scale = min(
-        1.0,
-        math.sqrt(max_patches / num_patches),
-        max_patches_per_side * patch_size / height,
-        max_patches_per_side * patch_size / width,
-    )
-    h = max(1, int(height * scale))
-    w = max(1, int(width * scale))
-    h = min(h, max_patches_per_side * patch_size)
-    w = min(w, max_patches_per_side * patch_size)
-
-    factor = patch_size * merge_size
-    pad_h = (factor - h % factor) % factor
-    pad_w = (factor - w % factor) % factor
-    return h, w, pad_h, pad_w
-
-
-def process_image(
-    image: str | bytes | Image.Image,
-    patch_size: int = 16,
-    merge_size: int = 2,
-    max_pixels: int = 16777216,
-    min_pixels: int = 65536,
-    image_mean: tuple[float, ...] = (0.5, 0.5, 0.5),
-    image_std: tuple[float, ...] = (0.5, 0.5, 0.5),
-    resize_fn: Callable[..., tuple[int, int, int, int]] = resize_to_pixel_budget,
-    image_interpolation_mode: TVF.InterpolationMode = TVF.InterpolationMode.BICUBIC,
-    max_patches: int = 4096,
-    max_patches_per_side: int = 512,
-) -> torch.Tensor | None:
-    """Load and preprocess a single image for VLM training.
-
-    Uses torchvision APIs for decoding and resizing (faster uint8 SIMD paths),
-    then normalizes with the given mean/std. ``resize_fn`` is the resize strategy
-    -- ``resize_to_pixel_budget`` (Qwen-VL, default) or
-    ``resize_to_navit_patch_grid`` (Kimi-VL) -- with the uniform signature
-    ``(height, width, *, patch_size, merge_size, **budget) -> (resize_h,
-    resize_w, pad_h, pad_w)``. All budget kwargs are passed through; each
-    strategy uses the subset it needs.
-
-    Args:
-        image: Raw bytes, file path, HTTP(S) URL, or PIL Image.
-        patch_size: Spatial patch size used by the vision encoder.
-        merge_size: Spatial merge factor (patches merged per dimension).
-        max_pixels: Upper pixel budget (``resize_to_pixel_budget``).
-        min_pixels: Lower pixel budget (``resize_to_pixel_budget``).
-        image_mean: Per-channel mean for normalization.
-        image_std: Per-channel std for normalization.
-        resize_fn: Resize-strategy callable (see above).
-        image_interpolation_mode: Torchvision interpolation mode used to resize
-            the image tensor.
-        max_patches: Pre-padding patch budget (``resize_to_navit_patch_grid``).
-        max_patches_per_side: Pre-padding per-side patch limit
-            (``resize_to_navit_patch_grid``).
-
-    Returns:
-        Tensor of shape (1, H, W, C) with a dummy temporal dim, or None on failure.
-    """
-    try:
-        # Decode to (C, H, W) uint8 tensor
-        img_tensor = _decode_image(image)
-        _, original_height, original_width = img_tensor.shape
-
-        resize_h, resize_w, pad_h, pad_w = resize_fn(
-            original_height,
-            original_width,
-            patch_size=patch_size,
-            merge_size=merge_size,
-            min_pixels=min_pixels,
-            max_pixels=max_pixels,
-            max_patches=max_patches,
-            max_patches_per_side=max_patches_per_side,
-        )
-        if (resize_h, resize_w) != (original_height, original_width):
-            # Resize on uint8 (leverages AVX2/NEON SIMD fast paths)
-            img_tensor = TVF.resize(
-                img_tensor,
-                [resize_h, resize_w],
-                interpolation=image_interpolation_mode,
-                antialias=True,
-            )
-        if pad_h or pad_w:
-            # Pad right/bottom with zeros (black); after normalization these are
-            # constant padding patches the encoder sees as part of the grid.
-            img_tensor = TVF.pad(img_tensor, [0, 0, pad_w, pad_h])
-
-        # uint8 → float32 [0, 1] → normalize
-        img_tensor = TVF.to_dtype(img_tensor, torch.float32, scale=True)
-        img_tensor = TVF.normalize(
-            img_tensor, list(image_mean), list(image_std), inplace=True
-        )
-
-        # (C, H, W) → (1, H, W, C)
-        return img_tensor.permute(1, 2, 0).unsqueeze(0)
-
-    except Exception as e:
-        logger.warning(f"Error processing image: {e}")
-        return None
 
 
 def calculate_vision_tokens(

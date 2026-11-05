@@ -9,7 +9,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import grain.python as grain
 from grain import experimental as grain_experimental
@@ -24,6 +24,10 @@ from torchtitan.components.data.types import (
 )
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable
+
+if TYPE_CHECKING:
+    from torchtitan.components.data.multimodal.image_processor import ImageProcessor
+    from torchtitan.components.data.multimodal.video_processor import VideoProcessor
 
 
 # NOTE: This class deliberately inherits from `Exception` and not `StopIteration`.
@@ -91,6 +95,8 @@ class GrainDataLoader(BaseDataLoader):
         tokenizer: BaseTokenizer,
         max_context_length: int,
         num_tokens_per_microbatch: int,
+        image_processor: "ImageProcessor | None" = None,
+        video_processor: "VideoProcessor | None" = None,
         **kwargs: Any,
     ) -> None:
         del kwargs
@@ -118,6 +124,8 @@ class GrainDataLoader(BaseDataLoader):
             read_options=read_options,
             max_num_documents=config.max_num_documents,
             num_mtp_layers=config.num_mtp_layers,
+            image_processor=image_processor,
+            video_processor=video_processor,
         )
         dataset_iteration_policy = DatasetIterationPolicy(
             seed=config.seed,

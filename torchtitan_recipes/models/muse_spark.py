@@ -274,38 +274,40 @@ def _resize_to_muse_glimmer_patch_grid(
     )
 
 
+# ``ImageProcessor.Config`` fields, used like the special tokens:
+# ``ImageProcessor.Config(**MUSE_SPARK_IMAGE_PROCESSOR)``. The patch sizes match
+# the NaViT encoder (``patch_size``, ``patch_temporal``, ``downsample_factor``).
+MUSE_SPARK_IMAGE_PROCESSOR: dict[str, Any] = {
+    "patch_size": 14,
+    "temporal_patch_size": 2,
+    "spatial_merge_size": 2,
+    "image_mean": (0.5, 0.5, 0.5),
+    "image_std": (0.5, 0.5, 0.5),
+    "resize_fn": _resize_to_muse_glimmer_patch_grid,
+    "patch_order": "raster",
+}
+
+# Video applies the image settings to every frame.
+MUSE_SPARK_VIDEO_PROCESSOR = dict(MUSE_SPARK_IMAGE_PROCESSOR)
+
+
 def _muse_spark_mm_dataloader(
     model_config: MuseSparkModel.Config,
     dataset: SingleDatasetConfig,
 ) -> GrainDataLoader.Config:
+    """Multimodal dataloader for ``dataset``. The trainer config also needs
+    ``image_processor`` / ``video_processor`` built from
+    ``MUSE_SPARK_IMAGE_PROCESSOR`` / ``MUSE_SPARK_VIDEO_PROCESSOR``."""
     from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
-    from torchtitan.components.data.multimodal.mm_datasets import VisionProcessor
 
-    vision_encoder = model_config.vision_encoder
-    if vision_encoder is None:
+    if model_config.vision_encoder is None:
         raise ValueError("Multimodal Muse Spark must own a vision encoder")
 
-    base_processor = dataset.processor
-    if not isinstance(base_processor, VisionProcessor.Config):
-        raise ValueError("Multimodal vision datasets must use VisionProcessor.Config")
-    processor = replace(
-        base_processor,
-        patch_size=vision_encoder.patch_size,
-        temporal_patch_size=vision_encoder.patch_temporal,
-        spatial_merge_size=vision_encoder.downsample_factor,
-        resize_fn=_resize_to_muse_glimmer_patch_grid,
-        image_mean=(0.5, 0.5, 0.5),
-        image_std=(0.5, 0.5, 0.5),
-    )
     audio_encoder = model_config.audio_encoder
     return GrainDataLoader.Config(
-        dataset=replace(dataset, processor=processor),
+        dataset=dataset,
         collator=MultiModalCollator.Config(
             max_images_per_microbatch=8,
-            patch_size=processor.patch_size,
-            temporal_patch_size=processor.temporal_patch_size,
-            spatial_merge_size=processor.spatial_merge_size,
-            patch_order="raster",
             build_mrope_positions=False,
             waveform_pad_multiple=(
                 None if audio_encoder is None else audio_encoder.patch_size
