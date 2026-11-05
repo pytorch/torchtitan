@@ -67,8 +67,11 @@ PLE projects the lexical features into keys `[T,4,2560]` and values
 produce gates `[T,4]`. The gated values form `[T,4,2560]`, receive a dilated
 depthwise convolution, and are added to the residual streams.
 
-The weight is a `Shard(0)` DTensor on the dense SPMD mesh (`dp`, `cp`, `tp`),
-excluded from FSDP all-gathers. Each DP owner keeps contiguous rows.
+The weight is a DTensor on the dense SPMD mesh (`dp`, `cp`, `tp`), excluded
+from FSDP all-gathers. Each DP owner keeps contiguous rows (`Shard(0)`); under
+TP, its TP ranks split those rows' features (`Shard(1)`). TP ranks hold the
+same token IDs, so only DP ranks exchange IDs and vectors, at the local feature
+width, and TP then gathers the looked-up features.
 Preprocessing deduplicates hash IDs and packs them into one fixed-size slot of
 `C` IDs per owner; forward exchanges the requested vectors, and backward
 returns their gradients to the owners. Fixed slots keep the all-to-all shapes
@@ -144,11 +147,13 @@ The multimodal recipe keeps vision on AdamW.
 | Feature | Notes |
 | --- | --- |
 | FSDP | Per-layer backbone sharding; persistent row ownership for PLE |
+| TP / SP | QSA heads and PLE feature columns; degree must divide the 2 QSA KV heads |
 | EP | Existing routed-expert placements; all-to-all dispatcher by default, Dist-MoE with accelerator graphs in the 125B recipe and the B200 graph test |
 
 EP shards experts independently of PLE: at FSDP8/EP4 each rank owns one eighth
 of the PLE rows and one fourth of the experts, with FSDP2 within each expert
-shard. CPU offload and deferred FSDP reduction for PLE are unsupported.
+shard. CPU offload and deferred FSDP reduction for PLE are unsupported. PP and
+CP are rejected at config time.
 
 ## Numerical Parity and Tests
 

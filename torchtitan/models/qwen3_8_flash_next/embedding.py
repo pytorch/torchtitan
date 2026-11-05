@@ -17,7 +17,8 @@ import torch_remat as remat
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.base.module import Module
 from torchtitan.models.common import Conv1d, Linear
 
@@ -53,7 +54,10 @@ def document_starts(positions_T: torch.Tensor) -> torch.Tensor:
 
 
 class NGramTable(nn.Embedding, Module):
-    """Lexical embedding with persistent rows owned by data-parallel ranks."""
+    """Lexical embedding whose rows are owned by data-parallel ranks.
+
+    Under TP each owner's rows are further split into feature columns.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -70,6 +74,11 @@ class NGramTable(nn.Embedding, Module):
         global_shape = torch.Size((self.num_embeddings, self.embedding_dim))
         global_stride = self.weight.stride()
         self.row_mesh = parallelism_context.get_optional_mesh("dp")
+        tp_mesh = parallelism_context.get_optional_mesh("tp")
+        if self.row_mesh is None and tp_mesh is not None:
+            # TP shards the table's columns, which only the row-sharded lookup
+            # handles. Without a DP mesh (DP=1), use the size-1 dp_shard mesh.
+            self.row_mesh = parallelism_context.get_mesh("dp_shard")
         if self.row_mesh is not None and self.num_embeddings % self.row_mesh.size():
             # SPMD meta allocation pads uneven shards; owners store only valid rows.
             raise ValueError("PLE requires num_embeddings divisible by the DP degree")
@@ -110,7 +119,8 @@ class NGramTable(nn.Embedding, Module):
             raise ValueError(
                 "Row-owned PLE requires lookup routing from preprocess_inputs"
             )
-        # _parallelize stores the weight as a Shard(0) DTensor over row_mesh.
+        # _parallelize shards the weight's rows over row_mesh (and its feature
+        # columns over TP).
         return row_sharded_embedding(cast(DTensor, self.weight), routing, dtype=dtype)
 
 
@@ -252,7 +262,18 @@ class NGramEmbedding(Module):
             if routing is None
             else routing.input_ids
         )
-        return self.ngram_embedding(hashes_TN, routing=routing, dtype=dtype).flatten(-2)
+        embedding_TNE = self.ngram_embedding(hashes_TN, routing=routing, dtype=dtype)
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is not None:
+            # The table shards features over TP; gather the looked-up vectors.
+            embedding_TNE = spmd.redistribute(
+                embedding_TNE,
+                tp_group,
+                src=spmd.S(2),
+                dst=spmd.R,
+                backward_options={"op_dtype": embedding_TNE.dtype},
+            )
+        return embedding_TNE.flatten(-2)
 
 
 class PLELayer(Module):

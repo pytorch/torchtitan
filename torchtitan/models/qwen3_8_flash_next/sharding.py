@@ -24,9 +24,17 @@ CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
 
+def _unsharded_param_placement(layout: SpmdType) -> SpmdType:
+    """TP-unsharded weight read by an activation in ``layout``: ``I`` for a
+    TP-``I`` input (TP without SP), else ``R``, as in the shared
+    ``norm_sharding_config``."""
+    tp = spmd.I if layout.local_type[TP] is spmd.I else spmd.R
+    return dense_param_placement(tp=tp)
+
+
 def unsharded_linear_sharding(layout: SpmdType) -> ShardingConfig:
     return ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
+        state_shardings={"weight": _unsharded_param_placement(layout)},
         input_shardings={"input": layout},
         output_shardings=layout,
     )
@@ -34,7 +42,7 @@ def unsharded_linear_sharding(layout: SpmdType) -> ShardingConfig:
 
 def grouped_norm_sharding(layout: SpmdType) -> ShardingConfig:
     return ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
+        state_shardings={"weight": _unsharded_param_placement(layout)},
         input_shardings={"input": layout},
         output_shardings=layout,
     )
@@ -78,13 +86,18 @@ def ngram_table_sharding() -> ShardingConfig:
     hashes = SpmdType(
         {DP: spmd.V, CP: spmd.V, TP: spmd.R}, spmd.PartitionSpec((DP, CP), None)
     )
-    replicated = SpmdType(
-        {DP: spmd.V, CP: spmd.V, TP: spmd.R}, spmd.PartitionSpec((DP, CP), None, None)
+    output = SpmdType(
+        {DP: spmd.V, CP: spmd.V, TP: spmd.V},
+        spmd.PartitionSpec((DP, CP), None, TP),
     )
     return ShardingConfig(
-        state_shardings={"weight": SpmdType({DP: spmd.S(0), CP: spmd.R, TP: spmd.R})},
+        # DP owns rows; TP gathers only the selected feature vectors.
+        state_shardings={
+            "weight": SpmdType({DP: spmd.S(0), CP: spmd.R, TP: spmd.S(1)})
+        },
         input_shardings={"input": hashes},
-        output_shardings=replicated,
+        # NGramEmbedding gathers the feature shards to TP-Replicate.
+        output_shardings=output,
     )
 
 
