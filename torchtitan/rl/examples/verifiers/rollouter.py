@@ -330,12 +330,17 @@ class VerifiersRollouter(Rollouter):
                 **{GROUP_ID_SAMPLING_PARAM: group_id},
             ),
         )
-        # `run` returned, so this rollout starts no new calls. Release each trace's routing
-        # session: Verifiers sends the trace id as X-Session-ID.
+        # `run` returned, so this rollout starts no new calls. For each trace, release its routing
+        # session (Verifiers sends the trace id as X-Session-ID) and take its generation metadata,
+        # so another agent's trace (a judge, a simulated user) leaves nothing on the server.
         # TODO: an attempt Verifiers retried has no trace here, so its held KV waits for the
         # group's release and its routing pin for the router's `max_sessions` LRU. The generation
         # server could record each rollout's session ids and release those too.
+        generation_metadata_by_trace = {}
         for trace in verifiers_episode.traces:
+            generation_metadata_by_trace[
+                trace.id
+            ] = self._generation_server.pop_generation_metadata(trace.id)
             try:
                 await release_session_fn(routing_session_id=trace.id)
             except Exception:
@@ -350,7 +355,7 @@ class VerifiersRollouter(Rollouter):
 
         # Convert Verifiers' graph trace to TitanRL's linear rollout turns.
         trace = traces[0]
-        generation_metadata = self._generation_server.pop_generation_metadata(trace.id)
+        generation_metadata = generation_metadata_by_trace[trace.id]
         turns = self.trace_to_rollout_turns(
             trace=trace,
             generation_metadata=generation_metadata,
