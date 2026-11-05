@@ -31,6 +31,32 @@ SESSION_ID_HEADER = "X-Session-ID"
 # Stands in for the logprobs content list; the handler splices the real list in.
 _LOGPROBS_CONTENT_PLACEHOLDER = "<logprobs content>"
 
+
+class _DebugAccessLogger(web.AbstractAccessLogger):
+    """Log each request at DEBUG on the ``aiohttp.access`` logger.
+
+    aiohttp's default logs one INFO line per request, most of the process's log lines. To see them:
+    ``logging.getLogger("aiohttp.access").setLevel(logging.DEBUG)``.
+    """
+
+    @property
+    def enabled(self) -> bool:
+        # False skips the per-request timing and formatting.
+        return self.logger.isEnabledFor(logging.DEBUG)
+
+    def log(
+        self, request: web.BaseRequest, response: web.StreamResponse, time: float
+    ) -> None:
+        self.logger.debug(
+            "%s %s %d %.3fs session=%s",
+            request.method,
+            request.path,
+            response.status,
+            time,
+            request.headers.get(SESSION_ID_HEADER),
+        )
+
+
 GROUP_ID_SAMPLING_PARAM = "torchtitan_group_id"
 """Sampling parameter carrying a request's rollout group id.
 
@@ -121,9 +147,11 @@ class GenerationServer:
         app.router.add_get("/v1/models", self._handle_models_request)
         app.router.add_post("/inference/v1/generate", self._handle_generate_request)
         # A handler whose client hung up is cancelled, so a request still on the engine loop's queue
-        # never runs. No access log: one line per request would run in the engine's process, and the
-        # rollouts carry each call's prompt and completion.
-        runner = web.AppRunner(app, handler_cancellation=True, access_log=None)
+        # never runs. The access log is at DEBUG: one INFO line per request would run in the engine's
+        # process.
+        runner = web.AppRunner(
+            app, handler_cancellation=True, access_log_class=_DebugAccessLogger
+        )
         await runner.setup()
         sock = _listening_socket()
         # A burst of new calls (one connection each) can pass aiohttp's default of 128 pending
