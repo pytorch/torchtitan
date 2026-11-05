@@ -4,26 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from unittest.mock import patch
-
 import pytest
 import torch
 import torch_remat as remat
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.glm5 import build_model_config
-
-
-def _cpu_attention(self, q, k, v, *, attention_metadata, scale=None, **kwargs):
-    # FlexAttention has no CPU backward. Keep the real DSA BlockMask and use
-    # differentiable PyTorch attention to exercise the MLA/MTP remat wiring.
-    query = torch.arange(q.shape[0])[:, None]
-    key = torch.arange(k.shape[0])[None, :]
-    allowed = attention_metadata.mask_mod(0, 0, query, key)
-    scores = torch.einsum("qhd,khd->hqk", q, k) * scale
-    probabilities = scores.masked_fill(~allowed, float("-inf")).softmax(-1)
-    return torch.einsum("hqk,khv->qhv", probabilities, v)
 
 
 @pytest.mark.parametrize("save", [[], ["*"], ["*.inner_attention"]])
@@ -62,7 +48,11 @@ def test_shared_mla_and_mtp_checkpoint_outputs_and_gradients(save):
         assert all(torch.isfinite(grad).all() for grad in gradients.values())
         return tuple(output.detach() for output in outputs), gradients
 
-    with patch.object(FlexInnerAttention, "forward", _cpu_attention):
+    deterministic = torch.are_deterministic_algorithms_enabled()
+    torch.use_deterministic_algorithms(True)
+    try:
         expected = run(False)
         actual = run(True)
+    finally:
+        torch.use_deterministic_algorithms(deterministic)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
