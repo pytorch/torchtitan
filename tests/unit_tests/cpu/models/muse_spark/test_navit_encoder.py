@@ -4,10 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from unittest.mock import patch
+
 import pytest
 import spmd_types as spmd
 import torch
 from spmd_types.checker import typecheck
+from torchtitan.models.common.rope import IdentityRoPE
 from torchtitan.models.muse_spark.flavors import muse_spark_navit_encoder_config
 from torchtitan.models.muse_spark.vision_encoder import VisionRopeFreq
 
@@ -22,6 +25,36 @@ def test_rope_frequency_meta_initialization_matches_hf():
     expected = 1.0 / (10000.0**exponent)
     torch.testing.assert_close(freq.inv_freq, expected, rtol=0, atol=0)
     assert not freq.state_dict()
+
+    for use_rope in (False, True):
+        config = muse_spark_navit_encoder_config(
+            latent_dim=16,
+            num_heads=2,
+            num_layers=0,
+            patch_size=2,
+            patch_temporal=1,
+            pos_emb_grid_h=2,
+            pos_emb_grid_w=2,
+            use_rope=use_rope,
+        )
+        if use_rope:
+            config.rope_apply = IdentityRoPE.Config()
+        assert isinstance(config.rope_apply, IdentityRoPE.Config)
+        encoder = config.build()
+        encoder.init_states()
+        with patch.object(encoder, "_make_2d_rope") as make_rope:
+            _, cache, *_ = encoder._embed_image(
+                torch.randn(16, 12), 4, 4, torch.device("cpu"), torch.float32
+            )
+        make_rope.assert_not_called()
+        assert cache.shape == (16, 0)
+        query, key = torch.randn(2, 16, 2, 8)
+        rotated_query, rotated_key = encoder.rope_apply(
+            query, key, rope_cache=cache.unsqueeze(1)
+        )
+        assert rotated_query is query
+        assert rotated_key is key
+        assert encoder.rope_apply(query, inverse=True) is query
 
 
 @pytest.mark.parametrize("grid_order", ["raster", "legacy_spark"])

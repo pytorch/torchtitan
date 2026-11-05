@@ -55,6 +55,7 @@ from torchtitan.models.common.decoder_sharding import (
 from torchtitan.models.common.moe.sharding import shared_experts_sharding_config
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
+from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.models.common.vision_encoder import (
     InvariantRowParallelLinear,
     VisionAttention,
@@ -285,6 +286,8 @@ def _qwen35_vision_encoder_config(
             theta=rope_theta,
             sharding_config=vision_rotary_embedding_sharding_config(),
         ),
+        # The encoder supplies the model-specific 2D cache.
+        rope_apply=CosSinRoPE.Config(dim=head_dim, max_context_length=0),
         merger=PatchMerger.Config(
             spatial_merge_size=spatial_merge_size,
             merged_hidden_size=merged_hidden_size,

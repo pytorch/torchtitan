@@ -59,6 +59,7 @@ from torchtitan.models.common.moe.sharding import (
     router_sharding_config,
 )
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
+from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
     InvariantRowParallelLinear,
     VisionAttention,
@@ -511,6 +512,8 @@ def _vision_encoder_config(
         rotary_pos_emb=VisionRotaryEmbedding2D.Config(
             head_dim=head_dim, sharding_config=moonvit_rotary_sharding_config()
         ),
+        # The encoder supplies the 2D cache, so no internal positions are needed.
+        rope_apply=ComplexRoPE.Config(dim=head_dim, max_context_length=0),
         block=block,
         final_norm=vision_norm,
         projector=KimiK3VisionProjector.Config(

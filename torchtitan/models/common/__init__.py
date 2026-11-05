@@ -46,7 +46,7 @@ from .moe import BatchWiseLoadBalanceLoss, MicrobatchWiseLoadBalanceLoss, MoE
 from .multimodal import MultimodalModel
 from .nn_modules import Conv1d, Conv2d, GELU, GroupNorm, Identity, LayerNorm, RMSNorm
 from .norm import GatedRMSNorm
-from .rope import ComplexRoPE, CosSinRoPE, RoPE
+from .rope import ComplexRoPE, CosSinRoPE, IdentityRoPE, RoPE
 
 __all__ = [
     "AttentionMetadata",
@@ -79,6 +79,7 @@ __all__ = [
     "GroupNorm",
     "GroupedLinear",
     "Identity",
+    "IdentityRoPE",
     "InnerAttention",
     "LayerNorm",
     "Linear",

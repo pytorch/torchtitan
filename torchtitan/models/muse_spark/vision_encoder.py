@@ -21,7 +21,6 @@ Shape suffixes:
 
 import math
 from dataclasses import dataclass, field
-from typing import cast
 
 import spmd_types as spmd
 import torch
@@ -31,23 +30,13 @@ import torch.nn.functional as F
 from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 
-from torchtitan.models.common import ComplexRoPE, Linear
+from torchtitan.models.common import ComplexRoPE, IdentityRoPE, Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     get_packed_vision_grids,
-    RopeApply,
     VisionTransformerBlock,
 )
-
-
-def _identity_rope(
-    query_TNH: torch.Tensor,
-    key_TNH: torch.Tensor,
-    rope_cache: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    _ = rope_cache
-    return query_TNH, key_TNH
 
 
 def _annotate_vision_activation_type(tensor: torch.Tensor) -> torch.Tensor:
@@ -147,11 +136,11 @@ class NaViTEncoder(Module):
         pos_emb_grid_h: int
         pos_emb_grid_w: int
         rope_freq: VisionRopeFreq.Config
+        rope_apply: ComplexRoPE.Config | IdentityRoPE.Config
         conv1_linear: Linear.Config
         ln_pre: LayerNorm.Config
         block: VisionTransformerBlock.Config
         ln_post: LayerNorm.Config
-        use_rope: bool = True
         grid_sample_mode: str = "bilinear"
         pos_emb_grid_order: str = "raster"
 
@@ -233,11 +222,12 @@ class NaViTEncoder(Module):
         self.sparse_attention_factor = config.sparse_attention_factor
         self.pos_emb_grid_h = config.pos_emb_grid_h
         self.pos_emb_grid_w = config.pos_emb_grid_w
-        self.use_rope = config.use_rope
+        self.use_rope = not isinstance(config.rope_apply, IdentityRoPE.Config)
         self.grid_sample_mode = config.grid_sample_mode
         self.pos_emb_grid_order = config.pos_emb_grid_order
 
         self.rope_freq = config.rope_freq.build()
+        self.rope_apply = config.rope_apply.build()
         self.conv1_linear = config.conv1_linear.build()
         self.positional_embedding_vlm = nn.Parameter(
             torch.empty(
@@ -447,11 +437,6 @@ class NaViTEncoder(Module):
         x_TD = torch.cat(all_x, dim=0)
         freqs_cis_TD = torch.cat(all_freqs, dim=0)
         rope_cache = freqs_cis_TD.unsqueeze(1)
-        rope_apply = (
-            cast(RopeApply, ComplexRoPE.apply_rotary_emb)
-            if self.use_rope
-            else _identity_rope
-        )
         total_tokens = x_TD.shape[0]
 
         sp_slens_cat = torch.cat(all_sp_slens) if all_sp_slens else None
@@ -488,7 +473,7 @@ class NaViTEncoder(Module):
             x_TD = layer(
                 x_TD,
                 rope_cache=rope_cache,
-                rope_apply=rope_apply,
+                rope_apply=self.rope_apply,
                 attention_mask=attention_mask,
             )
 

@@ -11,7 +11,7 @@ block-diagonal FlexInnerAttention mask helper and the pre-norm transformer block
 RoPE differs per model, so each encoder passes it through the block to the
 attention as two per-forward args: ``rope_cache`` (a tensor, so config-based
 sharding can annotate it before it meets the head-sharded q/k) and
-``rope_apply`` (a pass-through callable ``(q, k, rope_cache) -> (q, k)``).
+``rope_apply`` (a callable ``(q, k, *, rope_cache) -> (q, k)``).
 
 Shape suffixes:
 - T = packed visual tokens
@@ -39,10 +39,8 @@ from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 
 compiled_create_block_mask = compile(create_block_mask)
 
-# Applies rotary position embedding: (query, key, rope_cache) -> (query, key).
-RopeApply = Callable[
-    [torch.Tensor, torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]
-]
+# Applies rotary position embedding: (query, key, *, rope_cache) -> (query, key).
+RopeApply = Callable[..., torch.Tensor | tuple[torch.Tensor, torch.Tensor]]
 
 
 class InvariantRowParallelLinear(Linear):
@@ -218,7 +216,7 @@ class VisionAttention(Module):
         q_THDh, k_THDh, v_THDh = self._qkv(x)
 
         remat.recompute_needs_tensor(q_THDh, k_THDh)
-        q_THDh, k_THDh = rope_apply(q_THDh, k_THDh, rope_cache)
+        q_THDh, k_THDh = rope_apply(q_THDh, k_THDh, rope_cache=rope_cache)
 
         out_THDh = remat.region(
             self.flex_attention,

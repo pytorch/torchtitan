@@ -329,6 +329,7 @@ class Qwen35VisionEncoder(Module):
         patch_embed_proj: Linear.Config
         block: VisionTransformerBlock.Config
         rotary_pos_emb: VisionRotaryEmbedding.Config
+        rope_apply: CosSinRoPE.Config
         merger: PatchMerger.Config
 
         def build_flops_estimator(
@@ -389,6 +390,7 @@ class Qwen35VisionEncoder(Module):
         self.num_grid_per_side = int(config.num_position_embeddings**0.5)
 
         self.rotary_pos_emb = config.rotary_pos_emb.build()
+        self.rope_apply = config.rope_apply.build()
         self._cached_freq_table: torch.Tensor | None = None
 
         self.layers = ModuleDict(
@@ -488,7 +490,7 @@ class Qwen35VisionEncoder(Module):
             x = layer(
                 x,
                 rope_cache=rope_cache,
-                rope_apply=CosSinRoPE.apply_rotary_emb,
+                rope_apply=self.rope_apply,
                 attention_mask=attention_mask,
             )
 

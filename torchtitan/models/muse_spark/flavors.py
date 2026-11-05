@@ -64,7 +64,7 @@ from torchtitan.models.common.moe.sharding import (
 from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.common.nn_modules import Conv1d, GELU, LayerNorm, RMSNorm
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.models.common.rope import ComplexRoPE
+from torchtitan.models.common.rope import ComplexRoPE, IdentityRoPE
 from torchtitan.models.common.vision_encoder import (
     InvariantRowParallelLinear,
     VisionAttention,
@@ -647,6 +647,11 @@ def muse_spark_navit_encoder_config(
             rope_theta=rope_theta,
             sharding_config=vision_rope_freq_sharding_config(),
         ),
+        rope_apply=(
+            ComplexRoPE.Config(dim=head_dim, max_context_length=0)
+            if use_rope
+            else IdentityRoPE.Config()
+        ),
         conv1_linear=Linear.Config(
             in_features=patch_input_dim,
             out_features=latent_dim,
@@ -679,7 +684,6 @@ def muse_spark_navit_encoder_config(
             normalized_shape=latent_dim,
             sharding_config=invariant_norm_sharding_config(),
         ),
-        use_rope=use_rope,
         grid_sample_mode=grid_sample_mode,
         pos_emb_grid_order="legacy_spark",
         param_init=_VISION_POSITION_INIT,
