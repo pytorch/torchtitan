@@ -103,8 +103,10 @@ def lift_fusion_region_g003(gm, example_inputs=None):
 
 - A matcher returns the instance's member nodes (views and allocations included; T3
   regions include their GEMM) and its external inputs, or `None`.
-- `is_op(node, target, args, kwargs)`: `N` marks a node slot; other entries are literals
-  compared exactly (dtypes, devices and layouts as strings, e.g. `"torch.float32"`).
+- `is_op(node, target, args, kwargs)`: `N` marks a node slot, `S` a size (any int),
+  `V` a scalar operand (any number), `D('cuda')` a device of that type (any index);
+  other entries are literals compared exactly (dtypes and layouts as strings, e.g.
+  `"torch.float32"`). SKILL.md section 5 says which arguments get which slot.
   `user_of(node, path, target, args, kwargs, skip)` finds a user that has `node` at
   argument `path`.
 - `lift_matches` (`scripts/lift_regions.py`) checks every match with `lift_hazard`
