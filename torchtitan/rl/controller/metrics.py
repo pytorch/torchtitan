@@ -11,9 +11,11 @@
 
 import contextlib
 import logging
+import operator
 import time
 from collections import defaultdict
 
+from torchtitan.components.loss import loss_metric_reduce_op
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.types import Rollout
 
@@ -78,15 +80,15 @@ def forward_backward_wait_and_busy_seconds(
     return wait_s, busy_s
 
 
-_TOKEN_SUM_METRIC_SUFFIXES = ("/mean", "_mean", "/frac", "_frac")
+_REDUCE_FNS = {"sum": operator.add, "max": max, "min": min}
 
 
 def combine_microbatch_metrics(
     microbatch_metrics: list[dict[str, float]],
 ) -> dict[str, float]:
-    """Combine per-microbatch loss metrics over the grad-accumulation: mean/frac keys are token sums,
-    so they add up (`divide_token_sums` turns them into means). For keys ending in "max", the max value
-    is taken.
+    """Combine per-microbatch loss metrics over the grad-accumulation with `loss_metric_reduce_op`:
+    mean/frac keys are token sums, so they add up (`divide_token_sum_metrics` turns them into means);
+    max/min keys take the max/min.
 
     Example:
         combine_microbatch_metrics([{"loss/ratio_clipped_frac": 1.0, "x/max": 2.0},
@@ -96,30 +98,11 @@ def combine_microbatch_metrics(
     combined: dict[str, float] = {}
     for microbatch in microbatch_metrics:
         for key, value in microbatch.items():
-            if key not in combined:
-                combined[key] = value
-            elif key.endswith("/max"):
-                combined[key] = max(combined[key], value)
-            elif key.endswith(_TOKEN_SUM_METRIC_SUFFIXES):
-                combined[key] += value
+            reduce = _REDUCE_FNS[loss_metric_reduce_op(key)]
+            combined[key] = (
+                value if key not in combined else reduce(combined[key], value)
+            )
     return combined
-
-
-def divide_token_sums(
-    metrics: dict[str, float], *, num_loss_tokens: int
-) -> dict[str, float]:
-    """Divide the mean/frac token sums by the step's loss-token count; other keys pass through.
-
-    Example:
-        divide_token_sums({"loss/ratio_clipped_frac": 3.0, "x/max": 5.0}, num_loss_tokens=10)
-        # -> {"loss/ratio_clipped_frac": 0.3, "x/max": 5.0}
-    """
-    # A step with no loss tokens has all-zero sums; dividing by 1 keeps them zero.
-    divisor = max(num_loss_tokens, 1)
-    return {
-        key: value / divisor if key.endswith(_TOKEN_SUM_METRIC_SUFFIXES) else value
-        for key, value in metrics.items()
-    }
 
 
 def compute_perf_ratio_metrics(
