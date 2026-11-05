@@ -23,7 +23,9 @@ if TYPE_CHECKING:
 _TRUNCATED = frozenset(
     {"truncated_length", "truncated_prompt_too_long", "truncated_max_turns"}
 )
-_ERROR = frozenset({"error_parse", "error_timeout", "error_abort", "error"})
+_ERROR = frozenset(
+    {"error_parse", "error_timeout", "error_abort", "error", "error_system"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +144,10 @@ class RolloutStatus(StrEnum):
     ERROR_TIMEOUT = "error_timeout"
     ERROR_ABORT = "error_abort"
     ERROR = "error"
+    # The rollout failed outside the policy: its code raised, or Verifiers recorded an infra error
+    # (a generator 5xx, a sandbox or env failure). It stays in its group for logs, but gets no
+    # reward or advantage and isn't trained.
+    ERROR_SYSTEM = "error_system"
 
     def is_truncated(self) -> bool:
         return self.value in _TRUNCATED
