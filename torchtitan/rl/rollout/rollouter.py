@@ -202,7 +202,8 @@ class Rollouter(Configurable):
             _, pending = await asyncio.wait(calls, timeout=_RUN_GROUP_DRAIN_TIMEOUT_S)
             if pending:
                 logger.warning(
-                    "Stopping rollout workers with %d run_group calls still running",
+                    "Stopping rollout workers with %d run_group calls still running; "
+                    "the job may exit 130",
                     len(pending),
                 )
                 for call in pending:
