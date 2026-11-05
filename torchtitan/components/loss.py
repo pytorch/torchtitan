@@ -108,19 +108,6 @@ def _cross_entropy_loss(
     )
 
 
-# Measured on GB300: with bf16 logits, the accurate exp (libdevice.exp) limits the CE kernels.
-# use_fast_math emits a faster approximate exp (tl_math.exp): same error vs fp64, not bitwise.
-# fp32 CE is memory-bound, and other dtypes are unmeasured, so they keep the accurate exp.
-# Two compiles of one function keep separate graphs and share one recompile limit.
-_fast_exp_cross_entropy_loss = local_compile(
-    "loss", batch_invariant=False, options={"use_fast_math": True}
-)(_cross_entropy_loss)
-_accurate_exp_cross_entropy_loss = local_compile("loss", batch_invariant=False)(
-    _cross_entropy_loss
-)
-
-
-@local_compile("loss", batch_invariant=False)
 def cross_entropy_and_logsumexp(
     pred: torch.Tensor,
     labels: torch.Tensor,
@@ -134,6 +121,21 @@ def cross_entropy_and_logsumexp(
     ``IGNORE_INDEX`` labels. Both share one logsumexp; under TP the lse comes
     from the vocab-parallel CE's existing all-reduces.
     """
+    region = (
+        _fast_exp_cross_entropy_and_logsumexp
+        if pred.dtype == torch.bfloat16
+        else _accurate_exp_cross_entropy_and_logsumexp
+    )
+    return region(pred, labels, global_vocab_size=global_vocab_size)
+
+
+def _cross_entropy_and_logsumexp(
+    pred: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    global_vocab_size: int | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The body of ``cross_entropy_and_logsumexp``, compiled by both regions below."""
     if spmd_mesh_size("tp") > 1:
         if global_vocab_size is None:
             raise ValueError(
@@ -152,6 +154,24 @@ def cross_entropy_and_logsumexp(
     lse = torch.logsumexp(logits, dim=-1)
     target = logits.gather(-1, torch.where(valid, labels, 0).unsqueeze(-1)).squeeze(-1)
     return torch.where(valid, lse - target, 0).sum(), torch.where(valid, lse, 0)
+
+
+# Measured on GB300 with bf16 logits: use_fast_math makes CE fwd+bwd ~17% faster, the z-loss CE ~2-5%.
+# It emits a faster approximate exp (tl_math.exp): same error vs fp64, not bitwise.
+# fp32 CE is memory-bound, and other dtypes are unmeasured, so they keep the accurate exp (libdevice.exp).
+# Each body is compiled twice. Its two compiles keep separate graphs and share one recompile limit.
+_fast_exp_cross_entropy_loss = local_compile(
+    "loss", batch_invariant=False, options={"use_fast_math": True}
+)(_cross_entropy_loss)
+_accurate_exp_cross_entropy_loss = local_compile("loss", batch_invariant=False)(
+    _cross_entropy_loss
+)
+_fast_exp_cross_entropy_and_logsumexp = local_compile(
+    "loss", batch_invariant=False, options={"use_fast_math": True}
+)(_cross_entropy_and_logsumexp)
+_accurate_exp_cross_entropy_and_logsumexp = local_compile(
+    "loss", batch_invariant=False
+)(_cross_entropy_and_logsumexp)
 
 
 # Target probability at and above which the target gradient is -p_non_target.
