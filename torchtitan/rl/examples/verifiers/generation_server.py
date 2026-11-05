@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 _SESSION_ID_HEADER = "X-Session-ID"
 
+
 GROUP_ID_SAMPLING_PARAM = "torchtitan_group_id"
 """Sampling parameter carrying a request's rollout group id.
 
@@ -115,7 +116,7 @@ class GenerationServer(Configurable):
         app.router.add_get("/healthz", self._handle_health_request)
         app.router.add_get("/v1/models", self._handle_models_request)
         app.router.add_post("/inference/v1/generate", self._handle_generate_request)
-        runner = web.AppRunner(app)
+        runner = web.AppRunner(app, access_log_class=_DebugAccessLogger)
         await runner.setup()
         site = web.TCPSite(runner, self.host, self.requested_port)
         await site.start()
@@ -284,6 +285,32 @@ class GenerationServer(Configurable):
                 "prompt_logprobs": None,
                 "kv_transfer_params": None,
             }
+        )
+
+
+class _DebugAccessLogger(web.AbstractAccessLogger):
+    """Log each request at DEBUG on the ``aiohttp.access`` logger.
+
+    aiohttp's default logs one INFO line per request, most of the process's log lines. To see them,
+    run with ``TITAN_LOG_LEVEL=DEBUG``: aiohttp checks the level once per connection, so it must be
+    set before the server starts.
+    """
+
+    @property
+    def enabled(self) -> bool:
+        # False skips the per-request timing and formatting.
+        return self.logger.isEnabledFor(logging.DEBUG)
+
+    def log(
+        self, request: web.BaseRequest, response: web.StreamResponse, time: float
+    ) -> None:
+        self.logger.debug(
+            "%s %s %d %.3fs session=%s",
+            request.method,
+            request.path,
+            response.status,
+            time,
+            request.headers.get(_SESSION_ID_HEADER),
         )
 
 
