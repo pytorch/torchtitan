@@ -51,3 +51,6 @@ CLAUDE_CONTEXT/
 
 # Lychee (link checker) cache
 .lycheecache
+
+# Local-only 910B flex/env patches (not for PR #5772 / upstream).
+docs/npu_910b_patches/

@@ -16,10 +16,10 @@
 | 镜像 | CANN 9.2.0 910B Ubuntu22.04 py3.12 |
 | torch / torch_npu | **须配套**：`2.15.0+cpu` / `2.15.0.dev20261005+git14dc54e`（旧 `…git95c7e46` 会踩 flex 导入 / SympifyError，换包即可，不单列问题） |
 | 训练入口 | `ENTRYPOINT=torchtitan_ascend.train`（勿用裸 `torchtitan.train`） |
-| 必打补丁 | `docs/npu_910b_patches/` + ascend Inductor/remat patches |
+| 必打补丁（本地 910B） | 本机 `docs/npu_910b_patches/`（**不进 PR**）；或 ascend `fixes/torch_npu/` + Inductor/remat |
 | 编译线程 | `TORCHINDUCTOR_COMPILE_THREADS=1`，`TORCHNPU_PRECOMPILE_THREADS=1` |
 
-换机：检出本分支 → 同版本 wheel → `bash docs/npu_910b_patches/apply_npu_910b_patches.sh` → `source docs/npu_910b_patches/env_npu_910b.sh` → ascend 入口。说明见 `docs/npu_910b_patches/README.md`。
+换机（910B 本地）：检出本分支 → 同版本 wheel → 本机 apply `docs/npu_910b_patches/`（gitignore，不进 #5772）或 ascend `fixes/torch_npu/` → ascend 入口。A5 验收勿打 910B flex 补丁。
 
 ---
 
@@ -82,51 +82,47 @@
 
 | 文档 | 用途 |
 | --- | --- |
-| `docs/npu_910b_patches/` | flex/heuristics 可复用补丁 |
+| `docs/npu_910b_patches/`（本地） | 910B flex/heuristics；**不进 PR #5772**；合入侧用 ascend `fixes/torch_npu/` |
 | `docs/npu_debugmodel_verification.md` | 按清单行跑通记录（非四项验收） |
 
 ### 本分支（`npu-muse-spark-r04-code-only`）代码落点
 
-上表 **#1–#9 / #12 的对应改动在本分支**；**#10（Dist-MoE NPU）与 #13 / #14（配方）已迁到 `torchtitan-ascend`**（`patches/dist_moe/`、`recipes/muse_spark.py`）。形态分两类：本仓 Python / 配置，以及需打进当前环境的 site-packages 补丁与环境变量。
+上表 **#1 / #3 / #7–#9** 等本仓 Python 改动可进本 PR；**#2 / #4 / #5(decoding) / #6 / #12** 的 flex/`env` 补丁目录 **只留本地**（gitignore），合入请走 `torchtitan-ascend/fixes/torch_npu/`。**#10 / #13 / #14** 在 ascend。
 
 | # | 在本分支？ | 落点形态（检出后还要做什么） |
 | --- | --- | --- |
 | 1 | 是 | 本仓：`rope.py` / `vision_encoder.py` |
-| 2 | 是 | 补丁：`docs/npu_910b_patches/flex_attention.py.patch`（需 `apply_npu_910b_patches.sh`） |
+| 2 | 本地 910B | flex 补丁：本机 `docs/npu_910b_patches/` 或 ascend `fixes/torch_npu/`（**不进本 PR**） |
 | 3 | 是 | 本仓：`torchtitan_recipes/overrides/fused_swiglu.py` |
-| 4 | 是 | 补丁：`flex_attention.py.patch` + `triton_heuristics.py.patch`（需 apply） |
-| 5 | 部分 | 补丁关 flex decoding；配方 `train_timeout` 在 ascend `recipes/muse_spark.py` |
-| 6 | 是 | 环境变量：`docs/npu_910b_patches/env_npu_910b.sh`（需 `source`） |
+| 4 | 本地 910B | 同上 flex + heuristics（**不进本 PR**） |
+| 5 | 本地 910B | 补丁关 decoding（本地）；配方 timeout 仅 910b_local helper |
+| 6 | 本地 910B | `env_npu_910b.sh`（本地 / ascend `fixes/torch_npu/`；**不进本 PR**） |
 | 7 | 是 | 本仓：`torchtitan/components/loss.py` |
 | 8 | 是 | 本仓：`vision_encoder.py` 的 `contiguous()` |
 | 9 | 是 | 本仓：`CommConfig.init_timeout_seconds` 默认 300 |
 | 10 | 否（迁至 ascend） | `torchtitan-ascend`：`torchtitan_ascend/patches/dist_moe/`（仅 `ENTRYPOINT=torchtitan_ascend.train`） |
 | 11 | 否（已删） | A2 `torch 2.15.0+cpu` 已有相关 API，不再保留兼容探测 |
-| 12 | 是 | 补丁：`triton_heuristics.py.patch`（需 apply） |
+| 12 | 本地 910B | heuristics 补丁（**不进本 PR**） |
 | 13 | 本地 910B 测试 | 不进提交默认路径；本机用 gitignored `recipes/muse_spark_910b_local.py` 设 `train_timeout=1800` |
 | 14 | 本地 910B 测试 | 同上：本地 helper 收窄 `local_compile_regions`；A5 验收用干净 `recipes/muse_spark.py` |
 
-**#2 / #4 / #5（decoding）/ #6 / #12**：只拉分支不够，还要 apply 补丁并 source 环境变量，才会进当前 Python 的 `torch_npu`。  
-**不在本分支**（也不应合入本 PR）：E1 本地 UltraData JSONL；A1–A3（属 `torchtitan-ascend`）。
-
-相对上游 `release/0.4` 开 PR 时，应能在同一 PR 里看到本文档与上表所列本仓代码及 `docs/npu_910b_patches/`。
+**#2 / #4 / #5（decoding）/ #6 / #12**：不进 PR #5772。910B 本机用 gitignored `docs/npu_910b_patches/`，或 ascend `fixes/torch_npu/`。  
+**不在本 PR**：E1 本地 UltraData JSONL；A1–A3；`docs/npu_910b_patches/` 目录本身。
 
 ---
 
-## 可复用补丁（请先看这里）
+## 可复用补丁（本地 910B / ascend，不进本 PR）
 
-910B4 上仍要单独打的 **flex / heuristics** site-packages 改动在：
+910B4 上仍要单独打的 **flex / heuristics** site-packages 改动：
 
-- 目录：`docs/npu_910b_patches/`
-- 应用：`bash docs/npu_910b_patches/apply_npu_910b_patches.sh`
-- 环境变量：`source docs/npu_910b_patches/env_npu_910b.sh`
-- 说明与版本钉扎：`docs/npu_910b_patches/README.md`
+- **本机（gitignore）**：`docs/npu_910b_patches/` → `apply_npu_910b_patches.sh` / `env_npu_910b.sh`
+- **合入侧**：`torchtitan-ascend/fixes/torch_npu/`
 
 不要再手工改 `lowering.py` / `npu_combined_scheduling.py` / `torch_remat/_placeholder.py`。
 
 ### flex attention 非 Ascend 950 适配点
 
-下列改动只针对 **非 950**（本机为 910B4）；Ascend 950 仍走上游默认的 mask-out / decoding / 自动选块等路径。落点以 `docs/npu_910b_patches/` 为主，配方超时在 torchtitan 侧。
+下列改动只针对 **非 950**（本机为 910B4）；Ascend 950 仍走上游默认的 mask-out / decoding / 自动选块等路径。补丁落点见上；A5 勿打 910B flex 补丁。
 
 | 适配点 | 非 950 行为 | 代码/补丁落点 | 详情 |
 | --- | --- | --- | --- |
