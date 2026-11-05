@@ -40,9 +40,6 @@ class GptOssGroupedLinear(GroupedLinear):
         output_RO = super().forward(
             input_RI, offsets_E, routed_scores_R=routed_scores_R
         )
-        if routed_scores_R is None:
-            # The bias add below reads the grouped_mm output with bare ops.
-            remat.recompute_needs_tensor(output_RO)
         bias_RO = self._expand_grouped_bias(
             self.bias.flatten(1), offsets_E, output_RO.shape[0]
         )
@@ -50,14 +47,11 @@ class GptOssGroupedLinear(GroupedLinear):
             bias_RO = bias_RO.to(output_RO.dtype) * routed_scores_R.to(
                 output_RO.dtype
             ).reshape(-1, 1)
-            # Saving the add avoids pinning the grouped_mm output for bias replay.
-            return remat.region(
-                self._add_grouped_bias,
-                self.remat_region_name("bias_add"),
-                recompute=self.remat_should_recompute("bias_add"),
-            )(output_RO, bias_RO.reshape_as(output_RO))
-        bias_RO = bias_RO.reshape_as(output_RO)
-        return self._add_grouped_bias(output_RO, bias_RO)
+        return remat.region(
+            self._add_grouped_bias,
+            self.remat_region_name("bias_add"),
+            recompute=self.remat_should_recompute("bias_add"),
+        )(output_RO, bias_RO.reshape_as(output_RO))
 
     @staticmethod
     def _expand_grouped_bias(
