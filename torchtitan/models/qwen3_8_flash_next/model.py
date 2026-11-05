@@ -301,11 +301,11 @@ class Qwen38FlashNextModel(Qwen35Model):
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominators: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        with spmd_local_context("dp"):
-            if self.tok_embeddings is not None:
-                x_TC = self.tok_embeddings(tokens).repeat(1, self.num_streams)
-            else:
-                x_TC = tokens
+        if self.tok_embeddings is None:
+            x_TC = tokens
+        else:
+            # Embed in the global context so the output records its DP shard.
+            x_TC = self.tok_embeddings(tokens).repeat(1, self.num_streams)
         return self._forward_streams(
             x_TC,
             positions,
@@ -394,8 +394,10 @@ class Qwen38FlashNextMultimodalModel(Qwen38FlashNextModel, Qwen35MultimodalModel
         video_vision_bank_indices_T: torch.Tensor | None = None,
         aux_loss_denominators: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        with spmd_local_context("dp"):
-            if self.tok_embeddings is not None:
+        if self.tok_embeddings is None:
+            x_TC = tokens
+        else:
+            with spmd_local_context("dp"):
                 x_TD = self._prepare_multimodal_embeds(
                     tokens,
                     pixel_values=pixel_values,
@@ -407,9 +409,6 @@ class Qwen38FlashNextMultimodalModel(Qwen38FlashNextModel, Qwen35MultimodalModel
                     video_vision_bank_indices_T=video_vision_bank_indices_T,
                 )
                 x_TC = x_TD.repeat(1, self.num_streams)
-            else:
-                x_TC = tokens
-        if self.tok_embeddings is not None:
             # The vision scatter leaves the embeddings TP-Replicate.
             x_TC = replicate_to_residual(x_TC)
         return self._forward_streams(
