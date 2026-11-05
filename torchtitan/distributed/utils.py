@@ -383,7 +383,7 @@ def configure_nccl_for_ulysses(
     if device_type != "cuda" or comm_backend in {"fake", "real_pp_fake_spmd"}:
         return
 
-    from torchtitan.models.common.attention.cp_attention import UlyssesInnerAttention
+    from torchtitan.models.common.attention.cp_attention import Ulysses
 
     # TODO: Remove this workaround once supported PyTorch builds ship
     # NCCL >= 2.32.3.
@@ -392,7 +392,7 @@ def configure_nccl_for_ulysses(
 
     # We could only reproduce this issue with Ulysses. Always turning on
     # this flag may have performance regressions.
-    if not any(model.traverse(UlyssesInnerAttention.Config)):
+    if not any(model.traverse(Ulysses.Config)):
         return
 
     _warn_overwrite_env("NCCL_GRAPH_REGISTER", "0")
@@ -500,11 +500,15 @@ def init_distributed(
     # Directed physical PP edges need independent, preinitialized communicator
     # FIFOs so eager execution and CUDA graph replay use deterministic ordering.
     # Older PyTorch versions do not expose this option.
+    # XCCL cannot split process groups for directed PP edges.
+    # TODO: upstream issue https://github.com/pytorch/pytorch/issues/186548 and
+    # https://github.com/intel/torch-xpu-ops/issues/5742
+    # Remove this gate once per-edge P2P supports XCCL.
+    backend = torch.distributed.Backend.default_device_backend_map.get(device_type)
+    use_per_edge_p2p = pipeline_parallel_degree > 1 and backend != "xccl"
     if hasattr(dist_config, "pipeline_per_edge_p2p"):
-        setattr(  # noqa: B010
-            dist_config, "pipeline_per_edge_p2p", pipeline_parallel_degree > 1
-        )
-    elif pipeline_parallel_degree > 1:
+        setattr(dist_config, "pipeline_per_edge_p2p", use_per_edge_p2p)  # noqa: B010
+    elif use_per_edge_p2p:
         raise RuntimeError(
             "Pipeline parallelism requires a PyTorch version that provides "
             "torch.distributed.distributed_c10d._config.pipeline_per_edge_p2p."
