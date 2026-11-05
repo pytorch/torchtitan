@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 
 class _FA4PageSize:
-    """Ask vLLM for 128-token KV pages (its ``block_size``) when FA4 runs on SM100/SM103.
+    """Pick the KV kernel page size for FA4 on SM100/SM103: 128 tokens, or 16 if batch-invariant.
 
     There, FA4 loads prefill K/V with one bulk copy (TMA) only when a page holds
     exactly one 128-key tile, and decodes one token per sequence on its SwapAB
@@ -55,10 +55,13 @@ class _FA4PageSize:
     Costs: prefix-cache reuse in whole 128-token pages, up to 127 KV slots wasted
     per sequence, and an explicit ``block_size`` that is not a multiple of 128 now
     fails.
-    Batch-invariant runs keep vLLM's default: SwapAB reads 256 keys per tile, so
-    decode would no longer match prefill bitwise.
-    TODO: batch-invariant Qwen3.5 (head dim 256, where vLLM itself picks 128-token
-    pages) fails bitwise parity on GB300 with FA4 4.0.0b38, on main too.
+    Batch-invariant runs get exactly 16-token pages. FA4 runs its SwapAB decode
+    kernel on any page that is a multiple of 128 (``SwapABPolicy.page_multiple`` in
+    ``flash_attn/cute/config.py``). SwapAB reads 256 keys per tile and prefill reads
+    128, so decode would not match prefill bitwise. ``MultipleOf(16)`` is not enough:
+    it keeps a hybrid model's 1152-token KV block as one page.
+    TODO: ask FA4 for its standard decode kernel per call once torch's varlen
+    attention can pass that choice; batch-invariant runs can then keep 128-token pages.
     """
 
     @classmethod
@@ -68,9 +71,8 @@ class _FA4PageSize:
         if (
             get_cuda_flash_attention_impl() == "FA4"
             and torch.cuda.get_device_capability()[0] == 10
-            and not is_in_batch_invariant_mode()
         ):
-            return [128]
+            return [16] if is_in_batch_invariant_mode() else [128]
         # vLLM main passes kv_cache_spec; the vLLM nightly on PyTorch's index
         # (9f03b51) takes no argument.
         # TODO: always forward it once that nightly includes vllm-project/vllm#53175.
