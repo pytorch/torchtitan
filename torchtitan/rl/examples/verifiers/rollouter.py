@@ -401,10 +401,12 @@ class VerifiersRollouter(Rollouter):
             return RolloutStatus.ERROR_TIMEOUT
         if not verifiers_episode.ok or not trace.ok:
             # Verifiers records a failure as data instead of raising; the first error stopped the
-            # rollout. Only a generator 4xx (e.g. a prompt past the context) or the agent's own
-            # exit after the policy's first turn is the policy's doing. Any other error (a sandbox,
-            # env or tool failure, a generator 5xx or failed connection, a harness that failed
-            # before the first turn) makes the rollout ERROR_SYSTEM.
+            # rollout. Two errors are the policy's doing:
+            # - a prompt past the context: a generator error worded "maximum context length";
+            # - the agent's own exit after the policy's first turn. Verifiers records a harness
+            #   process that crashes on its own the same way, so that counts as the policy's too.
+            # Any other error (a sandbox, env or tool failure, any other generator error, a harness
+            # that failed before the first turn) makes the rollout ERROR_SYSTEM.
             errors = trace.errors or verifiers_episode.errors
             if not errors:
                 return RolloutStatus.ERROR
@@ -413,8 +415,7 @@ class VerifiersRollouter(Rollouter):
                 error.type == VerifiersHarnessError.__name__ and trace.num_turns > 0
             ) or (
                 error.type == VerifiersProviderError.__name__
-                and error.status_code is not None
-                and error.status_code < 500
+                and "maximum context length" in error.message
             )
             return (
                 RolloutStatus.ERROR if is_policy_error else RolloutStatus.ERROR_SYSTEM

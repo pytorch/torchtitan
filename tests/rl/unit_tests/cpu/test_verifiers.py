@@ -42,11 +42,17 @@ from torchtitan.rl.rollout.rubric import RubricOutput
 from torchtitan.rl.rollout.types import Completion, Rollout, RolloutStatus
 
 
-def _recorded_error(error_type: str, status_code: int | None = None) -> SimpleNamespace:
+# vLLM's wording, which the generation server keeps.
+_CONTEXT_OVERFLOW_MESSAGE = "This model's maximum context length is 8 tokens"
+
+
+def _recorded_error(
+    error_type: str, status_code: int | None = None, message: str | None = None
+) -> SimpleNamespace:
     """An error as Verifiers records it on a trace or an episode (`verifiers.v1.trace.Error`)."""
     fields = {
         "type": error_type,
-        "message": f"{error_type} happened",
+        "message": message or f"{error_type} happened",
         "status_code": status_code,
         "traceback": None,
     }
@@ -924,15 +930,35 @@ def test_rollout_status_maps_timeouts_to_error_timeout(
         # The env's own `run()` raised: recorded on the episode, not the trace.
         ([], [_recorded_error("EnvError")], 1, RolloutStatus.ERROR_SYSTEM),
         # A prompt past the context, or the agent's own exit: the policy's doing.
-        ([_recorded_error("ProviderError", 400)], [], 1, RolloutStatus.ERROR),
+        (
+            [_recorded_error("ProviderError", 400, _CONTEXT_OVERFLOW_MESSAGE)],
+            [],
+            1,
+            RolloutStatus.ERROR,
+        ),
         ([_recorded_error("HarnessError")], [], 1, RolloutStatus.ERROR),
-        # A generator 4xx stays ERROR even before the first turn.
-        ([_recorded_error("ProviderError", 400)], [], 0, RolloutStatus.ERROR),
+        # A prompt past the context stays ERROR even before the first turn.
+        (
+            [_recorded_error("ProviderError", 400, _CONTEXT_OVERFLOW_MESSAGE)],
+            [],
+            0,
+            RolloutStatus.ERROR,
+        ),
+        # Any other generator 4xx is a bug in the code around the policy.
+        (
+            [_recorded_error("ProviderError", 400, "missing X-Session-ID header")],
+            [],
+            1,
+            RolloutStatus.ERROR_SYSTEM,
+        ),
         # The harness failed before the policy's first turn: the policy never ran.
         ([_recorded_error("HarnessError")], [], 0, RolloutStatus.ERROR_SYSTEM),
         # The first error stopped the rollout; a later teardown error doesn't change it.
         (
-            [_recorded_error("ProviderError", 400), _recorded_error("SandboxError")],
+            [
+                _recorded_error("ProviderError", 400, _CONTEXT_OVERFLOW_MESSAGE),
+                _recorded_error("SandboxError"),
+            ],
             [],
             1,
             RolloutStatus.ERROR,
