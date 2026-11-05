@@ -85,7 +85,8 @@ def _build_tt_model(tt_config, device: torch.device):
         model = tt_config.build()
     model.to_empty(device="cpu")
     model.init_states(buffer_device=torch.device("cpu"))
-    return model.to(device=device, dtype=_DTYPE).eval()
+    # Parameters were initialized in FP32; preserve the complex RoPE buffers.
+    return model.to(device=device).eval()
 
 
 def _build_hf_model(
