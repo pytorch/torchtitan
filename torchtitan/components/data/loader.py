@@ -14,9 +14,11 @@ from typing import Any
 import grain.python as grain
 from grain import experimental as grain_experimental
 from torch.distributed.checkpoint.stateful import Stateful
-
 from torchtitan.components.data.collators import Collator, TextCollator
 from torchtitan.components.data.dataset import DatasetConfig
+
+from torchtitan.components.data.multimodal.image_processor import ImageProcessor
+from torchtitan.components.data.multimodal.video_processor import VideoProcessor
 from torchtitan.components.data.types import (
     DatasetBuildContext,
     DatasetIterationPolicy,
@@ -91,6 +93,8 @@ class GrainDataLoader(BaseDataLoader):
         tokenizer: BaseTokenizer,
         max_context_length: int,
         num_tokens_per_microbatch: int,
+        image_processor: ImageProcessor | None = None,
+        video_processor: VideoProcessor | None = None,
         **kwargs: Any,
     ) -> None:
         del kwargs
@@ -118,6 +122,8 @@ class GrainDataLoader(BaseDataLoader):
             read_options=read_options,
             max_num_documents=config.max_num_documents,
             num_mtp_layers=config.num_mtp_layers,
+            image_processor=image_processor,
+            video_processor=video_processor,
         )
         dataset_iteration_policy = DatasetIterationPolicy(
             seed=config.seed,

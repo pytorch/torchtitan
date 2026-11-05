@@ -9,10 +9,12 @@
 import dataclasses
 from collections.abc import Callable
 from functools import partial
+from typing import Any
 
 import spmd_types as spmd
 import torch.nn as nn
 
+from torchtitan.components.data.multimodal.image_processor import resize_to_pixel_budget
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
@@ -93,7 +95,9 @@ from .vision_encoder import PatchMerger, Qwen35VisionEncoder, VisionRotaryEmbedd
 __all__ = [
     "Qwen35Model",
     "MODEL_FLAVORS",
+    "QWEN3_5_IMAGE_PROCESSOR_KWARGS",
     "QWEN3_5_SPECIAL_TOKENS",
+    "QWEN3_5_VIDEO_PROCESSOR_KWARGS",
     "build_model_config",
 ]
 
@@ -104,6 +108,30 @@ QWEN3_5_SPECIAL_TOKENS = {
     "vision_end_token": "<|vision_end|>",
     "pad_token": "<|endoftext|>",
 }
+
+# ``ImageProcessor.Config`` fields, used like the special tokens:
+# ``ImageProcessor.Config(**QWEN3_5_IMAGE_PROCESSOR_KWARGS)``. The values match the
+# Hugging Face ``preprocessor_config.json`` shared by every Qwen3.5, Qwen3.6 and
+# Qwen3.8 vision checkpoint, and the vision encoder's patch sizes. Two fields
+# are not in the Hugging Face config: ``resize_fn`` reimplements the resize in
+# ``Qwen2VLImageProcessor``'s code, and ``patch_order`` is the patch layout this
+# vision encoder expects.
+QWEN3_5_IMAGE_PROCESSOR_KWARGS: dict[str, Any] = {
+    "patch_size": 16,
+    "temporal_patch_size": 2,
+    "spatial_merge_size": 2,
+    "image_mean": (0.5, 0.5, 0.5),
+    "image_std": (0.5, 0.5, 0.5),
+    "resize_fn": resize_to_pixel_budget,
+    "patch_order": "block",
+    "min_pixels": 65_536,
+    "max_pixels": 16_777_216,
+}
+
+# TODO: the Hugging Face ``video_preprocessor_config.json`` uses a different
+# pixel budget (4,096 to 25,165,824); this keeps the image budget the multimodal
+# dataloader has used for video so far.
+QWEN3_5_VIDEO_PROCESSOR_KWARGS = dict(QWEN3_5_IMAGE_PROCESSOR_KWARGS)
 
 
 _LINEAR_INIT = {

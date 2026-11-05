@@ -6,14 +6,15 @@
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import spmd_types as spmd
 import torch
 import torch.nn as nn
 from spmd_types.checker import typecheck
 from torch.nn.attention.flex_attention import create_mask
+from torchtitan.components.data.multimodal.image_processor import resize_to_pixel_budget
 from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
+from torchtitan.components.data.multimodal.video_processor import VideoProcessor
 
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.models.common.linear import Linear
@@ -151,12 +152,10 @@ class TestPackedVision(unittest.TestCase):
             num_tokens_per_microbatch=8,
             max_context_length=4,
             num_mtp_layers=0,
+            image_processor=None,
+            video_processor=None,
         )
-        collator = MultiModalCollator.Config(
-            patch_size=1,
-            temporal_patch_size=1,
-            spatial_merge_size=1,
-        ).build(context=context)
+        collator = MultiModalCollator.Config().build(context=context)
         batch = [
             {
                 "input_ids": torch.tensor([1, 2, 3, 4, 5]),
@@ -184,12 +183,10 @@ class TestPackedVision(unittest.TestCase):
             num_tokens_per_microbatch=10,
             max_context_length=4,
             num_mtp_layers=0,
+            image_processor=None,
+            video_processor=None,
         )
-        collator = MultiModalCollator.Config(
-            patch_size=1,
-            temporal_patch_size=1,
-            spatial_merge_size=1,
-        ).build(context=context)
+        collator = MultiModalCollator.Config().build(context=context)
         batch = [
             {
                 "input_ids": torch.tensor([1, 2, 3]),
@@ -207,45 +204,27 @@ class TestPackedVision(unittest.TestCase):
         # The tail is padding regardless of how its positions were filled in.
         torch.testing.assert_close(padding_mask, torch.tensor([False] * 3 + [True] * 7))
 
-    def test_collator_concatenates_patches(self) -> None:
-        patches_0 = torch.arange(12).view(3, 4)
-        patches_1 = torch.arange(8).view(2, 4) + 20
-        grid_0 = torch.tensor([1, 1, 3])
-        grid_1 = torch.tensor([1, 1, 2])
-        tokenizer = type("Tokenizer", (), {"pad_id": 99})()
-        context = SimpleNamespace(
-            tokenizer=tokenizer,
-            num_tokens_per_microbatch=8,
-            max_context_length=4,
-            num_mtp_layers=0,
-        )
-        collator = MultiModalCollator.Config(
-            patch_size=1,
-            temporal_patch_size=1,
-            spatial_merge_size=1,
-        ).build(context=context)
-
-        with patch(
-            "torchtitan.components.data.multimodal.mm_collator.vision_to_patches",
-            side_effect=[(patches_0, grid_0), (patches_1, grid_1)],
-        ):
-            packed, grids = collator.collate_images([torch.empty(0), torch.empty(0)])
-
-        torch.testing.assert_close(packed, torch.cat([patches_0, patches_1]))
-        torch.testing.assert_close(grids, torch.stack([grid_0, grid_1]))
-
     def test_collator_counts_partial_temporal_patch(self) -> None:
-        collator = MultiModalCollator.Config(
-            max_images_per_microbatch=1,
+        video_processor = VideoProcessor.Config(
+            patch_size=1,
             temporal_patch_size=2,
-        ).build(
+            spatial_merge_size=1,
+            image_mean=(0.5, 0.5, 0.5),
+            image_std=(0.5, 0.5, 0.5),
+            resize_fn=resize_to_pixel_budget,
+            patch_order="block",
+        ).build()
+        collator = MultiModalCollator.Config(max_images_per_microbatch=1).build(
             context=SimpleNamespace(
                 tokenizer=None,
                 num_tokens_per_microbatch=0,
                 max_context_length=0,
                 num_mtp_layers=0,
+                image_processor=None,
+                video_processor=video_processor,
             )
         )
+        # Three frames at two frames per temporal patch are two vision entries.
         batch = [{"pixel_values_videos": [torch.empty(3, 1, 1, 1)]}]
 
         with self.assertRaisesRegex(ValueError, "2 vision entries"):

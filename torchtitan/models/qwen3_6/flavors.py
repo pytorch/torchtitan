@@ -17,17 +17,20 @@ from torchtitan.models.qwen3_5.flavors import (
     _debugmodel,
     _debugmodel_moe,
     Qwen35Model,
+    QWEN3_5_IMAGE_PROCESSOR_KWARGS,
     QWEN3_5_SPECIAL_TOKENS,
 )
 
 __all__ = [
     "build_model_config",
+    "QWEN3_6_IMAGE_PROCESSOR_KWARGS",
     "QWEN3_6_SPECIAL_TOKENS",
     "Qwen35Model",
     "MODEL_FLAVORS",
 ]
 
 QWEN3_6_SPECIAL_TOKENS = dict(QWEN3_5_SPECIAL_TOKENS)
+QWEN3_6_IMAGE_PROCESSOR_KWARGS = dict(QWEN3_5_IMAGE_PROCESSOR_KWARGS)
 
 MODEL_FLAVORS = {
     "debugmodel": (_debugmodel, 4096),

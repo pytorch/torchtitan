@@ -11,7 +11,8 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-import torchvision.transforms.v2.functional as TVF
+import numpy as np
+import torch
 
 from torchtitan.components.data.dataset import SingleDatasetConfig
 from torchtitan.components.data.multimodal.mm_datasets import (
@@ -21,7 +22,7 @@ from torchtitan.components.data.multimodal.mm_datasets import (
     VisionProcessor,
 )
 from torchtitan.components.data.multimodal.utils.audio import load_pcm_waveform
-from torchtitan.components.data.multimodal.utils.video import load_npy_video_frames
+from torchtitan.components.data.multimodal.video_processor import VideoProcessor
 from torchtitan.components.data.sources import IndexedJsonlSource
 from torchtitan.components.tokenizer import MultiModalTokenizer
 
@@ -31,6 +32,44 @@ _ASSET_ROOT = (
 ).resolve()
 _AUDIO_ROOT = (_ASSET_ROOT / "audio_text").resolve()
 _VIDEO_ROOT = (_ASSET_ROOT / "video_text").resolve()
+
+
+def load_npy_video_frames(path: str | Path) -> torch.Tensor:
+    """Load a deterministic uint8 frame array from a NumPy file.
+
+    Args:
+        path: Path to a ``.npy`` array shaped ``(T, H, W, 3)``.
+
+    Returns:
+        A C-contiguous uint8 tensor with the same shape and values.
+
+    Raises:
+        ValueError: If the array is not a non-empty, C-contiguous uint8 THWC
+            array with three channels. NumPy also raises ``ValueError`` for
+            object arrays because pickle loading is disabled.
+    """
+    frames_THWC = np.load(path, allow_pickle=False)
+    if frames_THWC.dtype != np.uint8:
+        raise ValueError(
+            f"Video frame array must have dtype uint8, got {frames_THWC.dtype}"
+        )
+    if frames_THWC.ndim != 4:
+        raise ValueError(
+            f"Video frame array must have 4 dimensions (T, H, W, C), "
+            f"got shape {frames_THWC.shape}"
+        )
+    if any(size == 0 for size in frames_THWC.shape):
+        raise ValueError(
+            f"Video frame array must have non-empty dimensions, "
+            f"got shape {frames_THWC.shape}"
+        )
+    if frames_THWC.shape[-1] != 3:
+        raise ValueError(
+            f"Video frame array must have 3 channels, got {frames_THWC.shape[-1]}"
+        )
+    if not frames_THWC.flags.c_contiguous:
+        raise ValueError("Video frame array must be C-contiguous")
+    return torch.from_numpy(frames_THWC)
 
 
 def _process_synthetic_audio_text_sample(
@@ -61,36 +100,17 @@ def _process_synthetic_audio_text_sample(
 def _process_synthetic_video_text_sample(
     sample: dict[str, Any],
     tokenizer: MultiModalTokenizer,
-    patch_size: int,
-    temporal_patch_size: int,
-    spatial_merge_size: int,
-    min_pixels: int,
-    max_pixels: int,
-    image_mean: tuple[float, ...],
-    image_std: tuple[float, ...],
-    resize_fn: Callable[..., tuple[int, int, int, int]],
-    max_patches: int,
-    max_patches_per_side: int,
+    video_processor: VideoProcessor | None,
     *,
     video_root: Path,
-    image_interpolation_mode: TVF.InterpolationMode = TVF.InterpolationMode.BICUBIC,
+    **kwargs,
 ) -> dict[str, Any] | None:
     frames = load_npy_video_frames(video_root / sample["video_path"])
     return _process_video_text_sample(
         text=sample["text"],
         frames=frames,
         tokenizer=tokenizer,
-        patch_size=patch_size,
-        temporal_patch_size=temporal_patch_size,
-        spatial_merge_size=spatial_merge_size,
-        min_pixels=min_pixels,
-        max_pixels=max_pixels,
-        image_mean=image_mean,
-        image_std=image_std,
-        resize_fn=resize_fn,
-        image_interpolation_mode=image_interpolation_mode,
-        max_patches=max_patches,
-        max_patches_per_side=max_patches_per_side,
+        video_processor=video_processor,
     )
 
 

@@ -8,32 +8,50 @@
 
 ``resize_to_navit_patch_grid`` follows Kimi's NaViT image geometry: apply total
 and per-side patch limits before padding to a ``patch_size * merge_size`` grid.
-These tests pin that pure-geometry behavior.
+These tests pin that pure-geometry behavior, and the ``ImageProcessor`` /
+``VideoProcessor`` preprocessing built on the resize rules.
 """
 
 import math
-import tempfile
 import unittest
-from pathlib import Path
 
-import numpy as np
 import torch
 import torchvision.transforms.v2.functional as TVF
 from PIL import Image
-from torchtitan.components.data.multimodal.mm_datasets import _process_mm_sample
-from torchtitan.components.data.multimodal.utils.image import (
-    calculate_vision_tokens,
-    process_image,
+from torchtitan.components.data.multimodal.image_processor import (
+    ImageProcessor,
     resize_to_navit_patch_grid,
     resize_to_pixel_budget,
-    vision_to_patches,
 )
-from torchtitan.components.data.multimodal.utils.video import (
-    load_npy_video_frames,
-    process_video,
-)
+from torchtitan.components.data.multimodal.mm_datasets import _process_mm_sample
+from torchtitan.components.data.multimodal.video_processor import VideoProcessor
 
 from torchtitan.components.loss import IGNORE_INDEX
+
+
+def _image_processor_config(**overrides) -> ImageProcessor.Config:
+    fields = dict(
+        patch_size=16,
+        temporal_patch_size=2,
+        spatial_merge_size=2,
+        image_mean=(0.5, 0.5, 0.5),
+        image_std=(0.5, 0.5, 0.5),
+        resize_fn=resize_to_pixel_budget,
+        patch_order="block",
+    )
+    fields.update(overrides)
+    return ImageProcessor.Config(**fields)
+
+
+def _reference_patches(
+    resized_TCHW: torch.Tensor, config: ImageProcessor.Config
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Normalize and patchify resized uint8 frames step by step."""
+    pixels_TCHW = TVF.to_dtype(resized_TCHW, torch.float32, scale=True)
+    pixels_TCHW = TVF.normalize(
+        pixels_TCHW, list(config.image_mean), list(config.image_std)
+    )
+    return config.build().patchify(pixels_TCHW.permute(0, 2, 3, 1))
 
 
 def _navit_patch_grid_geometry(h, w, *, patch_size, merge_size, max_patches):
@@ -129,73 +147,100 @@ class TestResizeToNavitPatchGrid(unittest.TestCase):
         self.assertEqual((rh, rw, ph, pw), (height, width, 0, 0))
 
 
-class TestProcessImageNavitPatchGrid(unittest.TestCase):
+class TestImageProcessorNavitPatchGrid(unittest.TestCase):
     def test_navit_pads_to_factor_multiple(self):
         ps, merge = 14, 2
         factor = ps * merge
         # 100x173 is not a factor multiple -> navit must pad to one.
         img = Image.fromarray((torch.rand(100, 173, 3) * 255).to(torch.uint8).numpy())
-        out = process_image(
-            img,
+        processor = _image_processor_config(
             patch_size=ps,
-            merge_size=merge,
+            temporal_patch_size=1,
+            spatial_merge_size=merge,
             resize_fn=resize_to_navit_patch_grid,
+            patch_order="raster",
             max_patches=4096,
-            image_mean=(0.5, 0.5, 0.5),
-            image_std=(0.5, 0.5, 0.5),
-        )
-        self.assertIsNotNone(out)
-        # (1, H, W, C)
-        _, H, W, C = out.shape
-        self.assertEqual(C, 3)
+        ).build()
+        pixels, grid_thw = processor.resize_and_normalize(img)
+        pixel_values, _ = processor.patchify(pixels)
+        t, h, w = grid_thw.tolist()
+        H, W = h * ps, w * ps
         self.assertEqual(H % factor, 0)
         self.assertEqual(W % factor, 0)
         want_h, want_w = _navit_patch_grid_geometry(
             100, 173, patch_size=ps, merge_size=merge, max_patches=4096
         )
         self.assertEqual((H, W), (want_h, want_w))
+        self.assertEqual(pixel_values.shape, (t * h * w, 3 * ps * ps))
 
 
-class TestProcessImageInterpolationMode(unittest.TestCase):
+class TestImageProcessorInterpolationMode(unittest.TestCase):
     def test_lanczos_matches_torchvision_tensor_resize(self):
         image_CHW = torch.arange(3 * 5 * 7, dtype=torch.uint8).reshape(3, 5, 7)
         pil_image = Image.fromarray(image_CHW.permute(1, 2, 0).numpy())
         expected_CHW = TVF.resize(
             image_CHW,
-            [3, 4],
+            [4, 6],
             interpolation=TVF.InterpolationMode.LANCZOS,
             antialias=True,
         )
-        expected_CHW = TVF.to_dtype(expected_CHW, torch.float32, scale=True)
-        expected_CHW = TVF.normalize(expected_CHW, [0.5] * 3, [0.5] * 3)
 
         def fixed_geometry(*args, **kwargs):
-            return 3, 4, 0, 0
+            return 4, 6, 0, 0
 
-        actual = process_image(
-            pil_image,
+        config = _image_processor_config(
+            patch_size=2,
+            spatial_merge_size=1,
             resize_fn=fixed_geometry,
-            image_interpolation_mode=TVF.InterpolationMode.LANCZOS,
+            image_interpolation_mode="lanczos",
         )
+        processor = config.build()
+        actual, _ = processor.patchify(processor.resize_and_normalize(pil_image)[0])
 
-        self.assertIsNotNone(actual)
-        self.assertTrue(torch.equal(actual, expected_CHW.permute(1, 2, 0).unsqueeze(0)))
-
-
-class TestLoadNpyVideoFrames(unittest.TestCase):
-    def test_loads_c_contiguous_uint8_thwc_array(self):
-        frames_THWC = np.arange(2 * 3 * 4 * 3, dtype=np.uint8).reshape(2, 3, 4, 3)
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "frames.npy"
-            np.save(path, frames_THWC)
-
-            actual_THWC = load_npy_video_frames(path)
-
-        self.assertTrue(actual_THWC.is_contiguous())
-        self.assertTrue(torch.equal(actual_THWC, torch.from_numpy(frames_THWC)))
+        expected, _ = _reference_patches(expected_CHW.unsqueeze(0), config)
+        self.assertTrue(torch.equal(actual, expected))
 
 
-class TestProcessVideoResize(unittest.TestCase):
+class TestImageProcessorPreprocess(unittest.TestCase):
+    def test_matches_step_by_step_preprocessing(self):
+        # decode -> resize -> normalize -> patchify, bitwise, in both patch orders.
+        image_HWC = (torch.rand(100, 173, 3) * 255).to(torch.uint8)
+        pil_image = Image.fromarray(image_HWC.numpy())
+        for patch_order in ("block", "raster"):
+            config = _image_processor_config(patch_order=patch_order)
+
+            processor = config.build()
+            pixels, grid_thw = processor.resize_and_normalize(pil_image)
+            pixel_values, patch_grid_thw = processor.patchify(pixels)
+            self.assertEqual(patch_grid_thw.tolist(), grid_thw.tolist())
+
+            resize_h, resize_w, _, _ = resize_to_pixel_budget(
+                100,
+                173,
+                patch_size=16,
+                merge_size=2,
+                min_pixels=config.min_pixels,
+                max_pixels=config.max_pixels,
+            )
+            expected_CHW = TVF.resize(
+                image_HWC.permute(2, 0, 1),
+                [resize_h, resize_w],
+                interpolation=TVF.InterpolationMode.BICUBIC,
+                antialias=True,
+            )
+            expected, expected_grid = _reference_patches(
+                expected_CHW.unsqueeze(0), config
+            )
+            self.assertTrue(torch.equal(pixel_values, expected))
+            self.assertEqual(grid_thw.tolist(), expected_grid.tolist())
+
+    def test_num_placeholder_tokens(self):
+        processor = _image_processor_config().build()
+        # A (1, 4, 6) patch grid merges 2x2 patches into 2 * 3 tokens.
+        self.assertEqual(processor.num_placeholder_tokens((1, 4, 6)), 6)
+
+
+class TestVideoProcessorPreprocess(unittest.TestCase):
     def test_custom_resize_padding_and_interpolation(self):
         video_TCHW = torch.arange(1 * 3 * 2 * 2, dtype=torch.uint8).reshape(1, 3, 2, 2)
         video_THWC = video_TCHW.permute(0, 2, 3, 1)
@@ -203,29 +248,34 @@ class TestProcessVideoResize(unittest.TestCase):
 
         def custom_resize(height, width, **kwargs):
             resize_calls.append((height, width, kwargs))
-            return 2, 3, 1, 2
+            return 4, 6, 4, 2
 
         expected_TCHW = TVF.resize(
             video_TCHW,
-            [2, 3],
+            [4, 6],
             interpolation=TVF.InterpolationMode.NEAREST,
             antialias=True,
         )
-        expected_TCHW = TVF.pad(expected_TCHW, [0, 0, 2, 1])
-        expected_TCHW = TVF.to_dtype(expected_TCHW, torch.float32, scale=True)
-        expected_TCHW = TVF.normalize(expected_TCHW, [0.5] * 3, [0.5] * 3)
+        expected_TCHW = TVF.pad(expected_TCHW, [0, 0, 2, 4])
 
-        actual_THWC = process_video(
-            video_THWC,
+        config = VideoProcessor.Config(
             patch_size=4,
-            merge_size=2,
+            temporal_patch_size=2,
+            spatial_merge_size=2,
+            image_mean=(0.5, 0.5, 0.5),
+            image_std=(0.5, 0.5, 0.5),
+            resize_fn=custom_resize,
+            patch_order="block",
             max_pixels=200,
             min_pixels=20,
-            resize_fn=custom_resize,
-            image_interpolation_mode=TVF.InterpolationMode.NEAREST,
+            image_interpolation_mode="nearest",
             max_patches=12,
             max_patches_per_side=5,
         )
+        processor = config.build()
+        pixels, grid_thw = processor.resize_and_normalize_video(video_THWC)
+        pixel_values, patch_grid_thw = processor.patchify(pixels)
+        self.assertEqual(patch_grid_thw.tolist(), grid_thw.tolist())
 
         self.assertEqual(
             resize_calls,
@@ -244,8 +294,11 @@ class TestProcessVideoResize(unittest.TestCase):
                 )
             ],
         )
-        self.assertEqual(actual_THWC.shape, (1, 3, 5, 3))
-        self.assertTrue(torch.equal(actual_THWC, expected_TCHW.permute(0, 2, 3, 1)))
+        expected, expected_grid = _reference_patches(expected_TCHW, config)
+        # Resized to 4 x 6, padded to 8 x 8: a (1, 2, 2) grid of 4 x 4 patches.
+        self.assertEqual(grid_thw.tolist(), [1, 2, 2])
+        self.assertEqual(expected_grid.tolist(), [1, 2, 2])
+        self.assertTrue(torch.equal(pixel_values, expected))
 
 
 class TestVisionToPatchesOrder(unittest.TestCase):
@@ -255,8 +308,17 @@ class TestVisionToPatchesOrder(unittest.TestCase):
         # 2x4 patch grid (h=2, w=4), merge_size=2. Distinct per-patch values so
         # the two orderings are a pure permutation of each other.
         img = torch.arange(1 * 28 * 56 * 3, dtype=torch.float32).reshape(1, 28, 56, 3)
-        block, grid = vision_to_patches(img, 14, 1, 2, patch_order="block")
-        raster, _ = vision_to_patches(img, 14, 1, 2, patch_order="raster")
+        moonvit_style = dict(patch_size=14, temporal_patch_size=1, spatial_merge_size=2)
+        block, grid = (
+            _image_processor_config(**moonvit_style, patch_order="block")
+            .build()
+            .patchify(img)
+        )
+        raster, _ = (
+            _image_processor_config(**moonvit_style, patch_order="raster")
+            .build()
+            .patchify(img)
+        )
 
         self.assertEqual(grid.tolist(), [1, 2, 4])
         self.assertEqual(block.shape, raster.shape)
@@ -266,9 +328,8 @@ class TestVisionToPatchesOrder(unittest.TestCase):
             self.assertTrue(torch.equal(block[b], raster[r]))
 
     def test_invalid_patch_order_raises(self):
-        img = torch.zeros(1, 28, 28, 3)
-        with self.assertRaises(ValueError):
-            vision_to_patches(img, 14, 1, 2, patch_order="bogus")
+        with self.assertRaisesRegex(ValueError, "patch_order"):
+            _image_processor_config(patch_order="bogus")
 
 
 class _FakeMMTokenizer:
@@ -306,53 +367,25 @@ def _synthetic_rgb_image(height=64, width=64) -> Image.Image:
     return Image.fromarray((torch.rand(height, width, 3) * 255).to(torch.uint8).numpy())
 
 
-def _process_synthetic_image(*, temporal_patch_size: int):
-    return _process_mm_sample(
-        texts=[None, "hi"],
-        images=[_synthetic_rgb_image(), None],
-        tokenizer=_FakeMMTokenizer(),
+def _sample_image_processor(*, temporal_patch_size: int) -> ImageProcessor:
+    return _image_processor_config(
         patch_size=_IMAGE_TOKEN_GEOM["patch_size"],
         temporal_patch_size=temporal_patch_size,
         spatial_merge_size=_IMAGE_TOKEN_GEOM["spatial_merge_size"],
         min_pixels=1,
         max_pixels=1_000_000,
-        image_mean=(0.5, 0.5, 0.5),
-        image_std=(0.5, 0.5, 0.5),
-        resize_fn=resize_to_pixel_budget,
-        max_patches=4096,
-        max_patches_per_side=512,
+    ).build()
+
+
+def _process_synthetic_image(*, temporal_patch_size: int):
+    return _process_mm_sample(
+        texts=[None, "hi"],
+        images=[_synthetic_rgb_image(), None],
+        tokenizer=_FakeMMTokenizer(),
+        image_processor=_sample_image_processor(
+            temporal_patch_size=temporal_patch_size
+        ),
     )
-
-
-class TestCalculateVisionTokens(unittest.TestCase):
-    def test_image_token_count_independent_of_temporal_patch_size(self):
-        image_tps1 = calculate_vision_tokens(
-            num_frames=1, temporal_patch_size=1, **_IMAGE_TOKEN_GEOM
-        )
-        image_tps2 = calculate_vision_tokens(
-            num_frames=1, temporal_patch_size=2, **_IMAGE_TOKEN_GEOM
-        )
-        self.assertEqual(image_tps1, image_tps2)
-        for tps in (1, 2, 3, 8):
-            self.assertEqual(
-                calculate_vision_tokens(
-                    num_frames=1, temporal_patch_size=tps, **_IMAGE_TOKEN_GEOM
-                ),
-                image_tps1,
-            )
-
-    def test_two_frames_scales_with_temporal_patch_size(self):
-        image_count, _, _ = calculate_vision_tokens(
-            num_frames=1, temporal_patch_size=1, **_IMAGE_TOKEN_GEOM
-        )
-        two_frames_tps2, _, _ = calculate_vision_tokens(
-            num_frames=2, temporal_patch_size=2, **_IMAGE_TOKEN_GEOM
-        )
-        two_frames_tps1, _, _ = calculate_vision_tokens(
-            num_frames=2, temporal_patch_size=1, **_IMAGE_TOKEN_GEOM
-        )
-        self.assertEqual(two_frames_tps2, image_count)
-        self.assertEqual(two_frames_tps1, 2 * image_count)
 
 
 class TestProcessMmSampleLossMasking(unittest.TestCase):
@@ -361,16 +394,7 @@ class TestProcessMmSampleLossMasking(unittest.TestCase):
             texts=["a", None, "VP"],
             images=[None, _synthetic_rgb_image(), None],
             tokenizer=_FakeMMTokenizer(),
-            patch_size=_IMAGE_TOKEN_GEOM["patch_size"],
-            temporal_patch_size=1,
-            spatial_merge_size=_IMAGE_TOKEN_GEOM["spatial_merge_size"],
-            min_pixels=1,
-            max_pixels=1_000_000,
-            image_mean=(0.5, 0.5, 0.5),
-            image_std=(0.5, 0.5, 0.5),
-            resize_fn=resize_to_pixel_budget,
-            max_patches=4096,
-            max_patches_per_side=512,
+            image_processor=_sample_image_processor(temporal_patch_size=1),
         )
 
         self.assertIsNotNone(sample)
@@ -388,15 +412,35 @@ class TestProcessMmSampleLossMasking(unittest.TestCase):
 
 class TestProcessMmSampleTemporalPatchSize(unittest.TestCase):
     def test_image_placeholders_match_across_temporal_patch_sizes(self):
-        expected_tokens, _, _ = calculate_vision_tokens(
-            num_frames=1, temporal_patch_size=1, **_IMAGE_TOKEN_GEOM
-        )
+        # A 64 x 64 image in 32 x 32-pixel merged tokens, for any temporal patch size.
+        expected_tokens = 4
         counts = []
         for tps in (1, 2, 3, 8):
             sample = _process_synthetic_image(temporal_patch_size=tps)
             self.assertIsNotNone(sample)
             counts.append(int((sample["input_ids"] == _FakeMMTokenizer.image_id).sum()))
         self.assertTrue(all(count == expected_tokens for count in counts))
+
+
+class TestProcessMmSampleImageErrors(unittest.TestCase):
+    def test_unreadable_image_drops_sample(self):
+        sample = _process_mm_sample(
+            texts=[None, "hi"],
+            images=[b"not an image", None],
+            tokenizer=_FakeMMTokenizer(),
+            image_processor=_sample_image_processor(temporal_patch_size=1),
+        )
+
+        self.assertIsNone(sample)
+
+    def test_image_sample_without_image_processor_raises(self):
+        with self.assertRaisesRegex(ValueError, "image_processor"):
+            _process_mm_sample(
+                texts=[None, "hi"],
+                images=[_synthetic_rgb_image(), None],
+                tokenizer=_FakeMMTokenizer(),
+                image_processor=None,
+            )
 
 
 if __name__ == "__main__":

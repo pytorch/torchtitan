@@ -74,6 +74,8 @@ def _generic_validator(loader):
     validator.dp_world_size = 1
     validator.dp_rank = 0
     validator.tokenizer = mock.Mock()
+    validator.image_processor = None
+    validator.video_processor = None
     validator.seq_len = 4
     validator.num_tokens_per_microbatch = 4
     validator.metrics_processor = SimpleNamespace(

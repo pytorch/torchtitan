@@ -5,11 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-from dataclasses import replace
 
 import torch
 
 from torchtitan.components.data import GrainDataLoader
+from torchtitan.components.data.multimodal.image_processor import (
+    ImageProcessor,
+    resize_to_pixel_budget,
+)
 from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
 from torchtitan.components.data.multimodal.mm_datasets import (
     MM_DATASETS,
@@ -31,6 +34,18 @@ _TOKENIZER_CONFIG = MultiModalTokenizer.Config(
 
 _TOKENIZER = _TOKENIZER_CONFIG.build(tokenizer_path=_TOKENIZER_PATH)
 
+_IMAGE_PROCESSOR = ImageProcessor.Config(
+    patch_size=16,
+    temporal_patch_size=2,
+    spatial_merge_size=2,
+    image_mean=(0.5, 0.5, 0.5),
+    image_std=(0.5, 0.5, 0.5),
+    resize_fn=resize_to_pixel_budget,
+    patch_order="block",
+    min_pixels=784,
+    max_pixels=200000,
+).build()
+
 
 class TestMMDatasetCheckpointing(unittest.TestCase):
     """Test save/load for multimodal dataset, mirroring test_dataset_checkpointing.py."""
@@ -42,17 +57,9 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
         world_size,
         rank,
     ):
-        dataset = MM_DATASETS["cc12m-test"]
-        assert dataset.processor is not None
-        dataset = replace(
-            dataset,
-            processor=replace(
-                dataset.processor,
-                min_pixels=784,
-                max_pixels=200000,
-            ),
+        dataset = MMSamplePackingConfig(
+            dataset=MM_DATASETS["cc12m-test"], num_packing_bins=2
         )
-        dataset = MMSamplePackingConfig(dataset=dataset, num_packing_bins=2)
         dl_config = GrainDataLoader.Config(
             dataset=dataset,
             collator=MultiModalCollator.Config(),
@@ -65,6 +72,7 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
             tokenizer=_TOKENIZER,
             max_context_length=max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
+            image_processor=_IMAGE_PROCESSOR,
         )
 
     def test_cc12m_resumption(self):

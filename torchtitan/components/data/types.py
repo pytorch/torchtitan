@@ -13,6 +13,8 @@ from typing import Any
 import grain.python as grain
 import torch
 
+from torchtitan.components.data.multimodal.image_processor import ImageProcessor
+from torchtitan.components.data.multimodal.video_processor import VideoProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 
 
@@ -94,6 +96,10 @@ class DatasetBuildContext:
     read_options: grain.ReadOptions
     max_num_documents: int | None = None
     num_mtp_layers: int = 0
+    image_processor: ImageProcessor | None = None
+    """The model's image preprocessing. None: no image inputs."""
+    video_processor: VideoProcessor | None = None
+    """The model's video preprocessing. None: no video inputs."""
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
