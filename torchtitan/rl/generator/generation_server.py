@@ -419,7 +419,6 @@ def _listening_socket() -> socket.socket:
 
 def _validate_token_ids(value: object, *, field_name: str) -> list[int]:
     """Validate an untyped JSON value as integer token IDs and return it."""
-    # type(), not isinstance(): bool is an int subclass. map and set run in C.
     if not isinstance(value, list) or not set(map(type, value)) <= {int}:
         raise ValueError(f"{field_name} must be a list of integer token IDs")
     return value
