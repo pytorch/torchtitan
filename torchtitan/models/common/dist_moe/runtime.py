@@ -45,27 +45,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-
-class _NpuDistMoeContext:
-    """Stand-in for the CUDA annex context on Ascend.
-
-    Expert compute goes through npu_grouped_matmul. This object only satisfies
-    the runtime's slot and close calls, which the annex uses for CUDA scratch.
-    """
-
-    def __init__(self, max_num_local_input_tokens: int) -> None:
-        self.max_num_local_input_tokens = max_num_local_input_tokens
-
-    def select_activation_slot(self, slot_id: int, num_layers: int) -> None:
-        del slot_id, num_layers
-
-    def reset(self) -> None:
-        return None
-
-    def close(self) -> None:
-        return None
-
-
 __all__ = ["DistMoeRuntime"]
 
 PPActivationSlotPolicy = Literal["stage_microbatch", "microbatch"]
@@ -319,10 +298,7 @@ class DistMoeRuntime(Configurable):
         )
         if not self._modules:
             raise ValueError("Dist-MoE runtime requires at least one expert module")
-        self._use_npu = device.type == "npu"
-        if not self._use_npu and (
-            device.type != "cuda" or torch.cuda.get_device_capability(device)[0] < 10
-        ):
+        if device.type != "cuda" or torch.cuda.get_device_capability(device)[0] < 10:
             raise ValueError("Dist-MoE requires an SM100-or-newer CUDA device")
 
         ep_mesh = parallelism_context.get_optional_mesh(
@@ -382,33 +358,30 @@ class DistMoeRuntime(Configurable):
             device=device,
         )
 
-        if self._use_npu:
-            self.context = _NpuDistMoeContext(max_num_local_input_tokens)
-        else:
-            context_config = self._resolve_context_config(
-                self._modules[0],
+        context_config = self._resolve_context_config(
+            self._modules[0],
+            max_num_local_input_tokens=max_num_local_input_tokens,
+            max_live_activation_slots=max_live_activation_slots,
+            max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
+            wgrad_dtype=wgrad_dtype,
+        )
+        for module in self._modules[1:]:
+            candidate = self._resolve_context_config(
+                module,
                 max_num_local_input_tokens=max_num_local_input_tokens,
                 max_live_activation_slots=max_live_activation_slots,
                 max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
                 wgrad_dtype=wgrad_dtype,
             )
-            for module in self._modules[1:]:
-                candidate = self._resolve_context_config(
-                    module,
-                    max_num_local_input_tokens=max_num_local_input_tokens,
-                    max_live_activation_slots=max_live_activation_slots,
-                    max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
-                    wgrad_dtype=wgrad_dtype,
+            if candidate != context_config:
+                raise ValueError(
+                    "All local Dist-MoE layers must resolve one context configuration"
                 )
-                if candidate != context_config:
-                    raise ValueError(
-                        "All local Dist-MoE layers must resolve one context configuration"
-                    )
-            self.context = dist_moe.create_context(
-                group=ep_pg,
-                config=context_config,
-                device=device,
-            )
+        self.context = dist_moe.create_context(
+            group=ep_pg,
+            config=context_config,
+            device=device,
+        )
         self.forward_context = _DistMoeForwardContext(
             self.context,
             active_stage_indices=active_stage_indices,
