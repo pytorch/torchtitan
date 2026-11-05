@@ -683,7 +683,7 @@ def loss_metric_reduce_op(key: str) -> Literal["sum", "max", "min"]:
 def divide_token_sum_metrics(
     metrics: dict[str, float], num_loss_tokens: int
 ) -> dict[str, float]:
-    """Divide the token-sum metrics (``/mean``, ``/frac``) by the loss-token count.
+    """Divide the token-sum metrics (``/mean``, ``_mean``, ``/frac``, ``_frac``) by the loss-token count.
 
     Example:
         divide_token_sum_metrics({"loss/mean": 3.0, "x/max": 5.0}, num_loss_tokens=10)
