@@ -110,8 +110,8 @@ class EngineLoop:
 
     A model state dict load rides the same loop: `load_model_state_dict` puts a
     `ModelStateDictLoadMessage` on the queue, which rank 0 turns into a
-    `LoopDecision(LoopAction.LOAD_MODEL_STATE_DICT)` applied between step bursts. By default the
-    engine does NOT drain in-flight requests first ("hotswap"). A load with `drain=True` instead
+    `LoopDecision(LoopAction.LOAD_MODEL_STATE_DICT)` applied between step bursts. A load with
+    `drain=False` does NOT drain in-flight requests first ("hotswap"). A load with `drain=True` instead
     stops admitting new requests, keeps stepping the admitted ones, and applies once none is left;
     requests that arrive meanwhile are admitted right after it. The network load fills the engine's
     weights through `fetch_model_state_dict`: with ``model_state_dict_load_mode="cpu_prefetch"`` a

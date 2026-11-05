@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field, replace
 from typing import Any, TYPE_CHECKING
 
@@ -67,6 +68,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 VERIFIERS_REWARD_KEY = "verifiers_reward"
+
+# vLLM, the renderer and the generation server all word a prompt past the context this way.
+_CONTEXT_OVERFLOW_TEXT = "maximum context length"
+# Verifiers' message when the agent process exits non-zero: "harness 'terminus' exited 1: <stderr>".
+_AGENT_EXIT_MESSAGE = re.compile(r"harness .+ exited -?\d+: ")
 
 
 class RewardFromVerifiers(RewardFn):
@@ -367,11 +373,9 @@ class VerifiersRollouter(Rollouter):
         )
         status = self.rollout_status(verifiers_episode=verifiers_episode, trace=trace)
         if not turns and status is not RolloutStatus.ERROR_SYSTEM:
-            # Verifiers records an overlong first prompt as a failed model call; vLLM, the
-            # renderer and the generation server all word it "maximum context length".
+            # Verifiers records an overlong first prompt as a failed model call.
             first_prompt_too_long = any(
-                call.error is not None
-                and "maximum context length" in call.error.message
+                call.error is not None and _CONTEXT_OVERFLOW_TEXT in call.error.message
                 for call in trace.calls
             )
             if first_prompt_too_long:
@@ -410,20 +414,24 @@ class VerifiersRollouter(Rollouter):
         if not verifiers_episode.ok or not trace.ok:
             # Verifiers records a failure as data instead of raising; the first error stopped the
             # rollout. Two errors are the policy's doing:
-            # - a prompt past the context: a generator error worded "maximum context length";
-            # - the agent's own exit after the policy's first turn. Verifiers records a harness
-            #   process that crashes on its own the same way, so that counts as the policy's too.
-            # Any other error (a sandbox, env or tool failure, any other generator error, a harness
-            # that failed before the first turn) makes the rollout ERROR_SYSTEM.
+            # - a prompt past the context (`_CONTEXT_OVERFLOW_TEXT`);
+            # - the agent process exiting non-zero after the policy's first turn
+            #   (`_AGENT_EXIT_MESSAGE`). Verifiers can't tell this from a crash of that process,
+            #   so a crash after the first turn also counts as the policy's.
+            # Any other error (a sandbox, env or tool failure, an error in the harness's own code
+            # or metrics, any other generator error, a harness that failed before the first turn)
+            # makes the rollout ERROR_SYSTEM.
             errors = trace.errors or verifiers_episode.errors
             if not errors:
                 return RolloutStatus.ERROR
             error = errors[0]
             is_policy_error = (
-                error.type == VerifiersHarnessError.__name__ and trace.num_turns > 0
+                error.type == VerifiersHarnessError.__name__
+                and trace.num_turns > 0
+                and _AGENT_EXIT_MESSAGE.match(error.message) is not None
             ) or (
                 error.type == VerifiersProviderError.__name__
-                and "maximum context length" in error.message
+                and _CONTEXT_OVERFLOW_TEXT in error.message
             )
             return (
                 RolloutStatus.ERROR if is_policy_error else RolloutStatus.ERROR_SYSTEM
