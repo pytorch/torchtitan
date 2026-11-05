@@ -24,8 +24,8 @@ class FakeModel(BaseModel):
     class Config(BaseModel.Config):
         hidden: int = 8
 
-        def get_nparams_and_flops(self, model, seq_len):
-            return 0, 0
+        def build_flops_estimator(self, model, *, seq_len):
+            return lambda input_dict: 0
 
     def __init__(self, config: Config):
         super().__init__()
