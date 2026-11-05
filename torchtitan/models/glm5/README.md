@@ -4,8 +4,8 @@ This directory implements the shared GLM-MoE-DSA decoder architecture used by
 GLM-5.2 and GLM-5.3. The GLM-5.3 model card states that it uses the same base
 model as GLM-5.2, and the released training configuration retains the
 same decoder, DSA index-sharing schedule, MoE dimensions, and one-layer MTP
-configuration as GLM-5.2. Versioned flavors keep recipes and checkpoint
-validation explicit without duplicating model code.
+configuration as GLM-5.2. Both releases use the same model configurations and
+checkpoint adapter without duplicate version aliases.
 The implementation follows TorchTitan's config-first model contract and uses
 shared PyTorch-native components for distributed training.
 
