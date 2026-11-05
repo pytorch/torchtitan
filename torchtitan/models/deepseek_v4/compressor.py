@@ -7,6 +7,7 @@
 from dataclasses import dataclass
 from functools import cache
 
+import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 import torch_remat as remat
@@ -22,6 +23,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.tools.utils import has_cuda_capability
+from .metadata import compressed_cu_seqlens, SparseAttentionMetadata
 
 # Shape suffixes: T = tokens, H = heads, D = head width, K = selected slots,
 # G = compressed groups, R = compression ratio, S = compressed pool size.
@@ -37,20 +39,14 @@ def _hadamard(dim: int, dtype: torch.dtype, device: torch.device) -> torch.Tenso
     return h
 
 
-def compressed_cu_seqlens(cu_seqlens: torch.Tensor, ratio: int) -> torch.Tensor:
-    """Offsets of each document's compressed entries: ``len_d // ratio`` per document.
-
-    A document's trailing partial group forms no entry, matching Attention Gym's
-    packed ``cu_seqlens_k`` convention.
-    """
-    counts = torch.diff(cu_seqlens) // ratio
-    return F.pad(counts.cumsum(0, dtype=torch.int32), (1, 0))
-
-
-def compressed_gather_indices(topk_indices_TK, cu_seqlens, ratio):
+def compressed_gather_indices(
+    topk_indices_TK, cu_seqlens, ratio, attention_metadata=None
+):
     """Translate document-local selections into safe compressed-pool indices."""
     gather_TK = topk_indices_TK.clamp_min(0).long()
-    if cu_seqlens is not None:
+    if attention_metadata is not None:
+        gather_TK = gather_TK + attention_metadata.cmp_base[:, None]
+    elif cu_seqlens is not None:
         doc_T = torch.searchsorted(
             cu_seqlens[1:],
             torch.arange(topk_indices_TK.size(0), device=topk_indices_TK.device),
@@ -122,7 +118,7 @@ class Compressor(Module):
         curr = tensor[:, :, d:]
         return torch.cat([prev, curr], dim=1)
 
-    def forward(self, x, positions, cu_seqlens=None):
+    def forward(self, x, positions, cu_seqlens=None, *, attention_metadata=None):
         """Compress hidden states into compressed KV states.
 
         Args:
@@ -132,6 +128,9 @@ class Compressor(Module):
                 restart at each document start, a document's trailing partial
                 group forms no entry, and the overlap candidate never crosses a
                 document boundary.
+            attention_metadata: Cached document geometry from the inner attention
+                config. Enables reshape-based grouping only after alignment was
+                checked while building metadata.
 
         Returns:
             Compressed KV tensor of shape ``[L // compress_ratio, head_dim]``. With
@@ -139,6 +138,8 @@ class Compressor(Module):
             ``compressed_cu_seqlens(cu_seqlens, compress_ratio)`` and later slots
             are unused.
         """
+        if attention_metadata is not None:
+            cu_seqlens = attention_metadata.cu_seq_q
         seqlen = x.size(0)
         rd = self.rope_head_dim
         ratio = self.compress_ratio
@@ -153,7 +154,9 @@ class Compressor(Module):
         # document and takes the position of its first token, as in the
         # DeepSeek-V4 reference.
         first_G = None
-        if cu_seqlens is None:
+        if cu_seqlens is None or (
+            attention_metadata is not None and attention_metadata.aligned
+        ):
             if seqlen % ratio != 0:
                 raise ValueError(
                     f"seqlen ({seqlen}) must be divisible by compress_ratio ({ratio})"
@@ -165,6 +168,10 @@ class Compressor(Module):
             )
             kv = kv.unflatten(0, (-1, ratio))
             score = score.unflatten(0, (-1, ratio))
+            if attention_metadata is not None:
+                first_G = attention_metadata.group_first
+                if positions is None:
+                    comp_positions = attention_metadata.group_position
         else:
             if seqlen < ratio:
                 # Shorter than one group: no document has a compressed entry.
@@ -172,19 +179,29 @@ class Compressor(Module):
             # Entries are packed by document at compressed_cu_seqlens offsets in
             # a fixed pool of seqlen // ratio slots, so no host sync is needed.
             # Slots past the last complete group are unused and read token 0.
-            cmp_cu = compressed_cu_seqlens(cu_seqlens, ratio)
-            slot_G = torch.arange(seqlen // ratio, dtype=torch.int32, device=x.device)
-            doc_G = torch.searchsorted(cmp_cu[1:], slot_G, right=True, out_int32=True)
-            group_G = slot_G - cmp_cu[doc_G]
-            start_G = torch.where(
-                slot_G < cmp_cu[-1], cu_seqlens[doc_G] + group_G * ratio, 0
-            )
+            if attention_metadata is not None:
+                start_G = attention_metadata.group_start
+                first_G = attention_metadata.group_first
+                group_positions = attention_metadata.group_position
+            else:
+                cmp_cu = compressed_cu_seqlens(cu_seqlens, ratio)
+                slot_G = torch.arange(
+                    seqlen // ratio, dtype=torch.int32, device=x.device
+                )
+                doc_G = torch.searchsorted(
+                    cmp_cu[1:], slot_G, right=True, out_int32=True
+                )
+                group_G = slot_G - cmp_cu[doc_G]
+                start_G = torch.where(
+                    slot_G < cmp_cu[-1], cu_seqlens[doc_G] + group_G * ratio, 0
+                )
+                first_G = group_G == 0
+                group_positions = group_G * ratio
             token_GR = start_G.unsqueeze(1) + torch.arange(ratio, device=x.device)
             kv, score = kv[token_GR], score[token_GR]
             comp_positions = (
-                positions[start_G] if positions is not None else group_G * ratio
+                positions[start_G] if positions is not None else group_positions
             )
-            first_G = group_G == 0
         score = score + self.ape
         if self.overlap:
             kv = self._overlap_transform(kv, 0, first_G)
@@ -206,6 +223,7 @@ class Indexer(Module):
         wq_b: Linear.Config
         weights_proj: Linear.Config
         compressor: "Compressor.Config"
+        inner_indexer: "InnerIndexer.Config"
         num_index_heads: int = 64
         index_head_dim: int = 128
         rope_head_dim: int = 64
@@ -222,6 +240,7 @@ class Indexer(Module):
         self.wq_b = cfg.wq_b.build()
         self.weights_proj = cfg.weights_proj.build()
         self.compressor = cfg.compressor.build()
+        self.inner_indexer = cfg.inner_indexer.build()
 
     @staticmethod
     def _rotate_activation(x):
@@ -243,8 +262,13 @@ class Indexer(Module):
         *,
         positions,
         cu_seqlens=None,
+        attention_metadata=None,
+        topk,
+        return_scores=True,
     ):
-        """Project raw indexer queries, keys, and per-head weights."""
+        """Project features and return document-local selections and scores."""
+        if attention_metadata is not None:
+            cu_seqlens = attention_metadata.cu_seq_q
         seqlen = x.size(0)
         rd = self.rope_head_dim
         q = self.wq_b(qr)
@@ -255,13 +279,74 @@ class Indexer(Module):
         q_rope = self.rope(q_rope, positions=positions)
         q = torch.cat([q_nope, q_rope], dim=-1)
         q = self._rotate_activation(q)
-        k = self.compressor(x, positions=positions, cu_seqlens=cu_seqlens)
+        k = self.compressor(
+            x,
+            positions=positions,
+            cu_seqlens=cu_seqlens,
+            attention_metadata=attention_metadata,
+        )
         k = self._rotate_activation(k)
         weights = self.weights_proj(x)
         # The scale reads the weights_proj output with bare ops.
         remat.recompute_needs_tensor(weights)
         weights = weights * (self.softmax_scale * self.num_index_heads**-0.5)
-        return q, k, weights
+        indices, scores = self.inner_indexer(
+            q,
+            k,
+            weights,
+            max_seqlen=(
+                seqlen if attention_metadata is None else attention_metadata.max_k
+            ),
+            ratio=self.compressor.compress_ratio,
+            topk=topk,
+            cu_seqlens=cu_seqlens,
+            return_scores=return_scores,
+            attention_metadata=attention_metadata,
+        )
+
+        return indices, scores if return_scores else None
+
+
+class InnerIndexer(Module):
+    """Local-SPMD boundary for discrete selection and differentiable scores."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        pass
+
+    def __init__(self, config: Config):
+        super().__init__()
+
+    def forward(
+        self,
+        idx_q,
+        idx_k,
+        idx_w,
+        *,
+        max_seqlen,
+        ratio,
+        topk,
+        cu_seqlens=None,
+        return_scores=True,
+        attention_metadata=None,
+    ):
+        with spmd.no_typecheck():
+            indices, scores = self.select(
+                idx_q,
+                idx_k,
+                idx_w,
+                max_seqlen=max_seqlen,
+                ratio=ratio,
+                topk=topk,
+                cu_seqlens=cu_seqlens,
+                return_scores=return_scores,
+                attention_metadata=attention_metadata,
+            )
+            # local_map requires tensors at both declared output leaves.
+            # Indexer converts this sentinel to None outside the local boundary.
+            if scores is None:
+                scores = idx_w.new_empty((0, 0))
+        return indices, scores
 
     @staticmethod
     def select(
@@ -274,6 +359,7 @@ class Indexer(Module):
         topk: int,
         cu_seqlens: torch.Tensor | None = None,
         return_scores: bool = True,
+        attention_metadata: SparseAttentionMetadata | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Select top-k compressed positions per folded query token.
 
@@ -299,7 +385,11 @@ class Indexer(Module):
         )
         k = min(topk, max_seqlen // ratio)
         cu_seqlens_k = (
-            None if cu_seqlens is None else compressed_cu_seqlens(cu_seqlens, ratio)
+            attention_metadata.cu_seq_cmp
+            if attention_metadata is not None
+            else (
+                None if cu_seqlens is None else compressed_cu_seqlens(cu_seqlens, ratio)
+            )
         )
         with torch.no_grad():
             topk_indices = lightning_indexer(
@@ -317,7 +407,9 @@ class Indexer(Module):
         if not return_scores:
             return topk_indices, None
         valid_TK = topk_indices >= 0
-        gather_indices_TK = compressed_gather_indices(topk_indices, cu_seqlens, ratio)
+        gather_indices_TK = compressed_gather_indices(
+            topk_indices, cu_seqlens, ratio, attention_metadata
+        )
 
         selected_TKD = idx_k[gather_indices_TK]
         logits_THK = torch.einsum("thd,tkd->thk", idx_q, selected_TKD)
@@ -371,12 +463,13 @@ class SparseIndexerLoss(AuxLoss):
         attn_lse_TH: torch.Tensor,
         cu_seqlens: torch.Tensor | None,
         padding_mask_T: torch.Tensor | None = None,
+        attention_metadata: SparseAttentionMetadata | None = None,
     ) -> torch.Tensor:
         tp_size = spmd_mesh_size("tp")
         if q_THD.size(1) * tp_size != self.num_heads:
             raise ValueError("Teacher head count does not match the TP-sharded query.")
         gather_TK = compressed_gather_indices(
-            topk_indices_TK, cu_seqlens, self.compress_ratio
+            topk_indices_TK, cu_seqlens, self.compress_ratio, attention_metadata
         )
         targets = []
         # Bound gathered keys and fp32 logits by chunk_size, not context length.
@@ -431,6 +524,7 @@ class SparseIndexerLoss(AuxLoss):
         carrier: torch.Tensor,
         denominator: torch.Tensor,
         padding_mask_T: torch.Tensor | None = None,
+        attention_metadata: SparseAttentionMetadata | None = None,
     ) -> torch.Tensor:
         """Compute distillation loss and inject its gradient on ``carrier``."""
         if topk_scores_TK.numel() == 0:
@@ -443,6 +537,7 @@ class SparseIndexerLoss(AuxLoss):
             attn_lse_TH,
             cu_seqlens,
             padding_mask_T,
+            attention_metadata,
         )
         tiny = torch.finfo(torch.float32).tiny
         t_TK = p_TK / p_TK.sum(dim=-1, keepdim=True).clamp_min(tiny)

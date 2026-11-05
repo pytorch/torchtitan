@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field
+from math import lcm
 from typing import cast, TYPE_CHECKING
 
 import spmd_types as spmd
@@ -27,7 +28,7 @@ from torchtitan.models.deepseek_v3.mtp import (
     apply_fsdp_to_mtp_decoder,
     roll_mtp_sequence,
 )
-
+from .metadata import SparseAttentionMetadata
 from .mhc import HcHead, HcPost, HcPre
 from .state_dict_adapter import DeepSeekV4StateDictAdapter
 
@@ -182,11 +183,43 @@ class DeepSeekV4Model(Decoder):
         )
         hc_mult: int = 4
         n_mtp_layers: int = 0
+        align_documents: bool = False
+        """Opt in to aligned packing and reshape-based compression."""
         compress_ratios: tuple[int, ...] = (1, 1, 4, 4)
         n_layers: int = 4
         norm_eps: float = 1e-6
         hc_head: HcHead.Config
         mtp_layers: list["MTPBlock.Config"] | None = None
+
+        @property
+        def document_alignment(self) -> int | None:
+            if not self.align_documents:
+                return None
+            return lcm(
+                *(
+                    max(1, layer.attention.compress_ratio)
+                    for layer in (*self.layers, *(self.mtp_layers or ()))
+                )
+            )
+
+        def __post_init__(self) -> None:
+            Decoder.Config.__post_init__(self)
+            geometry = {}
+            alignment = self.document_alignment
+            if alignment is not None and self.max_context_length % alignment:
+                raise ValueError("document_alignment must divide max_context_length")
+            for layer in (*self.layers, *(self.mtp_layers or ())):
+                inner = layer.attention.inner_attention
+                inner.document_alignment = alignment
+                key = (max(1, inner.compress_ratio), inner.window_size)
+                if max(1, layer.attention.compress_ratio) != key[0]:
+                    raise ValueError(
+                        "Attention and inner attention compression ratios must agree"
+                    )
+                if geometry.setdefault(inner._owner, key) != key:
+                    raise ValueError(
+                        "Layers sharing an attention variant must have the same compress_ratio and window_size"
+                    )
 
         def build_flops_estimator(
             self,
@@ -239,6 +272,7 @@ class DeepSeekV4Model(Decoder):
         super().__init__(config)
         cfg = config
 
+        self.align_documents = cfg.align_documents
         self.hc_mult = cfg.hc_mult
         self.n_mtp_layers = cfg.n_mtp_layers
         self.compress_ratios = list(cfg.compress_ratios)[: cfg.n_layers]
@@ -251,6 +285,27 @@ class DeepSeekV4Model(Decoder):
                 mtp_layer.build() for mtp_layer in cfg.mtp_layers
             )
 
+    def preprocess_inputs(
+        self, input_dict, *, parallelism_context, parallelism, **kwargs
+    ):
+        result = super().preprocess_inputs(
+            input_dict,
+            parallelism_context=parallelism_context,
+            parallelism=parallelism,
+            **kwargs,
+        )
+        # Container tensors are not visited by annotate_input_spmd_types.
+        from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+
+        metadata = result[2].get("attention_metadata") or {}
+        with set_current_spmd_mesh(parallelism_context.spmd_dense_mesh()):
+            for value in metadata.values():
+                if isinstance(
+                    value, (VarlenAttentionMetadata, SparseAttentionMetadata)
+                ):
+                    value.annotate_spmd_types()
+        return result
+
     def forward(
         self,
         tokens: torch.Tensor,
@@ -260,6 +315,10 @@ class DeepSeekV4Model(Decoder):
         aux_loss_denominators: torch.Tensor | None = None,
     ):
         """Run the DeepSeek V4 decoder."""
+        if self.align_documents and attention_metadata is None:
+            raise ValueError(
+                "Aligned DeepSeek V4 requires attention metadata from preprocess_inputs"
+            )
         if len(self.mtp_layers) > 0 and self.tok_embeddings is None:
             raise ValueError("DeepSeek V4 MTP forward requires token embeddings.")
         if len(self.mtp_layers) > 0 and self._skip_lm_head:

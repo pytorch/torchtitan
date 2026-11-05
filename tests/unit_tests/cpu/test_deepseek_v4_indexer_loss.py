@@ -10,14 +10,12 @@ from unittest.mock import patch
 
 import torch
 from attn_gym.sparse.gather_attn import AuxRequest, gather_attn
-
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.deepseek_v4 import build_model_config
-from torchtitan.models.deepseek_v4.attention import CompressedSparseAttention
 from torchtitan.models.deepseek_v4.compressor import (
     compressed_cu_seqlens,
-    Indexer,
+    InnerIndexer,
     SparseIndexerLoss,
 )
 
@@ -226,7 +224,7 @@ class TestSparseIndexerLoss(unittest.TestCase):
                     self.assertEqual(aux.chunk_size, 32)
 
 
-class TestIndexerSelect(unittest.TestCase):
+class TestInnerIndexerSelect(unittest.TestCase):
     def setUp(self):
         self.enterContext(patch.dict(AuxLoss._group_counts, clear=True))
         self.enterContext(patch.dict(AuxLoss.group_acc, clear=True))
@@ -237,10 +235,10 @@ class TestIndexerSelect(unittest.TestCase):
         k = torch.randn(3, 8, requires_grad=True)
         w = torch.randn(12, 3, requires_grad=True)
         for cu in (None, torch.tensor([0, 4, 12], dtype=torch.int32)):
-            indices, scores = Indexer.select(
+            indices, scores = InnerIndexer.select(
                 q, k, w, max_seqlen=12, ratio=4, topk=2, cu_seqlens=cu
             )
-            index_only, no_scores = Indexer.select(
+            index_only, no_scores = InnerIndexer.select(
                 q,
                 k,
                 w,
@@ -257,29 +255,29 @@ class TestIndexerSelect(unittest.TestCase):
                 self.assertTrue(torch.isfinite(tensor.grad).all())
 
     def test_eval_and_disabled_loss_do_not_rescore(self):
-        q, kv = torch.randn(8, 4, 8), torch.randn(8, 8)
-        iq, ik, iw = torch.randn(8, 2, 8), torch.randn(2, 8), torch.randn(8, 2)
+        from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_debugmodel
+
         for training, enabled in ((False, True), (True, False)):
-            cfg = CompressedSparseAttention.Config(
-                window_size=3,
-                compress_ratio=4,
-                softmax_scale=8**-0.5,
-                index_topk=2,
-                aux_loss=SparseIndexerLoss.Config(
-                    coeff=0.01, softmax_scale=8**-0.5, num_heads=4
-                )
-                if enabled
-                else None,
+            cfg = next(
+                layer.attention
+                for layer in deepseek_v4_debugmodel(seq_len=128).model.layers
+                if layer.attention.compress_ratio == 4
             )
+            if not enabled:
+                cfg.inner_attention.aux_loss = None
             module = cfg.build().train(training)
+            for param in module.parameters():
+                torch.nn.init.normal_(param, std=0.02)
             with (
-                patch.object(Indexer, "select", wraps=Indexer.select) as select,
+                patch.object(
+                    InnerIndexer, "select", wraps=InnerIndexer.select
+                ) as select,
                 patch(
                     "torchtitan.models.deepseek_v4.attention.gather_attn",
                     wraps=gather_attn,
                 ) as attention,
             ):
-                module(q, kv, kv[:2], iq, ik, iw, torch.zeros(4))
+                module(torch.randn(8, cfg.dim), positions=torch.arange(8))
                 self.assertFalse(select.call_args.kwargs["return_scores"])
                 self.assertFalse(attention.call_args.kwargs["return_aux"].lse)
 
