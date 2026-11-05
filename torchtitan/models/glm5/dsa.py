@@ -278,6 +278,9 @@ class Glm5DsaIndexer(Module):
         # The learned per-token head weights turn N head-specific similarities
         # into the scalar [T,T] ranking consumed by top-k.
         with torch.autocast(device_type=hidden_states_TD.device.type, enabled=False):
+            if hidden_states_TD.dtype != self.weights_proj.weight.dtype:
+                # The cast is a bare read of the TP-gather region's output.
+                remat.recompute_needs_tensor(hidden_states_TD)
             weights_TN = self.weights_proj(
                 hidden_states_TD.to(self.weights_proj.weight.dtype)
             )
