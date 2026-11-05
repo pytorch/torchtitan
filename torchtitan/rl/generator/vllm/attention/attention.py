@@ -31,6 +31,7 @@ from vllm.v1.attention.backends.flash_attn_diffkv import (
     FlashAttentionDiffKVImpl,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.base.module import Module
@@ -61,14 +62,21 @@ class _FA4PageSize:
     """
 
     @classmethod
-    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(
+        cls, kv_cache_spec: KVCacheSpec | None = None
+    ) -> list[int | MultipleOf]:
         if (
             get_cuda_flash_attention_impl() == "FA4"
             and torch.cuda.get_device_capability()[0] == 10
             and not is_in_batch_invariant_mode()
         ):
             return [128]
-        return super().get_supported_kernel_block_sizes()
+        # vLLM main passes kv_cache_spec; the vLLM nightly on PyTorch's index
+        # (9f03b51) takes no argument.
+        # TODO: always forward it once that nightly includes vllm-project/vllm#53175.
+        if kv_cache_spec is None:
+            return super().get_supported_kernel_block_sizes()
+        return super().get_supported_kernel_block_sizes(kv_cache_spec)
 
 
 @register_backend(AttentionBackendEnum.CUSTOM)

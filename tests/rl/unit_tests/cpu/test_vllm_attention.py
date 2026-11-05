@@ -7,8 +7,10 @@
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from torchtitan.rl.generator.vllm.attention import attention as vllm_attention
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
 
@@ -58,3 +60,20 @@ def test_fa4_splits_hybrid_kv_blocks_into_128_token_pages():
         ),
     ):
         assert select_common_block_size(1152, [backend]) == 128
+
+
+def test_fa4_page_size_with_kv_cache_spec():
+    """vLLM main calls the hook with the layer's KV cache spec."""
+    spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+    )
+    backend = vllm_attention.TorchTitanVarlenInnerAttentionBackend
+    with (
+        patch.object(
+            vllm_attention, "get_cuda_flash_attention_impl", return_value="FA4"
+        ),
+        patch.object(
+            vllm_attention.torch.cuda, "get_device_capability", return_value=(10, 0)
+        ),
+    ):
+        assert backend.get_supported_kernel_block_sizes(spec) == [128]
