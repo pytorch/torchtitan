@@ -7,6 +7,7 @@
 """Tests for Rollouter's controller-side worker dispatch."""
 
 import asyncio
+import functools
 from types import SimpleNamespace
 
 from torchtitan.observability import structured_logger as sl
@@ -37,28 +38,10 @@ class _ChooseRunGroupEndpoint:
         return RolloutGroup(group_id=kwargs["group_id"], rollouts=[])
 
 
-def test_rollout_worker_actor_builds_configured_worker() -> None:
+def test_rollout_worker_actor_builds_configured_worker(monkeypatch) -> None:
     async def run() -> None:
         worker = object()
         worker_config = SimpleNamespace(build=lambda: worker)
-        actor = object.__new__(RolloutWorkerActor)
-
-        RolloutWorkerActor.__init__(
-            actor,
-            worker_config=worker_config,
-            num_threads=1,
-            structured_logger_init_fn=None,
-        )
-
-        assert actor._worker is worker
-
-    asyncio.run(run())
-
-
-def test_rollout_worker_actor_inits_structured_logger_with_its_rank(
-    monkeypatch,
-) -> None:
-    async def run() -> None:
         init_calls = []
         monkeypatch.setattr(
             rollout_worker_module, "current_rank", lambda: SimpleNamespace(rank=2)
@@ -67,11 +50,15 @@ def test_rollout_worker_actor_inits_structured_logger_with_its_rank(
 
         RolloutWorkerActor.__init__(
             actor,
-            worker_config=SimpleNamespace(build=lambda: None),
+            worker_config=worker_config,
             num_threads=1,
-            structured_logger_init_fn=lambda **kwargs: init_calls.append(kwargs),
+            # Bound like the controller's; the worker overrides source and rank.
+            structured_logger_init_fn=functools.partial(
+                lambda **kwargs: init_calls.append(kwargs), source="rl", rank=0
+            ),
         )
 
+        assert actor._worker is worker
         assert init_calls == [{"source": "rl_rollout_worker", "rank": 2}]
 
     asyncio.run(run())
