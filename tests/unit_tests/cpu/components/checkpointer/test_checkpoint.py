@@ -138,8 +138,8 @@ class DummyAsyncResult(AsyncSaveResponse):
 
 
 def fake_async_save(*args, **kwargs):
-    # Check if this is async_with_pinned_mem mode by looking for async_stager parameter
-    if kwargs.get("async_stager"):
+    # async_with_pinned_mem is the process-based mode; it returns staging and upload futures.
+    if kwargs.get("async_checkpointer_type") is not None:
         return DummyAsyncResult()
     else:
         return DummyFuture()
@@ -266,6 +266,7 @@ class TestCheckpointManager(unittest.TestCase):
         with open(index_path, "w") as f:
             json.dump({"weight_map": weight_map}, f)
         manager = CheckpointManager.__new__(CheckpointManager)
+        manager.save_thread_count = 1
         manager.sd_adapter = Llama3StateDictAdapter(
             config, hf_assets_path=self.test_folder
         )
@@ -280,6 +281,32 @@ class TestCheckpointManager(unittest.TestCase):
 
         with safe_open(os.path.join(checkpoint_id, shard), "pt") as f:
             self.assertEqual(list(f.keys()), ["model.norm.weight"])
+
+    def test_save_thread_count_writes_one_file_per_thread(self):
+        manager = CheckpointManager.__new__(CheckpointManager)
+        manager.save_thread_count = 4
+        checkpoint_id = os.path.join(self.test_folder, "step-1")
+        state_dict = {f"w{i}": torch.full((4,), float(i)) for i in range(4)}
+
+        manager.dcp_save(state_dict, checkpoint_id, AsyncMode.DISABLED)
+
+        files = [f for f in os.listdir(checkpoint_id) if f.endswith(".distcp")]
+        self.assertEqual(len(files), 4)
+
+    def test_async_save_does_not_stage_with_the_writer(self):
+        manager = CheckpointManager.__new__(CheckpointManager)
+        manager.save_thread_count = 1
+        manager.pg = None
+        checkpoint_id = os.path.join(self.test_folder, "step-1")
+        # FileSystemWriter is also a stager, and its stage() skips 0-d DTensors.
+        with mock.patch.object(
+            dist_checkpoint.FileSystemWriter,
+            "stage",
+            side_effect=AssertionError("staged with the writer"),
+        ):
+            manager.dcp_save(
+                {"w": torch.ones(4)}, checkpoint_id, AsyncMode.ASYNC
+            ).result()
 
     def setUp(self):
         self.base_temp_dir = tempfile.mkdtemp()

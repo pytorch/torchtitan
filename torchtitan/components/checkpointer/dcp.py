@@ -18,7 +18,13 @@ from typing import Any, cast, Literal, TYPE_CHECKING
 
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from torch.distributed.checkpoint import HuggingFaceStorageWriter, Metadata
+from torch.distributed.checkpoint import (
+    FileSystemWriter,
+    FsspecWriter,
+    HuggingFaceStorageWriter,
+    Metadata,
+    StorageWriter,
+)
 from torch.distributed.checkpoint._consolidate_hf_safetensors import (
     consolidate_safetensors_files_on_every_rank,
 )
@@ -138,8 +144,22 @@ class CheckpointManager(BaseCheckpointManager):
         async_mode: Literal["disabled", "async", "async_with_pinned_mem"] = "disabled"
         """DCP save mode: synchronous, threaded async, or pinned-memory async."""
 
+        save_thread_count: int = 1
+        """Threads per rank that write a save. More threads help storage with slow single
+        streams, e.g. network or FUSE mounts.
+
+        - DCP save: one file per thread, so N files per rank (empty when a rank has
+          fewer tensors).
+        - HF save: the same files, written in parallel.
+        """
+
         def __post_init__(self) -> None:
             BaseCheckpointManager.Config.__post_init__(self)
+            if self.save_thread_count < 1:
+                raise ValueError(
+                    "checkpointer.save_thread_count must be >= 1, got "
+                    f"{self.save_thread_count}"
+                )
             async_lowered = self.async_mode.lower()
             if async_lowered not in (
                 "disabled",
@@ -164,6 +184,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         self.folder = filesystem.join(base_folder, config.folder)
         self.interval = config.interval
+        self.save_thread_count = config.save_thread_count
         self._storage = _FilesystemCheckpointStorage()
 
         self._validate_extra_state_keys(extra_states)
@@ -280,7 +301,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         ret: Future | AsyncSaveResponse | Metadata | None = None
 
-        storage_writer: HuggingFaceStorageWriter | None = None
+        storage_writer: StorageWriter
         fqn_to_index_mapping: dict[Any, int] | None = None
 
         # HF Format Conversion
@@ -297,6 +318,7 @@ class CheckpointManager(BaseCheckpointManager):
             )
             storage_writer = HuggingFaceStorageWriter(
                 path=save_path,
+                thread_count=self.save_thread_count,
                 save_distributed=True,
                 fqn_to_index_mapping=fqn_to_index_mapping,
                 enable_consolidation=not fqn_to_index_mapping,
@@ -308,6 +330,16 @@ class CheckpointManager(BaseCheckpointManager):
             # The internal consolidation is disabled here and instead
             # `consolidate_safetensors_files_on_every_rank` is used later to manage
             # the multi-file merging process.
+        else:
+            # The writer DCP picks for this path, with more threads.
+            writer_class = (
+                FsspecWriter
+                if filesystem.is_remote(checkpoint_id)
+                else FileSystemWriter
+            )
+            storage_writer = writer_class(
+                checkpoint_id, thread_count=self.save_thread_count
+            )
 
         # Execution Dispatch
         checkpoint_save_id = (
@@ -315,12 +347,32 @@ class CheckpointManager(BaseCheckpointManager):
         )  # for HF the storage_writer handles the path
 
         if async_mode == AsyncMode.ASYNC:
-            ret = dcp.async_save(
-                state_dict,
-                storage_writer=storage_writer,
-                checkpoint_id=checkpoint_save_id,
-                process_group=self.pg,
+            # The stager DCP makes when it gets no writer. Without it, DCP stages with
+            # FileSystemWriter (also a stager), which copies each DTensor twice and keeps
+            # 0-d DTensors uncopied, so the upload reads their live value.
+            # TODO: drop this once DCP's _create_cpu_state_dict copies 0-d DTensors.
+            stager = DefaultStager(
+                StagingOptions(
+                    use_pinned_memory=False,
+                    use_shared_memory=False,
+                    use_async_staging=False,
+                    use_non_blocking_copy=False,
+                )
             )
+            # With a stager that stages synchronously, async_save returns the upload Future.
+            upload = cast(
+                Future,
+                dcp.async_save(
+                    state_dict,
+                    storage_writer=storage_writer,
+                    checkpoint_id=checkpoint_save_id,
+                    process_group=self.pg,
+                    async_stager=stager,
+                ),
+            )
+            # The upload reads the staged copy, so close the stager after it, as DCP does.
+            upload.add_done_callback(lambda _: stager.close())
+            ret = upload
         elif async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             ret = dcp.async_save(
                 state_dict,
