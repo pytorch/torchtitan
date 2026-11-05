@@ -46,13 +46,6 @@ IN_TREE_RENDERER_PATH = (
 # --- RenderersConfigAdapter ---
 
 
-def test_from_renderers_returns_adapter() -> None:
-    renderers_config = Qwen3RendererConfig(enable_thinking=False)
-    config = from_renderers(renderers_config)
-    assert isinstance(config, RenderersConfigAdapter)
-    assert config.renderers_config is renderers_config
-
-
 def test_build_renders_with_titan_tokenizer() -> None:
     tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
     renderer = RenderersConfigAdapter(
@@ -73,7 +66,7 @@ def test_build_renders_with_titan_tokenizer() -> None:
     ("renderers_config", "reason"),
     [
         (AutoRendererConfig(), "MODEL_RENDERER_MAP"),
-        (DefaultRendererConfig(), "special-token variables"),
+        (DefaultRendererConfig(), "bos_token and eos_token only"),
     ],
 )
 def test_auto_and_default_are_refused(renderers_config, reason: str) -> None:

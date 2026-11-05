@@ -17,19 +17,21 @@ import torch
 from batch_invariant_ops import enable_batch_invariant_mode
 from torchtitan.components.checkpointer import CheckpointManager
 
+from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.batch_invariant import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
 )
 from torchtitan.models.qwen3_5 import build_model_config
-from torchtitan.rl.generator.vllm import gdn, registry
-from torchtitan.rl.generator.vllm.batch_invariance import (
-    force_logprobs_fn_for_batch_invariance,
-)
-from torchtitan.rl.generator.vllm.linear_attention import (
+from torchtitan.rl.generator.vllm import registry
+from torchtitan.rl.generator.vllm.attention import gdn
+from torchtitan.rl.generator.vllm.attention.linear_attention import (
     LinearAttentionExecutionPath,
     TorchTitanLinearAttentionMetadata,
+)
+from torchtitan.rl.generator.vllm.batch_invariance import (
+    force_logprobs_fn_for_batch_invariance,
 )
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.forward_context import (
@@ -200,10 +202,9 @@ def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -
     weight = torch.randn(6144, 4, device=device, dtype=torch.bfloat16)
     a, b = torch.randn(2, 4, 16, device=device)
     A_log, bias = torch.randn(2, 16, device=device)
-    output = torch.zeros(4, 16, 128, device=device, dtype=torch.bfloat16)
 
     def forward():
-        layer._forward(inputs, a, b, weight, None, A_log, bias, output)
+        return layer._forward(inputs, a, b, weight, None, A_log, bias)
 
     def without_mask(kernel):
         def resumed(*args, has_initial_state=None, **kwargs):
@@ -219,7 +220,7 @@ def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -
         stream.synchronize()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=stream):
-            forward()
+            output = forward()
         # The first replay occupies both slots. Later requests reuse dirty slots,
         # alone and beside a continuing request, without changing the graph key.
         for slots, initial in (
@@ -250,14 +251,15 @@ def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -
                     "recurrent_gdn",
                 ):
                     unmasked.setattr(gdn, name, without_mask(getattr(gdn, name)))
-                forward()
-            expected = output.clone()
+                expected = forward()
             layer.kv_cache = cache_views(pools)
             has_initial_state.copy_(
                 torch.tensor(initial + [False] * (4 - len(slots)), device=device)
             )
             # Both repeated null slots and a negative sentinel must skip writes.
             state_indices[3] = -1
+            # NaN catches a null row the decode kernel leaves unwritten.
+            output.fill_(float("nan"))
             graph.replay()
             torch.testing.assert_close(output, expected, rtol=0, atol=0)
             assert not output[len(slots) :].count_nonzero()
@@ -308,9 +310,11 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
     registry.register_to_vllm(
         model_config,
         parallelism=registry.InferenceParallelismConfig(tensor_parallel_degree=1),
+        precision=PrecisionConfig(),
         checkpointer_config=CheckpointManager.Config(
             initial_load_in_hf=True, initial_load_path=model
         ),
+        model_state_dict_load_mode="cpu_prefetch",
     )
     engine = LLMEngine.from_engine_args(
         EngineArgs(

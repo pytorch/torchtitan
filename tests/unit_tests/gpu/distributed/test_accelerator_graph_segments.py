@@ -113,7 +113,6 @@ def _engine_config(case: _Case, *, graphs: bool) -> TrainingEngine.Config:
         training=dataclasses.replace(
             config.training,
             num_tokens_per_microbatch_per_dp_rank=_NUM_TOKENS_PER_MICROBATCH,
-            max_context_length=_NUM_TOKENS_PER_MICROBATCH,
             disable_accelerator_graphs=not graphs,
             preprocess_microbatch_groups_lazily=case.preprocess_lazily,
         ),
@@ -175,6 +174,7 @@ def _train(rank: int, port: int, case_name: str, graphs: bool, output_dir: str) 
     engine = TrainingEngine(
         config,
         model_config=config.model,
+        precision=config.precision,
         max_num_documents=_MAX_NUM_DOCUMENTS,
         output_dir=tempfile.mkdtemp(dir=output_dir),
     )

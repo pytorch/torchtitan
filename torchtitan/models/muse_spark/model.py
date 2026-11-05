@@ -23,6 +23,7 @@ from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     spmd_local_context,
 )
+from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
     AttentionMetadataMap,
@@ -34,10 +35,6 @@ from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
-from torchtitan.models.common.flops import (
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
-)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import MoE
@@ -214,14 +211,27 @@ class MuseSparkRMSNorm(RMSNorm):
     def __init__(self, config: Config):
         super().__init__(config)
         self.gain_center = config.gain_center
+        # Compiled code reads gain_center from this tensor, so every graph takes it as an
+        # input and saves the same tensors. A float is baked into layer 0's graph, and remat
+        # recompute of layer 0 can run layer 1's graph, which saves different tensors
+        # (CheckpointError). Eager keeps the float: SPMD typechecking rejects untyped tensors.
+        # TODO(pytorch/pytorch#166926): drop the copy once recompute reuses the forward's graph.
+        self._gain_center_tensor = torch.tensor(
+            config.gain_center, dtype=torch.float32, device="cpu"
+        )
 
     def _get_effective_weight(self) -> torch.Tensor | None:
         if self.weight is None:
             return None
+        if torch.compiler.is_compiling():
+            return self.weight + self._gain_center_tensor
         return self.weight + self.gain_center
 
-    # Limit 16, not the default 8: all residual-stream norms share this region and use 12 graphs.
-    @local_compile("muse_spark_rmsnorm", batch_invariant=False, recompile_limit=16)
+    # Limit 32, not the default 8: all residual-stream norms share this region. Pretraining uses 12
+    # graphs (weight or none, 8192- or 4096-wide weight, FSDP-wrapped or plain). An RL trainer adds a
+    # no_grad log-prob pass and micro-batches of varying token counts: 22 graphs measured on Muse Spark
+    # with the dapo_math recipe's LoRA setup, so 16 fails the first training step (fullgraph=True).
+    @local_compile("muse_spark_rmsnorm", batch_invariant=False, recompile_limit=32)
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         input_dtype = input.dtype
         effective_weight_D = self._get_effective_weight()
@@ -403,6 +413,7 @@ class MuseSparkTransformerBlock(TransformerBlock):
 class MuseSparkModel(MultimodalModel):
     state_dict_adapter_cls = MuseSparkStateDictAdapter
     multimodal_encoder_fqns = ("vision_encoder", "audio_encoder")
+
     pipeline_first_stage_module_fqns = (
         "vision_encoder",
         "vision_adapter",
@@ -480,40 +491,54 @@ class MuseSparkModel(MultimodalModel):
                         f"dataset_modalities requires a configured {modality}_encoder"
                     )
 
-        def get_nparams_and_flops(
+        def build_flops_estimator(
             self,
-            model: nn.Module,
+            model: Module,
+            *,
             seq_len: int,
-        ) -> tuple[int, int]:
-            # Perception modules run per image or audio clip rather than per
-            # text token, so this remains a decoder-only MFU estimate.
-            muse_model = cast("MuseSparkModel", model)
-            nparams, active_nparams = get_nparams_and_active_nparams(
-                model,
-                modules_excluded_from_active_params=(
-                    muse_model.vision_encoder,
-                    muse_model.vision_adapter,
-                    muse_model.vision_projection,
-                    muse_model.perception_emb_norm,
-                    muse_model.audio_encoder,
-                ),
+            excluded_submodules: tuple[Module | None, ...] = (),
+        ) -> FlopsEstimator:
+            from torchtitan.models.common.flops import active_parameter_flops_per_token
+
+            model = cast(MuseSparkModel, model)
+            vision_outputs = (
+                model.vision_adapter,
+                model.vision_projection,
+                model.perception_emb_norm,
             )
-            attention_op_flops = 0
-            for layer in self.layers:
-                attention = layer.attention
-                head_dim = (
-                    attention.head_dim
-                    if attention.head_dim is not None
-                    else attention.dim // attention.n_heads
-                )
-                attention_op_flops += quadratic_attention_flops_per_token(
-                    num_heads=attention.n_heads,
-                    qk_head_dim=head_dim,
-                    v_head_dim=head_dim,
-                    seq_len=seq_len,
-                    sliding_window_size=attention.window_size,
-                )
-            return nparams, 6 * active_nparams + attention_op_flops
+            base_estimate = super(MuseSparkModel.Config, self).build_flops_estimator(
+                model,
+                seq_len=seq_len,
+                excluded_submodules=(*vision_outputs, *excluded_submodules),
+            )
+            vision_config = self.vision_encoder
+            vision_output_flops = sum(
+                active_parameter_flops_per_token(module)
+                for module in vision_outputs
+                if module is not None
+            )
+            audio_config = self.audio_encoder
+            audio_output_flops = (
+                active_parameter_flops_per_token(model.perception_emb_norm)
+                if model.perception_emb_norm is not None
+                else 0
+            )
+
+            def estimate(input_dict) -> int:
+                flops = base_estimate(input_dict)
+                if vision_config is not None:
+                    flops += (
+                        vision_config.get_num_output_tokens(input_dict)
+                        * vision_output_flops
+                    )
+                if audio_config is not None:
+                    flops += (
+                        audio_config.get_num_output_tokens(input_dict)
+                        * audio_output_flops
+                    )
+                return flops
+
+            return estimate
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
@@ -546,7 +571,6 @@ class MuseSparkModel(MultimodalModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         aux_loss_denominators: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
@@ -584,7 +608,6 @@ class MuseSparkModel(MultimodalModel):
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
             )
 
         perception_input_sharding = multimodal_input_sharding()

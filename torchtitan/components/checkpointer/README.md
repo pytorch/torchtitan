@@ -21,6 +21,15 @@ checkpointer=CheckpointManager.Config(
     last_save_model_only=True,
 ),
 ```
+This final save cannot restore training, so it is written as an export under `exports/` rather than next to the resumable checkpoints. Automatic resume only considers `step-N` directories, so rerunning with a larger `training.steps` continues from the newest full checkpoint:
+```
+checkpoint/
+|-- step-500/          # full checkpoint, resumable
+|-- step-1000/         # full checkpoint, resumable
+`-- exports/
+    `-- step-1200/     # final model-only save (training.steps=1200)
+```
+To load an export, set `initial_load_path` to it (e.g. `.../checkpoint/exports/step-1200`); `initial_load_model_only` defaults to `True`. Run it from a job whose `checkpointer.folder` holds no `step-N`; otherwise the newest `step-N` is loaded and `initial_load_path` is ignored. A seed checkpoint stays at `step-0`.
 
 3. CHOOSE DESIRED EXPORT PRECISION
 The default model states are in `float32`. You can choose to export the checkpoint in a lower precision format such as `bfloat16`.
@@ -87,14 +96,14 @@ parallelism degree set to 1. Then run that configuration on one device.
 ### HuggingFace
 `torchtitan` offers two ways to work with Hugging Face models: either by directly saving and loading a Hugging Face checkpoint during training, or by using an example conversion script to directly reformat the model weights on cpu.
 
-1. You can directly save Hugging Face model weights during training by setting `checkpointer.last_save_in_hf` and `checkpointer.last_save_model_only` in the recipe. To directly load a `torchtitan` training session from a Hugging Face safetensors file, set `checkpointer.initial_load_in_hf`, and set either `hf_assets_path` or `checkpointer.initial_load_path` to the directory containing the Hugging Face checkpoint. `checkpointer.initial_load_path` overrides `hf_assets_path` if both are set. If `checkpointer.folder` already contains a valid checkpoint, training resumes from that folder and ignores `initial_load_in_hf` / `initial_load_path` (fault-tolerance restart). The first run (empty folder) uses the initial load.
+1. You can directly save Hugging Face model weights during training by setting `checkpointer.last_save_in_hf` and `checkpointer.last_save_model_only` in the recipe. The final save is written to `<checkpointer.folder>/exports/step-<N>`. To directly load a `torchtitan` training session from a Hugging Face safetensors file, set `checkpointer.initial_load_in_hf`, and set either `hf_assets_path` or `checkpointer.initial_load_path` to the directory containing the Hugging Face checkpoint. `checkpointer.initial_load_path` overrides `hf_assets_path` if both are set. If `checkpointer.folder` already contains a valid checkpoint, training resumes from that folder and ignores `initial_load_in_hf` / `initial_load_path` (fault-tolerance restart). The first run (empty folder) uses the initial load.
 
 2. To directly reformat the weights without the need to run a training loop, run the corresponding conversion script. The naming scheme is `torchtitan`-centric, e.g. convert_from_hf means convert hf->tt. `convert_ema_to_hf` exports the EMA weights instead of the trained ones, from the same checkpoint; it takes the same arguments plus `--ema_key` to pick one EMA copy (e.g. `--ema_key half_life_0p05`; optional when the checkpoint holds a single copy), and errors out if the checkpoint holds no EMA state. Note that `last_save_model_only` (the default) writes only model weights at the last step, so export the EMA from an interval checkpoint, or set it to `False`.
 
 ```bash
 python ./scripts/checkpoint_conversion/convert_from_hf.py <input_dir> <output_dir> --model_name <model_name> --model_flavor <model_flavor>
-python ./scripts/checkpoint_conversion/convert_to_hf.py <input_dir> <output_dir> --hf_assets_path ./assets/hf/Llama3.1-8B --model_name <model_name> --model_flavor <model_flavor>
-python ./scripts/checkpoint_conversion/convert_ema_to_hf.py <input_dir> <output_dir> --hf_assets_path ./assets/hf/Llama3.1-8B --model_name <model_name> --model_flavor <model_flavor> --ema_key <ema_key>
+python ./scripts/checkpoint_conversion/convert_to_hf.py <input_dir> <output_dir> --hf_assets_path ./assets/hf/Llama-3.1-8B --model_name <model_name> --model_flavor <model_flavor>
+python ./scripts/checkpoint_conversion/convert_ema_to_hf.py <input_dir> <output_dir> --hf_assets_path ./assets/hf/Llama-3.1-8B --model_name <model_name> --model_flavor <model_flavor> --ema_key <ema_key>
 # e.g.
 python ./scripts/checkpoint_conversion/convert_from_hf.py ~/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3-8B/snapshots/8cde5ca8380496c9a6cc7ef3a8b46a0372a1d920/ ./initial_load_path/ --model_name llama3 --model_flavor 8B
 ```
@@ -119,7 +128,7 @@ Once the above have been set, the final checkpoint at the end of the training st
 Finally, once you have obtained the last checkpoint, you can use the following command to convert the sharded checkpoints to a single .pt file.
 
 ```bash
-python -m torch.distributed.checkpoint.format_utils dcp_to_torch torchtitan/outputs/checkpoint/step-1000 checkpoint.pt
+python -m torch.distributed.checkpoint.format_utils dcp_to_torch torchtitan/outputs/checkpoint/exports/step-1000 checkpoint.pt
 ```
 
 

@@ -259,7 +259,6 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             compile=SimpleNamespace(),
             parallelism="PARALLELISM",
             training=SimpleNamespace(
-                max_context_length=8,
                 num_tokens_per_microbatch_per_dp_rank=1,
             ),
         )
@@ -276,6 +275,8 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine.local_loss_token_count = 0
         # Set by forward_backward: 1 routed token per loss token.
         engine._aux_loss_denominators = torch.tensor([1.0])
+        engine._forward_backward_num_flops = 0
+        engine.flops_estimator = lambda inputs: inputs["input"].numel()
         microbatches = [
             TokenizedTrainingMicrobatch(
                 input=torch.tensor([index]),
@@ -292,21 +293,32 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine._pp_forward_backward_microbatch_group = MagicMock(
             return_value=(torch.tensor(3.0), [{}, {}])
         )
-        result = engine._forward_backward_body(
+        loss, loss_metrics = engine._forward_backward_body(
             prepared_groups,
             defer_fsdp_gradient_reduction=False,
         )
 
         assert engine.ntokens_seen == 2
         assert engine.local_loss_token_count == 2
-        torch.testing.assert_close(result.loss, torch.tensor(3.0))
-        assert result.loss_metrics == [[{}, {}]]
+        assert engine._forward_backward_num_flops == 2
+        torch.testing.assert_close(loss, torch.tensor(3.0))
+        assert loss_metrics == [[{}, {}]]
         call = engine._pp_forward_backward_microbatch_group.call_args
         assert len(call.kwargs["inputs"]) == 2
         assert len(call.kwargs["model_kwargs"]) == 2
         assert len(call.kwargs["labels"]) == 2
         assert call.kwargs["loss_kwargs"] == [{}, {}]
         assert call.kwargs["finalize_gradients"]
+
+        engine.parallelism_context.pp_enabled = True
+        engine.pp_has_first_stage = True
+        engine.pp_has_last_stage = True
+        engine._forward_backward_num_flops = 0
+        engine.local_loss_token_count = 0
+        pp_prepared_groups = engine._preprocess_microbatch_groups([microbatches])
+        torch.testing.assert_close(pp_prepared_groups, prepared_groups)
+        assert engine._forward_backward_num_flops == 2
+        assert engine.local_loss_token_count == 2
 
     def test_graph_runtime_receives_shared_loss_kwargs(self):
         from types import SimpleNamespace
@@ -362,7 +374,6 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine.config = SimpleNamespace(
             parallelism="PARALLELISM",
             training=SimpleNamespace(
-                max_context_length=8,
                 num_tokens_per_microbatch_per_dp_rank=2,
             ),
         )
@@ -379,6 +390,8 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine.local_loss_token_count = 0
         # Set by forward_backward: routed tokens [2, 1] per 2 loss tokens.
         engine._aux_loss_denominators = torch.tensor([1.0, 0.5])
+        engine._forward_backward_num_flops = 0
+        engine.flops_estimator = lambda inputs: inputs["input"].numel()
         microbatch = TokenizedTrainingMicrobatch(
             input=main_tokens,
             labels=main_labels,
@@ -404,6 +417,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         (prepared_valid_mask,) = kwarg_mbs[0]["mtp_input_valid_masks"]
         torch.testing.assert_close(prepared_valid_mask, torch.tensor([True, False]))
         assert engine.ntokens_seen == 2
+        assert engine._forward_backward_num_flops == 2
 
     def test_accumulate_param_grads_clones_param_grad_when_requested(self):
         param = nn.Parameter(torch.zeros(2))
@@ -2316,9 +2330,8 @@ class TestTraceContextParallel(FSDPTest):
         trainer = None
         try:
             with tempfile.TemporaryDirectory() as dump_folder:
-                config = graph_trainer_llama3_debugmodel_varlen()
+                config = graph_trainer_llama3_debugmodel_varlen(seq_len=128)
                 config.dump_folder = dump_folder
-                config.training.max_context_length = 128
                 config.training.num_tokens_per_microbatch_per_dp_rank = 2 * 128
                 config.training.steps = 1
                 config.parallelism.data_parallel_replicate_degree = 1
@@ -2352,7 +2365,7 @@ class TestTraceContextParallel(FSDPTest):
                         device=trainer.engine.device,
                         dtype=torch.int32,
                     )
-                    % config.training.max_context_length
+                    % config.model.max_context_length
                 )
                 trainer.engine.forward_backward_microbatch(
                     microbatch_group=[
