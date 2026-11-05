@@ -7,12 +7,16 @@
 """Model config helpers shared by the RL recipes."""
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import LMHeadFP32OutputConverter
+from torchtitan.config.transform import (
+    DisableMoELoadBalancingTransform,
+    LMHeadFP32OutputConverter,
+    ModelConfigTransform,
+    transform_model_config_,
+)
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.moe import MoE
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 
 
@@ -34,8 +38,9 @@ def build_rl_model_configs(
 
     RL defaults, applied to both (pass False to skip one):
         fp32_lm_head                lm_head -> HiMidLoLinear (fp32 logits)
-        disable_moe_load_balancing  expert bias frozen as loaded, no router aux loss;
-                                    the router gate trains on the RL loss only
+        disable_moe_load_balancing  expert bias frozen as loaded, no router aux loss
+                                    (DisableMoELoadBalancingTransform); a moving
+                                    bias grows the trainer-vs-generator logprob gap
     Per-role transforms go through ``apply_transforms(config.generator, ...)``.
     """
     if fp32_lm_head:
@@ -49,9 +54,12 @@ def build_rl_model_configs(
             flavor, parallelism=generator_parallelism.to_training(), **kwargs
         ),
     )
+    transforms: list[ModelConfigTransform] = []
     if disable_moe_load_balancing:
-        for model_config in model_configs:
-            for _fqn, moe_config, _parent, _attr in model_config.traverse(MoE.Config):
-                moe_config.freeze_expert_bias = True
-                moe_config.router.aux_loss = None
-    return model_configs
+        transforms.append(DisableMoELoadBalancingTransform())
+    # A transform may return a new root (e.g. LoRA), so keep what it returns.
+    trainer_model, generator_model = (
+        cast(Decoder.Config, transform_model_config_(model_config, transforms))
+        for model_config in model_configs
+    )
+    return trainer_model, generator_model
