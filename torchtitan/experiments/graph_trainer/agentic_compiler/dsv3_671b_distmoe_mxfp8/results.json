@@ -225,6 +225,34 @@
     }
    },
    "bitwise_equal_to_baseline": true
+  },
+  {
+   "run": "iter9",
+   "gpu": 0,
+   "plan": "plans/plan_iter9.txt",
+   "kernels_added": "+ prepare_mxfp8_weight w13 and w2",
+   "gpu_ms_total": 678.4,
+   "gpu_ms_excl_fake_comm": 503.4,
+   "delta_vs_baseline_ms": -80.5,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.281303405761719,
+     "10": 12.479232788085938
+    },
+    "loss_metrics/global_max_loss": {
+     "1": 12.281303405761719,
+     "10": 12.479232788085938
+    },
+    "grad_norm": {
+     "1": 63.61985778808594,
+     "10": 4.849545478820801
+    },
+    "microbatch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "bitwise_equal_to_baseline": true
   }
  ]
 }

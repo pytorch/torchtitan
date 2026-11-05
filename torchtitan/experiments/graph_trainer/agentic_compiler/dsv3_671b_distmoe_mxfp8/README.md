@@ -45,12 +45,12 @@ either way.
 
 | | Value |
 |---|---|
-| GPU time per step, excluding fake-PG collectives, baseline -> iter8 (both on GPU 0) | **583.9 ms -> 514.2 ms (-69.8 ms unrounded, -11.9%)** |
-| Same, including fake-PG collectives | 758.8 ms -> 688.2 ms |
+| GPU time per step, excluding fake-PG collectives, baseline -> iter9 (both on GPU 0) | **583.9 ms -> 503.4 ms (-80.5 ms, -13.8%)** |
+| Same, including fake-PG collectives | 758.8 ms -> 678.4 ms |
 | Numerics | loss and grad_norm bitwise identical to the baseline in every iteration (sec. 6) |
-| Kernels in the cache | 20 kernel files across 18 patterns, each written by one agent, checked by a different freshly spawned verifier, and promoted only on PASS (18 measured in iter8; the 2 `prepare_mxfp8_weight` kernels were promoted after iter8) |
-| Verified per-call savings x calls per step | ~68 ms; consistent with the measured -69.7 ms |
-| Pending | iter9 training run with all 20 kernels (bitwise check + profile); expected about -77 ms vs baseline |
+| Kernels in the cache | 20 kernel files across 18 patterns, each written by one agent, checked by a different freshly spawned verifier, and promoted only on PASS (all 20 hit at every site in iter9) |
+| Verified per-call savings x calls per step | ~76 ms; consistent with the measured -80.5 ms (iter9 also includes ~2-3 ms of run-to-run variation) |
+| Pending | nothing in the loop; remaining options need a decision (sec. 11) |
 
 ## 2. Goal and constraints
 
@@ -124,11 +124,12 @@ iteration-7 profile was used to re-rank what was left (sec. 8).
 | iter5 | 12 | + MLA kv-bwd/quant, 5 norm+quant | 0 | 730.6 | 554.7 | -29.2 (-5.0%) | all sites | bitwise |
 | iter6 | 12 | + router fwd | 3 | 702.0 | 535.4 | -48.5 (-8.3%) | all sites | bitwise |
 | iter7 | 12 | + bucket pack, 2 norm-bwd+quant, GEMM-output permute | 3 | 681.2 | 515.9 | -68.0 (-11.6%) | all sites | bitwise |
-| **iter8** | **15** | + routed-experts pack, 4 quant-before-GEMM | **0** | **688.2** | **514.2** | **-69.7 (-11.9%)** | **all sites** | **bitwise** |
+| iter8 | 15 | + routed-experts pack, 4 quant-before-GEMM | 0 | 688.2 | 514.2 | -69.7 (-11.9%) | all sites | bitwise |
+| **iter9** | **15** | + prepare_mxfp8_weight w13, w2 | **0** | **678.4** | **503.4** | **-80.5 (-13.8%)** | **all sites** | **bitwise** |
 
 **Caveats:**
 - **GPU 3 runs faster:** iter6 and iter7 ran on GPU 3, which is faster on fake-comm copies (~9 ms) and GEMMs
-  (~1.6%, ~2 ms). Compare iter8 against the baseline (both on GPU 0) for the clean number.
+  (~1.6%, ~2 ms). Compare iter8 / iter9 against the baseline (all on GPU 0) for the clean number.
 - **Label shift:** GEMMs inside substituted kernels (5nj2, ponk, lfu5, bqhy) appear under the label `run`, not
   `_scaled_mm_v2`. Per-category GEMM totals are not comparable across iterations; the step totals are.
 - **Memory:** peak memory is flat at 138.9-139.5 GiB in all runs.
@@ -138,7 +139,7 @@ iteration-7 profile was used to re-rank what was left (sec. 8).
 
 - **What is compared:** each iteration's TensorBoard against the baseline `tb/`. TensorBoard logs steps 1 and 10;
   both are bitwise equal in every run, for grad_norm, global_avg_loss, global_max_loss and the load-balance loss.
-  Example from iter8: grad_norm step 1 = 63.61985778808594, step 10 = 4.849545478820801, identical to the baseline.
+  Example from iter9: grad_norm step 1 = 63.61985778808594, step 10 = 4.849545478820801, identical to the baseline.
 - **Limitation:** steps 2-9 are not logged. Step 10 depends on every earlier optimizer update, so an exact match at
   step 10 is strong evidence but not a proof that steps 2-9 match.
 - **Per-kernel parity:** checked bytewise against the immutable `reference.py`, on the harness (random seeds, real
@@ -170,8 +171,8 @@ GEMM.
 | lfu5 adm7po (G-015) | same | 61 | 44.8 | 38.5 | 0.4 | eve f1 -> vola | 6a3be1cfa65e7a11 | verify/quant_gemm_vola |
 | lfu5 autudf (G-015) | same | 61 | 187.2 | 168.1 | 1.2 | eve f1 -> vola | 6918f0a46c7edb20 | verify/quant_gemm_vola |
 | bqhy a42i3e (G-015) | same, other output order | 58 | 89.7 | 81.7 | 0.5 | eve f1 -> vola | cd1656916fc4da0e | verify/quant_gemm_vola |
-| x6t6 (G-021) | `dist_moe.prepare_mxfp8_weight`, w13 [4,4096,7168] | 116 | 102.0 | 51.4 | 5.9 | hana f2 -> vita | 88c5a967f5814cf4 | verify/prep_weight_vita (promoted after iter8) |
-| 5uzo (G-061) | `dist_moe.prepare_mxfp8_weight`, w2 [4,7168,2048] | 116 | 45.1 | 28.3 | 1.9 | hana f2 -> vita | 5673845eb1483e64 | verify/prep_weight_vita; writer claimed 23.8 us, measured with L2-resident outputs (promoted after iter8) |
+| x6t6 (G-021) | `dist_moe.prepare_mxfp8_weight`, w13 [4,4096,7168] | 116 | 102.0 | 51.4 | 5.9 | hana f2 -> vita | 88c5a967f5814cf4 | verify/prep_weight_vita |
+| 5uzo (G-061) | `dist_moe.prepare_mxfp8_weight`, w2 [4,7168,2048] | 116 | 45.1 | 28.3 | 1.9 | hana f2 -> vita | 5673845eb1483e64 | verify/prep_weight_vita; writer claimed 23.8 us, measured with L2-resident outputs |
 
 Candidate sources are under `autokernel/run1/candidates/<problem>/<writer>/...`; the board's "promote" rows list
 exact paths. Promoted copies are `kernel_cache/pat_<key>*/<kernel_name>`. The sha256 prefixes above were taken
@@ -205,6 +206,7 @@ override is disabled, the reference's own numerics change, and these kernels wou
   - `plan_iter2.txt` .. `plan_iter4.txt`: G-006, G-020, G-001, G-047, G-082, G-049, G-035.
   - `plan_iter5.txt` .. `plan_iter7.txt`: those plus G-007, G-003, G-015, G-031, G-073.
   - `plan_iter8.txt`: those plus G-028, G-021, G-061.
+  - `plan_iter9.txt`: the same passes as `plan_iter8.txt`; iter9 adds the 2 `prepare_mxfp8_weight` kernels.
 - **Not promoted, or not attempted, and why:**
   - **t6rh (G-031, colwise quant before GEMM, 6 specializations):** torchao's quantize is already ~7 TB/s; the
     gain is about 1-3 us per call, partly within noise. Not promoted.
@@ -279,8 +281,7 @@ override is disabled, the reference's own numerics change, and these kernels wou
 
 ## 11. Open items and decisions for you
 
-- **Pending measurement:** iter9, with the 2 `prepare_mxfp8_weight` kernels added (~7.8 ms/step from the verified
-  per-call numbers): bitwise check and profile. Expected total around -77 ms (-13%).
+- **Done:** iter9 with all 20 kernels: -80.5 ms (-13.8%) vs the baseline on the same GPU, bitwise identical.
 - **Beyond kernel fusion, needs your decision:**
   - **Save, don't recompute:** stop recomputing `prepare_mxfp8_weight`; about 8.5 ms/step, identical numerics,
     more memory.
