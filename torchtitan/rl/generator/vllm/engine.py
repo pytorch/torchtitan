@@ -12,6 +12,7 @@ import logging
 import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
+from hashlib import sha256
 from typing import Any
 
 import torch
@@ -104,7 +105,7 @@ class VLLMEngine(GenerationEngine):
 
         kv_transfer_config: KVTransferConfig | None = None
         """Native vLLM KV offload configuration. None: no connector. See
-        ``SIMPLE_CPU_OFFLOAD.md``."""
+        ``SIMPLE_CPU_OFFLOAD.md`` (local) and ``MOONCAKE_STORE.md`` (distributed)."""
 
         extra_engine_args: dict[str, Any] = field(default_factory=dict)
         """Additional keyword arguments passed to vLLM's ``EngineArgs``, for engine
@@ -134,20 +135,27 @@ class VLLMEngine(GenerationEngine):
                 return
             # TODO(acisseJZhong): support prefill/decode disaggregation connectors
             # if needed, and MultiConnector to combine them with KV offload.
-            if self.kv_transfer_config.kv_connector != "SimpleCPUOffloadConnector":
+            if self.kv_transfer_config.kv_connector not in (
+                "MooncakeStoreConnector",
+                "SimpleCPUOffloadConnector",
+            ):
                 raise ValueError(
-                    "Titan RL supports SimpleCPUOffloadConnector; "
+                    "Titan RL supports MooncakeStoreConnector and SimpleCPUOffloadConnector; "
                     "MultiConnector and other KV connectors are not supported."
                 )
             if self.kv_transfer_config.kv_role != "kv_both":
                 raise ValueError(
-                    "SimpleCPUOffloadConnector requires kv_role='kv_both': "
-                    "it both saves and loads KV, so vLLM must enable "
+                    "KV offload requires kv_role='kv_both': "
+                    "connectors both save and load KV, so vLLM must enable "
                     "producer finalization and consumer block-lifetime protection."
                 )
             if self.kv_transfer_config.kv_connector_module_path not in (
                 None,
-                "vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector",
+                (
+                    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector"
+                    if self.kv_transfer_config.kv_connector == "MooncakeStoreConnector"
+                    else "vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector"
+                ),
             ):
                 raise ValueError(
                     "KV offload requires vLLM's built-in connector in "
@@ -180,6 +188,12 @@ class VLLMEngine(GenerationEngine):
             parallelism.tensor_parallel_degree * parallelism.data_parallel_degree > 1
         )
         if config.kv_transfer_config is not None:
+            if config.kv_transfer_config.kv_connector == "MooncakeStoreConnector":
+                cache_prefix = config.kv_transfer_config.kv_connector_extra_config.get(
+                    "cache_prefix"
+                )
+                if not isinstance(cache_prefix, str) or not cache_prefix.strip():
+                    raise ValueError("Mooncake Store requires a non-empty cache_prefix")
             if reset_kv_cache_on_model_state_dict_load:
                 raise ValueError(
                     "KV offload requires reset_kv_cache_on_model_state_dict_load=False: "
@@ -218,6 +232,7 @@ class VLLMEngine(GenerationEngine):
             gpu_memory_limit=gpu_memory_limit,
             max_num_batched_tokens=max_num_batched_tokens,
             seed=debug.seed,
+            generator_name=generator_name,
         )
         tp_degree = parallelism.tensor_parallel_degree
         stat_loggers = None
@@ -286,6 +301,7 @@ class VLLMEngine(GenerationEngine):
         gpu_memory_limit: float,
         max_num_batched_tokens: int | None,
         seed: int | None,
+        generator_name: str,
     ) -> EngineArgs:
         """Build the vLLM ``EngineArgs`` (see ``GenerationEngine`` for the arguments)."""
         enable_ep = parallelism.expert_parallel_degree > 1
@@ -349,10 +365,25 @@ class VLLMEngine(GenerationEngine):
         #   when the request moves past them; hashed ones stay reusable until evicted.
         engine_kwargs["prefix_cache_retention_interval"] = None
         if self.config.kv_transfer_config is not None:
+            extra = self.config.kv_transfer_config.kv_connector_extra_config
+            if self.config.kv_transfer_config.kv_connector == "MooncakeStoreConnector":
+                extra = dict(extra)
+                # This option names an IPC socket, not a network port. Independent
+                # generators on the same host must not bind/unlink each other's socket.
+                extra.setdefault(
+                    "lookup_rpc_port",
+                    sha256(
+                        f"{extra['cache_prefix']}:{generator_name}".encode()
+                    ).hexdigest()[:16],
+                )
             engine_kwargs["kv_transfer_config"] = replace(
                 self.config.kv_transfer_config,
+                kv_connector_extra_config=extra,
                 kv_connector_module_path=(
-                    "torchtitan.rl.generator.vllm.simple_cpu_offload"
+                    "torchtitan.rl.generator.vllm.mooncake"
+                    if self.config.kv_transfer_config.kv_connector
+                    == "MooncakeStoreConnector"
+                    else "torchtitan.rl.generator.vllm.simple_cpu_offload"
                 ),
             )
             if self._coordinate_kv_offload:

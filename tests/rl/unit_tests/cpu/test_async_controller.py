@@ -57,12 +57,18 @@ def test_controller_config_maybe_log(tmp_path, caplog) -> None:
 
 
 @pytest.mark.parametrize("hot_swap", [False, True])
-def test_controller_rejects_hot_swap_with_kv_offload(hot_swap):
+@pytest.mark.parametrize(
+    "connector", ["SimpleCPUOffloadConnector", "MooncakeStoreConnector"]
+)
+def test_controller_rejects_hot_swap_with_kv_offload(hot_swap, connector):
     from torchtitan_recipes.tests.rl.alphabet_sort import (
         rl_grpo_qwen3_5_debug_varlen_cpu_offload,
     )
 
     config = rl_grpo_qwen3_5_debug_varlen_cpu_offload()
+    config.generator.engine.kv_transfer_config = replace(
+        config.generator.engine.kv_transfer_config, kv_connector=connector
+    )
     router = replace(config.generator_router, hot_swap=hot_swap)
     if hot_swap:
         with pytest.raises(ValueError, match="generator_router.hot_swap=False"):

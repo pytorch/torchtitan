@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any
 
@@ -67,7 +68,8 @@ class VLLMSessionKVHolder(Configurable):
     Args:
         scheduler: The vLLM v1 scheduler of this rank's in-process engine.
         offload_connector: Optional connector with ``get_pending_save_ids()`` and
-            ``release_session_cache(released_hashes, active_hashes)``.
+            ``release_session_cache(released_hashes, active_hashes)``. Release may
+            return a Future so the engine can drain asynchronous cleanup.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -91,6 +93,7 @@ class VLLMSessionKVHolder(Configurable):
         self._released_hashes: set[BlockHash] = set()
         self._eviction_hashes: set[BlockHash] = set()
         self._pending_saves: set[int] = set()
+        self._eviction: Future[None] | None = None
         # Held blocks per session, idle longest first.
         self._held: OrderedDict[str, list[Any]] = OrderedDict()
         self._session_groups: dict[str, int] = {}
@@ -210,9 +213,12 @@ class VLLMSessionKVHolder(Configurable):
 
     @property
     def has_pending_work(self) -> bool:
-        """Whether CPU release still needs engine steps to finish requests or saves."""
+        """Whether CPU release still needs engine steps or an eviction completion."""
         return bool(
-            self._released_sessions or self._released_hashes or self._eviction_hashes
+            self._released_sessions
+            or self._released_hashes
+            or self._eviction_hashes
+            or self._eviction is not None
         )
 
     def _release_cpu_cache(self) -> None:
@@ -224,6 +230,12 @@ class VLLMSessionKVHolder(Configurable):
             _, hashes = self._cpu_sessions.pop(session)
             self._released_hashes.update(hashes)
             self._released_sessions.remove(session)
+
+        if self._eviction is not None:
+            if not self._eviction.done():
+                return
+            self._eviction.result()
+            self._eviction = None
 
         connector = self._offload_connector
         if not self._eviction_hashes:
@@ -245,7 +257,7 @@ class VLLMSessionKVHolder(Configurable):
         self._eviction_hashes.clear()
         self._pending_saves.clear()
         if released:
-            connector.release_session_cache(released, active_hashes)
+            self._eviction = connector.release_session_cache(released, active_hashes)
 
     def _hold(self, request: Any, session_id: str, group_id: int) -> None:
         # The prompt's last token is recomputed for its logits, so a continuation hits at most

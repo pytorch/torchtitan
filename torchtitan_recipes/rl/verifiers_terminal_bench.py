@@ -14,6 +14,7 @@ The Muse Glimmer example is capped at its model's 16K context length.
 """
 
 import math
+from uuid import uuid4
 
 import verifiers.v1 as vf
 
@@ -77,6 +78,7 @@ from torchtitan.rl.trainer.losses import GRPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
 from verifiers.v1.configs.agent import TimeoutConfig as AgentTimeoutConfig
 from verifiers.v1.tasksets.harbor import HarborEnvConfig
+from vllm.config import KVTransferConfig
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
@@ -157,7 +159,9 @@ def _terminal_bench_rollouter_config(
 def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
     """Qwen3.5-9B: train on TMax (``local/tmax@v1``), validate on Terminal-Bench 2.1.
 
-    16 GPUs: 8 trainer (FSDP=8) and 8 one-GPU generators.
+    16 GPUs: 8 trainer (FSDP=8) and 8 one-GPU generators sharing Mooncake CPU KV.
+    Requires a running Mooncake Master and MOONCAKE_CONFIG_PATH on generator hosts;
+    see torchtitan/rl/generator/vllm/MOONCAKE_STORE.md.
     """
     # Agent turns average about 1.1K tokens (completion plus terminal output),
     # so 120 turns need about 128K.
@@ -210,9 +214,10 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
         ),
         num_generators=8,
         generator_router=InterGeneratorRouter.Config(
+            hot_swap=False,
             strategy=StickySessionRoutingStrategy.Config(
                 fallback_strategy=LeastLoadedRoutingStrategy.Config()
-            )
+            ),
         ),
         metrics=MetricsProcessor.Config(
             console_log_keys_validation=[
@@ -262,7 +267,16 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
         generator=Generator.Config(
             model=generator_model,
             engine=VLLMEngine.Config(
-                cuda_graph=VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY")
+                cuda_graph=VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY"),
+                kv_transfer_config=KVTransferConfig(
+                    kv_connector="MooncakeStoreConnector",
+                    kv_role="kv_both",
+                    kv_connector_extra_config={
+                        # Created once per controller config and shared by all replicas.
+                        "cache_prefix": f"qwen35-9b-terminal-bench-{uuid4().hex}",
+                        "save_decode_cache": True,
+                    },
+                ),
             ),
             parallelism=generator_parallelism,
             checkpointer=None,
