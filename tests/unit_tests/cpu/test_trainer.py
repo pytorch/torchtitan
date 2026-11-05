@@ -1177,7 +1177,11 @@ def test_trainer_accumulates_reused_accelerator_graph_losses():
         )
         trainer._step_started = True
         graph_loss.fill_(sum(next(loss_values) for _ in microbatch_groups))
-        return ForwardBackwardResult(graph_loss, [], 600)
+        # A token-summed /mean metric of 3 per group, like the losses.
+        loss_metrics = [
+            [{"ce_loss/mean": torch.tensor(3.0)}] for _ in microbatch_groups
+        ]
+        return ForwardBackwardResult(graph_loss, loss_metrics, 600)
 
     metrics_processor = SimpleNamespace(
         should_log=MagicMock(return_value=True),
@@ -1235,13 +1239,14 @@ def test_trainer_accumulates_reused_accelerator_graph_losses():
 
     # One denominator for the step: 12 routed tokens per 3 loss tokens.
     torch.testing.assert_close(passed_aux_loss_denominators, [torch.tensor([4.0])])
-    # The summed loss 1 + 2 + 3 over the step's 3 loss tokens.
+    # The summed loss 1 + 2 + 3 and the summed metric 3 + 3 + 3 over the step's
+    # 3 loss tokens.
     metrics_processor.log.assert_called_once_with(
         1,
         2.0,
         2.0,
         4.0,
-        extra_metrics={"n_tokens_seen": 3},
+        extra_metrics={"n_tokens_seen": 3, "ce_loss/mean": 3.0},
         num_flops=600.0,
     )
     # The first step after loading starts a new metrics window.
