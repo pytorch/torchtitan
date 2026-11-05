@@ -410,9 +410,11 @@ class TokenChoiceTopKRouter(Module):
             valid_map_TE = routing_map_TE
             if padding_mask_T is not None:
                 valid_map_TE = routing_map_TE & ~padding_mask_T.unsqueeze(-1)
-            # Exact integer counts for the tokens_per_expert_E buffer: batch-invariant mode runs
-            # a float sum as mean * T, which isn't exact. Summed outside the DP-local context
-            # below, so they are Partial over DP, as the buffer is.
+            # Int sum: the tokens_per_expert_E buffer needs exact counts. In batch-invariant mode,
+            # eager float sums run as mean * T (batch_invariant.py) and round when T isn't a power
+            # of two. The compiled region sums exactly. The fp32 aux-loss counts below only feed
+            # the loss, where that rounding is fine. Summed outside the DP-local context below, so
+            # they are Partial over DP, as the buffer is.
             tokens_per_expert_E = valid_map_TE.sum(dim=0)
             if self.aux_loss is not None:
                 # DP-local: each loss picks its own DP reduction. MicrobatchWise keeps DP ranks
