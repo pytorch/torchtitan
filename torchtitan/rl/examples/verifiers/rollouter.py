@@ -330,12 +330,17 @@ class VerifiersRollouter(Rollouter):
                 **{GROUP_ID_SAMPLING_PARAM: group_id},
             ),
         )
-        # `run` returned, so this rollout starts no new calls. Release each trace's routing
-        # session: Verifiers sends the trace id as X-Session-ID.
+        # `run` returned, so this rollout starts no new calls. For each trace, release its routing
+        # session (Verifiers sends the trace id as X-Session-ID) and take its generation metadata,
+        # so another agent's trace (a judge, a simulated user) leaves nothing on the server.
         # TODO: an attempt Verifiers retried has no trace here, so its held KV waits for the
         # group's release and its routing pin for the router's `max_sessions` LRU. The generation
         # server could record each rollout's session ids and release those too.
+        generation_metadata_by_trace = {}
         for trace in verifiers_episode.traces:
+            generation_metadata_by_trace[
+                trace.id
+            ] = self._generation_server.pop_generation_metadata(trace.id)
             try:
                 await release_session_fn(routing_session_id=trace.id)
             except Exception:
@@ -350,7 +355,7 @@ class VerifiersRollouter(Rollouter):
 
         # Convert Verifiers' graph trace to TitanRL's linear rollout turns.
         trace = traces[0]
-        generation_metadata = self._generation_server.pop_generation_metadata(trace.id)
+        generation_metadata = generation_metadata_by_trace[trace.id]
         turns = self.trace_to_rollout_turns(
             trace=trace,
             generation_metadata=generation_metadata,
@@ -401,10 +406,12 @@ class VerifiersRollouter(Rollouter):
             return RolloutStatus.ERROR_TIMEOUT
         if not verifiers_episode.ok or not trace.ok:
             # Verifiers records a failure as data instead of raising; the first error stopped the
-            # rollout. Only a generator 4xx (e.g. a prompt past the context) or the agent's own
-            # exit after the policy's first turn is the policy's doing. Any other error (a sandbox,
-            # env or tool failure, a generator 5xx or failed connection, a harness that failed
-            # before the first turn) makes the rollout ERROR_SYSTEM.
+            # rollout. Two errors are the policy's doing:
+            # - a prompt past the context: a generator error worded "maximum context length";
+            # - the agent's own exit after the policy's first turn. Verifiers records a harness
+            #   process that crashes on its own the same way, so that counts as the policy's too.
+            # Any other error (a sandbox, env or tool failure, any other generator error, a harness
+            # that failed before the first turn) makes the rollout ERROR_SYSTEM.
             errors = trace.errors or verifiers_episode.errors
             if not errors:
                 return RolloutStatus.ERROR
@@ -413,8 +420,7 @@ class VerifiersRollouter(Rollouter):
                 error.type == VerifiersHarnessError.__name__ and trace.num_turns > 0
             ) or (
                 error.type == VerifiersProviderError.__name__
-                and error.status_code is not None
-                and error.status_code < 500
+                and "maximum context length" in error.message
             )
             return (
                 RolloutStatus.ERROR if is_policy_error else RolloutStatus.ERROR_SYSTEM
