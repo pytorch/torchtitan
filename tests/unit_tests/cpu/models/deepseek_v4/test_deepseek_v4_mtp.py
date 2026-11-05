@@ -68,6 +68,7 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
         precision = SimpleNamespace(param_dtype="bfloat16", reduce_dtype="float32")
         parallelism = SimpleNamespace(
             fsdp_enable_cpu_offloading=False,
+            fsdp_backend="fsdp2",
             fsdp_reshard_after_forward="default",
             fsdp_symm_mem_scope=None,
         )

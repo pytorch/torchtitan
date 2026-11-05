@@ -20,6 +20,7 @@ from torchtitan.components.checkpointer import BaseCheckpointManager, Checkpoint
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.loss import ChunkedLossWrapper, Loss
 from torchtitan.components.optim import Optim
+from torchtitan.components.optim.optimizer import DistMuon
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import (
     CommConfig,
@@ -41,6 +42,7 @@ from torchtitan.distributed.activation_remat import (
     DefaultActivationRematConfig,
 )
 from torchtitan.distributed.batch_invariant import set_batch_invariance
+from torchtitan.distributed.fsdp import set_requires_gradient_sync
 from torchtitan.distributed.pipeline_parallel import (
     prepare_pipeline_schedule_for_accelerator_graph,
 )
@@ -163,6 +165,37 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 raise ValueError(
                     "parallelism.num_pp_microbatches must be greater than 0."
                 )
+            if self.parallelism.fsdp_backend == "flex_shard":
+                unsupported = [
+                    name
+                    for name, enabled in (
+                        (
+                            "accelerator graphs (set training.disable_accelerator_graphs)",
+                            not self.training.disable_accelerator_graphs
+                            and accelerator_graphs_supported(),
+                        ),
+                        (
+                            "ChunkedLossWrapper",
+                            isinstance(self.loss, ChunkedLossWrapper.Config),
+                        ),
+                        ("checkpointing", self.checkpointer is not None),
+                        ("optim.ema", self.optim.ema is not None),
+                        (
+                            "DistMuon, which needs DTensor parameters",
+                            any(
+                                isinstance(optimizer, DistMuon.Config)
+                                for optimizer in self.optim.optimizer.optimizers
+                            ),
+                        ),
+                        ("debug.spmd_typechecking", self.debug.spmd_typechecking),
+                    )
+                    if enabled
+                ]
+                if unsupported:
+                    raise ValueError(
+                        "parallelism.fsdp_backend='flex_shard' does not support "
+                        f"{', '.join(unsupported)} yet."
+                    )
             if (
                 self.optim.enable_accelerator_graph
                 and self.training.disable_accelerator_graphs
@@ -788,10 +821,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 )
             else:
                 if defer_fsdp_gradient_reduction:
-                    fsdp_root = cast(FSDPModule, self.model_parts[0])
-                    fsdp_root.set_is_last_backward(is_last_accumulation_step)
-                    fsdp_root.set_reshard_after_backward(is_last_accumulation_step)
-                    fsdp_root.set_requires_gradient_sync(is_last_accumulation_step)
+                    set_requires_gradient_sync(
+                        self.model_parts[0], is_last_accumulation_step
+                    )
                 inputs, labels, model_kwargs, loss_kwargs = prepared_inputs
                 loss = self._non_pp_forward_backward_microbatch(
                     inputs=inputs,

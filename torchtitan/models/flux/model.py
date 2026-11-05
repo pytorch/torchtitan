@@ -286,9 +286,11 @@ class FluxModel(BaseModel):
             disable_fsdp_gradient_division,
             enable_fsdp_symm_mem,
             mixed_precision_policy,
+            require_fsdp2_backend,
             resolve_fsdp_mesh,
         )
 
+        require_fsdp2_backend(parallelism, "Flux")
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
         fsdp_config: dict[str, Any] = {
             "mesh": dp_mesh,

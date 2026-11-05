@@ -19,7 +19,7 @@ from torch.distributed.fsdp import (
 )
 from torch.distributed.tensor import Shard
 
-from torchtitan.config.parallelism import FSDPSymmMemScope
+from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed.fsdp_lifecycle import complete_fsdp_grouped_forward
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.base.module import Module
@@ -35,8 +35,11 @@ __all__ = [
     "get_fsdp_reshard_after_forward_policy",
     "linear_param_shard_placements",
     "mixed_precision_policy",
+    "require_fsdp2_backend",
     "resolve_fsdp_mesh",
     "resolve_sparse_fsdp_mesh",
+    "routed_expert_param_placements",
+    "set_requires_gradient_sync",
 ]
 
 logger = logging.getLogger(__name__)
@@ -117,6 +120,56 @@ def linear_param_shard_placements(
         if (bias := getattr(child, "bias", None)) is not None:
             placements[bias] = Shard(bias.ndim - 1)
     return placements
+
+
+def routed_expert_param_placements(
+    routed_experts: nn.Module,
+    *,
+    num_experts: int,
+    expert_sharding_size: int,
+) -> dict[nn.Parameter, Shard]:
+    """Shard routed-expert parameters along the expert dimension, or along their
+    matrix rows when there are more expert shards than experts."""
+    placements: dict[nn.Parameter, Shard] = {
+        param: Shard(0) for param in routed_experts.parameters()
+    }
+    if expert_sharding_size > num_experts:
+        placements.update(
+            linear_param_shard_placements(
+                routed_experts,
+                include_unstacked_grouped=True,
+            )
+        )
+    return placements
+
+
+def set_requires_gradient_sync(
+    model_part: nn.Module, requires_gradient_sync: bool
+) -> None:
+    """Set whether the next backward reduces gradients, with FSDP2 or FlexShard.
+
+    For gradient accumulation: a backward without gradient sync also keeps the
+    parameters unsharded, and the next backward accumulates into their grads.
+    """
+    # FlexShard has no set_is_last_backward: every backward waits for its
+    # gradient reductions and releases its prefetch.
+    if hasattr(model_part, "set_is_last_backward"):
+        # pyrefly: ignore [not-callable]
+        model_part.set_is_last_backward(requires_gradient_sync)
+    # pyrefly: ignore [not-callable]
+    model_part.set_reshard_after_backward(requires_gradient_sync)
+    # pyrefly: ignore [not-callable]
+    model_part.set_requires_gradient_sync(requires_gradient_sync)
+
+
+def require_fsdp2_backend(parallelism: ParallelismConfig, model_name: str) -> None:
+    """Reject ``parallelism.fsdp_backend='flex_shard'`` for a model that has no
+    FlexShard path yet."""
+    if parallelism.fsdp_backend != "fsdp2":
+        raise ValueError(
+            f"{model_name} supports only parallelism.fsdp_backend='fsdp2', got "
+            f"{parallelism.fsdp_backend!r}."
+        )
 
 
 def resolve_fsdp_mesh(
@@ -439,16 +492,11 @@ def apply_fsdp_to_decoder(
                 if "cp" in dp_storage_mesh.mesh_dim_names:
                     expert_sharding_size *= dp_storage_mesh["cp"].size()
 
-            expert_param_placements = {
-                param: Shard(0) for param in routed_experts.parameters()
-            }
-            if expert_sharding_size > num_experts:
-                expert_param_placements.update(
-                    linear_param_shard_placements(
-                        routed_experts,
-                        include_unstacked_grouped=True,
-                    )
-                )
+            expert_param_placements = routed_expert_param_placements(
+                routed_experts,
+                num_experts=num_experts,
+                expert_sharding_size=expert_sharding_size,
+            )
             if ep_degree == 1:
                 param_placements = stacked_param_placements.copy()
                 param_placements.update(expert_param_placements)

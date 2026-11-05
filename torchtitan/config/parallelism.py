@@ -16,6 +16,8 @@ from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
 
 FSDPSymmMemScope: TypeAlias = Literal["all", "dense", None]
 _FSDP_SYMM_MEM_SCOPES = get_args(FSDPSymmMemScope)
+FSDPBackend: TypeAlias = Literal["fsdp2", "flex_shard"]
+_FSDP_BACKENDS = get_args(FSDPBackend)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -72,6 +74,16 @@ class ParallelismConfig:
     "dense" skips any module with routed experts. An MoE transformer block is
     one FSDP module, so its attention parameters are skipped along with its
     experts.
+    """
+
+    fsdp_backend: FSDPBackend = "fsdp2"
+    """
+    Which library shards parameters over ``dp_shard``. "fsdp2" applies PyTorch's
+    ``fully_shard``. "flex_shard" applies FlexShard (meta-pytorch/flex_shard),
+    with one ``fsdp2_compatible`` bucket per FSDP2 group, so training is bitwise
+    identical to "fsdp2". FlexShard does not support HSDP, tensor, context,
+    expert or pipeline parallelism, symmetric-memory communication or CPU
+    offloading yet.
     """
 
     tensor_parallel_degree: int = 1
@@ -244,6 +256,38 @@ class ParallelismConfig:
                 f"{list(_FSDP_SYMM_MEM_SCOPES)} "
                 f"(got {self.fsdp_symm_mem_scope!r})"
             )
+        if self.fsdp_backend not in _FSDP_BACKENDS:
+            raise ValueError(
+                f"parallelism.fsdp_backend must be one of {list(_FSDP_BACKENDS)} "
+                f"(got {self.fsdp_backend!r})"
+            )
+        if self.fsdp_backend == "flex_shard":
+            unsupported = [
+                f"parallelism.{name}={degree}"
+                for name, degree in (
+                    (
+                        "data_parallel_replicate_degree",
+                        self.data_parallel_replicate_degree,
+                    ),
+                    ("tensor_parallel_degree", self.tensor_parallel_degree),
+                    ("context_parallel_degree", self.context_parallel_degree),
+                    ("expert_parallel_degree", self.expert_parallel_degree),
+                    ("pipeline_parallel_degree", self.pipeline_parallel_degree),
+                )
+                if degree != 1
+            ]
+            if self.fsdp_symm_mem_scope is not None:
+                unsupported.append(
+                    f"parallelism.fsdp_symm_mem_scope={self.fsdp_symm_mem_scope!r}"
+                )
+            if self.fsdp_enable_cpu_offloading:
+                unsupported.append("parallelism.fsdp_enable_cpu_offloading=True")
+            if unsupported:
+                raise ValueError(
+                    "parallelism.fsdp_backend='flex_shard' shards over "
+                    "data_parallel_shard_degree only so far; it does not support "
+                    f"{', '.join(unsupported)}."
+                )
         if self.fsdp_symm_mem_scope is not None and (
             not torch.cuda.is_available()
             or (

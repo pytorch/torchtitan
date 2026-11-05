@@ -215,6 +215,22 @@ def test_microbatch_tokens_match_activation_sharding() -> None:
     config.__post_init__()
 
 
+def test_flex_shard_rejects_features_it_lacks() -> None:
+    config = llama3_debugmodel()
+    config.parallelism = ParallelismConfig(fsdp_backend="flex_shard")
+
+    with _accelerator_graphs_supported(True), pytest.raises(
+        ValueError,
+        match=r"does not support accelerator graphs .*, ChunkedLossWrapper yet",
+    ):
+        TrainingEngine.Config.__post_init__(config)
+
+    config.training.disable_accelerator_graphs = True
+    config.loss = config.loss.loss_fn  # the chunked wrapper's cross-entropy
+    with _accelerator_graphs_supported(True):
+        TrainingEngine.Config.__post_init__(config)
+
+
 def test_spmd_typechecking_rejects_pipeline_parallelism() -> None:
     with pytest.raises(ValueError, match="SPMD typechecking"):
         TrainingEngine.Config(
