@@ -243,7 +243,7 @@ config.compile.extra_passes = list(fusion_regions.DEFAULT_SELECTION)
 **Matching is by topology, not node names.** Each `lift_pass.py` holds generated
 plain-Python matchers. A matcher starts from an anchor node and walks the region: producers through
 `args`, and users (`user_of`) for members that are not ancestors of the anchor. At each
-node it checks the op and every literal argument (`is_op`), and it checks that paths
+node it checks the op and its literal arguments (`is_op`), and it checks that paths
 meeting inside the region, or reading the same external input, meet at the same node:
 
 ```python
@@ -276,6 +276,33 @@ MATCHERS = [('aten.unsqueeze.default', match_v0)]
 def lift_fusion_region_g003(gm, example_inputs=None):
     return lift_matches(gm, REGION_ID, MATCHERS)
 ```
+
+**Sizes and scalar operands match any value; devices match by type.** The op schema
+decides, when the matcher is generated:
+- `S`: arguments typed `SymInt`, `SymInt[]` or `SymInt?` (view/reshape/expand sizes,
+  split sizes, slice bounds, `topk`'s k, the bucketing ops' `group_size`), and the
+  `int[]` `normalized_shape` of `_fused_rms_norm` and its backward;
+- `V`: numbers passed to `Tensor` or `Scalar` arguments (`mul(x, 256)`,
+  `clamp_min(x, 1e-12)`);
+- `D('cuda')`: `Device` arguments, any index of that device type (`device=cuda:3`);
+- every other literal must be equal: dims, dtypes, bools, strings, `float` arguments
+  such as `eps`, custom-op ints such as the MXFP8 block size, and list lengths.
+
+The comment keeps the captured literals:
+
+```python
+    # _fused_rms_norm (as captured: [N, [7168], N, 1e-06])
+    if not is_op(n4, 'aten._fused_rms_norm.default', [N, [S], N, 1e-06]):
+```
+
+Ranks trace the same graph except for literals that `S` and `D` cover (device index,
+the bucketing ops' `rank`, FSDP shard offsets in `slice`), so a matcher generated from
+the rank-0 capture lifts the same instances on every rank. A region found in one capture
+is also found in other variants and layouts of the model where only shapes or config
+constants differ: the 671B norm region lifts in the 16B model (hidden size 2048).
+Lifting keeps numerics either way. Kernel caches (substitute_kernels) key kernels by the
+actual literals, so another shape gets its own kernel problem. Regions whose structure differs (different routing config, a collective
+or bucket layout that depends on the sharding) still have to be found in that capture.
 
 `curate_regions.py` generates a matcher from one instance and runs it on the dumped
 graph; if some instance is not found (a structural variant), it generates another

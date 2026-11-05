@@ -47,17 +47,22 @@ import subprocess
 from collections import Counter, defaultdict
 
 import pandas as pd
+import torch
 
 from find_regions import BARRIER_TARGETS
 from graph_lib import load_nodes, normalize_fqn, numel, short_src, tensor_vals
 from lift_regions import (
+    D,
     DumpNode,
     find_matches,
     is_op,
     lift_hazard,
     load_dump_graph,
     N,
+    op_schema,
+    S,
     user_of,
+    V,
     writes_outside,
 )
 
@@ -209,27 +214,96 @@ def region_family(r):
 _UNMATCHABLE = object()
 
 
-def _template(v):
-    """is_op template of a dumped argument: N for nodes, literals as dumped."""
+# Size arguments typed int[] instead of SymInt[] in their schema.
+# TODO: make _fused_rms_norm's normalized_shape SymInt[] upstream, as rms_norm's is.
+_INT_LIST_SIZE_ARGS = {
+    ("aten::_fused_rms_norm", "normalized_shape"),
+    ("aten::_fused_rms_norm_backward", "normalized_shape"),
+}
+
+
+def _literal_slot(schema, arg):
+    """S if ``arg`` holds sizes, V if it is a scalar operand, D if it is a device, None if
+    literals must be equal.
+
+    Sizes and scalar operands carry the shapes and config constants of the capture (hidden
+    size, number of experts, FSDP group size, ...) and the rank (bucket rank, shard
+    offsets); devices carry the rank's device index. Matching them as any value (devices:
+    any index of the same type) finds the region in other model variants and layouts and
+    on every rank. Lifting keeps numerics either way.
+    """
+    t = arg.real_type
+    while isinstance(t, (torch._C.OptionalType, torch._C.ListType)):
+        t = t.getElementType()
+    if (
+        isinstance(t, torch._C.SymIntType)
+        or (schema.name, arg.name) in _INT_LIST_SIZE_ARGS
+    ):
+        return S
+    if isinstance(t, (torch._C.TensorType, torch._C.NumberType)):
+        return V
+    if isinstance(t, torch._C.DeviceObjType):
+        return D
+    return None
+
+
+def _template(v, slot=None):
+    """is_op template of a dumped argument: N for nodes, ``slot`` (S or V) for numbers and
+    D(type) for devices if given, other literals as dumped."""
     if isinstance(v, DumpNode):
         return N
     if isinstance(v, list):
-        items = [_template(x) for x in v]
+        items = [_template(x, slot) for x in v]
         return _UNMATCHABLE if any(x is _UNMATCHABLE for x in items) else items
     if isinstance(v, dict):
         if set(v) == {"repr"}:  # a literal the dump could not encode
             return _UNMATCHABLE
-        items = {k: _template(x) for k, x in v.items()}
+        items = {k: _template(x, slot) for k, x in v.items()}
         return _UNMATCHABLE if any(x is _UNMATCHABLE for x in items.values()) else items
+    if isinstance(v, bool):
+        return v
+    # Graph dumps write symbolic sizes as strings.
+    if slot is S and isinstance(v, (int, str)):
+        return S
+    if slot is V and isinstance(v, (int, float)):
+        return V
+    if slot is D and isinstance(v, str):
+        return D(v.split(":")[0])
     if isinstance(v, float) and math.isnan(v):
         return _UNMATCHABLE
     return v
 
 
+def _templates(node):
+    """is_op templates of ``node``'s args and kwargs, with slots from its op schema."""
+    schema = op_schema(node)
+    if schema is None:
+        return _template(node.args), _template(node.kwargs)
+    slots = [_literal_slot(schema, a) for a in schema.arguments]
+    by_name = {a.name: slot for a, slot in zip(schema.arguments, slots)}
+    args = [
+        _template(v, slots[i] if i < len(slots) else None)
+        for i, v in enumerate(node.args)
+    ]
+    kwargs = {k: _template(v, by_name.get(k)) for k, v in node.kwargs.items()}
+    if any(x is _UNMATCHABLE for x in [*args, *kwargs.values()]):
+        return _UNMATCHABLE, _UNMATCHABLE
+    return args, kwargs
+
+
+def _captured(n, ta, tk):
+    """Comment naming the captured node, with its literals where slots stand for them."""
+    ea, ek = _template(n.args), _template(n.kwargs)
+    if _UNMATCHABLE in (ea, ek) or (ta, tk) == (ea, ek):
+        return f"    # {n.name} (as captured)"
+    kw = f", {_py(ek)}" if ek else ""
+    return f"    # {n.name} (as captured: {_py(ea)}{kw})"
+
+
 def _py(v):
     """Python source of a template value."""
-    if v is N:
-        return "N"
+    if v is N or v is S or v is V or isinstance(v, D):
+        return repr(v)
     if isinstance(v, list):
         return "[" + ", ".join(_py(x) for x in v) + "]"
     if isinstance(v, dict):
@@ -283,12 +357,12 @@ def _gen_matcher(inst, dn, fname):
     while True:
         while work:
             m = work.pop(0)
-            ta, tk = _template(m.args), _template(m.kwargs)
+            ta, tk = _templates(m)
             if ta is _UNMATCHABLE or tk is _UNMATCHABLE:
                 return None, f"{m.name} has a literal argument that cannot be matched"
             kw = f", {_py(tk)}" if tk else ""
             body += [
-                f"    # {m.name} (as captured)",
+                _captured(m, ta, tk),
                 f"    if not is_op({var[m]}, {m.target!r}, {_py(ta)}{kw}):",
                 "        return None",
             ]
@@ -310,7 +384,7 @@ def _gen_matcher(inst, dn, fname):
             link = next(
                 ((s, path) for s, _, path in _node_slots(u, "") if s in var), None
             )
-            ta, tk = _template(u.args), _template(u.kwargs)
+            ta, tk = _templates(u)
             if link is not None and ta is not _UNMATCHABLE and tk is not _UNMATCHABLE:
                 skip = ", ".join(var.values())
                 var[u] = f"n{len(var)}"
@@ -331,6 +405,24 @@ def _gen_matcher(inst, dn, fname):
     return "\n".join([f"def {fname}(n0):", doc] + body) + "\n", anchor.target
 
 
+def _lift_imports(matchers):
+    """Names the generated lift pass imports from lift_regions."""
+    calls = [
+        line
+        for _, src, _ in matchers
+        for line in src.splitlines()
+        if "is_op(" in line or "user_of(" in line
+    ]
+    slots = [
+        x for x in ("S", "V") if any(re.search(rf"[\[ ]{x}[\],]", c) for c in calls)
+    ]
+    if any(re.search(r"[\[ ]D\(", c) for c in calls):
+        slots.append("D")
+    return ", ".join(
+        sorted(["is_op", "lift_matches", "N", "user_of", *slots], key=str.lower)
+    )
+
+
 def _region_matchers(instances, dn, dump_nodes):
     """Matchers that find every finder instance: ([(anchor op, source, fn)], sites) or (None, reason)."""
     matchers = []
@@ -341,7 +433,7 @@ def _region_matchers(instances, dn, dump_nodes):
         src, anchor = _gen_matcher(sorted(uncovered[0]), dn, fname)
         if src is None:
             return None, anchor
-        ns = {"N": N, "is_op": is_op, "user_of": user_of}
+        ns = {"D": D, "N": N, "S": S, "V": V, "is_op": is_op, "user_of": user_of}
         exec(src, ns)  # noqa: S102  (generated matcher source)
         matchers.append((anchor, src, ns[fname]))
         sites = find_matches(dump_nodes, [(a, fn) for a, _, fn in matchers])
@@ -947,6 +1039,7 @@ def main():
                     num_found=len(r["_instances"]),
                     pass_name=pass_names[r["id"]],
                     attr=f"fusion_{r['id'].replace('-', '')}",
+                    lift_imports=_lift_imports(matchers),
                     matchers="\n\n".join(src for _, src, _ in matchers),
                     matcher_list="["
                     + ", ".join(
@@ -1084,16 +1177,19 @@ Generated by fusion_region_finder/scripts/curate_regions.py from {root}. In that
 the matchers below find {num_sites} site(s); the finder reported {num_found} instance(s).
 
 Each matcher walks the region's topology from an anchor node and checks every op and
-literal argument, so the region is found wherever the same subgraph appears; the node
-names in comments are from the capture, for reference only. Add "{pass_name}" to
-config.compile.extra_passes after importing this module or the fusion_regions package;
-the directory of lift_regions.py must be on PYTHONPATH. Every instance becomes
-``call_module {attr}`` (``{attr}_v<k>`` for structural variants) whose body runs the
-region's original aten ops. To replace it with a kernel, assign a module with the same
-signature to ``gm.{attr}`` in a pass listed after this one.
+literal argument, except sizes (``S``) and scalar operands (``V``), which match any value,
+and devices (``D``), which match by type. So the region is found wherever the same subgraph
+appears: at other shapes and model configs, and on every rank. The node names and literals
+in comments are from the capture, for reference only.
+
+Add "{pass_name}" to config.compile.extra_passes after importing this module or the
+fusion_regions package; the directory of lift_regions.py must be on PYTHONPATH. Every
+instance becomes ``call_module {attr}`` (``{attr}_v<k>`` for structural variants) whose
+body runs the region's original aten ops. To replace it with a kernel, assign a module
+with the same signature to ``gm.{attr}`` in a pass listed after this one.
 \"\"\"
 
-from lift_regions import is_op, lift_matches, N, user_of
+from lift_regions import {lift_imports}
 
 from torchtitan.experiments.graph_trainer.registry import register_graph_pass
 
