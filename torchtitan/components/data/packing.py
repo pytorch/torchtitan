@@ -30,6 +30,22 @@ class ConcatThenSplitPackingConfig:
         context: DatasetBuildContext,
         dataset_iteration_policy: DatasetIterationPolicy,
     ) -> grain.IterDataset:
+        if context.document_alignment is not None:
+            alignment = context.document_alignment
+            if context.max_num_documents is None:
+                raise ValueError(
+                    "document_alignment requires document-aware concat-then-split "
+                    "packing (max_num_documents)"
+                )
+            if (
+                alignment <= 0
+                or context.max_context_length % alignment
+                or context.num_tokens_per_microbatch % alignment
+            ):
+                raise ValueError(
+                    "document_alignment must be positive and divide "
+                    "max_context_length and num_tokens_per_microbatch"
+                )
         dataset = self.dataset.build(
             context=context,
             dataset_iteration_policy=dataset_iteration_policy,
@@ -42,6 +58,7 @@ class ConcatThenSplitPackingConfig:
                 max_num_documents_per_row=context.max_num_documents,
                 max_context_length=context.max_context_length,
                 num_tokens_per_row=context.num_tokens_per_microbatch,
+                document_alignment=context.document_alignment,
             )
         dataset = dataset.map(
             partial(
@@ -79,11 +96,13 @@ class _DocumentAwareConcatThenSplitIterDataset(grain.IterDataset):
         max_num_documents_per_row: int,
         max_context_length: int,
         num_tokens_per_row: int,
+        document_alignment: int | None = None,
     ) -> None:
         super().__init__(parent)
         self._max_num_documents_per_row = max_num_documents_per_row
         self._max_context_length = max_context_length
         self._num_tokens_per_row = num_tokens_per_row
+        self._document_alignment = document_alignment or 1
 
     def __iter__(self) -> grain.DatasetIterator:
         return _DocumentAwareConcatThenSplitIterator(
@@ -91,6 +110,7 @@ class _DocumentAwareConcatThenSplitIterDataset(grain.IterDataset):
             max_num_documents_per_row=self._max_num_documents_per_row,
             max_context_length=self._max_context_length,
             num_tokens_per_row=self._num_tokens_per_row,
+            document_alignment=self._document_alignment,
         )
 
 
@@ -104,11 +124,13 @@ class _DocumentAwareConcatThenSplitIterator(grain.DatasetIterator):
         max_num_documents_per_row: int,
         max_context_length: int,
         num_tokens_per_row: int,
+        document_alignment: int | None = None,
     ) -> None:
         super().__init__(parent)
         self._max_num_documents_per_row = max_num_documents_per_row
         self._max_context_length = max_context_length
         self._num_tokens_per_row = num_tokens_per_row
+        self._document_alignment = document_alignment or 1
         self._remainder: TextSequence | None = None
         self._remainder_parent_state: dict[str, Any] | None = None
         self._remainder_offset = 0
@@ -172,7 +194,15 @@ class _DocumentAwareConcatThenSplitIterator(grain.DatasetIterator):
                 if sequence.padding_mask is None
                 else np.asarray(sequence.padding_mask[token_slice], dtype=np.bool_)
             )
-            num_tokens += num_segment_tokens
+            pad = (-num_segment_tokens) % self._document_alignment
+            if pad:
+                input_parts[-1] = np.pad(input_parts[-1], (0, pad))
+                label_parts[-1] = np.pad(
+                    label_parts[-1], (0, pad), constant_values=IGNORE_INDEX
+                )
+                position_parts[-1] = np.arange(num_segment_tokens + pad, dtype=np.int64)
+                mask_parts[-1] = np.pad(mask_parts[-1], (0, pad), constant_values=True)
+            num_tokens += num_segment_tokens + pad
             self._remainder_offset += num_segment_tokens
             if self._remainder_offset == len(sequence.input_ids):
                 self._remainder = None
@@ -246,6 +276,10 @@ class FirstFitPackingConfig:
         context: DatasetBuildContext,
         dataset_iteration_policy: DatasetIterationPolicy,
     ) -> grain.IterDataset:
+        if context.document_alignment is not None:
+            raise ValueError(
+                "document_alignment requires document-aware concat-then-split packing"
+            )
         dataset = self.dataset.build(
             context=context,
             dataset_iteration_policy=dataset_iteration_policy,

@@ -2298,3 +2298,65 @@ def test_loader_passes_read_options_to_map_conversion(monkeypatch):
     loader.close()
 
     assert captured == [read_options]
+
+
+@pytest.mark.parametrize("capacity", [1, 4])
+def test_aligned_packing_preserves_tokens_and_checkpoint(tmp_path, capacity):
+    path = tmp_path / "aligned.jsonl"
+    documents = [list(range(10, 14)), list(range(20, 39)), list(range(50, 56))]
+    write_jsonl(path, [{"tokens": doc} for doc in documents])
+    source = SingleDatasetConfig(
+        source=IndexedJsonlSource.Config(patterns=(str(path),)),
+        processor=RowToTokens.Config(),
+    )
+    context = replace(
+        CONTEXT,
+        max_context_length=8,
+        num_tokens_per_microbatch=16,
+        max_num_documents=capacity,
+        document_alignment=4,
+    )
+    packed = ConcatThenSplitPackingConfig(dataset=source).build(
+        context=context, dataset_iteration_policy=dataset_iteration_policy()
+    )
+    iterator = iter(packed)
+    first = next(iterator)
+    state = iterator.get_state()
+    rest = list(iterator)
+    resumed = iter(packed)
+    resumed.set_state(state)
+    recovered = list(resumed)
+    assert len(rest) == len(recovered)
+    for left, right in zip(rest, recovered):
+        for field in ("input_ids", "labels", "positions", "padding_mask"):
+            np.testing.assert_array_equal(getattr(left, field), getattr(right, field))
+    batches = [first, *rest]
+    np.testing.assert_array_equal(
+        np.concatenate([row.input_ids[~row.padding_mask] for row in batches]),
+        np.concatenate([doc[:-1] for doc in documents]),
+    )
+    for row in batches:
+        assert (np.flatnonzero(row.positions == 0) % 4 == 0).all()
+        assert (row.labels[row.padding_mask] == IGNORE_INDEX).all()
+        assert len(row.input_ids) == 16
+
+
+@pytest.mark.parametrize(
+    "packing", [FirstFitPackingConfig, ConcatThenSplitPackingConfig]
+)
+def test_alignment_rejects_unsupported_packing(packing):
+    context = replace(CONTEXT, document_alignment=4)
+    with pytest.raises(ValueError, match="document-aware"):
+        packing(dataset=None).build(
+            context=context, dataset_iteration_policy=dataset_iteration_policy()
+        )
+
+
+@pytest.mark.parametrize("alignment", [0, 4])
+def test_alignment_must_divide_context_and_row(alignment):
+    # CONTEXT packs 9 tokens per document into 18-token rows: 4 divides neither.
+    context = replace(CONTEXT, max_num_documents=4, document_alignment=alignment)
+    with pytest.raises(ValueError, match="divide max_context_length"):
+        ConcatThenSplitPackingConfig(dataset=None).build(
+            context=context, dataset_iteration_policy=dataset_iteration_policy()
+        )
