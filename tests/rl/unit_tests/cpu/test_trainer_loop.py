@@ -65,6 +65,8 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
         return _RankValues(SimpleNamespace(policy_version=version, metrics={}))
 
     async def push(*, trainable_only):
+        # After the initial sync, pushes carry only the trainable parameters.
+        assert trainable_only
         events.append("push start")
         if on_push is not None:
             await on_push()
@@ -88,7 +90,6 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
     )
     controller.start_step = 0
     controller._trainer_policy_version = 0
-    controller._push_only_trainable_parameters = False
     trainer = SimpleNamespace(
         sync_log_step=_Endpoint(),
         forward_backward=_Endpoint(forward_backward),

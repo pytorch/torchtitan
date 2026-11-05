@@ -197,13 +197,14 @@ def _copy_published(new_state_dict: dict[str, torch.Tensor], published: set[str]
 
 
 @pytest.mark.parametrize("loaded_checkpoint", [False, True])
-def test_load_model_state_dict_fills_a_subset_only_after_a_checkpoint_load(
+def test_load_model_state_dict_fills_a_subset_once_it_holds_every_weight(
     tmp_path, loaded_checkpoint: bool
 ) -> None:
-    """Without a checkpoint load every load must fill every parameter, whose storage was
-    just reallocated. A generator that loaded the checkpoint gets only the trainable
-    parameters (e.g. LoRA adapters) and keeps the ones a load leaves out. An unfilled
-    buffer (e.g. a vLLM attention scale the trainer does not publish) keeps its value."""
+    """Without a checkpoint load, the first load must fill every parameter, whose storage
+    was just reallocated. After it (or after a checkpoint load) the trainer sends only
+    the trainable parameters (e.g. LoRA adapters), and a load keeps the ones it leaves
+    out. An unfilled buffer (e.g. a vLLM attention scale the trainer does not publish)
+    keeps its value."""
     dist.init_process_group(
         "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
     )
@@ -225,8 +226,8 @@ def test_load_model_state_dict_fills_a_subset_only_after_a_checkpoint_load(
                 model_wrapper._unshard_and_free_sharded_params(module)
         params = {name for name, _ in model.named_parameters()}
         loaded = {k: v + 1 for k, v in initial_state_dict.items()}
+        later = {k: v + 2 for k, v in initial_state_dict.items()}
 
-        wrapper.load_model_state_dict(_copy_published(loaded, params))
         if not loaded_checkpoint:
             with pytest.raises(
                 RuntimeError, match="did not fill 1 weights.*layers.1.bias"
@@ -234,8 +235,7 @@ def test_load_model_state_dict_fills_a_subset_only_after_a_checkpoint_load(
                 wrapper.load_model_state_dict(
                     _copy_published(loaded, params - {"layers.1.bias"})
                 )
-            return
-        later = {k: v + 2 for k, v in initial_state_dict.items()}
+        wrapper.load_model_state_dict(_copy_published(loaded, params))
         wrapper.load_model_state_dict(_copy_published(later, {"layers.0.weight"}))
 
         for name, param in model.named_parameters():

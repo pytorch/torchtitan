@@ -157,8 +157,8 @@ def rl_grpo_qwen3_5_0_8b_geometry3k_lora() -> Controller.Config:
     """`rl_grpo_qwen3_5_0_8b_geometry3k` with LoRA on the language model.
 
     Rank-32 adapters on the attention, GatedDeltaNet and MLP projections; the base
-    weights and the vision tower stay frozen. The generators load the base from the HF
-    checkpoint, so every weight sync sends only the adapters. The learning rate is 10x the full fine-tuning one,
+    weights and the vision tower stay frozen. The initial weight sync sends the whole
+    model; later ones only the adapters. The learning rate is 10x the full fine-tuning one,
     which "LoRA Without Regret" (Thinking Machines, 2025) found optimal for LoRA.
     """
     config = rl_grpo_qwen3_5_0_8b_geometry3k()
@@ -180,8 +180,7 @@ def rl_grpo_qwen3_5_0_8b_geometry3k_lora() -> Controller.Config:
     )
     trainer = apply_transforms(config.trainer, [lora])
     trainer.optim.optimizer.optimizers = [AdamW.Config(pattern=r".*", lr=2e-5)]
-    generator = apply_transforms(config.generator, [lora])
-    # The generators load the frozen base from the HF checkpoint, as the trainer does, so
-    # weight syncs carry only the adapters.
-    generator.checkpointer = CheckpointManager.Config(initial_load_in_hf=True)
-    return dataclasses.replace(config, trainer=trainer, generator=generator)
+    # The initial weight sync carries the whole model; later ones only the adapters.
+    return dataclasses.replace(
+        config, trainer=trainer, generator=apply_transforms(config.generator, [lora])
+    )

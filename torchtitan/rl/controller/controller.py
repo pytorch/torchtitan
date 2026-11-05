@@ -509,14 +509,14 @@ class Controller(Configurable):
         self.actor_system: ActorSystem | None = None
         self.trainer: TrainerHandle | None = None
         self.generator_router: InterGeneratorRouter | None = None
-        # Generators that load the checkpoint themselves already hold the parameters that
-        # do not train (e.g. a LoRA base), so every weight sync, the initial one included,
-        # carries only the trainable ones (for LoRA, the adapters). Otherwise every sync
-        # carries the whole model.
-        # TODO: every generator replica then reads the checkpoint from storage at once (80
-        # reads with 10 nodes x 8 GPUs at DP=1). Send the frozen parameters once in the
-        # initial weight sync instead, and only the trainable ones after it.
-        self._push_only_trainable_parameters = config.generator.checkpointer is not None
+        # The initial weight sync carries the whole model, unless the generators loaded the
+        # checkpoint themselves and so already hold the parameters that do not train (e.g. a
+        # LoRA base). Later syncs carry only the trainable parameters (for LoRA, the
+        # adapters): the others cannot change. Without frozen parameters that is the whole
+        # model either way.
+        self._initial_push_only_trainable_parameters = (
+            config.generator.checkpointer is not None
+        )
         # The batcher's single-actor handle.
         self.batcher: Any | None = None
         # Resume step (0 = fresh); set in setup_async from the loaded checkpoint.
@@ -786,10 +786,11 @@ class Controller(Configurable):
             await self.generator_router.start_engine_loop.call_one()
 
         # Initial push and pull: generators pull the trainer's weights at start_step (all of
-        # them, or only the trainable ones if they loaded the checkpoint).
+        # them, or only the trainable ones if they loaded the checkpoint). Generators read no
+        # checkpoint by default: N replicas would read it from storage at once.
         with sl.log_trace_span("trainer_push_model_state_dict"):
             await self.trainer.all_ranks.push_model_state_dict.call(
-                trainable_only=self._push_only_trainable_parameters
+                trainable_only=self._initial_push_only_trainable_parameters
             )
         with sl.log_trace_span("generator_pull_model_state_dict"):
             await self.generator_router.pull_model_state_dict.call_one(self.start_step)
@@ -1360,9 +1361,7 @@ class Controller(Configurable):
         """Push the trainer's model state dict to TorchStore; returns its wall time in seconds."""
         with sl.log_trace_span("trainer_push_model_state_dict"):
             start = time.perf_counter()
-            await self.trainer.all_ranks.push_model_state_dict.call(
-                trainable_only=self._push_only_trainable_parameters
-            )
+            await self.trainer.all_ranks.push_model_state_dict.call(trainable_only=True)
             return time.perf_counter() - start
 
     async def _pull_model_state_dict_and_release_groups(
