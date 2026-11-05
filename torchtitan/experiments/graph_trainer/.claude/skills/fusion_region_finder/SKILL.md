@@ -1,6 +1,6 @@
 ---
 name: fusion_region_finder
-description: Find kernel-fusion regions in a GraphTrainer training step (forward, recompute and backward) from the traced joint graph, a profiler trace and a measured roofline; rank them by gap to roofline, and write one folder per region with a compile.extra_passes graph pass that lifts the region into a call_module (whose body is the fusion target) and a KernelGen problem for it. Use when asked to find fusion opportunities, rank glue ops by distance from roofline, or prepare targets for handwritten kernels in graph_trainer.
+description: Find kernel-fusion regions in a GraphTrainer training step (forward, recompute and backward) from the traced joint graph, a profiler trace and a measured roofline; rank them by gap to roofline, and write one folder per region with a compile.extra_passes graph pass that lifts the region into a call_module, whose body is the fusion target. Use when asked to find fusion opportunities, rank glue ops by distance from roofline, or prepare targets for handwritten kernels in graph_trainer.
 ---
 
 # Finding fusion regions in a GraphTrainer step
@@ -8,8 +8,8 @@ description: Find kernel-fusion regions in a GraphTrainer training step (forward
 The method: capture one training step as GraphTrainer runs it, with every FX node
 labelled in the profiler trace; attribute each GPU kernel to its node; measure how
 far each group of fusible nodes is from its roofline; lift the groups into
-`call_module` nodes so a kernel can replace them; and write each group as a KernelGen
-problem that a kernel must reproduce bit for bit. Everything runs from
+`call_module` nodes so a kernel can replace them. Kernel problems are written by
+substitute_kernels when a lifted region has no kernel yet (section 5). Everything runs from
 `scripts/` in this skill and writes to one capture directory under `outputs/`
 (gitignored). Nothing under `torchtitan/` is edited.
 
@@ -38,10 +38,7 @@ parse_trace -> build_node_table -> find_regions -> curate_regions -> validate_re
                                                       |
                      regions.json, regions_table.md, fusion_regions/ (one folder per region)
                                                       |
-                              make_problems -> validate_problems (local GPU)
-                                                      |
-   fusion_regions/g003_rope/: region.json, lift_pass.py, problem.py, payload.json,
-                              problem_meta.json, validation.json
+                         fusion_regions/g003_rope/: region.json, lift_pass.py
                                                       |
    lifted run: compile.extra_passes = ["lift_fusion_region_g003", ...] -> same loss, per-region timing
 ```
@@ -64,9 +61,7 @@ helper:
   `_RecordFunctionFast("node: op (file:line)")`;
 - sets `debug.seed = 42`, `debug.deterministic = True`, profiles step 10 after 3
   warmup steps, turns accelerator graphs off (replay hides the labels), and writes
-  `setup.json`: config deltas plus the model constants that `make_problems.py` needs
-  (vocab size, context length, router experts/top-k/groups). The first graph dump adds
-  the world size. TensorBoard goes to `<out>/tb`, the full-precision baseline for
+  `setup.json` with the config deltas. The first graph dump adds the world size. TensorBoard goes to `<out>/tb`, the full-precision baseline for
   lifted runs.
 
 Pipelines:
@@ -185,7 +180,7 @@ What the scripts do:
 The scripts find dataflow-connected candidates. These parts need judgment:
 
 - Read the top of `regions_table.md` and the region's folder: the matcher in
-  `lift_pass.py` (its comments name the captured nodes) and the ops in `problem.py`.
+  `lift_pass.py` (its comments name the captured nodes and literals).
   For each region worth a kernel, write its title, the dataflow
   that makes it fusible, and its real blockers into an annotations JSON keyed by the
   region key that `curate_regions.py` prints. Then rerun it with `--annotations`.
@@ -364,49 +359,6 @@ capture -> analyze -> plan_passes.py -> lifted run + substitute (writes problems
 Each round, re-run the analysis on the new profile: the fused regions drop out and the
 next largest gaps lead the next plan.
 
-## 6. Write the KernelGen problems
-
-```bash
-python $SKILL/make_problems.py $OUT --model-tag dsv3_671b
-python $SKILL/validate_problems.py $OUT --gpus 0,1,2,3   # one process per problem
-```
-
-`make_problems.py` adds to each region folder:
-- `problem.py`: the reference program (`Model`, `get_init_inputs`, `get_inputs`). The
-  forward replays the region's aten ops from the `final` graph in graph order, one line
-  per node with its node name. Symbolic sizes become integers. Ops that training ran
-  under deterministic mode and that depend on it (`index_put`, `scatter_add`, `cumsum`,
-  ...) run inside `_deterministic()`. Inputs that the region writes in place or through
-  `out=` are cloned first. Inputs have the traced shapes, strides and dtypes. Their
-  values come from roles read off the graph (token ids, labels, positions, RMSNorm
-  `rstd`, ...); MoE routing tensors come from one consistent routing sample
-  (`_routing_context`), so indices are in range and agree with each other.
-- `payload.json`: the body of a KernelGen create-problem request: op type (the folder's
-  family), a unique shape string, flops, bytes, bound type and a description. T0-T2
-  regions get `max_valid_ulp = 0` and `max_valid_abs_diff = 0`.
-- `problem_meta.json`: FX node per variable, input roles, expected outputs, byte and
-  flop counts, and `same_computation_as`, the regions whose problem is identical. A
-  region that cannot be converted gets only `{"region", "error"}`.
-
-Nothing is submitted: get the user's approval of a subset first, and skip the
-duplicates listed in `same_computation_as`.
-
-`validate_problems.py` writes `validation.json` per folder. It checks:
-- the payload limits;
-- the recorded input and output shapes;
-- run-to-run bitwise determinism;
-- that outputs equal a run with `torch.use_deterministic_algorithms(True)` enabled
-  globally, as in training;
-- that inputs are not mutated.
-
-It also records forward time and peak memory. Problems are full size: 671B MoE
-problems need up to about 120 GiB.
-
-A problem's signature is not the lifted submodule's. The problem drops symbolic-size
-inputs, clones written inputs and returns each output once. `problem_meta.json` names
-the FX node behind every input and output, so a kernel written for the problem can be
-wrapped to the submodule's placeholders.
-
 ## Outputs
 
 | file | content |
@@ -415,13 +367,10 @@ wrapped to the submodule's placeholders.
 | `regions_table.md` | ranked table with tier and the lift pass (or why there is none) |
 | `fusion_regions/<folder>/region.json` | the region's `regions.json` entry plus `lift`: pass name, sites, default selection, or why it is not liftable |
 | `fusion_regions/<folder>/lift_pass.py` | liftable regions: generated topology matchers (`MATCHERS`) and the registered pass `lift_fusion_region_g<id>` |
-| `fusion_regions/<folder>/problem.py`, `payload.json`, `problem_meta.json` | the KernelGen problem (`make_problems.py`) |
-| `fusion_regions/<folder>/validation.json` | local GPU checks of the problem (`validate_problems.py`) |
 | `fusion_regions/__init__.py` | imports every lift pass; `PASSES` (region -> folder, pass) and `DEFAULT_SELECTION` |
 | `analysis/node_table.csv.gz` | one row per node: kernel time, phase, FQN, bytes, flops, ideal, ratio |
 | `analysis/candidates.json` | all discovery candidates before curation |
 | `analysis/step_budget.json` | GPU busy/idle and time by category |
 
-Done when attribution is at least 95%, `validate_regions.py` prints VALID, every
-problem passes `validate_problems.py`, `report.md` is written, and a lifted run of the
+Done when attribution is at least 95%, `validate_regions.py` prints VALID, `report.md` is written, and a lifted run of the
 selected regions gives bitwise identical loss and grad_norm.

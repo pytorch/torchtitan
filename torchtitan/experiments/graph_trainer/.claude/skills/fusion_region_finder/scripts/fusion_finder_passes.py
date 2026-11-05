@@ -23,7 +23,6 @@ Nothing under ``torchtitan/`` is modified.
 
 from __future__ import annotations
 
-import dataclasses
 import functools
 import gzip
 import json
@@ -40,7 +39,6 @@ from torchtitan.experiments.graph_trainer.passes import (
     construct_default_graph_passes,
 )
 from torchtitan.experiments.graph_trainer.registry import register_pass_pipeline
-from torchtitan.models.common.moe.moe import TokenChoiceTopKRouter
 from torchtitan.observability.metrics import TensorBoardLogger
 
 logger = logging.getLogger(__name__)
@@ -100,45 +98,10 @@ def enable_fusion_finder(
         "steps": config.training.steps,
         "profiled_step": profile_step,
         "model_config": type(config.model).__qualname__,
-        # Read by make_problems.py to generate realistic problem inputs.
-        "model": _model_constants(config.model),
     }
     with open(os.path.join(out_dir, "setup.json"), "w") as f:
         json.dump(setup, f, indent=1, default=str)
     return config
-
-
-def _find_config(node: Any, cls: type) -> Any:
-    """First instance of ``cls`` in a config tree (dataclasses, lists, dicts), or None."""
-    if isinstance(node, cls):
-        return node
-    if dataclasses.is_dataclass(node) and not isinstance(node, type):
-        children = [getattr(node, f.name) for f in dataclasses.fields(node)]
-    elif isinstance(node, (list, tuple)):
-        children = list(node)
-    elif isinstance(node, dict):
-        children = list(node.values())
-    else:
-        return None
-    for child in children:
-        found = _find_config(child, cls)
-        if found is not None:
-            return found
-    return None
-
-
-def _model_constants(model_config: Any) -> dict[str, Any]:
-    router = _find_config(model_config, TokenChoiceTopKRouter.Config)
-    return {
-        "vocab_size": getattr(model_config, "vocab_size", None),
-        "max_context_length": getattr(model_config, "max_context_length", None),
-        "router": None
-        if router is None
-        else {
-            k: getattr(router, k, None)
-            for k in ("num_experts", "top_k", "num_expert_groups", "num_limited_groups")
-        },
-    }
 
 
 def _record_world_size() -> None:

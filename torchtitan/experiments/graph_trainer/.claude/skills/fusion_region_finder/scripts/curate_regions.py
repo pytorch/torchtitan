@@ -27,7 +27,6 @@ Writes:
                               region.json    the region's regions.json entry plus its lift status
                               lift_pass.py   generated topology matchers and the registered
                                              graph pass lift_fusion_region_g003 (liftable only)
-                            make_problems.py adds the KernelGen problem to each folder.
                             __init__.py imports every lift pass and defines PASSES and
                             DEFAULT_SELECTION
   analysis/regions_side.json
@@ -194,8 +193,7 @@ def _reentry_path(member_names, by, order):
 def region_family(r):
     """Short name of a region: its innermost module, plus its GEMM kind or single op.
 
-    E.g. ``rope``, ``w13_grouped_gemm``, ``attention_cat``. Used in folder names and as
-    the KernelGen ``op_type``.
+    E.g. ``rope``, ``w13_grouped_gemm``, ``attention_cat``. Used in folder names.
     """
     fqns = [f for f in r["location"]["module_fqn_pattern"].split(", ") if f]
     parts = [[p for p in f.split(".") if p != "*"] for f in fqns]
