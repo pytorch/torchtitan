@@ -762,11 +762,8 @@ def test_generation_server_logs_each_request_at_debug_only(caplog) -> None:
         finally:
             await server.close()
 
-    # Set the level explicitly: imports can change the root level.
-    with caplog.at_level(logging.INFO, logger="aiohttp.access"):
-        asyncio.run(run_test())
-    assert "aiohttp.access" not in [record.name for record in caplog.records]
-
+    # One DEBUG record: no INFO line, and still logged. Set the level explicitly: imports can
+    # change the root level.
     with caplog.at_level(logging.DEBUG, logger="aiohttp.access"):
         asyncio.run(run_test())
     access_records = [r for r in caplog.records if r.name == "aiohttp.access"]

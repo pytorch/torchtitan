@@ -32,31 +32,6 @@ SESSION_ID_HEADER = "X-Session-ID"
 _LOGPROBS_CONTENT_PLACEHOLDER = "<logprobs content>"
 
 
-class _DebugAccessLogger(web.AbstractAccessLogger):
-    """Log each request at DEBUG on the ``aiohttp.access`` logger.
-
-    aiohttp's default logs one INFO line per request, most of the process's log lines. To see them:
-    ``logging.getLogger("aiohttp.access").setLevel(logging.DEBUG)``.
-    """
-
-    @property
-    def enabled(self) -> bool:
-        # False skips the per-request timing and formatting.
-        return self.logger.isEnabledFor(logging.DEBUG)
-
-    def log(
-        self, request: web.BaseRequest, response: web.StreamResponse, time: float
-    ) -> None:
-        self.logger.debug(
-            "%s %s %d %.3fs session=%s",
-            request.method,
-            request.path,
-            response.status,
-            time,
-            request.headers.get(SESSION_ID_HEADER),
-        )
-
-
 GROUP_ID_SAMPLING_PARAM = "torchtitan_group_id"
 """Sampling parameter carrying a request's rollout group id.
 
@@ -415,6 +390,32 @@ def _listening_socket() -> socket.socket:
             ("::", 0), family=socket.AF_INET6, dualstack_ipv6=True
         )
     return socket.create_server(("0.0.0.0", 0))  # IPv6 is disabled on this host
+
+
+class _DebugAccessLogger(web.AbstractAccessLogger):
+    """Log each request at DEBUG on the ``aiohttp.access`` logger.
+
+    aiohttp's default logs one INFO line per request, most of the process's log lines. To see them,
+    run with ``TITAN_LOG_LEVEL=DEBUG``: aiohttp checks the level once per connection, so it must be
+    set before the server starts.
+    """
+
+    @property
+    def enabled(self) -> bool:
+        # False skips the per-request timing and formatting.
+        return self.logger.isEnabledFor(logging.DEBUG)
+
+    def log(
+        self, request: web.BaseRequest, response: web.StreamResponse, time: float
+    ) -> None:
+        self.logger.debug(
+            "%s %s %d %.3fs session=%s",
+            request.method,
+            request.path,
+            response.status,
+            time,
+            request.headers.get(SESSION_ID_HEADER),
+        )
 
 
 def _validate_token_ids(value: object, *, field_name: str) -> list[int]:
