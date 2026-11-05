@@ -69,7 +69,7 @@ VERIFIERS_REWARD_KEY = "verifiers_reward"
 # vLLM, the renderer and the generation server all word a prompt past the context this way.
 _CONTEXT_OVERFLOW_TEXT = "maximum context length"
 # Verifiers' message when the agent process exits non-zero: "harness 'terminus' exited 1: <stderr>".
-_AGENT_EXIT_MESSAGE = re.compile(r"harness .+ exited -?\d+: ")
+_AGENT_EXIT_PATTERN = re.compile(r"harness '[^']*' exited -?\d+: ")
 
 
 class RewardFromVerifiers(RewardFn):
@@ -413,8 +413,8 @@ class VerifiersRollouter(Rollouter):
             # rollout. Two errors are the policy's doing:
             # - a prompt past the context (`_CONTEXT_OVERFLOW_TEXT`);
             # - the agent process exiting non-zero after the policy's first turn
-            #   (`_AGENT_EXIT_MESSAGE`). Verifiers can't tell this from a crash of that process,
-            #   so a crash after the first turn also counts as the policy's.
+            #   (`_AGENT_EXIT_PATTERN`). A program harness that crashes reports the same way, so
+            #   that crash after the first turn also counts as the policy's.
             # Any other error (a sandbox, env or tool failure, an error in the harness's own code
             # or metrics, any other generator error, a harness that failed before the first turn)
             # makes the rollout ERROR_SYSTEM.
@@ -425,7 +425,7 @@ class VerifiersRollouter(Rollouter):
             is_policy_error = (
                 error.type == VerifiersHarnessError.__name__
                 and trace.num_turns > 0
-                and _AGENT_EXIT_MESSAGE.match(error.message) is not None
+                and _AGENT_EXIT_PATTERN.match(error.message) is not None
             ) or (
                 error.type == VerifiersProviderError.__name__
                 and _CONTEXT_OVERFLOW_TEXT in error.message
