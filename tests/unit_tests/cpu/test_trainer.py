@@ -24,7 +24,7 @@ from torchtitan.distributed.accelerator_graph import wrap_with_accelerator_graph
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.observability.metrics import compute_training_performance_metrics
-from torchtitan.observability.profiler import CuspyProfilerConfig, Profiler
+from torchtitan.observability.profiler import CuspyTraceProfiler, Profiler
 from torchtitan.observability.sdc_replayer import SDCReplayMismatch
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import (
@@ -623,21 +623,17 @@ def test_accelerator_graph_wrapper_preserves_structured_args_and_kwargs():
     [
         (Profiler.Config(), None),
         (
-            Profiler.Config(enable_profiling=True, cuspy=CuspyProfilerConfig()),
+            Profiler.Config(trace=CuspyTraceProfiler.Config()),
             {"backend": "cupti", "key_by": "auto"},
         ),
         (
             Profiler.Config(
-                enable_profiling=True,
-                cuspy=CuspyProfilerConfig(enable_event_node_ids=True),
+                trace=CuspyTraceProfiler.Config(enable_event_node_ids=True)
             ),
             {"backend": "cupti", "key_by": "exec"},
         ),
         (
-            Profiler.Config(
-                enable_profiling=True,
-                cuspy=CuspyProfilerConfig(record_py_stacks=True),
-            ),
+            Profiler.Config(trace=CuspyTraceProfiler.Config(record_py_stacks=True)),
             {"backend": "cupti", "key_by": "auto", "record_py_stacks": True},
         ),
     ],

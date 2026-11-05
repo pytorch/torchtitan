@@ -26,7 +26,7 @@ from torchtitan.models.common.config_utils import (
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
 from torchtitan.observability.metrics import MetricsProcessor
-from torchtitan.observability.profiler import Profiler
+from torchtitan.observability.profiler import KinetoTraceProfiler, Profiler
 
 from torchtitan_recipes.data import c4_document_capacity
 
@@ -45,10 +45,7 @@ def llama3_torchft_debugmodel(
         ),
         hf_assets_path="./tests/assets/tokenizer",
         profiler=Profiler.Config(
-            enable_profiling=True,
-            profile_freq=10,
-            profiler_active=10,
-            profiler_warmup=0,
+            trace=KinetoTraceProfiler.Config(freq=10, active=10, warmup=0)
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,

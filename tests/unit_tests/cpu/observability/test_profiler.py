@@ -4,79 +4,37 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
 import re
+import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import torch
 
-from torchtitan.observability.profiler import Profiler
+from torchtitan.observability.profiler import (
+    CuspyTraceProfiler,
+    KinetoTraceProfiler,
+    MemorySnapshotProfiler,
+    Profiler,
+)
 
 
-class TestProfilerConfig(unittest.TestCase):
-    def test_default_field_values(self):
-        cfg = Profiler.Config()
-        self.assertFalse(cfg.enable_profiling)
-        self.assertEqual(cfg.save_traces_folder, "profiling/traces")
-        self.assertEqual(cfg.profile_freq, 10)
-        self.assertEqual(cfg.profiler_active, 1)
-        self.assertEqual(cfg.profiler_warmup, 3)
-        self.assertIsNone(cfg.profiler_repeat)
-        self.assertIsNone(cfg.profiler_skip_first)
-        self.assertIsNone(cfg.profiler_skip_first_wait)
-        self.assertFalse(cfg.enable_memory_snapshot)
-        self.assertEqual(cfg.save_memory_snapshot_folder, "profiling/memory_snapshot")
-        self.assertIsNone(cfg.memory_snapshot_freq)
-
-
-class TestProfilerDisabledPaths(unittest.TestCase):
-    """Tests for the no-op / disabled paths that require no GPU."""
-
-    def test_runtime_args_stored_on_init(self):
-        """Runtime kwargs passed to __init__ are stored on the instance."""
-        profiler = Profiler(
-            Profiler.Config(), global_step=42, base_folder="/data", leaf_folder="sub"
-        )
-        self.assertEqual(profiler._global_step, 42)
-        self.assertEqual(profiler._base_folder, "/data")
-        self.assertEqual(profiler._leaf_folder, "sub")
-
+class TestProfilerDisabled(unittest.TestCase):
     def test_context_manager_step_is_noop(self):
-        """With everything disabled, context manager and step() don't raise."""
+        """With nothing enabled, the context manager and step() need no process group."""
         profiler = Profiler(Profiler.Config())
         with profiler as prof:
             self.assertIs(prof, profiler)
-            self.assertIsNone(prof.torch_profiler)
-            self.assertIsNone(prof.memory_profiler)
+            self.assertIsNone(prof.trace)
+            self.assertIsNone(prof.memory_snapshot)
             prof.step()
             prof.step()
 
-    def test_active_updates_runtime_args(self):
-        """active() updates runtime args and returns self for context manager use."""
-        profiler = Profiler(Profiler.Config())
-        self.assertEqual(profiler._global_step, 0)
-        self.assertEqual(profiler._base_folder, "")
-        self.assertEqual(profiler._leaf_folder, "")
 
-        result = profiler.active(
-            global_step=10, base_folder="/output", leaf_folder="replica_0"
-        )
-        self.assertIs(result, profiler)
-        self.assertEqual(profiler._global_step, 10)
-        self.assertEqual(profiler._base_folder, "/output")
-        self.assertEqual(profiler._leaf_folder, "replica_0")
-
-    def test_active_as_context_manager(self):
-        """active() can be used as a context manager with 'with' statement."""
-        profiler = Profiler(Profiler.Config())
-        with profiler.active(global_step=5, base_folder="/tmp") as prof:
-            self.assertIs(prof, profiler)
-            self.assertEqual(prof._global_step, 5)
-            prof.step()
-
-
-class TestProfilerEnabledPaths(unittest.TestCase):
-    """Tests for enabled profiler paths — uses mocked distributed rank."""
+class TestProfilerEnabled(unittest.TestCase):
+    """Tests for enabled profilers -- uses mocked distributed rank."""
 
     def setUp(self):
         self.patcher_rank = mock.patch("torch.distributed.get_rank", return_value=0)
@@ -85,28 +43,21 @@ class TestProfilerEnabledPaths(unittest.TestCase):
     def tearDown(self):
         self.patcher_rank.stop()
 
-    def test_build_torch_profiler_returns_active_handle(self):
-        import tempfile
-
+    def test_kineto_backend_built_and_closed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             profiler = Profiler(
                 Profiler.Config(
-                    enable_profiling=True,
-                    profile_freq=4,
-                    profiler_warmup=1,
-                    profiler_active=1,
+                    trace=KinetoTraceProfiler.Config(freq=4, warmup=1, active=1)
                 ),
                 global_step=0,
                 base_folder=tmpdir,
             )
             with profiler:
-                self.assertIsNotNone(profiler.torch_profiler)
+                self.assertIsInstance(profiler.trace, KinetoTraceProfiler)
+                profiler.step()
+            self.assertIsNone(profiler.trace)
 
     def test_neuron_adds_privateuse1_activity_and_stacks(self):
-        import tempfile
-
-        import torch
-
         with (
             tempfile.TemporaryDirectory() as tmpdir,
             mock.patch("torch.cuda.is_available", return_value=False),
@@ -114,18 +65,8 @@ class TestProfilerEnabledPaths(unittest.TestCase):
             mock.patch("torchtitan.observability.profiler.device_type", "neuron"),
             mock.patch("torch.profiler.profile") as profile,
         ):
-            profiler = Profiler(
-                Profiler.Config(
-                    enable_profiling=True,
-                    profile_freq=4,
-                    profiler_warmup=1,
-                    profiler_active=1,
-                ),
-                global_step=0,
-                base_folder=tmpdir,
-            )
-            profiler.build_torch_profiler(
-                global_step=0, base_folder=tmpdir, leaf_folder=""
+            KinetoTraceProfiler.Config(freq=4, warmup=1, active=1).build(
+                global_step=0, base_folder=tmpdir, leaf_folder="", rank=0
             )
         self.assertEqual(
             profile.call_args.kwargs["activities"],
@@ -136,83 +77,33 @@ class TestProfilerEnabledPaths(unittest.TestCase):
         )
         self.assertTrue(profile.call_args.kwargs["with_stack"])
 
-    def test_memory_snapshot_frequency_is_independent(self):
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with mock.patch(
-                "torchtitan.observability.profiler.MemoryProfiler"
-            ) as memory_profiler_cls:
-                profiler = Profiler(
-                    Profiler.Config(
-                        enable_memory_snapshot=True,
-                        profile_freq=50,
-                        memory_snapshot_freq=3,
-                    )
-                )
-                memory_profiler = profiler.build_memory_profiler(
-                    global_step=7,
-                    base_folder=tmpdir,
-                    leaf_folder="",
-                )
-
-        self.assertIs(memory_profiler, memory_profiler_cls.return_value)
-        self.assertEqual(memory_profiler_cls.call_args.args[1], 3)
-
-    def test_memory_snapshot_frequency_defaults_to_profile_frequency(self):
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with mock.patch(
-                "torchtitan.observability.profiler.MemoryProfiler"
-            ) as memory_profiler_cls:
-                profiler = Profiler(
-                    Profiler.Config(
-                        enable_memory_snapshot=True,
-                        profile_freq=6,
-                    )
-                )
-                profiler.build_memory_profiler(
-                    global_step=0,
-                    base_folder=tmpdir,
-                    leaf_folder="",
-                )
-
-        self.assertEqual(memory_profiler_cls.call_args.args[1], 6)
-
-    def test_memory_snapshot_frequency_must_be_positive(self):
-        import tempfile
-
-        profiler = Profiler(
-            Profiler.Config(
-                enable_memory_snapshot=True,
-                memory_snapshot_freq=0,
+    def test_memory_snapshot_dumps_every_freq_steps_and_on_oom(self):
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            mock.patch("torchtitan.observability.profiler.device_module") as device,
+            mock.patch("torchtitan.observability.profiler.pickle.dump"),
+        ):
+            device.memory._snapshot.return_value = {}
+            profiler = Profiler(
+                Profiler.Config(memory_snapshot=MemorySnapshotProfiler.Config(freq=3)),
+                global_step=1,
+                base_folder=tmpdir,
             )
-        )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with self.assertRaisesRegex(
-                ValueError, "Memory snapshot frequency must be greater than zero"
-            ):
-                profiler.build_memory_profiler(
-                    global_step=0,
-                    base_folder=tmpdir,
-                    leaf_folder="",
-                )
+            with self.assertRaises(RuntimeError):
+                with profiler:
+                    for _ in range(3):
+                        profiler.step()
+                    try:
+                        raise torch.OutOfMemoryError("oom")
+                    except torch.OutOfMemoryError as oom:
+                        # Pipeline parallelism wraps the OOM in a RuntimeError.
+                        raise RuntimeError("stage failed") from oom
+            self.assertEqual(
+                sorted(os.listdir(os.path.join(tmpdir, "profiling/memory_snapshot"))),
+                ["step_000000000003", "step_000000000004_exit"],
+            )
 
     def test_cuspy_raises_when_environment_unsupported(self):
-        import tempfile
-
-        from torchtitan.observability.profiler import CuspyProfilerConfig
-
-        profiler = Profiler(
-            Profiler.Config(
-                enable_profiling=True,
-                profile_freq=4,
-                profiler_warmup=1,
-                profiler_active=1,
-                cuspy=CuspyProfilerConfig(),
-            )
-        )
         with (
             tempfile.TemporaryDirectory() as tmpdir,
             mock.patch("torch.cuda.is_available", return_value=True),
@@ -225,48 +116,30 @@ class TestProfilerEnabledPaths(unittest.TestCase):
                 ValueError,
                 re.escape("Cuspy cannot run here:\n  - reason one\n  - reason two"),
             ):
-                profiler.build_torch_profiler(
-                    global_step=0, base_folder=tmpdir, leaf_folder=""
+                CuspyTraceProfiler.Config(freq=4, warmup=1, active=1).build(
+                    global_step=0, base_folder=tmpdir, leaf_folder="", rank=0
                 )
 
-    def test_cuspy_activity_and_trace_file(self):
-        import os
-        import tempfile
-
-        from torchtitan.observability.profiler import CuspyProfilerConfig
-
+    def test_cuspy_trace_file(self):
         for trace_format, file_name in (
             ("json", "rank0_trace.json.gz"),
             ("pftrace", "rank0_trace.pftrace.gz"),
         ):
-            profiler = Profiler(
-                Profiler.Config(
-                    enable_profiling=True,
-                    profile_freq=4,
-                    profiler_warmup=1,
-                    profiler_active=1,
-                    cuspy=CuspyProfilerConfig(trace_format=trace_format),
-                )
-            )
             with (
                 self.subTest(trace_format=trace_format),
                 tempfile.TemporaryDirectory() as tmpdir,
-                mock.patch("torch.cuda.is_available", return_value=True),
-                mock.patch(
-                    "torchtitan.observability.profiler._cuspy_unavailable_reasons",
-                    return_value=[],
-                ),
-                mock.patch(
-                    "torchtitan.observability.profiler._get_cuspy_activity_config",
-                    return_value="cuspy-activity",
+                mock.patch.object(
+                    CuspyTraceProfiler,
+                    "profile_activities",
+                    return_value=["cuspy-activity"],
                 ),
                 mock.patch("torch.profiler.profile") as profile,
             ):
-                profiler.build_torch_profiler(
-                    global_step=0, base_folder=tmpdir, leaf_folder=""
-                )
+                CuspyTraceProfiler.Config(
+                    freq=4, warmup=1, active=1, trace_format=trace_format
+                ).build(global_step=0, base_folder=tmpdir, leaf_folder="", rank=0)
                 kwargs = profile.call_args.kwargs
-                self.assertIn("cuspy-activity", kwargs["activities"])
+                self.assertEqual(kwargs["activities"], ["cuspy-activity"])
                 prof = mock.Mock(step_num=4)
                 kwargs["on_trace_ready"](prof)
                 prof.export_chrome_trace.assert_called_once_with(
@@ -278,19 +151,25 @@ class TestProfilerEnabledPaths(unittest.TestCase):
     )
     def test_cuspy_activity_config(self):
         """Builds real torch Cuspy configs, so torch API changes fail here."""
-        from torchtitan.observability.profiler import (
-            _get_cuspy_activity_config,
-            CuspyProfilerConfig,
+        config = CuspyTraceProfiler.Config(
+            enable_event_node_ids=True,
+            performance_metrics=["sm__cycles_active.avg"],
+            pm_sampling_interval_ms=0.5,
         )
-
-        activity_config = _get_cuspy_activity_config(
-            CuspyProfilerConfig(
-                enable_event_node_ids=True,
-                performance_metrics=["sm__cycles_active.avg"],
-                pm_sampling_interval_ms=0.5,
+        with (
+            mock.patch("torch.cuda.is_available", return_value=True),
+            mock.patch(
+                "torchtitan.observability.profiler._cuspy_unavailable_reasons",
+                return_value=[],
+            ),
+            mock.patch("torch.cuda.graph_annotations.is_available", return_value=True),
+        ):
+            _, activity = CuspyTraceProfiler.profile_activities(
+                SimpleNamespace(_config=config)
             )
-        )[torch.profiler.ProfilerActivity.CUDA]
-        cuspy_config, pm_config = activity_config.profiler_configs
+        cuspy_config, pm_config = activity[
+            torch.profiler.ProfilerActivity.CUDA
+        ].profiler_configs
         self.assertTrue(cuspy_config.enable_event_node_ids)
         self.assertEqual(pm_config.metric_names, ["sm__cycles_active.avg"])
         self.assertEqual(pm_config.sampling_interval_ms, 0.5)
