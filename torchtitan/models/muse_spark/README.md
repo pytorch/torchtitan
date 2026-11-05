@@ -101,8 +101,8 @@ Both production and debug flavors use MoE in every layer.
 | Async tensor parallelism | Supported with BF16 projections |
 | Sequence parallelism | Supported when both TP and EP are enabled |
 | Pipeline parallelism | Supported |
-| Context parallelism | FlexAttention with Ulysses or K/V all-gather; varlen with Ulysses |
-| CP load balancing | Head-tail and PTRR with K/V all-gather FlexAttention; Ulysses requires no load balancer |
+| Context parallelism | FlexAttention or varlen, each with Ulysses or K/V all-gather |
+| CP load balancing | Head-tail and PTRR with K/V all-gather FlexAttention; head-tail with K/V all-gather varlen; Ulysses requires no load balancer |
 | Activation checkpointing | Full and region policies through `torch_remat` |
 | Loss compilation | Supported |
 | Model compilation | Regional compilation |
@@ -117,8 +117,29 @@ Ulysses CP requires `TP * CP` to divide the 16 KV heads and
 `context_parallel_load_balancer=None`.
 
 K/V all-gather CP requires tokens per microbatch to be divisible by the CP
-degree times the FlexAttention query block size. Media inputs remain replicated
-across CP; token-aligned bank indices select each rank's local embeddings.
+degree, or by 2 x the CP degree with head-tail load balancing. With
+FlexAttention, they must be divisible by the CP degree times the FlexAttention
+query block size. Media inputs remain replicated across CP; token-aligned bank
+indices select each rank's local embeddings.
+
+Varlen attention with CUDA graphs requires `dataloader.max_num_documents`, the
+upper bound on documents per local microbatch that fixes the metadata shapes.
+Without it, set `training.disable_accelerator_graphs`.
+
+## Dist-MoE scale recipes
+
+These BF16 Dist-MoE recipes are in `torchtitan_recipes.models.muse_spark`. All
+use EP64 and K/V all-gather CP. Each has a `_fake` variant that runs with
+FakePG on one GPU.
+
+| recipe | GPUs | seq len | global batch | DP / TP / CP | attention | Adam moments |
+| --- | ---: | ---: | ---: | --- | --- | --- |
+| `muse_spark_816b_a42b_dist_moe_bf16_spmd_64` | 64 | 32K | 64 | 8 / 1 / 8 | FA4 varlen, 64 documents | pinned host |
+| `muse_spark_816b_a42b_dist_moe_bf16_spmd_256` | 256 | 96K | 128 | 16 / 4 / 4 | Flex-Flash | device |
+| `muse_spark_816b_a42b_dist_moe_bf16_spmd_512` | 512 | 192K | 128 | 16 / 4 / 8 | Flex-Flash | device |
+
+Pinned-host Adam moments work best with NUMA binding, for example
+`torchrun --numa-binding=node`.
 
 Dist-MoE requires Blackwell GPUs and the optional
 `dist_moe` package. Dist-MoE owns dispatch, expert computation, and combine.
