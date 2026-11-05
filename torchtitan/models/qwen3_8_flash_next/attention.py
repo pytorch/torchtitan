@@ -14,9 +14,11 @@ import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 import torch_remat as remat
+from torch.distributed._functional_collectives import all_reduce, wait_tensor
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.utils.checkpoint import checkpoint
 
+from torchtitan.distributed.spmd_types import spmd_mesh_group, spmd_mesh_size
 from torchtitan.models.base.module import Module
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
@@ -334,6 +336,8 @@ class QSAInnerAttention(InnerAttention):
         # Empty ranks must participate in the indexer's FSDP gradient reduction.
         # An empty slice is finite even when all selected scores are -inf.
         raw_sum = scores_TB[..., :0].sum()
+        teacher_chunks = []
+        teacher_starts = []
         for start in range(0, query_THK.shape[0], self.chunk_size):
             stop = start + self.chunk_size
             indices_QJ = selected_indices_TJ[start:stop]
@@ -369,19 +373,48 @@ class QSAInnerAttention(InnerAttention):
                     logits_QHJ = logits_QHJ.masked_fill(
                         ~valid_QJ[:, None], torch.finfo(torch.float32).min
                     )
-                    teacher_QJ = logits_QHJ.softmax(-1).sum(1) / query_QH1K.shape[1]
-                    teacher_QJ = teacher_QJ * valid_QJ
-                    teacher_QB = (
-                        teacher_QJ[:, : num_blocks * self.compress_ratio]
-                        .unflatten(-1, (num_blocks, self.compress_ratio))
-                        .amax(-1)
+                    teacher_QJ = logits_QHJ.softmax(-1).sum(1) / (
+                        query_QH1K.shape[1] * spmd_mesh_size("tp")
                     )
-                raw_sum = raw_sum + self.indexer_loss.block_kl(
-                    scores_TB[start:stop], teacher_QB
-                )
+                    teacher_QJ = teacher_QJ * valid_QJ
+                    teacher_chunks.append(
+                        teacher_QJ[:, : num_blocks * self.compress_ratio]
+                    )
+                    teacher_starts.append(start)
+                # Preserve the SDPA and KL chunk order while reducing detached
+                # teachers in packets of 16 chunks (256 queries by default).
+                if len(teacher_chunks) < 16 and stop < query_THK.shape[0]:
+                    continue
+                with torch.no_grad():
+                    teacher_QJ = torch.cat(teacher_chunks)
+                    tp_group = spmd_mesh_group("tp")
+                    if tp_group is not None:
+                        teacher_QJ = wait_tensor(
+                            all_reduce(teacher_QJ, "sum", tp_group)
+                        )
+                    # Sum heads before max pooling; pooling each TP shard first
+                    # changes the target distribution.
+                    teacher_QB = teacher_QJ.unflatten(
+                        -1, (num_blocks, self.compress_ratio)
+                    ).amax(-1)
+                offset = 0
+                for teacher_start, teacher_chunk in zip(teacher_starts, teacher_chunks):
+                    length = teacher_chunk.shape[0]
+                    raw_sum = raw_sum + self.indexer_loss.block_kl(
+                        scores_TB[teacher_start : teacher_start + length],
+                        teacher_QB[offset : offset + length],
+                    )
+                    offset += length
+                teacher_chunks.clear()
+                teacher_starts.clear()
         output_THV = torch.cat(outputs)
         if train_indexer:
             assert self.indexer_loss is not None
+            # Indexer parameters and scores are TP-replicated. The FSDP bridge
+            # sums their local gradients, so contribute the global KL once.
+            raw_sum = raw_sum.detach() + (raw_sum - raw_sum.detach()) / spmd_mesh_size(
+                "tp"
+            )
             output_THV = self.indexer_loss.inject(
                 raw_sum,
                 carrier=output_THV,
