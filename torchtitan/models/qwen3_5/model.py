@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any
 
 import spmd_types as spmd
 import torch
@@ -15,7 +15,7 @@ import torch_remat as remat
 from spmd_types import SpmdType
 from torch import nn
 
-from torchtitan.config import TrainingConfig
+from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
@@ -36,15 +36,10 @@ from torchtitan.models.common.attention import (
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.attention.gdn import GDN
-from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
     token_id_placement,
-)
-from torchtitan.models.common.flops import (
-    delta_rule_flops_per_token,
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
 )
 from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.moe import MoE
@@ -122,6 +117,20 @@ class Qwen35Attention(Attention):
         wo: Linear.Config
         q_norm: OffsetRMSNorm.Config
         k_norm: OffsetRMSNorm.Config
+
+        def flops_per_token(self, seq_len: int) -> int:
+            from torchtitan.models.common.flops import (
+                quadratic_attention_flops_per_token,
+            )
+
+            head_dim = self.head_dim
+            return quadratic_attention_flops_per_token(
+                num_heads=self.n_heads,
+                qk_head_dim=head_dim,
+                v_head_dim=head_dim,
+                seq_len=seq_len,
+                sliding_window_size=None,
+            )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -332,7 +341,7 @@ class Qwen35Model(MultimodalModel):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
+    class Config(MultimodalModel.Config):
         vision_encoder: Qwen35VisionEncoder.Config | None = None
         local_compile: LocalCompileConfig = field(
             default_factory=lambda: LocalCompileConfig(
@@ -349,35 +358,6 @@ class Qwen35Model(MultimodalModel):
                 ]
             )
         )
-
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
-            # The vision encoder cost scales with patches rather than text
-            # sequence length, so this remains a decoder-only MFU estimate.
-            qwen_model = cast("Qwen35Model", model)
-            nparams, active_nparams = get_nparams_and_active_nparams(
-                model,
-                modules_excluded_from_active_params=(qwen_model.vision_encoder,),
-            )
-            attention_op_flops = 0
-            for layer in self.layers:
-                if isinstance(layer.attention, Qwen35Attention.Config):
-                    attention = layer.attention
-                    attention_op_flops += quadratic_attention_flops_per_token(
-                        num_heads=attention.n_heads,
-                        qk_head_dim=attention.head_dim,
-                        v_head_dim=attention.head_dim,
-                        seq_len=seq_len,
-                    )
-                elif isinstance(layer.attention, GDN.Config):
-                    delta_net = layer.attention
-                    attention_op_flops += delta_rule_flops_per_token(
-                        num_heads=delta_net.n_heads,
-                        key_head_dim=delta_net.key_head_dim,
-                        v_head_dim=delta_net.value_head_dim,
-                    )
-            return nparams, 6 * active_nparams + attention_op_flops
 
     def __init__(self, config: Config):
         from torchtitan.distributed.spmd_types import spmd_mesh_size
@@ -416,7 +396,7 @@ class Qwen35Model(MultimodalModel):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
         local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
@@ -424,7 +404,7 @@ class Qwen35Model(MultimodalModel):
     ) -> Qwen35Model:
         return super().parallelize(
             parallelism_context=parallelism_context,
-            training=training,
+            precision=precision,
             parallelism=parallelism,
             local_compile=local_compile,
             activation_remat=activation_remat,
@@ -438,7 +418,6 @@ class Qwen35Model(MultimodalModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
@@ -454,7 +433,6 @@ class Qwen35Model(MultimodalModel):
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
             )
 
         if parallelism_context.cp_enabled and self.tok_embeddings is not None:

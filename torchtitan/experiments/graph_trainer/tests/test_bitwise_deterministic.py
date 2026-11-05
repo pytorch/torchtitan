@@ -149,7 +149,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             dataloader=BaseDataLoader.Config(max_num_documents=BATCH_SIZE),
             training=TrainingConfig(
                 num_tokens_per_microbatch_per_dp_rank=NUM_TOKENS,
-                max_context_length=SEQ_LEN,
                 steps=NUM_STEPS,
             ),
             parallelism=ParallelismConfig(),
@@ -181,7 +180,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
         attention_metadata = model._get_attention_metadata(
             self.positions,
             max_num_documents=BATCH_SIZE,
-            max_context_length=SEQ_LEN,
         )
         return {"attention_metadata": attention_metadata}
 
@@ -191,7 +189,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         trainer_cls: type,
         *,
         enable_passes: bool = True,
-        compile_passes: list[str] | None = None,
+        compile_extra_passes: list[str] | None = None,
         compile_ep_overlap_enabled: bool = False,
         compile_ep_overlap_chunk_dim: str = "batch",
         compile_ep_overlap_module_fqn: str = "layers.*",
@@ -213,7 +211,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
             self.model_config,
             trainer_cls,
             compile_enable_passes=enable_passes,
-            compile_passes=compile_passes,
+            compile_extra_passes=compile_extra_passes,
             compile_ep_overlap_enabled=compile_ep_overlap_enabled,
             compile_ep_overlap_chunk_dim=compile_ep_overlap_chunk_dim,
             compile_ep_overlap_module_fqn=compile_ep_overlap_module_fqn,
@@ -224,7 +222,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             parallelism_context=self.parallelism_context,
             max_num_documents=BATCH_SIZE,
         )
-        trainer.config.training.max_context_length = SEQ_LEN
         global_loss_token_counts = torch.tensor(
             NUM_TOKENS, dtype=torch.float, device="cuda"
         )
@@ -291,7 +288,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             parallelism_context=self.parallelism_context,
             max_num_documents=BATCH_SIZE,
         )
-        trainer.config.training.max_context_length = SEQ_LEN
         fwd_bwd_fn = make_fwd_bwd_step(model, trainer.engine.loss_fn)
 
         global_loss_token_counts = torch.tensor(
