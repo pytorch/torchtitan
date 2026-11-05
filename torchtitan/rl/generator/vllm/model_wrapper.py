@@ -351,6 +351,33 @@ def _unshard_and_free_sharded_params(module: FSDPModule) -> None:
             free_storage(sharded_data)
 
 
+def _copy_unsharded_param_to_sharded(fsdp_param: Any) -> None:
+    """Copy this rank's shard of ``fsdp_param``'s current weight into its sharded storage.
+
+    For a parameter a model state dict load leaves out (e.g. the frozen base of a LoRA
+    model): the group's unshard then rewrites the weight unchanged. Run after
+    `_restore_sharded_params`, which leaves the unsharded storage (what CUDA graphs
+    read) holding the current weight.
+    """
+    if isinstance(fsdp_param._sharded_param_data, _ShardedFSDPTensor):
+        raise NotImplementedError(
+            f"A load must publish quantized parameter {fsdp_param._display_name}."
+        )
+    unsharded = fsdp_param._unsharded_param
+    if isinstance(unsharded, DTensor):
+        unsharded = unsharded.to_local()
+    mesh_info = fsdp_param.mesh_info
+    chunks = torch.chunk(
+        unsharded, mesh_info.shard_mesh_size, dim=fsdp_param.fsdp_placement.dim
+    )
+    # FSDP pads uneven shards; ranks past the last chunk hold no rows.
+    if mesh_info.shard_mesh_rank < len(chunks):
+        sharded = fsdp_param._sharded_local_tensor
+        assert sharded.dtype == unsharded.dtype, (sharded.dtype, unsharded.dtype)
+        with torch.no_grad():
+            sharded.copy_(chunks[mesh_info.shard_mesh_rank])
+
+
 def _fsdp_load_groups(
     model: nn.Module,
 ) -> tuple[list[tuple[FSDPModule, list[tuple[str, Any]]]], list[str]]:
@@ -549,6 +576,10 @@ class VLLMModelWrapper(Module):
             vllm_config.scheduler_config.max_num_batched_tokens,
             cast(torch.device, vllm_config.device_config.device),
         )
+        # A generator that loads the checkpoint holds every weight from the start, so the
+        # trainer then sends only what trains (see `Controller`) and loads fill a subset.
+        self._loads_fill_a_subset = checkpointer_config is not None
+        self._model_path = vllm_config.model_config.model
         self._maybe_initial_load_weights()
 
         # Give each gpt-oss attention's vLLM backend its sink rescale.
@@ -611,6 +642,12 @@ class VLLMModelWrapper(Module):
           - Per group: modules from one `fully_shard` call share one FSDP state, so unsharding
             after `norm` would all-gather `lm_head` before it loads.
 
+        A generator that did not load the checkpoint must fill every parameter on every
+        load. One that did gets only the parameters that train (the trainer pushes
+        nothing else to it; see `Controller`), e.g. just the LoRA adapters; every other
+        parameter keeps its weight: its shard is copied back from the unsharded storage
+        before the group's unshard.
+
         Args:
             fetch: Fills each tensor of the given subset of `self.model.state_dict()`
                 (each in its own dtype, as the trainer sends it) in place with the
@@ -636,14 +673,17 @@ class VLLMModelWrapper(Module):
                         key: fsdp_param.sharded_param
                         for key, fsdp_param in keyed_params
                     }
-                    # An unfilled parameter would load its just-reallocated,
-                    # uninitialized storage.
-                    missing = params.keys() - fetch(params)
-                    if missing:
+                    unfilled = params.keys() - set(fetch(params))
+                    if unfilled and not self._loads_fill_a_subset:
                         raise RuntimeError(
-                            f"fetch did not fill {len(missing)} weights, e.g. "
-                            f"{sorted(missing)[:5]}"
+                            f"fetch did not fill {len(unfilled)} weights, e.g. "
+                            f"{sorted(unfilled)[:5]}"
                         )
+                    # Unshard would otherwise load the just-reallocated, uninitialized
+                    # storage of the parameters this load left out.
+                    for key, fsdp_param in keyed_params:
+                        if key in unfilled:
+                            _copy_unsharded_param_to_sharded(fsdp_param)
                 except Exception as e:
                     error = e
             _unshard_and_free_sharded_params(module)
@@ -880,7 +920,8 @@ class VLLMModelWrapper(Module):
         if adapter_cls is not None:
             sd_adapter = adapter_cls(
                 model_config=self.config,
-                hf_assets_path=cfg.initial_load_path,
+                # Like the trainer, default to the model's HF assets.
+                hf_assets_path=cfg.initial_load_path or self._model_path,
             )
 
         # Model-only CheckpointManager: initial_load_model_only=True (default)
