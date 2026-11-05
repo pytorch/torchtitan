@@ -295,7 +295,7 @@ class VLLMModelWrapper(Module):
                 "precision.param_dtype as the engine dtype."
             )
         device = cast(torch.device, vllm_config.device_config.device)
-        self.model, self.parallelism_context = build_inference_model(
+        self.model, self.parallelism_context, frozen_param_keys = build_inference_model(
             self.config,
             parallelism=parallelism,
             precision=precision,
@@ -323,6 +323,8 @@ class VLLMModelWrapper(Module):
             self.model,
             checkpointer_config=checkpointer_config,
             model_state_dict_load_mode=model_state_dict_load_mode,
+            frozen_param_keys=frozen_param_keys,
+            hf_assets_path=vllm_config.model_config.model,
         )
 
         # Give each gpt-oss attention's vLLM backend its sink rescale.

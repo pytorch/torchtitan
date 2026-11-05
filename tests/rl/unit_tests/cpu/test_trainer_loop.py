@@ -65,7 +65,7 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
         events.append(f"optim {version}")
         return _RankValues(SimpleNamespace(policy_version=version, metrics={}))
 
-    async def push():
+    async def push(*, trainable_only):
         events.append("push start")
         if on_push is not None:
             await on_push()
@@ -92,6 +92,7 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
     controller._trainer_policy_version = 0
     controller._validation_tasks = []
     controller._has_pending_validation = False
+    controller._sync_trainable_only = False
     trainer = SimpleNamespace(
         sync_log_step=_Endpoint(),
         forward_backward=_Endpoint(forward_backward),

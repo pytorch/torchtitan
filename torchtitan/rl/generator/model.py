@@ -18,11 +18,13 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed._state_dict_utils import _create_cpu_state_dict
+from torch.distributed.tensor import DTensor
 
 # Registers the "loss" local-compile region. The generator shares the trainer's
 # model config, whose local_compile.regions may name it, but never builds a loss.
 from torchtitan.components import loss as _loss  # noqa: F401
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import current_spmd_mesh
@@ -64,7 +66,7 @@ def build_inference_model(
     precision: PrecisionConfig,
     device: torch.device,
     keep_vision_encoder: bool = False,
-) -> tuple[Decoder, ParallelismContext]:
+) -> tuple[Decoder, ParallelismContext, frozenset[str]]:
     """Build, parallelize and materialize the generator's model, without its weights.
 
     The model computes in ``precision.param_dtype``, holds ``preserve_dtype_params`` in
@@ -81,7 +83,9 @@ def build_inference_model(
             image prompts; otherwise it is dropped.
 
     Returns:
-        ``(model, parallelism_context)``, the model's buffers initialized.
+        ``(model, parallelism_context, frozen_param_keys)``: the model, its buffers
+        initialized, and the canonical FQNs of the parameters its config freezes (e.g. a
+        LoRA base); the generator freezes every parameter.
     """
     # Translate the inference parallelism into torchtitan's full
     # ParallelismConfig that ParallelismContext and model.parallelize consume.
@@ -111,6 +115,11 @@ def build_inference_model(
         set_default_dtype(TORCH_DTYPE_MAP[precision.dtype]),
     ):
         model = model_config.build()
+    frozen_param_keys = frozenset(
+        canonical_fqn(name)
+        for name, param in model.named_parameters(remove_duplicate=False)
+        if not param.requires_grad
+    )
     # The generator never computes gradients. Frozen parameters also let FSDP
     # hold mixed dtypes, and Dist-MoE's inference context rejects any operand
     # with requires_grad.
@@ -161,7 +170,7 @@ def build_inference_model(
         # spmd context.
         with parallelism_context.activate_spmd():
             model.init_weights(buffer_device=None)
-    return model, parallelism_context
+    return model, parallelism_context, frozen_param_keys
 
 
 def compute_logits(
@@ -392,7 +401,10 @@ def validate_ep_token_dispatcher_capacity(
 
 
 def _load_initial_weights(
-    model: Decoder, checkpointer_config: CheckpointManager.Config
+    model: Decoder,
+    checkpointer_config: CheckpointManager.Config,
+    *,
+    hf_assets_path: str | None,
 ) -> None:
     """Load the initial weights of ``model`` with a model-only ``CheckpointManager``."""
     adapter_cls = type(model).state_dict_adapter_cls
@@ -400,7 +412,8 @@ def _load_initial_weights(
     if adapter_cls is not None:
         sd_adapter = adapter_cls(
             model_config=model.config,
-            hf_assets_path=checkpointer_config.initial_load_path,
+            # Like the trainer, default to the model's HF assets.
+            hf_assets_path=checkpointer_config.initial_load_path or hf_assets_path,
         )
 
     # Model-only CheckpointManager: initial_load_model_only=True (default)
@@ -437,6 +450,10 @@ class ModelStateDictLoader:
             loop, where the weights arrive by model state dict loads.
         model_state_dict_load_mode: ``"cpu_prefetch"`` allocates the pinned CPU buffers
             of ``prefetched_model_state_dict``; ``"gpu_fetch"`` does not.
+        frozen_param_keys: Canonical FQNs of the parameters the model config freezes
+            (e.g. a LoRA base), from ``build_inference_model``.
+        hf_assets_path: The model's HF assets, which the initial load reads unless
+            ``checkpointer_config.initial_load_path`` is set.
     """
 
     def __init__(
@@ -445,15 +462,28 @@ class ModelStateDictLoader:
         *,
         checkpointer_config: CheckpointManager.Config | None,
         model_state_dict_load_mode: ModelStateDictLoadMode,
+        frozen_param_keys: frozenset[str] = frozenset(),
+        hf_assets_path: str | None = None,
     ) -> None:
         if checkpointer_config is not None:
-            _load_initial_weights(model, checkpointer_config)
+            _load_initial_weights(
+                model, checkpointer_config, hf_assets_path=hf_assets_path
+            )
         self._model = model
-        self._fsdp_load_groups, self._buffer_keys = _fsdp_load_groups(model)
+        # A generator that loads the checkpoint holds the frozen parameters from the
+        # start, so every model state dict load carries only the trainable ones
+        # (trainable-only syncs; `Controller` derives the same from
+        # `generator.checkpointer`).
+        left_out_keys = (
+            frozen_param_keys if checkpointer_config is not None else frozenset()
+        )
+        self._fsdp_load_groups, self._buffer_keys = _fsdp_load_groups(
+            model, left_out_keys=left_out_keys
+        )
         if model_state_dict_load_mode == "gpu_fetch":
             # gpu_fetch writes into the sharded parameter itself, not a quantized
             # parameter's high-precision _tensor.
-            for _, keyed_params in self._fsdp_load_groups:
+            for _, keyed_params, _ in self._fsdp_load_groups:
                 for key, fsdp_param in keyed_params:
                     if isinstance(fsdp_param._sharded_param_data, _ShardedFSDPTensor):
                         raise ValueError(
@@ -468,9 +498,17 @@ class ModelStateDictLoader:
             # Built while the model is still sharded. The sharded state dict has the
             # dtypes the trainer sends (see `Trainer._put_model_state_dict`);
             # torchstore's RDMA transport copies bytes and asserts matching dtypes.
+            # No buffers for the parameters loads leave out: they would pin a second
+            # copy of them in host memory (~100 GB per GPU for an 816B model on 16
+            # GPUs) that no load fills.
+            synced_state_dict = {
+                key: value
+                for key, value in model.state_dict().items()
+                if canonical_fqn(key) not in left_out_keys
+            }
             with torch.device("cpu"):
                 self.prefetched_model_state_dict = _create_cpu_state_dict(
-                    model.state_dict(), pin_memory=True
+                    synced_state_dict, pin_memory=True
                 )
 
         for module in model.modules():
@@ -495,6 +533,10 @@ class ModelStateDictLoader:
           - Per group: modules from one `fully_shard` call share one FSDP state, so unsharding
             after `norm` would all-gather `lm_head` before it loads.
 
+        Every load fills every parameter, except the frozen ones with trainable-only
+        syncs (e.g. a LoRA base): `fetch` never sees them, and `_restore_sharded_params`
+        refills their shards from the unsharded storage, so they keep their weight.
+
         Args:
             fetch: Fills each tensor of the given subset of the model's state dict
                 (each in its own dtype, as the trainer sends it) in place with the
@@ -505,14 +547,15 @@ class ModelStateDictLoader:
                 for queued device work, and must finish writing before it returns.
         """
         error = None
-        for module, keyed_params in self._fsdp_load_groups:
+        for module, keyed_params, left_out_params in self._fsdp_load_groups:
             # unshard() is a no-op while the group is unsharded. Resharding registers
             # the sharded parameters and keeps the unsharded storage CUDA graphs read.
             _reshard(module)
-            _restore_sharded_params(module)
+            _restore_sharded_params(module, refill_from_unsharded=left_out_params)
             # After a failed fetch, keep unsharding the remaining groups: unshard()
             # all-gathers across the FSDP group and the other ranks are still loading.
-            if error is None:
+            # A group of only left-out parameters has nothing to fetch.
+            if error is None and keyed_params:
                 try:
                     # The trainer sends each parameter in the dtype the generator
                     # holds it in, so fetch fills the sharded parameters in place.
@@ -561,21 +604,48 @@ def _reshard(module: FSDPModule) -> None:
         param_group._to_sharded()
 
 
-def _restore_sharded_params(module: FSDPModule) -> None:
-    """Re-allocate the sharded buffers of `module`'s FSDP group so new weights can be copied in.
+def _restore_sharded_params(
+    module: FSDPModule, *, refill_from_unsharded: Iterable[Any] = ()
+) -> None:
+    """Re-allocate the sharded storage of `module`'s FSDP group before a load fills it.
 
-    before:  sharded: freed                     unsharded: old weights (what CUDA graphs read)
-    after:   sharded: allocated, uninitialized  unsharded: unchanged
+    Between loads the generator keeps only the unsharded storage, which CUDA graphs
+    read; keeping the sharded storage too would hold a second copy of the weights. A
+    load re-allocates the sharded storage, fills it, then all-gathers every parameter
+    of the group into the unsharded storage. ``refill_from_unsharded`` lists the FSDP
+    parameters the load leaves out (the frozen ones with trainable-only syncs, e.g. a
+    LoRA base): each gets this rank's chunk of its unsharded weight back, else the
+    all-gather would write uninitialized memory over the weight:
 
-    FSDP's own load pre-hook may have resharded the group already (e.g.
-    tok_embeddings), so ``is_sharded`` can be True while the storage is still
-    freed; allocate unconditionally.
+                        sharded                          unsharded
+        before          freed                            current weight
+        after           allocated, uninitialized         unchanged
+        after, refill   this rank's chunk of the         unchanged
+                        unsharded weight
+
+    The group may already read as sharded: resharding (`_reshard`, FSDP's state_dict
+    and load_state_dict pre-hooks) marks it sharded without allocating the storage.
+    `alloc_storage` checks the storage size itself and leaves allocated storage as is.
     """
     from torch.distributed.fsdp._fully_shard._fsdp_param import alloc_storage
 
     # TODO: replace this with FSDPModule._restore_sharded_params()
     for sharded_data in _sharded_param_storages(module):
         alloc_storage(sharded_data)
+    for fsdp_param in refill_from_unsharded:
+        unsharded = fsdp_param._unsharded_param
+        if isinstance(unsharded, DTensor):
+            unsharded = unsharded.to_local()
+        mesh_info = fsdp_param.mesh_info
+        chunks = torch.chunk(
+            unsharded, mesh_info.shard_mesh_size, dim=fsdp_param.fsdp_placement.dim
+        )
+        # FSDP pads uneven shards; ranks past the last chunk hold no rows.
+        if mesh_info.shard_mesh_rank < len(chunks):
+            sharded = fsdp_param._sharded_local_tensor
+            assert sharded.dtype == unsharded.dtype, (sharded.dtype, unsharded.dtype)
+            with torch.no_grad():
+                sharded.copy_(chunks[mesh_info.shard_mesh_rank])
 
 
 def _unshard_and_free_sharded_params(module: FSDPModule) -> None:
@@ -596,17 +666,23 @@ def _unshard_and_free_sharded_params(module: FSDPModule) -> None:
 
 
 def _fsdp_load_groups(
-    model: nn.Module,
-) -> tuple[list[tuple[FSDPModule, list[tuple[str, Any]]]], list[str]]:
+    model: nn.Module, *, left_out_keys: frozenset[str] = frozenset()
+) -> tuple[list[tuple[FSDPModule, list[tuple[str, Any]], list[Any]]], list[str]]:
     """Group ``model.state_dict()`` keys by the FSDP group whose sharded parameters hold them.
 
     Must run while every group is sharded, so the state dict holds the sharded
     parameters. Tied parameters list each of their keys under the same group.
 
+    Args:
+        left_out_keys: Canonical FQNs of the parameters loads leave out: the frozen ones
+            with trainable-only syncs. `_restore_sharded_params` refills them.
+
     Returns:
-        ``(groups, buffer_keys)``: one ``(module, [(key, fsdp_param), ...])`` per FSDP
-        group in module order, where ``module`` is the group's first module; and the
-        keys of the buffers.
+        ``(groups, buffer_keys)``: one ``(module, keyed_params, left_out_params)`` per
+        FSDP group in module order, where ``module`` is the group's first module,
+        ``keyed_params`` the ``(key, fsdp_param)`` pairs loads fill, and
+        ``left_out_params`` the FSDP parameters of ``left_out_keys``; and the keys of
+        the buffers.
     """
     sharded_param_to_group: dict[int, tuple[FSDPModule, Any]] = {}
     group_modules: dict[Any, FSDPModule] = {}
@@ -627,6 +703,9 @@ def _fsdp_load_groups(
     keys_by_module: dict[FSDPModule, list[tuple[str, Any]]] = {
         module: [] for module in group_modules.values()
     }
+    left_out_by_module: dict[FSDPModule, list[Any]] = {
+        module: [] for module in group_modules.values()
+    }
     buffers = {id(buffer) for buffer in model.buffers()}
     buffer_keys = []
     for key, value in model.state_dict(keep_vars=True).items():
@@ -637,6 +716,19 @@ def _fsdp_load_groups(
             buffer_keys.append(key)
             continue
         module, fsdp_param = group
-        keys_by_module[module].append((key, fsdp_param))
-    groups = [(module, keyed) for module, keyed in keys_by_module.items() if keyed]
+        if canonical_fqn(key) not in left_out_keys:
+            keys_by_module[module].append((key, fsdp_param))
+        elif fsdp_param not in left_out_by_module[module]:  # tied keys: one refill
+            if isinstance(fsdp_param._sharded_param_data, _ShardedFSDPTensor):
+                raise ValueError(
+                    f"Weight syncs must carry quantized parameter {key}: its unsharded "
+                    "weight is quantized, so its shard cannot be refilled from it. "
+                    "Leave generator.checkpointer unset so syncs carry every parameter."
+                )
+            left_out_by_module[module].append(fsdp_param)
+    groups = [
+        (module, keyed, left_out_by_module[module])
+        for module, keyed in keys_by_module.items()
+        if keyed or left_out_by_module[module]
+    ]
     return groups, buffer_keys

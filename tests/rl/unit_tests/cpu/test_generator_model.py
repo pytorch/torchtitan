@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from unittest import mock
+
 import pytest
 import torch
 import torch.distributed as dist
@@ -15,6 +17,8 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
+from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.rl.generator import model as generator_model
 from torchtitan.rl.generator.model import ModelStateDictLoader
 
 
@@ -30,10 +34,49 @@ def _copy_from(new_state_dict: dict[str, torch.Tensor]):
     return fetch
 
 
-def test_load_model_state_dict_requires_every_param(tmp_path) -> None:
-    """Raise when fetch skips a parameter, whose storage was just reallocated; an
-    unfilled buffer (e.g. a vLLM attention scale the trainer does not publish) keeps
-    its value."""
+def _copy_published(new_state_dict: dict[str, torch.Tensor], published: set[str]):
+    """A fetch that fills only the ``published`` keys, as a TorchStore read of a push
+    that left the others out."""
+    copy = _copy_from(new_state_dict)
+
+    def fetch(state_dict: dict[str, torch.Tensor]) -> list[str]:
+        return copy({k: v for k, v in state_dict.items() if k in published})
+
+    return fetch
+
+
+def _build_loader(
+    model: nn.Module,
+    *,
+    loads_checkpoint: bool,
+    frozen_param_keys: frozenset[str] = frozenset(),
+) -> ModelStateDictLoader:
+    """Build the loader as a generator does. One that loads the checkpoint (whose load
+    is skipped here) gets trainable-only syncs."""
+    if not loads_checkpoint:
+        return ModelStateDictLoader(
+            model,
+            checkpointer_config=None,
+            model_state_dict_load_mode="gpu_fetch",
+            frozen_param_keys=frozen_param_keys,
+        )
+    with mock.patch.object(generator_model, "_load_initial_weights"):
+        return ModelStateDictLoader(
+            model,
+            checkpointer_config=CheckpointManager.Config(initial_load_path="/base"),
+            model_state_dict_load_mode="gpu_fetch",
+            frozen_param_keys=frozen_param_keys,
+        )
+
+
+@pytest.mark.parametrize("loads_checkpoint", [False, True])
+def test_load_model_state_dict_leaves_out_only_frozen_params(
+    tmp_path, loads_checkpoint: bool
+) -> None:
+    """Every load must fill every parameter, whose storage was just reallocated, except
+    the frozen ones with trainable-only syncs (e.g. a LoRA base), which keep their
+    weight. An unfilled buffer (e.g. a vLLM attention scale the trainer does not
+    publish) keeps its value."""
     dist.init_process_group(
         "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
     )
@@ -46,22 +89,86 @@ def test_load_model_state_dict_requires_every_param(tmp_path) -> None:
             fully_shard(block, mesh=mesh, reshard_after_forward=False)
         fully_shard(model, mesh=mesh, reshard_after_forward=False)
         model.set_keep_unsharded_storage(True)
+        initial_state_dict = {
+            k: v.detach().clone() for k, v in model.state_dict().items()
+        }
+        params = {name for name, _ in model.named_parameters()}
+        loader = _build_loader(
+            model,
+            loads_checkpoint=loads_checkpoint,
+            frozen_param_keys=frozenset(params - {"layers.0.weight"}),
+        )
+        loaded = {k: v + 1 for k, v in initial_state_dict.items()}
+
+        loader.load(_copy_published(loaded, params))
+        if not loads_checkpoint:
+            with pytest.raises(
+                RuntimeError, match="did not fill 1 weights.*layers.1.bias"
+            ):
+                loader.load(_copy_published(loaded, params - {"layers.1.bias"}))
+            return
+        later = {k: v + 2 for k, v in initial_state_dict.items()}
+        loader.load(_copy_published(later, {"layers.0.weight"}))
+
+        # Published or not, the frozen parameters are never fetched.
+        for name, param in model.named_parameters():
+            expected = later if name == "layers.0.weight" else initial_state_dict
+            assert param.equal(expected[name].full_tensor()), name
+        assert model.scale.equal(torch.ones(4))
+        # A trainable parameter is never left out, even with trainable-only syncs.
+        with pytest.raises(
+            RuntimeError, match="did not fill 1 weights.*layers.0.weight"
+        ):
+            loader.load(_copy_published(later, set()))
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("loads_checkpoint", [False, True])
+def test_receive_buffers_skip_frozen_params_with_trainable_only_syncs(
+    tmp_path, monkeypatch, loads_checkpoint: bool
+) -> None:
+    """With trainable-only syncs a generator receives only the trainable parameters
+    (e.g. LoRA adapters) and the buffers, so it keeps cpu_prefetch receive buffers for
+    those only; otherwise it receives the whole model."""
+    dist.init_process_group(
+        "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
+    )
+    try:
+        model = nn.Module()
+        model.base = nn.Linear(4, 4)
+        model.base.requires_grad_(False)
+        model.lora_a = nn.Linear(4, 2, bias=False)
+        model.register_buffer("scale", torch.ones(4))
+        frozen = frozenset(
+            n for n, p in model.named_parameters() if not p.requires_grad
+        )
+        fully_shard(model, mesh=init_device_mesh("cpu", (1,)))
+        model.set_keep_unsharded_storage(True)
+        # Pinned host memory needs a GPU; keep the receive buffers' state dict as is.
+        monkeypatch.setattr(
+            generator_model,
+            "_create_cpu_state_dict",
+            lambda state_dict, pin_memory: dict(state_dict),
+        )
+        monkeypatch.setattr(generator_model, "_load_initial_weights", mock.Mock())
+
         loader = ModelStateDictLoader(
-            model, checkpointer_config=None, model_state_dict_load_mode="gpu_fetch"
+            model,
+            checkpointer_config=(
+                CheckpointManager.Config(initial_load_path="/base")
+                if loads_checkpoint
+                else None
+            ),
+            model_state_dict_load_mode="cpu_prefetch",
+            frozen_param_keys=frozen,
         )
 
-        def fetch_published(published: set[str]):
-            def fetch(state_dict: dict[str, torch.Tensor]) -> list[str]:
-                return [key for key in state_dict if key in published]
-
-            return fetch
-
-        params = {name for name, _ in model.named_parameters()}
-        loader.load(fetch_published(params))
-        assert model.scale.equal(torch.ones(4))
-
-        with pytest.raises(RuntimeError, match="did not fill 1 weights.*layers.1.bias"):
-            loader.load(fetch_published(params - {"layers.1.bias"}))
+        assert frozen == {"base.weight", "base.bias"}
+        assert loader.prefetched_model_state_dict is not None
+        assert set(loader.prefetched_model_state_dict) == {"lora_a.weight", "scale"} | (
+            set() if loads_checkpoint else frozen
+        )
     finally:
         dist.destroy_process_group()
 
@@ -192,6 +299,37 @@ class TestLoadModelStateDictTwoRanks(DTensorTestBase):
             for name, param in model.named_parameters(remove_duplicate=False):
                 self.assertEqual(param, new_state_dict[name].full_tensor(), msg=name)
             self.assertEqual(model.scale, new_state_dict["scale"])
+
+    @with_comms
+    def test_partial_load_keeps_the_shards_it_leaves_out(self) -> None:
+        """With trainable-only syncs, a load that fills only the trainable parameters
+        (LoRA adapters) keeps every frozen parameter on every rank: each rank refills its
+        own (uneven) shard from the unsharded weight before the group's all-gather."""
+        model = nn.Module()
+        model.layers = nn.ModuleList(nn.Linear(16, 15) for _ in range(2))
+        mesh = init_device_mesh("cpu", (self.world_size,))
+        for block in model.layers:
+            fully_shard(block, mesh=mesh, reshard_after_forward=False)
+        fully_shard(model, mesh=mesh, reshard_after_forward=False)
+        model.set_keep_unsharded_storage(True)
+        initial_state_dict = {
+            k: v.detach().clone() for k, v in model.state_dict().items()
+        }
+        params = {name for name, _ in model.named_parameters()}
+        loader = _build_loader(
+            model,
+            loads_checkpoint=True,
+            frozen_param_keys=frozenset(params - {"layers.1.weight"}),
+        )
+        first = {k: v + 1 for k, v in initial_state_dict.items()}
+        second = {k: v + 2 for k, v in initial_state_dict.items()}
+
+        loader.load(_copy_published(first, params))
+        loader.load(_copy_published(second, {"layers.1.weight"}))
+
+        for name, param in model.named_parameters():
+            expected = second if name == "layers.1.weight" else initial_state_dict
+            self.assertEqual(param, expected[name].full_tensor(), msg=name)
 
     @with_comms
     def test_unshards_every_group_after_fetch_error(self) -> None:
