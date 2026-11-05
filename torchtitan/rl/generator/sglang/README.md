@@ -67,7 +67,7 @@ scripts/install_rl_env.sh --sglang
 | --- | --- |
 | Dense softmax attention, varlen backend (Qwen3, Llama 3) | Supported |
 | Tensor parallelism | Supported; outside batch-invariant mode, the model's TP all-reduces run on SGLang's TP all-reduce (custom all-reduce) instead of NCCL |
-| CUDA graphs (decode, and breakable prefill graphs), overlap scheduling, chunked prefill | Supported |
+| CUDA graphs (decode and prefill), overlap scheduling, chunked prefill | Supported |
 | Priority scheduling by rollout group | Supported |
 | Model state dict loads (`cpu_prefetch`, `gpu_fetch`) | Supported |
 | Policy-version prefix cache isolation | Supported (`cache_salt`) |
@@ -91,11 +91,14 @@ Unsupported configurations raise at engine build.
 
 `SGLangEngine.Config.cuda_graph` picks what SGLang captures. SGLang runs decode
 and prefill in separate batches; `"decode"` captures full graphs for decode
-batches. The default, `"breakable"`, also captures prefill batches as SGLang's
-breakable CUDA graphs: the model runs in graph segments, with attention eager in
-between.
-Without them, prefill is bound by the eager model's CPU overhead (about 7x the
-GPU time of a 16K-token prefill chunk of Qwen3-0.6B at TP 2). Capture adds
+batches. The default, `"full"`, also captures prefill batches as SGLang's full
+prefill CUDA graphs, one per token-count bucket, with a request slot per running
+request. Without them, prefill is bound by the eager model's CPU overhead (about
+7x the GPU time of a 16K-token prefill chunk of Qwen3-0.6B at TP 2). SGLang's
+linear attention backend fails to capture full prefill graphs, so linear
+attention models (GDN, KDA) raise with `"full"` and need `"breakable"`: SGLang's
+breakable prefill graphs, where the model runs in graph segments, with attention
+eager in between, at a CPU cost per layer in every prefill step. Capture adds
 about 30 s to startup; `"decode"` skips it.
 
 Attention kernels compile on first use for each kernel variant, so the first

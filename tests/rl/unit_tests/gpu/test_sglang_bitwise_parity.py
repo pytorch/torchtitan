@@ -103,7 +103,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
     # models whose random weights each side would initialize differently.
     sync_weights_from_trainer = False
     # CUDA graphs SGLang captures (SGLangEngine.Config.cuda_graph).
-    cuda_graph = "breakable"
+    cuda_graph = "full"
     BATCH_SIZE = 5
     PROMPT_LENGTH = 150
     MAX_GEN_TOKENS = 50
@@ -409,6 +409,8 @@ class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):
 
     __test__ = True
     config_fn = staticmethod(qwen3_5_debug_bitwise_config)
+    # SGLang cannot capture full prefill graphs of linear attention models.
+    cuda_graph = "breakable"
     sync_weights_from_trainer = True
     # Tests 4 and 5 then cover the reset path (retract, flush, continue), with
     # SGLang's normal event loop.
@@ -500,6 +502,8 @@ class TestSGLangBitwiseParityKDA(SGLangBitwiseParityTestBase):
 
     __test__ = True
     config_fn = staticmethod(kimi_k3_debug_bitwise_config)
+    # SGLang cannot capture full prefill graphs of linear attention models.
+    cuda_graph = "breakable"
     sync_weights_from_trainer = True
 
     @classmethod
