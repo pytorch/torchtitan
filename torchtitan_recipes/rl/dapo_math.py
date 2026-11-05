@@ -50,6 +50,7 @@ from torchtitan.models.muse_spark import (
 from torchtitan.models.muse_spark.renderer import MuseSparkRendererConfig
 from torchtitan.models.muse_spark.tokenizer import MuseSparkTokenizer
 from torchtitan.models.qwen3 import build_model_config
+from torchtitan.observability.profiler import Profiler
 from torchtitan.rl.controller.controller import (
     AsyncLoopConfig,
     Controller,
@@ -542,6 +543,40 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
 def rl_dapo_qwen3_30b_a3b_math_8k() -> Controller.Config:
     """Qwen3-30B-A3B-Base, 8K responses, 32 prompts x 16 samples per step, BF16 Dist-MoE experts."""
     return _qwen3_30b_a3b_dapo_math_8k_config(expert_precision="bf16")
+
+
+def rl_dapo_qwen3_30b_a3b_math_8k_50_steps() -> Controller.Config:
+    """Run 50 DAPO-Math steps on 8 GPUs with W&B and no held-out validation."""
+    config = rl_dapo_qwen3_30b_a3b_math_8k()
+    config.metrics.enable_wandb = True
+    config.async_loop.num_training_steps = 50
+    config.async_loop.validation = ValidationConfig(steps=0)
+    config.trainer.checkpointer.load_only = True
+    config.trainer.profiler = Profiler.Config(
+        enable_profiling=True,
+        profile_freq=10,
+        profiler_repeat=1,
+        profiler_warmup=1,
+        profiler_active=1,
+    )
+    return config
+
+
+def rl_dapo_qwen3_30b_a3b_math_8k_bf16_50_steps() -> Controller.Config:
+    """Run the 50-step BF16 Dist-MoE baseline with one trainer profiling capture."""
+    config = rl_dapo_qwen3_30b_a3b_math_8k()
+    config.metrics.enable_wandb = True
+    config.async_loop.num_training_steps = 50
+    config.async_loop.validation = ValidationConfig(steps=0)
+    config.trainer.checkpointer.load_only = True
+    config.trainer.profiler = Profiler.Config(
+        enable_profiling=True,
+        profile_freq=10,
+        profiler_repeat=1,
+        profiler_warmup=1,
+        profiler_active=1,
+    )
+    return config
 
 
 def rl_dapo_qwen3_30b_a3b_math_8k_mxfp8() -> Controller.Config:
