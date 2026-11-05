@@ -24,6 +24,7 @@ from torchtitan_recipes.tests.models.muse_spark import (
 @pytest.mark.parametrize(
     "recipe",
     [
+        recipes.muse_spark_816b_a42b_dist_moe_bf16_spmd_64_fake,
         recipes.muse_spark_816b_a42b_dist_moe_bf16_spmd_256_fake,
         recipes.muse_spark_816b_a42b_dist_moe_bf16_spmd_512_fake,
     ],
