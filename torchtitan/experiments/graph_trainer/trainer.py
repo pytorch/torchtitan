@@ -33,11 +33,12 @@ from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
     PagedStashManager,
     PagedStashRunner,
 )
+from torchtitan.experiments.graph_trainer.passes import resolve_registered_graph_passes
 from torchtitan.models.base import BaseModel
 from torchtitan.models.common.linear import Linear
 from torchtitan.observability import structured_logger as sl
 from torchtitan.trainer import Trainer
-from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
+from torchtitan.training_engine import LossAndMetrics, TrainingEngine
 
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,8 @@ class GraphTrainingEngine(TrainingEngine):
                 "parallelism.fsdp_symm_mem_scope; set it to None."
             )
         validate_memory_policy_config(config.compile)
+        # Fail before building the model rather than at trace time.
+        resolve_registered_graph_passes(config.compile.extra_passes)
         super().__init__(
             config,
             model_config=model_config,
@@ -265,6 +268,9 @@ class GraphTrainingEngine(TrainingEngine):
             kwarg_mbs: list[dict[str, Any]] = []
             target_mbs: list[torch.Tensor | tuple[torch.Tensor, ...]] = []
             for microbatch in microbatch_group:
+                self._forward_backward_num_flops += self.flops_estimator(
+                    microbatch.as_input_dict()
+                )
                 input_dict = microbatch.to_input_dict(self.device, non_blocking=True)
                 with (
                     sl.log_trace_span("preprocess_inputs"),
@@ -297,7 +303,7 @@ class GraphTrainingEngine(TrainingEngine):
         global_loss_token_counts: torch.Tensor,
         *,
         defer_fsdp_gradient_reduction: bool,
-    ) -> ForwardBackwardResult:
+    ) -> LossAndMetrics:
         """Run microbatch groups through GraphRuntime."""
         assert not defer_fsdp_gradient_reduction
         accumulated_loss: torch.Tensor | None = None
@@ -321,7 +327,7 @@ class GraphTrainingEngine(TrainingEngine):
             loss_metrics.append(group_loss_metrics)
 
         assert accumulated_loss is not None
-        return ForwardBackwardResult(accumulated_loss, loss_metrics)
+        return accumulated_loss, loss_metrics
 
     def _pp_forward_backward_microbatch_group(
         self,
@@ -367,7 +373,7 @@ class GraphTrainingEngine(TrainingEngine):
         global_loss_token_counts: torch.Tensor,
         *,
         defer_fsdp_gradient_reduction: bool,
-    ) -> ForwardBackwardResult:
+    ) -> LossAndMetrics:
         """``_forward_backward_body`` under the paged stash runner.
 
         Wraps every microbatch group of the optimizer step rather than one

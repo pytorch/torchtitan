@@ -6,13 +6,13 @@
 
 # Shape suffixes: T = packed tokens.
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, cast, Self
 
 import spmd_types as spmd
 import torch
 import torch_remat as remat
-from torch import nn, Tensor
+from torch import Tensor
 
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import ParallelismConfig
@@ -25,12 +25,16 @@ from torchtitan.distributed.spmd_types import (
     spmd_mesh_size,
 )
 from torchtitan.models.base import BaseModel
+from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleList
 from torchtitan.models.common.attention import (
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
-from torchtitan.models.common.flops import quadratic_attention_flops_per_token
+from torchtitan.models.common.flops import (
+    get_parameter_counts,
+    quadratic_attention_flops_per_token,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.flux.autoencoder import AutoEncoder
 from torchtitan.models.flux.hf_embedder import FluxEmbedder
@@ -85,7 +89,8 @@ def _get_attention_metadata(
         max_context_length=seq_len,
     )
     cp_size = spmd_mesh_size(MeshAxisName.CP)
-    return metadata._replace(
+    return replace(
+        metadata,
         cu_seq_k=metadata.cu_seq_k * cp_size,
         max_k=metadata.max_k * cp_size,
         window_size=(-1, -1),
@@ -134,9 +139,12 @@ class FluxModel(BaseModel):
         double_blocks: list[DoubleStreamBlock.Config]
         single_blocks: list[SingleStreamBlock.Config]
 
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
+        def get_parameter_counts(self, model: Module) -> tuple[int, int]:
+            return get_parameter_counts(model)
+
+        def build_flops_estimator(
+            self, model: Module, *, seq_len: int
+        ) -> FlopsEstimator:
             nparams = sum(p.numel() for p in model.parameters())
 
             # Base: 6 FLOPs per parameter per token (fwd + bwd for linear
@@ -201,7 +209,11 @@ class FluxModel(BaseModel):
                 * self.depth
             )
 
-            return nparams, num_flops_per_token
+            return (
+                lambda input_dict: num_flops_per_token
+                * seq_len
+                * input_dict["labels"].shape[0]
+            )
 
     def __init__(self, config: Config):
         super().__init__()

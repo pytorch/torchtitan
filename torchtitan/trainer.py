@@ -193,6 +193,7 @@ class Trainer(Configurable):
             config_dict=config.to_dict(),
             has_quantization=engine.has_quantization,
         )
+        self._local_num_flops_since_last_log = 0
         color = self.metrics_processor.color
 
         self.num_pp_microbatches = (
@@ -248,7 +249,6 @@ class Trainer(Configurable):
                 pp_schedule=config.parallelism.pipeline_parallel_schedule,
                 color=color,
             )
-        self.metrics_processor.num_flops_per_token = engine.num_flops_per_token
         self.metrics_processor.optimizers = engine.optim.optimizers
         self.metrics_processor.model_parts = engine.model_parts
 
@@ -341,6 +341,7 @@ class Trainer(Configurable):
         # step_last_log on the first step, so keep this check after it.
         if self.metrics_processor.step_last_log == engine.num_completed_steps:
             self.metrics_processor.reset()
+            self._local_num_flops_since_last_log = 0
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
@@ -407,12 +408,14 @@ class Trainer(Configurable):
         # scheduler advances in engine.optim_step().
         lr_metrics = engine.optim.lr_schedulers.get_metrics() if should_log else {}
         grad_norm = engine.optim_step()
+        self._local_num_flops_since_last_log += forward_backward_result.num_flops
 
         # log metrics
         if not should_log:
             return
 
         accumulated_loss = forward_backward_result.loss
+        mean_num_flops = self._local_num_flops_since_last_log
 
         with sl.log_trace_span("collect_dist_metrics"):
             sl.log_trace_scalar(
@@ -420,7 +423,7 @@ class Trainer(Configurable):
             )
 
             if parallelism_context.dp_cp_enabled:
-                loss_mesh = parallelism_context.get_optional_mesh("loss")
+                loss_mesh = parallelism_context.get_mesh("loss")
 
                 # For global_avg_loss, we want the average loss across all ranks:
                 # accumulated_loss = local_loss_sum / global_valid_tokens
@@ -448,6 +451,19 @@ class Trainer(Configurable):
                         loss_mesh,
                     ),
                 )
+                if parallelism_context.dp_enabled:
+                    dp_mesh = parallelism_context.get_mesh("dp")
+                    mean_num_flops = (
+                        dist_utils.dist_sum(
+                            torch.tensor(
+                                mean_num_flops,
+                                dtype=torch.float64,
+                                device=engine.device,
+                            ),
+                            dp_mesh,
+                        )
+                        / dp_mesh.size()
+                    )
             else:
                 global_avg_loss = global_max_loss = float(accumulated_loss.item())
                 global_ntokens_seen = engine.ntokens_seen
@@ -463,6 +479,7 @@ class Trainer(Configurable):
             global_max_loss,
             float(grad_norm.item()),
             extra_metrics=extra_metrics,
+            num_flops=mean_num_flops,
         )
 
     @record

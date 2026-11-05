@@ -20,8 +20,9 @@ Shape suffixes:
 - Dh = head dim
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 import spmd_types as spmd
 import torch
@@ -175,6 +176,9 @@ class VisionAttention(Module):
             default_factory=FlexInnerAttention.Config
         )
 
+        def flops_per_query_key_pair(self) -> int:
+            return 12 * self.dim
+
     def __init__(self, config: Config):
         super().__init__()
         if config.dim % config.num_heads != 0:
@@ -267,3 +271,18 @@ class VisionTransformerBlock(Module):
         return remat.region(
             torch.add, self.remat_region_name("ffn_residual"), recompute=False
         )(x, mlp_out)
+
+
+def get_packed_vision_grids(
+    input_dict: Mapping[str, Any]
+) -> tuple[tuple[int, int, int], ...]:
+    """Extract image and video patch grids from a raw CPU microbatch."""
+    return tuple(
+        (temporal, height, width)
+        for pixels, grid_key in (
+            ("pixel_values", "grid_thw"),
+            ("pixel_values_videos", "grid_thw_videos"),
+        )
+        if input_dict.get(pixels) is not None
+        for temporal, height, width in input_dict[grid_key].tolist()
+    )
