@@ -182,7 +182,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--model_flavor",
-        choices=("glm5_2_debugmodel", "glm5_3_debugmodel"),
+        choices=("glm5_2_debugmodel",),
         default=_DEFAULT_FLAVOR,
     )
     parser.add_argument("--seq_len", type=int, default=16)

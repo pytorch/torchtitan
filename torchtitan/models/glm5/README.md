@@ -28,10 +28,9 @@ Available flavors are defined in `flavors.py`:
 - `glm5_2_debugmodel_mtp`: small model with one trainable NextN/MTP objective
 - `glm5_2_scaled_debugmodel`: larger validation model
 - `744B-A40B`: released GLM-5.2 architecture
-- `glm5_3_debugmodel`: GLM-5.3 development model
-- `glm5_3_debugmodel_mtp`: GLM-5.3 development model with one MTP layer
-- `glm5_3_scaled_debugmodel`: larger GLM-5.3 validation model
-- `glm5_3_744b_a40b`: released GLM-5.3 training architecture
+
+GLM-5.2 and GLM-5.3 use these same architecture configurations; separate
+version aliases are not required for loading their checkpoints.
 
 Runnable development recipes live in
 `torchtitan_recipes/tests/models/glm5.py`. The released flavor describes the
@@ -138,7 +137,7 @@ Select the versioned GLM-5.3 development flavor with:
 
 ```bash
 python -m scripts.checkpoint_conversion.numerical_tests_glm5 \
-  --model_flavor glm5_3_debugmodel
+  --model_flavor glm5_2_debugmodel
 ```
 
 ## Multi-token prediction

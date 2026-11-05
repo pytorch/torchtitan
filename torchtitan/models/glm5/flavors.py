@@ -675,10 +675,6 @@ MODEL_FLAVORS = {
     "glm5_2_debugmodel": _glm5_2_debugmodel,
     "glm5_2_debugmodel_mtp": _glm5_2_debugmodel_mtp,
     "glm5_2_scaled_debugmodel": _glm5_2_scaled_debugmodel,
-    "glm5_3_744b_a40b": _glm5_2_744b_a40b,
-    "glm5_3_debugmodel": _glm5_2_debugmodel,
-    "glm5_3_debugmodel_mtp": _glm5_2_debugmodel_mtp,
-    "glm5_3_scaled_debugmodel": _glm5_2_scaled_debugmodel,
     "shared_dsa_debugmodel": _shared_dsa_debugmodel,
 }
 
@@ -698,8 +694,6 @@ def build_model_config(
     max_context_len = {
         "744B-A40B": 1_048_576,
         "glm5_2_scaled_debugmodel": 4096,
-        "glm5_3_744b_a40b": 1_048_576,
-        "glm5_3_scaled_debugmodel": 4096,
     }.get(flavor, DEFAULT_DEBUG_MODEL_SEQ_LEN)
     context_len = seq_len or max_context_len
     if context_len > max_context_len:
