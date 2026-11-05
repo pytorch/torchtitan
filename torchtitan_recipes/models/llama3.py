@@ -20,7 +20,7 @@ from torchtitan.distributed.activation_remat import (
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.llama3 import build_model_config
 from torchtitan.observability.metrics import MetricsProcessor, TensorBoardLogger
-from torchtitan.observability.profiler import Profiler
+from torchtitan.observability.profiler import KinetoTraceProfiler, Profiler
 from torchtitan.trainer import Trainer
 
 from torchtitan_recipes.data import c4_document_capacity
@@ -47,7 +47,7 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
             ),
         ),
         hf_assets_path="./assets/hf/Llama-3.1-8B",
-        profiler=Profiler.Config(enable_profiling=True, profile_freq=100),
+        profiler=Profiler.Config(trace=KinetoTraceProfiler.Config(freq=100)),
         metrics=MetricsProcessor.Config(loggers=[TensorBoardLogger.Config()]),
         model=model_config,
         parallelism=parallelism,
@@ -58,7 +58,6 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
@@ -84,7 +83,7 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
             ),
         ),
         hf_assets_path="./assets/hf/Llama-3.1-70B",
-        profiler=Profiler.Config(enable_profiling=True, profile_freq=100),
+        profiler=Profiler.Config(trace=KinetoTraceProfiler.Config(freq=100)),
         metrics=MetricsProcessor.Config(loggers=[TensorBoardLogger.Config()]),
         model=model_config,
         optim=Optim.Config(
@@ -94,7 +93,6 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(

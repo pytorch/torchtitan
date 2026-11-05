@@ -10,17 +10,10 @@
 Exercises them in isolation -- no Monarch, no GPU, no real model, and no broadcast
 (`test_engine_loop.py` covers the engine loop). Covers completion (token-out + the
 metrics that ride with it), the SamplingParams contract, and the vLLM metric timing math.
-
-The uneven-decode integration test requires four GPUs and a torchrun launcher.
 """
 
 import asyncio
 import concurrent.futures
-import gc
-import math
-import os
-import shutil
-import tempfile
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import cast
@@ -28,14 +21,12 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import torch
-import torch.distributed as dist
 
 import torchtitan.rl.generator.generator as generator_module
 import torchtitan.rl.generator.vllm.engine as vllm_engine_module
 from torchstore import RankRole
 from torchtitan.components.optim import AdamW
-from torchtitan.config import CommConfig, DebugConfig
-from torchtitan.distributed import utils as dist_utils
+from torchtitan.config import DebugConfig, PrecisionConfig
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.rl.generator.dispatcher import (
@@ -55,16 +46,23 @@ from torchtitan.rl.generator.vllm.engine import (
     add_extra_vllm_engine_args,
     VLLMEngine,
 )
-from torchtitan.rl.generator.vllm.registry import register_to_vllm
 from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.generator.vllm.worker import (
+    TorchTitanCudagraphDispatcher,
     TorchTitanGPUModelRunner,
     TorchTitanGPUWorker,
 )
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.rl.routing.strategies import LeastLoadedRoutingStrategy
-from vllm import SamplingParams
+from vllm.config import (
+    CompilationConfig,
+    CompilationMode,
+    CUDAGraphMode,
+    DeviceConfig,
+    SchedulerConfig,
+    VllmConfig,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
@@ -155,33 +153,28 @@ def test_initialize_torchstore_client_uses_requester_index():
             await generator.initialize_torchstore_client(requester_index=3)
 
         client.assert_awaited_once_with(role=RankRole.REQUESTER, group=3)
+        assert generator._torchstore_loop is asyncio.get_running_loop()
 
     asyncio.run(main())
 
 
 def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
     async def main():
-        staging_state_dict = {"weight": "old"}
+        staging_state_dict = {"weight": torch.zeros(2)}
         generator = Generator.__new__(Generator)
+        generator.config = SimpleNamespace(model_state_dict_load_mode="cpu_prefetch")
         generator._prefetched_model_state_dict = staging_state_dict
 
         def fill_state_dict(*args, **kwargs):
             assert kwargs["user_state_dict"] is staging_state_dict
-            staging_state_dict["weight"] = "fetched"
-            return {"weight": "fetched"}
-
-        load_state_dict = Mock()
-        engine = _vllm_engine(
-            model=SimpleNamespace(
-                load_state_dict=load_state_dict,
-                _prefetched_model_state_dict=staging_state_dict,
-            )
-        )
+            staging_state_dict["weight"].fill_(1)
+            return staging_state_dict
 
         get_state_dict = AsyncMock(side_effect=fill_state_dict)
         with patch.object(generator_module.ts, "get_state_dict", get_state_dict):
             await generator.prefetch_model_state_dict()
-        engine.load_prefetched_model_state_dict()
+        weights = {"weight": torch.zeros(2)}
+        assert generator._copy_prefetched_model_state_dict(weights) == weights.keys()
 
         assert generator._prefetched_model_state_dict is staging_state_dict
         get_state_dict.assert_awaited_once_with(
@@ -190,7 +183,7 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
             strict=False,
             direct_rdma=False,
         )
-        load_state_dict.assert_called_once_with({"weight": "fetched"})
+        assert torch.equal(weights["weight"], torch.ones(2))
 
     asyncio.run(main())
 
@@ -508,33 +501,16 @@ def test_shutdown_closes_the_renderer():
     engine._engine.renderer.shutdown.assert_called_once_with()
 
 
-def test_prefetched_model_state_dict_is_the_buffers_the_load_reads():
-    # The generator prefetches into this dict, so it must be the one the load copies from.
-    buffers = {"weight": torch.zeros(1)}
-    loaded = []
-    engine = _vllm_engine(
-        model=SimpleNamespace(
-            load_state_dict=loaded.append, _prefetched_model_state_dict=buffers
-        )
-    )
-
-    assert engine.prefetched_model_state_dict is buffers
-    engine.load_prefetched_model_state_dict()
-    assert loaded == [buffers]
-
-
 @pytest.mark.parametrize("reset_kv_cache", [False, True])
 def test_reset_kv_cache_on_model_state_dict_load_controls_cache_reset(
     reset_kv_cache: bool,
 ):
-    model = SimpleNamespace(
-        load_state_dict=lambda state_dict: None, _prefetched_model_state_dict={}
-    )
+    model = SimpleNamespace(load_model_state_dict=lambda fetch: None)
     engine = _vllm_engine(
         reset_kv_cache_on_model_state_dict_load=reset_kv_cache, model=model
     )
 
-    engine.load_prefetched_model_state_dict()
+    engine.load_model_state_dict(lambda state_dict: state_dict.keys())
 
     expected = [((), {"reset_running_requests": True})] if reset_kv_cache else []
     assert cast(_FakeLLMEngine, engine._engine).reset_prefix_cache_calls == expected
@@ -628,13 +604,14 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_p
             parallelism=_PARALLELISM,
             model_path="unused",
             max_num_seqs=8,
-            model_dtype="bfloat16",
+            precision=PrecisionConfig(),
             gpu_memory_limit=0.9,
             max_num_batched_tokens=None,
             checkpointer=None,
             dist_moe_runtime=None,
             debug=DebugConfig(),
             reset_kv_cache_on_model_state_dict_load=True,
+            model_state_dict_load_mode="cpu_prefetch",
             rank=0,
             generator_name="generator",
             output_dir=str(tmp_path),
@@ -675,22 +652,19 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dic
         parallelism=config.parallelism,
         model_path="unused",
         max_num_seqs=8,
-        model_dtype=config.model_dtype,
+        precision=PrecisionConfig(),
         gpu_memory_limit=config.gpu_memory_limit,
         max_num_batched_tokens=config.max_num_batched_tokens,
         checkpointer=None,
         dist_moe_runtime=None,
         debug=config.debug,
         reset_kv_cache_on_model_state_dict_load=False,
+        model_state_dict_load_mode="cpu_prefetch",
         rank=0,
         generator_name="generator",
         output_dir=str(tmp_path),
     )
     return engine_args.call_args.kwargs
-
-
-def test_generator_defaults_to_the_vllm_engine():
-    assert isinstance(Generator.Config(model=_MODEL_CONFIG).engine, VLLMEngine.Config)
 
 
 def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
@@ -817,6 +791,50 @@ def test_sequence_parallel_padding_rounds_runner_tokens(
     )
 
 
+@pytest.mark.parametrize(
+    "num_tokens,valid_modes,batch_invariant,expected",
+    [
+        (2, None, False, (CUDAGraphMode.FULL, True)),
+        # 3 decodes pad to 8, past the largest decode graph (2): mixed graph.
+        (3, None, False, (CUDAGraphMode.FULL, False)),
+        # Batch-invariant runs keep them eager on the decode kernels.
+        (3, None, True, (CUDAGraphMode.NONE, False)),
+        # DP sync pads a decoding rank to a peer's batch and allows only FULL:
+        # a decode graph up to the largest one, else the mixed graph.
+        (2, {CUDAGraphMode.FULL}, False, (CUDAGraphMode.FULL, True)),
+        (16, {CUDAGraphMode.FULL}, True, (CUDAGraphMode.FULL, False)),
+    ],
+)
+def test_full_mode_decode_dispatch(
+    monkeypatch, num_tokens, valid_modes, batch_invariant, expected
+):
+    monkeypatch.setattr(
+        "torchtitan.rl.generator.vllm.worker.is_in_batch_invariant_mode",
+        lambda: batch_invariant,
+    )
+    # An explicit device: CPU CI has no platform for vLLM to infer one from.
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    config.compilation_config = CompilationConfig(
+        mode=CompilationMode.NONE,
+        cudagraph_mode=CUDAGraphMode.FULL,
+        cudagraph_capture_sizes=[1, 2, 8, 16],
+        max_cudagraph_capture_size=16,
+    )
+    config.scheduler_config = SchedulerConfig(
+        max_model_len=64,
+        max_num_seqs=4,
+        max_num_batched_tokens=16,
+        is_encoder_decoder=False,
+    )
+    dispatcher = TorchTitanCudagraphDispatcher(config)
+    dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)
+
+    mode, descriptor = dispatcher.dispatch(
+        num_tokens, uniform_decode=True, valid_modes=valid_modes
+    )
+    assert (mode, descriptor.uniform) == expected
+
+
 def test_only_weights_use_cumem_allocator(monkeypatch):
     base_worker_cls = TorchTitanGPUWorker.__mro__[1]
     monkeypatch.setattr(
@@ -911,79 +929,3 @@ def test_inference_parallelism_disables_dense_sequence_parallelism():
     parallelism = InferenceParallelismConfig(tensor_parallel_degree=4)
 
     assert not parallelism.to_training().enable_sequence_parallel
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_vllm_uneven_decode_tp_padding():
-    """Three decode tokens run through EP-internal TP sequence sharding."""
-    world_size = (
-        dist.get_world_size()
-        if dist.is_initialized()
-        else int(os.environ.get("WORLD_SIZE", "1"))
-    )
-    if world_size != 4:
-        pytest.skip(f"requires exactly 4 GPUs, got {world_size}")
-
-    from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_moe_debug_varlen
-
-    from tests.rl.unit_tests.gpu.test_bitwise_parity import (
-        _make_prompt_tokens,
-        _run_engine,
-        build_inference_engine,
-    )
-
-    config = rl_grpo_qwen3_moe_debug_varlen()
-    config.generator.parallelism.data_parallel_degree = 1
-    config.generator.parallelism.tensor_parallel_degree = 4
-    config.generator.gpu_memory_limit = 0.5
-
-    temporary_dump_folder = None
-    if not dist.is_initialized():
-        temporary_dump_folder = tempfile.mkdtemp(prefix="rl_generator_moe_")
-        dist_utils.init_distributed(
-            CommConfig(),
-            base_folder=temporary_dump_folder,
-        )
-
-    register_to_vllm(
-        config.generator.model,
-        parallelism=config.generator.parallelism,
-        checkpointer_config=None,
-    )
-
-    engine = build_inference_engine(config)
-    try:
-        prompt_ids = _make_prompt_tokens(3, 100, engine.get_tokenizer())
-        outputs = _run_engine(
-            engine,
-            "uneven_decode",
-            prompt_ids,
-            SamplingParams(
-                temperature=0.0,
-                top_p=1.0,
-                max_tokens=2,
-                ignore_eos=True,
-                logprobs=1,
-                output_kind=RequestOutputKind.FINAL_ONLY,
-            ),
-        )
-
-        for output in outputs:
-            sample = output.outputs[0]
-            assert len(sample.token_ids) == 2
-            assert len(sample.logprobs) == 2
-            assert all(
-                math.isfinite(list(logprobs.values())[0].logprob)
-                for logprobs in sample.logprobs
-            )
-    finally:
-        if dist.is_initialized():
-            dist.barrier()
-        renderer = getattr(engine, "renderer", None)
-        if renderer is not None:
-            renderer.shutdown()
-        del engine
-        gc.collect()
-        torch.cuda.empty_cache()
-        if temporary_dump_folder is not None:
-            shutil.rmtree(temporary_dump_folder, ignore_errors=True)

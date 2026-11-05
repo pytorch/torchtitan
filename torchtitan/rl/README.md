@@ -250,6 +250,10 @@ python -m torchtitan.rl.train \
 `config.metrics.loggers = []` in your recipe. Append
 `TensorBoardLogger.Config()` to `config.metrics.loggers` to also write TensorBoard metrics.
 
+## Run on SLURM
+
+See [Launchers](./actors/monarch/README.md#launchers).
+
 ## Trainer/generator consistency
 
 Install the batch-invariant kernels shown in [Prerequisites](#prerequisites), then follow the [bitwise parity guide](./BITWISE_PARITY.md) for configuration, supported layouts, verification, and limitations.

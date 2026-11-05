@@ -29,7 +29,11 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     run_traced,
 )
 from torchtitan.experiments.graph_trainer.passes import apply_graph_passes
-from torchtitan.observability.profiler import _EXPORT_SUPPORTS_ANNOTATIONS, Profiler
+from torchtitan.observability.profiler import (
+    _EXPORT_SUPPORTS_ANNOTATIONS,
+    KinetoTraceProfiler,
+    Profiler,
+)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
@@ -200,11 +204,9 @@ class TestTraceAnnotationExport(TestCase):
             ),
         ):
             config = Profiler.Config(
-                enable_profiling=True,
-                save_traces_folder="traces",
-                profile_freq=4,
-                profiler_warmup=1,
-                profiler_active=1,
+                trace=KinetoTraceProfiler.Config(
+                    save_folder="traces", freq=4, warmup=1, active=1
+                )
             )
             profiler = config.build(global_step=0, base_folder=tmp)
 

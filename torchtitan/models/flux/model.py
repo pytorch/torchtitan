@@ -6,15 +6,15 @@
 
 # Shape suffixes: T = packed tokens.
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, cast, Self
 
 import spmd_types as spmd
 import torch
 import torch_remat as remat
-from torch import nn, Tensor
+from torch import Tensor
 
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import context_parallel
 from torchtitan.distributed.activation_remat import ActivationRematConfig
@@ -25,12 +25,16 @@ from torchtitan.distributed.spmd_types import (
     spmd_mesh_size,
 )
 from torchtitan.models.base import BaseModel
+from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleList
 from torchtitan.models.common.attention import (
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
-from torchtitan.models.common.flops import quadratic_attention_flops_per_token
+from torchtitan.models.common.flops import (
+    get_parameter_counts,
+    quadratic_attention_flops_per_token,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.flux.autoencoder import AutoEncoder
 from torchtitan.models.flux.hf_embedder import FluxEmbedder
@@ -85,7 +89,8 @@ def _get_attention_metadata(
         max_context_length=seq_len,
     )
     cp_size = spmd_mesh_size(MeshAxisName.CP)
-    return metadata._replace(
+    return replace(
+        metadata,
         cu_seq_k=metadata.cu_seq_k * cp_size,
         max_k=metadata.max_k * cp_size,
         window_size=(-1, -1),
@@ -134,9 +139,12 @@ class FluxModel(BaseModel):
         double_blocks: list[DoubleStreamBlock.Config]
         single_blocks: list[SingleStreamBlock.Config]
 
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
+        def get_parameter_counts(self, model: Module) -> tuple[int, int]:
+            return get_parameter_counts(model)
+
+        def build_flops_estimator(
+            self, model: Module, *, seq_len: int
+        ) -> FlopsEstimator:
             nparams = sum(p.numel() for p in model.parameters())
 
             # Base: 6 FLOPs per parameter per token (fwd + bwd for linear
@@ -201,7 +209,11 @@ class FluxModel(BaseModel):
                 * self.depth
             )
 
-            return nparams, num_flops_per_token
+            return (
+                lambda input_dict: num_flops_per_token
+                * seq_len
+                * input_dict["labels"].shape[0]
+            )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -236,7 +248,7 @@ class FluxModel(BaseModel):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
         local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
@@ -267,7 +279,7 @@ class FluxModel(BaseModel):
 
             self._apply_fsdp(
                 parallelism_context=parallelism_context,
-                training=training,
+                precision=precision,
                 parallelism=parallelism,
             )
         return self
@@ -276,32 +288,30 @@ class FluxModel(BaseModel):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
-        from torch.distributed.fsdp import (
-            CPUOffloadPolicy,
-            fully_shard,
-            MixedPrecisionPolicy,
-        )
+        from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
 
         from torchtitan.distributed.fsdp import (
             disable_fsdp_gradient_division,
             enable_fsdp_symm_mem,
+            mixed_precision_policy,
             resolve_fsdp_mesh,
         )
 
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
         fsdp_config: dict[str, Any] = {
             "mesh": dp_mesh,
-            "mp_policy": MixedPrecisionPolicy(
-                param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-                reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            "mp_policy": mixed_precision_policy(
+                self,
+                param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
+                reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
             ),
         }
         if dp_mesh_dims is not None:
             fsdp_config["dp_mesh_dims"] = dp_mesh_dims
-        if training.enable_cpu_offload:
+        if parallelism.fsdp_enable_cpu_offloading:
             fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
         for module in (self.img_in, self.time_in, self.vector_in, self.txt_in):
@@ -320,11 +330,10 @@ class FluxModel(BaseModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Encode a raw image-text batch and prepare flow-matching inputs."""
-        del max_num_documents, max_context_length
+        del max_num_documents
         if input_dict.pop("loss_kwargs", None):
             raise ValueError("Flux does not support per-microbatch loss arguments.")
         autoencoder = cast(AutoEncoder | None, kwargs["autoencoder"])

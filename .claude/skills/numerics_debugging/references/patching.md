@@ -1,7 +1,7 @@
 # Patching torchtitan to enable capture
 
-The capture is gated on a profiler flag and an `ActivationCaptureProfiler`
-constructed inside `Profiler`. Apply these patches before a capture run, then
+The capture is gated on a profiler config field and an
+`ActivationCaptureProfiler` constructed inside `Profiler`. Apply these patches before a capture run, then
 revert them when you are done (they don't belong on `main`).
 
 ## 0. Import bootstrap
@@ -37,20 +37,20 @@ bootstrap would then load another tree's tracer or fail outright.
 
 ## 1. `torchtitan/observability/profiler.py`
 
-Add the import, config field, constructor arg, lifecycle hooks, and builder.
+Add the import, config field, constructor arg, and lifecycle hooks.
 
 ```python
 # top of file
 _numerics_scripts_on_path()
 from activation_tracer import ActivationCaptureProfiler
 
-# inside Profiler.Config — add next to enable_memory_snapshot
-dump_numerics: bool = False
-"""Dump per-op activation logs for numerics debugging.
-Writes ``{dump_folder}/numerics/rank_{rank}_activations.log``
-(per-op stats + norm hashes of inputs / outputs)."""
+# inside Profiler.Config -- add next to memory_snapshot
+numerics_capture_step: int | None = None
+"""Training step whose per-op activations are dumped for numerics debugging to
+``{dump_folder}/numerics/rank_{rank}_activations.log`` (per-op stats + norm
+hashes of inputs / outputs); ``None`` disables it."""
 
-# Profiler.__init__ — add model kwarg and slots
+# Profiler.__init__ -- add a model kwarg and slots
 def __init__(
     self,
     config: "Profiler.Config",
@@ -58,57 +58,44 @@ def __init__(
     global_step: int = 0,
     base_folder: str = "",
     leaf_folder: str = "",
-    model: torch.nn.Module | None = None,  # for activation capture profiler
+    model: torch.nn.Module | None = None,  # for activation capture
 ) -> None:
     ...
-    self.activation_capture_profiler = None
+    self.numerics_capture = None
     # ActivationCaptureProfiler registers global module forward hooks on
     # the model so backward ops can recover their owning FQN.
     self._model = model
 
-# Profiler.__enter__ — build the activation capture profiler alongside the memory profiler
-self.activation_capture_profiler = self.build_activation_capture_profiler(
-    base_folder=self._base_folder,
-)
-
-# Profiler.__exit__ — teardown
-if self.activation_capture_profiler is not None:
-    self.activation_capture_profiler.__exit__(exc_type, exc_val, exc_tb)
-    self.activation_capture_profiler = None
-
-# Profiler.step — drive the capture-step cadence
-if self.activation_capture_profiler is not None:
-    self.activation_capture_profiler.step()
-
-# new method
-def build_activation_capture_profiler(self, *, base_folder: str):
-    """Create and return an :class:`ActivationCaptureProfiler`, or ``None`` if disabled."""
-    cfg = self._config
-    if not cfg.dump_numerics or self._model is None:
-        return None
-
-    dump_dir = os.path.join(base_folder, "numerics")
-    profiler = ActivationCaptureProfiler(
+# Profiler.__enter__ -- at the top, before the early return
+if self._config.numerics_capture_step is not None:
+    self.numerics_capture = ActivationCaptureProfiler(
         enabled=True,
         model=self._model,
-        dump_dir=dump_dir,
-        capture_step=cfg.profile_freq,
+        dump_dir=os.path.join(self._base_folder, "numerics"),
+        capture_step=self._config.numerics_capture_step,
     )
-    profiler.__enter__()
-    return profiler
+    self.numerics_capture.__enter__()
+
+# Profiler.__exit__ -- teardown
+if self.numerics_capture is not None:
+    self.numerics_capture.__exit__(exc_type, exc_val, exc_tb)
+    self.numerics_capture = None
+
+# Profiler.step -- drive the capture-step cadence
+if self.numerics_capture is not None:
+    self.numerics_capture.step()
 ```
 
-## 2. `torchtitan/trainer.py`
+## 2. `torchtitan/training_engine.py`
 
-Pass the model to the profiler when entering the training loop:
+Pass the model to the profiler in `TrainingEngine.start_profiler`:
 
 ```python
-with config.profiler.build(
-    global_step=self.step,
-    base_folder=config.dump_folder,
+self.profiler = self.config.profiler.build(
+    global_step=self.num_completed_steps,
+    base_folder=self.output_dir,
     model=self.model_parts[0],  # add this line
-) as profiler:
-    ...
+)
 ```
 
 `model_parts[0]` is the eager model rank-0 owns; that is what
