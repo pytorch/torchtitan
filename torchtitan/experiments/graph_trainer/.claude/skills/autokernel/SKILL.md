@@ -1,6 +1,6 @@
 ---
 name: autokernel
-description: Coordinate an agent swarm to optimize GPU kernel problem sets in CuTe DSL through operator fusion, schedule tuning, and profiling, while preserving bitwise parity and the complete input/output contract. Use when given kernel problems and reference implementations to optimize on available GPUs.
+description: Coordinate an agent swarm to optimize GPU kernel problem sets in CuTe DSL through operator fusion, schedule tuning, and profiling, while preserving bitwise parity and the complete input/output contract. Use when given kernel problems and reference implementations, or a substitute-kernels `cache_dir`, to optimize on available GPUs.
 ---
 
 # Autokernel
@@ -11,27 +11,30 @@ GPUs. Minimize memory traffic through fusion, tune schedules for the actual
 hardware, and use profiler evidence to work toward the applicable roofline.
 Bitwise parity and the original input/output contract are hard acceptance gates.
 
-## Kernel cache problem sets
+## Substitute-kernels problem sets
 
-When the problems come from a GraphTrainer kernel cache (written by
-`substitute_with_kernels_pass` in `graph_trainer/kernel_cache.py`):
+When the problems come from a GraphTrainer `cache_dir` (written by
+`substitute_with_kernels_pass` in `graph_trainer/substitute_kernels.py`):
 
 1. **Ask the user for `cache_dir` before doing anything else.** Do not guess or
-   fall back to `$TORCHTITAN_KERNEL_CACHE_DIR` or the Inductor cache directory
-   without confirmation, and do not write outside the confirmed directory.
+   fall back to `$TORCHTITAN_SUBSTITUTE_KERNELS_DIR` or the Inductor cache directory
+   without confirmation. Only the coordinator writes into `cache_dir`, and only
+   `<kernel_name>` files (see 3).
 2. **The problem set is every specialization in `cache_dir`.** Each
-   `pat_<l1>/specialization_<l2>.json` is one problem with ID `<l1>/<l2>`:
+   `pat_<l1>/specialization_<l2>.json` is one problem with ID `pat_<l1>/<l2>`:
    - `pat_<l1>/reference.py` is the immutable reference; its `run(*args)`
      defines the semantics. Specializations under one `pat_<l1>/` share it.
    - The spec's `signature`, `inputs` and `outputs` are the contract: build
      inputs with exactly the listed shapes, strides, dtypes, devices and
      values, and return outputs with exactly the listed structure and
-     metadata. The entrypoint is `run(*args)`, not `kernel(reference, *args)`.
+     metadata. The entrypoint is `run(*args)`, not `kernel(reference, *args)`:
+     the kernel does not receive the reference.
    - The kernel file is `pat_<l1>/<kernel_name>` from the spec. If it already
      exists, it is the current best implementation to beat; otherwise beat
-     `reference.py`.
-   - Never modify `reference.py` or the spec files. Writers and reviewers work
-     only in the run directory, never in `cache_dir`.
+     `reference.py`. It is imported as a standalone module, so a candidate
+     must be a single self-contained file with no relative imports.
+   - Never modify `reference.py` or the spec files. Writers, reviewers and
+     verifiers work only in the run directory.
 3. **Every claimed win gets a newly spawned verifier.** Each time a writer or
    reviewer reports a win, spawn a fresh verifier agent for that submission, one
    per submission, never the agent that wrote or reviewed it. On a leased GPU,
@@ -46,15 +49,15 @@ When the problems come from a GraphTrainer kernel cache (written by
    - records a pass/fail verdict with evidence on the board.
 
    Replace `pat_<l1>/<kernel_name>` with the candidate only when the verifier
-   passes it and it is faster than the current implementation. The
-   coordinator alone does the replacement: copy the previous file into the run
-   directory for rollback, write the candidate to a temporary file in the same
+   passes it and it is measurably faster than the current implementation
+   (beyond run-to-run noise). The coordinator alone does the replacement: copy
+   the previous file, if any, into the run directory for rollback, write the candidate to a temporary file in the same
    directory, then `os.replace` it onto `<kernel_name>`. A failed or
    inconclusive verification leaves `cache_dir` untouched and goes back to the
    writer.
 
-The rest of this skill applies unchanged; for cache problems, `<kernel_name>`
-plays the role of the canonical `kernel.py`.
+The rest of this skill applies unchanged; for these problems, `reference.py` is
+the reference and `<kernel_name>` is the canonical implementation file.
 
 ## Establish the contract and baseline
 
@@ -88,7 +91,7 @@ Use these collaboration mechanisms together:
 
 | Mechanism | Required behavior |
 | --- | --- |
-| Coordinator | Own assignments, GPU allocation, handoffs, and promotion of reviewed winners. |
+| Coordinator | Own assignments, GPU allocation, handoffs, and promotion of reviewed winners (verified winners for substitute-kernels problems). |
 | Shared task board | Agents claim work and post findings in one shared file so they can see progress and avoid duplicate work. |
 | Stage handoff | A writer's candidate and evidence become a different reviewer's inputs; review findings feed the next writing iteration. |
 | Named agents and messages | Reuse agents' context with the available messaging tool, such as `SendMessage` or `collaboration.send_message`; use a follow-up task to resume an idle agent. |
@@ -112,8 +115,9 @@ are not comparable.
 Keep trials in separate directories such as
 `candidates/<problem-id>/<agent-name>/<trial-id>/`. Give competing hypotheses
 separate board rows and candidate directories under the same problem ID. The
-coordinator alone promotes reviewed winners into the canonical `kernel.py` and
-its supporting files.
+coordinator alone promotes reviewed winners into the problem's canonical
+implementation file (such as `kernel.py`) and its supporting files; for
+substitute-kernels problems, only verified winners replace `<kernel_name>`.
 
 ## Hillclimbing loop
 

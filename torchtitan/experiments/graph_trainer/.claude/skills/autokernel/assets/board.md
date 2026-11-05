@@ -7,7 +7,7 @@ atomically. Keep detailed trial logs and profiles in the linked candidate folder
 
 - Run ID:
 - Coordinator:
-- Kernel cache_dir (confirmed by the user), if any:
+- Substitute-kernels cache_dir (confirmed by the user), if any:
 - Problem manifest:
 - Immutable references and source hashes:
 - Target GPU, CUDA, CuTe DSL, and reference math/backend settings:
@@ -19,7 +19,7 @@ atomically. Keep detailed trial logs and profiles in the linked candidate folder
 
 States: queued, writing, validating, review, verifying, accepted, blocked.
 
-| Problem ID / hypothesis | Occurrences / priority | Owner | State | Best reviewed candidate + hash | Exactness coverage | Reference median us | Best median us / spread | Next experiment or blocker |
+| Problem ID / hypothesis | Occurrences / priority | Owner | State | Best accepted candidate + hash | Exactness coverage | Reference median us | Best median us / spread | Next experiment or blocker |
 | --- | --- | --- | --- | --- | --- | ---: | --- | --- |
 
 ## GPU leases
@@ -42,9 +42,9 @@ independent verdict to the coordinator and records it here.
 
 ## Verifications
 
-One newly spawned verifier per claimed win. For kernel cache problems, the
-coordinator replaces `<kernel_name>` only after a pass, and records the
-replaced file's backup path.
+One newly spawned verifier per claimed win. For substitute-kernels problems, the
+coordinator replaces `<kernel_name>` only after a pass with a measurable
+speedup, and records the replaced file's backup path, if any.
 
 | Time | Problem / trial + hash | Claimed by | Verifier | Exactness / contract | Median us vs current | Verdict | Replaced kernel_name (backup path) |
 | --- | --- | --- | --- | --- | ---: | --- | --- |

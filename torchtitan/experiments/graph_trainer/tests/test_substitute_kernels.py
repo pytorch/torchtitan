@@ -19,17 +19,17 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from torchtitan.experiments.graph_trainer.kernel_cache import (
+from torchtitan.experiments.graph_trainer.substitute_kernels import (
     _load_run,
     cache_keys,
     substitute_with_kernels_pass,
 )
-from torchtitan.experiments.graph_trainer.tests import _kernel_cache_ops
+from torchtitan.experiments.graph_trainer.tests import _substitute_kernels_ops
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 
 # An op that is not a torch.library.custom_op, hence not cacheable.
-_lib = torch.library.Library("kc_test_lib", "DEF")
+_lib = torch.library.Library("sk_test_lib", "DEF")
 _lib.define("neg(Tensor x) -> Tensor")
 _lib.impl("neg", lambda x: -x, "CompositeExplicitAutograd")
 
@@ -39,11 +39,11 @@ def _swiglu(x, w1, w2):
 
 
 def _scaled_swiglu_op(x, w1, w2):
-    return torch.ops.kc_test.scale(_swiglu(x, w1, w2), 2.0)
+    return torch.ops.sk_test.scale(_swiglu(x, w1, w2), 2.0)
 
 
 def _swiglu_triton_add(x, w1, w2):
-    return torch.ops.kc_test.add(torch.nn.functional.silu(x @ w1), x @ w2)
+    return torch.ops.sk_test.add(torch.nn.functional.silu(x @ w1), x @ w2)
 
 
 def _inputs(m=8, k=16, dtype=torch.float32, device="cpu"):
@@ -110,7 +110,7 @@ def _keys(gm):
     ]
 
 
-class TestSubstituteWithKernels(TestCase):
+class TestSubstituteWithKernelsPass(TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.cache = Path(self._tmp.name)
@@ -151,20 +151,20 @@ class TestSubstituteWithKernels(TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return torch.load(output, weights_only=True)
 
-    def test_identical_layers_share_keys(self):
+    def test_renamed_identical_submodules_share_pattern_and_specialization(self):
         args = _inputs()
         gm = _parent([_layer(), _layer(name_suffix="_17")], args)
         keys = _keys(gm)
         self.assertEqual(len(keys), 2)
         self.assertEqual(keys[0], keys[1])
 
-    def test_fake_and_real_inputs_share_keys(self):
+    def test_fake_and_real_meta_vals_give_same_keys(self):
         args = _inputs()
         real = _keys(_parent([_layer()], args))
         fake = _keys(_parent([_layer()], args, fake=True))
         self.assertEqual(real, fake)
 
-    def test_miss_keeps_reference(self):
+    def test_miss_keeps_call_module_and_writes_reference_and_specialization(self):
         args = _inputs()
         gm = _parent([_layer(), _layer(name_suffix="_17")], args)
         ((_, l2), _) = _keys(gm)
@@ -236,7 +236,7 @@ def run(*args):
     return Reference()(*args)""",
         )
 
-    def test_reference_imports_only_used_builtins(self):
+    def test_reference_imports_only_fx_builtins_it_uses(self):
         def fn(x, w1, w2):
             masked = x.masked_fill(x > 0, float("-inf"))
             return masked + torch.ones(x.shape, device=x.device)
@@ -277,7 +277,7 @@ def run(*args):
             f"    return torch.full((x.shape[0], w1.shape[1]), {value})\n"
         )
 
-    def test_hit_substitutes_kernel(self):
+    def test_hit_replaces_call_module_with_kernel_run(self):
         args = _inputs()
         gm = _parent([_layer(), _layer(name_suffix="_17")], args)
         ((l1, l2), _) = _keys(gm)
@@ -289,7 +289,7 @@ def run(*args):
         self.assertFalse(hasattr(gm, "layer0") or hasattr(gm, "layer1"))
         self.assertEqual(gm(*args), torch.full((8, 16), 42.0))
 
-    def test_kernel_name_selects_kernel_file(self):
+    def test_specialization_kernel_name_selects_kernel_file(self):
         args = _inputs()
         make_gm = lambda: _parent([_layer()], args)  # noqa: E731
         substitute_with_kernels_pass(make_gm(), cache_dir=self.cache)  # writes spec
@@ -304,7 +304,7 @@ def run(*args):
         gm = substitute_with_kernels_pass(make_gm(), cache_dir=self.cache)
         self.assertEqual(gm(*args), torch.full((8, 16), 7.0))
 
-    def test_shape_and_dtype_change_spec_not_pattern(self):
+    def test_shape_and_dtype_change_specialization_not_pattern(self):
         keys = []
         for args in (_inputs(m=8), _inputs(m=32), _inputs(dtype=torch.float64)):
             gm = _parent([_layer()], args)
@@ -348,7 +348,7 @@ def run(*args):
 }""",
         )
 
-    def test_same_submodule_different_shapes(self):
+    def test_same_submodule_different_shapes_writes_one_specialization_each(self):
         layer = _layer()
         specs = []
         for m in (8, 32):
@@ -411,12 +411,12 @@ def run(*args):
 }""",
         )
 
-    def test_scalar_constant_changes_pattern(self):
+    def test_scalar_constant_in_submodule_changes_pattern(self):
         args = _inputs()
         keys = [_keys(_parent([_layer(_scaled_swiglu(s))], args)) for s in (2.0, 3.0)]
         self.assertNotEqual(keys[0][0][0], keys[1][0][0])
 
-    def test_tensor_attribute_is_not_cacheable(self):
+    def test_submodule_with_tensor_attribute_is_skipped(self):
         args = _inputs()
         layer = _layer(_scaled_swiglu(torch.full((16,), 2.0)))
         self.assertTrue(layer.graph.find_nodes(op="get_attr"))
@@ -424,7 +424,7 @@ def run(*args):
         self.assertEqual(len(gm.graph.find_nodes(op="call_module")), 1)
         self.assertEqual(self._patterns(), [])
 
-    def test_tensor_constant_argument_shares_pattern(self):
+    def test_tensor_constant_passed_as_argument_shares_pattern(self):
         args = _inputs()
         for value in (2.0, 3.0):
             c = torch.full((16,), value)
@@ -484,7 +484,7 @@ def run(*args):
             c = torch.full((16,), value)
             self.assertEqual(run(*args, c), _swiglu(*args) * value)
 
-    def test_spec_describes_tuple_outputs(self):
+    def test_specialization_describes_tuple_outputs_and_strides(self):
         def fn(x, w1, w2):
             return torch.nn.functional.silu(x @ w1), (x @ w2).t()
 
@@ -536,7 +536,7 @@ def run(*args):
 }""",
         )
 
-    def test_subgraph_is_not_cacheable(self):
+    def test_submodule_with_higher_order_op_subgraph_is_skipped(self):
         def fn(x, w1, w2):
             return torch.cond(x.sum() > 0, torch.sin, torch.cos, (x @ w1,))
 
@@ -547,7 +547,7 @@ def run(*args):
         self.assertEqual(len(gm.graph.find_nodes(op="call_module")), 1)
         self.assertEqual(self._patterns(), [])
 
-    def test_custom_op_reference_runs_in_fresh_process(self):
+    def test_custom_op_reference_imports_op_module_and_runs_in_fresh_process(self):
         args = _inputs()
         gm = _parent([_layer(_scaled_swiglu_op)], args)
         expected = gm(*args)
@@ -559,7 +559,7 @@ def run(*args):
             reference.read_text().strip(),
             """\
 import torch
-import torchtitan.experiments.graph_trainer.tests._kernel_cache_ops  # kc_test::scale
+import torchtitan.experiments.graph_trainer.tests._substitute_kernels_ops  # sk_test::scale
 
 
 class Reference(torch.nn.Module):
@@ -568,7 +568,7 @@ class Reference(torch.nn.Module):
         v4 = torch.ops.aten.silu.default(v3);  v3 = None
         v5 = torch.ops.aten.mm.default(in0, in2);  in0 = in2 = None
         v6 = torch.ops.aten.mul.Tensor(v4, v5);  v4 = v5 = None
-        v7 = torch.ops.kc_test.scale.default(v6, 2.0);  v6 = None
+        v7 = torch.ops.sk_test.scale.default(v6, 2.0);  v6 = None
         return v7
 
 
@@ -578,10 +578,10 @@ def run(*args):
         self.assertEqual(self._run_in_fresh_process(reference, args), expected)
 
     @unittest.skipIf(
-        _kernel_cache_ops.triton is None or not torch.cuda.is_available(),
+        _substitute_kernels_ops.triton is None or not torch.cuda.is_available(),
         "requires triton and CUDA",
     )
-    def test_triton_op_reference_runs_in_fresh_process(self):
+    def test_triton_op_reference_imports_op_module_and_runs_in_fresh_process(self):
         args = _inputs(device="cuda")
         gm = _parent([_layer(_swiglu_triton_add, device="cuda")], args)
         expected = gm(*args)
@@ -590,45 +590,45 @@ def run(*args):
         (pattern,) = self._patterns()
         reference = pattern / "reference.py"
         self.assertIn(
-            "import torchtitan.experiments.graph_trainer.tests._kernel_cache_ops"
-            "  # kc_test::add",
+            "import torchtitan.experiments.graph_trainer.tests._substitute_kernels_ops"
+            "  # sk_test::add",
             reference.read_text(),
         )
         self.assertEqual(self._run_in_fresh_process(reference, args), expected)
 
-    def test_custom_op_source_change_changes_pattern(self):
+    def test_custom_op_source_edit_changes_pattern_not_specialization(self):
         module_dir = Path(self._tmp.name) / "ops_src"
         module_dir.mkdir()
-        source = module_dir / "kc_tmp_ops.py"
+        source = module_dir / "sk_tmp_ops.py"
         source.write_text(
             "import torch\n"
-            "@torch.library.custom_op('kc_tmp::double', mutates_args=())\n"
+            "@torch.library.custom_op('sk_tmp::double', mutates_args=())\n"
             "def double(x: torch.Tensor) -> torch.Tensor:\n"
             "    return x * 2\n"
         )
         sys.path.insert(0, str(module_dir))
         try:
-            import kc_tmp_ops  # noqa: F401
+            import sk_tmp_ops  # noqa: F401
 
             args = _inputs()
-            gm = _parent([_layer(lambda x, w1, w2: torch.ops.kc_tmp.double(x))], args)
+            gm = _parent([_layer(lambda x, w1, w2: torch.ops.sk_tmp.double(x))], args)
             before = _keys(gm)
             source.write_text(source.read_text() + "# edited\n")
             after = _keys(gm)
         finally:
             sys.path.remove(str(module_dir))
-            sys.modules.pop("kc_tmp_ops", None)
+            sys.modules.pop("sk_tmp_ops", None)
         self.assertNotEqual(before[0][0], after[0][0])
         self.assertEqual(before[0][1], after[0][1])
 
-    def test_non_custom_op_is_not_cacheable(self):
+    def test_submodule_with_library_defined_op_is_skipped(self):
         args = _inputs()
-        gm = _parent([_layer(lambda x, w1, w2: torch.ops.kc_test_lib.neg(x))], args)
+        gm = _parent([_layer(lambda x, w1, w2: torch.ops.sk_test_lib.neg(x))], args)
         gm = substitute_with_kernels_pass(gm, cache_dir=self.cache)
         self.assertEqual(len(gm.graph.find_nodes(op="call_module")), 1)
         self.assertEqual(self._patterns(), [])
 
-    def test_skips_unsupported_call_modules(self):
+    def test_non_graph_module_and_missing_meta_val_call_modules_are_skipped(self):
         args = _inputs()
         gm = _parent([_layer()], args)
         gm.layer0_linear = torch.nn.Linear(16, 16)

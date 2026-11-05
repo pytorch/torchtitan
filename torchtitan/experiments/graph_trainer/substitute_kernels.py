@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Two-level on-disk kernel cache for outlined graph regions.
+"""Substitute outlined graph regions with tuned kernels from a two-level store.
 
 ``substitute_with_kernels_pass`` looks at every ``call_module`` node whose
 target is an ``fx.GraphModule`` and replaces it with a cached kernel if one
@@ -114,8 +114,8 @@ OpDeps = tuple[tuple[str, str, tuple[str, ...]], ...]
 
 def default_cache_dir() -> Path:
     return Path(
-        os.environ.get("TORCHTITAN_KERNEL_CACHE_DIR")
-        or os.path.join(inductor_cache_dir(), "kernel_cache")
+        os.environ.get("TORCHTITAN_SUBSTITUTE_KERNELS_DIR")
+        or os.path.join(inductor_cache_dir(), "substitute_kernels")
     )
 
 
@@ -287,7 +287,7 @@ def _write_reference(
 
 
 def _load_run(path: Path) -> Callable[..., Any]:
-    name = f"_kernel_cache_{path.parent.name}_{path.stem}"
+    name = f"_substitute_kernels_{path.parent.name}_{path.stem}"
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -319,7 +319,7 @@ def lookup(
     try:
         l1, l2, gm, op_deps = cache_keys(submod, example_inputs)
     except Exception:
-        logger.warning("kernel_cache: submodule is not cacheable", exc_info=True)
+        logger.warning("substitute_kernels: submodule is not cacheable", exc_info=True)
         return None
 
     pattern_dir = cache_dir / l1
@@ -329,9 +329,9 @@ def lookup(
     spec = _ensure_spec(pattern_dir, l2, gm, example_inputs, example_output)
     impl = pattern_dir / spec["kernel_name"]
     if not impl.exists():
-        logger.info("kernel_cache miss: %s", impl)
+        logger.info("substitute_kernels miss: %s", impl)
         return None
-    logger.info("kernel_cache hit: %s", impl)
+    logger.info("substitute_kernels hit: %s", impl)
     return _load_run(impl)
 
 
@@ -369,7 +369,7 @@ def substitute_with_kernels_pass(
             continue
         inputs = _example_inputs(node)
         if inputs is None:
-            logger.info("kernel_cache: skipping %s (no example inputs)", node)
+            logger.info("substitute_kernels: skipping %s (no example inputs)", node)
             continue
         impl = lookup(submod, inputs, root, node.meta.get("val"))
         if impl is None:
