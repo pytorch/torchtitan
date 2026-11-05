@@ -8,7 +8,7 @@
 
 T/Q/K are token/query/key counts; S is selected keys per query; N is heads.
 D/H/R/P are model/head/latent-or-rotary/pass-through widths; V is value width.
-Mask construction retains O(Q*K) storage. Attention delegates to the common
+Document metadata is linear in tokens. Attention delegates to the common
 FlexAttention backend; Attention Gym owns the weighted-ReLU top-k selection.
 """
 
@@ -16,7 +16,6 @@ from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
-import torch.nn.functional as F
 import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask
 
@@ -27,34 +26,65 @@ from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.base.module import Module
 from torchtitan.models.common import ComplexRoPE, LayerNorm, Linear
 from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.attention.cp_mla import AllGatherKVMLAFlexAttention
 from torchtitan.models.common.attn_gym import lightning_indexer, require_attn_gym
 
 
-def create_dsa_causal_mask(
-    positions_T: torch.Tensor,
-    *,
-    dtype: torch.dtype,
-    padding_mask_T: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Build a packed-document causal additive mask of shape ``[1, T, T]``.
+@dataclass(frozen=True)
+class DsaMetadata:
+    """Global keys in CP order and rank-local query indices; all tensors are 1D."""
 
-    ``positions_T`` restarts at zero for every packed document. The cumulative
-    restart count is therefore a document id. A query can see a key only when
-    both tokens belong to the same document and the key is not in the future.
-    Disallowed entries use the minimum finite value for indexer ranking.
-    The attention mask also excludes them after top-k selection.
-    """
-    T = positions_T.shape[0]
-    token_indices_T = torch.arange(T, device=positions_T.device)
-    document_ids_T = (positions_T == 0).cumsum(0)
-    allowed_TT = (token_indices_T[:, None] >= token_indices_T[None, :]) & (
-        document_ids_T[:, None] == document_ids_T[None, :]
-    )
-    if padding_mask_T is not None:
-        allowed_TT = allowed_TT & ~padding_mask_T[:, None] & ~padding_mask_T[None, :]
-    return torch.zeros(1, T, T, dtype=dtype, device=positions_T.device).masked_fill(
-        ~allowed_TT.unsqueeze(0), torch.finfo(dtype).min
-    )
+    positions_T: torch.Tensor
+    documents_T: torch.Tensor
+    valid_T: torch.Tensor
+    query_indices_Q: torch.Tensor
+    order_T: torch.Tensor
+
+    @classmethod
+    def from_positions(cls, positions, padding_mask=None):
+        valid = (
+            torch.ones_like(positions, dtype=torch.bool)
+            if padding_mask is None
+            else ~padding_mask
+        )
+        order = torch.arange(positions.numel(), device=positions.device)
+        return cls(positions, (positions == 0).cumsum(0), valid, order, order)
+
+
+class Glm5CPMLAAttention(AllGatherKVMLAFlexAttention):
+    """Reuse upstream compact KV communication with GLM document metadata."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(AllGatherKVMLAFlexAttention.Config):
+        pass
+
+    @staticmethod
+    def prepare_cp_metadata(  # pyrefly: ignore[bad-override]
+        attention_metadata: DsaMetadata, *, permutation: torch.Tensor | None
+    ) -> DsaMetadata:
+        metadata = attention_metadata
+        group = spmd_mesh_group(MeshAxisName.CP)
+        if group is None:
+            return metadata
+        count = metadata.positions_T.numel()
+        if count % group.size():
+            raise ValueError("DSA token count must divide evenly across CP ranks")
+        order = (
+            torch.arange(count, device=metadata.positions_T.device)
+            if permutation is None
+            else permutation.reshape(-1)
+        )
+        local = count // group.size()
+        queries = torch.arange(
+            group.rank() * local, (group.rank() + 1) * local, device=order.device
+        )
+        return DsaMetadata(
+            metadata.positions_T[order],
+            metadata.documents_T[order],
+            metadata.valid_T[order],
+            queries,
+            metadata.order_T[order],
+        )
 
 
 class DSAIndexerTopK(Module):
@@ -81,18 +111,14 @@ class DSAIndexerTopK(Module):
         q_QNH: torch.Tensor,
         k_KH: torch.Tensor,
         weights_QN: torch.Tensor,
-        attention_mask_QK: torch.Tensor,
+        metadata: DsaMetadata,
     ) -> torch.Tensor:
-        _, K = attention_mask_QK.shape
-        # In the document-causal mask, the first allowed key identifies the
-        # document. A fully masked row denotes an invalid query and key token.
-        mask_values_Q, document_starts_Q = attention_mask_QK.max(dim=-1)
-        valid_Q = mask_values_Q == 0
+        K = metadata.positions_T.numel()
         cp_group = spmd_mesh_group(MeshAxisName.CP)
         if cp_group is not None:
             # TODO: Keep queries local once Attention Gym supports query chunks.
-            q_QNH, weights_QN, document_starts_Q, valid_Q = cp_all_gather_tensors(
-                (q_QNH, weights_QN, document_starts_Q, valid_Q),
+            q_QNH, weights_QN = cp_all_gather_tensors(
+                (q_QNH, weights_QN),
                 reduce_dtype=torch.float32,
             )
         if q_QNH.shape[0] != K:
@@ -100,9 +126,16 @@ class DSAIndexerTopK(Module):
 
         # Keep token order within each document while moving padding to the end.
         # Fixed-capacity offsets use repeated endpoints for empty documents.
-        token_order_K = (~valid_Q).to(torch.int32).argsort(stable=True)
-        valid_K = valid_Q[token_order_K]
-        document_starts_K = document_starts_Q[token_order_K]
+        # Restore original document/token order after any CP load-balancer permutation.
+        token_order_K = metadata.positions_T.argsort(stable=True)
+        token_order_K = token_order_K[
+            metadata.documents_T[token_order_K].argsort(stable=True)
+        ]
+        token_order_K = token_order_K[
+            (~metadata.valid_T[token_order_K]).to(torch.int32).argsort(stable=True)
+        ]
+        valid_K = metadata.valid_T[token_order_K]
+        document_starts_K = metadata.documents_T[token_order_K]
         token_indices_K = torch.arange(K, device=q_QNH.device, dtype=torch.int32)
         starts_K = valid_K & (
             (token_indices_K == 0) | (document_starts_K != document_starts_K.roll(1))
@@ -194,7 +227,7 @@ class Glm5DsaIndexer(Module):
         hidden_states_TD: torch.Tensor,
         q_resid_TR: torch.Tensor,
         positions_T: torch.Tensor,
-        attention_mask_TK: torch.Tensor | None,
+        attention_mask_TK: DsaMetadata | None,
     ) -> torch.Tensor:
         T = hidden_states_TD.shape[0]
         # Build query and key features in the same indexer space. The key has a
@@ -243,49 +276,50 @@ class Glm5DsaIndexer(Module):
         remat.recompute_needs_tensor(weights_TN)
         # Attention Gym applies the 1/sqrt(N*H) indexer normalization.
         if attention_mask_TK is None:
-            attention_mask_TK = create_dsa_causal_mask(
-                positions_T, dtype=torch.float32
-            )[0]
+            attention_mask_TK = DsaMetadata.from_positions(positions_T)
         return self.topk(q_TNH, k_TH, weights_TN, attention_mask_TK)
-
-
-def selected_mask(
-    indices_QS: torch.Tensor, additive_mask_1QK: torch.Tensor
-) -> torch.Tensor:
-    """Intersect selected positions with the existing causal/document mask.
-
-    Negative entries denote padding. Duplicate indices represent a set, not
-    repeated probability mass. Invalid positive indices are excluded as well.
-    The supplied mask uses zero for allowed entries, not arbitrary score bias.
-    """
-    Q, K = additive_mask_1QK.shape[-2:]
-    valid_QS = (indices_QS >= 0) & (indices_QS < K)
-    safe_QS = indices_QS.clamp(0, K - 1).long()
-    counts_QK = torch.zeros((Q, K), dtype=torch.int32, device=indices_QS.device)
-    counts_QK.scatter_add_(1, safe_QS, valid_QS.to(torch.int32))
-    return (counts_QK > 0) & (additive_mask_1QK[0] == 0)
 
 
 def build_dsa_block_mask(
     indices_QS: torch.Tensor,
-    additive_mask_1QK: torch.Tensor,
+    metadata: DsaMetadata,
     block_size: int = 128,
 ) -> BlockMask:
     """Build conservative KV block lists and an exact token-level predicate."""
-    allowed_QK = selected_mask(indices_QS, additive_mask_1QK)
-    Q, K = allowed_QK.shape
+    Q, S = indices_QS.shape
+    K = metadata.positions_T.numel()
     B = block_size
-    padded = F.pad(allowed_QK, (0, (-K) % B, 0, (-Q) % B))
-    occupied = padded.reshape((Q + B - 1) // B, B, (K + B - 1) // B, B)
-    occupied = occupied.any(dim=3).any(dim=1)[None, None]
+    valid_QS = (indices_QS >= 0) & (indices_QS < K)
+    safe_QS = indices_QS.clamp(0, K - 1).long()
+    queries_Q = metadata.query_indices_Q
+    valid_QS = valid_QS & metadata.valid_T[queries_Q, None] & metadata.valid_T[safe_QS]
+    valid_QS = valid_QS & (
+        metadata.documents_T[queries_Q, None] == metadata.documents_T[safe_QS]
+    )
+    valid_QS = valid_QS & (
+        metadata.positions_T[queries_Q, None] >= metadata.positions_T[safe_QS]
+    )
+    num_q_blocks, num_k_blocks = (Q + B - 1) // B, (K + B - 1) // B
+    block_ids_QS = (
+        torch.arange(Q, device=indices_QS.device)[:, None] // B
+    ) * num_k_blocks + safe_QS // B
+    occupancy = torch.zeros(
+        num_q_blocks * num_k_blocks, device=indices_QS.device, dtype=torch.int32
+    )
+    occupancy.scatter_add_(
+        0, block_ids_QS.flatten(), valid_QS.flatten().to(torch.int32)
+    )
+    occupied = occupancy.view(1, 1, num_q_blocks, num_k_blocks) > 0
     counts = occupied.sum(-1).to(torch.int32)
-    # Sorting float32 0/1 keys preserves the exact occupancy order while
-    # allowing accelerator backends to use their native stable sort path.
     blocks = occupied.to(torch.float32).argsort(dim=-1, descending=True, stable=True)
 
     def mask_mod(b, h, q, k):
-        # Flex may evaluate padded lanes; clamp reads before applying bounds.
-        return (q < Q) & (k < K) & allowed_QK[q.clamp(max=Q - 1), k.clamp(max=K - 1)]
+        row = q.clamp(max=Q - 1)
+        return (
+            (q < Q)
+            & (k < K)
+            & ((indices_QS[row] == k[..., None]) & valid_QS[row]).any(dim=-1)
+        )
 
     return BlockMask.from_kv_blocks(
         counts,
@@ -305,8 +339,10 @@ class Glm5FlexAttention(FlexInnerAttention):
         attention_dropout: float = 0.0
 
         def __post_init__(self):
-            if not isinstance(self.block_size, int):
-                raise ValueError("GLM DSA requires a square integer block_size")
+            if not isinstance(self.block_size, int) or self.block_size <= 0:
+                raise ValueError(
+                    "GLM DSA requires a positive square integer block_size"
+                )
             if self.attention_dropout != 0.0:
                 raise ValueError(
                     "GLM FlexAttention currently requires attention_dropout=0"
@@ -323,7 +359,7 @@ class Glm5FlexAttention(FlexInnerAttention):
         k_THK: torch.Tensor,
         v_THV: torch.Tensor,
         *,
-        attention_metadata: torch.Tensor,
+        attention_metadata: DsaMetadata,
         topk_indices_QS: torch.Tensor,
         scale: float | None = None,
     ) -> torch.Tensor:

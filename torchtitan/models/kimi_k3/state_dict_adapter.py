@@ -128,18 +128,12 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
 
         # Loading MXFP4 dequantizes routed experts to BF16; HF saves write
         # unquantized weights rather than re-quantizing them. Remap the released
-        # index from X.weight_packed to X.weight and drop X.weight_scale so saves
-        # retain the original file assignments for the unquantized tensors.
-        # Text-only exports omit the vision tower and its projector.
+        # index from X.weight_packed to X.weight so saves retain the original
+        # file assignments for the unquantized tensors.
         if self.fqn_to_index_mapping is not None:
             self.fqn_to_index_mapping = {
                 key.removesuffix("_packed"): index
                 for key, index in self.fqn_to_index_mapping.items()
-                if not key.endswith(".weight_scale")
-                and (
-                    model_config.vision_encoder is not None
-                    or not key.startswith(("vision_tower.", "mm_projector."))
-                )
             }
         # Restore KDA DTensor layouts after converting the checkpoint's padded
         # A_log and flattened dt_bias back to Titan's parameter shapes.

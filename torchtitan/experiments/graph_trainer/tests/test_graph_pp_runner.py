@@ -164,7 +164,7 @@ def _build_test_stage_graphs(
         loss_fn=stage.loss_fn,
         config=types.SimpleNamespace(
             compile=stage.compile_config,
-            training=types.SimpleNamespace(disable_cuda_graphs=False),
+            training=types.SimpleNamespace(disable_accelerator_graphs=False),
             parallelism=None,
             model=None,
         ),
@@ -670,7 +670,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             loss_fn=lambda pred, target: pred.sum(),
             config=types.SimpleNamespace(
                 compile=GraphTrainerCompileConfig(),
-                training=types.SimpleNamespace(disable_cuda_graphs=False),
+                training=types.SimpleNamespace(disable_accelerator_graphs=False),
             ),
             plan=GraphExecutionPlan(
                 pp_enabled=True,
@@ -765,7 +765,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             loss_fn=lambda pred, target: pred.sum(),
             config=types.SimpleNamespace(
                 compile=GraphTrainerCompileConfig(),
-                training=types.SimpleNamespace(disable_cuda_graphs=False),
+                training=types.SimpleNamespace(disable_accelerator_graphs=False),
             ),
             plan=_make_test_pp_plan(),
         )
@@ -1134,7 +1134,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         )
         trainer_config = types.SimpleNamespace(
             compile=compile_config,
-            training=types.SimpleNamespace(disable_cuda_graphs=True),
+            training=types.SimpleNamespace(disable_accelerator_graphs=True),
             model=None,
             parallelism=ParallelismConfig(),
         )
@@ -1176,7 +1176,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         )
         trainer_config = types.SimpleNamespace(
             compile=compile_config,
-            training=types.SimpleNamespace(disable_cuda_graphs=True),
+            training=types.SimpleNamespace(disable_accelerator_graphs=True),
             model=None,
             parallelism=ParallelismConfig(),
         )

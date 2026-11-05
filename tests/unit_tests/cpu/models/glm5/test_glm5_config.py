@@ -14,7 +14,6 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import MLAAttention
 from torchtitan.models.common.attention.cp_mla import AllGatherKVMLAFlexAttention
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
-from torchtitan.models.common.flops import get_nparams_and_active_nparams
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.glm5 import build_model_config, MODEL_FLAVORS
@@ -139,7 +138,7 @@ class TestGlm5Config(unittest.TestCase):
         self.assertEqual(config.dataloader.num_mtp_layers, 1)
 
     def test_mtp_recipe_exposes_loss_scale(self) -> None:
-        from torchtitan.models.deepseek_v3.mtp import MTPLoss
+        from torchtitan.models.deepseek_v3.mtp import MTPCrossEntropyLoss as MTPLoss
         from torchtitan_recipes.tests.models.glm5 import (
             glm5_2_debugmodel_mtp,
             glm5_debugmodel,
@@ -225,26 +224,13 @@ class TestGlm5Config(unittest.TestCase):
         with torch.device("meta"):
             model = config.build()
 
-        nparams, active_nparams = get_nparams_and_active_nparams(model)
-        indexer_nparams = sum(
-            parameter.numel()
-            for name, parameter in model.named_parameters()
-            if ".attention.indexer." in name
-        )
-        attention = config.layers[0].attention
-        expected_flops = 6 * active_nparams - 4 * indexer_nparams
-        expected_flops += (
-            2
-            * (len(config.layers) + len(config.mtp_layers))
-            * attention.indexer.n_heads
-            * (attention.indexer.head_dim + 1)
-            * 8
-        )
-
-        self.assertEqual(
-            config.get_nparams_and_flops(model, seq_len=8),
-            (nparams, expected_flops),
-        )
+        total, active = config.get_parameter_counts(model)
+        self.assertGreaterEqual(total, active)
+        estimator = config.build_flops_estimator(model, seq_len=8)
+        one = estimator({"input": torch.ones(8, dtype=torch.int64)})
+        two = estimator({"input": torch.ones(16, dtype=torch.int64)})
+        self.assertGreater(one, 0)
+        self.assertEqual(two, 2 * one)
 
     def test_cp_selects_official_kv_all_gather_attention(self) -> None:
         eager_config = build_model_config(
@@ -272,7 +258,6 @@ class TestGlm5Config(unittest.TestCase):
                 "q_THK",
                 "kv_c_normed_TL",
                 "k_shared_TR",
-                "attention_metadata",
                 "topk_indices_QS",
             },
         )

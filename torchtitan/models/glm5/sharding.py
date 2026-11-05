@@ -22,14 +22,6 @@ CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
 
-def dsa_mask_placement() -> SpmdType:
-    """Placement for a dense ``(1, query, key)`` legality mask."""
-    return SpmdType(
-        {DP: spmd.V, CP: spmd.V, TP: spmd.R},
-        partition_spec=spmd.PartitionSpec(None, (DP, CP), None),
-    )
-
-
 def glm5_attention_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Keep a GLM attention block on the decoder residual layout."""
     residual = residual_activation_placement(enable_sp=enable_sp)
@@ -44,7 +36,6 @@ def glm5_inner_attention_sharding_config() -> ShardingConfig:
 
     config = mla_attention_local_spmd_sharding_config()
     extra = {
-        "attention_metadata": dsa_mask_placement(),
         "topk_indices_QS": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
     }
     assert config.in_src_shardings is not None
@@ -62,13 +53,11 @@ def glm5_indexer_sharding_config() -> ShardingConfig:
             "hidden_states_TD": activation,
             "q_resid_TR": activation,
             "positions_T": token_id_placement(),
-            "attention_mask_TK": activation,
         },
         in_dst_shardings={
             "hidden_states_TD": activation,
             "q_resid_TR": activation,
             "positions_T": token_id_placement(),
-            "attention_mask_TK": activation,
         },
         out_src_shardings=activation,
     )
@@ -87,7 +76,6 @@ def glm5_indexer_topk_sharding_config() -> ShardingConfig:
             "q_QNH": query_features,
             "k_KH": key,
             "weights_QN": query,
-            "attention_mask_QK": query,
         },
         out_src_shardings=query,
         local_spmd=True,

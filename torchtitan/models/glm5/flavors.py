@@ -17,6 +17,7 @@ from functools import partial
 
 import torch.nn as nn
 
+from torchtitan.config import derive
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common import (
     ComplexRoPE,
@@ -41,7 +42,7 @@ from torchtitan.models.deepseek_v3.flavors import (
     make_deepseek_v3_router_config,
     make_mla_attention_config,
 )
-from .dsa import DSAIndexerTopK, Glm5DsaIndexer, Glm5FlexAttention
+from .dsa import DSAIndexerTopK, Glm5CPMLAAttention, Glm5DsaIndexer, Glm5FlexAttention
 
 from .model import Glm5Attention, Glm5Model, Glm5TransformerBlock
 from .mtp import Glm5MTPTransformerBlock
@@ -87,7 +88,7 @@ def build_glm5_mtp_layers(
             norm.eps = norm_eps
             norm.param_init = _RMS_NORM_INIT
         layer.eh_proj.param_init = _LINEAR_INIT
-    return layers
+    return [derive(layer, Glm5MTPTransformerBlock.Config) for layer in layers]
 
 
 _LINEAR_INIT = {
@@ -118,7 +119,7 @@ def _depth_experts_init(layer_id: int) -> dict[str, Callable]:
     return {
         "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
         "w2_EDF": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
-        "w3_EFD": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "w3_EFD": partial(nn.init.trunc_normal_, std=0.02),
     }
 
 
@@ -173,14 +174,11 @@ def make_glm5_attention_config(
     if enable_cp:
         import spmd_types as spmd
 
-        from torchtitan.models.common.attention.cp_mla import (
-            AllGatherKVMLAFlexAttention,
-        )
         from torchtitan.models.common.decoder_sharding import (
             mla_kv_projection_sharding_config,
         )
 
-        mla = AllGatherKVMLAFlexAttention.Config(
+        mla = Glm5CPMLAAttention.Config(
             **{
                 field.name: getattr(mla, field.name)
                 for field in dataclasses.fields(mla)

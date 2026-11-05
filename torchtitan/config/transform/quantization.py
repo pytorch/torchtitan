@@ -53,6 +53,12 @@ def _validate_quantizable_linear(
             f"Quantization does not support {owner.__qualname__} at {fqn!r}; "
             f"supported Linear classes are {supported}."
         )
+    if config.preserve_dtype_params:
+        raise ValueError(
+            f"Cannot quantize {fqn!r}: it lists preserve_dtype_params "
+            f"{config.preserve_dtype_params}. List only the Linears to quantize in "
+            "the converter's fqns; an empty fqns selects every Linear."
+        )
 
 
 class QuantizationConverter(ModelConfigConverter):

@@ -12,7 +12,6 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from torchtitan.config.configurable import Configurable
 from torchtitan.config.function import Function
 from torchtitan.distributed.local_compile import local_compile
 
@@ -25,7 +24,7 @@ class BinaryActivationFn(Function[torch.Tensor], ABC):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):  # pyrefly: ignore[bad-override]
+    class Config(Function.Config):
         pass
 
     # recompile_limit=16: ~3 graphs per static F; DeepSeek-V3 at TP8 needs 10 (default 8).
@@ -75,7 +74,7 @@ class UnaryActivationFn(Function[torch.Tensor], ABC):
     """Base class for configurable one-input activation functions."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):  # pyrefly: ignore[bad-override]
+    class Config(Function.Config):
         pass
 
     @abstractmethod
@@ -177,29 +176,43 @@ class SwiGLU(BinaryActivationFn):
         return F.silu(gate) * up
 
 
+class LimitedSwiGLU(BinaryActivationFn):
+    """SwiGLU that clamps gate above and up on both sides (DeepSeek-V4 ``swiglu_limit``)."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BinaryActivationFn.Config):
+        limit: float
+
+        def __post_init__(self) -> None:
+            if not math.isfinite(self.limit) or self.limit <= 0:
+                raise ValueError(f"limit must be finite and positive, got {self.limit}")
+
+    def __init__(self, config: Config) -> None:
+        self.limit = config.limit
+
+    def _activation_fn(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+        gate = gate.clamp(max=self.limit)
+        up = up.clamp(min=-self.limit, max=self.limit)
+        return F.silu(gate) * up
+
+
 class ClampedSwiGLU(BinaryActivationFn):
     """Clamped SwiGLU with configurable sigmoid scale and input bound."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(BinaryActivationFn.Config):
-        swiglu_alpha: float = 1.702
-        swiglu_limit: float = 7.0
+        alpha: float = 1.702
+        limit: float = 7.0
 
         def __post_init__(self) -> None:
-            if not math.isfinite(self.swiglu_alpha) or self.swiglu_alpha <= 0:
-                raise ValueError(
-                    "swiglu_alpha must be finite and positive, got "
-                    f"{self.swiglu_alpha}"
-                )
-            if not math.isfinite(self.swiglu_limit) or self.swiglu_limit <= 0:
-                raise ValueError(
-                    "swiglu_limit must be finite and positive, got "
-                    f"{self.swiglu_limit}"
-                )
+            if not math.isfinite(self.alpha) or self.alpha <= 0:
+                raise ValueError(f"alpha must be finite and positive, got {self.alpha}")
+            if not math.isfinite(self.limit) or self.limit <= 0:
+                raise ValueError(f"limit must be finite and positive, got {self.limit}")
 
     def __init__(self, config: Config) -> None:
-        self.alpha = config.swiglu_alpha
-        self.limit = config.swiglu_limit
+        self.alpha = config.alpha
+        self.limit = config.limit
 
     def _activation_fn(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
         gate = gate.clamp(max=self.limit)

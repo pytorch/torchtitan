@@ -27,6 +27,8 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3 import build_model_config
+
+from torchtitan.observability.metrics import WandBLogger
 from torchtitan.rl.controller.controller import (
     AsyncLoopConfig,
     Controller,
@@ -49,7 +51,7 @@ from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
-from torchtitan.rl.rollout.data import IterableRLDataLoader
+from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.trainer.losses import DAPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
@@ -72,7 +74,7 @@ def _verifiers_math_rollouter_config(
     *, max_rollout_tokens: int
 ) -> VerifiersRollouter.Config:
     return VerifiersRollouter.Config(
-        training_dataloader=IterableRLDataLoader.Config(
+        training_dataloader=IterableRolloutDataLoader.Config(
             dataset=VerifiersTaskDataset.Config(
                 verifiers_taskset=_math_taskset_config("dapo_math")
             ),
@@ -142,7 +144,7 @@ def _qwen3_4b_verifiers_config(
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=True)),
         num_generators=6,
         metrics=MetricsProcessor.Config(
-            enable_wandb=True,
+            loggers=[WandBLogger.Config()],
             console_log_keys_validation=[
                 "validation_reward/_mean",
                 "validation_reward/_max",
@@ -169,9 +171,8 @@ def _qwen3_4b_verifiers_config(
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
-                max_context_length=max_total_tokens,
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -191,7 +192,6 @@ def _qwen3_4b_verifiers_config(
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             checkpointer=None,

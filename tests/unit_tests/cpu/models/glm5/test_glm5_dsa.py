@@ -8,16 +8,60 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import spmd_types as spmd
 import torch
 
 from torchtitan.models.common.attn_gym import lightning_indexer
 from torchtitan.models.glm5.dsa import (
-    create_dsa_causal_mask,
+    build_dsa_block_mask,
     DSAIndexerTopK,
-    selected_mask,
+    DsaMetadata,
+    Glm5CPMLAAttention,
 )
 from torchtitan.models.glm5.sharding import glm5_indexer_topk_sharding_config
+
+
+def create_dsa_causal_mask(
+    positions_T: torch.Tensor,
+    *,
+    dtype: torch.dtype,
+    padding_mask_T: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Build a packed-document causal additive mask of shape ``[1, T, T]``.
+
+    ``positions_T`` restarts at zero for every packed document. The cumulative
+    restart count is therefore a document id. A query can see a key only when
+    both tokens belong to the same document and the key is not in the future.
+    Disallowed entries use the minimum finite value for indexer ranking.
+    The attention mask also excludes them after top-k selection.
+    """
+    T = positions_T.shape[0]
+    token_indices_T = torch.arange(T, device=positions_T.device)
+    document_ids_T = (positions_T == 0).cumsum(0)
+    allowed_TT = (token_indices_T[:, None] >= token_indices_T[None, :]) & (
+        document_ids_T[:, None] == document_ids_T[None, :]
+    )
+    if padding_mask_T is not None:
+        allowed_TT = allowed_TT & ~padding_mask_T[:, None] & ~padding_mask_T[None, :]
+    return torch.zeros(1, T, T, dtype=dtype, device=positions_T.device).masked_fill(
+        ~allowed_TT.unsqueeze(0), torch.finfo(dtype).min
+    )
+
+
+def selected_mask(
+    indices_QS: torch.Tensor, additive_mask_1QK: torch.Tensor
+) -> torch.Tensor:
+    """Intersect selected positions with the existing causal/document mask.
+
+    Negative entries denote padding. Duplicate indices represent a set, not
+    repeated probability mass. Invalid positive indices are excluded as well.
+    The supplied mask uses zero for allowed entries, not arbitrary score bias.
+    """
+    Q, K = additive_mask_1QK.shape[-2:]
+    valid_QS = (indices_QS >= 0) & (indices_QS < K)
+    safe_QS = indices_QS.clamp(0, K - 1).long()
+    counts_QK = torch.zeros((Q, K), dtype=torch.int32, device=indices_QS.device)
+    counts_QK.scatter_add_(1, safe_QS, valid_QS.to(torch.int32))
+    return (counts_QK > 0) & (additive_mask_1QK[0] == 0)
 
 
 class TestGlm5Dsa(unittest.TestCase):
@@ -45,7 +89,13 @@ class TestGlm5Dsa(unittest.TestCase):
         model = build_model_config(
             "debugmodel", parallelism=ParallelismConfig(), seq_len=8
         ).build()
-        mask = model.get_attention_masks(batch.positions, batch.padding_mask)[0] == 0
+        metadata = model.get_attention_masks(batch.positions, batch.padding_mask)
+        mask = (
+            (metadata.documents_T[:, None] == metadata.documents_T[None, :])
+            & (metadata.positions_T[:, None] >= metadata.positions_T[None, :])
+            & metadata.valid_T[:, None]
+            & metadata.valid_T[None, :]
+        )
         expected = torch.zeros(8, 8, dtype=torch.bool)
         expected[:3, :3] = torch.ones(3, 3, dtype=torch.bool).tril()
         torch.testing.assert_close(mask, expected)
@@ -70,7 +120,14 @@ class TestGlm5Dsa(unittest.TestCase):
                 for topk in (1, 4, 64):
                     with self.subTest(dtype=dtype, positions=positions, topk=topk):
                         indexer = DSAIndexerTopK.Config(index_topk=topk).build()
-                        actual = indexer(q, k, weights, mask[0])
+                        actual = indexer(
+                            q,
+                            k,
+                            weights,
+                            DsaMetadata.from_positions(
+                                positions, None if valid is None else ~valid
+                            ),
+                        )
                         expected = self._dense_indices(q, k, weights, mask, topk)
                         self.assertEqual(actual.dtype, torch.int32)
                         self.assertEqual(actual.shape, (32, min(topk, 32)))
@@ -93,7 +150,14 @@ class TestGlm5Dsa(unittest.TestCase):
             dtype=torch.float32,
             padding_mask_T=torch.tensor([False, True, False, False]),
         )
-        actual = DSAIndexerTopK.Config(index_topk=2).build()(q, k, weights, mask[0])
+        actual = DSAIndexerTopK.Config(index_topk=2).build()(
+            q,
+            k,
+            weights,
+            DsaMetadata.from_positions(
+                torch.arange(4), torch.tensor([False, True, False, False])
+            ),
+        )
         torch.testing.assert_close(actual[1], torch.tensor([-1, -1], dtype=torch.int32))
         torch.testing.assert_close(
             actual[-1].sort().values, torch.tensor([2, 3], dtype=torch.int32)
@@ -108,7 +172,9 @@ class TestGlm5Dsa(unittest.TestCase):
         with patch(
             "torchtitan.models.glm5.dsa.lightning_indexer", wraps=lightning_indexer
         ) as kernel:
-            indices = indexer(q, k, weights, mask[0])
+            indices = indexer(
+                q, k, weights, DsaMetadata.from_positions(torch.arange(4))
+            )
         kernel.assert_called_once()
         self.assertFalse(kernel.call_args.args[0].requires_grad)
         self.assertFalse(indices.requires_grad)
@@ -130,43 +196,50 @@ class TestGlm5Dsa(unittest.TestCase):
                 padding_mask_T=None if valid is None else ~valid,
             )[0]
             torch.testing.assert_close(
-                compiled(q, k, weights, mask), indexer(q, k, weights, mask)
+                compiled(
+                    q,
+                    k,
+                    weights,
+                    DsaMetadata.from_positions(
+                        positions, None if valid is None else ~valid
+                    ),
+                ),
+                indexer(
+                    q,
+                    k,
+                    weights,
+                    DsaMetadata.from_positions(
+                        positions, None if valid is None else ~valid
+                    ),
+                ),
             )
 
     def test_cp_indexer_returns_local_queries_with_global_key_indices(self) -> None:
         torch.manual_seed(42)
-        q = torch.randn(16, 4, 8)
-        k = torch.randn(16, 8)
-        weights = torch.randn(16, 4)
-        mask = create_dsa_causal_mask(
-            torch.cat((torch.arange(6), torch.arange(10))), dtype=torch.float32
-        )
+        q, k, weights = torch.randn(16, 4, 8), torch.randn(16, 8), torch.randn(16, 4)
+        metadata = DsaMetadata.from_positions(torch.arange(8).repeat(2))
         indexer = DSAIndexerTopK.Config(index_topk=4).build()
-        expected = indexer(q, k, weights, mask[0])
-        mask_values, document_starts = mask[0].max(dim=-1)
+        expected = indexer(q, k, weights, metadata)
+        # Head-tail style permutation, mixing tokens from both documents.
+        order = torch.tensor([0, 1, 14, 15, 2, 3, 12, 13, 4, 5, 10, 11, 6, 7, 8, 9])
         for rank in range(2):
             local = slice(rank * 8, (rank + 1) * 8)
+            group = SimpleNamespace(rank=lambda: rank, size=lambda: 2)
+            with patch(
+                "torchtitan.models.glm5.dsa.spmd_mesh_group", return_value=group
+            ):
+                permuted = Glm5CPMLAAttention.prepare_cp_metadata(
+                    metadata, permutation=order
+                )
 
-            def gather(tensors, *, reduce_dtype, local=local):
-                for actual, full in zip(
-                    tensors,
-                    (q, weights, document_starts, mask_values == 0),
-                    strict=True,
-                ):
-                    torch.testing.assert_close(actual, full[local])
-                return q, weights, document_starts, mask_values == 0
+            def gather(tensors, *, reduce_dtype):
+                return q[order], weights[order]
 
-            def shard(indices, group, *, src, dst, local=local):
-                self.assertEqual(src, spmd.R)
-                self.assertEqual(dst, spmd.S(0))
-                torch.testing.assert_close(indices, expected)
+            def shard(indices, group, *, src, dst):
                 return indices[local]
 
             with (
-                patch(
-                    "torchtitan.models.glm5.dsa.spmd_mesh_group",
-                    return_value=SimpleNamespace(rank=lambda rank=rank: rank),
-                ),
+                patch("torchtitan.models.glm5.dsa.spmd_mesh_group", return_value=group),
                 patch(
                     "torchtitan.models.glm5.dsa.cp_all_gather_tensors",
                     side_effect=gather,
@@ -175,13 +248,22 @@ class TestGlm5Dsa(unittest.TestCase):
                     "torchtitan.models.glm5.dsa.spmd.redistribute", side_effect=shard
                 ),
             ):
-                actual = indexer(q[local], k, weights[local], mask[0, local])
-            torch.testing.assert_close(actual, expected[local])
+                actual = indexer(
+                    q[order][local], k[order], weights[order][local], permuted
+                )
+            # Compare token-level membership; top-k ties need not have equal order.
+            actual_original = torch.where(
+                actual >= 0, order[actual.clamp_min(0).long()], -1
+            )
+            torch.testing.assert_close(
+                actual_original.to(torch.int32).sort(-1).values,
+                expected[order][local].sort(-1).values,
+            )
 
     def test_indexer_layouts_match_tensor_ranks(self) -> None:
         config = glm5_indexer_topk_sharding_config()
         self.assertEqual(len(config.in_src_shardings["q_QNH"].partition_spec), 3)
-        for name in ("k_KH", "weights_QN", "attention_mask_QK"):
+        for name in ("k_KH", "weights_QN"):
             self.assertEqual(len(config.in_src_shardings[name].partition_spec), 2)
 
     def test_indexer_requires_complete_sequences(self) -> None:
@@ -191,7 +273,7 @@ class TestGlm5Dsa(unittest.TestCase):
                 torch.ones(2, 1, 8),
                 torch.ones(4, 8),
                 torch.ones(2, 1),
-                torch.zeros(2, 4),
+                DsaMetadata.from_positions(torch.arange(4)),
             )
 
     def test_packed_document_causal_mask(self) -> None:
@@ -225,6 +307,41 @@ class TestGlm5Dsa(unittest.TestCase):
             dtype=torch.bool,
         )
         torch.testing.assert_close(actual, expected)
+
+    def test_block_mask_matches_dense_reference_with_permuted_padding(self) -> None:
+        positions = torch.tensor([0, 1, 2, 3, 0, 1, 2, 3])
+        padding = torch.tensor([False, False, False, True, False, False, True, True])
+        order = torch.tensor([0, 7, 1, 6, 2, 5, 3, 4])
+        original = DsaMetadata.from_positions(positions, padding)
+        metadata = DsaMetadata(
+            positions[order],
+            original.documents_T[order],
+            ~padding[order],
+            torch.tensor([2, 3, 4, 5]),
+            order,
+        )
+        indices = torch.tensor(
+            [[0, 0, 2, -1], [3, 6, 99, -1], [4, 2, 0, 7], [5, 7, 1, -2]]
+        )
+        block_mask = build_dsa_block_mask(indices, metadata, block_size=2)
+        q = torch.arange(4)[:, None]
+        k = torch.arange(8)[None, :]
+        actual = block_mask.mask_mod(torch.tensor(0), torch.tensor(0), q, k)
+        queries = metadata.query_indices_Q
+        legal = (
+            metadata.valid_T[queries, None]
+            & metadata.valid_T[None, :]
+            & (metadata.documents_T[queries, None] == metadata.documents_T[None, :])
+            & (metadata.positions_T[queries, None] >= metadata.positions_T[None, :])
+        )
+        expected = (indices[:, :, None] == k).any(dim=1) & legal
+        torch.testing.assert_close(actual, expected)
+        # Every allowed token pair must also be present in the conservative block list.
+        for row, col in actual.nonzero().tolist():
+            count = block_mask.kv_num_blocks[0, 0, row // 2]
+            self.assertIn(
+                col // 2, block_mask.kv_indices[0, 0, row // 2, :count].tolist()
+            )
 
     def test_padding_mask_excludes_queries_and_keys(self) -> None:
         mask = create_dsa_causal_mask(

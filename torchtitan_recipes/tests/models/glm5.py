@@ -81,9 +81,8 @@ def glm5_debugmodel(
             ),
         ),
         training=TrainingConfig(
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
             num_tokens_per_microbatch_per_dp_rank=num_tokens,
-            max_context_length=seq_len,
             steps=10,
         ),
         parallelism=parallelism,

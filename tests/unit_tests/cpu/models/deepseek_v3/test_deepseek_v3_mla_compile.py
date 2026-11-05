@@ -8,16 +8,16 @@ import pytest
 import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.deepseek_v3 import build_model_config
 
 
 @pytest.fixture(autouse=True)
 def reset_local_compile():
-    apply_local_compile([])
+    LocalCompileConfig().apply()
     torch._dynamo.reset()
     yield
-    apply_local_compile([])
+    LocalCompileConfig().apply()
 
 
 @pytest.mark.parametrize("use_positions", [True, False])
@@ -39,7 +39,7 @@ def test_compiled_mla_qk_matches_eager(use_positions: bool) -> None:
 
     results = []
     for regions in ([], ["mla_qk"]):
-        apply_local_compile(regions)
+        LocalCompileConfig(regions=regions).apply()
         inputs = [t.clone().requires_grad_(True) for t in (q, k_pe)]
         rotated_q, rotated_k_pe = attention._apply_rope_to_q_and_k_pe(
             inputs[0], inputs[1], positions

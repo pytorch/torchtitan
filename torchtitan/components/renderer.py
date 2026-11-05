@@ -77,8 +77,9 @@ class RenderersConfigAdapter(RendererConfig):
             )
         if self.renderers_config.name == "default":
             raise ValueError(
-                "DefaultRenderer needs Hugging Face apply_chat_template; TorchTitan's template rendering lacks "
-                "its special-token variables (bos_token, ...) and would silently produce different tokens. "
+                "DefaultRenderer needs Hugging Face apply_chat_template; TorchTitan passes "
+                "bos_token and eos_token only, not the rest of the special-token map "
+                "(pad_token, unk_token, ...), and would silently produce different tokens. "
                 "Pick the model's renderer, e.g. Qwen3RendererConfig(...)."
             )
         return create_renderer(

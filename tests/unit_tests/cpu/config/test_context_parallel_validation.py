@@ -122,7 +122,7 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
                     config.__post_init__()
 
     def test_hybrid_linear_attention_requires_cp_transform(self):
-        from torchtitan.config import ParallelismConfig
+        from torchtitan.config.parallelism import ParallelismConfig
         from torchtitan.config.validation import validate_context_parallel
         from torchtitan.models.common.attention.cp_attention import (
             AllGatherKVFlexInnerAttention,
@@ -306,6 +306,7 @@ class TestGptOssUlysses(unittest.TestCase):
     def _parallelize(self, inner_attention):
         from types import SimpleNamespace
 
+        from torchtitan.distributed.local_compile import LocalCompileConfig
         from torchtitan.models.gpt_oss.model import GptOssModel
 
         with self.assertRaisesRegex(NotImplementedError, "Ulysses CP"):
@@ -322,9 +323,9 @@ class TestGptOssUlysses(unittest.TestCase):
                     )
                 ),
                 parallelism_context=SimpleNamespace(cp_enabled=True),
-                training=None,
+                precision=None,
                 parallelism=None,
-                local_compile_regions=[],
+                local_compile=LocalCompileConfig(),
                 activation_remat=None,
                 dump_folder="",
             )

@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from torchtitan.components.optim import GradientClipper, Optim
+from torchtitan.tools.utils import device_type
 
 
 @dataclass
@@ -79,11 +80,11 @@ def test_optim_config_rejects_negative_max_norm() -> None:
         Optim.Config(max_norm=-1)
 
 
-@pytest.mark.parametrize("enable_cuda_graph", [False, True])
-def test_optim_builds_owned_components(enable_cuda_graph: bool) -> None:
+@pytest.mark.parametrize("enable_accelerator_graph", [False, True])
+def test_optim_builds_owned_components(enable_accelerator_graph: bool) -> None:
     model = MagicMock(spec=torch.nn.Module)
     parameter = MagicMock(spec=torch.nn.Parameter)
-    parameter.device = torch.device("cuda" if enable_cuda_graph else "cpu")
+    parameter.device = torch.device(device_type if enable_accelerator_graph else "cpu")
     model.parameters.return_value = [parameter]
     optimizers = MagicMock()
     lr_schedulers = MagicMock()
@@ -102,16 +103,16 @@ def test_optim_builds_owned_components(enable_cuda_graph: bool) -> None:
         ema=SimpleNamespace(build=MagicMock(return_value=ema)),
         max_norm=1.0,
         gradient_clipper=gradient_clipper_config,
-        enable_cuda_graph=enable_cuda_graph,
+        enable_accelerator_graph=enable_accelerator_graph,
     )
     wrapped_update = MagicMock()
 
     with patch(
-        "torchtitan.components.optim.optim.wrap_with_cuda_graph",
+        "torchtitan.components.optim.optim.wrap_with_accelerator_graph",
         return_value=wrapped_update,
     ) as wrap, patch(
-        "torchtitan.components.optim.optim.cuda_graphs_supported",
-        return_value=enable_cuda_graph,
+        "torchtitan.components.optim.optim.accelerator_graphs_supported",
+        return_value=enable_accelerator_graph,
     ):
         optim = Optim(
             config,
@@ -123,7 +124,7 @@ def test_optim_builds_owned_components(enable_cuda_graph: bool) -> None:
 
     optimizer_config.build.assert_called_once_with(
         model_parts=[model],
-        enable_cuda_graph=enable_cuda_graph,
+        enable_accelerator_graph=enable_accelerator_graph,
     )
     config.lr_scheduler.build.assert_called_once_with(
         optimizers=optimizers,
@@ -133,7 +134,7 @@ def test_optim_builds_owned_components(enable_cuda_graph: bool) -> None:
     gradient_clipper_config.build.assert_called_once_with()
     assert optim.gradient_clipper is gradient_clipper
     assert optim._is_first_step_call
-    if enable_cuda_graph:
+    if enable_accelerator_graph:
         wrap.assert_called_once_with(
             optim._update,
             num_warmup_iterations=2,
@@ -147,7 +148,7 @@ def test_optim_builds_owned_components(enable_cuda_graph: bool) -> None:
 
 
 @pytest.mark.parametrize("runtime_supported", [False, True])
-def test_optim_cuda_graph_falls_back_for_unsupported_device(
+def test_optim_accelerator_graph_falls_back_for_unsupported_device(
     runtime_supported: bool,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -164,13 +165,13 @@ def test_optim_cuda_graph_falls_back_for_unsupported_device(
         ema=None,
         max_norm=1.0,
         gradient_clipper=gradient_clipper_config,
-        enable_cuda_graph=True,
+        enable_accelerator_graph=True,
     )
 
     with patch(
-        "torchtitan.components.optim.optim.cuda_graphs_supported",
+        "torchtitan.components.optim.optim.accelerator_graphs_supported",
         return_value=runtime_supported,
-    ), patch("torchtitan.components.optim.optim.wrap_with_cuda_graph") as wrap:
+    ), patch("torchtitan.components.optim.optim.wrap_with_accelerator_graph") as wrap:
         optim = Optim(
             config,
             model_parts=[model],
@@ -181,12 +182,12 @@ def test_optim_cuda_graph_falls_back_for_unsupported_device(
 
     optimizer_build.assert_called_once_with(
         model_parts=[model],
-        enable_cuda_graph=False,
+        enable_accelerator_graph=False,
     )
     gradient_clipper_config.build.assert_called_once_with()
     wrap.assert_not_called()
     assert optim._run_update == optim._update
-    assert "Optim CUDA graph is disabled" in caplog.text
+    assert "Optim graph capture is disabled" in caplog.text
 
 
 def test_optim_builds_configured_grad_clip() -> None:
@@ -200,7 +201,7 @@ def test_optim_builds_configured_grad_clip() -> None:
         ema=None,
         max_norm=1.0,
         gradient_clipper=_TestGradientClipper.Config(grad_norm=3.0),
-        enable_cuda_graph=False,
+        enable_accelerator_graph=False,
     )
 
     optim = Optim(
@@ -240,8 +241,19 @@ def test_optim_update_uses_configured_grad_clip() -> None:
     optim.optimizers.step.assert_called_once_with()
 
 
-@pytest.mark.parametrize("device_initialized", [False, True])
-def test_optim_step_keeps_eager_state_outside_update(device_initialized: bool) -> None:
+@pytest.mark.parametrize(
+    "device_initialized, first_step",
+    [
+        (False, []),
+        (True, ["synchronize"]),
+        # Device modules without is_initialized(), such as torch.mps.
+        (None, ["synchronize"]),
+    ],
+)
+def test_optim_step_keeps_eager_state_outside_update(
+    device_initialized: bool | None,
+    first_step: list[str],
+) -> None:
     events = []
     optim = object.__new__(Optim)
     optim._is_first_step_call = True
@@ -254,7 +266,10 @@ def test_optim_step_keeps_eager_state_outside_update(device_initialized: bool) -
     optim.ema = SimpleNamespace(step=lambda step: events.append(f"ema_{step}"))
 
     device_module = MagicMock()
-    device_module.is_initialized.return_value = device_initialized
+    if device_initialized is None:
+        del device_module.is_initialized
+    else:
+        device_module.is_initialized.return_value = device_initialized
     device_module.synchronize.side_effect = lambda: events.append("synchronize")
     device_module.empty_cache.side_effect = lambda: events.append("empty_cache")
 
@@ -271,7 +286,7 @@ def test_optim_step_keeps_eager_state_outside_update(device_initialized: bool) -
     device_module.empty_cache.assert_called_once_with()
 
     torch.testing.assert_close(grad_norm, torch.tensor(2.0))
-    assert events == (["synchronize"] if device_initialized else []) + [
+    assert events == first_step + [
         "empty_cache",
         "update",
         "lr_scheduler",

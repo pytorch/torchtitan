@@ -30,13 +30,12 @@ import spmd_types as spmd
 
 import torch
 import torch_remat as remat
-from torch import nn
 
 from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
-from torchtitan.models.common.flops import get_nparams_and_active_nparams
 from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
@@ -46,8 +45,7 @@ from torchtitan.models.deepseek_v3.model import (
 )
 from torchtitan.models.deepseek_v3.mtp import roll_mtp_sequence
 
-from .dsa import create_dsa_causal_mask, Glm5DsaIndexer
-from .sharding import dsa_mask_placement
+from .dsa import DsaMetadata, Glm5DsaIndexer
 from .state_dict_adapter import Glm5StateDictAdapter
 
 # Tensor dimensions used in this file:
@@ -77,28 +75,23 @@ class Glm5Attention(DeepSeekMLAAttention):
         super().__init__(config)
         self.indexer = config.indexer.build() if config.indexer is not None else None
 
-    def forward(  # pyrefly: ignore[bad-param-name-override]
+    # DSA specializes the parent's attention metadata contract.
+    def forward(  # pyrefly: ignore[bad-override]
         self,
         x_TD: torch.Tensor,
-        attention_masks: torch.Tensor,
+        attention_masks: DsaMetadata,
         positions: torch.Tensor | None = None,
         topk_indices_TS: torch.Tensor | None = None,
         *,
-        return_indices: bool = False,
-        padding_mask: torch.Tensor | None = None,
-        aux_loss_denominator: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        x_TD = maybe_gather_tp_input(self, x_TD)
+        prepared_query: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        x_TD, q_resid_TR = (
+            self.prepare_query(x_TD) if prepared_query is None else prepared_query
+        )
         T = x_TD.shape[0]
         if positions is None:
             positions = torch.arange(T, device=x_TD.device)
 
-        # Query path: compress to LoRA rank R, normalize, then expand to N
-        # heads. Split content (NoPE) from position-sensitive (RoPE) features.
-        q_resid_TR = self.wq_a(x_TD)
-        # RMSNorm reads the saved projection output with bare ops.
-        remat.recompute_needs_tensor(q_resid_TR)
-        q_resid_TR = self.q_norm(q_resid_TR)
         q_TNH = self.wq_b(q_resid_TR)
         # The head view/split reads the saved projection output with bare ops.
         remat.recompute_needs_tensor(q_TNH)
@@ -124,9 +117,7 @@ class Glm5Attention(DeepSeekMLAAttention):
         if topk_indices_TS is None:
             if self.indexer is None:
                 raise ValueError("shared-indexer attention requires top-k indices")
-            topk_indices_TS = self.indexer(
-                x_TD, q_resid_TR, positions, attention_masks[0]
-            )
+            topk_indices_TS = self.indexer(x_TD, q_resid_TR, positions, attention_masks)
         output_TNV = self.inner_attention(
             q_TNH,
             kv_TR,
@@ -138,8 +129,14 @@ class Glm5Attention(DeepSeekMLAAttention):
         # The contiguous view reads the attention output with bare ops.
         remat.recompute_needs_tensor(output_TNV)
         output_TD: torch.Tensor = self.wo(output_TNV.contiguous().view(T, -1))
-        assert topk_indices_TS is not None
-        return (output_TD, topk_indices_TS) if return_indices else output_TD
+        return output_TD
+
+    def prepare_query(self, x_TD):
+        """Share the gathered input and normalized query with the frozen indexer."""
+        gathered_TD = maybe_gather_tp_input(self, x_TD)
+        q_resid_TR = self.wq_a(gathered_TD)
+        remat.recompute_needs_tensor(q_resid_TR)
+        return gathered_TD, self.q_norm(q_resid_TR)
 
 
 class Glm5TransformerBlock(DeepSeekV3TransformerBlock):
@@ -153,10 +150,11 @@ class Glm5TransformerBlock(DeepSeekV3TransformerBlock):
         super().__init__(config)
         self.preserve_output_for_mtp = config.preserve_output_for_mtp
 
-    def forward(  # pyrefly: ignore[bad-param-name-override]
+    # Index reuse is internal to GLM blocks, not a shared Module tuple hook.
+    def forward(  # pyrefly: ignore[bad-override]
         self,
         x_TD: torch.Tensor,
-        attention_masks: torch.Tensor,
+        attention_masks: DsaMetadata,
         positions: torch.Tensor | None = None,
         topk_indices_TS: torch.Tensor | None = None,
         *,
@@ -164,21 +162,22 @@ class Glm5TransformerBlock(DeepSeekV3TransformerBlock):
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominator: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if return_indices:
-            attention_TD, topk_indices_TS = self.attention(
-                self.attention_norm(x_TD),
-                attention_masks,
-                positions,
-                topk_indices_TS,
-                return_indices=True,
+        normalized_TD = self.attention_norm(x_TD)
+        assert isinstance(self.attention, Glm5Attention)
+        prepared = self.attention.prepare_query(normalized_TD)
+        if topk_indices_TS is None:
+            if self.attention.indexer is None:
+                raise ValueError("shared-indexer block requires producer indices")
+            topk_indices_TS = self.attention.indexer(
+                *prepared, positions, attention_masks
             )
-        else:
-            attention_TD = self.attention(
-                self.attention_norm(x_TD),
-                attention_masks,
-                positions,
-                topk_indices_TS,
-            )
+        attention_TD = self.attention(
+            normalized_TD,
+            attention_masks,
+            positions,
+            topk_indices_TS,
+            prepared_query=prepared,
+        )
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attention_TD)
         x_TD = x_TD + attention_TD
@@ -229,39 +228,30 @@ class Glm5Model(DeepSeekV3Model):
         dim: int = 6144
         vocab_size: int = 154880
         index_sources: tuple[int, ...] = ()
-        local_compile_regions: list[str] = field(default_factory=list)
+        local_compile: LocalCompileConfig = field(default_factory=LocalCompileConfig)
 
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
-            attention = self.layers[0].attention
-            assert isinstance(attention, Glm5Attention.Config)
-            nparams, active_nparams = get_nparams_and_active_nparams(model)
-            base_flops = 6 * active_nparams
-            # The common parameter-based estimate charges every parameter for
-            # forward and backward matmuls (6 FLOPs per parameter). GLM-5's
-            # pretrained indexer is frozen and runs under no_grad, so it only
-            # incurs its forward cost (2 FLOPs per parameter). Keep the total
-            # parameter count unchanged while removing the nonexistent
-            # indexer backward work from MFU accounting.
-            nparams_indexer = sum(
-                parameter.numel()
-                for name, parameter in model.named_parameters()
-                if ".attention.indexer." in name
+        def build_flops_estimator(self, model, *, seq_len, excluded_submodules=()):
+            base = super().build_flops_estimator(
+                model, seq_len=seq_len, excluded_submodules=excluded_submodules
             )
-            base_flops -= 4 * nparams_indexer
-            # Per token, the indexer computes N dot products of width H against
-            # the full sequence, followed by a weighted reduction over N heads.
-            num_dsa_layers = len(self.layers) + len(self.mtp_layers or ())
-            assert attention.indexer is not None
-            dsa_flops = (
-                2
-                * num_dsa_layers
-                * attention.indexer.n_heads
-                * (attention.indexer.head_dim + 1)
-                * seq_len
+            excluded_ids = {
+                id(child)
+                for parent in excluded_submodules
+                if parent is not None
+                for child in parent.modules()
+            }
+            indexers = [
+                module
+                for module in model.modules()
+                if isinstance(module, Glm5DsaIndexer) and id(module) not in excluded_ids
+            ]
+            # Frozen selection has forward-only projection work and global-key scoring.
+            correction = sum(
+                -4 * sum(parameter.numel() for parameter in module.parameters())
+                + 2 * module.n_heads * (module.head_dim + 1) * seq_len
+                for module in indexers
             )
-            return nparams, base_flops + dsa_flops
+            return lambda batch: base(batch) + correction * batch["input"].numel()
 
     @classmethod
     def _register_optimizer_hooks(
@@ -275,7 +265,7 @@ class Glm5Model(DeepSeekV3Model):
         self,
         positions: torch.Tensor,
         padding_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor | None:
+    ) -> DsaMetadata | None:
         # Pipeline partitioning may create an embedding-only or output-only
         # stage. Such a stage has no attention operation and needs no mask.
         if len(self.layers) == 0:
@@ -283,24 +273,7 @@ class Glm5Model(DeepSeekV3Model):
 
         if positions.ndim != 1:
             raise ValueError("GLM-5 positions must have shape [T].")
-        # Non-first pipeline stages have tok_embeddings pruned away, but each
-        # PP stage containing attention builds its own mask. Every stage
-        # receives the same positions, so any float parameter dtype gives the
-        # same mask dtype; fall back to the first layer's norm weight when
-        # embeddings are absent. layers is a ModuleDict whose keys keep their
-        # original indices after pruning, so iterate values rather than
-        # indexing [0].
-        if self.tok_embeddings is not None:
-            token_dtype = self.tok_embeddings.weight.dtype
-        else:
-            attention_norm = next(iter(self.layers.values())).attention_norm
-            assert isinstance(attention_norm, nn.Module)
-            token_dtype = next(attention_norm.parameters()).dtype
-        return create_dsa_causal_mask(
-            positions,
-            dtype=token_dtype,
-            padding_mask_T=padding_mask,
-        )
+        return DsaMetadata.from_positions(positions, padding_mask)
 
     def __init__(self, config):
         super().__init__(config)
@@ -323,7 +296,7 @@ class Glm5Model(DeepSeekV3Model):
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ):
-        """Build the global DSA mask, then CP-shard only its query dimension."""
+        """Build compact document metadata and prepare rank-local CP queries."""
         del kwargs
         loss_kwargs = input_dict.pop("loss_kwargs", {})
         positions = input_dict.get("positions")
@@ -334,7 +307,6 @@ class Glm5Model(DeepSeekV3Model):
             )
 
         input_shardings = decoder_input_sharding()
-        input_shardings["attention_masks"] = dsa_mask_placement()
         depths = (
             range(1, len(self.mtp_layers) + 1)
             if self.mtp_layers is not None
@@ -372,16 +344,26 @@ class Glm5Model(DeepSeekV3Model):
             input_shardings[f"mtp_tokens_{depth}"] = input_shardings["input"]
             input_shardings[f"mtp_labels_{depth}"] = input_shardings["labels"]
             input_shardings[f"mtp_valid_{depth}"] = input_shardings["input"]
-            input_shardings[f"mtp_attention_masks_{depth}"] = dsa_mask_placement()
         input_shardings.update(dict.fromkeys(loss_kwargs, input_shardings["labels"]))
         input_dict.update(loss_kwargs)
         if parallelism_context.cp_enabled:
+            backend = self.config.layers[0].attention.inner_attention._owner
+            input_dict["attention_metadata"] = {
+                backend: input_dict.pop("attention_masks")
+            }
             input_dict = self._cp_shard(
                 input_dict,
                 input_shardings=input_shardings,
                 parallelism_context=parallelism_context,
                 parallelism=parallelism,
             )
+            metadata = input_dict.pop("attention_metadata")[backend]
+            input_dict["attention_masks"] = metadata
+            for depth in depths:
+                key = f"mtp_attention_masks_{depth}"
+                input_dict[key] = backend.prepare_cp_metadata(
+                    input_dict[key], permutation=metadata.order_T
+                )
         input_dict = annotate_input_spmd_types(
             parallelism_context, input_dict, input_shardings
         )
@@ -408,9 +390,9 @@ class Glm5Model(DeepSeekV3Model):
         tokens: torch.Tensor | tuple[torch.Tensor, ...],
         pipeline_indices_TS: torch.Tensor | None = None,
         positions: torch.Tensor | None = None,
-        attention_masks: torch.Tensor | None = None,
+        attention_masks: DsaMetadata | None = None,
         mtp_input_valid_masks: tuple[torch.Tensor, ...] | None = None,
-        mtp_attention_masks: tuple[torch.Tensor, ...] | None = None,
+        mtp_attention_masks: tuple[DsaMetadata, ...] | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominators: torch.Tensor | None = None,
@@ -446,6 +428,10 @@ class Glm5Model(DeepSeekV3Model):
         if external_sources:
             if pipeline_indices_TS is None:
                 raise ValueError("this GLM-5 PP stage requires DSA indices")
+            if len(external_sources) != 1:
+                raise ValueError(
+                    "GLM pipeline boundary requires exactly one external index source"
+                )
             source = next(iter(external_sources))
             indices_by_source[source] = pipeline_indices_TS
         for name, layer in self.layers.items():

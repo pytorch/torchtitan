@@ -108,13 +108,15 @@ class MLAAttention(InnerAttention):
         q_THK: torch.Tensor,
         kv_c_normed_TL: torch.Tensor,
         k_shared_TR: torch.Tensor,
+        *,
+        materialize_kv=materialize_mla_kv,
         **kwargs,
     ) -> torch.Tensor:
         """Project and run attention from compact Q/KV inputs."""
         kv_THP = self.project_mla_kv(kv_c_normed_TL)
         # Materialization reads saved projection/communication outputs outside a region.
         remat.recompute_needs_tensor(kv_THP, k_shared_TR)
-        k_THK, v_THV = materialize_mla_kv(q_THK, kv_THP, k_shared_TR)
+        k_THK, v_THV = materialize_kv(q_THK, kv_THP, k_shared_TR)
         return remat.region(
             self.inner_attention,
             self.remat_region_name("inner_attention"),

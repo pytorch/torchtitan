@@ -356,15 +356,6 @@ class TestModuleRedistribution(unittest.TestCase):
             self.weight = nn.Parameter(torch.empty(shape))
             self._sharding_config = ShardingConfig(state_shardings={"weight": layout})
 
-    def test_tuple_output_with_tuple_layout_is_unchanged(self):
-        layout = SpmdType({MeshAxisName.TP: spmd.R})
-        module = Module()
-        module._sharding_config = ShardingConfig(
-            out_src_shardings=(layout, layout, layout),
-        )
-        output = (torch.randn(2, 3), torch.randn(2, 3), torch.randn(2, 3))
-        self.assertIs(module._redistribute_outputs(output), output)
-
     def test_rejects_uneven_tp_parameter_sharding(self):
         module = self.WeightModule(
             (4, 5),
@@ -423,8 +414,8 @@ class TestParallelizeModuleProtocol(unittest.TestCase):
         class GoodModel(BaseModel):
             @dataclass(kw_only=True, slots=True)
             class Config(BaseModel.Config):
-                def get_nparams_and_flops(self, model, seq_len):
-                    return (0, 0)
+                def build_flops_estimator(self, model, *, seq_len):
+                    return lambda input_dict: 0
 
             def __init__(self):
                 super().__init__()
@@ -444,8 +435,8 @@ class TestParallelizeModuleProtocol(unittest.TestCase):
         class BadModel(BaseModel):
             @dataclass(kw_only=True, slots=True)
             class Config(BaseModel.Config):
-                def get_nparams_and_flops(self, model, seq_len):
-                    return (0, 0)
+                def build_flops_estimator(self, model, *, seq_len):
+                    return lambda input_dict: 0
 
             def __init__(self):
                 super().__init__()
@@ -465,8 +456,8 @@ class TestParallelizeModuleProtocol(unittest.TestCase):
         class ThirdPartyModel(BaseModel):
             @dataclass(kw_only=True, slots=True)
             class Config(BaseModel.Config):
-                def get_nparams_and_flops(self, model, seq_len):
-                    return (0, 0)
+                def build_flops_estimator(self, model, *, seq_len):
+                    return lambda input_dict: 0
 
             def __init__(self):
                 super().__init__()

@@ -50,7 +50,7 @@ Profiler startup raises a `ValueError` if torch or libcupti lacks Cuspy support.
 Enable it in a Python recipe:
 
 ```python
-from torchtitan.models.llama3.config_registry import llama3_debugmodel
+from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 from torchtitan.observability.profiler import CuspyProfilerConfig
 
 

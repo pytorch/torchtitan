@@ -66,7 +66,7 @@ from torchtitan.models.common.param_init import depth_scaled_std
 from .attention import DeepSeekMLAAttention
 from .model import DeepSeekV3Model, DeepSeekV3TransformerBlock
 from .moe import DeepSeekV3Router
-from .mtp import MTPDecoder, MTPLoss, MTPTransformerBlock
+from .mtp import MTPCrossEntropyLoss, MTPDecoder, MTPTransformerBlock
 from .sharding import (
     mla_attention_sharding_config,
     mtp_block_sharding_config,
@@ -76,7 +76,7 @@ from .sharding import (
 __all__ = [
     "DeepSeekV3Model",
     "DeepSeekV3Router",
-    "MTPLoss",
+    "MTPCrossEntropyLoss",
     "MTPDecoder",
     "MTPTransformerBlock",
     "MODEL_FLAVORS",

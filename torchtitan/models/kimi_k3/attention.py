@@ -71,6 +71,23 @@ class KimiMLAAttention(Attention):
                     f"but got {type(self.inner_attention).__qualname__}."
                 )
 
+        @property
+        def softmax_scale(self) -> float:
+            """Attention softmax scale."""
+            return (self.qk_nope_head_dim + self.qk_rope_head_dim) ** -0.5
+
+        def flops_per_token(self, seq_len: int) -> int:
+            from torchtitan.models.common.flops import (
+                quadratic_attention_flops_per_token,
+            )
+
+            return quadratic_attention_flops_per_token(
+                num_heads=self.n_heads,
+                qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
+                v_head_dim=self.v_head_dim,
+                seq_len=seq_len,
+            )
+
     def __init__(self, config: Config):
         super().__init__()
         self.n_heads = config.n_heads
@@ -79,7 +96,7 @@ class KimiMLAAttention(Attention):
         self.q_head_dim = config.qk_nope_head_dim + config.qk_rope_head_dim
         self.v_head_dim = config.v_head_dim
         self.kv_lora_rank = config.kv_lora_rank
-        self.scale = self.q_head_dim**-0.5
+        self.scale = config.softmax_scale
 
         self.wq_a = config.wq_a.build()
         self.q_norm = config.q_norm.build()
