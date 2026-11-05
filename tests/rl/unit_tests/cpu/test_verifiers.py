@@ -905,6 +905,7 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
     assert VERIFIERS_REWARD_KEY not in rollout.turns[-1].env_rewards
 
 
+# TODO: share the fake trace and rollouter of this test and the two above in one helper.
 def test_rollout_releases_every_trace_session_even_if_one_release_fails(caplog) -> None:
     """Each trace generated under its own id; another agent's trace has one too."""
     span = SimpleNamespace(duration=0.0)
@@ -930,8 +931,9 @@ def test_rollout_releases_every_trace_session_even_if_one_release_fails(caplog) 
         for trace_id, trainable in [("opponent", False), ("policy", True)]
     ]
     rollouter = object.__new__(VerifiersRollouter)
+    popped_trace_ids = []
     rollouter._generation_server = SimpleNamespace(
-        model_id="model", pop_generation_metadata=lambda trace_id: None
+        model_id="model", pop_generation_metadata=popped_trace_ids.append
     )
     rollouter._verifiers_env_client = SimpleNamespace(
         run=AsyncMock(
@@ -959,6 +961,7 @@ def test_rollout_releases_every_trace_session_even_if_one_release_fails(caplog) 
         {"routing_session_id": "policy"},
     ]
     assert "releasing routing session opponent failed" in caplog.text
+    assert popped_trace_ids == ["opponent", "policy"]
     assert rollout.group_id == 1
 
 
