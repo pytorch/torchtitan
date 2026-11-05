@@ -288,6 +288,8 @@ def build_dsa_block_mask(
 ) -> BlockMask:
     """Build conservative KV block lists and an exact token-level predicate."""
     Q, S = indices_QS.shape
+    if S == 0:
+        raise ValueError("DSA selection width must be positive")
     K = metadata.positions_T.numel()
     B = block_size
     valid_QS = (indices_QS >= 0) & (indices_QS < K)
@@ -313,13 +315,24 @@ def build_dsa_block_mask(
     occupied = occupancy.view(1, 1, num_q_blocks, num_k_blocks) > 0
     counts = occupied.sum(-1).to(torch.int32)
     blocks = occupied.to(torch.float32).argsort(dim=-1, descending=True, stable=True)
+    # FlexAttention mask subgraphs are pointwise: membership must not reduce S.
+    # Invalid entries sort behind all real keys; duplicates retain set semantics.
+    selected_QS = torch.where(valid_QS, indices_QS, K).sort(dim=-1).values
 
     def mask_mod(b, h, q, k):
         row = q.clamp(max=Q - 1)
+        lower = (q + k) * 0
+        upper = lower + S
+        for _ in range(S.bit_length()):
+            middle = (lower + upper) // 2
+            before = selected_QS[row, middle.clamp(max=S - 1)] < k
+            lower = torch.where(before, middle + 1, lower)
+            upper = torch.where(before, upper, middle)
         return (
             (q < Q)
             & (k < K)
-            & ((indices_QS[row] == k[..., None]) & valid_QS[row]).any(dim=-1)
+            & (lower < S)
+            & (selected_QS[row, lower.clamp(max=S - 1)] == k)
         )
 
     return BlockMask.from_kv_blocks(

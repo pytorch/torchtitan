@@ -345,6 +345,13 @@ class TestGlm5Dsa(unittest.TestCase):
             self.assertIn(
                 col // 2, block_mask.kv_indices[0, 0, row // 2, :count].tolist()
             )
+        # A reduction in mask_mod passes eager tests but fails Flex subgraph lowering.
+        from torch.fx.experimental.proxy_tensor import make_fx
+
+        traced = make_fx(block_mask.mask_mod)(torch.tensor(0), torch.tensor(0), q, k)
+        self.assertFalse(
+            any(node.target == torch.ops.aten.any.dim for node in traced.graph.nodes)
+        )
 
     def test_padding_mask_excludes_queries_and_keys(self) -> None:
         mask = create_dsa_causal_mask(
