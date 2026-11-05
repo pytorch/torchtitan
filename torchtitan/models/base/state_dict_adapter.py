@@ -17,7 +17,7 @@ from typing import Any
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import DTensor, Replicate
+from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import Placement
 
 from .model import BaseModel
@@ -181,7 +181,8 @@ class StateDictAdapter(BaseStateDictAdapter):
         self.model_config = model_config
         self.hf_assets_path = hf_assets_path
         # HF load calls to_hf on the destination state dict before from_hf.
-        # Remember each native QKV layout so the rebuilt tensor fits that target.
+        # Remember each native QKV (and GDN in_proj) layout so the rebuilt tensor
+        # fits that target.
         self._qkv_linear_sharding: dict[
             str, tuple[DeviceMesh, tuple[Placement, ...]]
         ] = {}
@@ -339,6 +340,72 @@ class StateDictAdapter(BaseStateDictAdapter):
                 fused = fused.redistribute(mesh, placements)
             state_dict[fused_key] = fused
 
+    def _split_gdn_in_proj(
+        self,
+        state_dict: dict[str, Any],
+        *,
+        prefix: str,
+        split_sizes: list[int],
+    ) -> None:
+        """Expose a native GDN ``in_proj`` as the logical q/k/v/z/a/b projections.
+
+        ``split_sizes`` are the rows of each projection per key head (``GDN.Config``).
+        """
+        fused_key = f"{prefix}in_proj.weight"
+        if fused_key not in state_dict:
+            return
+        tensor = state_dict.pop(fused_key)
+        # A dim-0 shard may split a key-head group, so shard the columns instead
+        # (replicating every layer's in_proj would cost 15 GiB per rank at 27B, fp32).
+        if isinstance(tensor, DTensor):
+            self._qkv_linear_sharding[fused_key] = (
+                tensor.device_mesh,
+                tensor.placements,
+            )
+            tensor = tensor.redistribute(
+                tensor.device_mesh, [Shard(1)] * tensor.device_mesh.ndim
+            )
+        grouped = tensor.reshape(-1, sum(split_sizes), tensor.shape[-1])
+        for name, projection in zip(
+            "qkvzab", grouped.split(split_sizes, dim=1), strict=True
+        ):
+            state_dict[f"{prefix}in_proj_{name}.weight"] = projection.reshape(
+                -1, tensor.shape[-1]
+            ).contiguous()
+
+    def _merge_gdn_in_proj(
+        self,
+        state_dict: dict[str, Any],
+        *,
+        prefix: str,
+        n_key_heads: int,
+    ) -> None:
+        """Pack the logical q/k/v/z/a/b projections into one native GDN ``in_proj``."""
+        logical_keys = tuple(f"{prefix}in_proj_{name}.weight" for name in "qkvzab")
+        if not all(key in state_dict for key in logical_keys):
+            return
+        projections = [state_dict.pop(key) for key in logical_keys]
+        # Rebuild from column shards (see _split_gdn_in_proj), then restore the native
+        # placement captured before HF loading.
+        if isinstance(projections[0], DTensor):
+            projections = [
+                tensor.redistribute(
+                    tensor.device_mesh,
+                    [Shard(1)] * tensor.device_mesh.ndim,
+                )
+                for tensor in projections
+            ]
+        dim = projections[0].shape[-1]
+        fused_key = f"{prefix}in_proj.weight"
+        fused = torch.cat(
+            [projection.reshape(n_key_heads, -1, dim) for projection in projections],
+            dim=1,
+        ).reshape(-1, dim)
+        if isinstance(fused, DTensor) and fused_key in self._qkv_linear_sharding:
+            mesh, placements = self._qkv_linear_sharding[fused_key]
+            fused = fused.redistribute(mesh, placements)
+        state_dict[fused_key] = fused
+
     def _native_fused_linears_to_hf(
         self,
         state_dict: dict[str, Any],
@@ -356,6 +423,7 @@ class StateDictAdapter(BaseStateDictAdapter):
                 tensors for HF schemas that store experts independently.
         """
         from torchtitan.models.common.attention import QKVLinear
+        from torchtitan.models.common.attention.gdn import GDN
         from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
         from torchtitan.models.common.feed_forward import DenseFeedForward
         from torchtitan.models.common.moe import RoutedExperts
@@ -383,6 +451,13 @@ class StateDictAdapter(BaseStateDictAdapter):
                 prefix=prefix,
                 head_dim=config.head_dim,
                 heads_per_kv=config.n_heads // config.n_kv_heads,
+            )
+
+        for fqn, config, _parent, _ in self.model_config.traverse(GDN.Config):
+            self._split_gdn_in_proj(
+                result,
+                prefix=f"{fqn}." if fqn else "",
+                split_sizes=config.in_proj_split_sizes,
             )
 
         if split_routed_experts:
@@ -418,6 +493,7 @@ class StateDictAdapter(BaseStateDictAdapter):
                 HF schemas that store experts independently.
         """
         from torchtitan.models.common.attention import QKVLinear
+        from torchtitan.models.common.attention.gdn import GDN
         from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
         from torchtitan.models.common.feed_forward import DenseFeedForward
         from torchtitan.models.common.moe import RoutedExperts
@@ -445,6 +521,13 @@ class StateDictAdapter(BaseStateDictAdapter):
                 prefix=prefix,
                 head_dim=config.head_dim,
                 heads_per_kv=config.n_heads // config.n_kv_heads,
+            )
+
+        for fqn, config, _parent, _ in self.model_config.traverse(GDN.Config):
+            self._merge_gdn_in_proj(
+                result,
+                prefix=f"{fqn}." if fqn else "",
+                n_key_heads=config.n_key_heads,
             )
 
         if fuse_routed_experts:

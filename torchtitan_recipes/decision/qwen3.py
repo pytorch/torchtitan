@@ -167,7 +167,6 @@ def qwen3_1_7b_decision(parallelism: ParallelismConfig | None = None) -> Trainer
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=16 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=600,
         ),
         dataloader=GrainDataLoader.Config(

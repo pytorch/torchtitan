@@ -38,7 +38,7 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.config import OverrideConfig, TrainingConfig
+from torchtitan.config import OverrideConfig, PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
@@ -384,14 +384,13 @@ def _muse_spark_816b_a42b(
             ),
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
+        precision=PrecisionConfig(
+            dtype="float32", param_dtype="bfloat16", reduce_dtype="float32"
+        ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
             num_tokens_per_train_step=32 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=120,
-            dtype="float32",
-            mixed_precision_param="bfloat16",
-            mixed_precision_reduce="float32",
             disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
@@ -479,8 +478,8 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
         scratch_capacity_factor=32.0,
         vmm_capacity_factor=None,
         expert_activation=ClampedSwiGLU.Config(
-            swiglu_alpha=1.702,
-            swiglu_limit=7.0,
+            alpha=1.702,
+            limit=7.0,
         ),
         remat_save_regions=remat_save_regions,
     )
@@ -492,7 +491,7 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     )
     config.training.num_tokens_per_microbatch_per_dp_rank = seq_len
     config.training.num_tokens_per_train_step = global_batch_size * seq_len
-    config.training.mixed_precision_reduce = "float32"
+    config.precision.reduce_dtype = "float32"
 
     p = config.parallelism
     p.data_parallel_replicate_degree = 1
@@ -773,12 +772,11 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
     config.training = TrainingConfig(
         num_tokens_per_microbatch_per_dp_rank=seq_len,
         num_tokens_per_train_step=seq_len,
-        max_context_length=seq_len,
         steps=1000,
-        dtype="bfloat16",
-        mixed_precision_param="bfloat16",
-        mixed_precision_reduce="float32",
         disable_accelerator_graphs=False,
+    )
+    config.precision = PrecisionConfig(
+        dtype="bfloat16", param_dtype="bfloat16", reduce_dtype="float32"
     )
     config.comm.init_timeout_seconds = 1800
     config.comm.train_timeout_seconds = 1800
