@@ -77,8 +77,8 @@ class Glm5Attention(DeepSeekMLAAttention):
         x_TD: torch.Tensor,
         attention_masks: DsaMetadata,
         positions: torch.Tensor | None = None,
-        topk_indices_TS: torch.Tensor | None = None,
         *,
+        topk_indices_TS: torch.Tensor | None = None,
         prepared_query: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         x_TD, q_resid_TR = (
@@ -171,7 +171,7 @@ class Glm5TransformerBlock(DeepSeekV3TransformerBlock):
             normalized_TD,
             attention_masks,
             positions,
-            topk_indices_TS,
+            topk_indices_TS=topk_indices_TS,
             prepared_query=prepared,
         )
         # The residual add reads the attention output with bare ops.

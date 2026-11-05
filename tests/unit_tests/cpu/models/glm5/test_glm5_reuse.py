@@ -10,6 +10,24 @@ import torch_remat as remat
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.glm5 import build_model_config
+from torchtitan.models.glm5.dsa import DsaMetadata
+
+
+def test_mtp_attention_boundary_accepts_omitted_keyword_indices():
+    config = build_model_config(
+        "glm5_2_debugmodel_mtp", parallelism=ParallelismConfig(), seq_len=16
+    )
+    attention = config.mtp_layers[0].attention.build()
+    attention._sharding_config = config.mtp_layers[0].attention.sharding_config
+    positions = torch.arange(16)
+    args = (
+        torch.zeros(16, config.dim),
+        DsaMetadata.from_positions(positions),
+        positions,
+    )
+    actual_args, actual_kwargs = attention._redistribute_inputs(args, {})
+    assert len(actual_args) == 3
+    assert not actual_kwargs
 
 
 @pytest.mark.parametrize("save", [[], ["*"], ["*.inner_attention"]])
