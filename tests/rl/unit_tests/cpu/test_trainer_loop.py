@@ -17,10 +17,17 @@ from types import SimpleNamespace
 import pytest
 
 from torchtitan.rl.actors.system import TrainerHandle
+from torchtitan.rl.controller import controller as controller_module
 from torchtitan.rl.controller.controller import Controller
 
 TRAINER_PUSH_KEY = "timing/weight_sync/trainer_push_model_state_dict"
 GENERATOR_PULL_KEY = "timing/weight_sync/generator_pull_model_state_dict"
+
+
+@pytest.fixture(autouse=True)
+def _no_host_memory_scan(monkeypatch):
+    # Awaiting the real scan yields to the event loop, so the fake push finishes before the next forward/backward.
+    monkeypatch.setattr(controller_module, "compute_host_memory_metrics", lambda: [])
 
 
 class _RankValues:

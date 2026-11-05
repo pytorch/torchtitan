@@ -27,6 +27,7 @@ from verifiers.v1.utils.loaders import resolve_env_config
 from verifiers.v1.utils.logging import setup_logging
 
 from torchtitan.config import Configurable
+from torchtitan.rl._env import RL_ROLE_ENV
 from torchtitan.rl.examples.verifiers.data import register_local_taskset_alias
 
 
@@ -43,6 +44,10 @@ def _run_env_server_process(
     no_proxy = ",".join(filter(None, (no_proxy, "127.0.0.1", "localhost")))
     os.environ["no_proxy"] = no_proxy
     os.environ["NO_PROXY"] = no_proxy
+
+    # Tag the pool workers spawned below as `env_server_worker` for host memory metrics.
+    # This process itself stays `other`: /proc/<pid>/environ keeps the env it started with.
+    os.environ[RL_ROLE_ENV] = "env_server_worker"
 
     if local_taskset_module is not None:
         environment["taskset"]["id"] = register_local_taskset_alias(

@@ -10,10 +10,15 @@
 # but components/ may not be the right home either.
 
 import contextlib
+import functools
 import logging
+import os
+import re
 import time
 from collections import defaultdict
+from pathlib import Path
 
+from torchtitan.rl._env import RL_ROLE_ENV
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.types import Rollout
 
@@ -302,3 +307,139 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
         )
     )
     return out
+
+
+# TODO: tag the batcher, generator-router and rollout-worker procs too, as spawn_proc_mesh does:
+# pass `bootstrap_command` to the `this_host().spawn_procs` call in `spawn_cpu_procs`.
+# Until then they count as `other`, mixed with Monarch host agents and the env server.
+_PROCESS_ROLES = ("controller", "trainer", "generator", "env_server_worker", "other")
+
+
+def compute_host_memory_metrics() -> list[m.Metric]:
+    """Anonymous memory per process role on this host, plus the job's cgroup total on this host.
+
+    Anonymous memory leaves out shared libraries, which summed RSS counts once per process.
+    It comes from `smaps_rollup`, a page-table walk (~1.5 ms per process). Before Linux 6.16,
+    `status`'s `RssAnon` misses memory each CPU hasn't reported yet: 2x low on GB300 (Linux 6.14).
+    Scans every process in the controller's Slurm job cgroup on this host, i.e. every job step
+    (outside Slurm, the controller's own cgroup): trainer ranks run in another step than the
+    controller, so its own cgroup misses them. A process's role is `TORCHTITAN_RL_ROLE` in its
+    spawn env:
+
+        controller           this process
+        trainer, generator   Monarch procs and their children
+        env_server_worker    processes the env server spawns, and their children
+        other                the rest, e.g. the batcher, router and rollout-worker procs,
+                             Monarch host agents, the env server itself and the job's
+                             other steps (step_extern)
+
+    Example:
+        compute_host_memory_metrics()
+        # -> host_memory/rss_anon_gib/env_server_worker 230.5,
+        #    host_memory/num_processes/env_server_worker 611, ...,
+        #    host_memory/cgroup_memory_current_gib 655.0
+    """
+    cgroup_dir = _cgroup_dir()
+    if cgroup_dir is None:
+        return []
+    rss_anon_kib = dict.fromkeys(_PROCESS_ROLES, 0)
+    num_processes = dict.fromkeys(_PROCESS_ROLES, 0)
+    for pid in _cgroup_pids(cgroup_dir):
+        # A process may exit after the cgroup listing, or be unreadable (hidepid, another user's).
+        try:
+            rollup = Path(f"/proc/{pid}/smaps_rollup").read_text()
+            role = "controller" if int(pid) == os.getpid() else _process_role(pid)
+        except OSError:
+            continue
+        # "Anonymous:   123456 kB"
+        for line in rollup.splitlines():
+            if line.startswith("Anonymous:"):
+                rss_anon_kib[role] += int(line.split()[1])
+                num_processes[role] += 1
+                break
+
+    metrics = [
+        m.Metric(f"host_memory/rss_anon_gib/{role}", m.NoReduce(kib / 2**20))
+        for role, kib in rss_anon_kib.items()
+    ]
+    metrics += [
+        m.Metric(f"host_memory/num_processes/{role}", m.NoReduce(count))
+        for role, count in num_processes.items()
+    ]
+    # The root cgroup has no memory.current.
+    with contextlib.suppress(FileNotFoundError):
+        memory_current = int((cgroup_dir / "memory.current").read_text())
+        metrics.append(
+            m.Metric(
+                "host_memory/cgroup_memory_current_gib",
+                m.NoReduce(memory_current / 2**30),
+            )
+        )
+    return metrics
+
+
+# Slurm's per-job cgroup (cgroup/v2 plugin): job_<id>/step_<step>/user/task_<n>.
+_SLURM_JOB_CGROUP = re.compile(r"job_\d+")
+
+
+@functools.cache
+def _cgroup_dir() -> Path | None:
+    """The cgroup v2 directory whose processes the host memory metrics scan; cached, so a host
+    without one warns once.
+
+    Example:
+        "0::/system.slice/slurmstepd.scope/job_7/step_batch/user/task_0"
+            -> /sys/fs/cgroup/system.slice/slurmstepd.scope/job_7
+        "0::/user.slice/session-3.scope" -> /sys/fs/cgroup/user.slice/session-3.scope
+    """
+    for line in Path("/proc/self/cgroup").read_text().splitlines():
+        if line.startswith("0::"):
+            cgroup_dir = _job_cgroup_dir(Path("/sys/fs/cgroup"), line[3:])
+            if (cgroup_dir / "cgroup.procs").exists():
+                return cgroup_dir
+    logger.warning("No cgroup v2 found; host memory metrics are off")
+    return None
+
+
+def _job_cgroup_dir(cgroup_root: Path, cgroup_path: str) -> Path:
+    """`cgroup_path`'s nearest ancestor that is a Slurm job cgroup, else `cgroup_path` itself.
+
+    Example: (/sys/fs/cgroup, "/system.slice/slurmstepd.scope/job_7/step_0/user/task_0")
+        -> /sys/fs/cgroup/system.slice/slurmstepd.scope/job_7
+    """
+    parts = Path(cgroup_path.lstrip("/")).parts
+    for depth in range(len(parts), 0, -1):
+        if _SLURM_JOB_CGROUP.fullmatch(parts[depth - 1]):
+            return cgroup_root.joinpath(*parts[:depth])
+    return cgroup_root.joinpath(*parts)
+
+
+def _cgroup_pids(cgroup_dir: Path) -> list[str]:
+    """Pids in `cgroup_dir`; for a Slurm job cgroup, in every cgroup below it (cgroup v2 keeps
+    processes in leaf cgroups, here each step's task cgroups).
+
+    Example: job_7/step_batch/user/task_0 holds [100], job_7/step_0/user/task_0 holds [200]
+        -> _cgroup_pids(.../job_7) == ["100", "200"]
+    """
+    if not _SLURM_JOB_CGROUP.fullmatch(cgroup_dir.name):
+        return (cgroup_dir / "cgroup.procs").read_text().split()
+    pids = []
+    for dirpath, _, filenames in os.walk(cgroup_dir):
+        if "cgroup.procs" in filenames:
+            # A step's cgroup can go away mid-walk.
+            with contextlib.suppress(OSError):
+                pids += (Path(dirpath) / "cgroup.procs").read_text().split()
+    return pids
+
+
+def _process_role(pid: str) -> str:
+    try:
+        environ = Path(f"/proc/{pid}/environ").read_bytes()
+    except PermissionError:  # another user's process
+        return "other"
+    prefix = f"{RL_ROLE_ENV}=".encode()
+    for entry in environ.split(b"\0"):
+        if entry.startswith(prefix):
+            role = entry[len(prefix) :].decode(errors="replace")
+            return role if role in _PROCESS_ROLES else "other"
+    return "other"
