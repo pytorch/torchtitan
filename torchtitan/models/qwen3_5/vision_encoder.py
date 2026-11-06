@@ -185,18 +185,17 @@ class QwenVisionRoPE(CosSinRoPE):
             )
         if config.max_context_length <= 0:
             raise ValueError("Qwen vision RoPE requires a positive coordinate bound.")
-        if config.scaling != "none":
+        if config.scaling is not None:
             raise ValueError("Qwen vision RoPE does not support frequency scaling.")
         super().__init__(config)
 
     def _precompute_cache(self) -> torch.Tensor:
-        cfg = self.config
-        half_dim = cfg.dim // 2
+        half_dim = self.dim // 2
         inv_freq_F = 1.0 / (
-            cfg.theta ** (torch.arange(0, half_dim, 2, dtype=torch.float32) / half_dim)
+            self.theta ** (torch.arange(0, half_dim, 2, dtype=torch.float32) / half_dim)
         )
         positions_P = torch.arange(
-            cfg.max_context_length, device=inv_freq_F.device, dtype=inv_freq_F.dtype
+            self.max_context_length, device=inv_freq_F.device, dtype=inv_freq_F.dtype
         )
         angles_PF = torch.outer(positions_P, inv_freq_F)
         return torch.stack((angles_PF.cos(), angles_PF.sin()), dim=-1)

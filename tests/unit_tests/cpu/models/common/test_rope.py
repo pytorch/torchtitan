@@ -24,6 +24,7 @@ from torchtitan.models.common.rope import (
     ComplexRoPE,
     CosSinRoPE,
     RoPE,
+    YaRNScalingConfig,
 )
 from torchtitan.models.kimi_k2_7.vision_encoder import MoonViTRoPE
 from torchtitan.models.muse_spark.vision_encoder import NaViTRoPE
@@ -321,9 +322,7 @@ class TestYaRNScaling(unittest.TestCase):
         yarn = ComplexRoPE.Config(
             dim=64,
             max_context_length=2048,
-            scaling="yarn",
-            rope_factor=40.0,
-            original_seq_len=4096,
+            scaling=YaRNScalingConfig(factor=40.0, original_seq_len=4096),
         ).build()
         unscaled = ComplexRoPE.Config(dim=64, max_context_length=2048).build()
 
@@ -342,18 +341,23 @@ class TestYaRNScaling(unittest.TestCase):
         )
         attention_config = model_config.layers[0].attention
         assert isinstance(attention_config, DeepSeekMLAAttention.Config)
+        assert isinstance(attention_config.rope.scaling, YaRNScalingConfig)
         attention_config.rope = dataclasses.replace(
             attention_config.rope,
-            max_context_length=attention_config.rope.original_seq_len // 2,
+            max_context_length=attention_config.rope.scaling.original_seq_len // 2,
         )
         attention = attention_config.build()
 
         expected_mscale = (
-            0.1 * attention_config.mscale * math.log(attention_config.rope.rope_factor)
+            0.1
+            * attention_config.mscale
+            * math.log(attention_config.rope.scaling.factor)
             + 1.0
         )
-        expected_softmax_scale = attention.qk_head_dim**-0.5 * expected_mscale**2
-        self.assertAlmostEqual(attention.softmax_scale, expected_softmax_scale)
+        expected_softmax_scale = (
+            attention.qk_head_dim**-0.5 * expected_mscale * expected_mscale
+        )
+        self.assertEqual(attention.softmax_scale, expected_softmax_scale)
 
 
 class TestPerLayerRoPECache(unittest.TestCase):

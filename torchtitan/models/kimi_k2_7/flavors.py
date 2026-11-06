@@ -35,6 +35,8 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std
+
+from torchtitan.models.common.rope import YaRNScalingConfig
 from torchtitan.models.common.vision_encoder import (
     InvariantRowParallelLinear,
     VisionAttention,
@@ -316,11 +318,9 @@ def _debugmodel(
             dim=rope_dim,
             max_context_length=seq_len,
             theta=10000.0,
-            scaling="yarn",
-            rope_factor=40.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=4096,
+            scaling=YaRNScalingConfig(
+                factor=40.0, beta_fast=32.0, beta_slow=1.0, original_seq_len=4096
+            ),
         ),
         first_layer_sharding_config=_first_layer_sharding(
             enable_sp=enable_sp, multimodal=True
@@ -541,11 +541,9 @@ def _kimi_k2_5(
             dim=rope_dim,
             max_context_length=seq_len,
             theta=50000.0,
-            scaling="yarn",
-            rope_factor=64.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=4096,
+            scaling=YaRNScalingConfig(
+                factor=64.0, beta_fast=32.0, beta_slow=1.0, original_seq_len=4096
+            ),
         ),
         first_layer_sharding_config=_first_layer_sharding(
             enable_sp=enable_sp, multimodal=True

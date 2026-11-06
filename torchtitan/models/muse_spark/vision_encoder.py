@@ -109,19 +109,17 @@ class NaViTRoPE(ComplexRoPE):
             raise ValueError("NaViT RoPE requires max_context_length greater than one")
         if config.theta <= 0:
             raise ValueError("NaViT RoPE theta must be positive")
-        if config.scaling != "none":
+        if config.scaling is not None:
             raise ValueError("NaViT RoPE does not support frequency scaling")
         super().__init__(config)
 
     def _precompute_cache(self) -> torch.Tensor:
-        config = self.config
-        half_dim = config.dim // 2
+        half_dim = self.dim // 2
         inv_freq_F = 1.0 / (
-            config.theta
-            ** (torch.arange(0, half_dim, 2, dtype=torch.float32) / half_dim)
+            self.theta ** (torch.arange(0, half_dim, 2, dtype=torch.float32) / half_dim)
         )
         positions_L = torch.arange(
-            config.max_context_length,
+            self.max_context_length,
             device=inv_freq_F.device,
             dtype=inv_freq_F.dtype,
         )

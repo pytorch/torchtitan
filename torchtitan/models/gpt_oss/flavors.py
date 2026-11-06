@@ -25,6 +25,7 @@ from torchtitan.models.common import (
     HiMidLoLinear,
     Linear,
     RMSNorm,
+    RoPE,
     RowParallelLinear,
     Softmax,
     TransformerBlock,
@@ -58,6 +59,8 @@ from torchtitan.models.common.moe.sharding import (
 )
 from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.common.param_init import depth_scaled_std
+
+from torchtitan.models.common.rope import YaRNScalingConfig
 from .model import GptOssAttention, GptOssModel, GptOssTransformerBlock
 from .moe import GptOssGroupedLinear
 from .sharding import attention_sharding_config, routed_expert_linear_sharding_config
@@ -97,7 +100,7 @@ def _make_gptoss_attn_config(
     n_kv_heads: int = 8,
     head_dim: int = 64,
     sliding_window_size: int | None = None,
-    rope: CosSinRoPE.Config,
+    rope: RoPE.Config,
     enable_sp: bool,
 ) -> GptOssAttention.Config:
     """Build a fully-specified, sharded GptOssAttention.Config for a layer.
@@ -220,7 +223,7 @@ def _build_gptoss_layers(
     top_k: int,
     load_balance_coeff: float | None,
     attn_backend: str = "varlen",
-    rope: CosSinRoPE.Config,
+    rope: RoPE.Config,
     enable_sp: bool,
     enable_ep: bool,
 ) -> list[TransformerBlock.Config]:
@@ -336,12 +339,13 @@ def _debugmodel(
                 dim=64,
                 max_context_length=seq_len,
                 theta=150000.0,
-                scaling="yarn",
-                rope_factor=32,
-                beta_fast=32.0,
-                beta_slow=1.0,
-                truncate=False,
-                original_seq_len=4096,
+                scaling=YaRNScalingConfig(
+                    factor=32,
+                    beta_fast=32.0,
+                    beta_slow=1.0,
+                    truncate=False,
+                    original_seq_len=4096,
+                ),
             ),
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,
@@ -395,12 +399,13 @@ def _20b(
                 dim=64,
                 max_context_length=seq_len,
                 theta=150000.0,
-                scaling="yarn",
-                rope_factor=32,
-                beta_fast=32.0,
-                beta_slow=1.0,
-                truncate=False,
-                original_seq_len=4096,
+                scaling=YaRNScalingConfig(
+                    factor=32,
+                    beta_fast=32.0,
+                    beta_slow=1.0,
+                    truncate=False,
+                    original_seq_len=4096,
+                ),
             ),
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,
@@ -454,12 +459,13 @@ def _120b(
                 dim=64,
                 max_context_length=seq_len,
                 theta=150000.0,
-                scaling="yarn",
-                rope_factor=32,
-                beta_fast=32.0,
-                beta_slow=1.0,
-                truncate=False,
-                original_seq_len=4096,
+                scaling=YaRNScalingConfig(
+                    factor=32,
+                    beta_fast=32.0,
+                    beta_slow=1.0,
+                    truncate=False,
+                    original_seq_len=4096,
+                ),
             ),
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,

@@ -31,7 +31,7 @@ from torchtitan.models.common.attention.cp_attention import UlyssesInnerAttentio
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.common.rope import CosSinRoPE
+from torchtitan.models.common.rope import RoPE
 
 from .state_dict_adapter import GptOssStateDictAdapter
 
@@ -63,15 +63,14 @@ class GptOssAttention(Attention):
         )
         sliding_window_size: int | None = None
         """Per-layer causal sliding-window size"""
-        rope: CosSinRoPE.Config
+        rope: RoPE.Config
 
         @property
         def softmax_scale(self) -> float:
             scale = 1.0 / math.sqrt(self.head_dim)
-            if self.rope.scaling == "yarn" and self.rope.rope_factor > 1.0:
-                mscale = 0.1 * math.log(self.rope.rope_factor) + 1.0
-                # RoPE is a pure rotation; apply YaRN's Q/K magnitude here.
-                scale *= mscale * mscale
+            # RoPE is a pure rotation; apply the Q/K magnitude here.
+            mscale = self.rope.qk_amplitude()
+            scale *= mscale * mscale
             return scale
 
         def flops_per_token(self, seq_len: int) -> int:

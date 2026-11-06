@@ -212,17 +212,16 @@ class MoonViTRoPE(ComplexRoPE):
             raise ValueError("MoonViT RoPE dim must be positive and divisible by four.")
         if config.max_context_length <= 0:
             raise ValueError("MoonViT RoPE requires a positive coordinate bound.")
-        if config.scaling != "none":
+        if config.scaling is not None:
             raise ValueError("MoonViT RoPE does not support frequency scaling.")
         super().__init__(config)
 
     def _precompute_cache(self) -> torch.Tensor:
-        cfg = self.config
         inv_freq_F = 1.0 / (
-            cfg.theta ** (torch.arange(0, cfg.dim, 4, dtype=torch.float32) / cfg.dim)
+            self.theta ** (torch.arange(0, self.dim, 4, dtype=torch.float32) / self.dim)
         )
         positions_P = torch.arange(
-            cfg.max_context_length, device=inv_freq_F.device, dtype=inv_freq_F.dtype
+            self.max_context_length, device=inv_freq_F.device, dtype=inv_freq_F.dtype
         )
         angles_PF = torch.outer(positions_P, inv_freq_F)
         return torch.polar(torch.ones_like(angles_PF), angles_PF)
