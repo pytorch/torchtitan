@@ -87,13 +87,12 @@ The sample buffer is held in process memory while profiling, not written to the 
 
 ## Always-on kernel spans
 
-Cuspy makes always-on profiling cheap enough for real-scale training: every
-step, every rank records every CUDA kernel's GPU start/end time, at about 1%
-of step time or less. On 4 GB300s with FSDP and CUDA graphs, step time went
-up 0.1-1.3% for Llama 3 8B (2.3k kernels/step) and 0.2-0.35% for Qwen3 32B
-(5.4k kernels/step). It stays cheap because:
+torchtitan supports always-on profiling through the Cuspy backend, typically
+adding under 1% overhead in real-scale training. Every step, each rank records
+every CUDA kernel's GPU start/end time and keeps the most recent steps on disk,
+so a slow step can be inspected after the fact. It stays cheap because:
 
-* each kernel is 32 bytes: CUDA graph node id, start, end, stream;
+* each kernel is recorded as a few integers (graph node id, start, end, stream);
 * the host collects records without a device sync, while it waits on the GPU;
 * kernel names come from the CUDA graph node table, recorded once per graph
   and joined offline, not per kernel during training;

@@ -4,40 +4,47 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Always-on recording of every CUDA kernel's GPU start and end time. Kernels
-are grouped by training step and written to .npz files on local disk; the
-oldest files are deleted so each rank keeps about num_steps_retained steps.
+"""Always-on recording of every CUDA kernel's GPU start/end time, per training
+step.
 
-How data flows, per rank:
+Per rank:
 
-    CUPTI --flush--> unassigned kernels --compare to step end times--> finished steps
-                                                                             |
-                                             every steps_per_file steps, write one .npz
-                                                                             |
-                                                  files on disk, oldest deleted first
+    CUPTI --> KernelSpanRecorder --> _KernelSpanFiles --> rank{r}/steps_<first>_<last>.npz
+              assigns kernels         writes every          oldest files deleted beyond
+              to steps                steps_per_file steps  num_steps_retained steps
 
-- KernelSpanRecorder takes kernel records from CUPTI and assigns each kernel to
-  the training step it started in.
-- _KernelSpanFiles holds finished steps in host memory, writes them to .npz
-  files steps_per_file steps at a time, and deletes the oldest files.
+File format: one .npz per file, holding one rank's S steps and K kernels.
 
-Each file, named steps_<first step>_<last step>.npz, holds one rank's steps
-and its rank number, with one row per kernel:
-its CUDA graph node id (0 for kernels launched outside CUDA graphs), GPU start
-and end time (unix nanoseconds) and CUDA stream. Kernels are grouped by step;
-step_offsets marks where each step's rows begin. The file also stores a node
-table, recorded when each CUDA graph was instantiated, that maps graph node ids
-to kernel names and graph annotations (mark_kernels regions, c10d collective
-metadata). Node ids are only meaningful within one process, so every file
-carries its own table. scripts/kernel_spans_to_trace.py turns chosen steps
-into a Chrome/Perfetto trace.
+    array          dtype/shape   meaning
+    rank           int64         rank that wrote the file
+    steps          int64[S]      step numbers
+    step_offsets   int64[S+1]    rows of step i: step_offsets[i]:step_offsets[i+1]
+    graph_node_id  uint64[K]     (exec graph id << 32) | node index; 0 = eager
+    start_ns       int64[K]      GPU start, unix ns
+    end_ns         int64[K]      GPU end, unix ns
+    stream_id      uint64[K]     CUDA stream
+    node_table     uint8[]       JSON {graph_node_id: {kernel_name, grid, block,
+                                 annotations}} for the graphs these steps ran
 
-Caveats: a step's end is the host time when step() was called for it. The host
-usually runs ahead of the GPU, so a step can include the tail of earlier steps.
-Steps not yet written to a file are lost if the process is killed.
+The four [K] arrays are the columns of one kernel table, one row per kernel,
+grouped by step. For example, a file with two steps and five kernels:
 
-Cuspy and the cupti-python package are imported only when a recorder is built,
-so the config can be imported without them.
+    steps        = [1001, 1002]
+    step_offsets = [0, 3, 5]
+
+    row  graph_node_id   start_ns  end_ns  stream_id
+    0    (7 << 32) | 12  ...       ...     21          step 1001
+    1    (7 << 32) | 13  ...       ...     21          step 1001
+    2    0               ...       ...     7           step 1001 (eager kernel)
+    3    (7 << 32) | 12  ...       ...     21          step 1002
+    4    (7 << 32) | 13  ...       ...     21          step 1002
+
+Graph node ids are only valid within one process, so each file carries its own
+node table. scripts/kernel_spans_to_trace.py converts steps to a Perfetto trace.
+
+Caveats: a step's end is the host time of its step() call, and the host runs
+ahead of the GPU, so a step can include the tail of earlier steps. Unwritten
+steps are lost if the process is killed.
 """
 
 import json
@@ -75,34 +82,23 @@ _SPAN_DTYPE = np.dtype(
 
 
 class KernelSpanRecorder(Configurable):
-    """Takes kernel records from CUPTI and assigns each kernel to the training
-    step it started in.
+    """Assigns each kernel CUPTI delivers to the training step it started in.
 
-    CUPTI records every kernel the GPU runs, but delivers the records late and
-    in batches that don't line up with steps: the host queues work ahead of the
-    GPU, so when a step ends on the host, some of its kernels haven't run or
-    haven't been delivered to the recorder yet.
+    CUPTI delivers kernel records late and in batches, so when step() is called
+    (the step "ends" on the host), some of its kernels haven't been delivered
+    yet. The step is "finished" once a kernel that started after its end has
+    been delivered.
 
-    The recorder keeps two things in memory:
+    State:
+    - self._open_step_ends: (step, host end time) of ended, unfinished steps.
+    - self._unassigned_spans: delivered kernels not yet in a finished step,
+      sorted by start time.
 
-    A step has "ended" once step() is called for it on the host, and is
-    "finished" once all of its kernels have been delivered.
+    step(): append the step's end time, flush CUPTI (no device sync), and move
+    each finished step's kernels to self._files (see _close_finished_steps).
 
-    - self._open_step_ends: the host end time of each step that has ended but
-      isn't finished. step() appends one per training step.
-    - self._unassigned_spans: kernels CUPTI has delivered that aren't assigned
-      to a step yet, sorted by start time.
-
-    Each step() call appends the step's end time, flushes CUPTI (without a
-    device sync) to collect newly delivered kernels, and assigns kernels in
-    self._unassigned_spans to every finished step by comparing kernel start
-    times to step end times (see _close_finished_steps). Each finished step's
-    kernels are passed to a _KernelSpanFiles, which writes them to disk. Kernels
-    are named from the CUDA graph nodes they ran as, so training must run in
-    CUDA graphs; kernels launched outside graphs are recorded without names.
-
-    Step files already on disk from before a restart are left alone and never
-    deleted.
+    Kernels are named from CUDA graph nodes, so training must use CUDA graphs;
+    kernels outside graphs are recorded without names.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -381,7 +377,8 @@ class _KernelSpanFiles:
         files (see _evict_old_files).
 
         The file embeds the node table of every CUDA graph its kernels ran in, so
-        it can be decoded without the training process.
+        it can be decoded without the training process. See the module docstring
+        for the arrays it holds.
         """
         steps, self._unwritten_steps = self._unwritten_steps, []
         path = os.path.join(
