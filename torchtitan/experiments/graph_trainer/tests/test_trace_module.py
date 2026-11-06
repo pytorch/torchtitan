@@ -230,6 +230,8 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         self.assertIs(engine.pp_schedule, graph_runtime)
         wrap_cuda_graph.assert_called_once()
         self.assertIs(engine._run_forward_backward, wrap_cuda_graph.return_value)
+        # The graph runtime covers the whole step, so a second call per step raises.
+        self.assertTrue(engine._forward_backward_captures_whole_step)
         make_runtime.assert_called_once_with(
             engine.model_parts[0],
             gradient_accumulation_steps=2,

@@ -16,6 +16,7 @@ from torchstore import RankRole
 from torchtitan.config import PrecisionConfig, TrainingConfig
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.rl.controller.metrics import combine_microbatch_metrics
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import (
     RDMAMicrobatch,
@@ -165,6 +166,8 @@ def test_forward_backward_preprocesses_every_group() -> None:
         ),
         _run_forward_backward=MagicMock(return_value=(torch.tensor(1.0), [])),
         _accelerator_graph_per_microbatch_group_enabled=False,
+        _step_started=False,
+        _forward_backward_captures_whole_step=False,
         sdc_replayer=None,
         flops_estimator=lambda inputs: inputs["input"].numel(),
     )
@@ -179,7 +182,6 @@ def test_forward_backward_preprocesses_every_group() -> None:
     torch.testing.assert_close(result.loss, torch.tensor(1.0))
     engine.garbage_collector.run.assert_called_once_with(1)
     engine.optim.zero_grad.assert_called_once_with(set_to_none=True)
-    assert engine.num_accumulation_steps == 3
     engine._preprocess_microbatch_groups.assert_called_once_with(microbatch_groups)
 
 
@@ -259,6 +261,10 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
         trainer.config = Trainer.Config(model=MagicMock())
         trainer.dp_rank = 1
         trainer._num_rdma_batches_read = 0
+        trainer._step_forward_backward_s = 0.0
+        trainer._step_num_tokens_per_dp_rank = 0
+        trainer._step_num_flops = 0
+        trainer._step_read_microbatches_s = 0.0
         trainer._reduce_forward_backward_metrics = MagicMock(
             side_effect=lambda *, sum_reduced_metrics, max_reduced_metrics: {
                 key: float(value.item())
@@ -321,6 +327,73 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
     asyncio.run(run())
 
 
+def test_streamed_forward_backward_calls_add_up_the_step_totals() -> None:
+    async def run() -> None:
+        trainer = object.__new__(Trainer)
+        trainer.engine = SimpleNamespace(
+            num_completed_steps=0,
+            device=torch.device("cpu"),
+            pp_has_last_stage=True,
+            forward_backward=MagicMock(
+                return_value=ForwardBackwardResult(
+                    loss=torch.tensor(0.5),
+                    loss_metrics=[[{"loss/mean": torch.tensor(1.0)}]],
+                    num_flops=100,
+                )
+            ),
+        )
+        trainer.config = Trainer.Config(model=MagicMock())
+        trainer.dp_rank = 0
+        trainer._num_rdma_batches_read = 0
+        trainer._step_forward_backward_s = 0.0
+        trainer._step_num_tokens_per_dp_rank = 0
+        trainer._step_num_flops = 0
+        trainer._step_read_microbatches_s = 0.0
+        trainer._reduce_forward_backward_metrics = MagicMock(
+            side_effect=lambda *, sum_reduced_metrics, max_reduced_metrics: {
+                key: float(value.item())
+                for key, value in {
+                    **sum_reduced_metrics,
+                    **max_reduced_metrics,
+                }.items()
+            }
+        )
+
+        call_metrics = []
+        # Each call's reads take 0.25 s.
+        with patch(
+            "torchtitan.rl.trainer.trainer.RDMAMicrobatchPrefetcher",
+            return_value=SimpleNamespace(read_s=0.25),
+        ):
+            for batch_index in range(2):
+                microbatch = MagicMock(
+                    spec=RDMAMicrobatch,
+                    batch_index=batch_index,
+                    dp_rank=0,
+                    microbatch_index=0,
+                )
+                call_metrics.append(
+                    await Trainer.forward_backward(
+                        trainer, [[microbatch]], torch.tensor([1.0])
+                    )
+                )
+
+        # optim_step reports the step's tokens, FLOPs and busy time over both calls.
+        assert trainer._step_num_tokens_per_dp_rank == (
+            2 * trainer.config.training.num_tokens_per_microbatch_per_dp_rank
+        )
+        assert trainer._step_num_flops == 200
+        assert trainer._step_forward_backward_s > 0.0
+        assert trainer.engine.forward_backward.call_count == 2
+        # The controller combines the calls' metrics; the step reports both calls' reads.
+        read_s = combine_microbatch_metrics(call_metrics)[
+            "timing/trainer/read_microbatches/max"
+        ]
+        assert read_s == 0.5
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     ("batch_index", "dp_rank", "microbatch_index"),
     [(1, 1, 0), (0, 0, 0), (0, 1, 1)],
@@ -334,6 +407,7 @@ def test_forward_backward_rejects_a_misplaced_rdma_microbatch(
     trainer.config = Trainer.Config(model=MagicMock())
     trainer.dp_rank = 1
     trainer._num_rdma_batches_read = 0
+    trainer._step_num_tokens_per_dp_rank = 0
     wrong = MagicMock(
         spec=RDMAMicrobatch,
         batch_index=batch_index,
@@ -372,7 +446,11 @@ def test_forward_backward_without_last_pipeline_stage_returns_no_metrics() -> No
         )
         trainer.engine = engine
         trainer.config = Trainer.Config(model=MagicMock())
+        engine.device = torch.device("cpu")
         trainer.dp_rank = 1
+        trainer._step_forward_backward_s = 0.0
+        trainer._step_num_tokens_per_dp_rank = 0
+        trainer._step_num_flops = 0
         trainer._reduce_forward_backward_metrics = MagicMock()
         # This rank's column: two pipeline steps of two microbatches each.
         microbatch_groups = [
@@ -382,10 +460,16 @@ def test_forward_backward_without_last_pipeline_stage_returns_no_metrics() -> No
 
         aux_loss_denominators = torch.tensor([2.0])
 
-        result = await Trainer.forward_backward(
-            trainer, microbatch_groups, aux_loss_denominators
-        )
+        with patch(
+            "torchtitan.rl.trainer.trainer.torch.accelerator.current_stream"
+        ) as current_stream:
+            result = await Trainer.forward_backward(
+                trainer, microbatch_groups, aux_loss_denominators
+            )
 
+        # Its busy time waits for the GPU, like the ranks that reduce the loss metrics.
+        current_stream.assert_called_once_with(engine.device)
+        current_stream.return_value.synchronize.assert_called_once_with()
         engine.forward_backward.assert_called_once_with(
             microbatch_groups=microbatch_groups,
             aux_loss_denominators=aux_loss_denominators,
@@ -447,9 +531,11 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
         trainer.engine = engine
         trainer._resume_state = MirroredState()
         trainer.gpu_peak_flops = 1000
-        trainer._step_compute_start = 0.0
+        # forward_backward's busy time; the patched clock makes the update itself take 0 s.
+        trainer._step_forward_backward_s = 2.0
         trainer._step_num_tokens_per_dp_rank = 10
-        trainer._num_flops = 2000
+        trainer._step_read_microbatches_s = 0.5
+        trainer._step_num_flops = 2000
         trainer._push_model_state_dict_stream = MagicMock()
         compute_stream = MagicMock()
 
@@ -512,6 +598,11 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
             gpu_peak_flops=1000,
             has_quantization=False,
         )
+        # The next step starts counting from zero.
+        assert trainer._step_forward_backward_s == 0.0
+        assert trainer._step_num_tokens_per_dp_rank == 0
+        assert trainer._step_num_flops == 0
+        assert trainer._step_read_microbatches_s == 0.0
         device_memory_monitor.get_peak_stats.assert_called_once_with()
         device_memory_monitor.reset_peak_stats.assert_called_once_with()
 

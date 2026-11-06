@@ -255,6 +255,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
             )
             _divide_gradients_by_num_tokens(model)
             optimizer.step()
+            # The test's optimizer stands in for engine.optim_step, which ends the step.
+            trainer.engine._step_started = False
 
         loss = result.loss.detach() / NUM_TOKENS
         return loss, hash_model(model), hash_gradient(model)

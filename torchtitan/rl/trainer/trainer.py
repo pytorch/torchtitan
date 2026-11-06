@@ -179,6 +179,11 @@ class Trainer(Configurable):
             self.dp_rank = 0
         # Batches read over RDMA so far; the next batch's `batch_index` must equal it.
         self._num_rdma_batches_read = 0
+        # This step's totals over its forward_backward calls; optim_step resets them.
+        self._step_forward_backward_s = 0.0
+        self._step_num_tokens_per_dp_rank = 0
+        self._step_num_flops = 0
+        self._step_read_microbatches_s = 0.0
 
     @property
     def policy_version(self) -> int:
@@ -258,16 +263,17 @@ class Trainer(Configurable):
         ),
         aux_loss_denominators: torch.Tensor,
     ) -> dict[str, float] | None:
-        """Run one optimizer step's forward/backward microbatches.
+        """Run one optimizer step's forward/backward microbatches, or part of them when the batcher
+        streams microbatches.
 
         Args:
             microbatch_groups: This rank's column of the batcher's
                 `[num_groups][num_microbatches_per_group][dp_degree]` grid. Under PP, each group runs
                 as one pipeline step. `RDMAMicrobatch`es when `rdma_min_tensor_bytes` is set,
                 read a few ahead of training.
-            aux_loss_denominators: The step's routed tokens per loss token over every DP rank,
-                one per routing depth (`aux_loss.aux_loss_denominators`), computed by the
-                controller.
+            aux_loss_denominators: R / N (routed tokens per loss token, over every DP rank) of
+                the step's batches sent so far, this one included, one per routing depth
+                (`aux_loss.aux_loss_denominators`), computed by the controller.
 
         Returns:
             dict[str, float] | None: Globally-reduced metrics, or ``None`` on
@@ -286,12 +292,12 @@ class Trainer(Configurable):
             f"policy_version={self.policy_version}"
         )
         engine = self.engine
-        self._step_compute_start = time.perf_counter()
+        forward_backward_start = time.perf_counter()
         microbatches = [
             microbatch for group in microbatch_groups for microbatch in group
         ]
         # The batcher pads every microbatch to the same token count.
-        self._step_num_tokens_per_dp_rank = (
+        self._step_num_tokens_per_dp_rank += (
             len(microbatches)
             * self.config.training.num_tokens_per_microbatch_per_dp_rank
         )
@@ -315,13 +321,22 @@ class Trainer(Configurable):
             # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
             # and broadcast it, to cut the trainer's reads by cp * tp. Needs a per-replica group.
             # The controller rejects RDMA with PP, so every group holds one microbatch.
+            # TODO: with stream_microbatches, each call's first read is not overlapped: this method
+            # never awaits, so a queued call starts reading only after the previous call returns.
+            # Start the reads when a call arrives.
             microbatch_groups = RDMAMicrobatchPrefetcher(microbatches)
         result = engine.forward_backward(
             microbatch_groups=microbatch_groups,
             aux_loss_denominators=aux_loss_denominators,
         )
-        self._num_flops = result.num_flops
+        self._step_num_flops += result.num_flops
         if not engine.pp_has_last_stage:
+            # Ranks with the last stage wait for the GPU when they reduce the loss metrics below.
+            # Wait here too, so this call's busy time includes its GPU work.
+            torch.accelerator.current_stream(engine.device).synchronize()
+            self._step_forward_backward_s += (
+                time.perf_counter() - forward_backward_start
+            )
             return None
         microbatch_metrics: list[dict[str, float]] = []
         # TODO: pick the cross-rank reduce with loss_metric_reduce_op, so /min keys take
@@ -345,9 +360,12 @@ class Trainer(Configurable):
 
         metrics = combine_microbatch_metrics(microbatch_metrics)
         if uses_rdma:
-            # The slowest rank's total read time this step, hidden or not (max over the loss mesh).
+            # The slowest rank's read time this step so far, hidden or not (max over the loss mesh).
+            # Each call reports the step's running total, so the controller's max over the step's calls
+            # (`combine_microbatch_metrics`) is the step total.
+            self._step_read_microbatches_s += microbatch_groups.read_s
             read_microbatches_s = torch.tensor(
-                microbatch_groups.read_s, device=engine.device
+                self._step_read_microbatches_s, device=engine.device
             )
             metrics.update(
                 self._reduce_forward_backward_metrics(
@@ -357,6 +375,7 @@ class Trainer(Configurable):
                     },
                 )
             )
+        self._step_forward_backward_s += time.perf_counter() - forward_backward_start
         return metrics
 
     @sl.log_trace_span("optim_step")
@@ -372,13 +391,14 @@ class Trainer(Configurable):
         # scheduler advances in engine.optim_step().
         lr_metrics = engine.optim.lr_schedulers.get_metrics()
 
+        optim_start = time.perf_counter()
         grad_norm = engine.optim_step()
         self._mark_model_state_dict_ready_for_push()
         self._resume_state.value = resume_state
 
         # TODO: Move performance, LR, and auxiliary-loss reporting into a shared
         # trainer metrics interface while preserving controller-side aggregation.
-        mean_num_flops = self._num_flops
+        mean_num_flops = self._step_num_flops
         if engine.parallelism_context.dp_enabled:
             dp_mesh = engine.parallelism_context.get_mesh("dp")
             mean_num_flops = (
@@ -391,14 +411,21 @@ class Trainer(Configurable):
                 / dp_mesh.size()
             )
 
+        # Busy time only: the forward_backward calls plus this update, not the waits between them.
         performance = compute_training_performance_metrics(
             num_tokens=self._step_num_tokens_per_dp_rank,
-            elapsed_time=time.perf_counter() - self._step_compute_start,
+            elapsed_time=(
+                self._step_forward_backward_s + time.perf_counter() - optim_start
+            ),
             non_data_parallel_size=engine.parallelism_context.non_data_parallel_size,
             num_flops=mean_num_flops,
             gpu_peak_flops=self.gpu_peak_flops,
             has_quantization=engine.has_quantization,
         )
+        self._step_forward_backward_s = 0.0
+        self._step_num_tokens_per_dp_rank = 0
+        self._step_num_flops = 0
+        self._step_read_microbatches_s = 0.0
 
         engine.save_checkpoint(last_step=last_step)
         engine.step_profiler()

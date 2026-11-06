@@ -58,6 +58,28 @@ class MetricsTimer:
         ]
 
 
+def forward_backward_wait_and_busy_seconds(
+    step_start_s: float, calls: list[tuple[float, float]]
+) -> tuple[float, float]:
+    """The trainer's total wait for batches and its total forward/backward time in one step, from each
+    forward_backward call's (sent, finished) times. The trainer runs its calls in order, so a call sent
+    while the previous one runs starts when that one finishes.
+
+    Example:
+        # Each call takes 3 s. Batch 2 is sent at t=1, while call 1 runs; batch 3 at t=10.
+        forward_backward_wait_and_busy_seconds(0.0, [(0.0, 3.0), (1.0, 6.0), (10.0, 13.0)])
+        # -> (4.0, 9.0): waits 0 + 0 + 4, forward/backward 3 + 3 + 3
+    """
+    wait_s = busy_s = 0.0
+    previous_end_s = step_start_s
+    for sent_s, finished_s in calls:
+        start_s = max(sent_s, previous_end_s)
+        wait_s += start_s - previous_end_s
+        busy_s += finished_s - start_s
+        previous_end_s = finished_s
+    return wait_s, busy_s
+
+
 _REDUCE_FNS = {"sum": operator.add, "max": max, "min": min}
 
 

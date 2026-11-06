@@ -10,11 +10,18 @@ Losses are sums. N is 509 here, not a power of two, so dividing by a wrong count
 gradients. FSDP 2 with the batcher's uneven per-rank loss tokens matches 1 GPU running both
 ranks' microbatches: optim_step sums the count over the DP ranks.
 
+Streamed forward_backward calls give the optimizer the same gradients as one call. One call and
+two calls run the same operations, so the gradients are bitwise equal on 1 GPU and with PP. HSDP
+all-reduces the replicas once per call instead of once per step, which reassociates the sum
+(allclose).
+
+    pytest tests/rl/unit_tests/gpu/test_loss_token_count.py                 # 1 GPU
     pytest tests/rl/unit_tests/gpu/test_loss_token_count.py -m multi_gpu    # 2 GPUs
 """
 
 import dataclasses
 import os
+from functools import partial
 
 import numpy as np
 import pytest
@@ -50,6 +57,21 @@ from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 _NUM_TOKENS_PER_MICROBATCH = 64
 _NUM_LOSS_TOKENS = 509
 
+# world size, trainer parallelism
+_LAYOUTS = {
+    "one_gpu": (1, ParallelismConfig()),
+    # HSDP all-reduces the replicas at each call's last group; PP finalizes gradients per group.
+    "hsdp": (2, ParallelismConfig(data_parallel_replicate_degree=2)),
+    "pp": (
+        2,
+        ParallelismConfig(
+            pipeline_parallel_degree=2,
+            pipeline_parallel_schedule="1F1B",
+            num_pp_microbatches=2,
+        ),
+    ),
+}
+
 
 def _trainer_config(
     parallelism: ParallelismConfig,
@@ -62,6 +84,13 @@ def _trainer_config(
         seq_len=_NUM_TOKENS_PER_MICROBATCH,
         attn_backend="varlen",
     )
+    if parallelism.pipeline_parallel_degree > 1:
+        # Tied embeddings cannot be split across pipeline stages. Untied, the embedding needs its
+        # own init: the tied output layer initialized it.
+        trainer_model.enable_weight_tying = False
+        trainer_model.tok_embeddings.param_init = {
+            "weight": partial(torch.nn.init.normal_, std=0.02)
+        }
     config = rl_grpo_qwen3_0_6b_varlen_no_compile(seq_len=_NUM_TOKENS_PER_MICROBATCH)
     trainer_config = dataclasses.replace(
         config.trainer,
@@ -106,7 +135,30 @@ def _training_sample_group(rng: np.random.Generator) -> TrainingSampleGroup:
     return TrainingSampleGroup(group_id=0, training_samples=samples, metrics=[])
 
 
-def _pack_batch(*, dp_degree: int) -> TrainerStepBatch:
+def _build_trainer(
+    rank: int,
+    world_size: int,
+    port: int,
+    parallelism: ParallelismConfig,
+    output_dir: str,
+) -> Trainer:
+    os.environ.update(
+        MASTER_ADDR="localhost",
+        MASTER_PORT=str(port),
+        RANK=str(rank),
+        LOCAL_RANK=str(rank),
+        WORLD_SIZE=str(world_size),
+    )
+    trainer_config, precision = _trainer_config(parallelism)
+    return Trainer(
+        trainer_config,
+        precision=precision,
+        max_num_documents=None,
+        output_dir=output_dir,
+    )
+
+
+def _pack_batch(*, dp_degree: int, num_pp_microbatches: int) -> TrainerStepBatch:
     batch, _ = (
         Batcher.Config()
         .build(
@@ -114,7 +166,7 @@ def _pack_batch(*, dp_degree: int) -> TrainerStepBatch:
             max_context_length=_NUM_TOKENS_PER_MICROBATCH,
             num_prompts_per_train_step=1,
             dp_degree=dp_degree,
-            num_pp_microbatches=1,
+            num_pp_microbatches=num_pp_microbatches,
             pad_id=0,
             temperature=1.0,
         )
@@ -147,6 +199,52 @@ def _record_optimizer_gradients(trainer: Trainer) -> list[dict[str, torch.Tensor
     return gradients
 
 
+def _run_streamed_vs_one_call(
+    rank: int, world_size: int, port: int, layout: str, output_dir: str
+) -> None:
+    parallelism = _LAYOUTS[layout][1]
+    trainer = _build_trainer(rank, world_size, port, parallelism, output_dir)
+    engine = trainer.engine
+    batch = _pack_batch(
+        dp_degree=trainer.dp_size,
+        num_pp_microbatches=parallelism.num_pp_microbatches,
+    )
+    column = [
+        [row[trainer.dp_rank] for row in group] for group in batch.microbatch_groups
+    ]
+    assert len(column) >= 2
+    first, second = column[: len(column) // 2], column[len(column) // 2 :]
+    gradients = _record_optimizer_gradients(trainer)
+    # The model has no auxiliary loss; every call takes the step's denominators.
+    denominators = aux_loss_denominators(
+        batch.routing_token_counts, torch.tensor(batch.num_loss_tokens)
+    )
+
+    engine.forward_backward(
+        microbatch_groups=column, aux_loss_denominators=denominators
+    )
+    one_call_loss = engine.loss.clone()
+    engine.optim_step()
+    engine.forward_backward(microbatch_groups=first, aux_loss_denominators=denominators)
+    engine.forward_backward(
+        microbatch_groups=second, aux_loss_denominators=denominators
+    )
+    streamed_loss = engine.loss.clone()
+    engine.optim_step()
+
+    assert int(engine.global_loss_token_count) == _NUM_LOSS_TOKENS
+    one_call, streamed = gradients
+    for name, expected in one_call.items():
+        if layout == "hsdp":
+            torch.testing.assert_close(streamed[name], expected)
+        else:
+            assert torch.equal(streamed[name], expected), name
+    if engine.pp_has_last_stage:
+        # The calls add the groups' losses in another order.
+        torch.testing.assert_close(streamed_loss, one_call_loss)
+    dist.destroy_process_group()
+
+
 def _run_dp_ranks_on_one_or_two_gpus(
     rank: int, world_size: int, port: int, output_dir: str
 ) -> None:
@@ -156,22 +254,9 @@ def _run_dp_ranks_on_one_or_two_gpus(
         if world_size == 1
         else ParallelismConfig(data_parallel_shard_degree=2)
     )
-    os.environ.update(
-        MASTER_ADDR="localhost",
-        MASTER_PORT=str(port),
-        RANK=str(rank),
-        LOCAL_RANK=str(rank),
-        WORLD_SIZE=str(world_size),
-    )
-    trainer_config, precision = _trainer_config(parallelism)
-    trainer = Trainer(
-        trainer_config,
-        precision=precision,
-        max_num_documents=None,
-        output_dir=output_dir,
-    )
+    trainer = _build_trainer(rank, world_size, port, parallelism, output_dir)
     model = trainer.engine.model_parts[0]
-    batch = _pack_batch(dp_degree=2)
+    batch = _pack_batch(dp_degree=2, num_pp_microbatches=1)
     columns = [
         [[row[dp_rank] for row in group] for group in batch.microbatch_groups]
         for dp_rank in range(2)
@@ -222,6 +307,27 @@ def _run_dp_ranks_on_one_or_two_gpus(
             os.path.join(output_dir, f"gradients_{world_size}.pt"),
         )
     dist.destroy_process_group()
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [
+        pytest.param(layout, marks=[pytest.mark.multi_gpu] if world_size > 1 else [])
+        for layout, (world_size, _) in _LAYOUTS.items()
+    ],
+)
+def test_streamed_microbatches_match_one_forward_backward(
+    layout: str, tmp_path
+) -> None:
+    world_size = _LAYOUTS[layout][0]
+    if torch.cuda.device_count() < world_size:
+        pytest.skip(f"needs {world_size} GPUs")
+    mp.spawn(
+        _run_streamed_vs_one_call,
+        args=(world_size, get_free_port(), layout, str(tmp_path)),
+        nprocs=world_size,
+        join=True,
+    )
 
 
 @pytest.mark.multi_gpu

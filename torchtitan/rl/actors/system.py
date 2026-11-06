@@ -71,6 +71,11 @@ class ActorSystem(Configurable, abc.ABC):
     - ``.stream(...)``: on every actor, yielding each rank's value as it arrives;
     - ``.broadcast(...)``: on every actor, without waiting for or returning a result.
 
+    A call is sent when it is made. The trainer runs one caller's ``forward_backward``
+    calls one at a time, in send order: the controller sends the next one while the
+    previous one runs. Monarch's concurrent endpoint starts queued calls in order, and
+    ``Trainer.forward_backward`` never awaits, so each call finishes before the next starts.
+
     These are Monarch's endpoint calls; another framework's actor system wraps its
     handles to provide them.
     """
