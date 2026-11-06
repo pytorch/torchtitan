@@ -81,28 +81,38 @@ class RegisterRDMAMicrobatch(Protocol):
 
 # Reads queued behind the one the engine waits on. A rank holds at most 4 microbatches on
 # the host: these 2, the one waited on, and the previous one, still in the engine's loop.
+# A queued call's prefetcher holds its first 2 more, so 6 with 2 calls in flight.
 _NUM_MICROBATCHES_READ_AHEAD = 2
 
 
 class RDMAMicrobatchPrefetcher:
     """Yields this rank's microbatches in order, reading the next ones on a background thread.
 
+    The first reads start when it is created, so they overlap an earlier call's GPU work.
     Implements only what `TrainingEngine.forward_backward` uses: `len()` and one in-order pass.
 
     Example:
         prefetcher = RDMAMicrobatchPrefetcher([rdma_microbatch_0, ..., rdma_microbatch_3])
+        # reads 0 and 1 start now
         len(prefetcher)  # 4
         for [microbatch] in prefetcher:
             train(microbatch)
+        prefetcher.close()  # cancels the reads not started yet, e.g. after a failed call
 
-        read thread:  read 0 | read 1, read 2 | read 3  |
-        main thread:  wait   | train 0        | train 1 | train 2 | train 3
+        read thread:  read 0, read 1    | read 2  | read 3  |
+        main thread:  earlier call      | train 0 | train 1 | train 2 | train 3
     """
 
     def __init__(self, rdma_microbatches: list[RDMAMicrobatch]) -> None:
         self._rdma_microbatches = rdma_microbatches
         # This rank's total read time, hidden or not; final once the pass ends.
         self.read_s = 0.0
+        self._pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="microbatch_read"
+        )
+        self._reads: deque[Future[TrainingMicrobatch]] = deque()
+        for rdma_microbatch in rdma_microbatches[:_NUM_MICROBATCHES_READ_AHEAD]:
+            self._submit_read(rdma_microbatch)
 
     def __len__(self) -> int:
         return len(self._rdma_microbatches)
@@ -113,26 +123,32 @@ class RDMAMicrobatchPrefetcher:
             with sl.log_trace_span("wait_for_microbatch"):
                 return read.result()
 
-        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="microbatch_read")
-        reads: deque[Future[TrainingMicrobatch]] = deque()
         try:
-            for rdma_microbatch in self._rdma_microbatches:
-                # Copy the actor's context: in a bare thread an actor framework can start a second
-                # client (Monarch does).
-                # Create the coroutine there too, so a cancelled read doesn't leave one unawaited.
-                reads.append(
-                    pool.submit(
-                        contextvars.copy_context().run, self._read, rdma_microbatch
-                    )
-                )
-                if len(reads) > _NUM_MICROBATCHES_READ_AHEAD:
-                    yield [wait_for_microbatch(reads.popleft())]
-            while reads:
-                yield [wait_for_microbatch(reads.popleft())]
+            for rdma_microbatch in self._rdma_microbatches[
+                _NUM_MICROBATCHES_READ_AHEAD:
+            ]:
+                self._submit_read(rdma_microbatch)
+                yield [wait_for_microbatch(self._reads.popleft())]
+            while self._reads:
+                yield [wait_for_microbatch(self._reads.popleft())]
         finally:
-            # The pass ended, or the generator was closed or collected (e.g. a failed step). Cancel the queued
-            # reads: with the batcher gone, each would wait out the 60 s RDMA timeout. The running read finishes.
-            pool.shutdown(cancel_futures=True)
+            # The pass ended, or the generator was closed or collected (e.g. a failed step).
+            self.close()
+
+    def close(self) -> None:
+        """Cancel the reads not started and wait for the running one, also if the pass never ran."""
+        # With the batcher gone, each queued read would wait out the 60 s RDMA timeout.
+        self._pool.shutdown(cancel_futures=True)
+
+    def _submit_read(self, rdma_microbatch: RDMAMicrobatch) -> None:
+        # Copy the caller's context: in a bare thread an actor framework can start a second
+        # client (Monarch does).
+        # Create the coroutine there too, so a cancelled read doesn't leave one unawaited.
+        self._reads.append(
+            self._pool.submit(
+                contextvars.copy_context().run, self._read, rdma_microbatch
+            )
+        )
 
     def _read(self, rdma_microbatch: RDMAMicrobatch) -> TrainingMicrobatch:
         start = time.perf_counter()

@@ -73,8 +73,10 @@ class ActorSystem(Configurable, abc.ABC):
 
     A call is sent when it is made. The trainer runs one caller's ``forward_backward``
     calls one at a time, in send order: the controller sends the next one while the
-    previous one runs. Monarch's concurrent endpoint starts queued calls in order, and
-    ``Trainer.forward_backward`` never awaits, so each call finishes before the next starts.
+    previous one runs. Monarch's concurrent endpoint starts queued calls in order.
+    ``Trainer.forward_backward`` holds a first-in, first-out lock and waits for the GPU off
+    the event loop. So the next call starts its RDMA reads during that wait, and its engine
+    work after the previous call returns.
 
     These are Monarch's endpoint calls; another framework's actor system wraps its
     handles to provide them.
