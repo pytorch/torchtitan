@@ -313,6 +313,20 @@ class SGLangEngine(GenerationEngine):
         # The sessions of each rollout group with a request admitted, for
         # `release_sessions`.
         self._group_sessions: dict[int, set[str]] = {}
+        # Per (cache salt, prompt) whose first admitted request awaits its prefill:
+        # that request, and the later requests with that prompt, held out of
+        # SGLang's waiting queue until then (see add_requests).
+        # TODO(https://github.com/sgl-project/sglang/issues/48963): SGLang could share
+        # a prompt's KV among requests in one prefill batch, as vLLM's prefix cache
+        # does; then drop the holding.
+        self._awaiting_prefill: dict[
+            tuple[str | None, tuple[int, ...]], tuple[Req, list[Req]]
+        ] = {}
+        # Without the extra_buffer strategy, SGLang snapshots a linear attention
+        # state only at the end of the cached prefix: a request that shares a whole
+        # prompt still recomputes its last token, so it needs the state one token
+        # earlier and reuses nothing. Holding it would only delay it.
+        self._hold_shared_prompts = not has_linear_attention
         # SGLang turns overlap scheduling off only for linear attention models (see
         # step()).
         if not self._scheduler.enable_overlap and not has_linear_attention:
@@ -445,6 +459,14 @@ class SGLangEngine(GenerationEngine):
         SGLang validates the rest as it admits a request and aborts an invalid one
         instead of raising, so that rejection is the abort, before SGLang schedules it.
         The checks are deterministic, so every TP rank rejects the same requests.
+
+        A request whose prompt (and cache salt) matches an admitted request still
+        awaiting its prefill waits outside SGLang's waiting queue until that prefill
+        is done, then reuses its KV. SGLang caches a request's KV only after its
+        prefill, so the samples of a rollout group admitted in one prefill batch
+        would each compute the prompt. SGLang's own parallel sampling (n > 1)
+        prefills the prompt first for the same reason. Linear attention models do
+        not hold requests (see ``_hold_shared_prompts``).
         """
         sglang_requests = []
         rejected: list[tuple[str, Exception]] = []
@@ -512,11 +534,22 @@ class SGLangEngine(GenerationEngine):
         arrival_times = {
             request.request_id: request.arrival_time for request in requests
         }
-        queued = set()
+        queued: dict[str, Req] = {}
         for req in self._scheduler.waiting_queue:
             if req.rid in admitted:
                 self._output_collector.admit(req, arrival_times[req.rid])
-                queued.add(req.rid)
+                queued[req.rid] = req
+        if self._hold_shared_prompts:
+            held = set()
+            # In admission order, so every TP rank picks the same leaders.
+            for req in queued.values():
+                key = (req.cache_salt, tuple(req.origin_input_ids))
+                if key in self._awaiting_prefill:
+                    self._awaiting_prefill[key][1].append(req)
+                    held.add(req.rid)
+                else:
+                    self._awaiting_prefill[key] = (req, [])
+            self._scheduler.waiting_queue.take(lambda req: req.rid in held)
         for finished, abort_message in self._output_collector.take():
             if finished.request_id in admitted:
                 assert (
@@ -526,7 +559,7 @@ class SGLangEngine(GenerationEngine):
             else:
                 self._finished.append(finished)
         # The collector reports a request's metrics from what admit() recorded.
-        unqueued = admitted - queued - {request_id for request_id, _ in rejected}
+        unqueued = admitted - queued.keys() - {request_id for request_id, _ in rejected}
         assert not unqueued, f"not in SGLang's waiting queue: {sorted(unqueued)}"
         return rejected
 
@@ -560,9 +593,13 @@ class SGLangEngine(GenerationEngine):
         return params
 
     def has_unfinished_requests(self) -> bool:
-        """Whether any admitted request is still running, or finished and not yet
-        returned by ``step()``."""
-        return bool(self._finished) or not self._scheduler.is_fully_idle()
+        """Whether any admitted request is still running or held, or finished and not
+        yet returned by ``step()``."""
+        return (
+            bool(self._finished)
+            or bool(self._awaiting_prefill)
+            or not self._scheduler.is_fully_idle()
+        )
 
     def step(self) -> list[FinishedRequest]:
         """Run one iteration of SGLang's event loop, a TP collective, and return the
@@ -583,6 +620,16 @@ class SGLangEngine(GenerationEngine):
                 # overlap, but needs the kernels to write state snapshots at
                 # intermediate positions (see register_to_sglang).
                 _normal_event_loop_iteration(scheduler)
+            # Processing a prefill's results appends the first token and caches the
+            # prompt's KV; queue the requests held for it (see add_requests).
+            released = []
+            for key, (leader, followers) in list(self._awaiting_prefill.items()):
+                if leader.output_ids or leader.finished():
+                    del self._awaiting_prefill[key]
+                    released.extend(followers)
+            # Without restamping their wait queue entry times, which order requests
+            # of equal priority.
+            scheduler.waiting_queue.join(released)
         finished, self._finished = self._finished, []
         finished.extend(request for request, _ in self._output_collector.take())
         return finished
