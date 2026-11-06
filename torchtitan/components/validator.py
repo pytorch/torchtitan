@@ -8,7 +8,7 @@ import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 from torch.distributed.pipelining.schedules import (
@@ -43,6 +43,10 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.tools import utils
 
+
+if TYPE_CHECKING:
+    from torchtitan.components.data.multimodal.image_processor import ImageProcessor
+    from torchtitan.components.data.multimodal.video_processor import VideoProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +140,8 @@ class Validator(BaseValidator):
         metrics_processor: MetricsProcessor,
         seq_len: int,
         num_tokens_per_microbatch: int,
+        image_processor: "ImageProcessor | None" = None,
+        video_processor: "VideoProcessor | None" = None,
         accelerator_graph_enabled: bool = False,
         cuda_graph_annotation_config: dict[str, Any] | None = None,
         pp_schedule: _PipelineSchedule | None = None,
@@ -146,6 +152,8 @@ class Validator(BaseValidator):
         super().__init__(config=config)
         self.parallelism = parallelism
         self.tokenizer = tokenizer
+        self.image_processor = image_processor
+        self.video_processor = video_processor
         self.parallelism_context = parallelism_context
         self.loss_fn = loss_fn
         # A bounded validation run repeats data; steps=-1 consumes one finite pass.
@@ -312,6 +320,8 @@ class Validator(BaseValidator):
                 tokenizer=self.tokenizer,
                 max_context_length=self.seq_len,
                 num_tokens_per_microbatch=self.num_tokens_per_microbatch,
+                image_processor=self.image_processor,
+                video_processor=self.video_processor,
             )
 
             validation_iterator = iter(

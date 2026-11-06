@@ -20,7 +20,9 @@ from torchtitan.components.data.dataset import SingleDatasetConfig
 from torchtitan.components.data.multimodal import mm_datasets
 from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
 from torchtitan.components.data.multimodal.utils.audio import load_pcm_waveform
+from torchtitan.components.data.multimodal.utils.resize import resize_to_pixel_budget
 from torchtitan.components.data.multimodal.utils.video import load_npy_video_frames
+from torchtitan.components.data.multimodal.video_processor import VideoProcessor
 from torchtitan.components.data.sources import IndexedJsonlSource
 from torchtitan.components.data.types import DatasetBuildContext
 from torchtitan.components.loss import IGNORE_INDEX
@@ -126,23 +128,25 @@ def test_video_sample_processor_resizes_and_masks(audio_tokenizer):
     row = _first_manifest_row("video")
     frames = load_npy_video_frames(_ASSET_ROOT / "video_text" / row["video_path"])
 
+    video_processor = VideoProcessor.Config(
+        patch_size=14,
+        temporal_patch_size=2,
+        spatial_merge_size=1,
+        image_mean=(0.5, 0.5, 0.5),
+        image_std=(0.5, 0.5, 0.5),
+        resize_fn=lambda height, width, **kwargs: (height, width, 0, 6),
+        patch_order="block",
+    ).build()
+
     result = mm_datasets._process_video_text_sample(
         text=row["text"],
         frames=frames,
         tokenizer=audio_tokenizer,
-        patch_size=14,
-        temporal_patch_size=2,
-        spatial_merge_size=1,
-        min_pixels=1,
-        max_pixels=1_000_000,
-        image_mean=(0.5, 0.5, 0.5),
-        image_std=(0.5, 0.5, 0.5),
-        resize_fn=lambda height, width, **kwargs: (height, width, 0, 6),
-        max_patches=128,
-        max_patches_per_side=32,
+        video_processor=video_processor,
     )
 
     assert result["pixel_values_videos"][0].shape == (2, 28, 42, 3)
+    assert result["pixel_values_videos"][0].dtype == torch.uint8
     assert torch.any(result["input_ids"] == audio_tokenizer.video_id)
     _assert_media_targets_masked(
         result,
@@ -168,16 +172,19 @@ def test_synthetic_datasets_register_absolute_sources_and_processors():
 
 def _synthetic_loader(audio_tokenizer, dataset_name: str):
     dataset = synthetic_multimodal.SYNTHETIC_MM_DATASETS[dataset_name]
-    assert dataset.processor is not None
+    video_processor = None
     if dataset_name == "synthetic-video-text":
-        dataset = replace(
-            dataset,
-            processor=replace(
-                dataset.processor,
-                min_pixels=784,
-                max_pixels=200_000,
-            ),
-        )
+        video_processor = VideoProcessor.Config(
+            patch_size=16,
+            temporal_patch_size=2,
+            spatial_merge_size=2,
+            image_mean=(0.5, 0.5, 0.5),
+            image_std=(0.5, 0.5, 0.5),
+            resize_fn=resize_to_pixel_budget,
+            patch_order="block",
+            min_pixels=784,
+            max_pixels=200_000,
+        ).build()
     collator = MultiModalCollator.Config()
     if dataset_name == "synthetic-audio-text":
         collator = replace(
@@ -198,6 +205,7 @@ def _synthetic_loader(audio_tokenizer, dataset_name: str):
         tokenizer=audio_tokenizer,
         max_context_length=512,
         num_tokens_per_microbatch=512,
+        video_processor=video_processor,
     )
 
 

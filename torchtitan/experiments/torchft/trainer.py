@@ -203,6 +203,16 @@ class FaultTolerantTrainer(Configurable):
             if config.tokenizer is not None
             else None
         )
+        self.image_processor = (
+            config.image_processor.build()
+            if config.image_processor is not None
+            else None
+        )
+        self.video_processor = (
+            config.video_processor.build()
+            if config.video_processor is not None
+            else None
+        )
 
         num_pp_microbatches = (
             config.parallelism.num_pp_microbatches
@@ -219,6 +229,8 @@ class FaultTolerantTrainer(Configurable):
             tokenizer=self.tokenizer,
             max_context_length=config.model.max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
+            image_processor=self.image_processor,
+            video_processor=self.video_processor,
         )
 
         # metrics logging (FT addition: ft_enable, ft_replica_id)
@@ -310,6 +322,8 @@ class FaultTolerantTrainer(Configurable):
                 dp_world_size=dp_degree,
                 dp_rank=dp_rank,
                 tokenizer=self.tokenizer,
+                image_processor=self.image_processor,
+                video_processor=self.video_processor,
                 parallelism_context=parallelism_context,
                 loss_fn=engine.loss_fn,
                 metrics_processor=self.metrics_processor,

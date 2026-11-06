@@ -7,39 +7,12 @@
 """Video processing utilities for multimodal datasets."""
 
 import logging
-from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
 import torch
 
-import torchvision.transforms.v2.functional as TVF
-
-from .image import smart_resize
-
-
 logger = logging.getLogger(__name__)
-
-
-def _resize_video_to_pixel_budget(
-    height: int,
-    width: int,
-    *,
-    patch_size: int,
-    merge_size: int,
-    min_pixels: int,
-    max_pixels: int,
-    **_: object,
-) -> tuple[int, int, int, int]:
-    """Adapt the default video resize geometry to the shared callback API."""
-    resize_h, resize_w = smart_resize(
-        height,
-        width,
-        factor=patch_size * merge_size,
-        min_pixels=min_pixels,
-        max_pixels=max_pixels,
-    )
-    return resize_h, resize_w, 0, 0
 
 
 def load_npy_video_frames(path: str | Path) -> torch.Tensor:
@@ -157,69 +130,3 @@ def load_video(
     except Exception as e:
         logger.warning(f"Error loading video {path}: {e}")
         return None
-
-
-def process_video(
-    video: torch.Tensor,
-    patch_size: int,
-    merge_size: int,
-    max_pixels: int,
-    min_pixels: int,
-    image_mean: tuple[float, ...] = (0.5, 0.5, 0.5),
-    image_std: tuple[float, ...] = (0.5, 0.5, 0.5),
-    resize_fn: Callable[..., tuple[int, int, int, int]] = _resize_video_to_pixel_budget,
-    image_interpolation_mode: TVF.InterpolationMode = TVF.InterpolationMode.BICUBIC,
-    max_patches: int = 4096,
-    max_patches_per_side: int = 512,
-) -> torch.Tensor:
-    """Resize and normalize video frames for VLM training.
-
-    Uses torchvision v2 APIs with uint8 resize for faster SIMD paths.
-
-    Args:
-        video: Raw video tensor of shape (T, H, W, C) in uint8.
-        patch_size: Spatial patch size.
-        merge_size: Spatial merge size.
-        max_pixels: Maximum spatial pixels per frame (H * W budget).
-        min_pixels: Minimum spatial pixels per frame (H * W budget).
-        image_mean: Per-channel mean for normalization.
-        image_std: Per-channel std for normalization.
-        resize_fn: Resize-strategy callable shared with ``process_image``.
-        image_interpolation_mode: Torchvision interpolation mode used to resize
-            the video frames.
-        max_patches: Pre-padding raw-patch budget.
-        max_patches_per_side: Pre-padding per-side raw-patch limit.
-
-    Returns:
-        Normalized tensor of shape (T, H', W', C) in float32.
-    """
-    _, height, width, _ = video.shape
-    resize_h, resize_w, pad_h, pad_w = resize_fn(
-        height,
-        width,
-        patch_size=patch_size,
-        merge_size=merge_size,
-        min_pixels=min_pixels,
-        max_pixels=max_pixels,
-        max_patches=max_patches,
-        max_patches_per_side=max_patches_per_side,
-    )
-
-    # Resize on uint8 for faster SIMD paths (AVX2/NEON)
-    # (T, H, W, C) → (T, C, H, W) for torchvision
-    video = video.permute(0, 3, 1, 2)  # (T, C, H, W) uint8
-    if (resize_h, resize_w) != (height, width):
-        video = TVF.resize(
-            video,
-            [resize_h, resize_w],
-            interpolation=image_interpolation_mode,
-            antialias=True,
-        )
-    if pad_h or pad_w:
-        video = TVF.pad(video, [0, 0, pad_w, pad_h])
-
-    # uint8 → float32 [0, 1] → normalize → channel-last
-    video = TVF.to_dtype(video, torch.float32, scale=True)
-    video = TVF.normalize(video, list(image_mean), list(image_std), inplace=True)
-    # (T, C, H', W') → (T, H', W', C)
-    return video.permute(0, 2, 3, 1)

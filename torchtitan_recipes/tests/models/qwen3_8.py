@@ -6,18 +6,11 @@
 
 """Qwen3.8 model configurations used by tests."""
 
-from dataclasses import replace
 
-from torchtitan.components.data import (
-    ConcatThenSplitPackingConfig,
-    GrainDataLoader,
-    SingleDatasetConfig,
-)
+from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data.multimodal.image_processor import ImageProcessor
 from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
-from torchtitan.components.data.multimodal.mm_datasets import (
-    MM_DATASETS,
-    VisionProcessor,
-)
+from torchtitan.components.data.multimodal.mm_datasets import MM_DATASETS
 from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
@@ -37,24 +30,15 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
-from torchtitan.models.qwen3_8 import build_model_config, QWEN3_8_SPECIAL_TOKENS
+from torchtitan.models.qwen3_8 import (
+    build_model_config,
+    QWEN3_8_IMAGE_PROCESSOR,
+    QWEN3_8_SPECIAL_TOKENS,
+)
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
 from torchtitan_recipes.data import c4_document_capacity
-
-
-def _multimodal_collator_config(
-    dataset_config: SingleDatasetConfig,
-) -> MultiModalCollator.Config:
-    processor_config = dataset_config.processor
-    assert isinstance(processor_config, VisionProcessor.Config)
-    return replace(
-        MultiModalCollator.Config(build_mrope_positions=True),
-        patch_size=processor_config.patch_size,
-        temporal_patch_size=processor_config.temporal_patch_size,
-        spatial_merge_size=processor_config.spatial_merge_size,
-    )
 
 
 def qwen38_debugmodel(
@@ -72,12 +56,13 @@ def qwen38_debugmodel(
         ),
         hf_assets_path="./tests/assets/tokenizer",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_8_SPECIAL_TOKENS),
+        image_processor=ImageProcessor.Config(**QWEN3_8_IMAGE_PROCESSOR),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         parallelism=parallelism,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m-test"],
-            collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
+            collator=MultiModalCollator.Config(build_mrope_positions=True),
             streaming_shuffle_buffer_size=128,
         ),
         optim=Optim.Config(
@@ -135,11 +120,12 @@ def qwen38_debugmodel_moe(
         ),
         hf_assets_path="./tests/assets/tokenizer",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_8_SPECIAL_TOKENS),
+        image_processor=ImageProcessor.Config(**QWEN3_8_IMAGE_PROCESSOR),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m-test"],
-            collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
+            collator=MultiModalCollator.Config(build_mrope_positions=True),
             streaming_shuffle_buffer_size=128,
         ),
         optim=Optim.Config(
@@ -175,10 +161,11 @@ def qwen38_27b(seq_len: int | None = None) -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/Qwen3.8-27B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_8_SPECIAL_TOKENS),
+        image_processor=ImageProcessor.Config(**QWEN3_8_IMAGE_PROCESSOR),
         model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
-            collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
+            collator=MultiModalCollator.Config(build_mrope_positions=True),
             streaming_shuffle_buffer_size=128,
         ),
         optim=Optim.Config(

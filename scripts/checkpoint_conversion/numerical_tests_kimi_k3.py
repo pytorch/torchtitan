@@ -37,17 +37,13 @@ import torch
 import torch.nn.functional as F
 from huggingface_hub import snapshot_download
 from PIL import Image
-from torchtitan.components.data.multimodal.utils.image import (
-    process_image,
-    resize_to_navit_patch_grid,
-    vision_to_patches,
-)
 
+from torchtitan.components.data.multimodal.image_processor import ImageProcessor
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.activation import SiTUGLU
 from torchtitan.models.common.attention.kda import InnerKDA, KDA
 from torchtitan.models.common.feed_forward import DenseFeedForward
-from torchtitan.models.kimi_k3 import build_model_config
+from torchtitan.models.kimi_k3 import build_model_config, KIMI_K3_IMAGE_PROCESSOR
 from torchtitan.models.kimi_k3.attention import KimiMLAAttention
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.moe import KimiLatentMoE
@@ -60,10 +56,6 @@ _HF_REVISION = "9f62e4e9fffbd0a83ddd60e1c209d828994b3569"
 _DTYPE = torch.bfloat16
 _HF_ATTN_BACKEND = "eager"
 _MEDIA_TOKEN_ID = 163605
-_PATCH_SIZE = 14
-_MERGE_SIZE = 2
-_MAX_PATCHES = 65536
-_MAX_PATCHES_PER_SIDE = 512
 _PROMPT = (
     "<|kimi_image_placeholder|>\n" "What is shown in this image? Describe it briefly."
 )
@@ -422,32 +414,17 @@ def run_tt(
                 )
             )
 
-    image = process_image(
-        Image.fromarray(ref["raw_image"].numpy()),
-        patch_size=_PATCH_SIZE,
-        merge_size=_MERGE_SIZE,
-        resize_fn=resize_to_navit_patch_grid,
-        max_patches=_MAX_PATCHES,
-        max_patches_per_side=_MAX_PATCHES_PER_SIDE,
-        image_mean=(0.5, 0.5, 0.5),
-        image_std=(0.5, 0.5, 0.5),
-    )
-    if image is None:
-        raise ValueError("TorchTitan failed to process the numerical test image.")
-    patches, grid = vision_to_patches(
-        image,
-        patch_size=_PATCH_SIZE,
-        temporal_patch_size=1,
-        merge_size=_MERGE_SIZE,
-        patch_order="raster",
-    )
+    image_processor = ImageProcessor.Config(**KIMI_K3_IMAGE_PROCESSOR).build()
+    image = image_processor.decode_and_resize(Image.fromarray(ref["raw_image"].numpy()))
+    patches, grid_thw = image_processor.normalize_and_patchify([image])
     pixel_values = patches.to(device=device, dtype=vision_dtype)
-    grid_thw = grid.unsqueeze(0).to(device)
-    num_vision_tokens = (grid[1] // _MERGE_SIZE) * (grid[2] // _MERGE_SIZE)
+    grid_thw = grid_thw.to(device)
+    _, height, width, _ = image.shape
+    num_vision_tokens = image_processor.num_placeholder_tokens(1, height, width)
     tokens = _expand_image_placeholder(
         ref["input_ids"],
         _MEDIA_TOKEN_ID,
-        int(num_vision_tokens.item()),
+        num_vision_tokens,
     ).to(device)
     positions = torch.arange(
         tokens.shape[0],
@@ -458,7 +435,7 @@ def run_tt(
 
     print(
         f"tokens={tuple(tokens.shape)} pixel_values={tuple(pixel_values.shape)} "
-        f"grid_thw={grid_thw.tolist()} vision_tokens={num_vision_tokens.item()}"
+        f"grid_thw={grid_thw.tolist()} vision_tokens={num_vision_tokens}"
     )
 
     hf_pixels = ref["pixel_values"].flatten(1)

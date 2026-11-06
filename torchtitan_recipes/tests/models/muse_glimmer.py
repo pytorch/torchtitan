@@ -6,9 +6,10 @@
 
 """Muse Glimmer model configurations used by tests."""
 
-from dataclasses import replace
+from typing import Any
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data.multimodal.utils.resize import resize_to_pixel_budget
 from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
@@ -30,7 +31,6 @@ from torchtitan.models.common.config_utils import (
 )
 
 from torchtitan.models.muse_glimmer import build_model_config
-from torchtitan.models.muse_glimmer.model import MuseGlimmerModel
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
@@ -48,23 +48,32 @@ MUSE_GLIMMER_SPECIAL_TOKENS = {
     "pad_token": "<|endoftext|>",
 }
 
+# ``ImageProcessor.Config`` fields, used like the special tokens:
+# ``ImageProcessor.Config(**MUSE_GLIMMER_IMAGE_PROCESSOR)``. The patch sizes match
+# the NaViT encoder (``patch_size``, ``patch_temporal``, ``downsample_factor``),
+# and raster order matches its row-major patch layout.
+MUSE_GLIMMER_IMAGE_PROCESSOR: dict[str, Any] = {
+    "patch_size": 14,
+    "temporal_patch_size": 2,
+    "spatial_merge_size": 2,
+    "image_mean": (0.5, 0.5, 0.5),
+    "image_std": (0.5, 0.5, 0.5),
+    "resize_fn": resize_to_pixel_budget,
+    "patch_order": "raster",
+    "min_pixels": 784,
+    "max_pixels": 3136,
+}
 
-def _muse_glimmer_mm_dataloader(
-    model_config: MuseGlimmerModel.Config, dataset_name: str
-) -> GrainDataLoader.Config:
-    """Build the shared multimodal dataloader config, taking the vision-patch
-    geometry from the model's own vision encoder.
 
-    ``patch_size``/``temporal_patch_size``/``spatial_merge_size`` must match the
-    encoder exactly: they drive the image-placeholder token count the shared
-    dataset inserts, which must equal the encoder's downsampled output token
-    count. Deriving them from ``model_config`` keeps loader and encoder aligned.
-    ``patch_order="raster"`` matches the encoder's raster patch layout (row-major
-    grid); ``build_mrope_positions=False`` since Muse Glimmer uses 1D ComplexRoPE
-    on the LLM side, not MRoPE.
+def _muse_glimmer_mm_dataloader(dataset_name: str) -> GrainDataLoader.Config:
+    """Build the shared multimodal dataloader config. The trainer config also
+    needs ``image_processor`` built from ``MUSE_GLIMMER_IMAGE_PROCESSOR``.
 
-    NOTE: the multimodal dataloader imports (``MultiModalCollator`` /
-    ``resize_to_pixel_budget``) are done lazily here because they pull in
+    ``build_mrope_positions=False`` since Muse Glimmer uses 1D ComplexRoPE on
+    the LLM side, not MRoPE.
+
+    NOTE: the multimodal imports (``MultiModalCollator``, ``MM_DATASETS``, and
+    ``ImageProcessor`` in the callers) are done lazily because they pull in
     ``torchvision`` (via ``torchtitan.components.data.multimodal.utils.image``).
     ``torchvision`` is an optional dependency (not in requirements.txt /
     pyproject.toml), so importing it at module top level breaks the text-only
@@ -73,45 +82,12 @@ def _muse_glimmer_mm_dataloader(
     lets the text configs load without torchvision.
     """
     from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
-    from torchtitan.components.data.multimodal.mm_datasets import (
-        MM_DATASETS,
-        VisionProcessor,
-    )
-    from torchtitan.components.data.multimodal.utils.image import resize_to_pixel_budget
-
-    encoder = model_config.vision_encoder
-    if encoder is None:
-        raise ValueError("Multimodal Muse Glimmer must own a vision encoder")
-
-    base_dataset = MM_DATASETS[dataset_name]
-    base_processor = base_dataset.processor
-    if not isinstance(base_processor, VisionProcessor.Config):
-        raise ValueError(
-            f"Multimodal dataset {dataset_name!r} must use VisionProcessor.Config"
-        )
-    processor = replace(
-        base_processor,
-        patch_size=encoder.patch_size,
-        temporal_patch_size=encoder.patch_temporal,
-        spatial_merge_size=encoder.downsample_factor,
-        resize_fn=resize_to_pixel_budget,
-        min_pixels=784,
-        max_pixels=3136,
-        image_mean=(0.5, 0.5, 0.5),
-        image_std=(0.5, 0.5, 0.5),
-        max_patches=4096,
-        max_patches_per_side=512,
-    )
-    dataset = replace(base_dataset, processor=processor)
+    from torchtitan.components.data.multimodal.mm_datasets import MM_DATASETS
 
     return GrainDataLoader.Config(
-        dataset=dataset,
+        dataset=MM_DATASETS[dataset_name],
         collator=MultiModalCollator.Config(
             max_images_per_microbatch=8,
-            patch_size=processor.patch_size,
-            temporal_patch_size=processor.temporal_patch_size,
-            spatial_merge_size=processor.spatial_merge_size,
-            patch_order="raster",
             build_mrope_positions=False,
         ),
     )
@@ -189,6 +165,8 @@ def muse_glimmer_debugmodel_mm(
 
     The integration smoke suite covers the TP+CP+PP+SP path.
     """
+    from torchtitan.components.data.multimodal.image_processor import ImageProcessor
+
     parallelism = ParallelismConfig()
     mm_model_spec = build_model_config(
         "debugmodel_mm",
@@ -206,7 +184,8 @@ def muse_glimmer_debugmodel_mm(
         tokenizer=MultiModalTokenizer.Config(**MUSE_GLIMMER_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=mm_model_spec,
-        dataloader=_muse_glimmer_mm_dataloader(mm_model_spec, "cc12m-test"),
+        image_processor=ImageProcessor.Config(**MUSE_GLIMMER_IMAGE_PROCESSOR),
+        dataloader=_muse_glimmer_mm_dataloader("cc12m-test"),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
@@ -272,6 +251,8 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
 
 
 def muse_glimmer_30b_mm(seq_len: int | None = None) -> Trainer.Config:
+    from torchtitan.components.data.multimodal.image_processor import ImageProcessor
+
     parallelism = ParallelismConfig(
         data_parallel_shard_degree=-1,
         tensor_parallel_degree=1,
@@ -293,7 +274,8 @@ def muse_glimmer_30b_mm(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Muse-Glimmer-30B",
         tokenizer=MultiModalTokenizer.Config(**MUSE_GLIMMER_SPECIAL_TOKENS),
         model=model_config,
-        dataloader=_muse_glimmer_mm_dataloader(model_config, "cc12m"),
+        image_processor=ImageProcessor.Config(**MUSE_GLIMMER_IMAGE_PROCESSOR),
+        dataloader=_muse_glimmer_mm_dataloader("cc12m"),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=3e-4)]
