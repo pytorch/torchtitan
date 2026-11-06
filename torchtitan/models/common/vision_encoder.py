@@ -132,6 +132,32 @@ def create_block_diagonal_mask(
     )
 
 
+def create_padded_block_diagonal_mask(segment_ids: torch.Tensor) -> BlockMask:
+    """`create_block_diagonal_mask` for patches padded to a fixed count.
+
+    ``segment_ids`` gives each patch's segment, -1 for padding. Padding patches attend
+    only to themselves: no row is fully masked, and padding adds no work to the
+    segments' blocks. The mask depends on nothing but ``segment_ids``, so a CUDA graph
+    captured for one padded count can replay it for any segments that fit.
+    """
+    total_tokens = segment_ids.shape[0]
+
+    def mask_mod(b, h, q_idx, kv_idx):
+        q_segment = segment_ids[q_idx]
+        return (q_segment == segment_ids[kv_idx]) & (
+            (q_segment >= 0) | (q_idx == kv_idx)
+        )
+
+    return compiled_create_block_mask(
+        mask_mod,
+        1,
+        None,
+        total_tokens,
+        total_tokens,
+        device=segment_ids.device,
+    )
+
+
 class VisionMLP(Module):
     """Feed-forward network with GELU activation (fc1 -> act -> fc2)."""
 

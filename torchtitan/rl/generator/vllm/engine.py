@@ -144,6 +144,11 @@ class VLLMEngine(GenerationEngine):
         generator_name: str,
         output_dir: str,
     ):
+        if config.cuda_graph.vision_encoder and image_processor is None:
+            raise ValueError(
+                "cuda_graph.vision_encoder captures the vision encoder of image prompts; "
+                "set Controller.Config.image_processor too, or unset it."
+            )
         if (
             config.session_kv_holder is not None
             and reset_kv_cache_on_model_state_dict_load
