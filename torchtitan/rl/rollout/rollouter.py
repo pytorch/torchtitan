@@ -170,6 +170,9 @@ class Rollouter(Configurable):
         renderer_config: RendererConfig,
         hf_assets_path: str,
         vision_processor_config: VisionProcessor.Config | None = None,
+        # Replaces `Config.worker` when part of it is known only at setup, e.g. a server address.
+        # TODO: remove once the Verifiers env runs in the rollout worker (its only user).
+        worker_config: BaseRolloutWorker.Config | None = None,
     ) -> None:
         """Spawn the rollout worker pool through ``actor_system`` and initialize it."""
         if self._worker_actors is not None:
@@ -177,7 +180,7 @@ class Rollouter(Configurable):
 
         self._actor_system = actor_system
         self._worker_actors = await actor_system.spawn_rollout_workers(
-            self._config.worker,
+            worker_config if worker_config is not None else self._config.worker,
             num_workers=self._config.worker_pool_size,
             num_threads=self._config.num_threads_per_worker,
         )

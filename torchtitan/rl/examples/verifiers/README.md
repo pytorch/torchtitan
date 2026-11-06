@@ -19,33 +19,29 @@ package and dependencies: [`dapo_math/`](./dapo_math) (single-turn math) and
 
 ![TorchTitan and Verifiers integration architecture](../../../../assets/images/rl_verifiers_integration_architecture.svg)
 
-1. [`data.py`](./data.py) loads a Verifiers taskset in the TitanRL controller,
-   where TitanRL samples each rollout task. It converts the task's typed data
-   to a plain dictionary because `VerifiersEnvClient` sends that data as
-   msgpack over ZMQ to the separately spawned environment-server process. The
-   server reconstructs the typed task before running the Verifiers environment.
-2. [`env_server.py`](./env_server.py) currently spawns and owns the Verifiers server as
-   a separate local process on the TitanRL controller host. The configured
-   Verifiers runtime is independent: for example, `SubprocessConfig` or
-   `DockerConfig` for the agent. The server and each of its pool workers first run
-   [`worker_setup.py`](./worker_setup.py). Every worker imports that module, so it
-   must not import torch.
-3. [`generation_server.py`](./generation_server.py) exposes TitanRL's `GenerateFn` through the
-   HTTP token-generation protocol expected by Verifiers. It also retains the
-   policy-version span and metrics that are absent from Verifiers traces.
-4. `rollouter.py` sends samples to Verifiers and converts the
-   returned trace graph into TitanRL `RolloutTurn` objects. TitanRL then applies
-   its rubric and advantage estimator normally.
+1. [`data.py`](./data.py) loads the taskset in the controller, which sends each group's task to a
+   rollout worker.
+2. [`env_server.py`](./env_server.py) runs the Verifiers env server as a local process on the
+   controller host. Its pool workers run the agents in the configured runtime, e.g.
+   `SubprocessConfig` or `DockerConfig`. The server and each of its pool workers first run
+   [`worker_setup.py`](./worker_setup.py). Every worker imports that module, so it must not
+   import torch.
+3. `rollouter.py` runs each group in a rollout worker process (`VerifiersRolloutWorker`), like
+   TitanRL's own rollout groups. The worker sends the task to the env server (a plain dict, msgpack
+   over ZMQ) and turns the trainable agent's trace of each rollout into TitanRL `RolloutTurn`s.
+   The controller receives finished groups only.
+4. [`generation_server.py`](./generation_server.py) serves Verifiers' model calls (token ids over
+   HTTP) and forwards them to TitanRL's generators. Each rollout worker runs its own, on localhost.
+   It also records what Verifiers' traces leave out: the policy versions and the generation
+   metrics.
 
 The training dataset is the single source of the environment taskset config.
 `VerifiersRollouter.Config` copies it into the environment-server config, so an
 experiment must not configure the same taskset a second time.
 
-For CPU-heavy environments, increase the Verifiers worker-pool size first. A
-future implementation could instead place the environment server in a Monarch
-actor. That would require routable ZMQ and generation-server addresses plus
-actor-owned startup and shutdown; the current integration does not provide
-that placement mode.
+For CPU-heavy envs, raise the env server's pool (`verifiers_env_server.serve.pool`, e.g.
+`vf.StaticPoolConfig(num_workers=16)`). At high rollout rates, also raise the
+rollouter's `worker_pool_size`: each rollout worker decodes one trace at a time.
 
 ## Add an experiment
 
