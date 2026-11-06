@@ -42,8 +42,7 @@ package name, `activation_tracer` is imported by putting `scripts/` on
    def numerics_run_a() -> Trainer.Config:
        config = base_config_a()
        config.training.steps = 2
-       config.profiler.dump_numerics = True
-       config.profiler.profile_freq = 2
+       config.profiler.numerics_capture_step = 2
        config.debug.seed = 42
        config.debug.deterministic = True
        config.precision.param_dtype = "float32"
@@ -55,8 +54,8 @@ package name, `activation_tracer` is imported by putting `scripts/` on
        --output-dir ./outputs/run_A
    ```
    Repeat with `numerics_run_b` and `./outputs/run_B`. The capture step is
-   `profile_freq`. With `profile_freq=2` and `training.steps=2`, step 1 warms
-   up and step 2 is the snapshot. Capture
+   `numerics_capture_step`. With `numerics_capture_step=2` and
+   `training.steps=2`, step 1 warms up and step 2 is the snapshot. Capture
    adds ~10–40% memory only on the capture step (stats are computed inline
    in float64; tensors aren't held).
 3. **Diff** the two logs:

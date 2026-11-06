@@ -5,14 +5,15 @@
 Configure profiling in the selected recipe:
 
 ```python
+from torchtitan.observability.profiler import MemorySnapshotProfiler
 from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
 
 def my_debug_recipe() -> Trainer.Config:
     config = llama3_debugmodel()
-    config.profiler.enable_memory_snapshot = True
-    config.profiler.save_memory_snapshot_folder = "memory_snapshot"
-    config.profiler.memory_snapshot_freq = 3
+    config.profiler.memory_snapshot = MemorySnapshotProfiler.Config(
+        save_folder="memory_snapshot", freq=3
+    )
     return config
 ```
 
@@ -20,17 +21,16 @@ Launch it with `MODULE=my_project.recipes CONFIG=my_debug_recipe
 ./run_train.sh`. In case of an OOM, the snapshot is written under
 `step_{step:012d}_exit`; regular snapshots use `step_{step:012d}`.
 
-* `profiler.enable_memory_snapshot`: enables memory profiling.
-* `profiler.save_memory_snapshot_folder`: configures the output folder.
-* `profiler.memory_snapshot_freq`: controls how often regular snapshots are
-  taken and defaults to `profiler.profile_freq` when unset.
+* `save_folder`: configures the output folder.
+* `freq`: controls how often regular snapshots are taken (default 10).
+* `max_entries`: caps the recorded alloc/free history.
 
 You can find the saved pickle files in your output folder.
 To visualize a snapshot file, you can drag and drop it to <https://pytorch.org/memory_viz>. To learn more details on memory profiling, please visit this [tutorial](https://pytorch.org/blog/understanding-gpu-memory-1/).
 
 ## Profile CUDA with Cuspy
 
-Configuring `Profiler.Config.cuspy` in your TorchTitan job enables the Cuspy profiler backend, PyTorch's in-process CUPTI collector, instead of Kineto. On top of what Kineto records, it can add:
+Setting `profiler.trace` to `CuspyTraceProfiler` instead of `KinetoTraceProfiler` collects CUDA activity with Cuspy, PyTorch's in-process CUPTI collector, instead of Kineto. On top of what Kineto records, it can add:
 
 * GPU performance metrics sampled with CUPTI PM sampling, e.g. SM activity, DRAM and NVLink bandwidth.
 * GPU power, clock and thermal counters (`enable_environment_counters`).
@@ -51,14 +51,13 @@ Enable it in a Python recipe:
 
 ```python
 from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
-from torchtitan.observability.profiler import CuspyProfilerConfig
+from torchtitan.observability.profiler import CuspyTraceProfiler
 
 
 def llama3_debugmodel_cuspy():
     config = llama3_debugmodel()
-    config.profiler.enable_profiling = True
-    config.profiler.cuspy = CuspyProfilerConfig(
-        performance_metrics=["sm__cycles_active.avg"],
+    config.profiler.trace = CuspyTraceProfiler.Config(
+        performance_metrics=["sm__cycles_active.avg"]
     )
     return config
 ```
