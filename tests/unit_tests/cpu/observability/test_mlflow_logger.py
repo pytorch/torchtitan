@@ -89,7 +89,13 @@ def test_existing_run_is_not_closed(fake_mlflow):
     ],
 )
 def test_only_metrics_rank_uses_mlflow(
-    fake_mlflow, monkeypatch, save_for_all_ranks, parallelism_context, rank, num_runs
+    fake_mlflow,
+    monkeypatch,
+    tmp_path,
+    save_for_all_ranks,
+    parallelism_context,
+    rank,
+    num_runs,
 ):
     monkeypatch.setattr("torch.distributed.get_rank", lambda: rank)
     monkeypatch.setattr(
@@ -97,10 +103,6 @@ def test_only_metrics_rank_uses_mlflow(
     )
     monkeypatch.setattr(
         "torchtitan.observability.metrics.utils.get_peak_flops", lambda _: 1.0
-    )
-    writer = MagicMock()
-    monkeypatch.setattr(
-        "torchtitan.observability.metrics.SummaryWriter", lambda *args, **kwargs: writer
     )
     result = MetricsProcessor.Config(
         loggers=[TensorBoardLogger.Config(), MLFlowLogger.Config()],
@@ -110,13 +112,14 @@ def test_only_metrics_rank_uses_mlflow(
             device_name="unused", reset_peak_stats=lambda: None
         ),
         parallelism_context=parallelism_context,
-        dump_folder="unused",
+        dump_folder=str(tmp_path),
         pp_schedule="1F1B",
     )
     for metric_logger in result.loggers:
         metric_logger.log({"loss": 1.0}, step=1)
     assert fake_mlflow.start_run.call_count == num_runs
-    assert writer.add_scalar.call_count == int(save_for_all_ranks or num_runs > 0)
+    events_files = list(tmp_path.rglob("events.out.tfevents.*"))
+    assert len(events_files) == int(save_for_all_ranks or num_runs > 0)
     result.close()
 
 

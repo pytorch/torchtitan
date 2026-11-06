@@ -14,7 +14,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import Any, ClassVar, Generic, TYPE_CHECKING, TypeAlias
+from typing import Any, ClassVar, Generic, Literal, TYPE_CHECKING, TypeAlias
 
 import spmd_types as spmd
 import torch
@@ -368,18 +368,24 @@ _VarlenMetadataT = TypeVar(
     "_VarlenMetadataT", bound=VarlenAttentionMetadata, default=VarlenAttentionMetadata
 )
 
+# SDPBackend member names that varlen_attn selects between.
+_VarlenSDPBackendName: TypeAlias = Literal["CUDNN_ATTENTION", "FLASH_ATTENTION"]
+
+
+def _default_varlen_sdpa_backends() -> list[_VarlenSDPBackendName]:
+    return ["CUDNN_ATTENTION", "FLASH_ATTENTION"]
+
 
 class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
     @dataclass(kw_only=True, slots=True)
     class Config(InnerAttention.Config):
-        sdpa_backends: list[SDPBackend] = field(
-            default_factory=lambda: [
-                SDPBackend.CUDNN_ATTENTION,
-                SDPBackend.FLASH_ATTENTION,
-            ]
+        sdpa_backends: list[_VarlenSDPBackendName] = field(
+            default_factory=_default_varlen_sdpa_backends
         )
-        """ Backend priority order for varlen_attn, applied via
-            ``sdpa_kernel(..., set_priority=True)``.
+        """ Backend priority order for varlen_attn, as ``SDPBackend`` member
+            names, applied via ``sdpa_kernel(..., set_priority=True)``.
+            Names keep the config plain data: ``SDPBackend`` is a pybind11
+            enum, which ``pprint`` (``--print-config``) cannot format.
         """
 
         @property
@@ -404,7 +410,9 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        self.sdpa_backends = config.sdpa_backends
+        self.sdpa_backends = [
+            getattr(SDPBackend, name) for name in config.sdpa_backends
+        ]
 
         from torchtitan.tools.utils import get_cuda_flash_attention_impl
 
