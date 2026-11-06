@@ -15,6 +15,10 @@
 [![pip](https://img.shields.io/pypi/v/torchtitan?color=blue)](https://pypi.org/project/torchtitan/)
 [![conda](https://img.shields.io/conda/vn/conda-forge/torchtitan?color=green)](https://anaconda.org/conda-forge/torchtitan)
 
+<p align="center">
+  <b>English</b> · <a href="README.zh.md">简体中文</a>
+</p>
+
 [Quick start](#quick-start) · [Models](#supported-models) · [Features](#features) · [RL](torchtitan/rl/README.md) · [Docs](#documentation) · [Contributing](#contributing)
 
 </div>
