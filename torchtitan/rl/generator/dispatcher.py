@@ -386,16 +386,23 @@ def _prepare_generation_request_metrics(
     """
 
     # TODO: Per-request fields here come from vLLM's RequestOutput.metrics
-    # (RequestStateStats). Engine-aggregate stats, such as KV-cache usage,
-    # prefix-cache hit rate, exact preemption counts, and batch occupancy, live
-    # in SchedulerStats / IterationStats and require registering a
+    # (RequestStateStats). Engine-aggregate stats, such as prefix-cache hit
+    # rate, exact preemption counts, and batch occupancy, live in
+    # SchedulerStats / IterationStats and require registering a
     # vllm.v1.metrics.loggers.StatLoggerBase via
     # LLMEngine.from_engine_args(..., stat_loggers=[...]); VllmOtelStatLogger
-    # does this when VLLMEngine.Config.stat_logger is set.
+    # does this when VLLMEngine.Config.stat_logger is set, but exports to OTel only.
+    # The KV cache reading is the exception: the engine stamps it on each
+    # finished request (`VLLMEngine.step`).
 
     metric_values: dict[str, float] = {}
     if inputs.num_cached_tokens is not None:
         metric_values[f"{prefix}/num_cached_tokens"] = inputs.num_cached_tokens
+    if inputs.kv_cache_reading is not None:
+        metric_values[
+            f"{prefix}/kv_cache_occupancy"
+        ] = inputs.kv_cache_reading.occupancy
+        metric_values[f"{prefix}/kv_cache_usage"] = inputs.kv_cache_reading.usage
 
     if inputs.has_stats:
         metric_values[f"{prefix}/queue_time_ms"] = (
