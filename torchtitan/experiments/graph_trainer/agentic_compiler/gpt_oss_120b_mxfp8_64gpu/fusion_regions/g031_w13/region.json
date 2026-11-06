@@ -1,0 +1,64 @@
+{
+ "id": "G-031",
+ "title": "Intra-module (forward): feed_forward.routed_experts.w13: new_zeros + cat + sub + rsub.Scalar + _to_copy + repeat_interleave + index_select + add",
+ "phases": [
+  "forward"
+ ],
+ "scope": [
+  "intra-module"
+ ],
+ "fusion_kind": "pointwise chain",
+ "location": {
+  "module_fqn_pattern": "layers.*.feed_forward.routed_experts.w13",
+  "graph_nodes_example": [
+   "new_zeros",
+   "cat_2",
+   "sub_4",
+   "rsub",
+   "new_zeros_1",
+   "cat_3",
+   "cat_4",
+   "_to_copy_22",
+   "repeat_interleave_1",
+   "index_select_1",
+   "add_22"
+  ],
+  "source": "torchtitan/torchtitan/models/gpt_oss/moe.py:34-37"
+ },
+ "ops": [
+  "aten._to_copy.default",
+  "aten.add.Tensor",
+  "aten.cat.default",
+  "aten.index_select.default",
+  "aten.new_zeros.default",
+  "aten.repeat_interleave.Tensor",
+  "aten.rsub.Scalar",
+  "aten.sub.Tensor"
+ ],
+ "kernels_per_instance": 13.0,
+ "instances_per_step": 36,
+ "shapes_dtypes": "int32[9], int32[1], int32[8], int32[]",
+ "external_bytes_per_instance": 1510473760,
+ "measured_us_per_instance": 538.3,
+ "measured_ms_total": 19.379,
+ "ideal_us_per_instance": 218.1,
+ "ideal_ms_total": 7.852,
+ "gap_ms_total": 11.527,
+ "gap_pct_of_step": 0.428,
+ "bitwise_tier": "T2",
+ "bitwise_notes": "order-sensitive data movement (repeat_interleave.Tensor): accumulation / selection order must match eager exactly.",
+ "blockers": "a dimension is data-dependent (unbacked SymInts): kernels need dynamic shapes.",
+ "evidence": "measured",
+ "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #42, L1)",
+ "overlaps_with": [
+  "G-009",
+  "G-024"
+ ],
+ "notes": "",
+ "lift": {
+  "pass_name": "lift_fusion_region_g031",
+  "num_sites": 36,
+  "in_default_selection": false,
+  "not_liftable_reason": ""
+ }
+}

@@ -1,0 +1,66 @@
+{
+ "id": "G-046",
+ "title": "Cross-module (forward): feed_forward.routed_experts, feed_forward.router, feed_forward.router.aux_loss: zeros_like + scatter_.value + bitwise_not + bitwise_and + sum + add_ + _to_copy + cat",
+ "phases": [
+  "forward"
+ ],
+ "scope": [
+  "cross-module"
+ ],
+ "fusion_kind": "reduction + pointwise",
+ "location": {
+  "module_fqn_pattern": "layers.*.feed_forward.routed_experts, layers.*.feed_forward.router, layers.*.feed_forward.router.aux_loss",
+  "graph_nodes_example": [
+   "zeros_like",
+   "scatter_",
+   "bitwise_not",
+   "bitwise_and",
+   "sum_2",
+   "add_",
+   "_to_copy_16",
+   "sum_3",
+   "cat_396",
+   "sum_6",
+   "sum_7",
+   "_to_copy_17"
+  ],
+  "source": "torchtitan/torchtitan/models/common/moe/moe.py:298-683; torchtitan/torchtitan/models/common/moe/token_dispatcher.py:294-394"
+ },
+ "ops": [
+  "aten._to_copy.default",
+  "aten.add_.Tensor",
+  "aten.bitwise_and.Tensor",
+  "aten.bitwise_not.default",
+  "aten.cat.default",
+  "aten.scatter_.value",
+  "aten.sum.dim_IntList",
+  "aten.zeros_like.default"
+ ],
+ "kernels_per_instance": 17.0,
+ "instances_per_step": 36,
+ "shapes_dtypes": "bool[16384, 128], float32[128], int64[128], int64[16]",
+ "external_bytes_per_instance": 8931840,
+ "measured_us_per_instance": 113.46,
+ "measured_ms_total": 4.084,
+ "ideal_us_per_instance": 1.29,
+ "ideal_ms_total": 0.046,
+ "gap_ms_total": 4.038,
+ "gap_pct_of_step": 0.15,
+ "bitwise_tier": "T2",
+ "bitwise_notes": "order-sensitive data movement (scatter_.value): accumulation / selection order must match eager exactly.",
+ "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+ "evidence": "measured",
+ "how_found": "XM-max component: L1 components of one phase/layer/stage joined across module FQNs (barrier-free edges) (candidate #77, XM-max)",
+ "overlaps_with": [
+  "G-063",
+  "G-070",
+  "G-071"
+ ],
+ "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.0 ms",
+ "lift": {
+  "pass_name": "lift_fusion_region_g046",
+  "num_sites": 36,
+  "in_default_selection": true,
+  "not_liftable_reason": ""
+ }
+}

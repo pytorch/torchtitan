@@ -1,0 +1,46 @@
+{
+ "id": "G-036",
+ "title": "Single op (forward): feed_forward.routed_experts: index_put_",
+ "phases": [
+  "forward"
+ ],
+ "scope": [
+  "intra-module"
+ ],
+ "fusion_kind": "single-op rewrite",
+ "location": {
+  "module_fqn_pattern": "layers.*.feed_forward.routed_experts",
+  "graph_nodes_example": [
+   "index_put_"
+  ],
+  "source": "torchtitan/torchtitan/models/common/moe/token_dispatcher.py:601"
+ },
+ "ops": [
+  "aten.index_put_.default"
+ ],
+ "kernels_per_instance": 18.0,
+ "instances_per_step": 36,
+ "shapes_dtypes": "bfloat16[N, 2880]",
+ "external_bytes_per_instance": 755499008,
+ "measured_us_per_instance": 350.13,
+ "measured_ms_total": 12.605,
+ "ideal_us_per_instance": 109.09,
+ "ideal_ms_total": 3.927,
+ "gap_ms_total": 8.678,
+ "gap_pct_of_step": 0.322,
+ "bitwise_tier": "T2",
+ "bitwise_notes": "order-sensitive data movement (index_put_): accumulation / selection order must match eager exactly.",
+ "blockers": "aten.index_put(_) under deterministic mode runs a sort-based path (memset/memcpy of the full destination); accumulate=True needs a deterministic segmented reduction. If the indices are a permutation (from sort/argsort), there are no duplicates and a gather/scatter is order-free. a dimension is data-dependent (unbacked SymInts): kernels need dynamic shapes.",
+ "evidence": "measured",
+ "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #57, L1)",
+ "overlaps_with": [
+  "G-026"
+ ],
+ "notes": "",
+ "lift": {
+  "pass_name": "lift_fusion_region_g036",
+  "num_sites": 36,
+  "in_default_selection": false,
+  "not_liftable_reason": ""
+ }
+}

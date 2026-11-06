@@ -1,0 +1,60 @@
+{
+ "id": "G-011",
+ "title": "Intra-module (backward): feed_forward.routed_experts: gather + _to_copy + mul + sum + new_zeros + index_put",
+ "phases": [
+  "backward"
+ ],
+ "scope": [
+  "intra-module"
+ ],
+ "fusion_kind": "gather/scatter + pointwise",
+ "location": {
+  "module_fqn_pattern": "layers.*.feed_forward.routed_experts",
+  "graph_nodes_example": [
+   "gather_36",
+   "_to_copy_1007",
+   "mul_720",
+   "mul_721",
+   "_to_copy_1008",
+   "sum_325",
+   "new_zeros_149",
+   "index_put_2"
+  ],
+  "source": "torchtitan/torchtitan/models/common/moe/token_dispatcher.py:403-601"
+ },
+ "ops": [
+  "aten._to_copy.default",
+  "aten.gather.default",
+  "aten.index_put.default",
+  "aten.mul.Tensor",
+  "aten.new_zeros.default",
+  "aten.sum.dim_IntList"
+ ],
+ "kernels_per_instance": 26.0,
+ "instances_per_step": 36,
+ "shapes_dtypes": "float32[65536, 2880], bfloat16[65536, 2880], float32[65536], float32[65536, 1]",
+ "external_bytes_per_instance": 850919424,
+ "measured_us_per_instance": 1734.91,
+ "measured_ms_total": 62.457,
+ "ideal_us_per_instance": 122.87,
+ "ideal_ms_total": 4.423,
+ "gap_ms_total": 58.033,
+ "gap_pct_of_step": 2.154,
+ "bitwise_tier": "T2",
+ "bitwise_notes": "order-sensitive data movement (index_put): accumulation / selection order must match eager exactly.",
+ "blockers": "aten.index_put(_) under deterministic mode runs a sort-based path (memset/memcpy of the full destination); accumulate=True needs a deterministic segmented reduction. If the indices are a permutation (from sort/argsort), there are no duplicates and a gather/scatter is order-free.",
+ "evidence": "measured",
+ "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #15, L1)",
+ "overlaps_with": [
+  "G-008",
+  "G-010",
+  "G-062"
+ ],
+ "notes": "",
+ "lift": {
+  "pass_name": "lift_fusion_region_g011",
+  "num_sites": 36,
+  "in_default_selection": false,
+  "not_liftable_reason": ""
+ }
+}

@@ -1,0 +1,49 @@
+{
+ "id": "G-048",
+ "title": "Intra-module (backward): feed_forward.routed_experts: mul.Scalar + mul",
+ "phases": [
+  "backward"
+ ],
+ "scope": [
+  "intra-module"
+ ],
+ "fusion_kind": "pointwise chain",
+ "location": {
+  "module_fqn_pattern": "layers.*.feed_forward.routed_experts",
+  "graph_nodes_example": [
+   "mul_724",
+   "mul_725"
+  ],
+  "source": "torchtitan/torchtitan/distributed/local_compile.py:96"
+ },
+ "ops": [
+  "aten.mul.Scalar",
+  "aten.mul.Tensor"
+ ],
+ "kernels_per_instance": 2.0,
+ "instances_per_step": 36,
+ "shapes_dtypes": "bfloat16[N, 2880]",
+ "external_bytes_per_instance": 1132462080,
+ "measured_us_per_instance": 268.73,
+ "measured_ms_total": 9.674,
+ "ideal_us_per_instance": 163.52,
+ "ideal_ms_total": 5.887,
+ "gap_ms_total": 3.788,
+ "gap_pct_of_step": 0.141,
+ "bitwise_tier": "T0",
+ "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+ "blockers": "a dimension is data-dependent (unbacked SymInts): kernels need dynamic shapes.",
+ "evidence": "measured",
+ "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #79, L1)",
+ "overlaps_with": [
+  "G-001",
+  "G-030"
+ ],
+ "notes": "",
+ "lift": {
+  "pass_name": "lift_fusion_region_g048",
+  "num_sites": 72,
+  "in_default_selection": false,
+  "not_liftable_reason": ""
+ }
+}

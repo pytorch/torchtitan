@@ -1,0 +1,34 @@
+{
+  "kernel_name": "dxq3ettid4za5fvweqydslwscpeett5lzszm4midyzen2xgnqnqi.py",
+  "reference": "reference.py",
+  "signature": "def run(in0, in1, in2)",
+  "inputs": [
+    {
+      "shape": [
+        "N0 + N1 + N10 + N11 + N12 + N13 + N14 + N15 + N2 + N3 + N4 + N5 + N6 + N7 + N8 + N9",
+        2880
+      ],
+      "stride": [2880, 1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [65536],
+      "stride": [1],
+      "dtype": "int64",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [16384, 2880],
+      "stride": [2880, 1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    }
+  ],
+  "outputs": {
+    "shape": [16384, 2880],
+    "stride": [2880, 1],
+    "dtype": "bfloat16",
+    "device": "cuda:0"
+  }
+}

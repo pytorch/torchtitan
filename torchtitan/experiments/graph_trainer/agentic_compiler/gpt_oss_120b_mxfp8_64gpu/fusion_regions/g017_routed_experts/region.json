@@ -1,0 +1,54 @@
+{
+ "id": "G-017",
+ "title": "Intra-module (forward): feed_forward.routed_experts: clamp + mul + sigmoid + addcmul",
+ "phases": [
+  "forward"
+ ],
+ "scope": [
+  "intra-module"
+ ],
+ "fusion_kind": "pointwise chain",
+ "location": {
+  "module_fqn_pattern": "layers.*.feed_forward.routed_experts",
+  "graph_nodes_example": [
+   "clamp",
+   "clamp_1",
+   "mul_15",
+   "sigmoid_1",
+   "mul_16",
+   "addcmul"
+  ],
+  "source": "torchtitan/torchtitan/distributed/local_compile.py:96"
+ },
+ "ops": [
+  "aten.addcmul.default",
+  "aten.clamp.default",
+  "aten.mul.Tensor",
+  "aten.sigmoid.default"
+ ],
+ "kernels_per_instance": 6.0,
+ "instances_per_step": 36,
+ "shapes_dtypes": "bfloat16[N, 2880]",
+ "external_bytes_per_instance": 2642411520,
+ "measured_us_per_instance": 1415.59,
+ "measured_ms_total": 50.961,
+ "ideal_us_per_instance": 381.54,
+ "ideal_ms_total": 13.736,
+ "gap_ms_total": 37.226,
+ "gap_pct_of_step": 1.382,
+ "bitwise_tier": "T0",
+ "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+ "blockers": "a dimension is data-dependent (unbacked SymInts): kernels need dynamic shapes.",
+ "evidence": "measured",
+ "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #23, L1)",
+ "overlaps_with": [
+  "G-009"
+ ],
+ "notes": "",
+ "lift": {
+  "pass_name": "lift_fusion_region_g017",
+  "num_sites": 36,
+  "in_default_selection": true,
+  "not_liftable_reason": ""
+ }
+}

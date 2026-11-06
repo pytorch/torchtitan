@@ -1,0 +1,31 @@
+{
+  "kernel_name": "ajqazxhhilwtzeqdw5ycvcmd34y6qumxonwcli3ad6aewtx4p3ih.py",
+  "reference": "reference.py",
+  "signature": "def run(in0, in1, in2)",
+  "inputs": [
+    {
+      "shape": [16384, 8, 64],
+      "stride": [512, 64, 1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [16384, 1, 64],
+      "stride": [128, 128, 1],
+      "dtype": "float32",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [16384, 1, 64],
+      "stride": [128, 128, 1],
+      "dtype": "float32",
+      "device": "cuda:0"
+    }
+  ],
+  "outputs": {
+    "shape": [16384, 8, 64],
+    "stride": [512, 64, 1],
+    "dtype": "bfloat16",
+    "device": "cuda:0"
+  }
+}

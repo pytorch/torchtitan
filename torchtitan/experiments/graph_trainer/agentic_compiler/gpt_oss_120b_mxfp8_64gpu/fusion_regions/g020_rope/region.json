@@ -1,0 +1,56 @@
+{
+ "id": "G-020",
+ "title": "Intra-module (forward): attention.rope: _to_copy + mul + neg + cat + add",
+ "phases": [
+  "forward"
+ ],
+ "scope": [
+  "intra-module"
+ ],
+ "fusion_kind": "pointwise chain",
+ "location": {
+  "module_fqn_pattern": "layers.*.attention.rope",
+  "graph_nodes_example": [
+   "_to_copy_4",
+   "mul",
+   "neg",
+   "cat",
+   "mul_1",
+   "add",
+   "_to_copy_6"
+  ],
+  "source": "torchtitan/torchtitan/models/common/rope.py:171"
+ },
+ "ops": [
+  "aten._to_copy.default",
+  "aten.add.Tensor",
+  "aten.cat.default",
+  "aten.mul.Tensor",
+  "aten.neg.default"
+ ],
+ "kernels_per_instance": 7.0,
+ "instances_per_step": 36,
+ "shapes_dtypes": "float32[16384, 64, 64], float32[16384, 64, 32], bfloat16[16384, 64, 64]",
+ "external_bytes_per_instance": 276824064,
+ "measured_us_per_instance": 930.64,
+ "measured_ms_total": 33.503,
+ "ideal_us_per_instance": 39.97,
+ "ideal_ms_total": 1.439,
+ "gap_ms_total": 32.064,
+ "gap_pct_of_step": 1.19,
+ "bitwise_tier": "T0",
+ "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+ "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+ "evidence": "measured",
+ "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #29, L1)",
+ "overlaps_with": [
+  "G-016"
+ ],
+ "notes": "",
+ "lift": {
+  "pass_name": "lift_fusion_region_g020",
+  "num_sites": 72,
+  "in_default_selection": false,
+  "not_liftable_reason": ""
+ }
+}

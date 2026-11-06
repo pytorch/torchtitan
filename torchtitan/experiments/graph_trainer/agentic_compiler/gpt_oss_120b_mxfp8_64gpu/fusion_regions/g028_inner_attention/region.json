@@ -1,0 +1,58 @@
+{
+ "id": "G-028",
+ "title": "Cross-module (backward): attention.inner_attention: mul + sum + _to_copy + sigmoid_backward + neg",
+ "phases": [
+  "backward"
+ ],
+ "scope": [
+  "intra-module"
+ ],
+ "fusion_kind": "reduction + pointwise",
+ "location": {
+  "module_fqn_pattern": "layers.*.attention.inner_attention",
+  "graph_nodes_example": [
+   "mul_742",
+   "mul_743",
+   "sum_330",
+   "_to_copy_1025",
+   "sigmoid_backward_1",
+   "neg_74",
+   "sum_331",
+   "_to_copy_1026"
+  ],
+  "source": "torchtitan/torchtitan/models/common/attention/attention.py:457"
+ },
+ "ops": [
+  "aten._to_copy.default",
+  "aten.mul.Tensor",
+  "aten.neg.default",
+  "aten.sigmoid_backward.default",
+  "aten.sum.dim_IntList"
+ ],
+ "kernels_per_instance": 9.0,
+ "instances_per_step": 36,
+ "shapes_dtypes": "bfloat16[16384, 64, 64], float32[16384, 64], bfloat16[16384, 64, 1], float32[16384, 64, 1]",
+ "external_bytes_per_instance": 408944768,
+ "measured_us_per_instance": 446.23,
+ "measured_ms_total": 16.064,
+ "ideal_us_per_instance": 59.05,
+ "ideal_ms_total": 2.126,
+ "gap_ms_total": 13.938,
+ "gap_pct_of_step": 0.517,
+ "bitwise_tier": "T1",
+ "bitwise_notes": "contains reductions (sum.dim_IntList): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+ "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+ "evidence": "measured",
+ "how_found": "XM-max component: L1 components of one phase/layer/stage joined across module FQNs (barrier-free edges) (candidate #38, XM-max)",
+ "overlaps_with": [
+  "G-033",
+  "G-044"
+ ],
+ "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.7 ms",
+ "lift": {
+  "pass_name": "lift_fusion_region_g028",
+  "num_sites": 36,
+  "in_default_selection": true,
+  "not_liftable_reason": ""
+ }
+}

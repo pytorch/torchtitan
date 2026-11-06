@@ -1,0 +1,51 @@
+{
+  "kernel_name": "dpx2qv4eqjcevt6mprer6ap5ei7p2djmub7kymm365a5i77ynxdf.py",
+  "reference": "reference.py",
+  "signature": "def run(in0, in1, in2, in3)",
+  "inputs": [
+    {
+      "shape": [
+        "N0 + N1 + N10 + N11 + N12 + N13 + N14 + N15 + N2 + N3 + N4 + N5 + N6 + N7 + N8 + N9",
+        5760
+      ],
+      "stride": [5760, 1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "value": "N0 + N1 + N10 + N11 + N12 + N13 + N14 + N15 + N2 + N3 + N4 + N5 + N6 + N7 + N8 + N9"
+    },
+    {
+      "shape": [8, 2, 2880],
+      "stride": [5760, 2880, 1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8],
+      "stride": [1],
+      "dtype": "int32",
+      "device": "cuda:0"
+    }
+  ],
+  "outputs": [
+    {
+      "shape": [
+        "N0 + N1 + N10 + N11 + N12 + N13 + N14 + N15 + N2 + N3 + N4 + N5 + N6 + N7 + N8 + N9"
+      ],
+      "stride": [1],
+      "dtype": "int64",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [
+        "N0 + N1 + N10 + N11 + N12 + N13 + N14 + N15 + N2 + N3 + N4 + N5 + N6 + N7 + N8 + N9",
+        2,
+        2880
+      ],
+      "stride": [5760, 2880, 1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    }
+  ]
+}

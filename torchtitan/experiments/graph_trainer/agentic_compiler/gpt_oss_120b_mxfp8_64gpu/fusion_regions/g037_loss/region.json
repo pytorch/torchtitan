@@ -1,0 +1,52 @@
+{
+ "id": "G-037",
+ "title": "Intra-module (backward): loss: div + nll_loss_backward + _log_softmax_backward_data + _to_copy",
+ "phases": [
+  "backward"
+ ],
+ "scope": [
+  "intra-module"
+ ],
+ "fusion_kind": "cross-entropy (log_softmax + nll)",
+ "location": {
+  "module_fqn_pattern": "loss",
+  "graph_nodes_example": [
+   "div_109",
+   "nll_loss_backward",
+   "_log_softmax_backward_data",
+   "_to_copy_976"
+  ],
+  "source": "torchtitan/torchtitan/distributed/local_compile.py:96"
+ },
+ "ops": [
+  "aten._log_softmax_backward_data.default",
+  "aten._to_copy.default",
+  "aten.div.Tensor",
+  "aten.nll_loss_backward.default"
+ ],
+ "kernels_per_instance": 5.0,
+ "instances_per_step": 8,
+ "shapes_dtypes": "float32[2048, 201088], float32[], bfloat16[2048, 201088]",
+ "external_bytes_per_instance": 4118298640,
+ "measured_us_per_instance": 1608.26,
+ "measured_ms_total": 12.866,
+ "ideal_us_per_instance": 594.65,
+ "ideal_ms_total": 4.757,
+ "gap_ms_total": 8.109,
+ "gap_pct_of_step": 0.301,
+ "bitwise_tier": "T1",
+ "bitwise_notes": "contains reductions (_log_softmax_backward_data, nll_loss_backward): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+ "blockers": "fp32 intermediates of >= 1 GiB (type promotion) double the bytes of every pass in eager.",
+ "evidence": "measured",
+ "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #59, L1)",
+ "overlaps_with": [
+  "G-032"
+ ],
+ "notes": "",
+ "lift": {
+  "pass_name": "lift_fusion_region_g037",
+  "num_sites": 8,
+  "in_default_selection": false,
+  "not_liftable_reason": ""
+ }
+}
