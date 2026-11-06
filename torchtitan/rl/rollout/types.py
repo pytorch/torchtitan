@@ -95,7 +95,7 @@ class GenerateFn(Protocol):
         *,
         request_id: str,
         group_id: int,
-        routing_session_id: str | None = None,
+        routing_session_id: str,
         sampling_config: SamplingConfig | None = None,
     ) -> Completion | None:
         """Run one generation.
@@ -105,9 +105,12 @@ class GenerateFn(Protocol):
             request_id: Unique per call; identifies the exact turn (e.g. ".../turn=2") in logs.
             group_id: Rollout group this call belongs to. Calls of one group share a prefix
                 cache namespace, so siblings and later turns can reuse the group's KV.
-            routing_session_id: Optional stable key for the routing session this call
-                belongs to. A router may use it for session affinity, routing same-key
-                calls to the same generator when possible. `None` means no affinity.
+            routing_session_id: Stable key for the routing session this call belongs
+                to (e.g. "group=7/rollout=3"). Routers send same-key calls to the same
+                generator when possible. Engines may key per-rollout state by it (vLLM
+                evicts a session's cached KV on `ReleaseSessionFn` or at its group's end).
+                One key per rollout: rollouts that share a key share one session, and each
+                one's new prompt evicts what the others hold.
             sampling_config: Optional per-call sampling overrides.
 
         Returns:

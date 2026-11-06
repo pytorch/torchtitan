@@ -175,6 +175,7 @@ def _decide(
     pending_engine_requests: list[EngineRequest],
     *messages: EngineLoopMessage | EngineRequest,
     pending_load_messages: list[ModelStateDictLoadMessage] | None = None,
+    pending_release_messages: list[SessionReleaseMessage] | None = None,
 ) -> LoopDecision:
     """Puts `messages` on the queue, then runs one decision."""
 
@@ -184,6 +185,7 @@ def _decide(
             engine_loop._decide_next_action(
                 pending_engine_requests,
                 [] if pending_load_messages is None else pending_load_messages,
+                [] if pending_release_messages is None else pending_release_messages,
             ),
             _TIMEOUT_S,
         )
@@ -295,34 +297,70 @@ def test_close_takes_precedence_over_everything(runner) -> None:
     assert pending_load_messages == [load]  # for the engine loop to fail
 
 
-@pytest.mark.parametrize("load", [False, True])
-def test_session_releases_ride_the_load_or_step_decision(runner, load) -> None:
-    engine_loop = _bare_loop(event_loop=runner.get_loop())
+@pytest.mark.parametrize("load", [None, "hot_swap", "drain"])
+@pytest.mark.parametrize("with_request", [True, False])
+def test_session_releases_ride_the_step_that_admits_the_requests_queued_with_them(
+    runner, load, with_request
+) -> None:
+    # A load admits nothing, so its releases wait with its requests for the next STEP. That STEP
+    # comes right after the load, also with no request to admit. A draining load first steps the
+    # admitted request "inflight" without the releases: they could evict a prefix that the
+    # held-back request shares.
+    engine_loop = _bare_loop(event_loop=runner.get_loop(), inflight=load == "drain")
+    request = _request()
+    pending_engine_requests: list[EngineRequest] = []
+    pending_load_messages: list[ModelStateDictLoadMessage] = []
+    pending_release_messages: list[SessionReleaseMessage] = []
     messages = [
         SessionReleaseMessage(session_ids=["s0"]),
-        _request(),
+        *([request] if with_request else []),
         SessionReleaseMessage(group_ids=[3]),
     ]
-    decision = _decide(
-        runner, engine_loop, [], *messages, *([_load(5)] if load else [])
-    )
-    assert decision.action is (
-        LoopAction.LOAD_MODEL_STATE_DICT if load else LoopAction.STEP
-    )
+
+    def decide(*messages) -> LoopDecision:
+        return _decide(
+            runner,
+            engine_loop,
+            pending_engine_requests,
+            *messages,
+            pending_load_messages=pending_load_messages,
+            pending_release_messages=pending_release_messages,
+        )
+
+    decision = decide(*messages, *([_load(5, drain=load == "drain")] if load else []))
+    if load == "drain":
+        assert decision.action is LoopAction.STEP
+        assert decision.requests_per_dp_rank == [[]]
+        assert (decision.released_session_ids, decision.released_group_ids) == ([], [])
+        del engine_loop._request_dispatcher._rank0_outstanding_generations["inflight"]
+        decision = decide()
+    if load:
+        assert decision.action is LoopAction.LOAD_MODEL_STATE_DICT
+        assert (decision.released_session_ids, decision.released_group_ids) == ([], [])
+        pending_load_messages.clear()  # the engine loop clears them once the load is applied
+        decision = decide()
+    assert decision.action is LoopAction.STEP
+    assert decision.requests_per_dp_rank == [[request] if with_request else []]
     assert (decision.released_session_ids, decision.released_group_ids) == (["s0"], [3])
+    assert pending_release_messages == []
 
 
-def test_session_releases_are_queued_only_when_the_engine_holds_session_kv(
-    runner,
-) -> None:
-    for holds_session_kv in (False, True):
-        engine = _FakeEngine()
-        engine.holds_session_kv = holds_session_kv
-        engine_loop = _bare_loop(event_loop=runner.get_loop(), engine=engine)
+def test_session_releases_are_queued_only_on_rank_0(runner) -> None:
+    # Every generator rank gets `release_groups`, but only rank 0 takes messages off its queue.
+    for rank in (0, 1):
+        engine_loop = _bare_loop(event_loop=runner.get_loop(), rank=rank)
         engine_loop.release_sessions(["s0"])
         engine_loop.release_groups([3])
         runner.run(asyncio.sleep(0))  # `put` lands on the next loop iteration
-        assert engine_loop._queue.empty() is not holds_session_kv
+        assert engine_loop._queue.empty() is (rank != 0)
+
+
+def test_session_releases_after_close_are_dropped(runner) -> None:
+    engine_loop = _bare_loop(event_loop=runner.get_loop())
+    engine_loop._queue.close(CloseMessage(), reason="generator is closed")
+    # Rollouts that end during shutdown, or after a crash, release their sessions late.
+    engine_loop.release_sessions(["s0"])
+    engine_loop.release_groups([3])
 
 
 def test_load_takes_precedence_over_queued_requests(runner) -> None:
@@ -458,7 +496,7 @@ def test_idle_decision_waits_for_the_next_message(runner) -> None:
     request = _request()
 
     async def run() -> LoopDecision:
-        decision = asyncio.create_task(engine_loop._decide_next_action([], []))
+        decision = asyncio.create_task(engine_loop._decide_next_action([], [], []))
         await asyncio.sleep(0.1)
         assert not decision.done()
         await _put(engine_loop, request)
@@ -602,17 +640,16 @@ class _FakeEngine:
     """Every step finishes all admitted requests. `step_hook` runs inside each step;
     `threads` records which threads admitted and stepped, and `shutdowns` which shut it down."""
 
-    holds_session_kv = False
-
     def __init__(self, step_hook: Callable[[], None] = lambda: None):
         self.step_hook = step_hook
         self.running: list[str] = []
         self.threads: set[threading.Thread] = set()
         self.shutdowns: list[threading.Thread] = []
-        self.released_sessions: list[tuple[list[str], list[int]]] = []
+        # Each release: its session ids, its group ids, and the requests admitted but not stepped.
+        self.released_sessions: list[tuple[list[str], list[int], list[str]]] = []
 
     def release_sessions(self, session_ids: list[str], group_ids: list[int]) -> None:
-        self.released_sessions.append((session_ids, group_ids))
+        self.released_sessions.append((session_ids, group_ids, list(self.running)))
 
     def add_requests(
         self, requests: list[EngineRequest]
@@ -1361,13 +1398,16 @@ def test_follower_applies_broadcast_decisions_on_the_engine_thread(
     request.min_policy_version = 0  # rank 0 pins it on admission
     decisions = iter(
         [
-            LoopDecision(action=LoopAction.STEP, requests_per_dp_rank=[[request]]),
+            LoopDecision(
+                action=LoopAction.STEP,
+                requests_per_dp_rank=[[request]],
+                released_session_ids=["s0"],
+                released_group_ids=[3],
+            ),
             LoopDecision(
                 action=LoopAction.LOAD_MODEL_STATE_DICT,
                 requests_per_dp_rank=[],
                 load_version=4,
-                released_session_ids=["s0"],
-                released_group_ids=[3],
             ),
             LoopDecision(action=LoopAction.CLOSE, requests_per_dp_rank=[]),
         ]
@@ -1402,8 +1442,9 @@ def test_follower_applies_broadcast_decisions_on_the_engine_thread(
         assert engine.threads == {engine_loop.engine_thread.thread}
         assert reads == [engine_loop.engine_thread.thread]
         assert engine_loop.policy_version == 4
-        # Every rank releases the sessions rank 0 decided, before acting on the decision.
-        assert engine.released_sessions == [([], []), (["s0"], [3])]
+        # Every rank releases the sessions rank 0 decided after admitting the decision's
+        # requests, so a request queued before its rollout's release is released too.
+        assert engine.released_sessions == [(["s0"], [3], ["r0"])]
 
     asyncio.run(run())
 
