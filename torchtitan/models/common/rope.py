@@ -128,9 +128,7 @@ class IdentityRoPE(RoPE["IdentityRoPE.Config"]):
         return query if key is None else (query, key)
 
 
-class _CachedRoPE(RoPE["_CachedRoPE.Config"]):
-    """Shared cache lifecycle and lookup for the concrete rotary formats."""
-
+class ComplexRoPE(RoPE["ComplexRoPE.Config"]):
     @dataclass(kw_only=True, slots=True)
     class Config(RoPE.Config):
         dim: int
@@ -153,80 +151,11 @@ class _CachedRoPE(RoPE["_CachedRoPE.Config"]):
         super().__init__(config)
         self.register_buffer("cache", self._precompute_cache(), persistent=False)
 
-    def _precompute_cache(self) -> torch.Tensor:
-        """Build the reusable cache for all positions up to ``max_context_length``.
-
-        Returns:
-            RoPE cache for all valid positions.
-        """
-        raise NotImplementedError
-
-    def _reshape_cache(
-        self,
-        query: torch.Tensor,
-        positions: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Return a cache aligned to ``query`` and ``positions``.
-
-        Args:
-            query: Query tensor with shape ``[T, N, H]``.
-            positions: Optional position IDs with shape ``[T]``.
-
-        Returns:
-            Prepared RoPE cache for the concrete RoPE format.
-        """
-        raise NotImplementedError
-
-    @staticmethod
-    def apply_rotary_emb(
-        query: torch.Tensor,
-        key: torch.Tensor | None,
-        rope_cache: torch.Tensor,
-        *,
-        inverse: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Apply a prepared RoPE cache to query and optional key.
-
-        Args:
-            query: Query tensor with shape ``[T, N, H]``.
-            key: Optional key tensor with the same leading dimensions as
-                ``query``. If ``None``, only ``query`` is rotated and returned.
-            rope_cache: Prepared cache broadcastable to ``query`` and ``key``
-                according to the concrete RoPE format.
-            inverse: Whether to apply the inverse rotation.
-
-        Returns:
-            Rotated query tensor when ``key`` is ``None``; otherwise rotated
-            query and key tensors with the same shapes and dtypes as inputs.
-        """
-        raise NotImplementedError
-
-    def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor | None = None,
-        positions: torch.Tensor | None = None,
-        *,
-        inverse: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Apply rotary embeddings to query and optional key tensors."""
-        reshaped_cache = self._reshape_cache(query, positions)
-        return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
-
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
-        # TODO: In long-term we need to have buffer abstraction in `Module`` class to infer the buffer_device
         if buffer_device is None:
-            # After ``to_empty()``, the existing cache records the target device.
-            # Recompute there when the caller does not pass an explicit buffer device.
             buffer_device = self.cache.device
         with torch.device(buffer_device):
             self.cache = self._precompute_cache()
-
-
-class ComplexRoPE(_CachedRoPE):
-    @dataclass(kw_only=True, slots=True)
-    class Config(_CachedRoPE.Config):
-        pass
 
     # Cat options: only fp32/fp16 inputs reach the stack (bf16 writes int32 pairs); they write
     # each half with one store, instead of one masked kernel over both.
@@ -255,7 +184,8 @@ class ComplexRoPE(_CachedRoPE):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return super().forward(query, key, positions, inverse=inverse)
+        reshaped_cache = self._reshape_cache(query, positions)
+        return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
         """Precompute complex cis values.
@@ -425,10 +355,34 @@ class _RotatePairs(torch.autograd.Function):
         return torch.stack((real, imag), dim=-1).flatten(-2)
 
 
-class CosSinRoPE(_CachedRoPE):
+class CosSinRoPE(RoPE["CosSinRoPE.Config"]):
     @dataclass(kw_only=True, slots=True)
-    class Config(_CachedRoPE.Config):
-        pass
+    class Config(RoPE.Config):
+        dim: int
+        max_context_length: int
+        theta: float = 10000.0
+        scaling: Literal["none", "llama", "yarn"] = "none"
+        # llama scaling params
+        scaling_factor: float = 8.0
+        low_freq_factor: float = 1.0
+        high_freq_factor: float = 4.0
+        original_max_position_embeddings: int = 8192
+        # yarn scaling params
+        rope_factor: float = 1.0
+        beta_fast: float = 32.0
+        beta_slow: float = 1.0
+        original_seq_len: int = 4096
+        truncate: bool = True
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.register_buffer("cache", self._precompute_cache(), persistent=False)
+
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        if buffer_device is None:
+            buffer_device = self.cache.device
+        with torch.device(buffer_device):
+            self.cache = self._precompute_cache()
 
     @local_compile("rope", batch_invariant=True)
     def forward(
@@ -439,7 +393,8 @@ class CosSinRoPE(_CachedRoPE):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return super().forward(query, key, positions, inverse=inverse)
+        reshaped_cache = self._reshape_cache(query, positions)
+        return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
         """Precompute cos/sin values.
