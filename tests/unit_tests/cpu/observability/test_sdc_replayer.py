@@ -248,6 +248,7 @@ def test_schedule_checks_first_num_steps_and_rearms_on_reset(
         replayer.run_fwd_bwd(execute, step=index, get_loss=lambda loss: loss)
         # A checked step executes twice (reference plus one replay).
         checked.append(calls - calls_before == 2)
+        replayer.step_completed()
         assert replayer.steps_since_reset == index + 1
     assert checked == expected_checked
 
@@ -256,6 +257,26 @@ def test_schedule_checks_first_num_steps_and_rearms_on_reset(
     calls_before = calls
     replayer.run_fwd_bwd(execute, step=99, get_loss=lambda loss: loss)
     assert calls - calls_before == 2
+
+
+def test_schedule_checks_every_call_of_a_checked_step():
+    replayer = SDCReplayer(
+        SDCReplayer.Config(num_steps=1), modules=[], device=torch.device("cpu")
+    )
+    executions = []
+
+    def execute():
+        executions.append(replayer.steps_since_reset)
+        return torch.tensor(1.0)
+
+    # Step 1 has two calls, step 2 one.
+    replayer.run_fwd_bwd(execute, step=1, get_loss=lambda loss: loss)
+    replayer.run_fwd_bwd(execute, step=1, get_loss=lambda loss: loss)
+    replayer.step_completed()
+    replayer.run_fwd_bwd(execute, step=2, get_loss=lambda loss: loss)
+
+    # Both calls of step 1 run twice (checked); step 2's call runs once.
+    assert executions == [0, 0, 0, 0, 1]
 
 
 def test_config_validation():

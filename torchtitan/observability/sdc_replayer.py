@@ -6,12 +6,13 @@
 
 """Deterministic replay for silent data corruption (SDC) detection.
 
-The replayer checks the complete forward/backward execution for each checked
-optimizer step. This includes every gradient accumulation step and every
-pipeline microbatch. For each checked step it:
+The replayer checks every forward/backward call of each checked optimizer
+step. A call covers one or more gradient accumulation steps and their pipeline
+microbatches; a step may span several calls when microbatches are streamed in.
+For each call of a checked step it:
 
-1. snapshots Python, CPU, and accelerator RNG state and registered module
-   buffers, and records which parameters entered without gradients;
+1. snapshots Python, CPU, and accelerator RNG state, registered module
+   buffers, and the gradients the call starts with;
 2. runs the forward/backward once and records a reference signature (loss,
    gradients, buffers, and RNG advancement);
 3. restores the snapshot and re-executes ``num_replays`` times, comparing
@@ -19,10 +20,9 @@ pipeline microbatch. For each checked step it:
 4. raises ``SDCReplayMismatch`` on every rank on any divergence; otherwise
    only the final execution's effects remain committed.
 
-Entry contract: ``run_fwd_bwd`` must be called with no pending gradients,
-i.e. the post-``zero_grad`` state (``None`` or zeros). Gradient values are
-never snapshotted; restore rebuilds the entry state from that contract, so
-any other entry state is unrecoverable and surfaces as a false mismatch.
+A call may start with gradients pending from the step's earlier calls. Restore
+copies their values back in place, so a re-run adds to the same gradients the
+reference run added to, at the same storage addresses.
 
 Replay is one of several SDC detection strategies (others include shadow
 computation on redundant hardware and algorithm-level checks such as
@@ -148,6 +148,8 @@ class _BufferSnapshot:
 class _GradientSnapshot:
     parameter: torch.nn.Parameter
     original: torch.Tensor | None
+    value: torch.Tensor | None
+    """A copy of ``original``'s values, or None when the parameter had no gradient."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,18 +193,15 @@ class _ReplayStateProvider:
                         seen_parameters.add(id(parameter))
                         parameters.append(parameter)
 
-        # Gradient values are never snapshotted: entry gradients must be
-        # empty (None or zeros, the post-zero_grad state), so this only
-        # records each parameter's entry gradient (None marker or tensor
-        # identity) and restore rebuilds the entry state from the contract:
-        # None stays None, tensors are zeroed in place. Any other entry
-        # state is unrecoverable and surfaces as a false mismatch, e.g. a
-        # requires_grad parameter left out of the optimizer: the trainer's
-        # zero_grad never clears it, so it enters later checked steps with
-        # accumulated gradients. Freeze such parameters with
-        # requires_grad=False instead.
+        # A call starts with None gradients (the step's first call) or with the
+        # step's earlier calls' gradients. Restore keeps each tensor's identity,
+        # so accelerator graphs keep their addresses, and copies its values back.
         gradients = tuple(
-            _GradientSnapshot(parameter=parameter, original=parameter.grad)
+            _GradientSnapshot(
+                parameter=parameter,
+                original=parameter.grad,
+                value=None if parameter.grad is None else _clone_tensor(parameter.grad),
+            )
             for parameter in parameters
         )
         return _ReplayStateSnapshot(
@@ -237,14 +236,15 @@ class _ReplayStateProvider:
             assert snapshot.value is not None
             _local_tensor(snapshot.original).copy_(snapshot.value)
 
-        # Restore each entry gradient identity and zero surviving tensors.
+        # Restore each entry gradient identity, then its values.
         for snapshot in state.gradients:
             if snapshot.original is None:
                 snapshot.parameter.grad = None
             else:
                 if snapshot.parameter.grad is not snapshot.original:
                     snapshot.parameter.grad = snapshot.original
-                _local_tensor(snapshot.original).zero_()
+                assert snapshot.value is not None
+                _local_tensor(snapshot.original).copy_(snapshot.value)
 
 
 def _compare_signature(
@@ -290,15 +290,19 @@ def _find_signature_mismatch(
 
 
 class SDCReplayer(Configurable):
-    """Replay-checks the forward/backward work for scheduled optimizer steps.
+    """Replay-checks the forward/backward calls of scheduled optimizer steps.
 
     See the module docstring for the snapshot/execute/restore/compare
-    lifecycle and the entry contract (``run_fwd_bwd`` must be entered with
-    no pending gradients). The replayer owns its check schedule: it counts
-    the optimizer steps it has seen (``steps_since_reset``) and checks the
-    first ``config.num_steps`` of them; ``reset_schedule`` restarts the
+    lifecycle. The replayer owns its check schedule: ``step_completed`` counts
+    the optimizer steps (``steps_since_reset``), and every call of the first
+    ``config.num_steps`` of them is checked; ``reset_schedule`` restarts the
     count, e.g. after a checkpoint load, so the steps right after a restore
     are checked again.
+
+    Example:
+        replayer.run_fwd_bwd(call_1, step=1, get_loss=...)  # checked
+        replayer.run_fwd_bwd(call_2, step=1, get_loss=...)  # checked, same step
+        replayer.step_completed()                           # num_steps=1: later steps run unchecked
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -353,6 +357,18 @@ class SDCReplayer(Configurable):
         """Optimizer steps observed since construction or ``reset_schedule``."""
         return self._steps_since_reset
 
+    @property
+    def checks_current_step(self) -> bool:
+        """Whether ``run_fwd_bwd`` checks the calls of the current optimizer step."""
+        return (
+            self.config.num_steps == -1
+            or self._steps_since_reset < self.config.num_steps
+        )
+
+    def step_completed(self) -> None:
+        """Count one optimizer step; call after the step's last ``run_fwd_bwd``."""
+        self._steps_since_reset += 1
+
     def reset_schedule(self) -> None:
         """Restart the check schedule; call after loading a checkpoint."""
         self._steps_since_reset = 0
@@ -364,26 +380,21 @@ class SDCReplayer(Configurable):
         step: int,
         get_loss: Callable[[_ResultT], torch.Tensor],
     ) -> _ResultT:
-        """Run one optimizer step's forward/backward work and replay-check it.
+        """Run one forward/backward call and replay-check it if its step is checked.
 
-        Call exactly once per optimizer step with no pending gradients
-        (``None`` or zeros, the post-``zero_grad`` state). Unchecked steps run
-        ``execute`` once with no snapshot or signature overhead. ``get_loss``
-        extracts the loss tensor used in the replay signature. ``step`` is the
-        global training step, used only for error reporting.
+        Unchecked calls run ``execute`` once with no snapshot or signature
+        overhead. ``get_loss`` extracts the loss tensor used in the replay
+        signature. ``step`` is the global training step, used only for error
+        reporting.
         """
-        local_step = self._steps_since_reset
-        if self.config.num_steps == -1 or local_step < self.config.num_steps:
-            result = self._run_checked(
-                execute,
-                step=step,
-                local_step=local_step + 1,
-                get_loss=get_loss,
-            )
-        else:
-            result = execute()
-        self._steps_since_reset = local_step + 1
-        return result
+        if not self.checks_current_step:
+            return execute()
+        return self._run_checked(
+            execute,
+            step=step,
+            local_step=self._steps_since_reset + 1,
+            get_loss=get_loss,
+        )
 
     def _signature(self, loss: torch.Tensor) -> _ReplaySignature:
         """Capture tensor hashes and exact RNG states after one execution.

@@ -96,7 +96,7 @@ def test_stream_microbatches_config_check(setting: str | None) -> None:
     config.async_loop = dataclasses.replace(config.async_loop, batcher=batcher)
 
     # replace() reruns __post_init__.
-    if setting not in ("accelerator_graphs", "sdc_replay"):
+    if setting != "accelerator_graphs":
         dataclasses.replace(config)
         return
     with pytest.raises(ValueError, match="stream_microbatches needs"):

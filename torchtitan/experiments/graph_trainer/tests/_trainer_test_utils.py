@@ -210,7 +210,9 @@ def build_minimal_trainer(
             )
             return outputs[0]
 
-        def run_direct_graph_accumulation(microbatch_groups) -> LossAndMetrics:
+        def run_direct_graph_accumulation(
+            microbatch_groups, *, preprocess_microbatch_groups_lazily: bool
+        ) -> LossAndMetrics:
             """Run all groups through the test's unsplit graph adapter."""
             accumulated_loss = None
             loss_metrics = []

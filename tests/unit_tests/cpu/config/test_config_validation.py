@@ -81,15 +81,6 @@ def test_lazy_preprocessing_config_restrictions() -> None:
         TrainingEngine.Config(
             training=TrainingConfig(preprocess_microbatch_groups_lazily=True)
         )
-    with pytest.raises(ValueError, match="does not support SDC replay"):
-        TrainingEngine.Config(
-            training=TrainingConfig(
-                preprocess_microbatch_groups_lazily=True,
-                disable_accelerator_graphs=True,
-            ),
-            sdc_replayer=SDCReplayer.Config(),
-        )
-
     TrainingEngine.Config(
         training=TrainingConfig(
             preprocess_microbatch_groups_lazily=True, disable_accelerator_graphs=True
