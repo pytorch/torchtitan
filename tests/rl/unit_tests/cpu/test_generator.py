@@ -771,14 +771,19 @@ def _mooncake_transfer_config():
     )
 
 
-def test_mooncake_engine_args_and_namespace(monkeypatch, tmp_path):
+@pytest.mark.parametrize("hold_sessions", [False, True])
+def test_mooncake_engine_args_and_namespace(monkeypatch, tmp_path, hold_sessions):
     monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(tmp_path / "store.json"))
     transfer = _mooncake_transfer_config()
-    transfer.kv_connector_extra_config["load_async"] = False
+    holder_build = Mock()
+    monkeypatch.setattr(VLLMSessionKVHolder.Config, "build", holder_build)
     original = copy.deepcopy(transfer)
     config = Generator.Config(
         model=_MODEL_CONFIG,
-        engine=VLLMEngine.Config(kv_transfer_config=transfer),
+        engine=VLLMEngine.Config(
+            kv_transfer_config=transfer,
+            session_kv_holder=VLLMSessionKVHolder.Config() if hold_sessions else None,
+        ),
     )
     kwargs = _build_engine_kwargs(monkeypatch, tmp_path, config)
     resolved = kwargs["kv_transfer_config"]
@@ -788,9 +793,18 @@ def test_mooncake_engine_args_and_namespace(monkeypatch, tmp_path):
     assert resolved.kv_connector_extra_config == {
         "cache_prefix": "run-1",
         "save_decode_cache": True,
-        "load_async": False,
     }
     assert transfer == original
+
+    if hold_sessions:
+        scheduler = (
+            vllm_engine_module.LLMEngine.from_engine_args.return_value.engine_core.engine_core.scheduler
+        )
+        holder_build.assert_called_once_with(
+            scheduler=scheduler, offload_connector=None
+        )
+    else:
+        holder_build.assert_not_called()
 
 
 @pytest.mark.parametrize("hold_sessions", [False, True])
@@ -853,12 +867,6 @@ def test_mooncake_lookup_sockets_are_generator_local(monkeypatch, tmp_path, tp):
     second_extra = second["kv_transfer_config"].kv_connector_extra_config
     assert first_extra["lookup_rpc_port"] != second_extra["lookup_rpc_port"]
     assert "lookup_rpc_port" not in transfer.kv_connector_extra_config
-    transfer.kv_connector_extra_config["lookup_rpc_port"] = 4321
-    explicit = _build_engine_kwargs(monkeypatch, tmp_path, config)
-    assert (
-        explicit["kv_transfer_config"].kv_connector_extra_config["lookup_rpc_port"]
-        == 4321
-    )
 
 
 @pytest.mark.parametrize(
@@ -866,33 +874,54 @@ def test_mooncake_lookup_sockets_are_generator_local(monkeypatch, tmp_path, tp):
     [
         ("cache_prefix", "", "non-empty cache_prefix"),
         ("cache_prefix", None, "non-empty cache_prefix"),
+        ("cache_prefix", "  ", "non-empty cache_prefix"),
+        ("lookup_rpc_port", 4321, "derives lookup_rpc_port"),
+        ("load_async", False, "requires load_async=True"),
     ],
 )
-def test_mooncake_passthrough_rejects_unsafe_settings(
-    monkeypatch, tmp_path, field, value, match
-):
+def test_mooncake_passthrough_rejects_unsafe_settings(field, value, match):
     transfer = _mooncake_transfer_config()
     if value is None:
         transfer.kv_connector_extra_config.pop(field)
     else:
         transfer.kv_connector_extra_config[field] = value
-    config = Generator.Config(
-        model=_MODEL_CONFIG,
-        engine=VLLMEngine.Config(kv_transfer_config=transfer),
-    )
     with pytest.raises(ValueError, match=match):
-        _build_engine_kwargs(monkeypatch, tmp_path, config)
+        VLLMEngine.Config(kv_transfer_config=transfer)
 
 
 @pytest.mark.parametrize(
-    "connector", ["SimpleCPUOffloadConnector", "MooncakeStoreConnector"]
-)
-@pytest.mark.parametrize(
-    "kv_role, module_path, match",
+    "connector, kv_role, module_path, match",
     [
-        ("kv_both", "custom.cpu_offload_connector", "custom kv_connector_module_path"),
-        ("kv_producer", None, "requires kv_role='kv_both'"),
-        ("kv_consumer", None, "requires kv_role='kv_both'"),
+        (
+            "SimpleCPUOffloadConnector",
+            "kv_both",
+            "custom.connector",
+            "custom kv_connector_module_path",
+        ),
+        (
+            "MooncakeStoreConnector",
+            "kv_both",
+            "custom.connector",
+            "custom kv_connector_module_path",
+        ),
+        (
+            "SimpleCPUOffloadConnector",
+            "kv_producer",
+            None,
+            "requires kv_role='kv_both'",
+        ),
+        (
+            "SimpleCPUOffloadConnector",
+            "kv_consumer",
+            None,
+            "requires kv_role='kv_both'",
+        ),
+        (
+            "MooncakeStoreConnector",
+            "kv_producer",
+            None,
+            "kv_producer requires enable_lookup=False",
+        ),
     ],
 )
 def test_unsupported_kv_transfer_config_rejected_before_engine_creation(
@@ -904,8 +933,28 @@ def test_unsupported_kv_transfer_config_rejected_before_engine_creation(
                 kv_connector=connector,
                 kv_role=kv_role,
                 kv_connector_module_path=module_path,
+                kv_connector_extra_config={"cache_prefix": "run-1"},
             )
         )
+
+
+@pytest.mark.parametrize("role", ["kv_consumer", "kv_producer"])
+def test_mooncake_roles_preserve_native_settings(monkeypatch, tmp_path, role):
+    transfer = _mooncake_transfer_config()
+    transfer.kv_role = role
+    if role == "kv_producer":
+        transfer.kv_connector_extra_config["enable_lookup"] = False
+    kwargs = _build_engine_kwargs(
+        monkeypatch,
+        tmp_path,
+        Generator.Config(
+            model=_MODEL_CONFIG, engine=VLLMEngine.Config(kv_transfer_config=transfer)
+        ),
+    )
+    assert kwargs["kv_transfer_config"].kv_role == role
+    assert kwargs["kv_transfer_config"].kv_connector_extra_config.get(
+        "enable_lookup", True
+    ) == (role != "kv_producer")
 
 
 @pytest.mark.parametrize(

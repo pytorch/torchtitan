@@ -119,8 +119,8 @@ class VLLMEngine(GenerationEngine):
 
         session_kv_holder: VLLMSessionKVHolder.Config | None = None
         """Keep each multi-turn session's cached prefix on GPU between its turns (see
-        `VLLMSessionKVHolder`). With KV offload configured, also send CPU cache
-        release hints when sessions end. None disables both session behaviors."""
+        `VLLMSessionKVHolder`). With SimpleCPU offload configured, also send CPU
+        cache release hints when sessions end. None disables both behaviors."""
 
         @property
         def supports_hot_swap(self) -> bool:
@@ -143,7 +143,10 @@ class VLLMEngine(GenerationEngine):
                     "Titan RL supports MooncakeStoreConnector and SimpleCPUOffloadConnector; "
                     "MultiConnector and other KV connectors are not supported."
                 )
-            if self.kv_transfer_config.kv_role != "kv_both":
+            if (
+                self.kv_transfer_config.kv_connector == "SimpleCPUOffloadConnector"
+                and self.kv_transfer_config.kv_role != "kv_both"
+            ):
                 raise ValueError(
                     "KV offload requires kv_role='kv_both': "
                     "connectors both save and load KV, so vLLM must enable "
@@ -162,6 +165,25 @@ class VLLMEngine(GenerationEngine):
                     "user config. Titan installs its lifecycle adapter automatically; "
                     "user-provided custom kv_connector_module_path values are not supported."
                 )
+            if self.kv_transfer_config.kv_connector == "MooncakeStoreConnector":
+                extra = self.kv_transfer_config.kv_connector_extra_config
+                cache_prefix = extra.get("cache_prefix")
+                if not isinstance(cache_prefix, str) or not cache_prefix.strip():
+                    raise ValueError("Mooncake Store requires a non-empty cache_prefix")
+                if "lookup_rpc_port" in extra:
+                    raise ValueError(
+                        "TorchTitan derives lookup_rpc_port for each generator; "
+                        "do not set it in kv_connector_extra_config."
+                    )
+                if not extra.get("load_async", True):
+                    raise ValueError("Mooncake Store requires load_async=True")
+                if self.kv_transfer_config.kv_role == "kv_producer" and extra.get(
+                    "enable_lookup", True
+                ):
+                    raise ValueError(
+                        "Mooncake Store kv_producer requires enable_lookup=False: "
+                        "vLLM protects asynchronous load destinations only for consumers."
+                    )
 
     def __init__(
         self,
@@ -188,12 +210,6 @@ class VLLMEngine(GenerationEngine):
             parallelism.tensor_parallel_degree * parallelism.data_parallel_degree > 1
         )
         if config.kv_transfer_config is not None:
-            if config.kv_transfer_config.kv_connector == "MooncakeStoreConnector":
-                cache_prefix = config.kv_transfer_config.kv_connector_extra_config.get(
-                    "cache_prefix"
-                )
-                if not isinstance(cache_prefix, str) or not cache_prefix.strip():
-                    raise ValueError("Mooncake Store requires a non-empty cache_prefix")
             if reset_kv_cache_on_model_state_dict_load:
                 raise ValueError(
                     "KV offload requires reset_kv_cache_on_model_state_dict_load=False: "
@@ -259,7 +275,9 @@ class VLLMEngine(GenerationEngine):
             self._session_kv_holder = config.session_kv_holder.build(
                 scheduler=scheduler,
                 offload_connector=scheduler.connector
-                if self._uses_kv_offload
+                if config.kv_transfer_config is not None
+                and config.kv_transfer_config.kv_connector
+                == "SimpleCPUOffloadConnector"
                 else None,
             )
 
@@ -370,12 +388,9 @@ class VLLMEngine(GenerationEngine):
                 extra = dict(extra)
                 # This option names an IPC socket, not a network port. Independent
                 # generators on the same host must not bind/unlink each other's socket.
-                extra.setdefault(
-                    "lookup_rpc_port",
-                    sha256(
-                        f"{extra['cache_prefix']}:{generator_name}".encode()
-                    ).hexdigest()[:16],
-                )
+                extra["lookup_rpc_port"] = sha256(
+                    f"{extra['cache_prefix']}:{generator_name}".encode()
+                ).hexdigest()[:16]
             engine_kwargs["kv_transfer_config"] = replace(
                 self.config.kv_transfer_config,
                 kv_connector_extra_config=extra,

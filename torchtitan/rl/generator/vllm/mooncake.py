@@ -65,15 +65,11 @@ TODO(acisseJZhong): upstream external-launcher KV coordination so these adapters
 can be removed: https://github.com/vllm-project/vllm/issues/11400
 """
 
-import logging
-from collections import Counter
-from concurrent.futures import Future
 from typing import Any
 
 import torch.distributed as dist
 from vllm.config import VllmConfig
 from vllm.distributed import get_tp_group
-from vllm.distributed.kv_transfer import get_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector import (
     MooncakeStoreConnector as VllmMooncakeStoreConnector,
@@ -81,62 +77,17 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector impor
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (
     LookupKeyServer,
 )
-from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
 
-logger = logging.getLogger(__name__)
-
 
 class MooncakeStoreConnector(VllmMooncakeStoreConnector):
-    """Adapt distributed Store lookup and session release to Titan's TP groups.
+    """Adapt distributed Store lookup and save completion to Titan's TP groups.
 
     Share the leader's lookup result and scope save completion to this TP group.
-    Session release attempts asynchronous deletion; KVOffloadScheduler handles
+    KVOffloadScheduler handles
     request ordering and completion aggregation for both CPU offload connectors.
     """
-
-    def get_pending_save_ids(self) -> set[int]:
-        """Snapshot saves whose source blocks still await TP completion reports."""
-        assert self.connector_scheduler is not None
-        return set(self.connector_scheduler._pinned_saves)
-
-    def release_session_cache(
-        self, block_hashes: set[BlockHash], active_hashes: set[BlockHash]
-    ) -> Future[None]:
-        """Attempt scoped Store deletion after saves, retaining Store lease checks."""
-        assert self.connector_scheduler is not None
-        # external_launcher keeps this rank's scheduler and worker in-process.
-        worker = get_kv_transfer_group().connector_worker
-        assert worker is not None
-        keys = sorted(
-            {
-                db.store_layout.key_for(shard_id, block_hash)
-                for db in worker.token_dbs
-                for shard_id in db.store_layout.local_shard_ids
-                for block_hash in block_hashes - active_hashes
-            }
-        )
-
-        def remove() -> None:
-            try:
-                results = worker.store.batch_remove(keys, force=False)
-                # -704 means the key is already absent. A lease or another
-                # Store constraint can reject deletion; this hint is not retried.
-                failed = Counter(
-                    status for status in results if status not in (0, -704)
-                )
-                if failed:
-                    logger.warning(
-                        "Mooncake KV eviction declined (status counts): %s",
-                        dict(failed),
-                    )
-            except Exception:
-                logger.exception("Mooncake session KV eviction failed")
-
-        # Submit deletion on the existing lookup executor; the holder drains
-        # its Future. A later synchronous lookup may wait behind this deletion.
-        return self.connector_scheduler.client.executor.submit(remove)
 
     def __init__(
         self,

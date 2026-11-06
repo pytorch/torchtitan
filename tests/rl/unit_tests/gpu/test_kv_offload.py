@@ -74,7 +74,6 @@ def _generator_worker(
         from torchtitan.tools.utils import has_cuda_capability
         from vllm.config import KVTransferConfig
         from vllm.distributed import cleanup_dist_env_and_memory, get_tp_group
-        from vllm.distributed.kv_transfer import get_kv_transfer_group
 
         torch.cuda.set_device(rank)
         dist.init_process_group("nccl", device_id=torch.device(f"cuda:{rank}"))
@@ -162,25 +161,7 @@ def _generator_worker(
         while (command := commands.get()) is not None:
             if command == "release":
                 if is_mooncake:
-                    worker = get_kv_transfer_group().connector_worker
-                    hashes = set().union(
-                        *(
-                            h
-                            for _, h in engine._session_kv_holder._cpu_sessions.values()
-                        )
-                    )
-                    keys = sorted(
-                        {
-                            db.store_layout.key_for(shard, h)
-                            for db in worker.token_dbs
-                            for shard in db.store_layout.local_shard_ids
-                            for h in hashes
-                        }
-                    )
-                    before = sum(worker.store.batch_is_exist(keys)) if keys else 0
-                    # Existence lookup renews the Master's default 10s lease.
-                    # Let it expire to exercise non-forced deletion, not refusal.
-                    time.sleep(11)
+                    before = len(engine._session_kv_holder._held)
                 else:
                     pool = scheduler.connector.scheduler_manager.cpu_block_pool
                     cached = {
@@ -198,7 +179,7 @@ def _generator_worker(
                     engine.step()
                 assert not engine._session_kv_holder.has_pending_work
                 if is_mooncake:
-                    after = sum(worker.store.batch_is_exist(keys)) if keys else 0
+                    after = len(engine._session_kv_holder._held)
                 else:
                     first_blocks = pool.free_block_queue.get_all_free_blocks()[:before]
                     assert {b.block_id for b in first_blocks} == cached
@@ -551,7 +532,7 @@ def test_cpu_kv_and_weight_version_isolation(
     namespace = f"titan-test-{uuid.uuid4().hex}"
     processes = []
     with (tmp_path / "master.log").open("w") as log, subprocess.Popen(
-        [master, f"--rpc_port={port}", "--rpc_thread_num=4"],
+        [master, f"--rpc_port={port}", "--metrics_port=0", "--rpc_thread_num=4"],
         stdout=log,
         stderr=log,
     ) if is_mooncake else nullcontext() as server:
@@ -575,6 +556,8 @@ def test_cpu_kv_and_weight_version_isolation(
                 )
                 if is_mooncake and save_decode_cache is not None:
                     extra["save_decode_cache"] = save_decode_cache
+                if is_mooncake and roles[gpu] == "kv_producer":
+                    extra["enable_lookup"] = False
                 connector_args = {
                     "kv_connector": connector,
                     "kv_role": roles[gpu],
@@ -721,7 +704,12 @@ def test_cpu_kv_and_weight_version_isolation(
             assert updated[2] == 0, "old policy KV must not match after a weight update"
             assert updated[1] != first[1], "the test must actually change model weights"
             # Updating one generator must not invalidate another's old-policy KV.
-            old = generate(0 if is_mooncake else 1, 0, prompt, clear_local=True)
+            old = generate(
+                0 if is_mooncake else 1,
+                0,
+                prompt,
+                clear_local=roles[0] != "kv_producer",
+            )
             assert old[2] >= cached_prompt_tokens
             assert old[0] == first[0]
             print(
@@ -746,9 +734,13 @@ def test_cpu_kv_and_weight_version_isolation(
                 after = sum(item[1] for item in released)
                 assert before > 0
                 if is_mooncake:
+                    assert after == 0, "session release must free local GPU holds"
+                    reused = generate(
+                        consumer, 1, prompt, clear_local=True, target_dp=consumer_dp
+                    )
                     assert (
-                        after < before
-                    ), "session release must delete actual Store keys"
+                        reused[2] >= cached_prompt_tokens
+                    ), "session release must retain shared Store KV"
                 print(
                     f"Session release: {connector}, cached before={before}, after={after}"
                 )

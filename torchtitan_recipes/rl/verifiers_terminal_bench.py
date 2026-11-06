@@ -14,6 +14,7 @@ The Muse Glimmer example is capped at its model's 16K context length.
 """
 
 import math
+from dataclasses import replace
 from uuid import uuid4
 
 import verifiers.v1 as vf
@@ -159,9 +160,7 @@ def _terminal_bench_rollouter_config(
 def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
     """Qwen3.5-9B: train on TMax (``local/tmax@v1``), validate on Terminal-Bench 2.1.
 
-    16 GPUs: 8 trainer (FSDP=8) and 8 one-GPU generators sharing Mooncake CPU KV.
-    Requires a running Mooncake Master and MOONCAKE_CONFIG_PATH on generator hosts;
-    see torchtitan/rl/generator/vllm/MOONCAKE_STORE.md.
+    16 GPUs: 8 trainer (FSDP=8) and 8 one-GPU generators.
     """
     # Agent turns average about 1.1K tokens (completion plus terminal output),
     # so 120 turns need about 128K.
@@ -214,10 +213,9 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
         ),
         num_generators=8,
         generator_router=InterGeneratorRouter.Config(
-            hot_swap=False,
             strategy=StickySessionRoutingStrategy.Config(
                 fallback_strategy=LeastLoadedRoutingStrategy.Config()
-            ),
+            )
         ),
         metrics=MetricsProcessor.Config(
             console_log_keys_validation=[
@@ -267,16 +265,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
         generator=Generator.Config(
             model=generator_model,
             engine=VLLMEngine.Config(
-                cuda_graph=VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY"),
-                kv_transfer_config=KVTransferConfig(
-                    kv_connector="MooncakeStoreConnector",
-                    kv_role="kv_both",
-                    kv_connector_extra_config={
-                        # Created once per controller config and shared by all replicas.
-                        "cache_prefix": f"qwen35-9b-terminal-bench-{uuid4().hex}",
-                        "save_decode_cache": True,
-                    },
-                ),
+                cuda_graph=VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY")
             ),
             parallelism=generator_parallelism,
             checkpointer=None,
@@ -286,6 +275,32 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
                 max_tokens=max_output_tokens,
             ),
         ),
+    )
+
+
+def rl_grpo_qwen35_9b_terminal_bench_mooncake() -> Controller.Config:
+    """Qwen3.5-9B with shared CPU KV; requires Mooncake Master and SDK.
+
+    Set MOONCAKE_CONFIG_PATH on each generator host; see
+    torchtitan/rl/generator/vllm/MOONCAKE_STORE.md.
+    """
+    config = rl_grpo_qwen35_9b_terminal_bench()
+    assert isinstance(config.generator.engine, VLLMEngine.Config)
+    config.generator.engine = replace(
+        config.generator.engine,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MooncakeStoreConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                # Created once per controller config and shared by all replicas.
+                "cache_prefix": f"qwen35-9b-terminal-bench-{uuid4().hex}",
+                "save_decode_cache": True,
+            },
+        ),
+    )
+    return replace(
+        config,
+        generator_router=replace(config.generator_router, hot_swap=False),
     )
 
 

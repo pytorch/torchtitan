@@ -7,7 +7,6 @@
 """VLLMSessionKVHolder on vLLM's real KV cache manager: 1 attention group + 3 Mamba "align"
 groups, 16-token blocks standing in for Qwen3.5's 1,152."""
 
-from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -308,24 +307,6 @@ def test_release_waits_for_decode_and_saves_and_preserves_shared_prefix(manager)
     assert not holder.has_pending_work
     holder.release(["session-0", "unknown"], [0, 1])
     assert connector.release_session_cache.call_count == 2
-
-
-def test_eviction_future_keeps_idle_engine_work_alive(manager):
-    eviction = Future()
-    connector = Mock()
-    connector.get_pending_save_ids.return_value = set()
-    connector.release_session_cache.return_value = eviction
-    requests = {}
-    holder = _holder(manager, requests, offload_connector=connector)
-    _finished_turn(manager, holder, requests, "session", list(range(50)))
-    holder.release(["session"], [])
-    assert holder.num_sessions == 0
-    assert holder.has_pending_work
-    holder.after_step()
-    connector.release_session_cache.assert_called_once()
-    eviction.set_result(None)
-    holder.after_step()
-    assert not holder.has_pending_work
 
 
 def test_evict_until_free_skips_a_session_with_a_running_request(manager):

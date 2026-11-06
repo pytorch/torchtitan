@@ -75,7 +75,15 @@ generator_router = InterGeneratorRouter.Config(hot_swap=False)
   KV layout, runtime versions, and hash settings, including any `PYTHONHASHSEED`
   override. Prefix caching and hashing otherwise use vLLM defaults.
 - `kv_both` enables reads and writes; `save_decode_cache=True` also saves generated
-  KV. Other native roles and save options pass through.
+  KV. `kv_consumer` skips prefill saves but can save decode KV when requested.
+  `kv_producer` requires `enable_lookup=False` because vLLM protects asynchronous
+  load destinations only for consumers. `load_async=False` is unsupported.
+- Do not set `lookup_rpc_port`: Titan derives this IPC socket name for each
+  generator so replicas on one host cannot unlink each other's lookup socket.
+
+The opt-in recipe `rl_grpo_qwen35_9b_terminal_bench_mooncake` configures a fresh
+shared namespace and drained weight updates. The base
+`rl_grpo_qwen35_9b_terminal_bench` recipe does not require Mooncake.
 
 ## Weight and cache lifecycle
 
@@ -97,28 +105,11 @@ generator_router = InterGeneratorRouter.Config(hot_swap=False)
 - **Connector:** select the built-in `MooncakeStoreConnector`; Titan installs its
   lifecycle adapter. `kv_transfer_config=None` disables it. For local CPU offload,
   use [SimpleCPU](SIMPLE_CPU_OFFLOAD.md).
-- **Sessions:** enabling `session_kv_holder` retains local GPU KV and sends
-  best-effort CPU eviction hints when sessions end, as described below.
-  With `session_kv_holder=None`, Store eviction follows its normal policy.
+- **Sessions:** enabling `session_kv_holder` retains local GPU KV between turns.
+  Session release frees local GPU holds. Store always manages CPU eviction:
+  a generator cannot determine whether another generator still needs a prefix.
 - **Unsupported:** `MultiConnector`, custom connectors, batch-invariant mode,
   and standalone `generate.py`.
-
-## Session release
-
-With `session_kv_holder` enabled, Titan forwards finished-session/group
-notifications to every generator and uses
-the same `connector.release_session_cache(released_hashes, active_hashes)` API as
-[SimpleCPU](SIMPLE_CPU_OFFLOAD.md#session-release). After requests and their
-outstanding save batch finish, each worker's Store layout maps the released
-hashes to keys. Deletion runs in the background with `batch_remove(force=False)`;
-the engine drains it before becoming idle. No global cache reset is used.
-
-This is best-effort deletion. Hashes used by known active sessions on the local
-DP replica are excluded at submission. Mooncake has no global session ownership:
-other replicas or newly admitted sessions may lose a cache hit and recompute.
-Store lease/replication checks can decline deletion, including leases refreshed
-by recent lookups. Rejected keys remain cached for normal Store eviction; the
-hint does not retry indefinitely. Later saves may publish the same prefix again.
 
 ## Multi-GPU coordination
 
@@ -196,7 +187,10 @@ RUN_MOONCAKE_TEST=1 pytest -s tests/rl/unit_tests/gpu/test_kv_offload.py
 
 Tests cover shared KV reuse, policy-version isolation, TP/DP/EP coordination,
 and hybrid partial-tail saves after the last request finishes.
-Multi-node operation and CUDA graphs remain unvalidated.
+The Mooncake GPU matrix is opt-in because it needs a Mooncake SDK and RDMA
+hardware that the default RL CI image does not provide. The Gloo coordination
+and no-forward save regressions run in the CPU suite without a Store.
+Multi-node operation and the full Terminal-Bench recipe remain unvalidated.
 
 ### Local performance sample
 
@@ -229,5 +223,30 @@ consistent end-to-end speedup: paired total-time changes ranged from -1.6% to
 interval runs from first scheduling to first token, not just GPU compute. These
 single-host, short-context debug-model results do not establish production
 performance.
+
+### Concurrent TP cache-pressure sample
+
+A separate Qwen3-8B generator benchmark used one TP group on H100s, four
+interleaved four-turn sessions with two concurrent requests, FULL CUDA graphs,
+and 4 GiB of Store DRAM per worker. Prompts began with 8,192 tokens; each turn
+generated 32 tokens and added 192 input tokens. Each run had two warmup cycles
+and five measured cycles (80 measured requests).
+Three OFF/ON pairs compared native GPU prefix caching with the same GPU cache
+plus Mooncake. The GPU cache had 80 blocks to exercise CPU reloads.
+
+| TP | OFF sessions/s | ON sessions/s | Change | Median requests with CPU hits |
+| --- | ---: | ---: | ---: | ---: |
+| 2 | 0.8362 | 0.9395 | +12.36% | 25 / 80 |
+| 4 | 1.2580 | 1.3621 | +8.27% | 34 / 80 |
+
+With a roomy 512-block GPU cache, neither arm needed CPU reloads; throughput
+changed by +1.65% (TP=2) and -2.05% (TP=4). These are generator throughput
+measurements, not cross-generator or full RL training speedups.
+
+The recompute comparison had identical greedy tokens in TP=2 and two differing
+requests out of 80 in TP=4. GPU-cache and CPU-cache arms reused different prefix
+lengths, so these measurements do not establish bitwise numerical parity.
+The sample predates the config validation and session-release changes in this PR;
+GPU session holding was disabled.
 
 See the [architecture overview](https://vllm.ai/blog/2026-05-06-mooncake-store).
