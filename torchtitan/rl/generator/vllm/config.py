@@ -53,9 +53,10 @@ class VLLMCudaGraphConfig:
     capture_sizes: list[int] | None = None
     """Explicit CUDA graph capture batch sizes. When ``None`` (default), sizes are
     auto-derived: powers of 2 up to the cap, plus ``max_num_seqs`` and the cap as
-    exact sizes. When set, these sizes are deduped and sorted. When expert
-    sequence parallelism is enabled, capture sizes that are not multiples of
-    its degree are removed."""
+    exact sizes. When set, these sizes are deduped and sorted (``FULL`` rejects
+    sizes no step reaches: above ``max_num_seqs`` x the model's
+    ``max_context_length``). When expert sequence parallelism is enabled, capture
+    sizes that are not multiples of its degree are removed."""
 
     # TODO: Validate CUDA graph capture with MoE / Expert Parallelism.
     # MoE routing produces dynamic shapes that may conflict with full
@@ -70,6 +71,7 @@ class VLLMCudaGraphConfig:
         self,
         *,
         max_num_seqs: int,
+        max_model_len: int,
         expert_sequence_parallel_size: int,
         enable_sequence_parallel: bool,
         max_num_batched_tokens: int | None = None,
@@ -84,7 +86,15 @@ class VLLMCudaGraphConfig:
         prefill, whose per-step token count is bounded by
         ``max_num_batched_tokens`` (the configured value, else
         ``_DEFAULT_MAX_NUM_BATCHED_TOKENS``), so the cap extends to it -- otherwise
-        prefill chunks larger than the cap fall back to eager.
+        prefill chunks larger than the cap fall back to eager. A step holds at most
+        ``max_num_seqs`` requests of at most ``max_model_len`` tokens, so ``FULL`` also
+        stops at ``max_num_seqs * max_model_len``. ``TorchTitanGPUModelRunner._dummy_run``
+        keeps each capture request within ``max_model_len``.
+
+            FULL, max_num_seqs=8, max_model_len=1000, auto sizes          -> [1, 2, ..., 1024, 2048]
+            FULL, max_num_seqs=1, max_model_len=1000, auto sizes          -> [1, 2, ..., 512, 1000]
+            FULL, max_num_seqs=1, max_model_len=1000, capture_sizes=[2048] -> ValueError
+            FULL_DECODE_ONLY                                              -> unchanged
 
         ``expert_sequence_parallel_size`` is the TP-axis shard count used by the
         internally sequence-sharded MoE path. A value greater than one removes
@@ -118,13 +128,19 @@ class VLLMCudaGraphConfig:
         else:
             _max_cuda_graph_capture_size = _DEFAULT_MAX_NUM_BATCHED_TOKENS
         cap = max_num_seqs
+        max_step_tokens = max_num_seqs * max_model_len
         if self.mode == "FULL":
-            cap = max(cap, _max_cuda_graph_capture_size)
+            cap = min(max(cap, _max_cuda_graph_capture_size), max_step_tokens)
         if self.capture_sizes is not None:
             if not self.capture_sizes or any(s <= 0 for s in self.capture_sizes):
                 raise ValueError(
                     "cuda_graph.capture_sizes must be a non-empty list of positive "
                     f"ints, got {self.capture_sizes}"
+                )
+            if self.mode == "FULL" and max(self.capture_sizes) > max_step_tokens:
+                raise ValueError(
+                    f"cuda_graph.capture_sizes {self.capture_sizes} has sizes above "
+                    f"max_num_seqs x max_model_len = {max_step_tokens}, which no step reaches"
                 )
             sizes = sorted(set(self.capture_sizes))
         else:
