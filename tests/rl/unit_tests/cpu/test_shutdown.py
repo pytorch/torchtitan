@@ -116,7 +116,7 @@ def test_async_loop_config_rejects_bad_windowed_fifo_batches() -> None:
         AsyncLoopConfig(window_fraction=0.3)  # type: ignore[call-arg]
 
 
-def _make_stub_rl_trainer(dump_folder):
+def _make_stub_rl_trainer(tmp_path):
     """Create an Controller with a minimal stub config (no Generator validation)."""
     from torchtitan.rl.observability import metrics as m
 
@@ -124,12 +124,10 @@ def _make_stub_rl_trainer(dump_folder):
         async def close(self):
             pass
 
-    folder = str(dump_folder)
-
     class _StubConfig:
         async_loop = AsyncLoopConfig()
         metrics = m.MetricsProcessor.Config()
-        dump_folder = folder
+        dump_folder = str(tmp_path)
         rollout_recorder = RolloutSampleRecorder.Config()
         hf_assets_path = "./tests/assets/tokenizer"
         # __init__ builds these too; stub them so construction does no real work.
