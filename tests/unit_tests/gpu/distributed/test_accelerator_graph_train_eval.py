@@ -237,7 +237,7 @@ def test_eval_warmup_keeps_rng_and_buffer_updates():
             assert torch.equal(torch.cuda.get_rng_state(), expected_rng)
 
 
-def test_per_group_graph_waits_for_eval_capture():
+def test_later_segment_graph_waits_for_eval_capture():
     accelerator_graph_manager.capture_allowed = False
     parameter = torch.nn.Parameter(torch.ones(1024, device="cuda"))
     inputs = torch.ones_like(parameter)

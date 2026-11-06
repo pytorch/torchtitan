@@ -8,16 +8,14 @@
 the consume-time staleness invariant, the metrics timer drain, and RolloutTurnID."""
 
 import asyncio
-import dataclasses
 import json
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import numpy as np
 import pytest
 import torch
-from torchtitan.models.common.moe.moe import MicrobatchWiseLoadBalanceLoss, MoE
 from torchtitan.rl.controller.controller import Controller
 from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
@@ -56,51 +54,6 @@ def test_controller_config_maybe_log(tmp_path, caplog) -> None:
     with open(tmp_path / "config.json") as file:
         saved_config = json.load(file)
     assert saved_config["trainer"]["model"]["max_context_length"] == 128
-
-
-@pytest.mark.parametrize(
-    "setting",
-    [
-        None,
-        "aux_loss",
-        "mtp",
-        "per_group_accelerator_graphs",
-        "accelerator_graphs",
-        "sdc_replay",
-        "deferred_reduction",
-        "rdma",
-    ],
-)
-def test_stream_microbatches_config_check(setting: str | None) -> None:
-    from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_moe_debug_varlen
-
-    config = rl_grpo_qwen3_moe_debug_varlen()
-    batcher = dataclasses.replace(config.async_loop.batcher, stream_microbatches=True)
-    if setting == "aux_loss":
-        _, moe, _, _ = next(config.trainer.model.traverse(MoE.Config))
-        moe.router.aux_loss = MicrobatchWiseLoadBalanceLoss.Config(coeff=0.01)
-    elif setting == "mtp":
-        batcher = dataclasses.replace(batcher, num_mtp_layers=1)
-    elif setting == "per_group_accelerator_graphs":
-        config.trainer.training.disable_accelerator_graphs = False
-        config.trainer.training.accelerator_graph_per_microbatch_group = True
-    elif setting == "accelerator_graphs":
-        config.trainer.training.disable_accelerator_graphs = False
-    elif setting == "sdc_replay":
-        config.trainer.sdc_replayer = MagicMock()
-    elif setting == "deferred_reduction":
-        config.trainer.parallelism.fsdp_defer_gradient_reduction = True
-    elif setting == "rdma":
-        batcher = dataclasses.replace(batcher, rdma_min_tensor_bytes=1)
-        config.trainer.training.preprocess_microbatch_groups_lazily = True
-    config.async_loop = dataclasses.replace(config.async_loop, batcher=batcher)
-
-    # replace() reruns __post_init__.
-    if setting != "accelerator_graphs":
-        dataclasses.replace(config)
-        return
-    with pytest.raises(ValueError, match="stream_microbatches needs"):
-        dataclasses.replace(config)
 
 
 def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:

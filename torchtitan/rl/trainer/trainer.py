@@ -318,18 +318,44 @@ class Trainer(Configurable):
                         f"{identity}, expected {expected}."
                     )
             self._num_rdma_batches_read += 1
-            # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
-            # and broadcast it, to cut the trainer's reads by cp * tp. Needs a per-replica group.
-            # The controller rejects RDMA with PP, so every group holds one microbatch.
-            # TODO: with stream_microbatches, each call's first read is not overlapped: this method
-            # never awaits, so a queued call starts reading only after the previous call returns.
-            # Start the reads when a call arrives.
-            microbatch_groups = RDMAMicrobatchPrefetcher(microbatches)
-        result = engine.forward_backward(
-            microbatch_groups=microbatch_groups,
-            aux_loss_denominators=aux_loss_denominators,
-        )
-        self._step_num_flops += result.num_flops
+        # With graphs, the engine replays the step's first call as one graph, so that call needs
+        # the same group count every step. Packing changes a step's group count, so the step's
+        # first group goes in its own call. That adds a gradient reduction per step only under
+        # HSDP or deferred reduction, which reduce once per call.
+        if (
+            len(microbatch_groups) > 1
+            and engine.uses_forward_backward_accelerator_graphs
+            and not engine.step_started
+        ):
+            engine_calls = [microbatch_groups[:1], microbatch_groups[1:]]
+        else:
+            engine_calls = [microbatch_groups]
+        loss_metrics_by_group: list[list[dict[str, torch.Tensor]]] = []
+        for call_groups in engine_calls:
+            if uses_rdma:
+                # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per
+                # replica and broadcast it, to cut the trainer's reads by cp * tp. Needs a
+                # per-replica group.
+                # The controller rejects RDMA with PP, so every group holds one microbatch.
+                # TODO: with stream_microbatches, each call's first read is not overlapped: this
+                # method never awaits, so a queued call starts reading only after the previous
+                # call returns. Start the reads when a call arrives.
+                # Made when its engine call starts, so a split call's two reads don't overlap.
+                prefetcher = RDMAMicrobatchPrefetcher(
+                    [microbatch for group in call_groups for microbatch in group]
+                )
+                result = engine.forward_backward(
+                    microbatch_groups=prefetcher,
+                    aux_loss_denominators=aux_loss_denominators,
+                )
+                self._step_read_microbatches_s += prefetcher.read_s
+            else:
+                result = engine.forward_backward(
+                    microbatch_groups=call_groups,
+                    aux_loss_denominators=aux_loss_denominators,
+                )
+            loss_metrics_by_group += result.loss_metrics
+            self._step_num_flops += result.num_flops
         if not engine.pp_has_last_stage:
             # Ranks with the last stage wait for the GPU when they reduce the loss metrics below.
             # Wait here too, so this call's busy time includes its GPU work.
@@ -341,7 +367,7 @@ class Trainer(Configurable):
         microbatch_metrics: list[dict[str, float]] = []
         # TODO: pick the cross-rank reduce with loss_metric_reduce_op, so /min keys take
         # the min across ranks too (no RL loss emits /min today).
-        for group_metrics in result.loss_metrics:
+        for group_metrics in loss_metrics_by_group:
             for loss_metrics in group_metrics:
                 microbatch_metrics.append(
                     self._reduce_forward_backward_metrics(
@@ -363,7 +389,6 @@ class Trainer(Configurable):
             # The slowest rank's read time this step so far, hidden or not (max over the loss mesh).
             # Each call reports the step's running total, so the controller's max over the step's calls
             # (`combine_microbatch_metrics`) is the step total.
-            self._step_read_microbatches_s += microbatch_groups.read_s
             read_microbatches_s = torch.tensor(
                 self._step_read_microbatches_s, device=engine.device
             )

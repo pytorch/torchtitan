@@ -235,7 +235,6 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
         dist_moe_runtime=runtime_config,
         sdc_replayer=None,
         training=SimpleNamespace(
-            accelerator_graph_per_microbatch_group=False,
             disable_accelerator_graphs=True,
             num_tokens_per_microbatch_per_dp_rank=8,
             preprocess_microbatch_groups_lazily=False,

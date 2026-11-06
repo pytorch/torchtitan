@@ -165,7 +165,6 @@ def test_forward_backward_preprocesses_every_group() -> None:
             return_value=[("input", "labels", {}, {}) for _ in range(3)]
         ),
         _run_forward_backward=MagicMock(return_value=(torch.tensor(1.0), [])),
-        _accelerator_graph_per_microbatch_group_enabled=False,
         _step_started=False,
         _forward_backward_captures_whole_step=False,
         sdc_replayer=None,
@@ -236,6 +235,7 @@ def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
             model_config=SimpleNamespace(mtp_layers=None),
             device=torch.device("cpu"),
             pp_has_last_stage=True,
+            uses_forward_backward_accelerator_graphs=False,
         )
         engine.forward_backward = MagicMock(
             return_value=ForwardBackwardResult(
@@ -395,6 +395,100 @@ def test_streamed_forward_backward_calls_add_up_the_step_totals() -> None:
 
 
 @pytest.mark.parametrize(
+    ("graphs_enabled", "step_started", "expected_engine_calls"),
+    [
+        # With graphs, the step's first group is its own engine call.
+        (True, False, [[0], [1, 2]]),
+        (True, True, [[0, 1, 2]]),
+        (False, False, [[0, 1, 2]]),
+    ],
+)
+@pytest.mark.parametrize("rdma", [False, True])
+def test_forward_backward_sends_the_step_first_group_alone_with_graphs(
+    graphs_enabled: bool,
+    step_started: bool,
+    expected_engine_calls: list[list[int]],
+    rdma: bool,
+) -> None:
+    events = []
+
+    class RecordingPrefetcher:
+        def __init__(self, microbatches):
+            events.append("prefetcher")
+            self.microbatches = microbatches
+            self.read_s = 0.25
+
+    def forward_backward(*, microbatch_groups, aux_loss_denominators):
+        microbatches = (
+            microbatch_groups.microbatches
+            if rdma
+            else [microbatch for [microbatch] in microbatch_groups]
+        )
+        # Both engine calls of a split call take the trainer call's denominators.
+        assert aux_loss_denominators is denominators
+        events.append([microbatch.microbatch_index for microbatch in microbatches])
+        return ForwardBackwardResult(
+            loss=torch.tensor(0.5),
+            loss_metrics=[[{"loss/mean": torch.tensor(1.0)}] for _ in microbatches],
+            num_flops=100,
+        )
+
+    trainer = object.__new__(Trainer)
+    trainer.engine = SimpleNamespace(
+        num_completed_steps=0,
+        device=torch.device("cpu"),
+        pp_has_last_stage=True,
+        uses_forward_backward_accelerator_graphs=graphs_enabled,
+        step_started=step_started,
+        forward_backward=forward_backward,
+    )
+    trainer.config = Trainer.Config(model=MagicMock())
+    trainer.dp_rank = 0
+    trainer._num_rdma_batches_read = 0
+    trainer._step_forward_backward_s = 0.0
+    trainer._step_num_tokens_per_dp_rank = 0
+    trainer._step_num_flops = 0
+    trainer._step_read_microbatches_s = 0.0
+    trainer._reduce_forward_backward_metrics = MagicMock(
+        side_effect=lambda *, sum_reduced_metrics, max_reduced_metrics: {
+            key: float(value.item())
+            for key, value in {**sum_reduced_metrics, **max_reduced_metrics}.items()
+        }
+    )
+    microbatches = [
+        MagicMock(
+            spec=RDMAMicrobatch if rdma else TrainingMicrobatch,
+            batch_index=0,
+            dp_rank=0,
+            microbatch_index=index,
+        )
+        for index in range(3)
+    ]
+
+    denominators = torch.tensor([2.0])
+    with patch(
+        "torchtitan.rl.trainer.trainer.RDMAMicrobatchPrefetcher", RecordingPrefetcher
+    ):
+        metrics = asyncio.run(
+            Trainer.forward_backward(
+                trainer, [[microbatch] for microbatch in microbatches], denominators
+            )
+        )
+
+    # Each prefetcher is made when its engine call starts, so a split call's reads don't overlap.
+    assert events == [
+        event
+        for engine_call in expected_engine_calls
+        for event in (["prefetcher", engine_call] if rdma else [engine_call])
+    ]
+    # Both engine calls' loss metrics and FLOPs come back.
+    assert metrics["loss/mean"] == 3.0
+    assert trainer._step_num_flops == 100 * len(expected_engine_calls)
+    if rdma:
+        assert trainer._step_read_microbatches_s == 0.25 * len(expected_engine_calls)
+
+
+@pytest.mark.parametrize(
     ("batch_index", "dp_rank", "microbatch_index"),
     [(1, 1, 0), (0, 0, 0), (0, 1, 1)],
     ids=["another_batch", "another_rank", "out_of_order"],
@@ -438,7 +532,11 @@ def _rl_microbatch(token: int) -> TrainingMicrobatch:
 def test_forward_backward_without_last_pipeline_stage_returns_no_metrics() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
-        engine = SimpleNamespace(num_completed_steps=0, pp_has_last_stage=False)
+        engine = SimpleNamespace(
+            num_completed_steps=0,
+            pp_has_last_stage=False,
+            uses_forward_backward_accelerator_graphs=False,
+        )
         engine.forward_backward = MagicMock(
             return_value=ForwardBackwardResult(
                 loss=torch.tensor(-1.0), loss_metrics=[[{}, {}], [{}, {}]], num_flops=0

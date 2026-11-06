@@ -112,7 +112,6 @@ def build_minimal_trainer(
     engine.flops_estimator = lambda inputs: 0
     engine.num_completed_steps = 0
     engine.sdc_replayer = None
-    engine._accelerator_graph_per_microbatch_group_enabled = False
     engine._step_started = False
     engine._forward_backward_captures_whole_step = False
     engine.garbage_collector = SimpleNamespace(run=lambda _step: False)

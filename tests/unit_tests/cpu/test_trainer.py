@@ -390,15 +390,10 @@ def test_pp_forward_backward_passes_loss_kwargs_and_nests_metrics() -> None:
     ]
 
 
-@pytest.mark.parametrize(
-    ("per_group_graph", "lazily", "set_to_none"),
-    [(False, False, True), (True, False, False), (False, True, True)],
-)
+@pytest.mark.parametrize("lazily", [False, True])
 def test_forward_backward_runs_whole_accumulation(
     monkeypatch,
-    per_group_graph: bool,
     lazily: bool,
-    set_to_none: bool,
 ) -> None:
     captured: dict[str, Any] = {}
     events: list[str] = []
@@ -455,7 +450,6 @@ def test_forward_backward_runs_whole_accumulation(
     engine.device = torch.device("cpu")
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
-    engine._accelerator_graph_per_microbatch_group_enabled = per_group_graph
     engine._step_started = False
     engine._forward_backward_captures_whole_step = False
     engine.sdc_replayer = None
@@ -496,7 +490,7 @@ def test_forward_backward_runs_whole_accumulation(
     assert engine.local_loss_token_count == 2
     assert engine._step_started
     engine.garbage_collector.run.assert_called_once_with(1)
-    engine.optim.zero_grad.assert_called_once_with(set_to_none=set_to_none)
+    engine.optim.zero_grad.assert_called_once_with(set_to_none=True)
     for microbatch in microbatches:
         assert isinstance(microbatch, _DictTrainingMicrobatch)
         assert microbatch.to_input_dict_calls == [(engine.device, True)]
@@ -577,7 +571,6 @@ def _streaming_engine(
             torch.tensor(0.0),
         )[1],
     )
-    engine._accelerator_graph_per_microbatch_group_enabled = False
     engine._step_started = False
     engine._forward_backward_captures_whole_step = captures_whole_step
     engine.sdc_replayer = None
@@ -666,8 +659,8 @@ def test_a_captured_step_takes_one_forward_backward_call(
         )
         assert events == ["preprocess 2 aux 1.0"]
         return
-    # A whole-step graph sees only one call's gradients.
-    with pytest.raises(ValueError, match="capture one forward_backward call"):
+    # GraphTrainer's graph and runtime cover the whole step, so they see only one call.
+    with pytest.raises(ValueError, match="each optimizer step in one forward_backward"):
         TrainingEngine.forward_backward(
             engine,
             microbatch_groups=[[_microbatch(2.0, 4)]],
@@ -839,12 +832,10 @@ def test_accelerator_graph_wrapper_preserves_structured_args_and_kwargs():
         ),
     ],
 )
-def test_training_engine_configures_gradient_accumulation_accelerator_graph(
+def test_training_engine_configures_segment_accelerator_graphs(
     profiler: Profiler.Config, annotation_config: dict[str, Any] | None
 ) -> None:
     model = torch.nn.Linear(2, 2)
-    eager_forward_backward = MagicMock(return_value=(torch.tensor(1.0), []))
-    accelerator_graph_forward_backward = MagicMock(return_value=(torch.tensor(2.0), []))
     engine = cast(
         TrainingEngine,
         SimpleNamespace(
@@ -853,117 +844,75 @@ def test_training_engine_configures_gradient_accumulation_accelerator_graph(
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
                 profiler=profiler,
-                training=SimpleNamespace(
-                    accelerator_graph_per_microbatch_group=False,
-                    disable_accelerator_graphs=False,
-                ),
-                parallelism=SimpleNamespace(
-                    enable_sequence_parallel=False,
-                    fsdp_defer_gradient_reduction=True,
-                    fsdp_reshard_after_forward="never",
-                ),
+                training=SimpleNamespace(disable_accelerator_graphs=False),
+                parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
             ),
-            parallelism_context=SimpleNamespace(pp_enabled=False),
+            parallelism_context=SimpleNamespace(
+                pp_enabled=False, dp_replicate_enabled=False
+            ),
             model_parts=[model],
-            _forward_backward_body=eager_forward_backward,
+            _forward_backward_body=MagicMock(),
+            _run_forward_backward_segments=MagicMock(),
         ),
     )
 
     with (
         patch(
-            "torchtitan.training_engine.wrap_fwd_bwd_with_accelerator_graph",
-            return_value=accelerator_graph_forward_backward,
-        ) as wrap,
+            "torchtitan.training_engine.wrap_fwd_bwd_with_accelerator_graph"
+        ) as wrap_first_segment,
+        patch("torchtitan.training_engine.wrap_with_accelerator_graph") as wrap_later,
         patch(
             "torchtitan.training_engine.accelerator_graphs_supported", return_value=True
         ),
         patch("torch.cuda.graph_annotations.is_available", return_value=True),
     ):
         TrainingEngine._initialize_forward_backward(engine)
-        loss, _ = engine._run_forward_backward([(), ()])
-        torch.testing.assert_close(loss, torch.tensor(2.0))
+        engine._later_segment_graphs[2]  # makes a later-segment graph
 
-    wrap.assert_called_once()
-    assert wrap.call_args.kwargs["num_warmup_iterations"] == 2
-    assert tuple(wrap.call_args.kwargs["parameters"]) == tuple(model.parameters())
-    assert wrap.call_args.kwargs["annotation_config"] == annotation_config
-    accelerator_graph_forward_backward.assert_called_once()
-    assert engine._forward_backward_accelerator_graph_enabled
-    assert engine._forward_backward_captures_whole_step
+    assert tuple(wrap_first_segment.call_args.kwargs["parameters"]) == tuple(
+        model.parameters()
+    )
+    for wrap in (wrap_first_segment, wrap_later):
+        assert wrap.call_args.kwargs["num_warmup_iterations"] == 2
+        assert wrap.call_args.kwargs["annotation_config"] == annotation_config
 
 
-def test_training_engine_replays_one_accelerator_graph_per_microbatch_group() -> None:
-    graph_loss = torch.tensor(0.0)
-    graph_metric = torch.tensor(0.0)
+@pytest.mark.parametrize(
+    ("replace_weight_gradient", "new_gradient"), [(False, "bias"), (True, "weight")]
+)
+def test_later_segment_capture_rejects_a_new_gradient_tensor(
+    replace_weight_gradient: bool, new_gradient: str
+) -> None:
+    model = torch.nn.Linear(2, 2)
+    # The first-segment graph allocated weight.grad only.
+    model.weight.grad = torch.zeros_like(model.weight)
 
-    def run_group(
-        microbatch_groups: list[tuple[int]],
-        *,
-        preprocess_microbatch_groups_lazily: bool,
-    ) -> LossAndMetrics:
-        assert len(microbatch_groups) == 1
-        assert not preprocess_microbatch_groups_lazily
-        graph_loss.fill_(microbatch_groups[0][0])
-        graph_metric.fill_(microbatch_groups[0][0])
-        return graph_loss, [[{"group": graph_metric}]]
+    def later_segment(segment: list[Any]) -> LossAndMetrics:
+        # Either tensor would live in this capture, and the next zero_grad would drop it.
+        if replace_weight_gradient:
+            model.weight.grad = model.weight.grad + 1
+        else:
+            model(torch.ones(1, 2)).sum().backward()  # allocates bias.grad
+        return torch.tensor(1.0), []
 
-    group_runner = MagicMock(side_effect=run_group)
     engine = cast(
         TrainingEngine,
         SimpleNamespace(
-            config=SimpleNamespace(
-                dist_moe_runtime=None,
-                sdc_replayer=None,
-                debug=SimpleNamespace(spmd_typechecking=False),
-                profiler=Profiler.Config(),
-                training=SimpleNamespace(
-                    accelerator_graph_per_microbatch_group=True,
-                    disable_accelerator_graphs=False,
-                ),
-                parallelism=SimpleNamespace(
-                    fsdp_defer_gradient_reduction=False,
-                ),
-            ),
-            parallelism_context=SimpleNamespace(pp_enabled=False),
-            _forward_backward_body=MagicMock(),
-            # Set by TrainingEngine.__init__.
-            _forward_backward_captures_whole_step=False,
+            _step_started=True,
+            _graph_segment_is_whole_call=False,
+            sdc_replayer=None,
+            _first_segment_graph=SimpleNamespace(captured=True),
+            _later_segment_graphs={
+                1: MagicMock(side_effect=later_segment, captured=False)
+            },
+            model_parts=[model],
         ),
     )
 
-    with (
-        patch(
-            "torchtitan.training_engine.wrap_with_accelerator_graph",
-            return_value=group_runner,
-        ) as wrap_group,
-        patch(
-            "torchtitan.training_engine.wrap_fwd_bwd_with_accelerator_graph"
-        ) as wrap_step,
-        patch(
-            "torchtitan.training_engine.accelerator_graphs_supported", return_value=True
-        ),
-    ):
-        TrainingEngine._initialize_forward_backward(engine)
-        loss, loss_metrics = engine._run_forward_backward(
-            [(1,), (2,), (3,)], preprocess_microbatch_groups_lazily=False
+    with pytest.raises(ValueError, match=rf"Parameters \['{new_gradient}'\] got a new"):
+        TrainingEngine._run_forward_backward_segments(
+            engine, [()], preprocess_microbatch_groups_lazily=False
         )
-
-    torch.testing.assert_close(loss, torch.tensor(6.0))
-    assert [metrics["group"].item() for [metrics] in loss_metrics] == [
-        1.0,
-        2.0,
-        3.0,
-    ]
-    assert engine._accelerator_graph_per_microbatch_group_enabled
-    assert engine._forward_backward_accelerator_graph_enabled
-    assert not engine._forward_backward_captures_whole_step
-    wrap_group.assert_called_once()
-    wrap_step.assert_not_called()
-    assert [call.args[0] for call in group_runner.call_args_list] == [
-        [(1,)],
-        [(2,)],
-        [(3,)],
-    ]
 
 
 def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() -> None:
@@ -976,7 +925,6 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
                 training=SimpleNamespace(
-                    accelerator_graph_per_microbatch_group=False,
                     disable_accelerator_graphs=False,
                     preprocess_microbatch_groups_lazily=False,
                 ),
@@ -987,8 +935,6 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
             ),
             parallelism_context=SimpleNamespace(pp_enabled=False),
             _forward_backward_body=eager_forward_backward,
-            # Set by TrainingEngine.__init__.
-            _forward_backward_captures_whole_step=False,
         ),
     )
 
@@ -1006,7 +952,6 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
     eager_forward_backward.assert_called_once()
     wrap.assert_not_called()
     assert not engine._forward_backward_accelerator_graph_enabled
-    assert not engine._forward_backward_captures_whole_step
 
 
 def test_graph_training_engine_rejects_optimizer_accelerator_graph() -> None:
@@ -1217,7 +1162,6 @@ def test_trainer_accumulates_reused_accelerator_graph_losses():
         SimpleNamespace(
             config=SimpleNamespace(
                 training=SimpleNamespace(
-                    accelerator_graph_per_microbatch_group=False,
                     disable_accelerator_graphs=False,
                 ),
             ),
@@ -1338,9 +1282,8 @@ def test_step_aux_loss_denominators_sum_counts_over_dp_in_one_all_reduce(
 
 
 @pytest.mark.parametrize("disable_accelerator_graphs", [False, True])
-@pytest.mark.parametrize("per_group", [False, True])
 def test_engine_prepares_pp_metadata_before_accelerator_graph(
-    disable_accelerator_graphs, per_group
+    disable_accelerator_graphs,
 ):
     engine = object.__new__(TrainingEngine)
     engine.config = SimpleNamespace(
@@ -1349,14 +1292,15 @@ def test_engine_prepares_pp_metadata_before_accelerator_graph(
         profiler=Profiler.Config(),
         training=SimpleNamespace(
             disable_accelerator_graphs=disable_accelerator_graphs,
-            accelerator_graph_per_microbatch_group=per_group,
             preprocess_microbatch_groups_lazily=False,
         ),
         parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
         debug=SimpleNamespace(spmd_typechecking=False),
     )
     engine.parallelism_context = SimpleNamespace(
-        pp_enabled=True, activate_spmd=lambda **kwargs: contextlib.nullcontext()
+        pp_enabled=True,
+        dp_replicate_enabled=False,
+        activate_spmd=lambda **kwargs: contextlib.nullcontext(),
     )
     engine.device = torch.device("cpu")
     engine.model_parts = [torch.nn.Linear(4, 4)]
@@ -1365,10 +1309,10 @@ def test_engine_prepares_pp_metadata_before_accelerator_graph(
         patch(
             "torchtitan.training_engine.accelerator_graphs_supported", return_value=True
         ),
-        patch("torchtitan.training_engine.wrap_with_accelerator_graph") as wrap_group,
+        patch("torchtitan.training_engine.wrap_with_accelerator_graph") as wrap_later,
         patch(
             "torchtitan.training_engine.wrap_fwd_bwd_with_accelerator_graph"
-        ) as wrap_update,
+        ) as wrap_first_segment,
         patch(
             "torchtitan.training_engine.prepare_pipeline_schedule_for_accelerator_graph"
         ) as prepare,
@@ -1376,21 +1320,23 @@ def test_engine_prepares_pp_metadata_before_accelerator_graph(
         engine._initialize_forward_backward()
         prepare.assert_not_called()
         if disable_accelerator_graphs:
-            wrap_group.assert_not_called()
-            wrap_update.assert_not_called()
+            wrap_later.assert_not_called()
+            wrap_first_segment.assert_not_called()
             return
-        wrap = wrap_group if per_group else wrap_update
+        engine._later_segment_graphs[1]
         inputs, labels = torch.ones(1, 4), torch.zeros(1, 4)
         advantages = torch.ones(1, 4)
         # PP layout: (arg_mbs, kwarg_mbs, target_mbs, loss_kwarg_mbs).
         group = ([(inputs,)], [{}], [labels], [{"advantages": advantages}])
-        wrap.call_args.kwargs["prepare_for_capture"]([group])
-        assert prepare.call_args.args == (engine.pp_schedule,)
-        assert prepare.call_args.kwargs["args"] == (inputs,)
-        assert prepare.call_args.kwargs["target"] is labels
-        loss_kwargs = prepare.call_args.kwargs["loss_kwargs"]
-        assert loss_kwargs.keys() == {"advantages"}
-        assert loss_kwargs["advantages"] is advantages
+        for wrap in (wrap_first_segment, wrap_later):
+            prepare.reset_mock()
+            wrap.call_args.kwargs["prepare_for_capture"]([group])
+            assert prepare.call_args.args == (engine.pp_schedule,)
+            assert prepare.call_args.kwargs["args"] == (inputs,)
+            assert prepare.call_args.kwargs["target"] is labels
+            loss_kwargs = prepare.call_args.kwargs["loss_kwargs"]
+            assert loss_kwargs.keys() == {"advantages"}
+            assert loss_kwargs["advantages"] is advantages
 
 
 def test_engine_replay_checks_whole_accumulation() -> None:
@@ -1432,7 +1378,6 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     engine.device = torch.device("cpu")
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
-    engine._accelerator_graph_per_microbatch_group_enabled = False
     engine._step_started = False
     engine._forward_backward_captures_whole_step = True
     engine.sdc_replayer = replayer
@@ -1487,7 +1432,6 @@ def test_replay_failure_propagates_from_engine():
     engine.device = torch.device("cpu")
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
-    engine._accelerator_graph_per_microbatch_group_enabled = False
     engine._step_started = False
     engine._forward_backward_captures_whole_step = True
     engine.sdc_replayer = SimpleNamespace(run_fwd_bwd=MagicMock(side_effect=mismatch))
@@ -1620,49 +1564,10 @@ def test_accelerator_graph_wrapper_is_noop_when_unsupported(
     ):
         runner = wrap_with_accelerator_graph(fwd_bwd)
 
-    assert runner is fwd_bwd
+    assert runner(1, scale=2) is fwd_bwd.return_value
+    fwd_bwd.assert_called_once_with(1, scale=2)
+    assert not runner.captured
     warning.assert_called_once()
-
-
-def test_accelerator_graph_accumulation_supports_eager_gradient_reduction() -> None:
-    engine = cast(
-        TrainingEngine,
-        SimpleNamespace(
-            parallelism_context=SimpleNamespace(pp_enabled=False),
-            config=SimpleNamespace(
-                dist_moe_runtime=None,
-                profiler=Profiler.Config(),
-                training=SimpleNamespace(
-                    accelerator_graph_per_microbatch_group=False,
-                    disable_accelerator_graphs=False,
-                ),
-                sdc_replayer=None,
-                parallelism=SimpleNamespace(
-                    fsdp_defer_gradient_reduction=False,
-                    fsdp_reshard_after_forward="never",
-                ),
-            ),
-            model_parts=[],
-            _forward_backward_body=MagicMock(),
-        ),
-    )
-
-    with (
-        patch(
-            "torchtitan.training_engine.wrap_fwd_bwd_with_accelerator_graph",
-            side_effect=lambda fn, **_: fn,
-        ),
-        patch(
-            "torchtitan.training_engine.accelerator_graphs_supported", return_value=True
-        ),
-    ):
-        TrainingEngine._initialize_forward_backward(engine)
-        engine._run_forward_backward([(), ()])
-
-    engine._forward_backward_body.assert_called_once_with(
-        [(), ()],
-        defer_fsdp_gradient_reduction=False,
-    )
 
 
 @pytest.mark.parametrize("configured_defer", [False, True])
@@ -1676,7 +1581,6 @@ def test_initialize_forward_backward_uses_eager_fsdp_reduction_config(
             config=SimpleNamespace(
                 dist_moe_runtime=None,
                 training=SimpleNamespace(
-                    accelerator_graph_per_microbatch_group=False,
                     disable_accelerator_graphs=True,
                 ),
                 parallelism=SimpleNamespace(

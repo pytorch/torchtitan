@@ -630,71 +630,95 @@ def accelerator_graphs_supported() -> bool:
 
 
 # TODO: Unify PP and non-PP callable signatures to restore strict input typing.
-def _wrap_with_accelerator_graph(
-    fn: Callable[..., Any],
-    *,
-    num_warmup_iterations: int,
-    gradient_parameters: tuple[torch.nn.Parameter, ...] | None,
-    prepare_for_capture: Callable[..., None] | None,
-    name: str | None,
-    annotation_config: dict[str, Any] | None,
-) -> Callable[..., Any]:
-    """Implement structured accelerator graph wrapping."""
+class StructuredAcceleratorGraph:
+    """Capture and replay ``fn(*args, **kwargs)``; the inputs can be any pytree of tensors.
 
-    reason = _unsupported_reason()
-    if reason is not None:
-        logger.warning(
-            f"Graph capture is unavailable ({reason}); using eager execution."
+    The graph is built from the first call's inputs, and later calls must keep their
+    structure. Without graph support, every call runs ``fn`` eagerly.
+
+    Example:
+        graph = wrap_with_accelerator_graph(fn, num_warmup_iterations=2)
+        graph(batch)  # eager warmup
+        graph(batch)  # eager warmup
+        graph(batch)  # capture, then replay
+        graph.captured  # True; every later call replays
+    """
+
+    def __init__(
+        self,
+        fn: Callable[..., Any],
+        *,
+        num_warmup_iterations: int,
+        gradient_parameters: tuple[torch.nn.Parameter, ...] | None,
+        prepare_for_capture: Callable[..., None] | None,
+        name: str | None,
+        annotation_config: dict[str, Any] | None,
+    ) -> None:
+        self._fn = fn
+        self._num_warmup_iterations = num_warmup_iterations
+        self._gradient_parameters = gradient_parameters
+        self._prepare_for_capture = prepare_for_capture
+        self._name = name
+        self._annotation_config = annotation_config
+        reason = _unsupported_reason()
+        if reason is not None:
+            logger.warning(
+                f"Graph capture is unavailable ({reason}); using eager execution."
+            )
+        self._supported = reason is None
+        # The manager keeps each captured wrapper alive until teardown.
+        self._graph_wrapper: AcceleratorGraphWrapper | None = None
+        self._input_spec: AcceleratorGraphInputSpec | None = None
+
+    @property
+    def captured(self) -> bool:
+        """Whether the graph is captured, so every later call replays it."""
+        return (
+            self._graph_wrapper is not None and self._graph_wrapper._graph is not None
         )
-        return fn
 
-    # The manager keeps each captured wrapper alive until teardown.
-    graph_wrapper: AcceleratorGraphWrapper | None = None
-    input_spec: AcceleratorGraphInputSpec | None = None
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        if not self._supported:
+            return self._fn(*args, **kwargs)
 
-    def run(*args: Any, **kwargs: Any) -> Any:
-        nonlocal graph_wrapper, input_spec
-
-        if graph_wrapper is None:
+        if self._graph_wrapper is None:
             input_spec = AcceleratorGraphInputSpec((args, kwargs))
+            self._input_spec = input_spec
 
             def run_flat(fn: Callable[..., Any], *flat_inputs: Any) -> Any:
-                assert input_spec is not None
                 step_args, step_kwargs = input_spec.unflatten(flat_inputs)
                 return fn(*step_args, **step_kwargs)
 
             flat_inputs = input_spec.flatten((args, kwargs))
             flat_prepare = (
-                partial(run_flat, prepare_for_capture)
-                if prepare_for_capture is not None
+                partial(run_flat, self._prepare_for_capture)
+                if self._prepare_for_capture is not None
                 else None
             )
-            if gradient_parameters is None:
-                graph_wrapper = AcceleratorGraphWrapper(
-                    partial(run_flat, fn),
+            if self._gradient_parameters is None:
+                self._graph_wrapper = AcceleratorGraphWrapper(
+                    partial(run_flat, self._fn),
                     flat_inputs,
-                    num_warmup_iterations=num_warmup_iterations,
+                    num_warmup_iterations=self._num_warmup_iterations,
                     prepare_for_capture=flat_prepare,
-                    name=name,
-                    annotation_config=annotation_config,
+                    name=self._name,
+                    annotation_config=self._annotation_config,
                 )
             else:
-                graph_wrapper = _ForwardBackwardAcceleratorGraphWrapper(
-                    partial(run_flat, fn),
+                self._graph_wrapper = _ForwardBackwardAcceleratorGraphWrapper(
+                    partial(run_flat, self._fn),
                     flat_inputs,
-                    parameters=gradient_parameters,
-                    num_warmup_iterations=num_warmup_iterations,
+                    parameters=self._gradient_parameters,
+                    num_warmup_iterations=self._num_warmup_iterations,
                     prepare_for_capture=flat_prepare,
-                    name=name,
-                    annotation_config=annotation_config,
+                    name=self._name,
+                    annotation_config=self._annotation_config,
                 )
         else:
-            assert input_spec is not None
-            flat_inputs = input_spec.flatten((args, kwargs))
+            assert self._input_spec is not None
+            flat_inputs = self._input_spec.flatten((args, kwargs))
 
-        return graph_wrapper(*flat_inputs)
-
-    return run
+        return self._graph_wrapper(*flat_inputs)
 
 
 def wrap_with_accelerator_graph(
@@ -704,7 +728,7 @@ def wrap_with_accelerator_graph(
     prepare_for_capture: Callable[..., None] | None = None,
     name: str | None = None,
     annotation_config: dict[str, Any] | None = None,
-) -> Callable[..., Any]:
+) -> StructuredAcceleratorGraph:
     """Decorate a structured callable with accelerator graph capture and replay.
 
     The positional and keyword inputs must keep the same pytree structure and
@@ -720,7 +744,7 @@ def wrap_with_accelerator_graph(
         annotation_config: Backend-specific annotation options used at capture.
     """
 
-    return _wrap_with_accelerator_graph(
+    return StructuredAcceleratorGraph(
         fn,
         num_warmup_iterations=num_warmup_iterations,
         gradient_parameters=None,
@@ -738,7 +762,7 @@ def wrap_fwd_bwd_with_accelerator_graph(
     prepare_for_capture: Callable[..., None] | None = None,
     name: str | None = None,
     annotation_config: dict[str, Any] | None = None,
-) -> Callable[..., Any]:
+) -> StructuredAcceleratorGraph:
     """Wrap forward-backward and preserve gradients allocated during capture.
 
     Args:
@@ -751,7 +775,7 @@ def wrap_fwd_bwd_with_accelerator_graph(
         annotation_config: Backend-specific annotation options used at capture.
     """
 
-    return _wrap_with_accelerator_graph(
+    return StructuredAcceleratorGraph(
         fn,
         num_warmup_iterations=num_warmup_iterations,
         gradient_parameters=tuple(parameters),

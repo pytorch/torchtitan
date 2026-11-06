@@ -65,9 +65,6 @@ snapshotted nor included in the replay signature.
 
 ## Limitations
 
-Per-microbatch-group accelerator graphs
-(`training.accelerator_graph_per_microbatch_group=True`) do not support replay.
-
 Accelerator graphs currently require `sdc_replayer.num_replays=1`. With more
 replays, a graph replay is checked against an eager first execution, and no CI
 config has checked that yet. Also, a forward that replaces a registered buffer

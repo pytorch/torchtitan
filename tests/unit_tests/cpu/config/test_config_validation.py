@@ -45,56 +45,8 @@ def test_training_token_counts_are_positive() -> None:
         TrainingConfig(num_tokens_per_train_step=0)
 
 
-def test_per_group_accelerator_graph_config_restrictions() -> None:
-    with pytest.raises(ValueError, match="require accelerator graphs to be enabled"):
-        TrainingEngine.Config(
-            training=TrainingConfig(
-                accelerator_graph_per_microbatch_group=True,
-                disable_accelerator_graphs=True,
-            )
-        )
-    with pytest.raises(ValueError, match="fsdp_defer_gradient_reduction=False"):
-        TrainingEngine.Config(
-            training=TrainingConfig(accelerator_graph_per_microbatch_group=True),
-            parallelism=ParallelismConfig(fsdp_defer_gradient_reduction=True),
-        )
-    with pytest.raises(ValueError, match="do not support SDC replay"):
-        TrainingEngine.Config(
-            training=TrainingConfig(
-                accelerator_graph_per_microbatch_group=True,
-                num_tokens_per_microbatch_per_dp_rank=1,
-                num_tokens_per_train_step=3,
-            ),
-            sdc_replayer=SDCReplayer.Config(),
-        )
-
-    TrainingEngine.Config(
-        training=TrainingConfig(accelerator_graph_per_microbatch_group=True),
-        parallelism=ParallelismConfig(pipeline_parallel_degree=2),
-    )
-
-
-def test_lazy_preprocessing_config_restrictions() -> None:
-    with pytest.raises(
-        ValueError, match="requires training.disable_accelerator_graphs=True"
-    ):
-        TrainingEngine.Config(
-            training=TrainingConfig(preprocess_microbatch_groups_lazily=True)
-        )
-    TrainingEngine.Config(
-        training=TrainingConfig(
-            preprocess_microbatch_groups_lazily=True, disable_accelerator_graphs=True
-        )
-    )
-
-
-def test_graph_trainer_rejects_per_group_accelerator_graphs() -> None:
+def test_graph_trainer_rejects_lazy_preprocessing() -> None:
     config = llama3_debugmodel(attn_backend="flex")
-    with pytest.raises(ValueError, match="not supported with GraphTrainer"):
-        GraphTrainer.Config(
-            model=config.model,
-            training=TrainingConfig(accelerator_graph_per_microbatch_group=True),
-        )
     with pytest.raises(ValueError, match="lazily is not supported with GraphTrainer"):
         GraphTrainer.Config(
             model=config.model,

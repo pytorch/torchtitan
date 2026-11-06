@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from functools import partial
@@ -29,9 +31,11 @@ from torchtitan.config.configs import (
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.accelerator_graph import (
+    accelerator_graph_manager,
     accelerator_graph_teardown,
     accelerator_graphs_supported,
     NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
+    StructuredAcceleratorGraph,
     wrap_fwd_bwd_with_accelerator_graph,
     wrap_with_accelerator_graph,
 )
@@ -121,7 +125,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             +-- _preprocess_microbatch_groups (unless lazy)
             |
             +-- _run_forward_backward =
-                _forward_backward_body (maybe_wrapped_with_accelerator_graph)
+                _forward_backward_body, or with accelerator graphs
+                _run_forward_backward_segments (one graph replay per segment)
                 |
                 +-- _preprocess_microbatch_group (if lazy)
                 |
@@ -194,27 +199,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 raise ValueError(
                     "The optimization accelerator graph requires accelerator graphs to be enabled."
                 )
-            if self.training.accelerator_graph_per_microbatch_group:
-                if self.training.disable_accelerator_graphs:
-                    raise ValueError(
-                        "Per-group accelerator graphs require accelerator graphs to be enabled."
-                    )
-                if self.sdc_replayer is not None:
-                    raise ValueError(
-                        "Per-group accelerator graphs do not support SDC replay."
-                    )
-                if self.parallelism.fsdp_defer_gradient_reduction:
-                    raise ValueError(
-                        "Per-group accelerator graphs require "
-                        "parallelism.fsdp_defer_gradient_reduction=False."
-                    )
-            if self.training.preprocess_microbatch_groups_lazily:
-                if not self.training.disable_accelerator_graphs:
-                    # TODO: with several smaller accelerator graphs, preprocess each group between replays.
-                    raise ValueError(
-                        "training.preprocess_microbatch_groups_lazily requires "
-                        "training.disable_accelerator_graphs=True."
-                    )
             num_tokens = self.training.num_tokens_per_microbatch_per_dp_rank
             sequence_parallel_degree = (
                 self.parallelism.tensor_parallel_degree
@@ -283,12 +267,17 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     """The current ``forward_backward`` call's ``aux_loss_denominators``, on device."""
     _step_started: bool
     _forward_backward_captures_whole_step: bool
-    """A whole-step graph: one ``forward_backward`` call per optimizer step."""
+    """One ``forward_backward`` call per optimizer step: set by subclasses whose graph or
+    runtime covers the whole step (GraphTrainer)."""
     device_memory_monitor: DeviceMemoryMonitor
     model_device_mem_stats: DeviceMemStats
     _run_forward_backward: _ForwardBackwardFn
     _forward_backward_accelerator_graph_enabled: bool
-    _accelerator_graph_per_microbatch_group_enabled: bool
+    _graph_segment_is_whole_call: bool
+    """With accelerator graphs, whether a later call's segment (the microbatch groups between
+    two gradient reductions) is the whole call, as under HSDP or deferred gradient reduction."""
+    _first_segment_graph: StructuredAcceleratorGraph
+    _later_segment_graphs: defaultdict[int, StructuredAcceleratorGraph]
     _dist_moe_runtime: "DistMoeRuntime | None"
 
     def __init__(
@@ -319,7 +308,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self._forward_backward_num_flops = 0
         self.sdc_replayer = None
         self._forward_backward_accelerator_graph_enabled = False
-        self._accelerator_graph_per_microbatch_group_enabled = False
+        self._graph_segment_is_whole_call = False
         self._dist_moe_runtime = None
         self.preprocess_inputs_kwargs: dict[str, Any] = {}
         self.loss_metrics = {}
@@ -598,65 +587,55 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     loss_kwargs=loss_kwarg_mbs[0],
                 )
 
-        if self.config.training.accelerator_graph_per_microbatch_group:
-            graph_group_runner = wrap_with_accelerator_graph(
-                eager_forward_backward_fn,
-                num_warmup_iterations=NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
-                prepare_for_capture=prepare_for_capture
-                if self.parallelism_context.pp_enabled
-                else None,
-                name="forward_backward",
-                annotation_config=self.config.profiler.maybe_cuda_graph_annotation_config(),
-            )
-
-            # TODO: Use multiple accelerator graphs to support variable group counts
-            # without duplicating the gradient accumulation logic.
-            def run_forward_backward_groups(
-                microbatch_groups: list[tuple[Any, ...]],
-                *,
-                preprocess_microbatch_groups_lazily: bool,
-            ) -> LossAndMetrics:
-                accumulated_loss: torch.Tensor | None = None
-                loss_metrics: list[list[dict[str, torch.Tensor]]] = []
-                for microbatch_group in microbatch_groups:
-                    group_loss, group_loss_metrics = graph_group_runner(
-                        [microbatch_group],
-                        preprocess_microbatch_groups_lazily=preprocess_microbatch_groups_lazily,
-                    )
-                    group_loss = group_loss.clone()
-                    if accumulated_loss is None:
-                        accumulated_loss = group_loss
-                    else:
-                        accumulated_loss.add_(group_loss)
-                    loss_metrics.extend(
-                        [
-                            {key: value.clone() for key, value in metrics.items()}
-                            for metrics in group_metrics
-                        ]
-                        for group_metrics in group_loss_metrics
-                    )
-                assert accumulated_loss is not None
-                return accumulated_loss, loss_metrics
-
-            self._accelerator_graph_per_microbatch_group_enabled = True
-            self._run_forward_backward = run_forward_backward_groups
-            return
-
-        self._forward_backward_captures_whole_step = True
-        self._run_forward_backward = wrap_fwd_bwd_with_accelerator_graph(
+        graph_kwargs: dict[str, Any] = {
+            "num_warmup_iterations": NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
+            "prepare_for_capture": prepare_for_capture
+            if self.parallelism_context.pp_enabled
+            else None,
+            "annotation_config": self.config.profiler.maybe_cuda_graph_annotation_config(),
+        }
+        # The first-segment graph runs the step's first call: it starts from None gradients and
+        # allocates them in the graph pool. Later-segment graphs add into them, one graph per
+        # segment length.
+        self._first_segment_graph = wrap_fwd_bwd_with_accelerator_graph(
             eager_forward_backward_fn,
             parameters=(
                 parameter
                 for model_part in self.model_parts
                 for parameter in model_part.parameters()
             ),
-            num_warmup_iterations=NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
-            prepare_for_capture=prepare_for_capture
-            if self.parallelism_context.pp_enabled
-            else None,
             name="forward_backward",
-            annotation_config=self.config.profiler.maybe_cuda_graph_annotation_config(),
+            **graph_kwargs,
         )
+        # TODO: with eval graphs, a later-segment length that still has warmup calls left
+        # keeps all_wrappers_warmed_up False. Then eval and training don't capture until that
+        # length has run twice: training stays eager and validation runs after every update.
+        # No config reaches it today: RL builds no validator, and the core trainer makes one
+        # call per step, so it builds no later-segment graph.
+        self._later_segment_graphs = defaultdict(
+            partial(
+                wrap_with_accelerator_graph,
+                eager_forward_backward_fn,
+                name="forward_backward_later_segment",
+                **graph_kwargs,
+            )
+        )
+        # HSDP all-reduces replicas, and deferral reduce-scatters, once per call.
+        self._graph_segment_is_whole_call = (
+            self.parallelism_context.dp_replicate_enabled
+            or self.config.parallelism.fsdp_defer_gradient_reduction
+        )
+        self._run_forward_backward = self._run_forward_backward_segments
+
+    @property
+    def step_started(self) -> bool:
+        """Whether a ``forward_backward`` call ran since the last ``optim_step``."""
+        return self._step_started
+
+    @property
+    def uses_forward_backward_accelerator_graphs(self) -> bool:
+        """Whether ``forward_backward`` uses accelerator graphs."""
+        return self._forward_backward_accelerator_graph_enabled
 
     @sl.log_trace_span("forward_backward")
     def forward_backward(
@@ -671,7 +650,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         later calls add to them. Each loss is a sum over its loss tokens, and
         ``optim_step`` divides the gradients by the step's count.
         ``aux_loss_denominators`` (``aux_loss.aux_loss_denominators``) divides this
-        call's auxiliary losses.
+        call's auxiliary losses. With accelerator graphs, the step's first call replays
+        one graph, so it must have the same number of groups every step.
 
         Example, with d01 and d012 the R / N of mb0-mb1 and of mb0-mb2:
             engine.forward_backward(microbatch_groups=[[mb0], [mb1]], aux_loss_denominators=d01)
@@ -685,14 +665,14 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             raise ValueError("microbatch_groups must not be empty.")
         if self._step_started and self._forward_backward_captures_whole_step:
             raise ValueError(
-                "Whole-step graphs capture one forward_backward call per optimizer step: "
+                "This engine runs each optimizer step in one forward_backward call: "
                 "call optim_step before the next forward_backward."
             )
         if not self._step_started:
             self.garbage_collector.run(self.num_completed_steps + 1)
-            self.optim.zero_grad(
-                set_to_none=not self._accelerator_graph_per_microbatch_group_enabled
-            )
+            # The first-segment graph needs None gradients: its capture allocates them,
+            # and its replays put them back.
+            self.optim.zero_grad(set_to_none=True)
             self.local_loss_token_count = 0
         # non_blocking: a pageable copy would wait for the work queued before this call.
         self._aux_loss_denominators = aux_loss_denominators.to(
@@ -792,6 +772,100 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         )
         loss_kwarg_mbs = [loss_kwargs for *_, loss_kwargs in prepared_microbatches]
         return (arg_mbs, kwarg_mbs, target_mbs, loss_kwarg_mbs)
+
+    def _run_forward_backward_segments(
+        self,
+        microbatch_groups: list[Any],
+        *,
+        preprocess_microbatch_groups_lazily: bool,
+    ) -> LossAndMetrics:
+        """Replay one accelerator graph per segment: the microbatch groups one replay runs.
+
+        The step's first call is one segment. In a later call, a segment ends at each
+        gradient reduction. The first-segment graph allocates the gradients. Each later
+        segment replays the later-segment graph of its length, which adds into them.
+
+        Example (one reduction per group, plain FSDP or PP):
+            step's first call [g0, g1] -> first_segment_graph([g0, g1])
+            next call [g2, g3]         -> later_segment_graphs[1]([g2]), then ([g3])
+        Example (one reduction per call, HSDP or deferral):
+            step's first call [g0, g1] -> first_segment_graph([g0, g1])
+            next call [g2, g3, g4]     -> later_segment_graphs[3]([g2, g3, g4])
+        """
+        if not self._step_started:
+            if preprocess_microbatch_groups_lazily:
+                # Preprocessing waits for the host, which capture does not allow.
+                microbatch_groups = self._preprocess_microbatch_groups(
+                    microbatch_groups
+                )
+            return self._first_segment_graph(microbatch_groups)
+
+        if self._graph_segment_is_whole_call:
+            segments: Iterable[list[Any]] = [microbatch_groups]
+        else:
+            # A generator: lazy preprocessing reads each group just before its replay.
+            segments = ([group] for group in microbatch_groups)
+        # SDC replay reruns a checked call from the same input tensors. A capture keeps its
+        # call's input tensors as the graph's inputs, and the call's next replays overwrite
+        # them. So later-segment graphs don't capture in a checked call.
+        sdc_checks_call = (
+            self.sdc_replayer is not None and self.sdc_replayer.checks_current_step
+        )
+        loss: torch.Tensor | None = None
+        loss_metrics: list[list[dict[str, torch.Tensor]]] = []
+        for segment in segments:
+            if preprocess_microbatch_groups_lazily:
+                segment = self._preprocess_microbatch_groups(segment)
+            graph = self._later_segment_graphs[len(segment)]
+            if graph.captured:
+                segment_loss, segment_loss_metrics = graph(segment)
+            elif not self._first_segment_graph.captured or sdc_checks_call:
+                # A later-segment graph records adds into the gradient addresses that the
+                # first-segment graph's replays put back, so it captures only after that graph.
+                # Until it can capture, it warms up on the graph stream.
+                capture_allowed = accelerator_graph_manager.capture_allowed
+                accelerator_graph_manager.capture_allowed = False
+                try:
+                    segment_loss, segment_loss_metrics = graph(segment)
+                finally:
+                    accelerator_graph_manager.capture_allowed = capture_allowed
+            else:
+                # This call may capture. A gradient tensor the first-segment graph did not
+                # allocate (a new one, or a replacement) would be allocated in this capture,
+                # and the next zero_grad would drop it.
+                gradients_before = [
+                    (name, parameter, parameter.grad)
+                    for model_part in self.model_parts
+                    for name, parameter in model_part.named_parameters()
+                    if parameter.requires_grad
+                ]
+                segment_loss, segment_loss_metrics = graph(segment)
+                new_gradients = [
+                    name
+                    for name, parameter, gradient in gradients_before
+                    if parameter.grad is not gradient
+                ]
+                if new_gradients:
+                    raise ValueError(
+                        f"Parameters {new_gradients} got a new gradient tensor in a later "
+                        "forward_backward call. With accelerator graphs, later calls must add "
+                        "into the gradients that the step's first call allocated, or the next "
+                        "zero_grad drops them. Give these parameters a gradient in the first "
+                        "call and don't replace `.grad` in later calls, or set "
+                        "training.disable_accelerator_graphs=True."
+                    )
+            # The next replay overwrites graph outputs.
+            segment_loss = segment_loss.clone()
+            loss = segment_loss if loss is None else loss.add_(segment_loss)
+            loss_metrics.extend(
+                [
+                    {key: value.clone() for key, value in metrics.items()}
+                    for metrics in group
+                ]
+                for group in segment_loss_metrics
+            )
+        assert loss is not None
+        return loss, loss_metrics
 
     def _forward_backward_body(
         self,

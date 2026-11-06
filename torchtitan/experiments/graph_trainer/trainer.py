@@ -428,10 +428,6 @@ class GraphTrainer(Trainer):
 
         def __post_init__(self) -> None:
             Trainer.Config.__post_init__(self)
-            if self.training.accelerator_graph_per_microbatch_group:
-                raise ValueError(
-                    "Per-group CUDA graphs are not supported with GraphTrainer."
-                )
             if self.training.preprocess_microbatch_groups_lazily:
                 raise ValueError(
                     "training.preprocess_microbatch_groups_lazily is not supported "

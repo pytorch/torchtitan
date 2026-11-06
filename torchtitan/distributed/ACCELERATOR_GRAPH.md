@@ -24,25 +24,67 @@ Training capture requires `training.disable_accelerator_graphs=False`.
 
 | Setting | Captured work |
 | --- | --- |
-| `training.accelerator_graph_per_microbatch_group=False` | Forward and backward for all microbatch groups in one optimizer update |
-| `training.accelerator_graph_per_microbatch_group=True` | Forward and backward for one microbatch group, replayed for each group |
+| `training.disable_accelerator_graphs=False` | Forward and backward, one graph replay per segment (below); one validation microbatch group, if validation is configured |
 | `optim.enable_accelerator_graph=True` | Gradient clipping, finite checks, and optimizer update |
-| `training.disable_accelerator_graphs=False` | One validation microbatch group, if validation is configured |
 
 An eval microbatch group contains one microbatch without PP. With PP, it contains
 the microbatches for one eval schedule call. A full validation pass runs the
 configured number of groups and reports one validation loss.
 
-With `accelerator_graph_per_microbatch_group=False`, one graph captures all microbatch
-groups. Each replay runs all groups for one update. The number of groups and their
-input structure must stay fixed across updates.
+### Segments
 
-With `accelerator_graph_per_microbatch_group=True`, one graph captures one microbatch
-group. Each group replays that graph. Groups must have the same input structure,
-tensor shapes, dtypes, devices, and set of parameters receiving gradients. The
-number of groups can change between updates. Each group reduces gradients
-separately. With hybrid sharded data parallelism (HSDP), this can change results
-because eager accumulation reduces replicas once per update.
+A segment is the microbatch groups that one graph replay runs. The step's first
+`forward_backward` call is one segment. In a later call, a segment ends at each
+gradient reduction: one group with FSDP or PP, the whole call with hybrid sharded data
+parallelism (HSDP) or `parallelism.fsdp_defer_gradient_reduction=True`.
+
+Training uses two kinds of graphs:
+- The first-segment graph runs the step's first call. Gradients are `None` before it,
+  so autograd allocates them in the graph pool (see `_AcceleratorGraphGradientState`
+  below). A trainer that makes one call per update, like the core trainer, replays
+  only this graph: one replay per update.
+- A later-segment graph runs each segment of a later call and adds into those
+  gradients. There is one per segment length, made on its first call.
+
+```text
+one call [g0, g1, g2]:            first([g0, g1, g2])
+FSDP, calls [g0] then [g1, g2]:   first([g0]) later_1([g1]) later_1([g2])
+HSDP, calls [g0] then [g1, g2]:   first([g0]) later_2([g1, g2])
+```
+
+Eager training given the same calls reduces at the same points, so the graphs compute
+the same reductions. The GPU test
+(`tests/unit_tests/gpu/distributed/test_accelerator_graph_segments.py`) checks graphs vs
+eager bitwise for one call per step, FSDP (1 and 2 GPUs), HSDP 2x1 and deferral, on one
+node.
+
+A later-segment graph records adds into the gradient addresses that the first-segment
+graph's replays put back. So a later-segment graph captures only after the
+first-segment graph has captured.
+
+A later-segment graph also does not capture inside a call that SDC replay checks. A
+capture keeps the call's input tensors as the graph's inputs. The call's next segments
+copy their inputs into those tensors, so an SDC re-run would read overwritten inputs.
+With `sdc_replayer.num_steps=-1`, every call is checked, so later-segment graphs never
+capture and those calls stay eager.
+
+Until it can capture, a later-segment graph's calls are warmup calls with capture
+blocked.
+
+A later call must add into the gradient tensors the first call allocated. If a later
+graph's capture gives a parameter a new gradient tensor (none before, or a replaced
+one), it raises a `ValueError`.
+
+The number of calls per update, and of groups in a later call, can change between
+updates. The step's first call must have the same number of groups in every update.
+Every segment of one length must keep the same input structure, tensor shapes, dtypes,
+devices, and set of parameters receiving gradients. The RL trainer's group count
+changes with packing, so with graphs it sends each step's first group as its own call.
+Under HSDP or deferral, that step reduces one more time with graphs than without, and
+the two runs are not bitwise equal. Each later segment adds one graph launch, and each
+new segment length adds one graph with its own warmup calls. With
+`training.preprocess_microbatch_groups_lazily=True`, the step's first call is
+preprocessed before its replay, and each later segment just before its own.
 
 Training and validation use the same capture flag. Disabling training capture
 also disables validation capture.
@@ -95,10 +137,13 @@ Step 2: Training warmup 2 -> optimizer warmup 2 -> eval capture/replay
 Step 3: Training capture/replay -> optimizer capture/replay -> eval if due
 ```
 
-Warmup counts wrapper calls, not training steps. With capture per microbatch
-group, several training warmup calls can occur in one update. The capture gate
-keeps later groups eager until eval captures. Wrappers register on their first
-call. `all_wrappers_warmed_up` checks those registered wrappers.
+Warmup counts wrapper calls, not training steps. With several segments per update,
+several training warmup calls can occur in one update. The capture gate keeps them
+eager until eval captures. Wrappers register on their first call.
+`all_wrappers_warmed_up` checks those registered wrappers. So a later-segment length
+that still has warmup calls left (seen fewer than two times) keeps eval capture
+waiting, and with it all training capture: validation runs after every update and
+training stays eager.
 `capture_allowed` controls capture of wrappers that do not have a graph.
 It does not block replay of existing graphs.
 
@@ -131,7 +176,7 @@ Before its first capture, each wrapper calls `torch.cuda.empty_cache()`. This
 releases unused normal cache. It cannot release storage held by live tensors or
 live graph pools. Replay does not call it.
 
-## Memory use with and without `_AcceleratorGraphGradientState`
+## Memory use with `_AcceleratorGraphGradientState`
 
 The figures show possible reuse of one GPU address range in the shared pool.
 Each row shows when its tensor values are needed. They do not show total memory
@@ -146,44 +191,11 @@ The figures use one forward/backward call. With several microbatch groups or
 interleaved PP calls, gradients from earlier backward calls must stay intact during
 later forward calls.
 
-### Without `_AcceleratorGraphGradientState`
-
-`zero_grad(set_to_none=False)` keeps the gradient buffers allocated during eager
-warmup. These buffers are outside the graph pool. They stay allocated through
-forward, backward, optimizer, and eval. The graph allocator cannot reuse their
-storage. Eval and training can still share temporary storage inside the graph pool:
-
-```text
-Capture phase       eval            forward         backward        optimizer
-Eager grad storage  [======================================================] ...
-Eval temporary      [==========]
-Forward temporary                   [==========]
-Backward temporary                                  [==========]
-Shared range        [eval temp]     [forward temp]  [backward temp]
-```
-
-Replay keeps the eager gradient buffer separate from temporary storage:
-
-```text
-Replay phase        forward         backward        optimizer       eval
-Eager grad storage  [======================================================] ...
-Gradient values                     [========================]
-Forward temporary   [==========]
-Backward temporary                  [==========]
-Eval temporary                                                      [==========]
-Shared range        [forward temp]  [backward temp]                  [eval temp]
-```
-
-Capture per microbatch group uses this approach. It clears gradients with
-`set_to_none=False` once per update and accumulates them across group replays.
-
 Using `set_to_none=True` without saving and restoring gradient references fails.
 Replay does not repeat autograd's assignment to `param.grad`. After that reference
 is cleared, the optimizer sees `param.grad is None` and skips the parameter update.
 
-### With `_AcceleratorGraphGradientState`
-
-Capturing all microbatch groups together uses `_AcceleratorGraphGradientState` to save and
+The first-segment graph uses `_AcceleratorGraphGradientState` to save and
 restore gradient references. Before training capture,
 `zero_grad(set_to_none=True)` releases eager gradient buffers. Parameter gradients
 are absent when the first forward starts. Autograd creates them during backward
