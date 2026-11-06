@@ -4,7 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Torch profiler traces and memory snapshots, and their lifecycle."""
+"""Torch profiler traces, memory snapshots, always-on kernel spans, and their
+lifecycle."""
 
 import inspect
 import logging
@@ -23,6 +24,7 @@ from torchtitan.distributed.accelerator_graph import (
     get_cuspy_cuda_graph_annotation_config,
 )
 from torchtitan.observability import structured_logger as sl
+from torchtitan.observability.kernel_spans import KernelSpanRecorder
 from torchtitan.tools.utils import device_module, device_type
 
 # torch's export_chrome_trace gained cuda_graph_annotations when the offline joiner
@@ -487,10 +489,11 @@ class MemorySnapshotProfiler(Configurable):
 class Profiler(Configurable):
     """The profiling entry point for a training run: owns every enabled profiling
     tool -- torch profiler traces (``trace``), memory snapshots
-    (``memory_snapshot``), and other collected data -- and drives their
-    lifecycle. Callers hold only this class: it builds the enabled tools on
-    ``__enter__``, steps them after every training step, and closes them on
-    ``__exit__``, passing along the exception that ended training.
+    (``memory_snapshot``), and other collected data such as always-on kernel
+    spans (``kernel_spans``) -- and drives their lifecycle. Callers hold only
+    this class: it builds the enabled tools on ``__enter__``, steps them after
+    every training step, and closes them on ``__exit__``, passing along the
+    exception that ended training.
 
     Example::
 
@@ -520,9 +523,30 @@ class Profiler(Configurable):
         memory_snapshot: MemorySnapshotProfiler.Config | None = None
         """Memory snapshots; ``None`` disables them."""
 
+        kernel_spans: KernelSpanRecorder.Config | None = None
+        """Always-on kernel span recording; ``None`` disables it."""
+
+        def __post_init__(self) -> None:
+            if self.kernel_spans is not None and isinstance(
+                self.trace, KinetoTraceProfiler.Config
+            ):
+                # Kineto's one-shot CUPTI init fails once Cuspy holds the subscription.
+                raise ValueError(
+                    "profiler.kernel_spans cannot run with KinetoTraceProfiler: "
+                    "Kineto cannot profile CUDA while Cuspy collects kernel spans. "
+                    "Use CuspyTraceProfiler instead."
+                )
+
         def maybe_cuda_graph_annotation_config(self) -> dict[str, Any] | None:
-            """``torch.cuda.graph`` annotation options the trace profiler needs at
+            """``torch.cuda.graph`` annotation options the profilers need at
             capture, or ``None`` for the default."""
+            if self.kernel_spans is not None:
+                # Kernel spans are named by exec-graph node id.
+                return get_cuspy_cuda_graph_annotation_config(
+                    enable_event_node_ids=True,
+                    record_py_stacks=isinstance(self.trace, CuspyTraceProfiler.Config)
+                    and self.trace.record_py_stacks,
+                )
             if self.trace is None:
                 return None
             return self.trace.maybe_cuda_graph_annotation_config()
@@ -541,10 +565,15 @@ class Profiler(Configurable):
         self._leaf_folder = leaf_folder
         self.trace: TraceProfiler | None = None
         self.memory_snapshot: MemorySnapshotProfiler | None = None
+        self.kernel_spans: KernelSpanRecorder | None = None
 
     def __enter__(self) -> "Profiler":
         config = self._config
-        if config.trace is None and config.memory_snapshot is None:
+        if (
+            config.trace is None
+            and config.memory_snapshot is None
+            and config.kernel_spans is None
+        ):
             return self
         kwargs = {
             "global_step": self._global_step,
@@ -556,6 +585,8 @@ class Profiler(Configurable):
             self.trace = config.trace.build(**kwargs)
         if config.memory_snapshot is not None:
             self.memory_snapshot = config.memory_snapshot.build(**kwargs)
+        if config.kernel_spans is not None:
+            self.kernel_spans = config.kernel_spans.build(**kwargs)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
@@ -565,10 +596,15 @@ class Profiler(Configurable):
         if self.memory_snapshot is not None:
             self.memory_snapshot.close(exc_val)
             self.memory_snapshot = None
+        if self.kernel_spans is not None:
+            self.kernel_spans.close()
+            self.kernel_spans = None
         return False
 
     def step(self) -> None:
-        """Advance the trace profiler and memory snapshots by one training step."""
+        """Advance all enabled profilers by one training step."""
+        if self.kernel_spans is not None:
+            self.kernel_spans.step()
         if self.trace is not None:
             self.trace.step()
         if self.memory_snapshot is not None:
