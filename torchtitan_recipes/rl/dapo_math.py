@@ -276,7 +276,6 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
         seq_len=max_total_tokens,
-        moe_comm_backend="standard",
         attn_backend="varlen",
     )
     rollouter = _dapo_math_rollouter_config(
