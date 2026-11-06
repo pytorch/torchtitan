@@ -558,6 +558,11 @@ class Controller(Configurable):
             logger.exception("rollouter.close failed")
 
         try:
+            self.rollout_recorder.close()
+        except Exception:
+            logger.exception("rollout_recorder.close failed")
+
+        try:
             self.metrics_processor.close()
         except Exception:
             logger.exception("metrics_processor close failed")
