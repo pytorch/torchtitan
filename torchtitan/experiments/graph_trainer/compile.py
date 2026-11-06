@@ -15,6 +15,7 @@ from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
 
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,9 @@ def apply_compile(
     parallelism_context: ParallelismContext,
 ) -> nn.Module:
     """Configure tracing and leave whole-step capture to ``GraphRuntime``."""
+    for module in model.modules():
+        if isinstance(module, DeepEPTokenDispatcher):
+            module._split_dispatch_launch_wait = compile_config.deepep_dispatch_overlap
     _maybe_enable_async_tp(
         compile_config,
         parallelism_context.get_dense_tp_mesh()
