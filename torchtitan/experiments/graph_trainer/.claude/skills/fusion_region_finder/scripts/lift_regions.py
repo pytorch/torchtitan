@@ -265,7 +265,8 @@ def op_schema(node: Any) -> torch._C.FunctionSchema | None:
     if key not in _SCHEMAS:
         if node.schema:
             _SCHEMAS[key] = torch._C.parse_schema(node.schema)
-        elif t.startswith(("_operator.", "hop.")):
+        elif t.startswith(("_operator.", "hop.")) or t.count(".") != 2:
+            # Python callables, e.g. substitute_kernels' _substitute_kernels_pat_* wrappers.
             _SCHEMAS[key] = None
         else:
             ns, op, overload = t.split(".")

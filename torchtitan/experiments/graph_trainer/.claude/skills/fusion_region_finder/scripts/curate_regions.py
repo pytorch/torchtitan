@@ -965,6 +965,9 @@ def main():
                 "instances cannot all be lifted"
             )
         for inst in [] if reason else r["_lift_instances"]:
+            if not inst:
+                reason = "no member is left once outside reads and writes stay outside"
+                break
             missing = [
                 m for m in inst if m not in dn or dn[m].target != by[m]["target"]
             ]
