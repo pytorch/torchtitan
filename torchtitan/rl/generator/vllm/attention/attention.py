@@ -19,7 +19,7 @@ from torch.nn.attention import (
 from torch.nn.attention.varlen import AuxRequest
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import get_attention_context
-from vllm.v1.attention.backend import AttentionCGSupport, AttentionType
+from vllm.v1.attention.backend import AttentionCGSupport, AttentionType, MultipleOf
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
     FlashAttentionImpl,
@@ -31,6 +31,7 @@ from vllm.v1.attention.backends.flash_attn_diffkv import (
     FlashAttentionDiffKVImpl,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.base.module import Module
@@ -43,8 +44,43 @@ from torchtitan.tools.utils import get_cuda_flash_attention_impl, set_default_dt
 logger = logging.getLogger(__name__)
 
 
+class _FA4PageSize:
+    """Ask vLLM for 128-token KV pages (its ``block_size``) when FA4 runs on SM100/SM103.
+
+    There, FA4 loads prefill K/V with one bulk copy (TMA) only when a page holds
+    exactly one 128-key tile, and decodes one token per sequence on its SwapAB
+    kernel. 16-token pages get a slower gather. vLLM already picks 128 for head
+    dim 256. Other GPUs that run FA4 (e.g. SM120, whose FA4 forward is the SM80
+    kernel) keep vLLM's default.
+    Costs: prefix-cache reuse in whole 128-token pages, up to 127 KV slots wasted
+    per sequence, and an explicit ``block_size`` that is not a multiple of 128 now
+    fails.
+    Batch-invariant runs keep vLLM's default: SwapAB reads 256 keys per tile, so
+    decode would no longer match prefill bitwise.
+    TODO: batch-invariant Qwen3.5 (head dim 256, where vLLM itself picks 128-token
+    pages) fails bitwise parity on GB300 with FA4 4.0.0b38, on main too.
+    """
+
+    @classmethod
+    def get_supported_kernel_block_sizes(
+        cls, kv_cache_spec: KVCacheSpec | None = None
+    ) -> list[int | MultipleOf]:
+        if (
+            get_cuda_flash_attention_impl() == "FA4"
+            and torch.cuda.get_device_capability()[0] == 10
+            and not is_in_batch_invariant_mode()
+        ):
+            return [128]
+        # vLLM main passes kv_cache_spec; the vLLM nightly on PyTorch's index
+        # (9f03b51) takes no argument.
+        # TODO: always forward it once that nightly includes vllm-project/vllm#53175.
+        if kv_cache_spec is None:
+            return super().get_supported_kernel_block_sizes()
+        return super().get_supported_kernel_block_sizes(kv_cache_spec)
+
+
 @register_backend(AttentionBackendEnum.CUSTOM)
-class TorchTitanVarlenInnerAttentionBackend(FlashAttentionBackend):
+class TorchTitanVarlenInnerAttentionBackend(_FA4PageSize, FlashAttentionBackend):
     """Custom vLLM attention backend using PyTorch's native FlashAttention kernel.
 
     This class is not directly referenced in user code. It is registered into
@@ -76,7 +112,9 @@ class TorchTitanVarlenInnerAttentionBackend(FlashAttentionBackend):
         return TorchTitanVarlenInnerAttentionMetadataBuilder
 
 
-class TorchTitanVarlenInnerAttentionDiffKVBackend(FlashAttentionDiffKVBackend):
+class TorchTitanVarlenInnerAttentionDiffKVBackend(
+    _FA4PageSize, FlashAttentionDiffKVBackend
+):
     """PyTorch varlen backend using vLLM's unequal K/V cache support."""
 
     @staticmethod
