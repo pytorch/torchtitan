@@ -72,8 +72,10 @@ class _InterGeneratorRouterActorEndpoints:
         await super().release_groups(group_ids)
 
     @concurrent_endpoint
-    async def pull_model_state_dict(self, policy_version: int) -> None:
-        await super().pull_model_state_dict(policy_version)
+    async def pull_model_state_dict(
+        self, policy_version: int, *, initial: bool = False
+    ) -> None:
+        await super().pull_model_state_dict(policy_version, initial=initial)
 
     @concurrent_endpoint
     async def close_generators(self) -> list[Any | BaseException]:
