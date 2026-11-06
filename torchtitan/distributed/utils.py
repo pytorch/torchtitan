@@ -440,7 +440,8 @@ def build_alternative_fsdp_mesh(
 
         backend = dist.get_backend(parent_group)
         if backend == "fake":
-            # A one-rank group, such as a size-1 edp_shard, has nothing to cap.
+            # A one-rank group, such as a size-1 dp_shard or edp_shard, has
+            # nothing to cap.
             if storage_mesh[axis_name].size() != 1:
                 warnings.warn(
                     "Redistribution max_ctas is not modeled by the fake process "

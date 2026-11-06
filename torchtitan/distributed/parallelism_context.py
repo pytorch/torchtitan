@@ -283,14 +283,12 @@ class ParallelismContext:
         ):
             """Unflatten the world mesh to create the required mesh axes.
 
-            Uses the fake backend for inactive axes, and for a size-1
-            ``edp_shard`` axis, to avoid unnecessary process-group creation.
+            Uses the fake backend for inactive axes and size-1 axes, to avoid
+            unnecessary process-group creation.
             """
             backend_override = {}
             for axis, degree in zip(axis_names, axis_degrees, strict=True):
-                if not self._axis_is_active(axis, degree) or (
-                    axis == MeshAxisName.EDP_SHARD and degree == 1
-                ):
+                if degree == 1 or not self._axis_is_active(axis, degree):
                     backend_override[axis] = "fake"
 
             return world_mesh._unflatten(
@@ -575,18 +573,17 @@ class ParallelismContext:
         access their process groups.
 
         Note:
-            Axes that ``build_mesh`` created with the Fake backend are excluded,
-            because their process groups cannot carry collectives. For example,
-            ``edp_shard`` when EP is disabled: its size is ``dp_shard * cp * tp``,
-            but ``_axis_is_active`` marks it inactive so it is unflattened with a
-            fake backend.
+            Axes that are inactive or have one rank are excluded; ``build_mesh``
+            gives them the Fake backend. For example, ``edp_shard`` when EP is
+            disabled: its size is ``dp_shard * cp * tp``, but ``_axis_is_active``
+            marks it inactive.
 
         Returns:
             dict[str, DeviceMesh]: A dictionary mapping mesh axis names to their
                 corresponding DeviceMesh objects. Only includes meshes where:
                 - ndim == 1 (one-dimensional)
                 - parallelism is enabled (size > 1)
-                - the axis exists, i.e. it is not backed by the Fake backend
+                - the axis has a real process group (not the Fake backend)
 
         Example:
             >>> parallelism_context = ParallelismContext(
