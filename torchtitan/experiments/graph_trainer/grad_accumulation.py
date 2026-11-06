@@ -13,6 +13,9 @@ from typing import Any
 import torch
 import torch.fx as fx
 
+from torchtitan.experiments.graph_trainer.common_utils import (
+    node_tensor_meta as _tensor_meta,
+)
 from torchtitan.experiments.graph_trainer.debug_utils import tlparse_log_graph_pass
 from torchtitan.experiments.graph_trainer.graph_pp.utils import graph_outputs
 
@@ -408,11 +411,6 @@ def insert_graph_gradient_accumulation_before_reduction(
         graph_name="after_insert_graph_gradient_accumulation_before_reduction",
     )
     return tuple(graph_input_accumulators)
-
-
-def _tensor_meta(node: fx.Node) -> torch.Tensor | None:
-    value = node.meta.get("val")
-    return value if isinstance(value, torch.Tensor) else None
 
 
 __all__ = [
