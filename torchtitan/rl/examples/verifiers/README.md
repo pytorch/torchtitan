@@ -25,23 +25,30 @@ package and dependencies: [`dapo_math/`](./dapo_math) (single-turn math) and
    msgpack over ZMQ to the separately spawned environment-server process. The
    server reconstructs the typed task before running the Verifiers environment.
 2. [`env_server.py`](./env_server.py) currently spawns and owns the Verifiers server as
-   a separate local process on the TitanRL controller host. The configured
+   a separate local process on the TitanRL controller host. `VerifiersRollouter`
+   starts it from the controller, before it spawns the rollout workers. The configured
    Verifiers runtime is independent: for example, `SubprocessConfig` or
    `DockerConfig` for the agent. Each pool worker imports the taskset and harness by
    id (below), so the modules it imports must not import torch.
 3. [`generation_server.py`](./generation_server.py) exposes TitanRL's `GenerateFn` through the
-   HTTP token-generation protocol expected by Verifiers. It also retains the
-   policy-version span and metrics that are absent from Verifiers traces.
-4. `rollouter.py` sends samples to Verifiers and converts the
-   returned trace graph into TitanRL `RolloutTurn` objects. TitanRL then applies
-   its rubric and advantage estimator normally.
+   HTTP token-generation protocol expected by Verifiers. Each rollout worker runs one.
+   It also retains the policy-version span and metrics that are absent from
+   Verifiers traces.
+4. `rollouter.py` runs each group in a TitanRL rollout worker process
+   (`VerifiersRolloutWorker`), so the controller receives finished groups only, as
+   with native rollouts. Each worker sends samples to Verifiers, points their
+   agents at its own generation server, and converts the returned trace graph into
+   TitanRL `RolloutTurn` objects. TitanRL then applies its rubric and advantage
+   estimator normally.
 
 The training dataset is the single source of the environment taskset config.
 `VerifiersRollouter.Config` copies it into the environment-server config, so an
 experiment must not configure the same taskset a second time.
 
-For CPU-heavy environments, increase the Verifiers worker-pool size first. A
-future implementation could instead place the environment server in a Monarch
+For CPU-heavy environments, increase the env server's process pool
+(`verifiers_env_server.serve.pool`) first. Each TitanRL rollout worker decodes one
+returned trace at a time, so at high rollout rates also raise the rollouter's
+`worker_pool_size`. A future implementation could instead place the environment server in a Monarch
 actor. That would require routable ZMQ and generation-server addresses plus
 actor-owned startup and shutdown; the current integration does not provide
 that placement mode.

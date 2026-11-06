@@ -94,7 +94,8 @@ class Rollouter(Configurable):
             `setup_async` too, or the worker pool is still spawned unused.
           - Group execution, fine: keep the stock orchestration and point `worker`
             at a `RolloutWorker.Config` subclass, overriding only what you need
-            (`make_env_group`, `score_group`, `run_group`).
+            (`make_env_group`, `score_group`, `run_group`). If a worker setting is known only
+            at setup (a server address), pass the whole worker config to `setup_async(worker_config=...)`.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -167,14 +168,17 @@ class Rollouter(Configurable):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
+        # TODO: remove once the Verifiers env runs in the rollout worker (its only user).
+        worker_config: RolloutWorker.Config | None = None,
     ) -> None:
-        """Spawn the rollout worker pool through ``actor_system`` and initialize it."""
+        """Spawn the rollout worker pool through `actor_system` and initialize it.
+        `worker_config` replaces `Config.worker`, for a worker config known only at setup."""
         if self._worker_actors is not None:
             raise RuntimeError("rollout worker pool is already initialized")
 
         self._actor_system = actor_system
         self._worker_actors = await actor_system.spawn_rollout_workers(
-            self._config.worker,
+            worker_config if worker_config is not None else self._config.worker,
             num_workers=self._config.worker_pool_size,
             num_threads=self._config.num_threads_per_worker,
         )
