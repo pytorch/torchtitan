@@ -122,6 +122,10 @@ class VLLMEngine(GenerationEngine):
         release hints when sessions end. None disables both session behaviors."""
 
         @property
+        def supports_hot_swap(self) -> bool:
+            return self.kv_transfer_config is None
+
+        @property
         def holds_session_kv(self) -> bool:
             return self.session_kv_holder is not None
 
@@ -134,6 +138,12 @@ class VLLMEngine(GenerationEngine):
                 raise ValueError(
                     "Titan RL supports SimpleCPUOffloadConnector; "
                     "MultiConnector and other KV connectors are not supported."
+                )
+            if self.kv_transfer_config.kv_role != "kv_both":
+                raise ValueError(
+                    "SimpleCPUOffloadConnector requires kv_role='kv_both': "
+                    "it both saves and loads KV, so vLLM must enable "
+                    "producer finalization and consumer block-lifetime protection."
                 )
             if self.kv_transfer_config.kv_connector_module_path not in (
                 None,
@@ -540,21 +550,6 @@ class VLLMEngine(GenerationEngine):
     ) -> None:
         """Fetch the model state dict into the model's weights one FSDP group at a time, and
         reset the KV cache when configured."""
-        if self._uses_kv_offload:
-            # Every rank enters the weight-load boundary. Reject active generations
-            # together, but allow saves of already-computed, versioned KV to finish.
-            has_requests = self._engine.output_processor.has_unfinished_requests()
-            if self._coordinate_kv_offload:
-                active = torch.tensor(has_requests, dtype=torch.int32)
-                dist.all_reduce(
-                    active, op=dist.ReduceOp.MAX, group=get_world_group().cpu_group
-                )
-                has_requests = bool(active.item())
-            if has_requests:
-                raise RuntimeError(
-                    "KV offload requires drained weight updates: set "
-                    "generator_router.hot_swap=False before loading weights"
-                )
         self._get_model().load_model_state_dict(fetch)
         self._loaded_policy_version = policy_version
         if self._reset_kv_cache_on_model_state_dict_load:

@@ -130,11 +130,6 @@ def _coordinate_worker(rank, rendezvous):
             engine._session_kv_holder = None
             engine._coordinate_kv_offload = True
             engine._uses_kv_offload = True
-            engine._loaded_policy_version = 0
-            engine._reset_kv_cache_on_model_state_dict_load = False
-            model = SimpleNamespace(load_model_state_dict=Mock())
-            fetch = Mock()
-            engine._get_model = lambda: model
             state = SimpleNamespace(requests=False, scheduled=False)
             core = SimpleNamespace(
                 scheduler=SimpleNamespace(has_requests=lambda: state.scheduled),
@@ -157,20 +152,6 @@ def _coordinate_worker(rank, rendezvous):
                         [object()] if rank == 1 and source == "queue" else None
                     )
                     assert engine.has_unfinished_requests() == (source != "idle")
-
-                    model.load_model_state_dict.reset_mock()
-                    if source == "requests":
-                        # Only rank 1 is active, but both must reject before
-                        # changing weights; the work flag alone is insufficient.
-                        with pytest.raises(RuntimeError, match="hot_swap=False"):
-                            engine.load_model_state_dict(fetch, policy_version=1)
-                        model.load_model_state_dict.assert_not_called()
-                        assert engine._loaded_policy_version == 0
-                    else:
-                        # Saving old, versioned KV does not block a drained load.
-                        engine.load_model_state_dict(fetch, policy_version=1)
-                        model.load_model_state_dict.assert_called_once_with(fetch)
-                        assert engine._loaded_policy_version == 1
 
                     # Single-rank generators use the same combined local condition.
                     engine._coordinate_kv_offload = False

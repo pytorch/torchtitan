@@ -77,9 +77,9 @@ class SimpleCPUOffloadConnector(VllmSimpleCPUOffloadConnector):
                         get_block_hash(alias) in active_hashes for alias in aliases
                     ):
                         blocks[block.block_id] = block
-        # TODO(acisseJZhong): add an upstream CPU BlockPool API that demotes
-        # unreferenced hashes while protecting active aliases, replacing direct
-        # access to the cache index and free queue below.
+        # TODO(acisseJZhong): replace direct cache-index and free-queue access
+        # with upstream session eviction hints that protect active aliases:
+        # https://github.com/vllm-project/vllm/issues/51428
         # Block IDs agree across TP ranks; hashes may use per-process seeds.
         ordered_blocks = [blocks[block_id] for block_id in sorted(blocks)]
         for block in ordered_blocks:

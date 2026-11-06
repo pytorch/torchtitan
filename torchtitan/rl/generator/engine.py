@@ -62,6 +62,11 @@ class GenerationEngine(Configurable, abc.ABC):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         @property
+        def supports_hot_swap(self) -> bool:
+            """Whether model state dict loads may interrupt active requests."""
+            return True
+
+        @property
         def holds_session_kv(self) -> bool:
             """Whether session completion needs generator-side cache cleanup."""
             return False
@@ -111,6 +116,8 @@ class GenerationEngine(Configurable, abc.ABC):
     ) -> None:
         """Load a model state dict by having ``fetch`` fill the model's weights in place, and
         reset the KV cache when configured.
+
+        Callers must drain requests first when ``Config.supports_hot_swap`` is False.
 
         Args:
             fetch: Fills each tensor of the given subset of the model state dict in place

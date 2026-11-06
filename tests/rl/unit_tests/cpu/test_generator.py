@@ -568,23 +568,6 @@ def test_kv_offload_uses_loaded_weights_not_group_version():
     assert engine._engine.reset_prefix_cache_calls == []
 
 
-def test_kv_offload_rejects_weight_swap_during_generation():
-    model = SimpleNamespace(load_model_state_dict=Mock())
-    engine = _vllm_engine(
-        model=model,
-        kv_transfer_config=KVTransferConfig(
-            kv_connector="SimpleCPUOffloadConnector", kv_role="kv_both"
-        ),
-    )
-    engine._engine.output_processor.has_unfinished_requests = lambda: True
-    with pytest.raises(RuntimeError, match="hot_swap=False"):
-        engine.load_model_state_dict(
-            lambda state_dict: state_dict.keys(), policy_version=2
-        )
-    model.load_model_state_dict.assert_not_called()
-    assert engine._loaded_policy_version is None
-
-
 def test_kv_offload_failed_load_does_not_advance_cache_version():
     model = SimpleNamespace(
         load_model_state_dict=Mock(side_effect=RuntimeError("load failed")),
@@ -811,13 +794,23 @@ def test_simple_cpu_offload_uses_shared_coordination_without_store_settings(
         holder_build.assert_not_called()
 
 
-def test_custom_kv_connector_rejected_before_engine_creation():
-    with pytest.raises(ValueError, match="custom kv_connector_module_path"):
+@pytest.mark.parametrize(
+    "kv_role, module_path, match",
+    [
+        ("kv_both", "custom.cpu_offload_connector", "custom kv_connector_module_path"),
+        ("kv_producer", None, "requires kv_role='kv_both'"),
+        ("kv_consumer", None, "requires kv_role='kv_both'"),
+    ],
+)
+def test_unsupported_kv_transfer_config_rejected_before_engine_creation(
+    kv_role, module_path, match
+):
+    with pytest.raises(ValueError, match=match):
         VLLMEngine.Config(
             kv_transfer_config=KVTransferConfig(
                 kv_connector="SimpleCPUOffloadConnector",
-                kv_role="kv_both",
-                kv_connector_module_path="custom.cpu_offload_connector",
+                kv_role=kv_role,
+                kv_connector_module_path=module_path,
             )
         )
 
