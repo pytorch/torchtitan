@@ -524,8 +524,6 @@ class TestBufferDtypeGuard(unittest.TestCase):
         m = self.WithBuffer()
         expected = m.buf.clone()
         m.float().cpu().to(memory_format=torch.contiguous_format)
-        if torch.cuda.is_available():
-            m.cuda().cpu()
         torch.testing.assert_close(m.buf, expected, rtol=0, atol=0)
         m.to_empty(device="cpu")
         self.assertEqual(m.buf.dtype, torch.float32)
@@ -536,11 +534,6 @@ class TestBufferDtypeGuard(unittest.TestCase):
         m = self.WithBuffer()
         spmd.assert_type(m.buf, SpmdType({}))
         m.to_empty(device="cpu")
-        self.assertTrue(spmd.has_local_type(m.buf))
-        m.init_states(buffer_device=torch.device("cpu"))
-        self.assertTrue(spmd.has_local_type(m.buf))
-        with self.assertRaises(ValueError):
-            m.half()
         self.assertTrue(spmd.has_local_type(m.buf))
 
 

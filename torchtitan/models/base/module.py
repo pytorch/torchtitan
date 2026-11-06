@@ -43,12 +43,11 @@ class Module(nn.Module, Configurable):
     ordering (e.g., weight tying before init). Override ``_init_self_buffers``
     for buffer initialization.
 
-    All materialized buffers owned by this module reject dtype changes.
-    This default prevents silent corruption when a new buffer is added.
-    An unsupported cast fails immediately instead of silently changing state.
-    Cast meta models before ``to_empty`` and ``init_states``. The guard preserves
-    the current dtype, not a canonical dtype after direct assignment or loading.
-    Failed conversions may leave earlier parameters or children changed.
+    Materialized buffers owned by this module reject dtype changes. Cast a
+    meta-built model before ``to_empty`` and ``init_states``, which rebuild
+    buffers in their intended dtypes. The guard keeps a buffer's current dtype.
+    It does not restore a canonical dtype after direct assignment or loading.
+    A failed cast may leave earlier parameters or children converted.
     """
 
     _param_init: dict[str, Callable] | None = None
@@ -202,7 +201,8 @@ class Module(nn.Module, Configurable):
                 if result.dtype != dtype:
                     raise ValueError(
                         f"Cannot convert {type(self).__name__}.{name} from "
-                        f"{dtype} to {result.dtype}; this buffer's dtype is pinned. "
+                        f"{dtype} to {result.dtype}. "
+                        "torchtitan Module buffers keep their dtype. "
                         "For a model constructed on meta, apply the dtype cast "
                         "before to_empty() and init_states(). Earlier tensors may "
                         "already have changed; recreate the model after failure."
