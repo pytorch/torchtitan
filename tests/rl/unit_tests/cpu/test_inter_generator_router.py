@@ -68,6 +68,7 @@ def _router(actors, *, strategy=None, hot_swap=False) -> InterGeneratorRouter:
             hot_swap=hot_swap,
         ),
         generators=[ServiceHandle(all_ranks=actor, rank0=actor) for actor in actors],
+        holds_session_kv=False,
     )
 
 
@@ -385,18 +386,36 @@ def test_sticky_session_release_drops_its_assignment():
     asyncio.run(_run())
 
 
-def test_session_release_reaches_only_its_pinned_generator():
-    """The generator a session is pinned to releases its held KV."""
+@pytest.mark.parametrize("holds_session_kv", [False, True])
+def test_session_release_only_notifies_rank0_when_holding(holds_session_kv):
+    """Release covers a repin without redundant RPCs to inactive holder paths."""
 
     async def _run():
-        actors = [_Actor("gen0"), _Actor("gen1")]
-        router = _router(actors, strategy=StickySessionRoutingStrategy.Config())
+        actors = [_Actor("all0"), _Actor("all1")]
+        rank0_actors = [_Actor("gen0"), _Actor("gen1")]
+        router = InterGeneratorRouter(
+            InterGeneratorRouter.Config(strategy=StickySessionRoutingStrategy.Config()),
+            generators=[
+                ServiceHandle(all_ranks=actor, rank0=rank0)
+                for actor, rank0 in zip(actors, rank0_actors)
+            ],
+            holds_session_kv=holds_session_kv,
+        )
         assert await _generate(router, group_id=0, session_id="s0") == "gen0"
+        router._generators[0].reserved_load = 3
+        assert await _generate(router, group_id=0, session_id="s0") == "gen1"
 
         await router.release_session("s0")
 
-        assert actors[0].release_sessions.calls == [((["s0"],), {})]
-        assert actors[1].release_sessions.calls == []
+        assert (
+            router._strategy.pinned_candidate(RoutingContext(session_id="s0")) is None
+        )
+        expected = [((["s0"],), {})] if holds_session_kv else []
+        assert [actor.release_sessions.calls for actor in rank0_actors] == [
+            expected,
+            expected,
+        ]
+        assert all(not actor.release_sessions.calls for actor in actors)
 
     asyncio.run(_run())
 

@@ -10,6 +10,7 @@ the consume-time staleness invariant, the metrics timer drain, and RolloutTurnID
 import asyncio
 import json
 import logging
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -53,6 +54,21 @@ def test_controller_config_maybe_log(tmp_path, caplog) -> None:
     with open(tmp_path / "config.json") as file:
         saved_config = json.load(file)
     assert saved_config["trainer"]["model"]["max_context_length"] == 128
+
+
+@pytest.mark.parametrize("hot_swap", [False, True])
+def test_controller_rejects_hot_swap_with_kv_offload(hot_swap):
+    from torchtitan_recipes.tests.rl.alphabet_sort import (
+        rl_grpo_qwen3_5_debug_varlen_cpu_offload,
+    )
+
+    config = rl_grpo_qwen3_5_debug_varlen_cpu_offload()
+    router = replace(config.generator_router, hot_swap=hot_swap)
+    if hot_swap:
+        with pytest.raises(ValueError, match="generator_router.hot_swap=False"):
+            replace(config, generator_router=router)
+    else:
+        replace(config, generator_router=router)
 
 
 def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:
