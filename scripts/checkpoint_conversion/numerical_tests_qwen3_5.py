@@ -332,7 +332,7 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
             layer.attention.inner_attention = _SDPA(is_causal=True)
 
     for blk in model.vision_encoder.layers.values():
-        blk.attn.flex_attention = _SDPA(is_causal=False)
+        blk.attn.inner_attention = _SDPA(is_causal=False)
 
     model.eval()
 

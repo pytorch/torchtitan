@@ -207,7 +207,7 @@ def run_tt(model_flavor, checkpoint_path, ref, dtype, vision_dtype, force_hf_rou
     for layer in model.layers.values():
         layer.attention.inner_attention.inner_attention = _SDPA(is_causal=True)
     for layer in model.vision_encoder.layers.values():
-        layer.attn.flex_attention = _SDPA(is_causal=False)
+        layer.attn.inner_attention = _SDPA(is_causal=False)
     model.eval()
 
     if force_hf_routing:

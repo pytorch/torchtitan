@@ -32,9 +32,12 @@ from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 
 from torchtitan.models.common import ComplexRoPE, Linear
+from torchtitan.models.common.attention import (
+    DeterministicVarlenInnerAttention,
+    VarlenAttentionMetadata,
+)
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
 from torchtitan.models.common.vision_encoder import (
-    create_block_diagonal_mask,
     get_packed_vision_grids,
     RopeApply,
     VisionTransformerBlock,
@@ -48,6 +51,20 @@ def _identity_rope(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     _ = rope_cache
     return query_TNH, key_TNH
+
+
+def _segment_attention_metadata(
+    segment_lengths: torch.Tensor, max_segment_length: int
+) -> VarlenAttentionMetadata:
+    """Full attention within each packed segment."""
+    cu_seqlens = F.pad(torch.cumsum(segment_lengths, 0, dtype=torch.int32), (1, 0))
+    return VarlenAttentionMetadata(
+        cu_seq_q=cu_seqlens,
+        cu_seq_k=cu_seqlens,
+        max_q=max_segment_length,
+        max_k=max_segment_length,
+        window_size=(-1, -1),
+    )
 
 
 def _annotate_vision_activation_type(tensor: torch.Tensor) -> torch.Tensor:
@@ -226,6 +243,15 @@ class NaViTEncoder(Module):
             raise ValueError("NaViT positional embedding grid must be positive")
         if config.pos_emb_grid_order not in {"raster", "legacy_spark"}:
             raise ValueError("NaViT positional embedding grid order is invalid")
+        if not isinstance(
+            config.block.attn.inner_attention,
+            DeterministicVarlenInnerAttention.Config,
+        ):
+            raise ValueError(
+                "NaViT attention must use DeterministicVarlenInnerAttention: "
+                "vision weights are invariant over TP and CP, so their backward "
+                "must be deterministic or the copies drift."
+            )
 
         self.patch_size = config.patch_size
         self.patch_temporal = config.patch_temporal
@@ -418,6 +444,7 @@ class NaViTEncoder(Module):
         all_freqs: list[torch.Tensor] = []
         all_sp_slens: list[torch.Tensor] = []
         all_global_slens: list[int] = []
+        max_window_tokens = 0
         per_frame_meta: list[tuple[int, int, int, torch.Tensor | None]] = []
 
         offset = 0
@@ -441,6 +468,11 @@ class NaViTEncoder(Module):
                 all_freqs.append(freqs_cis_TD)
                 if sp_slens.numel() > 0:
                     all_sp_slens.append(sp_slens)
+                    max_window_tokens = max(
+                        max_window_tokens,
+                        min(grid_h, self.pos_emb_grid_h)
+                        * min(grid_w, self.pos_emb_grid_w),
+                    )
                 all_global_slens.append(num_tokens)
                 per_frame_meta.append((grid_h, grid_w, num_tokens, sp_perm))
 
@@ -452,7 +484,6 @@ class NaViTEncoder(Module):
             if self.use_rope
             else _identity_rope
         )
-        total_tokens = x_TD.shape[0]
 
         sp_slens_cat = torch.cat(all_sp_slens) if all_sp_slens else None
         global_slens = torch.tensor(
@@ -462,17 +493,11 @@ class NaViTEncoder(Module):
         )
         global_slens = _annotate_vision_activation_type(global_slens)
         with spmd.no_typecheck():
-            full_attention_mask = create_block_diagonal_mask(
-                global_slens,
-                total_tokens,
-                device,
+            full_attention_mask = _segment_attention_metadata(
+                global_slens, max(all_global_slens)
             )
             sparse_attention_mask = (
-                create_block_diagonal_mask(
-                    sp_slens_cat,
-                    total_tokens,
-                    device,
-                )
+                _segment_attention_metadata(sp_slens_cat, max_window_tokens)
                 if sp_slens_cat is not None
                 else None
             )
