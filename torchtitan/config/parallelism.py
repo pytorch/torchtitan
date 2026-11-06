@@ -201,7 +201,24 @@ class ParallelismConfig:
     (edp_shard * ep) cover the same ranks, so
     dp_shard * cp * tp == edp_shard * ep. EP borrows ranks from FSDP and TP:
     edp_shard = dp_shard * cp * tp / ep.
-    pp and dp_replicate are outer dimensions unaffected by this constraint.
+    pp is an outer dimension unaffected by this constraint, and so is
+    dp_replicate unless `expert_data_parallel_replicate_degree` is set.
+    """
+
+    expert_data_parallel_replicate_degree: int | None = None
+    """
+    HSDP replicate degree of routed experts when expert parallelism is enabled.
+    None uses `data_parallel_replicate_degree`, so dense parameters and routed
+    experts have the same number of replicas.
+
+    A set value must be >= 1 and divide `data_parallel_replicate_degree`. Then
+    K = data_parallel_replicate_degree / expert_data_parallel_replicate_degree
+    consecutive dense replicas hold one copy of the routed experts: EP groups
+    stay inside one dense replica and expert FSDP spans the K replicas, so
+    edp_shard = K * dp_shard * cp * tp / ep. This keeps dense FSDP small (e.g.
+    inside one scale-up domain, if consecutive ranks share a domain) when one
+    copy of the experts needs more devices. A value different from
+    `data_parallel_replicate_degree` requires expert_parallel_degree > 1.
     """
 
     save_parallelism_folder: str | None = None
@@ -254,6 +271,28 @@ class ParallelismConfig:
                 f"that limit is set; got {lookahead!r} for pipeline degree "
                 f"{self.pipeline_parallel_degree}"
             )
+        edp_replicate = self.expert_data_parallel_replicate_degree
+        if edp_replicate is not None:
+            dp_replicate = self.data_parallel_replicate_degree
+            if edp_replicate < 1:
+                raise ValueError(
+                    "parallelism.expert_data_parallel_replicate_degree must be "
+                    ">= 1, or None to use data_parallel_replicate_degree; got "
+                    f"{edp_replicate}."
+                )
+            if dp_replicate % edp_replicate != 0:
+                raise ValueError(
+                    "parallelism.expert_data_parallel_replicate_degree "
+                    f"({edp_replicate}) must divide data_parallel_replicate_degree "
+                    f"({dp_replicate})."
+                )
+            if edp_replicate != dp_replicate and self.expert_parallel_degree <= 1:
+                raise ValueError(
+                    "parallelism.expert_data_parallel_replicate_degree "
+                    f"({edp_replicate}) differs from data_parallel_replicate_degree "
+                    f"({dp_replicate}), which requires expert_parallel_degree > 1: "
+                    "without EP, routed experts use the dense FSDP mesh."
+                )
         if self.fsdp_symm_mem_scope not in _FSDP_SYMM_MEM_SCOPES:
             raise ValueError(
                 "parallelism.fsdp_symm_mem_scope must be one of: "

@@ -6,6 +6,7 @@
 
 import copy
 import json
+import math
 import os
 import socket
 import tempfile
@@ -17,14 +18,15 @@ import spmd_types as spmd
 import torch
 import torch.distributed as dist
 from spmd_types import SpmdType
-from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import Replicate
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
+from torch.testing._internal.distributed.fake_pg import FakeStore
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
+from torchtitan.distributed.fsdp import apply_fsdp_to_decoder, resolve_sparse_fsdp_mesh
 from torchtitan.distributed.parallelism_context import (
     DistributedTopology,
     MeshAxisName,
@@ -513,8 +515,12 @@ class TestParallelismContextMeshOperations(unittest.TestCase):
             enable_sequence_parallel=False,
         )
 
-        # Test mesh building
-        world_mesh = parallelism_context.build_mesh()
+        # Test mesh building (dense job must not log edp_replicate)
+        with self.assertLogs(
+            "torchtitan.distributed.parallelism_context", level="INFO"
+        ) as log_cm:
+            world_mesh = parallelism_context.build_mesh()
+        self.assertFalse(any("edp_replicate=" in msg for msg in log_cm.output))
         self.assertIsNotNone(world_mesh)
         self.assertEqual(world_mesh.size(), 1)
 
@@ -546,10 +552,10 @@ class TestParallelismContextMeshOperations(unittest.TestCase):
             ["dp_replicate", "dp_shard"]
         )
         self.assertIsNone(dp_replicate_fsdp_mesh)  # Both dimensions have size 1
-        dp_replicate_edp_shard_mesh = parallelism_context.get_optional_mesh(
-            ["dp_replicate", "edp_shard"]
+        edp_replicate_edp_shard_mesh = parallelism_context.get_optional_mesh(
+            ["edp_replicate", "edp_shard"]
         )
-        self.assertIsNone(dp_replicate_edp_shard_mesh)  # Both dimensions have size 1
+        self.assertIsNone(edp_replicate_edp_shard_mesh)  # Both dimensions have size 1
 
         # Test get_optional_mesh returns None when all dimensions have size 1
         self.assertIsNone(parallelism_context.get_optional_mesh("tp"))
@@ -621,6 +627,34 @@ class TestParallelismContextMeshOperations(unittest.TestCase):
         self.assertTrue(parallelism_context.ep_enabled)
         self.assertTrue(parallelism_context.dp_replicate_enabled)
         self.assertTrue(parallelism_context.dp_shard_enabled)
+        # Unset, routed experts have as many replicas as dense parameters.
+        self.assertEqual(parallelism_context.edp_replicate, 2)
+        self.assertEqual(parallelism_context.edp_shard, 1)
+        # from_config passes the option through; None resolves to dp_replicate.
+        for edp_replicate, expected_edp_replicate, expected_edp_shard in (
+            (None, 2, 1),
+            (1, 1, 2),
+        ):
+            with self.subTest(expert_data_parallel_replicate_degree=edp_replicate):
+                parallelism_context = ParallelismContext.from_config(
+                    ParallelismConfig(
+                        data_parallel_replicate_degree=2,
+                        data_parallel_shard_degree=2,
+                        expert_parallel_degree=2,
+                        expert_data_parallel_replicate_degree=edp_replicate,
+                    ),
+                    DistributedTopology(world_size=4),
+                    dump_folder="",
+                )
+                self.assertEqual(
+                    parallelism_context.edp_replicate, expected_edp_replicate
+                )
+                self.assertEqual(parallelism_context.edp_shard, expected_edp_shard)
+
+        self.assertEqual(
+            ParallelismContext.compute_edp_shard(4, 2, 1, 2, 2, 2),
+            4,
+        )
 
         with self.assertRaisesRegex(
             ValueError,
@@ -668,6 +702,219 @@ class TestDenseStorageAxes(DTensorTestBase):
             self.assertNotIn("fsdp", axes)
             self.assertIn("dp", axes)
             self.assertIn("dp_shard", axes)
+
+
+class TestExpertReplicateAxis(DTensorTestBase):
+    """Routed experts with fewer HSDP replicas than dense parameters."""
+
+    @property
+    def world_size(self):
+        return 8
+
+    @with_comms
+    def test_expert_copy_spans_consecutive_dense_replicas(self):
+        with patch(
+            "torchtitan.distributed.parallelism_context.device_type", self.device_type
+        ):
+            pd = ParallelismContext(
+                dp_replicate=4,
+                dp_shard=2,
+                cp=1,
+                tp=1,
+                pp=1,
+                ep=2,
+                world_size=8,
+                enable_sequence_parallel=False,
+                expert_data_parallel_replicate_degree=2,
+            )
+            with self.assertLogs(
+                "torchtitan.distributed.parallelism_context", level="INFO"
+            ) as log_cm:
+                pd.build_mesh()
+            self.assertTrue(any("edp_replicate=2" in msg for msg in log_cm.output))
+
+            # Dense replicas are rank pairs (0, 1), (2, 3), ...; K = 4 // 2 = 2
+            # consecutive replicas hold one copy of the routed experts.
+            self.assertEqual(pd.edp_shard, 2)
+            sparse_mesh = pd._global_meshes["sparse"]
+            self.assertEqual(
+                sparse_mesh.mesh_dim_names, ("pp", "edp_replicate", "edp_shard", "ep")
+            )
+            self.assertEqual(
+                sparse_mesh.mesh.tolist(), torch.arange(8).view(1, 2, 2, 2).tolist()
+            )
+
+            dense_replica = self.rank // 2
+            # EP stays inside the dense replica of this rank.
+            self.assertEqual(
+                pd.get_mesh("ep").mesh.tolist(),
+                [2 * dense_replica, 2 * dense_replica + 1],
+            )
+            # Expert FSDP spans the two dense replicas of this rank's expert copy.
+            expert_copy_start = 4 * (self.rank // 4)
+            self.assertEqual(
+                pd.get_mesh("edp_shard").mesh.tolist(),
+                [
+                    expert_copy_start + self.rank % 2,
+                    expert_copy_start + 2 + self.rank % 2,
+                ],
+            )
+            self.assertEqual(
+                pd.get_mesh("edp_replicate").mesh.tolist(),
+                [self.rank % 4, self.rank % 4 + 4],
+            )
+
+            _, dp_mesh_dims = resolve_sparse_fsdp_mesh(pd)
+            assert dp_mesh_dims is not None
+            self.assertEqual(dp_mesh_dims.shard, "edp_shard")
+            self.assertEqual(dp_mesh_dims.replicate, "edp_replicate")
+
+
+def _rank_groups(mesh: DeviceMesh, axes: tuple[str, ...]) -> set[frozenset[int]]:
+    """Groups of ranks that differ only in their coordinates along ``axes``."""
+    assert mesh.mesh_dim_names is not None
+    mesh_axis_names = list(mesh.mesh_dim_names)
+    mesh_dims = [mesh_axis_names.index(axis) for axis in axes]
+    ranks = mesh.mesh.movedim(mesh_dims, list(range(-len(mesh_dims), 0)))
+    group_size = math.prod(mesh.mesh.shape[d] for d in mesh_dims)
+    return {frozenset(group.tolist()) for group in ranks.reshape(-1, group_size)}
+
+
+class TestExpertReplicateMeshGroups(unittest.TestCase):
+    """Expert rank groups for every expert replicate degree, on 8 fake ranks.
+
+    The global meshes hold the coordinates of every rank, so one process
+    checks the groups of all ranks. Catches a wrong sparse mesh order or
+    degree, which would reduce expert gradients over the wrong ranks.
+    """
+
+    world_size = 8
+
+    def setUp(self):
+        dist.init_process_group(
+            backend="fake", store=FakeStore(), rank=0, world_size=self.world_size
+        )
+
+    def tearDown(self):
+        dist.destroy_process_group()
+
+    def _build(self, pp, dp_replicate, dp_shard, cp, tp, ep, edp_replicate):
+        parallelism_context = ParallelismContext(
+            dp_replicate=dp_replicate,
+            dp_shard=dp_shard,
+            cp=cp,
+            tp=tp,
+            pp=pp,
+            ep=ep,
+            world_size=self.world_size,
+            enable_sequence_parallel=False,
+            expert_data_parallel_replicate_degree=edp_replicate,
+        )
+        parallelism_context.build_mesh()
+        return parallelism_context
+
+    @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
+    def test_example_rank_groups(self):
+        # dp_replicate=4, dp_shard=2, ep=2: dense replicas and EP groups are
+        # {0, 1} {2, 3} {4, 5} {6, 7} for every expert replicate degree.
+        pairs = {frozenset(range(r, r + 2)) for r in range(0, 8, 2)}
+        expected = {
+            # edp_replicate: (edp_shard groups, edp_replicate groups)
+            4: ([{r} for r in range(8)], [{0, 2, 4, 6}, {1, 3, 5, 7}]),
+            2: ([{0, 2}, {1, 3}, {4, 6}, {5, 7}], [{0, 4}, {1, 5}, {2, 6}, {3, 7}]),
+            1: ([{0, 2, 4, 6}, {1, 3, 5, 7}], [{r} for r in range(8)]),
+        }
+        for edp_replicate, (edp_shard_groups, edp_replicate_groups) in expected.items():
+            with self.subTest(edp_replicate=edp_replicate):
+                pd = self._build(1, 4, 2, 1, 1, 2, edp_replicate)
+                dense = pd._global_meshes["dense"]
+                sparse = pd._global_meshes["sparse"]
+                self.assertEqual(pd.edp_shard, 4 // edp_replicate)
+                self.assertEqual(_rank_groups(dense, ("dp_shard",)), pairs)
+                self.assertEqual(_rank_groups(sparse, ("ep",)), pairs)
+                self.assertEqual(
+                    _rank_groups(sparse, ("edp_shard",)),
+                    {frozenset(g) for g in edp_shard_groups},
+                )
+                self.assertEqual(
+                    _rank_groups(sparse, ("edp_replicate",)),
+                    {frozenset(g) for g in edp_replicate_groups},
+                )
+                # Expert gradients are summed over all ranks with the same
+                # EP index.
+                self.assertEqual(
+                    _rank_groups(sparse, ("edp_replicate", "edp_shard")),
+                    {frozenset({0, 2, 4, 6}), frozenset({1, 3, 5, 7})},
+                )
+
+    @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
+    def test_invariants_across_layouts(self):
+        layouts = [
+            # (pp, dp_replicate, dp_shard, cp, tp, ep)
+            (1, 4, 2, 1, 1, 2),
+            (1, 4, 1, 1, 2, 2),
+            (1, 2, 1, 2, 2, 2),
+            (1, 2, 1, 2, 2, 4),
+            (2, 2, 2, 1, 1, 2),
+            (2, 2, 1, 2, 1, 2),
+            (2, 2, 1, 1, 2, 2),
+        ]
+        for pp, dp_replicate, dp_shard, cp, tp, ep in layouts:
+            inner = dp_shard * cp * tp
+            unset = self._build(pp, dp_replicate, dp_shard, cp, tp, ep, None)
+            unset_sparse = unset._global_meshes["sparse"]
+            # Unset keeps the layout from before the option existed.
+            self.assertEqual(unset.edp_replicate, dp_replicate)
+            self.assertEqual(
+                unset_sparse.mesh.tolist(),
+                torch.arange(self.world_size)
+                .view(pp, dp_replicate, inner // ep, ep)
+                .tolist(),
+            )
+            divisors = [d for d in range(1, dp_replicate + 1) if dp_replicate % d == 0]
+            for edp_replicate in divisors:
+                layout = (pp, dp_replicate, dp_shard, cp, tp, ep, edp_replicate)
+                with self.subTest(layout=layout):
+                    k = dp_replicate // edp_replicate
+                    pd = self._build(*layout)
+                    sparse = pd._global_meshes["sparse"]
+                    self.assertEqual(
+                        sparse.mesh_dim_names,
+                        ("pp", "edp_replicate", "edp_shard", "ep"),
+                    )
+                    self.assertEqual(
+                        tuple(sparse.mesh.shape),
+                        (pp, edp_replicate, k * inner // ep, ep),
+                    )
+                    # Expert DP size, and so gradient scaling, does not depend on K.
+                    self.assertEqual(
+                        edp_replicate * pd.edp_shard, self.world_size // (pp * ep)
+                    )
+                    dense_replicas = _rank_groups(
+                        pd._global_meshes["dense"], ("dp_shard", "cp", "tp")
+                    )
+                    ep_groups = _rank_groups(sparse, ("ep",))
+                    # EP groups do not depend on K and stay inside one dense replica.
+                    self.assertEqual(ep_groups, _rank_groups(unset_sparse, ("ep",)))
+                    for ep_group in ep_groups:
+                        self.assertTrue(any(ep_group <= r for r in dense_replicas))
+                    # Each expert FSDP group spans K consecutive dense replicas.
+                    for group in _rank_groups(sparse, ("edp_shard",)):
+                        replicas = sorted({r // inner for r in group})
+                        self.assertEqual(
+                            replicas, list(range(replicas[0], replicas[0] + k))
+                        )
+                    # Expert gradients are summed over the same ranks for every K.
+                    self.assertEqual(
+                        _rank_groups(sparse, ("edp_replicate", "edp_shard")),
+                        _rank_groups(unset_sparse, ("edp_replicate", "edp_shard")),
+                    )
+                    _, dp_mesh_dims = resolve_sparse_fsdp_mesh(pd)
+                    assert dp_mesh_dims is not None
+                    self.assertEqual(
+                        dp_mesh_dims.replicate,
+                        "edp_replicate" if edp_replicate > 1 else None,
+                    )
 
 
 class TestOneDimensionalMeshesSkipFakeAxes(DTensorTestBase):
@@ -839,13 +1086,13 @@ class TestParallelismContextWorld8MeshOperations(DTensorTestBase):
             self.assertEqual(
                 dp_replicate_fsdp_mesh.shape, (2, 2)
             )  # (dp_replicate, dp_shard)
-            # edp_shard mesh only exists when ep > 1, so dp_replicate_edp_shard should be None when ep=1
-            dp_replicate_edp_shard_mesh = parallelism_context.get_optional_mesh(
-                ["dp_replicate", "edp_shard"]
+            # Expert axes only exist when ep > 1, so the expert HSDP mesh is None when ep=1
+            edp_replicate_edp_shard_mesh = parallelism_context.get_optional_mesh(
+                ["edp_replicate", "edp_shard"]
             )
             self.assertIsNone(
-                dp_replicate_edp_shard_mesh
-            )  # edp_shard disabled when ep=1
+                edp_replicate_edp_shard_mesh
+            )  # edp_replicate and edp_shard disabled when ep=1
             # Test get_mesh returns valid meshes for enabled dimensions (size > 1)
             self.assertIsNotNone(parallelism_context.get_mesh("tp"))
             self.assertIsNotNone(parallelism_context.get_mesh("dp_replicate"))

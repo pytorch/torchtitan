@@ -155,6 +155,7 @@ class TestApplySimpleFSDPExpertTraversal(unittest.TestCase):
         parallelism_context = SimpleNamespace(
             dp_replicate_enabled=False,
             ep_enabled=True,
+            edp_replicate_enabled=False,
             ep=2,
         )
 

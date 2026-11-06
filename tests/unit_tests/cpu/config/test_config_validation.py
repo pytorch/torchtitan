@@ -205,6 +205,23 @@ def test_ep_off_built_moe_rejects_ep_gt1() -> None:
         )
 
 
+@pytest.mark.parametrize("edp_replicate", [None, 2, 1])
+def test_hsdp_ep_routed_experts_declare_edp_replicate(
+    edp_replicate: int | None,
+) -> None:
+    # Routed-expert layouts declare edp_replicate, not dp_replicate, so HSDP +
+    # EP must pass the declared-axes check with K = 1, 2 and 4 dense replicas
+    # per expert copy. Building the Trainer.Config runs the check.
+    deepseek_v3_debugmodel(
+        parallelism=ParallelismConfig(
+            data_parallel_replicate_degree=4,
+            data_parallel_shard_degree=2,
+            expert_parallel_degree=2,
+            expert_data_parallel_replicate_degree=edp_replicate,
+        )
+    )
+
+
 def test_ep_off_routed_experts_checked_as_dense() -> None:
     # When EP is off, routed-expert weights live on the dense mesh, so a
     # layout under <moe>.routed_experts. that omits an active dense axis

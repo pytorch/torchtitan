@@ -305,10 +305,10 @@ def compile_time_passes(
                 )
 
             sparse_hsdp_mesh = parallelism_context.get_optional_mesh(
-                ["dp_replicate", "edp_shard"]
+                ["edp_replicate", "edp_shard"]
             )
             if sparse_hsdp_mesh is not None:
-                sparse_replicate_mesh = sparse_hsdp_mesh["dp_replicate"]
+                sparse_replicate_mesh = sparse_hsdp_mesh["edp_replicate"]
                 sparse_shard_mesh = sparse_hsdp_mesh["edp_shard"]
                 hsdp_process_group_pairs.append(
                     (

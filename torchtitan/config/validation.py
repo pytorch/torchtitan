@@ -79,7 +79,7 @@ def _validate_declared_parallel_axes(
     Dense and sparse layouts get different treatment. When
     ``expert_parallel_degree > 1``, layouts on ``routed_experts``
     submodules (``w13``, ``w2``, postprocess, and Dist-MoE children)
-    live in the sparse ``{dp_replicate, edp_shard, ep}`` region.
+    live in the sparse ``{edp_replicate, edp_shard, ep}`` region.
     When EP is off, those weights use the dense mesh, so they are
     checked as dense layouts. Activation contracts on the
     ``routed_experts`` container and all other modules always use the
@@ -90,7 +90,10 @@ def _validate_declared_parallel_axes(
     weight placements, so validating it at ``expert_parallel_degree > 1``
     fails here instead of silently ignoring the EP degree at runtime.
     """
-    from torchtitan.distributed.parallelism_context import MeshAxisName
+    from torchtitan.distributed.parallelism_context import (
+        MeshAxisName,
+        ParallelismContext,
+    )
     from torchtitan.models.common.moe import MoE
 
     p = parallelism
@@ -122,8 +125,11 @@ def _validate_declared_parallel_axes(
             )
         # The mesh keeps edp_shard alive whenever EP is enabled.
         sparse_required = [MeshAxisName.EP, MeshAxisName.EDP_SHARD]
-        if p.data_parallel_replicate_degree > 1:
-            sparse_required.append(MeshAxisName.DP_REPLICATE)
+        edp_replicate = ParallelismContext.resolve_edp_replicate(
+            p.data_parallel_replicate_degree, p.expert_data_parallel_replicate_degree
+        )
+        if edp_replicate > 1:
+            sparse_required.append(MeshAxisName.EDP_REPLICATE)
 
     for fqn, field, axes in _collect_model_layouts(model):
         if p.expert_parallel_degree > 1 and fqn.startswith(sparse_prefixes):

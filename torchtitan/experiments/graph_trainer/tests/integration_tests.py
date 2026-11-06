@@ -121,6 +121,13 @@ def deepseek_v3_hsdp_edp_shard_ep():
     return config
 
 
+def deepseek_v3_hsdp_edp_shard_ep_edp_replicate1():
+    """Both dense replicas share one copy of the routed experts (edp_shard=4)."""
+    config = deepseek_v3_hsdp_edp_shard_ep()
+    config.parallelism.expert_data_parallel_replicate_degree = 1
+    return config
+
+
 def deepseek_v3_fsdp_tp_cp_ep():
     config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel(
         parallelism=ParallelismConfig(expert_parallel_degree=4)
@@ -444,7 +451,10 @@ def _build_deepseek_v3_tests() -> list[IntegrationTestDefinition]:
     return [
         # === GraphRuntime tests ===
         IntegrationTestDefinition(
-            configs=[deepseek_v3_hsdp_edp_shard_ep],
+            configs=[
+                deepseek_v3_hsdp_edp_shard_ep,
+                deepseek_v3_hsdp_edp_shard_ep_edp_replicate1,
+            ],
             test_descr="aot_fx_trace deepseek_v3 HSDP+edp_shard+EP",
             test_name="aot_fx_trace_deepseek_v3_hsdp_edp_shard_ep",
             ngpu=8,

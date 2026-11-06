@@ -11,6 +11,7 @@ import pytest
 
 from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed.context_parallel import PTRRFlexAttentionCPLoadBalancer
+from torchtitan.distributed.parallelism_context import ParallelismContext
 
 
 def test_cp_import_before_parallelism_config() -> None:
@@ -101,4 +102,54 @@ def test_parallelism_config_rejects_unknown_fsdp_symm_mem_scope() -> None:
     ):
         ParallelismConfig(
             fsdp_symm_mem_scope="sparse"  # pyrefly: ignore [bad-argument-type]
+        )
+
+
+@pytest.mark.parametrize(
+    ("dp_replicate", "edp_replicate", "ep", "expected"),
+    [
+        (4, None, 2, 4),
+        (4, 2, 2, 2),
+        (4, 1, 2, 1),
+        # Without EP, only the dense replicate degree is allowed.
+        (4, None, 1, 4),
+        (4, 4, 1, 4),
+    ],
+)
+def test_parallelism_config_accepts_expert_replicate_degree(
+    dp_replicate: int, edp_replicate: int | None, ep: int, expected: int
+) -> None:
+    config = ParallelismConfig(
+        data_parallel_replicate_degree=dp_replicate,
+        expert_parallel_degree=ep,
+        expert_data_parallel_replicate_degree=edp_replicate,
+    )
+    assert (
+        ParallelismContext.resolve_edp_replicate(
+            config.data_parallel_replicate_degree,
+            config.expert_data_parallel_replicate_degree,
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("dp_replicate", "edp_replicate", "ep", "match"),
+    [
+        # None is the only way to inherit the dense replicate degree.
+        (4, -1, 2, r">= 1, or None .*got -1"),
+        (4, 0, 2, r">= 1, or None .*got 0"),
+        (4, 3, 2, r"\(3\) must divide data_parallel_replicate_degree \(4\)"),
+        (2, 4, 2, r"\(4\) must divide data_parallel_replicate_degree \(2\)"),
+        (4, 2, 1, r"requires expert_parallel_degree > 1"),
+    ],
+)
+def test_parallelism_config_rejects_invalid_expert_replicate_degree(
+    dp_replicate: int, edp_replicate: int, ep: int, match: str
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        ParallelismConfig(
+            data_parallel_replicate_degree=dp_replicate,
+            expert_parallel_degree=ep,
+            expert_data_parallel_replicate_degree=edp_replicate,
         )
