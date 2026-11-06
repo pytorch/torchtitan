@@ -114,7 +114,7 @@ def build_rl_test_list() -> list[IntegrationTestDefinition]:
 
 
 def build_h100_rl_test_list() -> list[IntegrationTestDefinition]:
-    """Build RL integration tests for Attention Gym KDA and vLLM's native MLA, which require SM90+."""
+    """Build RL integration tests for Attention Gym KDA and MLA decode, which require SM90+."""
     return [
         _rl_test(
             configs=[rl_grpo_kimi_k3_debug_batch_invariant],

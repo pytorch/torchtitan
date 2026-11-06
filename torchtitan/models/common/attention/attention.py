@@ -14,18 +14,13 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import Any, ClassVar, Generic, TYPE_CHECKING, TypeAlias
+from typing import Any, ClassVar, Generic, Literal, TYPE_CHECKING, TypeAlias
 
 import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch.export import register_dataclass
-from torch.nn.attention import (
-    activate_flash_attention_impl,
-    current_flash_attention_impl,
-    sdpa_kernel,
-    SDPBackend,
-)
+from torch.nn.attention import current_flash_attention_impl, sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _DEFAULT_SPARSE_BLOCK_SIZE,
     _mask_mod_signature,
@@ -49,7 +44,7 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
-from torchtitan.tools.utils import round_up
+from torchtitan.tools.utils import activate_cuda_flash_attention_impl, round_up
 
 if TYPE_CHECKING:
     from . import AttentionMetadata
@@ -118,6 +113,10 @@ class Attention(Module):
 
         def __post_init__(self):
             assert self.n_heads > 0, "n_heads must be > 0"
+
+        def flops_per_token(self, seq_len: int) -> int:
+            """Training attention contractions, excluding parameter-based work."""
+            raise NotImplementedError(type(self).__qualname__)
 
 
 class QKVLinear(Module):
@@ -226,6 +225,30 @@ class GQAttention(Attention):
                     f"n_heads ({self.n_heads}) must be divisible by "
                     f"n_kv_heads ({n_kv_heads})"
                 )
+
+        def flops_per_token(self, seq_len: int) -> int:
+            from torchtitan.models.common.flops import (
+                quadratic_attention_flops_per_token,
+            )
+
+            head_dim = self.head_dim or self.dim // self.n_heads
+            return quadratic_attention_flops_per_token(
+                num_heads=self.n_heads,
+                qk_head_dim=head_dim,
+                v_head_dim=head_dim,
+                seq_len=seq_len,
+                sliding_window_size=(
+                    self.inner_attention.sliding_window_size
+                    if isinstance(
+                        self.inner_attention,
+                        (
+                            SlidingWindowFlexInnerAttention.Config,
+                            SlidingWindowVarlenInnerAttention.Config,
+                        ),
+                    )
+                    else None
+                ),
+            )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -340,18 +363,24 @@ _VarlenMetadataT = TypeVar(
     "_VarlenMetadataT", bound=VarlenAttentionMetadata, default=VarlenAttentionMetadata
 )
 
+# SDPBackend member names that varlen_attn selects between.
+_VarlenSDPBackendName: TypeAlias = Literal["CUDNN_ATTENTION", "FLASH_ATTENTION"]
+
+
+def _default_varlen_sdpa_backends() -> list[_VarlenSDPBackendName]:
+    return ["CUDNN_ATTENTION", "FLASH_ATTENTION"]
+
 
 class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
     @dataclass(kw_only=True, slots=True)
     class Config(InnerAttention.Config):
-        sdpa_backends: list[SDPBackend] = field(
-            default_factory=lambda: [
-                SDPBackend.CUDNN_ATTENTION,
-                SDPBackend.FLASH_ATTENTION,
-            ]
+        sdpa_backends: list[_VarlenSDPBackendName] = field(
+            default_factory=_default_varlen_sdpa_backends
         )
-        """ Backend priority order for varlen_attn, applied via
-            ``sdpa_kernel(..., set_priority=True)``.
+        """ Backend priority order for varlen_attn, as ``SDPBackend`` member
+            names, applied via ``sdpa_kernel(..., set_priority=True)``.
+            Names keep the config plain data: ``SDPBackend`` is a pybind11
+            enum, which ``pprint`` (``--print-config``) cannot format.
         """
 
         @property
@@ -376,16 +405,11 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        self.sdpa_backends = config.sdpa_backends
+        self.sdpa_backends = [
+            getattr(SDPBackend, name) for name in config.sdpa_backends
+        ]
 
-        from torchtitan.tools.utils import get_cuda_flash_attention_impl
-
-        flash_attention_impl = get_cuda_flash_attention_impl()
-        if (
-            flash_attention_impl is not None
-            and current_flash_attention_impl() != flash_attention_impl
-        ):
-            activate_flash_attention_impl(flash_attention_impl)
+        activate_cuda_flash_attention_impl()
 
     def forward(
         self,

@@ -76,7 +76,7 @@ class TestLlama3WeightTying(unittest.TestCase):
         unique_param_count = sum(
             p.numel() for p in {id(p): p for p in model.parameters()}.values()
         )
-        reported_param_count, _ = config.get_nparams_and_flops(model, seq_len=512)
+        reported_param_count, _ = config.get_parameter_counts(model)
 
         self.assertEqual(reported_param_count, unique_param_count)
 

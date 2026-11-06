@@ -1049,11 +1049,17 @@ class TestRematRegions(unittest.TestCase):
                         output = model(x_TD)
                     output.backward()
 
+                region_names = (
+                    ("grouped_mm", "bias_add")
+                    if isinstance(config.w13, GptOssGroupedLinear.Config)
+                    else ("grouped_mm",)
+                )
                 self.assertEqual(
                     [entry.name for entry in trace.entries],
                     [
-                        "routed_experts.w13.grouped_mm",
-                        "routed_experts.w2.grouped_mm",
+                        f"routed_experts.{projection}.{name}"
+                        for projection in ("w13", "w2")
+                        for name in region_names
                     ],
                 )
                 self.assertIsNotNone(x_TD.grad)

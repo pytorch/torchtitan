@@ -20,7 +20,6 @@ import pytest
 
 import spmd_types as spmd
 import torch
-from torch.nn.attention import SDPBackend
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform.base import convert_config_type
@@ -170,7 +169,7 @@ def test_sliding_varlen_preserves_backend_options(model):
         flavors,
         "get_attention_config",
         side_effect=lambda _backend: VarlenInnerAttention.Config(
-            sdpa_backends=[SDPBackend.FLASH_ATTENTION]
+            sdpa_backends=["FLASH_ATTENTION"]
         ),
     ):
         config = flavors.build_model_config(
@@ -182,7 +181,7 @@ def test_sliding_varlen_preserves_backend_options(model):
         SlidingWindowVarlenInnerAttention.Config,
     }
     for inner in inner_configs:
-        assert inner.sdpa_backends == [SDPBackend.FLASH_ATTENTION]
+        assert inner.sdpa_backends == ["FLASH_ATTENTION"]
 
 
 @pytest.mark.parametrize(
@@ -197,7 +196,7 @@ def test_sliding_varlen_preserves_backend_options(model):
     ],
 )
 def test_cp_conversion_preserves_varlen_options(config, cp_backend, kernel_window_size):
-    config.sdpa_backends = [SDPBackend.FLASH_ATTENTION]
+    config.sdpa_backends = ["FLASH_ATTENTION"]
     converted = convert_config_type(config, cp_backend)
     assert type(converted) is cp_backend.Config
     assert converted.sdpa_backends == config.sdpa_backends
