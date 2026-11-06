@@ -27,6 +27,9 @@ from:
 - `torchtitan/rl/generator/generator.py` (generator)
 - `torchtitan/rl/generate.py` (standalone generation)
 
+The generator also needs `reset_kv_cache_on_model_state_dict_load=True`, so cached KV
+can't cross a policy update. With vLLM, that requires `VLLMEngine.Config(session_kv_holder=None)`.
+
 ## Sources of non-batch-invariance
 
 For the same input, the trainer and generator must run the same ops with the

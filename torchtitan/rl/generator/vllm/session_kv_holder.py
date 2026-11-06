@@ -72,10 +72,14 @@ class VLLMSessionKVHolder(Configurable):
         # prompt-end block this holds.
         if scheduler.kv_cache_manager.coordinator.enable_partial_hash_hits:
             raise ValueError(
-                "session_kv_holder does not support partial-block prefix hits"
+                "session_kv_holder does not support partial-block prefix hits; set "
+                "VLLMEngine.Config.session_kv_holder=None"
             )
         if scheduler.vllm_config.speculative_config is not None:
-            raise ValueError("session_kv_holder does not support speculative decoding")
+            raise ValueError(
+                "session_kv_holder does not support speculative decoding; set "
+                "VLLMEngine.Config.session_kv_holder=None"
+            )
         self._scheduler = scheduler
         kv_cache_manager = scheduler.kv_cache_manager
         self._coordinator = kv_cache_manager.coordinator

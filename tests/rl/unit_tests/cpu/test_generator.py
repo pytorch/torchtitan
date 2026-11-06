@@ -46,7 +46,6 @@ from torchtitan.rl.generator.vllm.engine import (
     add_extra_vllm_engine_args,
     VLLMEngine,
 )
-from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.generator.vllm.worker import (
     TorchTitanCudagraphDispatcher,
     TorchTitanGPUModelRunner,
@@ -595,11 +594,14 @@ def test_batch_invariant_requires_kv_cache_reset():
         )
 
 
-def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_path):
+def test_default_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(
+    tmp_path,
+):
+    # The holder is on by default, so a config that resets the KV cache must turn it off.
     with pytest.raises(
         ValueError, match="needs reset_kv_cache_on_model_state_dict_load=False"
     ):
-        VLLMEngine.Config(session_kv_holder=VLLMSessionKVHolder.Config()).build(
+        VLLMEngine.Config().build(
             model=_MODEL_CONFIG,
             parallelism=_PARALLELISM,
             model_path="unused",
@@ -673,7 +675,10 @@ def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
         tmp_path,
         Generator.Config(
             model=_MODEL_CONFIG,
-            engine=VLLMEngine.Config(extra_engine_args={"watermark": 0.03}),
+            # The session KV holder needs vLLM's real scheduler; LLMEngine is mocked here.
+            engine=VLLMEngine.Config(
+                extra_engine_args={"watermark": 0.03}, session_kv_holder=None
+            ),
         ),
     )
     assert engine_kwargs["watermark"] == 0.03

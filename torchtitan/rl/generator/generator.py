@@ -197,7 +197,8 @@ class Generator(Configurable):
             ):
                 raise ValueError(
                     "batch_invariant requires reset_kv_cache_on_model_state_dict_load=True so "
-                    "cached KV cannot cross a policy update"
+                    "cached KV cannot cross a policy update (with vLLM, also set "
+                    "VLLMEngine.Config.session_kv_holder=None)"
                 )
 
     def __init__(

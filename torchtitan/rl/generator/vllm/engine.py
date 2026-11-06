@@ -109,9 +109,13 @@ class VLLMEngine(GenerationEngine):
         stat_logger: VllmOtelStatLogger.Config | None = None
         """Optional logger instantiated on TP rank 0 to export vLLM metrics."""
 
-        session_kv_holder: VLLMSessionKVHolder.Config | None = None
+        session_kv_holder: VLLMSessionKVHolder.Config | None = field(
+            default_factory=VLLMSessionKVHolder.Config
+        )
         """Keep each multi-turn session's cached prefix on GPU between its turns (see
-        `VLLMSessionKVHolder`). None: off."""
+        `VLLMSessionKVHolder`). None: off. Must be None when
+        ``Generator.Config.reset_kv_cache_on_model_state_dict_load=True``, because vLLM
+        can't reset the prefix cache while the holder holds blocks."""
 
     def __init__(
         self,
@@ -139,7 +143,8 @@ class VLLMEngine(GenerationEngine):
         ):
             raise ValueError(
                 "session_kv_holder needs reset_kv_cache_on_model_state_dict_load=False: vLLM "
-                "cannot reset the prefix cache while blocks are held"
+                "cannot reset the prefix cache while blocks are held. Set "
+                "VLLMEngine.Config.session_kv_holder=None to turn the holder off"
             )
         self.config = config
         self._reset_kv_cache_on_model_state_dict_load = (

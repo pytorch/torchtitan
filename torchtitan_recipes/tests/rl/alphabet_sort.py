@@ -261,7 +261,9 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             parallelism=generator_parallelism,
             # TODO: use FULL CUDA graphs once a CUDA-graph-compatible
             # distributed MoE token dispatcher is enabled for GPT-OSS.
-            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
+            engine=VLLMEngine.Config(
+                cuda_graph=VLLMCudaGraphConfig(mode="NONE"), session_kv_holder=None
+            ),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
@@ -501,7 +503,9 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
         ),
         generator=Generator.Config(
             model=generator_model,
-            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
+            engine=VLLMEngine.Config(
+                cuda_graph=VLLMCudaGraphConfig(mode="NONE"), session_kv_holder=None
+            ),
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -608,6 +612,7 @@ def rl_grpo_qwen3_5_debug_varlen_batch_invariant(
         config.generator,
         debug=_BATCH_INVARIANT_DEBUG,
         reset_kv_cache_on_model_state_dict_load=True,
+        engine=dataclasses.replace(config.generator.engine, session_kv_holder=None),
     )
     config.trainer.model, config.generator.model = _qwen3_5_rl_model_configs(
         "debugmodel",
@@ -741,6 +746,7 @@ def _set_kimi_k3_batch_invariant(config: Controller.Config) -> Controller.Config
         config.generator,
         debug=_BATCH_INVARIANT_DEBUG,
         reset_kv_cache_on_model_state_dict_load=True,
+        engine=dataclasses.replace(config.generator.engine, session_kv_holder=None),
     )
     config.trainer.model, config.generator.model = _kimi_k3_rl_model_configs(
         "debugmodel",
