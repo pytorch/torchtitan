@@ -1322,6 +1322,20 @@ def test_compute_training_performance_metrics():
     }
 
 
+def test_compute_training_performance_metrics_without_peak_flops():
+    """An unknown device peak omits MFU but keeps TFLOPS."""
+    metrics = compute_training_performance_metrics(
+        num_tokens=20,
+        elapsed_time=2.0,
+        non_data_parallel_size=2,
+        num_flops=4000,
+        gpu_peak_flops=None,
+        has_quantization=False,
+    )
+
+    assert metrics == {"tokens_per_second": 5.0, "tflops": 1e-9}
+
+
 @pytest.mark.parametrize(
     ("device_type", "current_accelerator", "hip_version"),
     [

@@ -285,7 +285,8 @@ class FaultTolerantTrainer(Configurable):
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = engine.device_memory_monitor
         gpu_peak_flops = utils.get_peak_flops(device_memory_monitor.device_name)
-        logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
+        if gpu_peak_flops is not None:
+            logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
         logger.info(
             f"{engine.device.type.upper()} memory usage for model: "
             f"{engine.model_device_mem_stats.max_reserved_gib:.2f}GiB"
