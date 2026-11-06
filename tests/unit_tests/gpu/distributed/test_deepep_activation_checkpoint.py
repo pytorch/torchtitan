@@ -35,6 +35,7 @@ from torchtitan.models.common.moe.token_dispatcher import (
 )
 
 deep_ep = pytest.importorskip("deep_ep")
+_EP_BUFFER = getattr(deep_ep, "EPBuffer", None) or deep_ep.ElasticBuffer
 
 pytestmark = pytest.mark.multi_gpu
 

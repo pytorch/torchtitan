@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import cast, Protocol
 
@@ -111,6 +111,7 @@ class RoutedExperts(Module):
         routing_map_TE: torch.Tensor,
         *,
         padding_mask_T: torch.Tensor | None = None,
+        dispatch_callback: Callable[[], None] | None = None,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
@@ -124,16 +125,23 @@ class RoutedExperts(Module):
         # TODO(acisseJZhong): skip padding rows' dispatch, expert compute and
         # combine in the stock token dispatchers too, as Dist-MoE does.
         del padding_mask_T
-        (
-            routed_input_RD,
-            num_global_tokens_per_local_expert_e,
-            metadata,
-        ) = self.token_dispatcher.dispatch(
+        dispatch_args = (
             x_TD,
             topk_scores_TK,
             topk_expert_ids_TK,
             routing_map_TE,
         )
+        if dispatch_callback is None:
+            dispatch_result = self.token_dispatcher.dispatch(*dispatch_args)
+        else:
+            dispatch_result = self.token_dispatcher.dispatch_with_overlap(
+                *dispatch_args, compute_while_dispatching=dispatch_callback
+            )
+        (
+            routed_input_RD,
+            num_global_tokens_per_local_expert_e,
+            metadata,
+        ) = dispatch_result
         offsets_E = torch.cumsum(
             num_global_tokens_per_local_expert_e,
             dim=0,
@@ -734,8 +742,11 @@ class MoE(FeedForward):
         """Route with ``expert_bias_E`` but never update it: no balancing hook is registered.
         ``load_balance_coeff=None`` instead removes the bias from routing."""
         shared_experts: DenseFeedForward.Config | None = None
+        overlap_shared_experts: bool = False
 
         def __post_init__(self) -> None:
+            if self.overlap_shared_experts and self.shared_experts is None:
+                raise ValueError("overlap_shared_experts requires shared experts")
             expert_counts = {
                 "moe": self.num_experts,
                 "router": self.router.num_experts,
@@ -758,6 +769,13 @@ class MoE(FeedForward):
         self.shared_experts = (
             config.shared_experts.build() if config.shared_experts is not None else None
         )
+        self.overlap_shared_experts = config.overlap_shared_experts
+        if self.overlap_shared_experts and type(self).forward is not MoE.forward:
+            raise ValueError("overlap_shared_experts requires the standard MoE.forward")
+        if self.overlap_shared_experts and not isinstance(
+            self.routed_experts, RoutedExperts
+        ):
+            raise ValueError("overlap_shared_experts requires RoutedExperts")
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
         # NOTE: router.tokens_per_expert_E is accumulated in the router forward pass.
@@ -811,17 +829,35 @@ class MoE(FeedForward):
             **router_kwargs,
         )
 
+        shared_TD = None
+        dispatch_callback = None
+        if self.overlap_shared_experts:
+
+            def compute_shared_experts() -> None:
+                nonlocal shared_TD
+                assert self.shared_experts is not None
+                shared_TD = self.shared_experts(x_TD)
+
+            dispatch_callback = compute_shared_experts
+
         out_TD = self.routed_experts(
             routed_x_TD,
             topk_scores_TK,
             topk_expert_ids_TK,
             routing_map_TE,
             padding_mask_T=routed_padding_mask_T,
+            dispatch_callback=dispatch_callback,
         )
-        return self._add_shared_experts_and_reduce_across_tp(out_TD, x_TD)
+        return self._add_shared_experts_and_reduce_across_tp(
+            out_TD, x_TD, shared_TD=shared_TD
+        )
 
     def _add_shared_experts_and_reduce_across_tp(
-        self, routed_out_TD: torch.Tensor, x_TD: torch.Tensor
+        self,
+        routed_out_TD: torch.Tensor,
+        x_TD: torch.Tensor,
+        *,
+        shared_TD: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Add the shared experts' output of ``x_TD`` to the routed output and
         materialize the MoE output across TP.
@@ -840,15 +876,16 @@ class MoE(FeedForward):
                 self._maybe_zero_fill_routed_output_to_tp_partial(routed_out_TD),
                 region_name="tp_routed_reduction",
             )
-            shared_TD = self._maybe_all_reduce_moe_output_across_tp(
-                self.shared_experts(x_TD)
-            )
+            if shared_TD is None:
+                shared_TD = self.shared_experts(x_TD)
+            shared_TD = self._maybe_all_reduce_moe_output_across_tp(shared_TD)
             return remat.region(
                 torch.add, self.remat_region_name("shared_add"), recompute=False
             )(routed_out_TD, shared_TD)
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(routed_out_TD)
         if self.shared_experts is not None:
-            shared_TD = self.shared_experts(x_TD)
+            if shared_TD is None:
+                shared_TD = self.shared_experts(x_TD)
             # Trailing add, always saved: it saves nothing for backward, so replay skips
             # it and its inputs need no persisting, matching checkpoint early stop.
             out_TD = remat.region(
