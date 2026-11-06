@@ -16,7 +16,7 @@ from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
-from torchtitan.models.base.model import BaseModel
+from torchtitan.models.base.model import BaseModel, FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.attention import (
     Attention,
@@ -30,6 +30,10 @@ from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
+from torchtitan.models.common.flops import (
+    active_parameter_flops_per_token,
+    get_parameter_counts,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -148,6 +152,27 @@ class Decoder(BaseModel):
                 (config for _, config, _, _ in self.traverse(MoE.Config)),
                 None,
             )
+
+        def get_parameter_counts(self, model: Module) -> tuple[int, int]:
+            """Return total and architecturally active native decoder parameters."""
+            return get_parameter_counts(model)
+
+        def build_flops_estimator(
+            self,
+            model: Module,
+            *,
+            seq_len: int,
+            excluded_submodules: tuple[Module | None, ...] = (),
+        ) -> FlopsEstimator:
+            parameter_flops = active_parameter_flops_per_token(
+                model, excluded_submodules=excluded_submodules
+            )
+            attention_flops = sum(
+                attention.flops_per_token(seq_len)
+                for _, attention, _, _ in self.traverse(Attention.Config)
+            )
+            flops_per_token = parameter_flops + attention_flops
+            return lambda input_dict: flops_per_token * input_dict["input"].numel()
 
     # Set by the trainer when ChunkedLossWrapper is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().

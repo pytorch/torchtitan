@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-import importlib
-import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -16,21 +14,8 @@ import grain.python as grain
 from verifiers.v1.configs.taskset import TasksetConfig as VerifiersTasksetConfig
 from verifiers.v1.utils.loaders import load_taskset
 
+from torchtitan.rl.examples.verifiers.worker_setup import register_local_taskset_alias
 from torchtitan.rl.rollout.data import RLDataset
-
-
-def register_local_taskset_alias(taskset_id: str) -> str:
-    """Register a dotted local taskset under an importable Verifiers plugin ID."""
-    if "." not in taskset_id or "/" in taskset_id:
-        return taskset_id
-
-    module = importlib.import_module(taskset_id)
-    alias = taskset_id.replace(".", "_").lower()
-    existing = sys.modules.get(alias)
-    if existing is not None and existing is not module:
-        raise ValueError(f"taskset alias {alias!r} is already registered")
-    sys.modules[alias] = module
-    return alias
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

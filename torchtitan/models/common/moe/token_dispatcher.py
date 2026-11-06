@@ -801,6 +801,13 @@ class EPDispatchMetadata:
     state: object  # Backend-specific dispatch state.
 
 
+@dataclass(frozen=True, kw_only=True)
+class DeepEPDispatchMetadata(EPDispatchMetadata):
+    """DeepEP dispatch state and per-row router scores."""
+
+    scores_R: torch.Tensor  # noqa: N815
+
+
 class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     """Token dispatcher using DeepEP v2's unified ``ElasticBuffer`` dispatch/combine.
 
@@ -809,11 +816,10 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     from its deduplicated output into expert-major order; expand dispatch already returns
     the static expert-major layout. Combine is synchronized before returning its result.
 
-    Dispatch and combine share one remat policy (``ep_communication``) because combine
-    consumes the handle produced by dispatch. A remat policy replays both unless
-    ``ep_communication`` is saved (the full policy never saves it); a replay
-    must receive rows in the forward's order, so ``init_buffer`` then makes the buffer
-    deterministic (a sort per dispatch).
+    Dispatch replay follows the ``ep_communication`` policy. A replay must receive
+    rows in the forward's order, so ``init_buffer`` makes the buffer deterministic
+    when dispatch is replayed (a sort per dispatch). Combine is a pure reduction
+    and is never replayed.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -850,7 +856,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         from torchtitan.distributed.deepep import deepep  # noqa: F401
 
     def _replays_communication(self) -> bool:
-        """Whether activation remat replays dispatch/combine during backward."""
+        """Whether activation remat replays dispatch during backward."""
         # Without activation remat the regions have no fqn and do not affect execution
         # (remat_should_recompute is then True, since nothing is saved).
         return bool(self._remat_module_fqn) and self.remat_should_recompute(
@@ -861,7 +867,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         """Eagerly create the DeepEP buffer.
 
         Runs after activation checkpointing is applied, so it can make the buffer
-        deterministic when activation remat replays dispatch/combine.
+        deterministic when activation remat replays dispatch.
         """
         ep_group = _ep_process_group()
         assert ep_group is not None
@@ -884,7 +890,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
         routing_map_TE: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, EPDispatchMetadata]:
+    ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
         """Dispatch through the preallocated ElasticBuffer."""
         # Ignore input routing_map_TE. DeepEP returns the number
         # of global routed tokens for every local expert using other inputs.
@@ -898,7 +904,12 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
 
         from torchtitan.distributed.deepep.deepep import dispatch_tokens
 
-        hidden_states_RD, num_global_tokens_per_local_expert_e, state = dispatch_tokens(
+        (
+            hidden_states_RD,
+            num_global_tokens_per_local_expert_e,
+            scores_R,
+            state,
+        ) = dispatch_tokens(
             x_TD,
             topk_expert_ids_TK,
             topk_scores_TK,
@@ -910,29 +921,29 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             cuda_graph_compatible=self.cuda_graph_compatible,
         )
 
-        metadata = EPDispatchMetadata(state=state)
+        metadata = DeepEPDispatchMetadata(state=state, scores_R=scores_R)
         return hidden_states_RD, num_global_tokens_per_local_expert_e, metadata
 
     # pyrefly: ignore [bad-override]
     def combine(
         self,
         routed_output_RD: torch.Tensor,
-        metadata: EPDispatchMetadata,
+        metadata: DeepEPDispatchMetadata,
         x_TD: torch.Tensor,
     ) -> torch.Tensor:
-        """Combine tokens via DeepEP and wait for completion."""
+        """Combine scored tokens via DeepEP and wait for completion."""
         del x_TD
         from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
 
-        # combine_tokens applies routing scores with bare ops.
-        remat.recompute_needs_tensor(routed_output_RD)
-
-        combined_TD = combine_tokens(
-            routed_output_RD,
-            metadata.state,  # pyrefly: ignore [bad-argument-type]
-            remat_region_name=self.remat_region_name("ep_communication.combine"),
-            recompute=self._replays_communication(),
-        )
+        # Replaying unpermute requires retaining or rebuilding W2's output. Wrap
+        # all of combine_tokens in one SAVE region to avoid that replay, saving
+        # only R int64 routing indices for unpermute backward: 8R bytes
+        # (~256 KiB at R=32768).
+        combined_TD = remat.region(
+            combine_tokens,
+            self.remat_region_name("ep_communication.combine"),
+            recompute=False,
+        )(routed_output_RD, metadata.state)
         sync_combine()
         return combined_TD
 
