@@ -47,7 +47,7 @@ from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
-from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
+from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.losses import GRPOLoss
@@ -98,7 +98,7 @@ def rl_grpo_qwen3_5_0_8b_geometry3k() -> Controller.Config:
             validation_dataset=Geometry3kDataset.Config(
                 split="test", image_dir=GEOMETRY3K_IMAGE_DIR, seed=99
             ),
-            worker=RolloutWorker.Config(
+            worker=MessageEnvRolloutWorker.Config(
                 rubric=Rubric.Config(reward_fns=[RewardMathVerify.Config(weight=1.0)]),
                 message_env=Geometry3kEnv.Config(),
             ),

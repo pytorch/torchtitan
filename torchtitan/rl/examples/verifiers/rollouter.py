@@ -36,7 +36,7 @@ from torchtitan.rl.examples.verifiers.generation_server import (
 )
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
-from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
+from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
 from torchtitan.rl.rollout.rubric import RewardFn, Rubric
 from torchtitan.rl.rollout.types import (
     GenerateFn,
@@ -80,7 +80,7 @@ class VerifiersRollouter(Rollouter):
 
     Verifiers owns environment execution, including its process pool and the
     message/tool loop, so this path bypasses TitanRL's ``RolloutWorkerActor``,
-    ``RolloutWorker``, ``MessageEnv``, and ``TokenEnv``. Token-in/token-out is
+    ``MessageEnvRolloutWorker``, ``MessageEnv``, and ``TokenEnv``. Token-in/token-out is
     preserved through ``GenerationServer``, which forwards Verifiers model
     requests to TitanRL's controller-provided ``GenerateFn``.
 
@@ -97,7 +97,7 @@ class VerifiersRollouter(Rollouter):
         validation_dataset: VerifiersTaskDataset.Config
         """Verifiers taskset used for validation samples."""
 
-        worker: RolloutWorker.Config | None = None
+        worker: MessageEnvRolloutWorker.Config | None = None
         """Inherited schema field; hidden because Verifiers replaces that path."""
 
         worker_pool_size: int = 1
