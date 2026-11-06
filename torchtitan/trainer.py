@@ -253,10 +253,11 @@ class Trainer(Configurable):
         self.metrics_processor.optimizers = engine.optim.optimizers
         self.metrics_processor.model_parts = engine.model_parts
 
-        logger.info(
-            "Peak FLOPS used for computing MFU: "
-            f"{self.metrics_processor.gpu_peak_flops:.3e}"
-        )
+        if self.metrics_processor.gpu_peak_flops is not None:
+            logger.info(
+                "Peak FLOPS used for computing MFU: "
+                f"{self.metrics_processor.gpu_peak_flops:.3e}"
+            )
         logger.info(
             f"{engine.device.type.upper()} memory usage for model: "
             f"{engine.model_device_mem_stats.max_reserved_gib:.2f}GiB"

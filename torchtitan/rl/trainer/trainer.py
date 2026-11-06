@@ -146,7 +146,8 @@ class Trainer(Configurable):
             extra_states={"resume": self._resume_state},
         )
 
-        logger.info(f"Peak FLOPS used for computing MFU: {self.gpu_peak_flops:.3e}")
+        if self.gpu_peak_flops is not None:
+            logger.info(f"Peak FLOPS used for computing MFU: {self.gpu_peak_flops:.3e}")
         logger.info(
             f"{engine.device.type.upper()} memory usage for model: "
             f"{engine.model_device_mem_stats.max_reserved_gib:.2f}GiB"
