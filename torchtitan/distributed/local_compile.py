@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
+import torch._inductor.config as inductor_config
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 
@@ -87,7 +88,22 @@ def local_compile(
                     "batch-invariant mode; remove it from local_compile.regions."
                 )
             if enabled:
-                fn = config._compile(reference, fullgraph=True, **compile_kwargs)
+                region_kwargs = dict(compile_kwargs)
+                options = region_kwargs.get("options") or {}
+                if options.get("coordinate_descent_tuning") and (
+                    inductor_config.deterministic or batch_invariant_mode
+                ):
+                    # Deterministic mode (torch.use_deterministic_algorithms) skips reduction
+                    # tuning but keeps the option's rewrite of size-1 matmuls: Kimi K3's
+                    # attention_residual ran 5.7x slower. Batch-invariant mode can't use
+                    # configs picked by timing. set_determinism does the same for flex.
+                    # TODO: drop the deterministic case once Inductor's size-1 bmm/mm
+                    # rewrite (torch/_inductor/decomposition.py) respects that mode.
+                    region_kwargs["options"] = {
+                        **options,
+                        "coordinate_descent_tuning": False,
+                    }
+                fn = config._compile(reference, fullgraph=True, **region_kwargs)
             else:
                 fn = reference
 

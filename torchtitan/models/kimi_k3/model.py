@@ -68,7 +68,15 @@ class AttentionResidual(Function[torch.Tensor]):
         pass
 
     # N grows across attention-residual blocks, so keep one shape-polymorphic graph.
-    @local_compile("attention_residual", batch_invariant=True, dynamic=True)
+    @local_compile(
+        "attention_residual",
+        batch_invariant=True,
+        dynamic=True,
+        # Rewrites the [T, 1, N] x [T, N, D] matmul as multiply + sum and tunes each
+        # kernel: fwd+bwd 5.8 -> 3.4 ms (N=7, 16k tokens, GB300), slower first compile.
+        # local_compile turns it off in deterministic and batch-invariant mode.
+        options={"coordinate_descent_tuning": True},
+    )
     def __call__(
         self,
         partial_block_TD: torch.Tensor | None,
