@@ -666,6 +666,17 @@ class FlexInnerAttention(InnerAttention):
         kernel_options: dict = field(default_factory=dict)
 
         @property
+        def needs_dq_write_order(self) -> bool:
+            """Whether the BlockMask needs dQ write-order metadata.
+
+            Only the deterministic FLASH backward reads it, and it requires it.
+            """
+            return (
+                self.kernel_options.get("BACKEND") == "FLASH"
+                and torch.are_deterministic_algorithms_enabled()
+            )
+
+        @property
         def is_full_attention(self) -> bool:
             return True
 
@@ -697,6 +708,7 @@ class FlexInnerAttention(InnerAttention):
                 # on the particular batch
                 # for batch invariance, we disable this optimization
                 separate_full_blocks=not is_in_batch_invariant_mode(),
+                compute_dq_write_order=self.needs_dq_write_order,
             )
 
     inductor_configs: ClassVar[dict[str, bool]] = {
@@ -879,6 +891,7 @@ class SlidingWindowFlexInnerAttention(FlexInnerAttention):
                 # on the particular batch
                 # for batch invariance, we disable this optimization
                 separate_full_blocks=not is_in_batch_invariant_mode(),
+                compute_dq_write_order=self.needs_dq_write_order,
             )
 
 

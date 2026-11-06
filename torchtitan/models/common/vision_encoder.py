@@ -113,8 +113,19 @@ def create_block_diagonal_mask(
     segment_lengths: torch.Tensor,
     total_tokens: int,
     device: torch.device,
+    *,
+    inner_attention: Module.Config,
 ) -> BlockMask:
-    """Create a FlexInnerAttention mask over contiguous packed segments."""
+    """Create a FlexInnerAttention mask over contiguous packed segments.
+
+    ``inner_attention`` is the vision attention's FlexInnerAttention config; it
+    sets the block size and whether the mask needs dQ write-order metadata.
+    """
+    if not isinstance(inner_attention, FlexInnerAttention.Config):
+        raise ValueError(
+            "create_block_diagonal_mask needs a FlexInnerAttention config, got "
+            f"{type(inner_attention).__qualname__}"
+        )
     segment_ids = torch.repeat_interleave(
         torch.arange(segment_lengths.shape[0], device=device, dtype=torch.int32),
         segment_lengths.to(device=device, dtype=torch.int32),
@@ -133,6 +144,8 @@ def create_block_diagonal_mask(
         total_tokens,
         total_tokens,
         device=device,
+        BLOCK_SIZE=inner_attention.block_size,
+        compute_dq_write_order=inner_attention.needs_dq_write_order,
     )
 
 
