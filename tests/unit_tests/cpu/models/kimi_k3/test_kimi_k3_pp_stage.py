@@ -8,7 +8,8 @@
 the swap of core's stages for AttnRes ones."""
 
 import unittest
-from unittest.mock import patch
+from contextlib import contextmanager
+from unittest.mock import Mock, patch
 
 import torch
 import torch.nn as nn
@@ -45,6 +46,18 @@ class TestCarrier(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "routing expects"):
             _assemble_stack(hidden, delta, [2, 3], store)
 
+    def test_assembly_reuses_an_already_ordered_wire_stack(self):
+        delta = torch.randn(4, 3, 8, requires_grad=True)
+
+        stack, order = _assemble_stack(torch.randn(4, 8), delta, [0, 1, 2], {})
+
+        self.assertEqual(order, [0, 1, 2])
+        self.assertEqual(stack.data_ptr(), delta.data_ptr())
+        self.assertTrue(stack.is_leaf and stack.requires_grad)
+        stack.sum().backward()
+        self.assertIsNotNone(stack.grad)
+        self.assertIsNone(delta.grad)
+
     def test_payload_is_the_routed_columns_of_the_model_stack(self):
         T, D = 4, 8
         stack_out = torch.randn(T, 3, D, requires_grad=True)
@@ -55,6 +68,16 @@ class TestCarrier(unittest.TestCase):
         self.assertEqual(
             tuple(_pack_outgoing_delta(stack_out, [0, 1, 2], []).shape), (T, 0, D)
         )
+
+    def test_payload_reuses_a_fully_routed_model_stack(self):
+        stack_out = torch.randn(4, 3, 8, requires_grad=True)
+
+        payload = _pack_outgoing_delta(stack_out, [0, 1, 2], [0, 1, 2])
+
+        self.assertIs(payload, stack_out)
+        payload.sum().backward()
+        assert stack_out.grad is not None
+        self.assertTrue(torch.equal(stack_out.grad, torch.ones_like(stack_out)))
 
     def test_gradient_split_sends_the_received_and_deposits_the_stored(self):
         T, D = 4, 8
@@ -84,6 +107,42 @@ class TestCarrier(unittest.TestCase):
         self.assertTrue(torch.equal(grad, torch.full((4, 2), 2.0)))
         self.assertFalse(store.has_deposits(0))
         self.assertEqual(store.collect(0, 0), (None, 0))
+
+    def test_forward_enters_registered_pipeline_context(self):
+        """The Kimi carrier stage preserves PyTorch's forward-context API."""
+        events = []
+
+        @contextmanager
+        def forward_context(info):
+            events.append(("enter", info.stage_index, info.microbatch_index))
+            yield
+            events.append(("exit", info.stage_index, info.microbatch_index))
+
+        stage = AttnResPipelineStage.__new__(AttnResPipelineStage)
+        stage.stage_index = 0
+        stage.num_stages = 1
+        stage._store = PPRankLocalCache()
+        stage._forward_contexts = {0: forward_context}
+        stage.output_chunks = []
+        stage._forward_chunk_states = {}
+        stage._make_forward_chunk_state = lambda *_args: object()
+        stage._is_last_on_rank = lambda: True
+        stage.submod = nn.Identity()
+
+        def forward(value):
+            events.append(("forward", 0, 2))
+            return value + 1
+
+        stage.forward_maybe_with_nosync = forward
+        value = torch.randn(4, 8)
+
+        output = stage.forward_one_chunk(2, (value,))
+
+        torch.testing.assert_close(output, value + 1)
+        self.assertEqual(
+            events,
+            [("enter", 0, 2), ("forward", 0, 2), ("exit", 0, 2)],
+        )
 
 
 class TestForwardOnly(unittest.TestCase):
@@ -152,6 +211,40 @@ class TestStageSwap(DTensorTestBase):
         self.assertIs(new._mesh_cache._get_mesh_cb, old._mesh_cache._get_mesh_cb)
         self.assertEqual(new.stage_index_to_group_rank, old.stage_index_to_group_rank)
         self.assertTrue(new.empty_cache_before_first_backward)
+
+    @with_comms
+    def test_forward_enables_fsdp_manual_backward_finalization(self):
+        """The custom stage retains the FSDP protocol from PipelineStage."""
+
+        class FSDPModuleStub(nn.Linear):
+            def __init__(self):
+                super().__init__(2, 2)
+                self.manual_backward_finalization = []
+
+            def set_manual_backward_finalization(self, enabled: bool) -> None:
+                self.manual_backward_finalization.append(enabled)
+
+        module = FSDPModuleStub()
+        stage = AttnResPipelineStage(
+            module,
+            0,
+            1,
+            torch.device("cpu"),
+            get_mesh=_get_mesh,
+        )
+        stage.has_backward = True
+        stage.set_routing(
+            Mock(stage_to_rank={0: 0}),
+            PPRankLocalCache(),
+        )
+
+        with patch(
+            "torchtitan.models.kimi_k3.pipeline_parallel.stage.FSDPModule",
+            FSDPModuleStub,
+        ):
+            stage.forward_one_chunk(0, (torch.ones(1, 2),))
+
+        self.assertEqual(module.manual_backward_finalization, [True])
 
     @with_comms
     def test_single_stage_schedule(self):
