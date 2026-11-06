@@ -110,6 +110,10 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
     NEXT_TURN_SUFFIX_LENGTH = 8
     # The policy version of the engine's weights, which salts the requests' KV.
     policy_version = 0
+    # Whether a request reuses the KV of an earlier request with the same prompt
+    # admitted with it. SGLang cannot reuse linear attention states there (see
+    # SGLangEngine._hold_shared_prompts).
+    reuses_shared_prompt = True
 
     @classmethod
     def setUpClass(cls):
@@ -237,7 +241,13 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         return results
 
     def test_trainer_vs_sglang_decode(self):
-        self._check_trainer_vs_sglang_decode(self.prompt_ids)
+        # The last two requests share a prompt no earlier test cached, as the samples
+        # of a rollout group do: the second reuses the first's prompt KV.
+        shared_prompt = self.prompt_ids[0][::-1]
+        prompt_ids = self.prompt_ids[:-2] + [shared_prompt, shared_prompt]
+        results = self._check_trainer_vs_sglang_decode(prompt_ids)
+        if dist.get_rank() == 0 and self.reuses_shared_prompt:
+            self.assertGreater(results[-1].metrics_inputs.num_cached_tokens, 0)
 
     def test_sglang_decode_batch_invariance(self):
         (single,) = self._generate(self.prompt_ids[:1])
@@ -379,6 +389,7 @@ class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):
     __test__ = True
     config_fn = staticmethod(qwen3_5_debug_bitwise_config)
     sync_weights_from_trainer = True
+    reuses_shared_prompt = False
 
 
 def _debug_model_config(
@@ -469,6 +480,7 @@ class TestSGLangBitwiseParityKDA(SGLangBitwiseParityTestBase):
     __test__ = True
     config_fn = staticmethod(kimi_k3_debug_bitwise_config)
     sync_weights_from_trainer = True
+    reuses_shared_prompt = False
 
     @classmethod
     def setUpClass(cls):
