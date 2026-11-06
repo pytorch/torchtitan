@@ -6,7 +6,7 @@
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
@@ -148,13 +148,14 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
 class TestApplySimpleFSDPExpertTraversal(unittest.TestCase):
     def test_wraps_all_nested_moe_transformer_blocks(self):
         fsdp_mesh = object()
-        edp_mesh = MagicMock()
-        edp_mesh["edp_shard"].size.return_value = 1
+        edp_mesh = object()
         ep_mesh = object()
         tp_mesh = object()
         parallelism_context = SimpleNamespace(
             dp_replicate_enabled=False,
             ep_enabled=True,
+            edp_replicate_enabled=False,
+            edp_shard=1,
             ep=2,
         )
 
@@ -205,6 +206,7 @@ class TestApplySimpleFSDPExpertTraversal(unittest.TestCase):
                     self.assertIs(expert_calls[1].args[0], auxiliary_routed_experts)
                 for expert_call in expert_calls:
                     self.assertIs(expert_call.args[1], edp_mesh)
+                    self.assertEqual(expert_call.args[2], "fully_shard")
                     self.assertEqual(expert_call.kwargs["shard_dim"], 0)
                     self.assertEqual(expert_call.kwargs["param_shard_placements"], {})
                     self.assertIs(expert_call.kwargs["non_dp_mesh"], ep_mesh)
@@ -214,6 +216,120 @@ class TestApplySimpleFSDPExpertTraversal(unittest.TestCase):
                 self.assertIs(model_call.args[0], model)
                 self.assertIs(model_call.args[1], fsdp_mesh)
                 self.assertIs(model_call.kwargs["non_dp_mesh"], tp_mesh)
+
+    def test_edp_mode_decoupled_from_dense_dp_mode(self):
+        cases = (
+            # Dense is pure replicate (dp_shard=1, cp=1), but tp > ep gives
+            # edp_shard > 1 -> routed experts must use hybrid_shard.
+            {
+                "name": "dense_replicate_sparse_hybrid_shard",
+                "dp_shard_enabled": False,
+                "edp_replicate_enabled": True,
+                "edp_shard": 2,
+                "expected_dp_mode": "replicate",
+                "expected_edp_axes": ["edp_replicate", "edp_shard"],
+                "expected_edp_mode": "hybrid_shard",
+            },
+            # Dense is hybrid_shard (dp_shard > 1), but ep == dp_shard * cp * tp
+            # gives edp_shard == 1 -> routed experts must use 1D replicate mesh.
+            {
+                "name": "dense_hybrid_shard_sparse_replicate",
+                "dp_shard_enabled": True,
+                "edp_replicate_enabled": True,
+                "edp_shard": 1,
+                "expected_dp_mode": "hybrid_shard",
+                "expected_edp_axes": ["edp_replicate"],
+                "expected_edp_mode": "replicate",
+            },
+            # Dense is hybrid_shard, but edp_replicate == 1 -> routed experts
+            # must use fully_shard on edp_shard only.
+            {
+                "name": "dense_hybrid_shard_sparse_fully_shard",
+                "dp_shard_enabled": True,
+                "edp_replicate_enabled": False,
+                "edp_shard": 2,
+                "expected_dp_mode": "hybrid_shard",
+                "expected_edp_axes": ["edp_shard"],
+                "expected_edp_mode": "fully_shard",
+            },
+        )
+        precision = PrecisionConfig(param_dtype="bfloat16", reduce_dtype="float32")
+
+        def run_case(case):
+            fsdp_mesh = object()
+            dp_replicate_mesh = object()
+            concat_dp_mesh = object()
+            edp_mesh = object()
+            ep_mesh = object()
+            tp_mesh = object()
+            requested_edp_axes = []
+
+            def get_optional_mesh(mesh_axis_names, **kwargs):
+                del kwargs
+                if mesh_axis_names == "dp_replicate":
+                    return dp_replicate_mesh
+                if mesh_axis_names == "ep":
+                    return ep_mesh
+                if mesh_axis_names == "tp":
+                    return tp_mesh
+                if isinstance(mesh_axis_names, list):
+                    requested_edp_axes.append(mesh_axis_names)
+                    return edp_mesh
+                raise AssertionError(f"Unexpected mesh axes: {mesh_axis_names}")
+
+            def get_mesh(axis):
+                self.assertEqual(axis, "dp_replicate")
+                return dp_replicate_mesh
+
+            parallelism_context = SimpleNamespace(
+                dp_replicate_enabled=True,
+                dp_shard_enabled=case["dp_shard_enabled"],
+                cp_enabled=False,
+                ep_enabled=True,
+                edp_replicate_enabled=case["edp_replicate_enabled"],
+                edp_shard=case["edp_shard"],
+                ep=2,
+                get_optional_mesh=get_optional_mesh,
+                get_mesh=get_mesh,
+            )
+            model = _decoder(with_auxiliary_moe=False)
+            routed_experts = model.layers["0"].feed_forward.routed_experts
+
+            with (
+                patch(
+                    "torchtitan.experiments.graph_trainer.common_utils."
+                    "get_simple_fsdp_mesh",
+                    return_value=fsdp_mesh,
+                ),
+                patch(
+                    "torchtitan.experiments.graph_trainer.common_utils."
+                    "DeviceMesh._concatenate",
+                    return_value=concat_dp_mesh,
+                ),
+                patch(
+                    "torchtitan.experiments.graph_trainer.common_utils."
+                    "data_parallel",
+                    side_effect=lambda module, *args, **kwargs: module,
+                ) as mock_dp,
+            ):
+                apply_simple_fsdp(
+                    model,
+                    parallelism_context=parallelism_context,
+                    precision=precision,
+                )
+
+            self.assertEqual(requested_edp_axes, [case["expected_edp_axes"]])
+            self.assertEqual(mock_dp.call_count, 2)
+            expert_call, model_call = mock_dp.call_args_list
+            self.assertIs(expert_call.args[0], routed_experts)
+            self.assertIs(expert_call.args[1], edp_mesh)
+            self.assertEqual(expert_call.args[2], case["expected_edp_mode"])
+            self.assertIs(model_call.args[0], model)
+            self.assertEqual(model_call.args[2], case["expected_dp_mode"])
+
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                run_case(case)
 
 
 if __name__ == "__main__":

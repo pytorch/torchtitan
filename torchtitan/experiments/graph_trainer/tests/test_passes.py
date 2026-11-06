@@ -230,9 +230,9 @@ class TestDefaultTransformerBlockBuckets(TestCase):
                 return SimpleNamespace(
                     _flatten=lambda name: make_mesh(name, 2),
                 )
-            if axis == ["dp_replicate", "edp_shard"]:
+            if axis == ["edp_replicate", "edp_shard"]:
                 return {
-                    "dp_replicate": make_mesh("expert_dp_replicate", 2),
+                    "edp_replicate": make_mesh("expert_dp_replicate", 2),
                     "edp_shard": make_mesh("edp_shard", 2),
                 }
             return None
@@ -308,6 +308,87 @@ class TestDefaultTransformerBlockBuckets(TestCase):
         self.assertEqual(with_cuda_graph.count(insert_kernel_annotations_pass), 1)
         self.assertNotIn(insert_kernel_annotations_pass, without_cuda_graph)
         self.assertNotIn(cuda_graph_pass, with_cuda_graph)
+
+    def test_compile_time_passes_edp_shard_degree_without_parallelism_context(self):
+        from torchtitan.components.loss import CrossEntropyLoss
+
+        def make_config(parallelism):
+            return SimpleNamespace(
+                compile=GraphTrainerCompileConfig(inductor_compilation="full"),
+                loss=CrossEntropyLoss.Config(),
+                model=SimpleNamespace(
+                    layers=[SimpleNamespace(feed_forward=None) for _ in range(2)]
+                ),
+                parallelism=parallelism,
+                training=SimpleNamespace(disable_accelerator_graphs=True),
+            )
+
+        traced_result = SimpleNamespace(
+            state_fqns=[],
+            graph_state=GraphStateSpec(),
+        )
+
+        # ep=1 must force edp_shard_degree=1 even when tp > 1 or edp_replicate < dp_replicate.
+        cases = (
+            (
+                SimpleNamespace(
+                    data_parallel_replicate_degree=4,
+                    data_parallel_shard_degree=1,
+                    context_parallel_degree=1,
+                    tensor_parallel_degree=4,
+                    expert_parallel_degree=1,
+                    expert_data_parallel_replicate_degree=1,
+                ),
+                False,
+            ),
+            # ep > 1 with K = 4 // 2 = 2 -> edp_shard = 2 * (2 // 2) = 2 > 1.
+            (
+                SimpleNamespace(
+                    data_parallel_replicate_degree=4,
+                    data_parallel_shard_degree=2,
+                    context_parallel_degree=1,
+                    tensor_parallel_degree=1,
+                    expert_parallel_degree=2,
+                    expert_data_parallel_replicate_degree=2,
+                ),
+                True,
+            ),
+            # ep > 1 with expert_data_parallel_replicate_degree=None defaults to dp_replicate.
+            (
+                SimpleNamespace(
+                    data_parallel_replicate_degree=2,
+                    data_parallel_shard_degree=2,
+                    context_parallel_degree=1,
+                    tensor_parallel_degree=1,
+                    expert_parallel_degree=2,
+                    expert_data_parallel_replicate_degree=None,
+                ),
+                False,
+            ),
+        )
+        for parallelism, expected_split in cases:
+            with patch(
+                "torchtitan.experiments.graph_trainer.common_utils."
+                "get_default_transformer_block_buckets",
+                return_value=[],
+            ) as mock_bucket_plan:
+                compile_time_passes(traced_result, make_config(parallelism))
+            self.assertEqual(
+                mock_bucket_plan.call_args.kwargs["split_moe_expert_buckets"],
+                expected_split,
+            )
+
+        # Explicit `is None` check must not silently swallow 0 into dp_replicate.
+        zero_edp_replicate = SimpleNamespace(
+            data_parallel_replicate_degree=2,
+            data_parallel_shard_degree=2,
+            context_parallel_degree=1,
+            tensor_parallel_degree=1,
+            expert_parallel_degree=2,
+            expert_data_parallel_replicate_degree=0,
+        )
+        with self.assertRaises(ZeroDivisionError):
+            compile_time_passes(traced_result, make_config(zero_edp_replicate))
 
 
 class TestFSDPUnshardDedupPass(TestCase):
