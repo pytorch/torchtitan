@@ -383,6 +383,22 @@ class TestMoE(unittest.TestCase):
             training_counts,
         )
 
+    def test_cpu_no_grad_forward_never_queries_graph_capture(self):
+        # The capture query raises when no accelerator is visible.
+        moe = self._build_moe()
+        moe.shared_experts = make_shared_expert_ffn_config(
+            dim=4, hidden_dim=8, w13_param_init={}, w2_param_init={}, enable_sp=False
+        ).build()
+        moe.eval()
+        with (
+            patch(
+                "torch.accelerator.current_stream",
+                side_effect=RuntimeError("no accelerator is available"),
+            ),
+            torch.no_grad(),
+        ):
+            moe(torch.randn(6, 4))
+
     def test_padding_is_excluded_from_counts_but_still_dispatched(self):
         moe = self._build_moe()
         x_TD = torch.randn(6, 4)
