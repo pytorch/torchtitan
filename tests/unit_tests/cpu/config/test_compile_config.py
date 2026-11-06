@@ -127,8 +127,12 @@ def test_local_compile_turns_off_coordinate_descent_in_deterministic_or_batch_in
         "torchtitan.distributed.local_compile.is_in_batch_invariant_mode",
         lambda: batch_invariant_mode,
     )
-    with torch._inductor.config.patch(deterministic=deterministic):
+    was_deterministic = torch.are_deterministic_algorithms_enabled()
+    torch.use_deterministic_algorithms(deterministic)
+    try:
         LocalCompileConfig(regions=["test_deterministic_options"]).apply()
+    finally:
+        torch.use_deterministic_algorithms(was_deterministic)
 
     named_calls = [call for call in compiled_calls if call[0] is fn.__wrapped__]
     assert named_calls[0][1]["options"] == {

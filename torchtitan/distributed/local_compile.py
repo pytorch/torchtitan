@@ -91,12 +91,15 @@ def local_compile(
                 region_kwargs = dict(compile_kwargs)
                 options = region_kwargs.get("options") or {}
                 if options.get("coordinate_descent_tuning") and (
-                    inductor_config.deterministic or batch_invariant_mode
+                    torch.are_deterministic_algorithms_enabled()
+                    # TORCHINDUCTOR_DETERMINISTIC=1 sets only Inductor's flag.
+                    or inductor_config.deterministic
+                    or batch_invariant_mode
                 ):
-                    # Deterministic mode (torch.use_deterministic_algorithms) skips reduction
-                    # tuning but keeps the option's rewrite of size-1 matmuls: Kimi K3's
-                    # attention_residual ran 5.7x slower. Batch-invariant mode can't use
-                    # configs picked by timing. set_determinism does the same for flex.
+                    # Deterministic mode skips reduction tuning but keeps the option's
+                    # rewrite of size-1 matmuls: Kimi K3's attention_residual ran 5.7x
+                    # slower. Batch-invariant mode can't use configs picked by timing.
+                    # set_determinism does the same for flex.
                     # TODO: drop the deterministic case once Inductor's size-1 bmm/mm
                     # rewrite (torch/_inductor/decomposition.py) respects that mode.
                     region_kwargs["options"] = {
