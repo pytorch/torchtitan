@@ -162,13 +162,41 @@ class TestOptimizerConfig(unittest.TestCase):
         self.assertIsInstance(container.optimizers[0], ExternalSGD)
         self.assertEqual(container.optimizers[0].param_groups[0]["lr"], 0.25)
 
-    def test_bfloat16_moments_require_fused_adam(self):
-        with self.assertRaisesRegex(ValueError, "require fused=True"):
-            AdamW.Config(
-                pattern=r".*",
-                fused=False,
-                moment_dtype="bfloat16",
-            )
+    def test_moment_options_require_fused_adam(self):
+        """Catches bf16 or pinned_host moments silently using a non-fused kernel,
+        which lacks mixed-precision support and passes over the moments several
+        times."""
+        for moment_kwargs in (
+            {"moment_dtype": "bfloat16"},
+            {"moment_location": "pinned_host"},
+        ):
+            with self.subTest(**moment_kwargs):
+                with self.assertRaisesRegex(ValueError, "require fused=True"):
+                    AdamW.Config(pattern=r".*", fused=False, **moment_kwargs)
+
+    def test_pinned_host_moments_rejected_on_rocm_at_config_time(self):
+        """Catches a ROCm run failing late, at optimizer construction."""
+        with patch.object(torch.version, "hip", "6.0"):
+            with self.assertRaisesRegex(ValueError, "not verified on ROCm"):
+                AdamW.Config(pattern=r".*", fused=True, moment_location="pinned_host")
+            AdamW.Config(pattern=r".*", fused=True, moment_location="device")
+
+    def test_moment_options_checked_when_assigned_after_config(self):
+        """Catches recipes that set moment_location after the config is built,
+        which skips the config-time checks."""
+        param = nn.Parameter(torch.zeros(2))
+        for optimizer_cls in (Adam, AdamW):
+            config = optimizer_cls.Config(pattern=r".*", fused=False)
+            config.moment_location = "pinned_host"
+            with self.subTest(optimizer=optimizer_cls.__name__, check="fused"):
+                with self.assertRaisesRegex(ValueError, "require fused=True"):
+                    optimizer_cls(config, params=[param])
+            config = optimizer_cls.Config(pattern=r".*", fused=True)
+            config.moment_location = "pinned_host"
+            with self.subTest(optimizer=optimizer_cls.__name__, check="rocm"):
+                with patch.object(torch.version, "hip", "6.0"):
+                    with self.assertRaisesRegex(ValueError, "not verified on ROCm"):
+                        optimizer_cls(config, params=[param])
 
     def test_catch_all_optimizer(self):
         """A catch-all optimizer selects every trainable parameter."""
