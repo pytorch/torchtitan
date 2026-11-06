@@ -108,7 +108,7 @@ class TestProfilerEnabled(unittest.TestCase):
             tempfile.TemporaryDirectory() as tmpdir,
             mock.patch("torch.cuda.is_available", return_value=True),
             mock.patch(
-                "torchtitan.observability.profiler._cuspy_unavailable_reasons",
+                "torchtitan.observability.profiler.cuspy_unavailable_reasons",
                 return_value=["reason one", "reason two"],
             ),
         ):
@@ -159,7 +159,7 @@ class TestProfilerEnabled(unittest.TestCase):
         with (
             mock.patch("torch.cuda.is_available", return_value=True),
             mock.patch(
-                "torchtitan.observability.profiler._cuspy_unavailable_reasons",
+                "torchtitan.observability.profiler.cuspy_unavailable_reasons",
                 return_value=[],
             ),
             mock.patch("torch.cuda.graph_annotations.is_available", return_value=True),

@@ -53,7 +53,7 @@ MEMORY_FILE = (
 )
 
 
-def _cuspy_unavailable_reasons(config: "CuspyTraceProfiler.Config") -> list[str]:
+def cuspy_unavailable_reasons(config: "CuspyTraceProfiler.Config") -> list[str]:
     """Return why Cuspy cannot run ``config`` in this environment; empty when it can.
 
     Probes without taking a CUPTI subscription: holding one makes Kineto's one-shot
@@ -325,7 +325,7 @@ class CuspyTraceProfiler(TraceProfiler):
             raise ValueError(
                 "CuspyTraceProfiler is configured, but no CUDA device is available."
             )
-        if reasons := _cuspy_unavailable_reasons(config):
+        if reasons := cuspy_unavailable_reasons(config):
             raise ValueError(
                 "CuspyTraceProfiler is configured, but Cuspy cannot run here:\n  - "
                 + "\n  - ".join(reasons)
