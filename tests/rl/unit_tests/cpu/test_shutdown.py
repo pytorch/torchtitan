@@ -142,7 +142,10 @@ def _make_stub_rl_trainer():
         # generator.debug.seed; resolve_overrides is stubbed below.
         trainer = SimpleNamespace(model=None)
         generator = SimpleNamespace(
-            model=None, sampling=SamplingConfig(), debug=SimpleNamespace(seed=None)
+            model=None,
+            sampling=SamplingConfig(),
+            debug=SimpleNamespace(seed=None),
+            checkpointer=None,
         )
         override = OverrideConfig()
         rollouter = SimpleNamespace(build=lambda: _StubRollouter())

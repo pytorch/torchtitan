@@ -437,7 +437,7 @@ class Trainer(Configurable):
         )
 
     @sl.log_trace_span("push_model_state_dict")
-    async def push_model_state_dict(self) -> None:
+    async def push_model_state_dict(self, *, trainable_only: bool) -> None:
         """Publish model weights for generators to pull.
 
         The live GPU tensors are put directly, so the trainer keeps no CPU
@@ -457,8 +457,21 @@ class Trainer(Configurable):
         - The controller awaits this push before the next optimizer step mutates
           the model, and awaits the generators' pull of it before the next push
           overwrites the TorchStore key.
+
+        Args:
+            trainable_only: Publish only the parameters that train, plus the buffers.
+                For generators that loaded the frozen parameters themselves (e.g. a LoRA
+                base, from the checkpoint): a LoRA model then sends only its adapters
+                (`lora_a`, `lora_b`).
         """
         model_state_dict = self._model_state_dict()
+        if trainable_only:
+            frozen = self._frozen_param_keys()
+            model_state_dict = {
+                key: tensor
+                for key, tensor in model_state_dict.items()
+                if key not in frozen
+            }
         await asyncio.to_thread(
             self._put_model_state_dict,
             model_state_dict,
@@ -501,6 +514,15 @@ class Trainer(Configurable):
             for model_part in self.engine.model_parts
             for name, tensor in model_part.state_dict().items()
         }
+
+    def _frozen_param_keys(self) -> frozenset[str]:
+        """Return the `model_state_dict` keys of this rank's parameters that do not train."""
+        return frozenset(
+            canonical_fqn(name)
+            for model_part in self.engine.model_parts
+            for name, param in model_part.named_parameters(remove_duplicate=False)
+            if not param.requires_grad
+        )
 
     def _preserve_dtype_keys(
         self, model_state_dict: dict[str, torch.Tensor]

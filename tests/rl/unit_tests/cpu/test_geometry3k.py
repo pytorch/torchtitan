@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+import dataclasses
 import io
 import os
 
@@ -138,3 +139,51 @@ def test_recipe_image_processor_matches_vision_encoder() -> None:
         assert processor.patch_size == encoder.patch_size
         assert processor.temporal_patch_size == encoder.temporal_patch_size
         assert processor.spatial_merge_size == encoder.spatial_merge_size
+
+
+def test_lora_recipe_applies_one_lora_to_the_language_model_of_both_roles() -> None:
+    from torchtitan.models.common.lora import lora_projections
+    from torchtitan_recipes.rl.geometry3k import rl_grpo_qwen3_5_0_8b_geometry3k_lora
+
+    config = rl_grpo_qwen3_5_0_8b_geometry3k_lora()
+
+    projections = lora_projections(config.trainer.model)
+    # 6 full-attention layers x 4, 18 GatedDeltaNet layers x 2, 24 MLPs x 2.
+    assert len(projections) == 108
+    assert not any(fqn.startswith("vision_encoder") for fqn, _, _ in projections)
+    assert lora_projections(config.generator.model) == projections
+    # The generators load the frozen base themselves; syncs carry only the adapters.
+    assert config.generator.checkpointer.initial_load_in_hf
+
+
+def test_recipe_rejects_a_generator_lora_that_differs_from_the_trainer() -> None:
+    from torchtitan.config.transform import apply_transforms, LoRATransform
+    from torchtitan_recipes.rl.geometry3k import (
+        rl_grpo_qwen3_5_0_8b_geometry3k,
+        rl_grpo_qwen3_5_0_8b_geometry3k_lora,
+    )
+
+    config = rl_grpo_qwen3_5_0_8b_geometry3k_lora()
+    base_generator = rl_grpo_qwen3_5_0_8b_geometry3k().generator
+    generator = apply_transforms(
+        base_generator,
+        [LoRATransform(rank=16, alpha=32.0, target_modules=["feed_forward.w2"])],
+    )
+
+    with pytest.raises(ValueError, match="same LoRATransform"):
+        dataclasses.replace(config, generator=generator)
+
+
+def test_recipe_rejects_a_generator_checkpoint_that_differs_from_the_trainer() -> None:
+    from torchtitan_recipes.rl.geometry3k import rl_grpo_qwen3_5_0_8b_geometry3k_lora
+
+    config = rl_grpo_qwen3_5_0_8b_geometry3k_lora()
+    generator = dataclasses.replace(
+        config.generator,
+        checkpointer=dataclasses.replace(
+            config.generator.checkpointer, initial_load_path="/other/checkpoint"
+        ),
+    )
+
+    with pytest.raises(ValueError, match="must load the trainer's initial checkpoint"):
+        dataclasses.replace(config, generator=generator)

@@ -66,8 +66,8 @@ class _TrainerActorEndpoints:
         return await super().optim_step(resume_state=resume_state, last_step=last_step)
 
     @concurrent_endpoint
-    async def push_model_state_dict(self) -> None:
-        await super().push_model_state_dict()
+    async def push_model_state_dict(self, *, trainable_only: bool) -> None:
+        await super().push_model_state_dict(trainable_only=trainable_only)
 
 
 class TrainerActor(Actor, _TrainerActorEndpoints, Trainer):

@@ -887,6 +887,7 @@ def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
 
     async def get_state_dict(*args, **kwargs):
         reads.append((threading.current_thread(), asyncio.get_running_loop()))
+        return kwargs["user_state_dict"]
 
     monkeypatch.setattr(generator_module.ts, "get_state_dict", get_state_dict)
     gate = _StepGate()
