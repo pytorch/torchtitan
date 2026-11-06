@@ -67,9 +67,28 @@ ActivationRematConfig(
 )
 ```
 
-The same policy currently applies to every transformer block. Wildcards such
-as `attention.*` are supported. Unmatched patterns are currently ignored;
-validation must eventually account for regions across all pipeline stages.
+Global save/recompute patterns apply to every transformer block. To spend an
+additional activation budget on selected blocks, add save patterns keyed by
+their original model FQNs:
+
+```python
+ActivationRematConfig(
+    save_regions=[],
+    block_save_regions={"layers.91": ["attention.inner_attention"]},
+)
+```
+
+Block keys are shell-style globs; overlapping entries are additive. Region
+patterns remain relative to the block, and `recompute_regions` still wins over
+policy-controlled saves. Pipeline partitioning preserves original layer FQNs,
+so this rule follows layer 91 instead of a PP-local index. Fixed Full/default
+presets reject block overrides; use `ActivationRematConfig` to customize them.
+
+Wildcards such as `attention.*` are supported. Unmatched patterns are currently
+ignored; validation must eventually account for regions across all pipeline
+stages. Retained tensors follow the block's saved-tensor hooks, described below.
+By default they consume device memory independently of backend-owned expert
+activation arenas; measure that cost before enabling extra saves.
 
 ## Saved-tensor hooks
 
