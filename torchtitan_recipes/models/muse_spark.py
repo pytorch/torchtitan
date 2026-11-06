@@ -278,6 +278,8 @@ def _muse_spark_mm_dataloader(
     model_config: MuseSparkModel.Config,
     dataset: SingleDatasetConfig,
 ) -> GrainDataLoader.Config:
+    import torchvision.transforms.v2.functional as TVF
+
     from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
     from torchtitan.components.data.multimodal.mm_datasets import VisionProcessor
 
@@ -294,6 +296,8 @@ def _muse_spark_mm_dataloader(
         temporal_patch_size=vision_encoder.patch_temporal,
         spatial_merge_size=vision_encoder.downsample_factor,
         resize_fn=_resize_to_muse_glimmer_patch_grid,
+        # The released processor_config.json resamples with LANCZOS.
+        image_interpolation_mode=TVF.InterpolationMode.LANCZOS,
         image_mean=(0.5, 0.5, 0.5),
         image_std=(0.5, 0.5, 0.5),
     )
