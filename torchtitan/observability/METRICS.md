@@ -30,6 +30,19 @@ Weights and Biases will automatically send metrics to a remote server if you log
 Add `WandBLogger.Config()` to `metrics.loggers` in your recipe. Set
 `WANDB_PROJECT` to select the W&B project; the default is `torchtitan`.
 
+Each log call is its own W&B row, and every row carries the training step as
+`trainer/step`, the x-axis of the generated charts. So validation logged at a
+step that training already logged keeps its own row. W&B's `_step` (`Step` in
+the UI) counts rows, not training steps:
+- A saved panel with `Step` on its x-axis must switch to `trainer/step`. Runs
+  from before this change have no `trainer/step`.
+- `WANDB_RESUME_FROM` and `WANDB_FORK_FROM` take `<run>?_step=N`. To rewind to
+  training step S, find the `_step` of a row whose `trainer/step` is S, e.g. with
+  `wandb.Api().run(path).history(keys=["trainer/step"])`. A rewind drops every
+  later row, including validation rows for older steps that were logged after it.
+- A run that logs again into an existing run id appends its rows, so replayed
+  steps show twice.
+
 For an example you can inspect the Llama 3 [recipe](../../torchtitan_recipes/models/llama3.py)
 
 ## MLflow
