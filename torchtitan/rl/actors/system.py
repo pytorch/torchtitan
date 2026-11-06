@@ -116,10 +116,16 @@ class ActorSystem(Configurable, abc.ABC):
 
     @abc.abstractmethod
     async def spawn_rollout_workers(
-        self, config: BaseRolloutWorker.Config, *, num_workers: int, num_threads: int
+        self,
+        config: BaseRolloutWorker.Config,
+        *,
+        num_workers: int,
+        num_threads: int,
+        **kwargs: Any,
     ) -> Any:
         """Spawn a pool of ``num_workers`` rollout worker processes on the
-        controller host, each running ``num_threads`` rollout threads."""
+        controller host, each running ``num_threads`` rollout threads.
+        ``kwargs`` go to each worker's constructor."""
 
     @abc.abstractmethod
     async def stop_rollout_workers(self) -> None:

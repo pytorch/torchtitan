@@ -62,6 +62,7 @@ def test_rollout_worker_actor_builds_its_worker_and_inits_its_logger(
         RolloutWorkerActor.__init__(
             actor,
             worker_config=worker_config,
+            worker_kwargs={},
             num_threads=1,
             # Bound like the controller's; the worker overrides source and rank.
             structured_logger_init_fn=functools.partial(
@@ -179,6 +180,7 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
         # The actor gets the worker's own config, not the whole Rollouter config.
         assert kwargs == {
             "worker_config": rollouter._config.worker,
+            "worker_kwargs": {},
             "num_threads": 2,
             "structured_logger_init_fn": structured_logger_init_fn,
         }
