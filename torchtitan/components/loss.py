@@ -65,8 +65,6 @@ def cross_entropy_loss(
     takes ``pred`` as is and upcasts internally, so the compiled region can save
     the low-precision input for backward instead of an fp32 copy.
     """
-    # TODO: Muse Glimmer's soft cap upcasts its logits to fp32 before CE (`postprocess_logits` in
-    # muse_glimmer/model.py). Applying the cap inside this region would let CE read bf16 logits instead.
     region = (
         _fast_exp_cross_entropy_loss
         if pred.dtype == torch.bfloat16
