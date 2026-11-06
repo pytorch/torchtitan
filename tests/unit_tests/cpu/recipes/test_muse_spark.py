@@ -15,7 +15,11 @@ from torchtitan.models.common.attention.cp_attention import (
 )
 from torchtitan.models.muse_spark.tokenizer import MuseSparkTokenizer
 
-from torchtitan_recipes.models import muse_spark as recipes
+from torchtitan_recipes.models import (
+    muse_glimmer as glimmer_recipes,
+    muse_spark as recipes,
+)
+from torchtitan_recipes.tests.models.muse_glimmer import muse_glimmer_debugmodel_mm
 from torchtitan_recipes.tests.models.muse_spark import (
     muse_spark_debugmodel,
     muse_spark_debugmodel_mm,
@@ -80,13 +84,18 @@ def test_debug_recipe_tokenizer(recipe):
 _VISION_PREFIXES = ("vision_encoder.", "vision_adapter.", "vision_projection.")
 
 
+@pytest.mark.parametrize(
+    "debugmodel_mm, slake_lora_transform",
+    [
+        (muse_spark_debugmodel_mm, recipes._slake_lora_transform),
+        (muse_glimmer_debugmodel_mm, glimmer_recipes._slake_lora_transform),
+    ],
+)
 @pytest.mark.parametrize("variant", ["lora_decoder", "lora_vision_decoder"])
-def test_slake_lora_trainable_split(variant):
+def test_slake_lora_trainable_split(debugmodel_mm, slake_lora_transform, variant):
     # LoRA only warns on unmatched targets; this catches a renamed module.
-    model_config = muse_spark_debugmodel_mm().model
-    model_config = transform_model_config_(
-        model_config, [recipes._slake_lora_transform(variant)]
-    )
+    transform = slake_lora_transform(variant)
+    model_config = transform_model_config_(debugmodel_mm().model, [transform])
     with torch.device("meta"):
         model = model_config.build()
     trainable = {
@@ -107,8 +116,15 @@ def test_slake_lora_trainable_split(variant):
         "vision_projection",
     }
     adapted_vision = {name.rsplit(".lora_", 1)[0] for name in vision}
-    decoder = {name for name in lora if name.startswith("layers.")}
-    assert decoder
+    decoder = {
+        name.rsplit(".lora_", 1)[0].rsplit(".", 1)[-1]
+        for name in lora
+        if name.startswith("layers.")
+    }
+    # Every decoder target must match a decoder module.
+    assert decoder == {
+        name for name in transform.target_modules if not name.startswith("vision")
+    }
     if variant == "lora_decoder":
         assert not vision
     else:

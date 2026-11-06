@@ -37,6 +37,7 @@ from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
 from torchtitan_recipes.data import c4_document_capacity
+from torchtitan_recipes.models.muse_glimmer import MUSE_GLIMMER_30B_SPECIAL_TOKENS
 
 if TYPE_CHECKING:
     import torchvision.transforms.v2.functional as TVF
@@ -51,15 +52,6 @@ MUSE_GLIMMER_DEBUG_SPECIAL_TOKENS = {
     "vision_start_token": "<|vision_start|>",
     "vision_end_token": "<|vision_end|>",
     "pad_token": "<|endoftext|>",
-}
-
-# Multimodal special tokens of the released Muse Glimmer 30B tokenizer.
-MUSE_GLIMMER_30B_SPECIAL_TOKENS = {
-    "image_token": "<|patch|>",
-    "video_token": "<|video|>",
-    "vision_start_token": "<|image_start|>",
-    "vision_end_token": "<|image_end|>",
-    "pad_token": "<|finetune_right_pad|>",
 }
 
 
