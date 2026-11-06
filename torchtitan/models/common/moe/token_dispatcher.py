@@ -805,7 +805,7 @@ class EPDispatchMetadata:
 class DeepEPDispatchMetadata(EPDispatchMetadata):
     """DeepEP dispatch state and per-row router scores."""
 
-    routed_scores_R: torch.Tensor  # noqa: N815
+    scores_R: torch.Tensor  # noqa: N815
 
 
 class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
@@ -907,7 +907,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         (
             hidden_states_RD,
             num_global_tokens_per_local_expert_e,
-            routed_scores_R,
+            scores_R,
             state,
         ) = dispatch_tokens(
             x_TD,
@@ -921,7 +921,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             cuda_graph_compatible=self.cuda_graph_compatible,
         )
 
-        metadata = DeepEPDispatchMetadata(state=state, routed_scores_R=routed_scores_R)
+        metadata = DeepEPDispatchMetadata(state=state, scores_R=scores_R)
         return hidden_states_RD, num_global_tokens_per_local_expert_e, metadata
 
     # pyrefly: ignore [bad-override]

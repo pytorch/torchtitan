@@ -151,7 +151,7 @@ class RoutedExperts(Module):
                 and self.output_postprocess is None
             ):
                 routed_output_RD = self.w2(
-                    hidden_RF, offsets_E, scores_R=metadata.routed_scores_R
+                    hidden_RF, offsets_E, scores_R=metadata.scores_R
                 )
             else:
                 routed_output_RD = self.w2(hidden_RF, offsets_E)
@@ -170,13 +170,11 @@ class RoutedExperts(Module):
                 routed_output_RD = self.output_postprocess(routed_output_RD)
                 if isinstance(metadata, DeepEPDispatchMetadata):
                     # A nonlinear postprocess must run before score multiplication.
-                    remat.recompute_needs_tensor(
-                        routed_output_RD, metadata.routed_scores_R
-                    )
+                    remat.recompute_needs_tensor(routed_output_RD, metadata.scores_R)
                     # Promote the product without saving a float32 output copy.
                     routed_output_RD = (
                         routed_output_RD
-                        * metadata.routed_scores_R.reshape(-1, 1).to(torch.float32)
+                        * metadata.scores_R.reshape(-1, 1).to(torch.float32)
                     ).to(routed_output_RD.dtype)
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,

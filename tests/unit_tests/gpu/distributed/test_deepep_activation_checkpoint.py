@@ -136,7 +136,7 @@ class _PostW2(_EPBlock):
         if experts.output_postprocess is not None:
             routed_output_RD = experts.output_postprocess(routed_output_RD)
         routed_output_RD = (
-            routed_output_RD * metadata.routed_scores_R.reshape(-1, 1).to(torch.float32)
+            routed_output_RD * metadata.scores_R.reshape(-1, 1).to(torch.float32)
         ).to(routed_output_RD.dtype)
         out_TD = experts.token_dispatcher.combine(
             routed_output_RD,
