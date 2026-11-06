@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from torchtitan.config import Configurable
 from torchtitan.observability import structured_logger as sl
@@ -21,6 +21,10 @@ from torchtitan.rl.routing.strategies import (
     StickySessionRoutingStrategy,
 )
 from torchtitan.rl.routing.types import RoutingCandidate, RoutingContext
+
+if TYPE_CHECKING:
+    from torchtitan.rl.actors.rdma import RDMAObject
+    from torchtitan.rl.rollout.types import Prompt
 
 
 @dataclass(kw_only=True, slots=True)
@@ -269,7 +273,7 @@ class InterGeneratorRouter(Configurable):
 
     async def generate(
         self,
-        prompt_token_ids: list[int],
+        prompt: Prompt | RDMAObject[Prompt],
         *,
         request_id: str,
         group_id: int,
@@ -277,10 +281,11 @@ class InterGeneratorRouter(Configurable):
         sampling_config: Any | None,
         metrics_prefix: str,
     ) -> Any:
-        """Route one generation call to a generator and return its completion."""
+        """Route one generation call to a generator and return its completion. An `RDMAObject`
+        prompt goes to the generator as is: generator rank 0 reads it from the rollout worker."""
         return await self._route(
             "generate",
-            prompt_token_ids,
+            prompt,
             request_id=request_id,
             group_id=group_id,
             # Generator.generate also requires this field for its

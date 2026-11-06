@@ -13,11 +13,12 @@ import json
 import logging
 from dataclasses import dataclass
 
+import numpy as np
 from aiohttp import web
 
 from torchtitan.config import Configurable
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.rollout.types import GenerateFn
+from torchtitan.rl.rollout.types import GenerateFn, Prompt
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +213,7 @@ class GenerationServer(Configurable):
         request_id = f"{session_id}/request={request_index}"
         try:
             completion = await self.generate_fn(
-                prompt_token_ids,
+                Prompt(token_ids=np.asarray(prompt_token_ids, dtype=np.int32)),
                 request_id=request_id,
                 group_id=group_id,
                 routing_session_id=session_id,

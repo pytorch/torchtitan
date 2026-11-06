@@ -12,9 +12,9 @@ from monarch.actor import Actor, endpoint
 
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
-from torchtitan.rl.actors.monarch.rdma_microbatch import (
+from torchtitan.rl.actors.monarch.rdma import (
     create_cuda_context_to_silence_monarch_log,
-    MonarchRDMAMicrobatch,
+    MonarchRDMAObject,
 )
 from torchtitan.rl.rollout.types import RolloutGroup
 from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
@@ -53,7 +53,7 @@ class _BatcherActorEndpoints:
             num_pp_microbatches=num_pp_microbatches,
             pad_id=pad_id,
             temperature=temperature,
-            register_rdma_microbatch=MonarchRDMAMicrobatch.register,
+            register_rdma_object=MonarchRDMAObject.register,
         )
 
     @endpoint
@@ -90,6 +90,6 @@ class BatcherActor(Actor, _BatcherActorEndpoints, Batcher):
             **other_init_kwargs,  # see `_BatcherActorEndpoints.__init__`
         )
         await batcher.add_group.call_one(rollout_group=group0)  # -> (None, True)
-        await batcher.add_group.call_one(rollout_group=group1)  # -> (batch of MonarchRDMAMicrobatches, True)
+        await batcher.add_group.call_one(rollout_group=group1)  # -> (batch of RDMAMicrobatches, True)
         batcher.maybe_release_oldest_batch.broadcast()  # once every trainer rank has read group1's batch
     """
