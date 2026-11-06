@@ -230,6 +230,13 @@ class MoonViTRoPE(ComplexRoPE):
         )
 
     def _precompute_cache(self) -> torch.Tensor:
+        # Meta construction needs only the table shape and dtype.
+        if torch.get_default_device().type == "meta":
+            return torch.empty(
+                (self.max_context_length, self.dim // 4),
+                dtype=torch.complex64,
+                device="meta",
+            )
         inv_freq_F = 1.0 / (
             self.theta ** (torch.arange(0, self.dim, 4, dtype=torch.float32) / self.dim)
         )

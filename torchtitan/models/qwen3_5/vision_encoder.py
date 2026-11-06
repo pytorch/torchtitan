@@ -203,6 +203,13 @@ class QwenVisionRoPE(CosSinRoPE):
         )
 
     def _precompute_cache(self) -> torch.Tensor:
+        # Meta construction needs only the table shape and dtype.
+        if torch.get_default_device().type == "meta":
+            return torch.empty(
+                (self.max_context_length, self.dim // 4, 2),
+                dtype=torch.float32,
+                device="meta",
+            )
         half_dim = self.dim // 2
         inv_freq_F = 1.0 / (
             self.theta ** (torch.arange(0, half_dim, 2, dtype=torch.float32) / half_dim)
