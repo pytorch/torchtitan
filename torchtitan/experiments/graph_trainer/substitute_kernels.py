@@ -17,7 +17,11 @@ exists::
         <l2>.py                   # optimized kernel for that specialization
 
 The level-2 key is the AOTAutograd cache key of the submodule on its inputs.
-Neither key depends on the device index, so every rank finds the same kernels.
+Inputs with symbolic sizes (e.g. the routed-row count of a token dispatcher)
+are keyed by their description instead, with the symbols renamed ``N0``,
+``N1``, ... in order of first appearance: the AOTAutograd key would include the
+enclosing graph's symbol names, which differ at every call site. Neither key
+depends on the device index, so every rank finds the same kernels.
 ``specialization_<l2>.json`` is written when a specialization is first seen::
 
     {
@@ -48,6 +52,7 @@ calling any other non-torch op are not cacheable.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
 import inspect
@@ -61,6 +66,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import sympy
 import torch
 import torch._guards
 from torch._functorch._aot_autograd.autograd_cache import (
@@ -227,12 +233,60 @@ def pattern_key(gm: torch.fx.GraphModule, op_deps: OpDeps = ()) -> str:
         return "pat_" + FxGraphCachePickler(gm).get_hash((gm, op_deps))
 
 
+def _symbol_names(values: list[Any]) -> dict[sympy.Symbol, str]:
+    """``N0``, ``N1``, ... for the free symbols of ``values``' symbolic sizes,
+    strides and ints, in order of first appearance."""
+    names: dict[sympy.Symbol, str] = {}
+
+    def visit(x: Any) -> None:
+        if isinstance(x, torch.Tensor):
+            for d in (*x.shape, *x.stride()):
+                visit(d)
+        elif isinstance(x, (tuple, list)):
+            for v in x:
+                visit(v)
+        elif isinstance(x, torch.SymInt):
+            # Symbols are numbered in creation order, the same at every call site.
+            for sym in sorted(x.node.expr.free_symbols, key=_symbol_order):
+                names.setdefault(sym, f"N{len(names)}")
+
+    visit(values)
+    return names
+
+
+def _symbol_order(sym: sympy.Symbol) -> tuple[str, int]:
+    name = str(sym)
+    digits = name.lstrip("abcdefghijklmnopqrstuvwxyz")
+    return name[: len(name) - len(digits)], int(digits) if digits.isdigit() else -1
+
+
+def _render(x: Any, names: dict[sympy.Symbol, str]) -> Any:
+    if isinstance(x, torch.SymInt):
+        expr = x.node.expr.xreplace({s: sympy.Symbol(n) for s, n in names.items()})
+        return int(expr) if expr.is_number else str(expr)
+    return x
+
+
 def spec_key(gm: torch.fx.GraphModule, example_inputs: list[Any]) -> str:
     """Level-2 key: the AOTAutograd cache key for ``gm`` on ``example_inputs``.
 
     Inputs are keyed on device index 0, so every rank computes the same key
-    (``normalize_names`` drops the index of device literals).
+    (``normalize_names`` drops the index of device literals). Inputs with
+    symbolic sizes are keyed by their description (see the module docstring)
+    and the deterministic-algorithms flag, which the AOTAutograd key also
+    includes.
     """
+    names = _symbol_names(example_inputs)
+    if names:
+        described = [_describe(v, names) for v in example_inputs]
+        for d in described:
+            if isinstance(d, dict) and "device" in d:
+                d["device"] = torch.device(d["device"]).type
+        payload = json.dumps(
+            [described, torch.are_deterministic_algorithms_enabled()], sort_keys=True
+        )
+        digest = base64.b32encode(hashlib.sha256(payload.encode()).digest())
+        return "d" + digest.decode().lower().rstrip("=")[:51]
     # The FX graph cache validator requires an active ShapeEnv.
     fake_mode = FakeTensorMode(shape_env=ShapeEnv())
     inputs = []
@@ -279,17 +333,21 @@ def reference_source(gm: torch.fx.GraphModule, op_deps: OpDeps = ()) -> str:
     )
 
 
-def _describe(val: Any) -> Any:
-    """JSON description of an input or output ``meta["val"]``."""
+def _describe(val: Any, names: dict[sympy.Symbol, str] | None = None) -> Any:
+    """JSON description of an input or output ``meta["val"]``; symbolic sizes are
+    written with ``names``."""
+    names = names or {}
     if isinstance(val, torch.Tensor):
         return {
-            "shape": list(val.shape),
-            "stride": list(val.stride()),
+            "shape": [_render(d, names) for d in val.shape],
+            "stride": [_render(d, names) for d in val.stride()],
             "dtype": str(val.dtype).removeprefix("torch."),
             "device": str(val.device),
         }
     if isinstance(val, (tuple, list)):
-        return [_describe(v) for v in val]
+        return [_describe(v, names) for v in val]
+    if isinstance(val, torch.SymInt):
+        return {"value": _render(val, names)}
     if val is None or isinstance(val, (bool, int, float, str)):
         return {"value": val}
     return {"value": repr(val)}
@@ -320,13 +378,15 @@ def _ensure_spec(
     path = pattern_dir / f"specialization_{l2}.json"
     if path.exists():
         return json.loads(path.read_text())
-    names = [n.name for n in gm.graph.find_nodes(op="placeholder")]
+    params = [n.name for n in gm.graph.find_nodes(op="placeholder")]
+    # Output-only symbols (sizes computed inside the region) continue the numbering.
+    names = _symbol_names([*inputs, output])
     spec = {
         "kernel_name": f"{l2}.py",
         "reference": "reference.py",
-        "signature": f"def run({', '.join(names)})",
-        "inputs": [_describe(v) for v in inputs],
-        "outputs": _describe(output),
+        "signature": f"def run({', '.join(params)})",
+        "inputs": [_describe(v, names) for v in inputs],
+        "outputs": _describe(output, names),
     }
     _atomic_write(path, _spec_json(spec) + "\n")
     return spec
@@ -340,13 +400,21 @@ def _write_reference(
 
 
 def _load_run(path: Path) -> Callable[..., Any]:
-    name = f"_substitute_kernels_{path.parent.name}_{path.stem}"
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module.run
+    # One module per file content: every call site of a pattern shares it, and a
+    # replaced file is loaded anew.
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    name = f"_substitute_kernels_{path.parent.name}_{path.stem}_{digest}"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            del sys.modules[name]
+            raise
+    return sys.modules[name].run
 
 
 def cache_keys(

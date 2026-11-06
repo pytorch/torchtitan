@@ -17,6 +17,7 @@ import torch
 import torch.fx as fx
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.experimental.proxy_tensor import make_fx
+from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.graph_trainer.substitute_kernels import (
@@ -177,6 +178,34 @@ class TestSubstituteWithKernelsPass(TestCase):
             gm = make_fx(fn, tracing_mode="fake")(x)
             keys.append(cache_keys(gm, [x])[:2])
         self.assertEqual(keys[0], keys[1])
+
+    def test_symbolic_sizes_are_keyed_by_description(self):
+        # A token dispatcher's routed-row count is a new unbacked symbol in every
+        # layer; identical regions must still share one specialization.
+        layer = _layer(lambda x, w1, w2: torch.nn.functional.silu(x) * 2)
+        shape_env = ShapeEnv()
+        with FakeTensorMode(shape_env=shape_env):
+            vals = [
+                torch.empty(shape_env.create_unbacked_symint(), 16) for _ in range(2)
+            ]
+            w = torch.empty(16, 16)
+            out = torch.empty(vals[1].shape[0], 16)
+        keys = [cache_keys(layer, [x, w, w])[:2] for x in vals]
+        self.assertEqual(keys[0], keys[1])
+
+        root = torch.nn.Module()
+        root.add_module("layer0", layer)
+        graph = fx.Graph()
+        inputs = [graph.placeholder(f"arg{i}") for i in range(3)]
+        for node, val in zip(inputs, (vals[1], w, w)):
+            node.meta["val"] = val
+        call = graph.call_module("layer0", tuple(inputs))
+        call.meta["val"] = out
+        graph.output(call)
+        substitute_with_kernels_pass(fx.GraphModule(root, graph), cache_dir=self.cache)
+        spec = json.loads(self._spec_text(*keys[0]))
+        self.assertEqual(spec["inputs"][0]["shape"], ["N0", 16])
+        self.assertEqual(spec["outputs"]["shape"], ["N0", 16])
 
     def test_miss_keeps_call_module_and_writes_reference_and_specialization(self):
         args = _inputs()
