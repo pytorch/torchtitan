@@ -37,6 +37,7 @@ __all__ = [
     "mixed_precision_policy",
     "resolve_fsdp_mesh",
     "resolve_sparse_fsdp_mesh",
+    "store_frozen_params_in_param_dtype_",
 ]
 
 logger = logging.getLogger(__name__)
@@ -257,6 +258,27 @@ def mixed_precision_policy(
         cast_forward_inputs=cast_forward_inputs,
         param_dtype_override_fn=param_dtype_override_fn if preserved else None,
     )
+
+
+def store_frozen_params_in_param_dtype_(
+    module: Module, param_dtype: torch.dtype
+) -> None:
+    """Store the frozen parameters of ``module`` in ``param_dtype``.
+
+    Parameters listed in ``preserve_dtype_params`` keep their dtype. Each tensor is
+    swapped rather than assigned to ``param.data``, because setting ``.data`` would
+    leave a quantized tensor subclass's inner tensor in the old dtype. Parameter
+    identity (tied weights) and attributes (e.g. the SPMD type) are kept. Call
+    before ``fully_shard``, which records parameter dtypes.
+    """
+    preserved = {param for _, param in module.named_preserve_dtype_params()}
+    for param in module.parameters():
+        if param.requires_grad or param in preserved or param.dtype == param_dtype:
+            continue
+        new_param = nn.Parameter(param.detach().to(param_dtype), requires_grad=False)
+        for name, value in param.__dict__.items():
+            new_param.__dict__.setdefault(name, value)
+        torch.utils.swap_tensors(param, new_param)
 
 
 def apply_fsdp_to_multimodal_encoder(

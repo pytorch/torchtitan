@@ -41,6 +41,7 @@ from torchtitan.distributed.activation_remat import (
     DefaultActivationRematConfig,
 )
 from torchtitan.distributed.batch_invariant import set_batch_invariance
+from torchtitan.distributed.fsdp import store_frozen_params_in_param_dtype_
 from torchtitan.distributed.pipeline_parallel import (
     prepare_pipeline_schedule_for_accelerator_graph,
 )
@@ -389,6 +390,11 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             utils.set_default_dtype(TORCH_DTYPE_MAP[self.precision.dtype]),
         ):
             model = self.model_config.build()
+        # A frozen parameter is never updated and FSDP computes it in param_dtype,
+        # so a wider dtype only costs memory.
+        param_dtype = TORCH_DTYPE_MAP[self.precision.param_dtype]
+        if param_dtype.itemsize < TORCH_DTYPE_MAP[self.precision.dtype].itemsize:
+            store_frozen_params_in_param_dtype_(model, param_dtype)
         self.model_cls = type(model)
         adapter_cls = type(model).state_dict_adapter_cls
         self.state_dict_adapter = (
