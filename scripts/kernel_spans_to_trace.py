@@ -6,37 +6,37 @@
 
 """Convert recorded kernel span steps into a Chrome trace for Perfetto.
 
-Reads the step files ``Profiler.Config.kernel_spans`` writes (see
-``torchtitan/observability/kernel_spans.py``) and joins each kernel span to
-its CUDA graph node, so slices carry the kernel name and the node's graph
-annotations. Ranks become processes and CUDA streams become threads; each step
-also gets a slice on a ``steps`` track spanning its kernels.
+Reads step files written by ``Profiler.Config.kernel_spans`` (see
+``torchtitan/observability/kernel_spans.py``), one rank and many steps per
+file, and joins each kernel span to its CUDA graph node, so slices carry the
+kernel name and the node's graph annotations. Ranks become processes and CUDA
+streams become threads; each step also gets a slice on a ``steps`` track
+spanning its kernels.
 
 Example::
 
     python scripts/kernel_spans_to_trace.py \\
-        outputs/profiling/kernel_spans --steps 150-152 --ranks 0,1 \\
-        --output trace.json.gz
+        outputs/profiling/kernel_spans/rank{0,1}/steps_000000000101_000000000200.npz \\
+        --steps 150-152 --output trace.json.gz
 
 Open the output in https://ui.perfetto.dev.
 """
 
 import argparse
-import glob
 import gzip
 import json
-import os
-import re
 
 import numpy as np
 
-_STEPS_FILE_RE = re.compile(r"steps_(\d+)_(\d+)\.npz$")
-_RANK_DIR_RE = re.compile(r"rank(\d+)$")
+# Turns mangled C++ kernel names (e.g. _ZN2at6native...) into readable ones.
+# TODO: private torch API; switch to a public demangler if torch exposes one.
+from torch._C import _demangle
+
 # Thread id for the per-rank track of step slices; CUDA stream ids are small.
 _STEPS_TID = -1
 
 
-def _parse_int_list(spec: str) -> list[int]:
+def _parse_steps(spec: str) -> list[int]:
     """Parse ``"3,5-7"`` into ``[3, 5, 6, 7]``."""
     values: list[int] = []
     for part in spec.split(","):
@@ -45,29 +45,13 @@ def _parse_int_list(spec: str) -> list[int]:
     return values
 
 
-def _demangle(name: str) -> str:
-    try:
-        from torch._C import _demangle as demangle
-    except ImportError:
-        return name
-    return demangle(name)
-
-
-def _rank_dirs(spans_dir: str, ranks: list[int] | None) -> dict[int, str]:
-    found = {}
-    for path in glob.glob(os.path.join(spans_dir, "rank*")):
-        if (match := _RANK_DIR_RE.search(path)) and os.path.isdir(path):
-            found[int(match.group(1))] = path
-    if ranks is None:
-        return dict(sorted(found.items()))
-    missing = [rank for rank in ranks if rank not in found]
-    if missing:
-        raise ValueError(f"no rank directories for ranks {missing} under {spans_dir}")
-    return {rank: found[rank] for rank in ranks}
-
-
-def _rank_events(rank: int, rank_dir: str, steps: set[int]) -> tuple[list, set[int]]:
-    """Return the trace events for ``steps`` on one rank, and the steps found."""
+def _file_events(path: str, steps: set[int]) -> tuple[list, set[int]]:
+    """Return the trace events for ``steps`` in one rank's step file, and the
+    steps found."""
+    data = np.load(path)
+    rank = int(data["rank"])
+    node_table = json.loads(data["node_table"].tobytes())
+    offsets = data["step_offsets"]
     events: list[dict] = [
         {
             "ph": "M",
@@ -86,63 +70,54 @@ def _rank_events(rank: int, rank_dir: str, steps: set[int]) -> tuple[list, set[i
     found: set[int] = set()
     streams: set[int] = set()
     num_unnamed = 0
-    for path in sorted(glob.glob(os.path.join(rank_dir, "steps_*.npz"))):
-        match = _STEPS_FILE_RE.search(path)
-        assert match is not None
-        first_step, last_step = int(match.group(1)), int(match.group(2))
-        if not any(first_step <= step <= last_step for step in steps):
+    for i, step in enumerate(data["steps"].tolist()):
+        if step not in steps:
             continue
-        data = np.load(path)
-        node_table = json.loads(data["node_table"].tobytes())
-        offsets = data["step_offsets"]
-        for i, step in enumerate(data["steps"].tolist()):
-            if step not in steps:
-                continue
-            found.add(step)
-            rows = slice(offsets[i], offsets[i + 1])
-            node_ids = data["graph_node_id"][rows].tolist()
-            starts = data["start_ns"][rows].tolist()
-            ends = data["end_ns"][rows].tolist()
-            stream_ids = data["stream_id"][rows].tolist()
-            for node_id, start, end, stream in zip(node_ids, starts, ends, stream_ids):
-                streams.add(stream)
-                node = node_table.get(str(node_id)) if node_id else None
-                args: dict = {"graph_node_id": node_id}
-                if node is None:
-                    name = "eager kernel" if node_id == 0 else "unknown graph node"
-                    num_unnamed += node_id != 0
-                else:
-                    name = _demangle(node["kernel_name"] or node["node_type"])
-                    if node["grid"] is not None:
-                        args["grid"], args["block"] = node["grid"], node["block"]
-                    for annotation in node["annotations"] or []:
-                        if isinstance(annotation, dict):
-                            args.update(annotation)
-                events.append(
-                    {
-                        "ph": "X",
-                        "cat": "kernel",
-                        "name": name,
-                        "pid": rank,
-                        "tid": stream,
-                        "ts": start / 1e3,
-                        "dur": (end - start) / 1e3,
-                        "args": args,
-                    }
-                )
-            if starts:
-                events.append(
-                    {
-                        "ph": "X",
-                        "cat": "step",
-                        "name": f"step {step}",
-                        "pid": rank,
-                        "tid": _STEPS_TID,
-                        "ts": min(starts) / 1e3,
-                        "dur": (max(ends) - min(starts)) / 1e3,
-                        "args": {"num_kernels": len(starts)},
-                    }
-                )
+        found.add(step)
+        rows = slice(offsets[i], offsets[i + 1])
+        node_ids = data["graph_node_id"][rows].tolist()
+        starts = data["start_ns"][rows].tolist()
+        ends = data["end_ns"][rows].tolist()
+        stream_ids = data["stream_id"][rows].tolist()
+        for node_id, start, end, stream in zip(node_ids, starts, ends, stream_ids):
+            streams.add(stream)
+            node = node_table.get(str(node_id)) if node_id else None
+            args: dict = {"graph_node_id": node_id}
+            if node is None:
+                name = "eager kernel" if node_id == 0 else "unknown graph node"
+                num_unnamed += node_id != 0
+            else:
+                name = _demangle(node["kernel_name"] or node["node_type"])
+                if node["grid"] is not None:
+                    args["grid"], args["block"] = node["grid"], node["block"]
+                for annotation in node["annotations"] or []:
+                    if isinstance(annotation, dict):
+                        args.update(annotation)
+            events.append(
+                {
+                    "ph": "X",
+                    "cat": "kernel",
+                    "name": name,
+                    "pid": rank,
+                    "tid": stream,
+                    "ts": start / 1e3,
+                    "dur": (end - start) / 1e3,
+                    "args": args,
+                }
+            )
+        if starts:
+            events.append(
+                {
+                    "ph": "X",
+                    "cat": "step",
+                    "name": f"step {step}",
+                    "pid": rank,
+                    "tid": _STEPS_TID,
+                    "ts": min(starts) / 1e3,
+                    "dur": (max(ends) - min(starts)) / 1e3,
+                    "args": {"num_kernels": len(starts)},
+                }
+            )
     events.extend(
         {
             "ph": "M",
@@ -163,24 +138,22 @@ def _rank_events(rank: int, rank_dir: str, steps: set[int]) -> tuple[list, set[i
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("spans_dir", help="kernel spans folder holding rank*/ dirs")
+    parser.add_argument(
+        "files", nargs="+", help="step files to convert, one per rank to show"
+    )
     parser.add_argument(
         "--steps", required=True, help='steps to convert, e.g. "150-152,160"'
     )
-    parser.add_argument("--ranks", help='ranks to include, e.g. "0-3"; default all')
     parser.add_argument("--output", required=True, help="output .json or .json.gz path")
     args = parser.parse_args()
 
-    steps = set(_parse_int_list(args.steps))
-    ranks = None if args.ranks is None else _parse_int_list(args.ranks)
+    steps = set(_parse_steps(args.steps))
     events: list[dict] = []
-    for rank, rank_dir in _rank_dirs(args.spans_dir, ranks).items():
-        rank_events, found = _rank_events(rank, rank_dir, steps)
+    for path in args.files:
+        file_events, found = _file_events(path, steps)
         if missing := sorted(steps - found):
-            print(
-                f"rank {rank}: steps {missing} are not on disk (evicted or not reached)"
-            )
-        events.extend(rank_events)
+            print(f"{path}: steps {missing} are not in this file")
+        events.extend(file_events)
 
     opener = gzip.open if args.output.endswith(".gz") else open
     with opener(args.output, "wt") as f:

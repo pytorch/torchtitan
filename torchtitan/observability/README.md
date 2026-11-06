@@ -87,10 +87,18 @@ The sample buffer is held in process memory while profiling, not written to the 
 
 ## Always-on kernel spans
 
-`Profiler.Config.kernel_spans` records every CUDA kernel's GPU start and
-end time on every training step with Cuspy, so a slow step can be inspected
-after the fact without having scheduled a profiling window for it. Each rank
-keeps the most recent `num_steps_retained` steps (default 1000) on disk:
+Cuspy makes always-on profiling cheap enough for real-scale training: every
+step, every rank records every CUDA kernel's GPU start/end time, at about 1%
+of step time or less. On 4 GB300s with FSDP and CUDA graphs, step time went
+up 0.1-1.3% for Llama 3 8B (2.3k kernels/step) and 0.2-0.35% for Qwen3 32B
+(5.4k kernels/step). It stays cheap because:
+
+* each kernel is 32 bytes: CUDA graph node id, start, end, stream;
+* the host collects records without a device sync, while it waits on the GPU;
+* kernel names come from the CUDA graph node table, recorded once per graph
+  and joined offline, not per kernel during training;
+* steps are written in batches of `steps_per_file`, and old files are deleted
+  so each rank keeps the last `num_steps_retained` steps.
 
 ```python
 from torchtitan.observability.kernel_spans import KernelSpanRecorder
@@ -101,41 +109,36 @@ config.profiler.kernel_spans = KernelSpanRecorder.Config(num_steps_retained=1000
 ```
 <dump_folder>/profiling/kernel_spans/
   rank0/
-    steps_000000000901_000000001000.npz   # one file per steps_per_file (100) steps, oldest deleted first
+    steps_000000000901_000000001000.npz   # steps_per_file (100) steps each, oldest deleted first
     steps_000000001001_000000001100.npz
   rank1/
     ...
 ```
 
-Kernels are named from the CUDA graph nodes they were replayed from, so this
-requires accelerator graphs (the default). It holds Cuspy's CUPTI subscription,
-so it can run alongside a `CuspyTraceProfiler` trace but not
-`KinetoTraceProfiler`. Each file carries the kernel names and
-graph annotations (`mark_kernels` regions, c10d collective metadata) of the graphs
-its steps ran; eager kernels outside graphs are recorded without names. See
-[`kernel_spans.py`](kernel_spans.py) for the file format.
-
-Requirements are the Cuspy ones above, plus CUDA graph node ids: a CUDA 13.1 or
-newer driver, or cuda-compat 13.1 or newer on `LD_LIBRARY_PATH` (see
-`torch.cuda.graph_annotations.is_available`).
-
-Convert steps into a Chrome trace and open it in <https://ui.perfetto.dev>:
+To look at steps, convert them into a trace for <https://ui.perfetto.dev>,
+passing the file that holds them from each rank you want:
 
 ```bash
 python scripts/kernel_spans_to_trace.py \
-    outputs/profiling/kernel_spans --steps 1050-1052 --ranks 0-3 \
-    --output trace.json.gz
+    outputs/profiling/kernel_spans/rank{0..3}/steps_000000001001_000000001100.npz \
+    --steps 1050-1052 --output trace.json.gz
 ```
 
-Ranks become processes and CUDA streams become tracks, with a `steps` track
-marking each step's kernels.
+Caveats:
 
-A step holds the kernels that started on the GPU between the host-side ends of
-the previous step and this one. Training only syncs the host with the GPU on
-logging steps, so when the host runs ahead of the GPU, a step can hold the tail of
-earlier steps. Steps buffered since the last file are lost if the process is
-killed without a clean shutdown.
+* A step holds the kernels that started between the previous step's end on
+  the host and its own. When the host runs ahead of the GPU, a step can include
+  the tail of earlier steps.
+* Kernels launched outside CUDA graphs are recorded without names.
+* Steps not yet written to a file are lost if the process is killed.
+* It can run alongside `CuspyTraceProfiler`, but not `KinetoTraceProfiler`.
 
-Measured on 4 GB300s with FSDP and CUDA graphs, collection and writing cost 0.4%
-of step time for Llama 3 8B (about 2,300 kernels per step) and under 0.5% for
-Qwen3 32B (about 5,400 kernels per step, about 190 KB per step on disk).
+The file format is described in [`kernel_spans.py`](kernel_spans.py).
+
+Requirements:
+
+* Accelerator graphs (the default), since kernels are named from graph nodes.
+* The Cuspy requirements above (libcupti 13.3 or newer).
+* CUDA graph node ids: a CUDA 13.1 or newer driver, or cuda-compat 13.1 or
+  newer on `LD_LIBRARY_PATH` (see `torch.cuda.graph_annotations.is_available`).
+  CUDA 13.5 is not required.
