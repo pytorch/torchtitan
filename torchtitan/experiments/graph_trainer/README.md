@@ -173,6 +173,43 @@ repeated name in `compile.extra_passes` raises at trainer init. A replacement
 node should copy the meta of the node it replaces, which carries the fake
 value, module FQN, and forward/backward marker that later passes read.
 
+### Copy-engine SimpleFSDP collectives
+
+Enable the experimental CE all-gather and reduce-scatter adapters:
+
+```python
+from torchtitan.experiments.ce_collectives.configs import CECollectivesConfig
+
+config.compile.ce_collectives = CECollectivesConfig()
+config.compile.numerics_changing_optim = True
+```
+
+The graph pass replaces only operations carrying SimpleFSDP parameter
+provenance, including bucketed all-gather output buffers. It preserves the
+existing waits and leaves TP/EP activation collectives on their original path.
+CE transfers run on a communication stream and share one symmetric workspace
+per FSDP group/device. `config.compile.ce_workspace_size_mib` sets its size
+(128 MiB by default). Both collectives exchange chunks through that workspace
+instead of allocating full-tensor staging buffers. All-gather copies each
+completed chunk into ordinary output storage; reduce-scatter reduces each
+chunk in the same source order. Workspace reuse stays on the communication
+stream so compute consumers cannot change symmetric-buffer reuse across ranks.
+Larger workspaces reduce the number of transfers and barriers at a fixed memory
+cost. Keep the same workspace size when comparing memory measurements.
+Communication work retains input/output tensors until the existing wait orders
+the caller after communication, then releases them. This allows reuse within
+CUDA graph capture without accumulating every layer's communication buffers.
+
+All-gather requires a multicast-capable NVLink domain containing the entire
+FSDP shard group. For hierarchical reduce-scatter, set
+`CECollectivesConfig(all_gather=False, ranks_per_domain=...)`. Rank ordering,
+dependencies, and reduction semantics follow the
+[CE collective implementation](../ce_collectives/README.md). Its fixed FP32
+accumulation order can differ from NCCL, so reduce-scatter requires the
+numerics-changing opt-in. Warm up all shapes before CUDA graph capture.
+`scope="dense"` excludes MoE blocks in joint GraphTrainer graphs; extracted
+GraphPP callables currently require `scope="all"`.
+
 ### Expert Parallel Overlap
 
 EP overlap is an experimental graph-trainer optimization for MoE models with

@@ -404,6 +404,7 @@ def compile_time_passes(
         final_inductor_compile_passes(
             config.compile,
             use_cuda_graph=not config.training.disable_accelerator_graphs,
+            moe_module_fqns=tuple(f"layers.{i}" for i in sorted(moe_layer_ids)),
         )
     )
     return passes
@@ -414,6 +415,7 @@ def final_inductor_compile_passes(
     *,
     use_cuda_graph: bool = False,
     boxed_codegen: bool = False,
+    moe_module_fqns: tuple[str, ...] | None = None,
 ) -> list[Callable]:
     """Return the terminal Inductor passes for a traced graph.
 
@@ -427,6 +429,32 @@ def final_inductor_compile_passes(
     from torchtitan.models.common.attention import FlexInnerAttention
 
     passes: list[Callable] = []
+    if compile_config.ce_collectives is not None:
+        from torchtitan.experiments.graph_trainer.ce_collectives import (
+            ce_collectives_pass,
+        )
+
+        ce_config = compile_config.ce_collectives
+        if ce_config.reduce_scatter and not compile_config.numerics_changing_optim:
+            raise ValueError(
+                "CE reduce-scatter requires compile.numerics_changing_optim=True "
+                "because its accumulation order can differ from NCCL."
+            )
+        if ce_config.scope == "dense" and moe_module_fqns is None:
+            raise ValueError(
+                "CE dense scope requires model layer metadata; use scope='all' for GraphPP"
+            )
+        # GraphPP must extract FSDP boundaries before replacing c10d operations.
+        passes.append(
+            functools.partial(
+                ce_collectives_pass,
+                config=ce_config,
+                workspace_size_mib=compile_config.ce_workspace_size_mib,
+                excluded_module_fqns=moe_module_fqns
+                if ce_config.scope == "dense"
+                else (),
+            )
+        )
     inductor_compilation = compile_config.inductor_compilation
     if inductor_compilation == "full":
         # Compile the entire graph into optimized Triton kernels. Must be
