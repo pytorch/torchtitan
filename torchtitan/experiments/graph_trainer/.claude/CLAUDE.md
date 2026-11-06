@@ -245,8 +245,8 @@ step: 20  loss: 11.83506  grad_norm:  9.6669  memory: 48.87GiB(51.44%)  tps: 4,3
 
 ### Profiling
 
-Set `config.profiler.enable_profiling = True` in the recipe.
-Set `config.profiler.profile_freq` to control which step is captured
+Set `config.profiler.trace = KinetoTraceProfiler.Config()` in the recipe.
+Set `KinetoTraceProfiler.Config(freq=...)` to control which step is captured
 (default: 10). Traces are saved to `{dump_folder}/profile_traces/`.
 
 ```bash
@@ -255,9 +255,9 @@ NGPU=8 MODULE=my_graph_configs CONFIG=llama3_8b_profile ./run_train.sh
 
 ### Memory Snapshot
 
-Set `config.profiler.enable_memory_snapshot = True` in the recipe to capture a
-memory snapshot.
-The snapshot fires at every `profile_freq`-th step and is saved to
+Set `config.profiler.memory_snapshot = MemorySnapshotProfiler.Config()` in the
+recipe to capture a memory snapshot.
+The snapshot fires at every `freq`-th step (default: 10) and is saved to
 `{dump_folder}/memory_snapshot/` (default: `./outputs/memory_snapshot/`).
 Each rank produces its own file:
 `iteration_{step}/rank{N}_memory_snapshot.pickle`.
