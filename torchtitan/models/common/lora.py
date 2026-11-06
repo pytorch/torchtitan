@@ -22,6 +22,7 @@ import torch
 import torch.nn as nn
 from spmd_types import SpmdType
 
+from torchtitan.distributed.local_compile import compile
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig
@@ -244,6 +245,84 @@ class _LoRAGroupedLinearMixin(_LoRAMixin):
         return base_out_RO + self._lora_scaling * lora_out_RO
 
 
+def _merge_expert_lora(
+    weight_EOI: torch.Tensor,
+    lora_b_EOL: torch.Tensor,
+    lora_a_ELI: torch.Tensor,
+    scale: float,
+) -> torch.Tensor:
+    """Return ``W + scale * (B @ A)`` without copying the full weight W.
+
+    Out-of-place ``torch.baddbmm(W, B, A)`` makes two passes over W-sized memory:
+    a copy kernel reads W and writes the output buffer, then the GEMM reads that
+    buffer as C and writes the result back into it. Here the GEMM writes only
+    ``scale * (B @ A)`` (``beta=0`` ignores the empty buffer), and the compiled
+    add reads W once and writes the result once. cuBLAS baddbmm also rounds
+    ``scale * (B @ A)`` to the weight dtype before adding W, so the rounding
+    matches ``torch.baddbmm``.
+
+    TODO: Call ``torch.baddbmm(W, B, A)`` directly once out-of-place baddbmm
+    passes self to cuBLASLt as C and writes D without copying self first.
+    """
+    lora_delta_EOI = torch.baddbmm(
+        torch.empty_like(weight_EOI), lora_b_EOL, lora_a_ELI, beta=0, alpha=scale
+    )
+    return weight_EOI + lora_delta_EOI
+
+
+# GEMM autotuning can fuse the add into a Triton GEMM epilogue, so W is read
+# once and the result written once. It benchmarks kernels in each process, so
+# the chosen kernel can differ between runs.
+_autotuned_merge_expert_lora = compile(
+    _merge_expert_lora,
+    fullgraph=True,
+    dynamic=False,
+    options={"max_autotune_gemm": True},
+)
+# Deterministic mode skips benchmarking: a cuBLAS GEMM, then an in-place add.
+_deterministic_merge_expert_lora = compile(
+    _merge_expert_lora,
+    fullgraph=True,
+    dynamic=False,
+    options={"deterministic": True},
+)
+
+
+class _MergeExpertLoRA(torch.autograd.Function):
+    """Compile only the merge forward.
+
+    The backward stays eager and uses the ``torch.baddbmm`` derivative formulas,
+    so the gradients do not depend on kernel choices.
+    """
+
+    @staticmethod
+    def forward(  # pyrefly: ignore [bad-override]
+        ctx,
+        weight_EOI: torch.Tensor,
+        lora_b_EOL: torch.Tensor,
+        lora_a_ELI: torch.Tensor,
+        scale: float,
+    ) -> torch.Tensor:
+        ctx.save_for_backward(lora_b_EOL, lora_a_ELI)
+        ctx.scale = scale
+        merge = (
+            _deterministic_merge_expert_lora
+            if torch.are_deterministic_algorithms_enabled()
+            else _autotuned_merge_expert_lora
+        )
+        return merge(weight_EOI, lora_b_EOL, lora_a_ELI, scale)
+
+    @staticmethod
+    def backward(  # pyrefly: ignore [bad-override]
+        ctx, grad_EOI: torch.Tensor
+    ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor, None]:
+        lora_b_EOL, lora_a_ELI = ctx.saved_tensors
+        grad_weight_EOI = grad_EOI if ctx.needs_input_grad[0] else None
+        grad_b_EOL = grad_EOI.bmm(lora_a_ELI.transpose(1, 2)) * ctx.scale
+        grad_a_ELI = lora_b_EOL.transpose(1, 2).bmm(grad_EOI) * ctx.scale
+        return grad_weight_EOI, grad_b_EOL, grad_a_ELI, None
+
+
 class _LoRADistMoeRoutedExpertsMixin:
     """Materialize child GroupedLinear LoRA updates into weight operands.
 
@@ -257,7 +336,7 @@ class _LoRADistMoeRoutedExpertsMixin:
     and scaling; this mixin only detects adapted children and materializes a
     full-sized ``W + scale * (B @ A)`` tensor for each one. Dist-MoE saves each
     effective weight until its backward and, with in-place WGRAD accumulation
-    disabled, returns a fresh full-sized gradient for it. The baddbmm backward
+    disabled, returns a fresh full-sized gradient for it. The merge backward
     then contracts that gradient into A and B gradients; only after that can the
     effective weight and its gradient be released.
 
@@ -287,22 +366,20 @@ class _LoRADistMoeRoutedExpertsMixin:
         w13_EFD = base_w13_EFD
         w13 = self.w13
         if isinstance(w13, _LoRAGroupedLinearMixin):
-            w13_EFD = torch.baddbmm(
+            w13_EFD = _MergeExpertLoRA.apply(
                 base_w13_EFD,
                 w13.lora_b.weight.flatten(1, -2),
                 w13.lora_a.weight,
-                beta=1,
-                alpha=w13._lora_scaling,
+                w13._lora_scaling,
             )
         w2_EDF = base_w2_EDF
         w2 = self.w2
         if isinstance(w2, _LoRAGroupedLinearMixin):
-            w2_EDF = torch.baddbmm(
+            w2_EDF = _MergeExpertLoRA.apply(
                 base_w2_EDF,
                 w2.lora_b.weight,
                 w2.lora_a.weight,
-                beta=1,
-                alpha=w2._lora_scaling,
+                w2._lora_scaling,
             )
         return w13_EFD, w2_EDF
 
