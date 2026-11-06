@@ -14,6 +14,8 @@ The Muse Glimmer example is capped at its model's 16K context length.
 """
 
 import math
+from dataclasses import replace
+from uuid import uuid4
 
 import verifiers.v1 as vf
 
@@ -77,6 +79,7 @@ from torchtitan.rl.trainer.losses import GRPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
 from verifiers.v1.configs.agent import TimeoutConfig as AgentTimeoutConfig
 from verifiers.v1.tasksets.harbor import HarborEnvConfig
+from vllm.config import KVTransferConfig
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
@@ -272,6 +275,32 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
                 max_tokens=max_output_tokens,
             ),
         ),
+    )
+
+
+def rl_grpo_qwen35_9b_terminal_bench_mooncake() -> Controller.Config:
+    """Qwen3.5-9B with shared CPU KV; requires Mooncake Master and SDK.
+
+    Set MOONCAKE_CONFIG_PATH on each generator host; see
+    torchtitan/rl/generator/vllm/MOONCAKE_STORE.md.
+    """
+    config = rl_grpo_qwen35_9b_terminal_bench()
+    assert isinstance(config.generator.engine, VLLMEngine.Config)
+    config.generator.engine = replace(
+        config.generator.engine,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MooncakeStoreConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                # Created once per controller config and shared by all replicas.
+                "cache_prefix": f"qwen35-9b-terminal-bench-{uuid4().hex}",
+                "save_decode_cache": True,
+            },
+        ),
+    )
+    return replace(
+        config,
+        generator_router=replace(config.generator_router, hot_swap=False),
     )
 
 

@@ -4,14 +4,22 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""CPU KV offload with real model execution and transfers (up to eight GPUs)."""
+"""CPU KV offload with real model execution and transfers (up to eight GPUs).
 
+RUN_MOONCAKE_TEST=1 also requires mooncake-transfer-engine, mooncake_master,
+and working GPUDirect RDMA.
+"""
+
+import json
 import multiprocessing
 import os
+import shutil
 import socket
+import subprocess
 import time
 import traceback
 import uuid
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import pytest
@@ -80,6 +88,10 @@ def _generator_worker(
             seq_len=2048,
         )
         model.local_compile.regions = []
+        is_mooncake = connector_args["kv_connector"] == "MooncakeStoreConnector"
+        if tp > 1 and is_mooncake:
+            # Exercise shared pending-lookup decisions as well as hit/miss results.
+            connector_args["kv_connector_extra_config"]["lookup_async"] = True
         engine = VLLMEngine.Config(
             cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
             kv_transfer_config=KVTransferConfig(**connector_args),
@@ -136,6 +148,10 @@ def _generator_worker(
 
         engine.load_model_state_dict(fetch, policy_version=0)
         scheduler = engine._engine.engine_core.engine_core.scheduler
+        store_scheduler = (
+            scheduler.connector.connector_scheduler if is_mooncake else None
+        )
+        lookup_enabled = store_scheduler.enable_lookup if is_mooncake else False
         block_size = scheduler.block_size
         if prefix_match_unit is not None:
             assert scheduler.mamba_partial_cache_hit
@@ -144,13 +160,16 @@ def _generator_worker(
         )
         while (command := commands.get()) is not None:
             if command == "release":
-                pool = scheduler.connector.scheduler_manager.cpu_block_pool
-                cached = {
-                    b.block_id
-                    for b in pool.free_block_queue.get_all_free_blocks()
-                    if b.block_hash is not None
-                }
-                before = len(cached)
+                if is_mooncake:
+                    before = len(engine._session_kv_holder._held)
+                else:
+                    pool = scheduler.connector.scheduler_manager.cpu_block_pool
+                    cached = {
+                        b.block_id
+                        for b in pool.free_block_queue.get_all_free_blocks()
+                        if b.block_hash is not None
+                    }
+                    before = len(cached)
                 engine.release_sessions(["session-0"], [])
                 deadline = time.monotonic() + 60
                 while engine.has_unfinished_requests():
@@ -159,9 +178,12 @@ def _generator_worker(
                     ), "session eviction failed to drain"
                     engine.step()
                 assert not engine._session_kv_holder.has_pending_work
-                first_blocks = pool.free_block_queue.get_all_free_blocks()[:before]
-                assert {b.block_id for b in first_blocks} == cached
-                after = len(first_blocks)
+                if is_mooncake:
+                    after = len(engine._session_kv_holder._held)
+                else:
+                    first_blocks = pool.free_block_queue.get_all_free_blocks()[:before]
+                    assert {b.block_id for b in first_blocks} == cached
+                    after = len(first_blocks)
                 results.put(("released", (before, after)))
                 continue
             version, prompt, clear_local, request_id, max_tokens, force_cold = command
@@ -171,6 +193,8 @@ def _generator_worker(
                     tensor.mul_(0.75)
                 engine.load_model_state_dict(fetch, policy_version=version)
             # A cold reference bypasses both cache tiers without changing weights.
+            if is_mooncake:
+                store_scheduler.enable_lookup = lookup_enabled and not force_cold
             if clear_local or force_cold:
                 # Simulate GPU eviction between turns, not session completion.
                 if engine._session_kv_holder is not None:
@@ -193,7 +217,7 @@ def _generator_worker(
             # Idle DP replicas still participate in EP forwards and global progress.
             assert engine.add_requests([request] if prompt is not None else []) == []
             scheduler = engine._engine.engine_core.engine_core.scheduler
-            if force_cold:
+            if not is_mooncake and force_cold:
                 for active in scheduler.requests.values():
                     active.skip_reading_prefix_cache = True
             if tp > 1 and prompt is not None:
@@ -209,7 +233,13 @@ def _generator_worker(
                 nonlocal num_tail_saves
                 assert scheduler_output.total_num_scheduled_tokens == 0
                 metadata = scheduler_output.kv_connector_metadata
-                num_tail_saves += int(metadata.store_event >= 0)
+                if is_mooncake:
+                    num_tail_saves += sum(
+                        bool(req.can_save and req.boundary_state_offloads)
+                        for req in metadata.requests
+                    )
+                else:
+                    num_tail_saves += int(metadata.store_event >= 0)
                 return no_forward(scheduler_output, vllm_config)
 
             deadline = time.monotonic() + 60
@@ -264,6 +294,136 @@ def _generator_worker(
 @pytest.mark.parametrize(
     "connector, roles, save_decode_cache, hold_sessions, block_size, tp, dp, ep, async_scheduling, prefix_match_unit",
     [
+        pytest.param(
+            "MooncakeStoreConnector",
+            ("kv_both", "kv_both"),
+            True,
+            False,
+            256,
+            1,
+            1,
+            1,
+            True,
+            None,
+            id="decode",
+        ),
+        pytest.param(
+            "MooncakeStoreConnector",
+            ("kv_both", "kv_both"),
+            False,
+            False,
+            None,
+            1,
+            1,
+            1,
+            True,
+            None,
+            id="prompt-only",
+        ),
+        pytest.param(
+            "MooncakeStoreConnector",
+            ("kv_producer", "kv_consumer"),
+            None,
+            False,
+            None,
+            1,
+            1,
+            1,
+            True,
+            None,
+            id="roles",
+        ),
+        pytest.param(
+            "MooncakeStoreConnector",
+            ("kv_both", "kv_both"),
+            True,
+            True,
+            None,
+            1,
+            1,
+            1,
+            True,
+            None,
+            id="session-holder",
+        ),
+        pytest.param(
+            "MooncakeStoreConnector",
+            ("kv_both", "kv_both"),
+            True,
+            False,
+            None,
+            2,
+            1,
+            1,
+            True,
+            None,
+            id="tp2",
+        ),
+        pytest.param(
+            "MooncakeStoreConnector",
+            ("kv_both", "kv_both"),
+            True,
+            False,
+            None,
+            2,
+            1,
+            1,
+            False,
+            None,
+            id="tp2-sync",
+        ),
+        pytest.param(
+            "MooncakeStoreConnector",
+            ("kv_both", "kv_both"),
+            True,
+            False,
+            None,
+            1,
+            2,
+            2,
+            True,
+            None,
+            id="dp2-ep2",
+        ),
+        pytest.param(
+            "MooncakeStoreConnector",
+            ("kv_both", "kv_both"),
+            True,
+            False,
+            None,
+            2,
+            2,
+            4,
+            True,
+            None,
+            id="tp2-dp2-ep4",
+        ),
+        pytest.param(
+            "MooncakeStoreConnector",
+            ("kv_both", "kv_both"),
+            True,
+            False,
+            256,
+            1,
+            1,
+            1,
+            True,
+            32,
+            id="hybrid-tail",
+        ),
+        pytest.param(
+            "MooncakeStoreConnector",
+            ("kv_both", "kv_both"),
+            True,
+            False,
+            256,
+            2,
+            1,
+            1,
+            False,
+            32,
+            id="hybrid-tail-tp2",
+        ),
         pytest.param(
             "SimpleCPUOffloadConnector",
             ("kv_both", "kv_both"),
@@ -332,6 +492,9 @@ def test_cpu_kv_and_weight_version_isolation(
     async_scheduling,
     prefix_match_unit,
 ):
+    is_mooncake = connector == "MooncakeStoreConnector"
+    if is_mooncake and os.getenv("RUN_MOONCAKE_TEST") != "1":
+        pytest.skip("opt-in integration test: set RUN_MOONCAKE_TEST=1")
     # Spawned workers import PyTorch with a connector-compatible allocator.
     monkeypatch.setenv("PYTORCH_ALLOC_CONF", "expandable_segments:False")
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:False")
@@ -343,183 +506,255 @@ def test_cpu_kv_and_weight_version_isolation(
         if visible_devices is not None
         else [str(i) for i in range(2 * world_size)]
     )
-    context = multiprocessing.get_context("spawn")
-    processes = []
-    try:
-        queues = []
-        block_sizes = []
-        for gpu in range(2):
-            extra = {"cpu_bytes_to_use_per_rank": 1 << 30}
-            connector_args = {
-                "kv_connector": connector,
-                "kv_role": roles[gpu],
-                "kv_connector_extra_config": extra,
+    master = shutil.which("mooncake_master") if is_mooncake else None
+    if is_mooncake:
+        assert master is not None, "install mooncake-transfer-engine"
+    port = _free_port()
+    config = tmp_path / "store.json"
+    config.write_text(
+        json.dumps(
+            {
+                "mode": "embedded",
+                "metadata_server": "P2PHANDSHAKE",
+                "master_server_address": f"127.0.0.1:{port}",
+                "global_segment_size": "1GB",
+                "local_buffer_size": "64MB",
+                "protocol": "rdma",
+                "device_name": "",
+                "enable_offload": False,
             }
-            rank_queues = []
-            instance_port = _free_port()
-            for rank in range(world_size):
-                commands, results = context.Queue(), context.Queue()
-                process = context.Process(
-                    target=_generator_worker,
-                    args=(
-                        ",".join(device_ids[gpu * world_size : (gpu + 1) * world_size]),
-                        instance_port,
-                        connector_args,
-                        hold_sessions,
-                        block_size,
-                        commands,
-                        results,
-                        rank,
-                        tp,
-                        dp,
-                        ep,
-                        async_scheduling,
-                        prefix_match_unit,
-                    ),
+        )
+    )
+    if is_mooncake:
+        monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(config))
+        monkeypatch.setenv("VLLM_HOST_IP", "127.0.0.1")
+    context = multiprocessing.get_context("spawn")
+    namespace = f"titan-test-{uuid.uuid4().hex}"
+    processes = []
+    with (tmp_path / "master.log").open("w") as log, subprocess.Popen(
+        [master, f"--rpc_port={port}", "--metrics_port=0", "--rpc_thread_num=4"],
+        stdout=log,
+        stderr=log,
+    ) if is_mooncake else nullcontext() as server:
+        try:
+            deadline = time.monotonic() + 30
+            while is_mooncake:
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=1):
+                        break
+                except OSError:
+                    assert server.poll() is None
+                    assert time.monotonic() < deadline
+                    time.sleep(0.1)
+            queues = []
+            block_sizes = []
+            for gpu in range(2):
+                extra = (
+                    {"cache_prefix": namespace}
+                    if is_mooncake
+                    else {"cpu_bytes_to_use_per_rank": 1 << 30}
                 )
-                process.start()
-                processes.append(process)
-                rank_queues.append((commands, results))
-            queues.append(rank_queues)
-            for rank, (_, results) in enumerate(rank_queues):
-                kind, payload = results.get(timeout=300)
-                assert kind == "ready", payload
-                resolved_block_size, device_uuid = payload
-                assert device_uuid == str(
-                    torch.cuda.get_device_properties(gpu * world_size + rank).uuid
-                )
-                if block_size is not None and prefix_match_unit is None:
-                    assert resolved_block_size == block_size
-                block_sizes.append(resolved_block_size)
-
-        assert block_sizes[0] == block_sizes[1]
-        cache_block_size = block_sizes[0]
-
-        def generate(
-            gpu,
-            version,
-            prompt,
-            clear_local=False,
-            target_dp=0,
-            background_prompt=None,
-            force_cold=False,
-        ):
-            request_id = uuid.uuid4().hex
-            prompts = {target_dp: prompt}
-            if background_prompt is not None:
-                prompts[1 - target_dp] = background_prompt
-            for rank, (commands, _) in enumerate(queues[gpu]):
-                dp_rank = rank // tp
-                commands.put(
-                    (
-                        version,
-                        prompts.get(dp_rank),
-                        clear_local,
-                        f"{request_id}-dp{dp_rank}",
-                        (
-                            1
-                            if prefix_match_unit is not None
-                            else max(48, cache_block_size + 2)
-                        )
-                        + (64 if dp_rank != target_dp else 0),
-                        force_cold,
+                if is_mooncake and save_decode_cache is not None:
+                    extra["save_decode_cache"] = save_decode_cache
+                if is_mooncake and roles[gpu] == "kv_producer":
+                    extra["enable_lookup"] = False
+                connector_args = {
+                    "kv_connector": connector,
+                    "kv_role": roles[gpu],
+                    "kv_connector_extra_config": extra,
+                }
+                rank_queues = []
+                instance_port = _free_port()
+                for rank in range(world_size):
+                    commands, results = context.Queue(), context.Queue()
+                    process = context.Process(
+                        target=_generator_worker,
+                        args=(
+                            ",".join(
+                                device_ids[gpu * world_size : (gpu + 1) * world_size]
+                            ),
+                            instance_port,
+                            connector_args,
+                            hold_sessions,
+                            block_size,
+                            commands,
+                            results,
+                            rank,
+                            tp,
+                            dp,
+                            ep,
+                            async_scheduling,
+                            prefix_match_unit,
+                        ),
                     )
+                    process.start()
+                    processes.append(process)
+                    rank_queues.append((commands, results))
+                queues.append(rank_queues)
+                for rank, (_, results) in enumerate(rank_queues):
+                    kind, payload = results.get(timeout=300)
+                    assert kind == "ready", payload
+                    resolved_block_size, device_uuid = payload
+                    assert device_uuid == str(
+                        torch.cuda.get_device_properties(gpu * world_size + rank).uuid
+                    )
+                    if block_size is not None and prefix_match_unit is None:
+                        assert resolved_block_size == block_size
+                    block_sizes.append(resolved_block_size)
+
+            assert block_sizes[0] == block_sizes[1]
+            cache_block_size = block_sizes[0]
+
+            def generate(
+                gpu,
+                version,
+                prompt,
+                clear_local=False,
+                target_dp=0,
+                background_prompt=None,
+                force_cold=False,
+            ):
+                request_id = uuid.uuid4().hex
+                prompts = {target_dp: prompt}
+                if background_prompt is not None:
+                    prompts[1 - target_dp] = background_prompt
+                for rank, (commands, _) in enumerate(queues[gpu]):
+                    dp_rank = rank // tp
+                    commands.put(
+                        (
+                            version,
+                            prompts.get(dp_rank),
+                            clear_local,
+                            f"{request_id}-dp{dp_rank}",
+                            (
+                                1
+                                if prefix_match_unit is not None
+                                else max(48, cache_block_size + 2)
+                            )
+                            + (64 if dp_rank != target_dp else 0),
+                            force_cold,
+                        )
+                    )
+                outputs = {}
+                for rank, (_, results) in enumerate(queues[gpu]):
+                    dp_rank = rank // tp
+                    kind, payload = results.get(timeout=90)
+                    assert kind == ("output" if dp_rank in prompts else "idle"), payload
+                    if kind == "output":
+                        if dp_rank in outputs:
+                            assert payload == outputs[dp_rank]
+                        outputs[dp_rank] = payload
+                return outputs[target_dp]
+
+            prompt = list(range(100, 100 + max(512, 2 * cache_block_size)))
+            if prefix_match_unit is not None:
+                # End prefill at a hash boundary inside a physical block, then
+                # finish after one sample: the tail can only save on an idle step.
+                prompt += [42] * prefix_match_unit
+            # Recomputing the last prompt token limits a repeated prompt's hit
+            # to the preceding full block.
+            cached_prompt_tokens = (
+                (len(prompt) - 1) // cache_block_size * cache_block_size
+            )
+            first = generate(0, 0, prompt)
+            assert first[2] == 0
+            if prefix_match_unit is not None:
+                assert first[3] > 0, "must exercise a finish-time save without forward"
+
+            # Local offload must reload on the same DP replica. Mooncake can
+            # instead load on an independent generator that has never seen it.
+            consumer = 1 if is_mooncake else 0
+            consumer_dp = dp - 1 if is_mooncake else 0
+            if not is_mooncake:
+                assert generate(1, 0, prompt)[2] == 0
+            next_turn = prompt + first[0] + [42, 43]
+            continued = generate(
+                consumer, 0, next_turn, clear_local=True, target_dp=consumer_dp
+            )
+            if prefix_match_unit is not None:
+                # SimpleCPU saves confirmed GPU cache blocks; a hybrid tail
+                # need not be present in every cache group. Mooncake explicitly
+                # saves the boundary state and can reuse the entire prompt.
+                minimum = len(prompt) if is_mooncake else cached_prompt_tokens
+                assert continued[2] >= minimum
+            elif save_decode_cache:
+                assert continued[2] >= len(prompt) + cache_block_size
+            else:
+                assert cached_prompt_tokens <= continued[2] <= len(prompt)
+
+            # Compare the cached continuation against an uncached reference.
+            cold = generate(
+                consumer, 0, next_turn, target_dp=consumer_dp, force_cold=True
+            )
+            assert cold[2] == 0
+            assert continued[0] == cold[0]
+            torch.testing.assert_close(
+                torch.tensor(continued[1]), torch.tensor(cold[1]), atol=0.02, rtol=0
+            )
+            shared = generate(
+                consumer, 0, prompt, clear_local=True, target_dp=consumer_dp
+            )
+            assert shared[2] >= cached_prompt_tokens
+            assert shared[0] == first[0]
+            torch.testing.assert_close(
+                torch.tensor(shared[1]), torch.tensor(first[1]), atol=0.02, rtol=0
+            )
+
+            updated = generate(consumer, 1, prompt, target_dp=consumer_dp)
+            assert updated[2] == 0, "old policy KV must not match after a weight update"
+            assert updated[1] != first[1], "the test must actually change model weights"
+            # Updating one generator must not invalidate another's old-policy KV.
+            old = generate(
+                0 if is_mooncake else 1,
+                0,
+                prompt,
+                clear_local=roles[0] != "kv_producer",
+            )
+            assert old[2] >= cached_prompt_tokens
+            assert old[0] == first[0]
+            print(
+                f"{connector} cached tokens: cold={first[2]}, shared={shared[2]}, "
+                f"next_turn={continued[2]}, new_policy={updated[2]}, old_policy={old[2]}"
+            )
+            if dp > 1:
+                # Both DP replicas work concurrently, then DP0 drains outputs and
+                # saves while DP1 is still decoding through EP collectives.
+                generate(0, 1, [51] + prompt, background_prompt=[52] + prompt)
+            if hold_sessions:
+                for rank_queues in queues:
+                    for commands, _ in rank_queues:
+                        commands.put("release")
+                released = []
+                for rank_queues in queues:
+                    for _, results in rank_queues:
+                        kind, payload = results.get(timeout=90)
+                        assert kind == "released", payload
+                        released.append(payload)
+                before = sum(item[0] for item in released)
+                after = sum(item[1] for item in released)
+                assert before > 0
+                if is_mooncake:
+                    assert after == 0, "session release must free local GPU holds"
+                    reused = generate(
+                        consumer, 1, prompt, clear_local=True, target_dp=consumer_dp
+                    )
+                    assert (
+                        reused[2] >= cached_prompt_tokens
+                    ), "session release must retain shared Store KV"
+                print(
+                    f"Session release: {connector}, cached before={before}, after={after}"
                 )
-            outputs = {}
-            for rank, (_, results) in enumerate(queues[gpu]):
-                dp_rank = rank // tp
-                kind, payload = results.get(timeout=90)
-                assert kind == ("output" if dp_rank in prompts else "idle"), payload
-                if kind == "output":
-                    if dp_rank in outputs:
-                        assert payload == outputs[dp_rank]
-                    outputs[dp_rank] = payload
-            return outputs[target_dp]
-
-        prompt = list(range(100, 100 + max(512, 2 * cache_block_size)))
-        if prefix_match_unit is not None:
-            # End prefill at a hash boundary inside a physical block, then
-            # finish after one sample: the tail can only save on an idle step.
-            prompt += [42] * prefix_match_unit
-        # Recomputing the last prompt token limits a repeated prompt's hit
-        # to the preceding full block.
-        cached_prompt_tokens = (len(prompt) - 1) // cache_block_size * cache_block_size
-        first = generate(0, 0, prompt)
-        assert first[2] == 0
-        if prefix_match_unit is not None:
-            assert first[3] > 0, "must exercise a finish-time save without forward"
-
-        # Local offload must reload on the same DP replica.
-        consumer = 0
-        consumer_dp = 0
-        assert generate(1, 0, prompt)[2] == 0
-        next_turn = prompt + first[0] + [42, 43]
-        continued = generate(
-            consumer, 0, next_turn, clear_local=True, target_dp=consumer_dp
-        )
-        if prefix_match_unit is not None:
-            # SimpleCPU saves confirmed GPU cache blocks; a hybrid tail
-            # need not be present in every cache group.
-            minimum = cached_prompt_tokens
-            assert continued[2] >= minimum
-        elif save_decode_cache:
-            assert continued[2] >= len(prompt) + cache_block_size
-        else:
-            assert cached_prompt_tokens <= continued[2] <= len(prompt)
-
-        # Compare the cached continuation against an uncached reference.
-        cold = generate(consumer, 0, next_turn, target_dp=consumer_dp, force_cold=True)
-        assert cold[2] == 0
-        assert continued[0] == cold[0]
-        torch.testing.assert_close(
-            torch.tensor(continued[1]), torch.tensor(cold[1]), atol=0.02, rtol=0
-        )
-        shared = generate(consumer, 0, prompt, clear_local=True, target_dp=consumer_dp)
-        assert shared[2] >= cached_prompt_tokens
-        assert shared[0] == first[0]
-        torch.testing.assert_close(
-            torch.tensor(shared[1]), torch.tensor(first[1]), atol=0.02, rtol=0
-        )
-
-        updated = generate(consumer, 1, prompt, target_dp=consumer_dp)
-        assert updated[2] == 0, "old policy KV must not match after a weight update"
-        assert updated[1] != first[1], "the test must actually change model weights"
-        # Updating one generator must not invalidate another's old-policy KV.
-        old = generate(1, 0, prompt, clear_local=True)
-        assert old[2] >= cached_prompt_tokens
-        assert old[0] == first[0]
-        print(
-            f"{connector} cached tokens: cold={first[2]}, shared={shared[2]}, "
-            f"next_turn={continued[2]}, new_policy={updated[2]}, old_policy={old[2]}"
-        )
-        if dp > 1:
-            # Both DP replicas work concurrently, then DP0 drains outputs and
-            # saves while DP1 is still decoding through EP collectives.
-            generate(0, 1, [51] + prompt, background_prompt=[52] + prompt)
-        if hold_sessions:
             for rank_queues in queues:
                 for commands, _ in rank_queues:
-                    commands.put("release")
-            released = []
-            for rank_queues in queues:
-                for _, results in rank_queues:
-                    kind, payload = results.get(timeout=90)
-                    assert kind == "released", payload
-                    released.append(payload)
-            before = sum(item[0] for item in released)
-            after = sum(item[1] for item in released)
-            assert before > 0
-            print(
-                f"Session release: {connector}, cached before={before}, after={after}"
-            )
-        for rank_queues in queues:
-            for commands, _ in rank_queues:
-                commands.put(None)
-        for process in processes:
-            process.join(timeout=30)
-            assert process.exitcode == 0
-    finally:
-        for process in processes:
-            if process.is_alive():
-                process.terminate()
-            process.join(timeout=10)
+                    commands.put(None)
+            for process in processes:
+                process.join(timeout=30)
+                assert process.exitcode == 0
+        finally:
+            for process in processes:
+                if process.is_alive():
+                    process.terminate()
+                process.join(timeout=10)
+            if server is not None:
+                server.terminate()
+                server.wait(timeout=10)
