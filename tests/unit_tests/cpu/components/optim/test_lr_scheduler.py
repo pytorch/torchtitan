@@ -20,7 +20,7 @@ class TestLRScheduler(unittest.TestCase):
         # Create a simple model with parameters
         self.model = torch.nn.Linear(10, 10)
         # Create an optimizer
-        self.optimizer = Adam(self.model.parameters(), lr=0.1)
+        self.optimizer = Adam(self.model.parameters(), lr=0.1, foreach=True)
 
         # We don't actually call `optimizer.step()` which will cause a warning
         # from PyTorch. Avoid the warnings that may confuse people.
@@ -166,7 +166,7 @@ class TestLRScheduler(unittest.TestCase):
         steps inside the schedule unchanged."""
 
         def run(decay_type, decay_ratio, training_steps, total_steps):
-            optimizer = Adam(torch.nn.Linear(10, 10).parameters(), lr=0.1)
+            optimizer = Adam(torch.nn.Linear(10, 10).parameters(), lr=0.1, foreach=True)
             optimizer._opt_called = True
             container = MagicMock(spec=OptimizersContainer)
             container.__iter__.return_value = iter([optimizer])

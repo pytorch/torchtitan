@@ -205,7 +205,7 @@ class TestStateDictKeys(unittest.TestCase):
     def test_init_optim_state_materializes_missing_state(self) -> None:
         initialized = torch.nn.Parameter(torch.ones(1))
         missing = torch.nn.Parameter(torch.ones(1))
-        optim = torch.optim.AdamW([initialized, missing])
+        optim = torch.optim.AdamW([initialized, missing], foreach=True)
         initialized.grad = torch.ones_like(initialized)
         optim.step()
         saved_grad = initialized.grad

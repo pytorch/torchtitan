@@ -976,8 +976,8 @@ class TestTraceModule(unittest.TestCase):
         train_step = make_train_step(model_ref, loss_fn)
         traced = minimal_fx_tracer(train_step, module=model_ref)(tokens, labels)
 
-        opt_ref = torch.optim.Adam(model_ref.parameters(), lr=self.LR)
-        opt_copy = torch.optim.Adam(model_test.parameters(), lr=self.LR)
+        opt_ref = torch.optim.Adam(model_ref.parameters(), lr=self.LR, foreach=True)
+        opt_copy = torch.optim.Adam(model_test.parameters(), lr=self.LR, foreach=True)
 
         for step in range(1, self.NUM_STEPS + 1):
             logits_ref = model_ref(tokens)
@@ -1032,7 +1032,7 @@ class TestTraceModule(unittest.TestCase):
 
     def test_optimizer_passed_without_module_raises(self):
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
-        opt = torch.optim.Adam(model.parameters())
+        opt = torch.optim.Adam(model.parameters(), foreach=True)
         with self.assertRaises(ValueError, msg="optimizer"):
             minimal_fx_tracer(lambda: None, optimizer=opt)
 
@@ -1297,7 +1297,8 @@ class TestReparametrizeOptimizer(unittest.TestCase):
         weights = [p for n, p in module.named_parameters() if n.endswith("weight")]
         biases = [p for n, p in module.named_parameters() if n.endswith("bias")]
         optimizer = torch.optim.AdamW(
-            [{"params": weights, "lr": 0.1}, {"params": biases, "lr": 0.01}]
+            [{"params": weights, "lr": 0.1}, {"params": biases, "lr": 0.01}],
+            foreach=True,
         )
 
         x = torch.randn(2, 3)
@@ -1744,8 +1745,8 @@ class TestTraceModels(unittest.TestCase):
         if use_regional_inductor:
             _apply_regional_inductor(traced)
 
-        opt_ref = torch.optim.Adam(model_ref.parameters(), lr=lr)
-        opt_copy = torch.optim.Adam(model_test.parameters(), lr=lr)
+        opt_ref = torch.optim.Adam(model_ref.parameters(), lr=lr, foreach=True)
+        opt_copy = torch.optim.Adam(model_test.parameters(), lr=lr, foreach=True)
 
         for step in range(1, num_steps + 1):
             logits_ref = model_ref(*fwd_args, **fwd_kwargs)
@@ -2203,8 +2204,8 @@ class TestTraceFSDP(FSDPTest):
         if use_regional_inductor:
             _apply_regional_inductor(traced)
 
-        opt_ref = torch.optim.Adam(model_ref.parameters(), lr=1e-3)
-        opt_copy = torch.optim.Adam(model_test.parameters(), lr=1e-3)
+        opt_ref = torch.optim.Adam(model_ref.parameters(), lr=1e-3, foreach=True)
+        opt_copy = torch.optim.Adam(model_test.parameters(), lr=1e-3, foreach=True)
 
         for step in range(1, 6):
             logits_ref = model_ref(*fwd_args, **fwd_kwargs)

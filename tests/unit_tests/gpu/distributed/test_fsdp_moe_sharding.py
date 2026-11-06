@@ -291,7 +291,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
                     self.assertIs(routed_experts.w2.weight.device_mesh, edp_mesh)
                     self.assertIs(postprocess.weight.device_mesh, edp_mesh)
 
-                optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+                optimizer = torch.optim.SGD(model.parameters(), lr=0.01, foreach=True)
                 tokens = (
                     torch.arange(8, device=self.device_type) + 8 * self.rank
                 ) % config.vocab_size
