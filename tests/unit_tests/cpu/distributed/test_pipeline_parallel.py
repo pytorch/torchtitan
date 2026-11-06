@@ -353,6 +353,58 @@ def test_static_decoder_stage_metadata_describes_logits_output():
     assert last["output_args"][0].shape == torch.Size([128, model_config.vocab_size])
 
 
+def test_pipeline_metadata_factory_uses_owned_global_stage_indices(monkeypatch):
+    model = nn.Module()
+    model.tok_embeddings = nn.Embedding(8, 4)
+    model.layers = nn.ModuleDict({str(index): nn.Linear(4, 4) for index in range(4)})
+    model.norm = nn.LayerNorm(4)
+    model.lm_head = nn.Linear(4, 8)
+    splits = [
+        ["tok_embeddings", "layers.0"],
+        ["layers.1"],
+        ["layers.2"],
+        ["layers.3", "norm", "lm_head"],
+    ]
+    calls, received = [], []
+    input_args = (torch.empty(8, 4, device="meta", requires_grad=True),)
+    output_args = (torch.empty(8, 8, device="meta", requires_grad=True),)
+    metadata = {
+        "input_args": input_args,
+        "output_args": output_args,
+        "input_grads": (input_args[0].detach(),),
+        "output_grads": (None,),
+    }
+
+    def factory(stage_idx, num_stages):
+        calls.append((stage_idx, num_stages))
+        return metadata
+
+    def construct_stage(model, stage_idx, num_stages, device, **kwargs):
+        received.append((stage_idx, num_stages, kwargs))
+        return object()
+
+    monkeypatch.setattr(pipeline_parallel, "PipelineStage", construct_stage)
+    group = object()
+    pipeline_parallel._pipeline_module_split(
+        model,
+        SimpleNamespace(
+            get_local_rank=lambda: 1,
+            size=lambda: 2,
+            get_group=lambda _: group,
+        ),
+        "Interleaved1F1B",
+        torch.device("cpu"),
+        splits,
+        stage_metadata_factory=factory,
+    )
+    assert calls == [(1, 4), (3, 4)]
+    assert [(stage_idx, count) for stage_idx, count, _ in received] == calls
+    for _, _, kwargs in received:
+        assert kwargs["group"] is group
+        for key, value in metadata.items():
+            assert kwargs[key] is value
+
+
 def test_static_decoder_metadata_accepts_standard_decoder_boundaries():
     assert (
         _unsupported_static_split(

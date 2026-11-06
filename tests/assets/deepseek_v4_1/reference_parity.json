@@ -1,0 +1,69 @@
+{
+  "revision": "314113f8a7dadb388215396ba5fbee2c610a04d6",
+  "source_sha256": {
+    "model.py": "e5decd76fe70fd56ef2f10124d245c6f64fb6a0003cc9068a1d3182a168b8d2d",
+    "engram.py": "11f35ecbead8150c35aa002b3d180ef290b05a25afe883a11884f94d476d3897",
+    "vision.py": "5d49edc196a4ef22384abe76d35a40098cbe1e74b586c8f66a2edff4f076b26c",
+    "image_processor.py": "482759e3bcc4e9bb5ee582b244cc563f5d0e163d8b48dda91ebb7106e62f9272",
+    "kernel.py": "1236c3507019ed176f5dba5e04bcea58867cf654818c6cf138ed4845398c2455"
+  },
+  "dtype": "float32",
+  "seq_len": 64,
+  "quantization": "FP8 SWA/Engram and FP4 global KV/indexer",
+  "block_max_abs_error": {
+    "0": 2.384185791015625e-07,
+    "1": 5.960464477539062e-07,
+    "2": 5.960464477539062e-07,
+    "3": 7.152557373046875e-07,
+    "4": 7.152557373046875e-07,
+    "5": 7.152557373046875e-07,
+    "6": 7.152557373046875e-07,
+    "7": 7.152557373046875e-07,
+    "8": 9.5367431640625e-07,
+    "9": 9.5367431640625e-07,
+    "10": 7.927417755126953e-06,
+    "11": 7.927417755126953e-06
+  },
+  "first_block_component_max_abs_error": {
+    "attention_norm": 0.0,
+    "attention.wq_a": 0.0,
+    "attention.q_norm": 0.0,
+    "attention.wq_b": 0.0,
+    "attention.wkv": 0.0,
+    "attention.kv_norm": 0.0,
+    "attention.wo_b": 0.0,
+    "ffn_norm": 0.0,
+    "feed_forward": 1.1175870895385742e-08
+  },
+  "shared_kv_index_selection_max_abs_error": {
+    "kv": 0.0,
+    "index": 0.0,
+    "selected": 0
+  },
+  "logit_max_abs_error": 1.7583370208740234e-06,
+  "reference_to_native_probability_kl": 2.629559040904061e-15,
+  "logit_cosine_similarity": 0.9999999999999134,
+  "top1_agreement": 1.0,
+  "top5_set_agreement": 1.0,
+  "input_grad_max_abs_error": 1.4551915228366852e-11,
+  "parameter_grad_max_abs_error": 1.780335878720507e-10,
+  "num_parameter_gradients": 44,
+  "whole_model_input_grad_max_abs_error": 5.820766091346741e-10,
+  "whole_model_parameter_grad_max_abs_error": 1.8955324776470661e-06,
+  "num_whole_model_parameter_gradients": 547,
+  "whole_model_objective": "train-mode normalized next-token cross entropy; indexer auxiliary loss disabled",
+  "whole_model_loss_token_count": 63,
+  "whole_model_cross_entropy_loss": 7.70496129989624,
+  "reference_whole_model_cross_entropy_loss": 7.70496129989624,
+  "whole_model_gradient_norm_ratio": 0.9999999947542952,
+  "released_checkpoint_manifest": {
+    "index_sha256": "74b0686a3d2891980d5e303251b075a3bccae2c2ff650747db2620a649b98fa8",
+    "num_weight_keys": 47006,
+    "num_manifest_keys": 96085,
+    "engram_rows": [
+      384006168,
+      384016682
+    ],
+    "num_parameters": 748494654064
+  }
+}

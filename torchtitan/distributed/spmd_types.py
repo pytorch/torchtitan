@@ -16,6 +16,9 @@ from typing import Any
 import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.fsdp._fully_shard._fsdp_param_group import (
+    RegisterPostBackwardFunction,
+)
 
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 
@@ -23,6 +26,20 @@ from torchtitan.distributed.parallelism_context import MeshAxisName, Parallelism
 # TODO: Remove after spmd_types fixes deepcopy for its variadic tuple subclass.
 # PartitionSpec is immutable, so sharing it across a model deepcopy is safe.
 setattr(spmd.PartitionSpec, "__deepcopy__", lambda self, memo: self)  # noqa: B010
+
+
+def _fsdp_input_types(*, inputs: tuple[torch.Tensor, ...]):
+    return tuple(
+        spmd.rules.einsum("...->...", tensor, linear_in=(0,)) for tensor in inputs
+    )
+
+
+# TODO: Move this identity rule upstream: https://github.com/pytorch/pytorch/issues/203261
+# The default local rule merges the layouts of all arguments, but FSDP returns
+# one identity view per argument.
+setattr(  # noqa: B010
+    RegisterPostBackwardFunction, "spmd_typecheck", staticmethod(_fsdp_input_types)
+)
 
 __all__ = [
     "annotate_input_spmd_types",

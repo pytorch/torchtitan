@@ -590,19 +590,27 @@ class Module(nn.Module, Configurable):
         return new_args, new_kwargs
 
     def _redistribute_outputs(self, outputs: Any) -> Any:
-        """Redistribute output to desired placement.
+        """Annotate flat tuple outputs and redistribute single tensor outputs.
 
-        TODO: Currently only handles a single tensor output. Extend to
-        support nested outputs (tuples, dicts) when models with
-        multi-tensor forward returns (e.g., Flux, MoE) adopt config-based
-        sharding. ``out_dst_shardings`` would also need to become a nested
-        structure.
+        TODO: Support redistribution of nested outputs once
+        ``out_dst_shardings`` can describe a nested structure.
         """
         sharding_config = self._sharding_config
         assert sharding_config is not None
 
         out_src = sharding_config.out_src_shardings
         out_dst = sharding_config.out_dst_shardings
+        if isinstance(out_src, tuple):
+            if out_dst is not None:
+                raise ValueError("Tuple output redistribution is not supported.")
+            if not isinstance(outputs, tuple) or len(outputs) != len(out_src):
+                raise ValueError(
+                    "Tuple outputs must match the declared source layouts."
+                )
+            if spmd.is_type_checking():
+                for output, layout in zip(outputs, out_src):
+                    spmd.assert_type(output, layout)
+            return outputs
         if not isinstance(outputs, torch.Tensor):
             return outputs
 
@@ -613,11 +621,6 @@ class Module(nn.Module, Configurable):
                     "requires explicit out_src_shardings."
                 )
             return outputs
-        if isinstance(out_src, tuple):
-            raise ValueError(
-                f"{type(self).__name__}: SPMD output redistribution only "
-                "supports a single tensor output."
-            )
         if spmd.is_type_checking():
             spmd.assert_type(outputs, out_src)
 

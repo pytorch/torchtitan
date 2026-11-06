@@ -1,6 +1,7 @@
 This note outlines the process of adding a new model in the `torchtitan` repo. In most cases, new models should be added first under the `torchtitan/experiments` folder. For criteria of contributions, please see the [Contributing Guidelines](/torchtitan/experiments/README.md) therein. In general, please adhere to the [Guiding Principles](/README.md#overview) of `torchtitan`.
 
-For offline explorations, we recommend the same steps, unless otherwise noted.
+The [DeepSeek V4.1 Flash implementation](deepseek_v4_1/README.md) includes the
+text backbone, a pinned reference comparison, and a quantized checkpoint reader.
 
 For MoE models, see the [expert-parallel backend selection guide](common/moe/README.md).
 

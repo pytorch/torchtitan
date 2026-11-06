@@ -69,6 +69,13 @@ def _stock_config(*, dim: int = 32) -> RoutedExperts.Config:
     )
 
 
+def test_transform_rejects_float32_expert_compute():
+    config = _stock_config()
+    config.compute_dtype = "float32"
+    with pytest.raises(ValueError, match="compute_dtype"):
+        DistMoeTransform().transform(config)
+
+
 def _lora_dist_moe_config() -> DistMoeRoutedExperts.Config:
     stock = _stock_config()
     base_config = cast(

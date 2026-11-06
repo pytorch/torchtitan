@@ -9,6 +9,7 @@ import logging
 import math
 import os
 from collections.abc import Callable, Sequence
+from functools import partial
 from typing import Any, cast
 
 import torch
@@ -86,6 +87,7 @@ def pipeline_llm(
     device: torch.device,
     model_config: BaseModel.Config,
     loss_fn: LossFunction,
+    stage_metadata_factory: Callable[[int, int], dict[str, Any]] | None = None,
 ) -> tuple[_PipelineSchedule, list[BaseModel], bool, bool]:
     pp_mesh = parallelism_context.get_mesh("pp")
 
@@ -104,8 +106,10 @@ def pipeline_llm(
     for i, stage_ms in enumerate(module_names_per_stage):
         logger.debug(f"Stage {i}: {stage_ms}")
 
-    stage_io = None
-    if torch.distributed.get_backend(pp_mesh.get_group("pp")) == "fake":
+    if (
+        stage_metadata_factory is None
+        and torch.distributed.get_backend(pp_mesh.get_group("pp")) == "fake"
+    ):
         if not isinstance(model_config, Decoder.Config):
             raise ValueError(
                 "Pipeline Parallel on a fake process group requires a Decoder "
@@ -126,6 +130,7 @@ def pipeline_llm(
             model_config=model_config,
             lm_head_in_loss=isinstance(loss_fn, ChunkedLossWrapper),
         )
+        stage_metadata_factory = partial(_static_stage_metadata, stage_io)
 
     get_mesh_cb = _build_get_mesh_callback(parallelism_context)
     stages, model_parts = _pipeline_module_split(
@@ -135,7 +140,7 @@ def pipeline_llm(
         device,
         module_names_per_stage,
         get_mesh=get_mesh_cb,
-        stage_io=stage_io,
+        stage_metadata_factory=stage_metadata_factory,
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
@@ -854,7 +859,7 @@ def _pipeline_module_split(
     device: torch.device,
     module_names_per_stage: list[list[str]],
     get_mesh: Callable | None = None,
-    stage_io: _DecoderStageIO | None = None,
+    stage_metadata_factory: Callable[[int, int], dict[str, Any]] | None = None,
 ) -> tuple[list[PipelineStage], list[BaseModel]]:
     """Create pipeline stages based on specified module names for each stage.
 
@@ -879,8 +884,8 @@ def _pipeline_module_split(
                                - "norm" for the final normalization layer
                                - "lm_head" for the output projection layer
         get_mesh: Callback used to reconstruct DTensor inputs after PP receives.
-        stage_io: Static tensors describing decoder stage boundaries. Fake PP
-            requires these because it cannot exchange metadata dynamically.
+        stage_metadata_factory: Complete static ``PipelineStage`` metadata for
+            each stage. Fake PP requires it because it cannot exchange metadata.
 
     Returns:
         Tuple of (stages, models) where stages are PipelineStage objects and models are the
@@ -912,8 +917,8 @@ def _pipeline_module_split(
             group=pp_mesh.get_group("pp"),
             get_mesh=get_mesh,
             **(
-                _static_stage_metadata(stage_io, stage_idx, num_stages)
-                if stage_io is not None
+                stage_metadata_factory(stage_idx, num_stages)
+                if stage_metadata_factory is not None
                 else {}
             ),
         )
