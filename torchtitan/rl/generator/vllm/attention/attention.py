@@ -102,6 +102,8 @@ class TorchTitanVarlenInnerAttentionBackend(_FA4PageSize, FlashAttentionBackend)
 
     @staticmethod
     def get_impl_cls():
+        if torch.version.hip is not None:
+            return GatheredVarlenInnerAttentionImpl
         return TorchTitanVarlenInnerAttentionImpl
 
     @staticmethod
@@ -125,11 +127,57 @@ class TorchTitanVarlenInnerAttentionDiffKVBackend(
 
     @staticmethod
     def get_impl_cls():
+        if torch.version.hip is not None:
+            raise ValueError(
+                "Unequal K/V head dims are not supported in the ROCm generator: "
+                "its varlen path gathers from a single paged cache."
+            )
         return TorchTitanVarlenInnerAttentionDiffKVImpl
 
     @staticmethod
     def get_builder_cls():
         return TorchTitanVarlenInnerAttentionBackend.get_builder_cls()
+
+
+def _is_capturing() -> bool:
+    return torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+
+
+def _gather_paged_kv(
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seqused_k: torch.Tensor,
+    max_seqlen_k: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Copy each sequence's paged KV into rows laid out at a fixed stride.
+
+    Returns ``(key, value, cu_seqlens_k)``. Rows are strided rather than packed
+    so nothing here reads a tensor back to the host: packing would need the
+    batch's total context length, which costs a sync per layer and which a CUDA
+    graph capture cannot read at all. ``seqused_k`` carries the real lengths, so
+    the kernel never looks at the padding.
+
+    Under capture the stride must not depend on the batch, so it is the whole
+    block table; otherwise the batch's own longest context is enough.
+    """
+    num_seqs, max_pages = block_table.shape
+    page_size = key_cache.shape[1]
+    device = block_table.device
+
+    stride = max_pages * page_size if _is_capturing() else max_seqlen_k
+    columns = torch.arange(stride, device=device)
+    within = columns[None, :] < seqused_k.to(torch.int64)[:, None]
+    blocks = torch.where(
+        within, block_table.to(torch.int64)[:, columns // page_size], 0
+    )
+    offsets = torch.where(within, (columns % page_size).expand(num_seqs, stride), 0)
+    cu_seqlens_k = torch.arange(num_seqs + 1, device=device, dtype=torch.int32) * stride
+    return (
+        key_cache[blocks, offsets].flatten(0, 1),
+        value_cache[blocks, offsets].flatten(0, 1),
+        cu_seqlens_k,
+    )
 
 
 class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
@@ -161,7 +209,7 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
                         f"{flash_attention_impl} is required on detected SM "
                         f"{capability[0]}.{capability[1]}, but activation failed."
                     ) from error
-        else:
+        elif torch.version.hip is None:
             warn_once(
                 logger,
                 "FA3/FA4 not available on this CUDA architecture, falling back to FA2. ",
@@ -194,9 +242,6 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
-        assert (
-            self.vllm_flash_attn_version is not None
-        ), "FlashAttention version not detected."
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
@@ -241,8 +286,6 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
             "fp8"
         ), "FP8 KV cache not supported yet."
 
-        assert not attn_metadata.use_cascade, "Cascade not supported yet."
-
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
         max_seqlen_q = attn_metadata.max_query_len
@@ -264,6 +307,38 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
             sliding_window_size = self.sliding_window
 
         assert self.alibi_slopes is None, "Alibi slopes not supported yet."
+
+        return self._attend(
+            output[:num_actual_tokens],
+            query[:num_actual_tokens],
+            key_cache,
+            value_cache,
+            cu_seqlens_q=cu_seqlens_q,
+            seqused_k=seqused_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            block_table=block_table,
+            window_size=sliding_window_size,
+        )
+
+    def _attend(
+        self,
+        output: torch.Tensor,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        *,
+        cu_seqlens_q: torch.Tensor,
+        seqused_k: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        block_table: torch.Tensor,
+        window_size: tuple[int, int],
+    ) -> torch.Tensor:
+        """Attend over vLLM's paged KV cache with torch's varlen kernel."""
+        assert (
+            self.vllm_flash_attn_version is not None
+        ), "FlashAttention version not detected."
 
         # FA3 and FA4 infer key lengths from block_table + seqused_k for paged
         # KV. FA4 explicitly rejects page_table together with cu_seqlens_k.
@@ -295,8 +370,8 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
             extra_kwargs["return_aux"] = AuxRequest(lse=True)
 
         result = torch.nn.attention.varlen.varlen_attn_out(
-            output[:num_actual_tokens],
-            query[:num_actual_tokens],
+            output,
+            query,
             key_cache,
             value_cache,
             cu_seqlens_q,
@@ -304,7 +379,7 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
             max_seqlen_q,
             max_seqlen_k,
             scale=self.scale,
-            window_size=sliding_window_size,
+            window_size=window_size,
             block_table=block_table,
             seqused_k=seqused_k,
             **extra_kwargs,
@@ -313,9 +388,79 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
             return result
 
         out, lse = result
-        out = self.out_transform(out, lse.transpose(0, 1))
-        output[:num_actual_tokens].copy_(out)
-        return output[:num_actual_tokens]
+        output.copy_(self.out_transform(out, lse.transpose(0, 1)))
+        return output
+
+
+class GatheredVarlenInnerAttentionImpl(TorchTitanVarlenInnerAttentionImpl):
+    """The ROCm half of CUSTOM: gather the pages, then run the trainer's kernel."""
+
+    def _attend(
+        self,
+        output: torch.Tensor,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        *,
+        cu_seqlens_q: torch.Tensor,
+        seqused_k: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        block_table: torch.Tensor,
+        window_size: tuple[int, int],
+    ) -> torch.Tensor:
+        """Attend over gathered rows with the varlen kernel the trainer runs.
+
+        torch's ROCm varlen kernel refuses a page table outright
+        (``mha_varlen_fwd: block_table_ must be nullopt``), so the pages are
+        gathered into contiguous rows and the page table is dropped.
+
+        A decode query sits at the end of its sequence, so the causal mask must
+        be bottom-right aligned per sequence. AOTriton spells that as
+        ``WindowValue::BottomRightAligned``, which ROCm's
+        ``calculate_swa`` installs only when no explicit window is given --
+        and ``varlen_attn`` always passes one, so this calls the op directly.
+        TODO(pytorch/pytorch): two upstream gaps keep this class alive --
+        ROCm's ``mha_varlen_fwd`` should accept ``block_table`` so the gather
+        can go, and ``varlen_attn``'s ``(-1, 0)`` branch should forward
+        ``window_size_right=-1`` so bottom-right causal needs no private op.
+        """
+        if window_size != (-1, 0):
+            raise NotImplementedError(
+                "Sliding-window attention is not supported in the ROCm "
+                "generator: AOTriton aligns a windowed mask top-left, which is "
+                "wrong for decode queries."
+            )
+
+        key, value, cu_seqlens_k = _gather_paged_kv(
+            key_cache, value_cache, block_table, seqused_k, max_seqlen_k
+        )
+
+        out, lse, *_ = torch.ops.aten._flash_attention_forward(
+            query,
+            key,
+            value,
+            cu_seqlens_q[: seqused_k.shape[0] + 1],
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            0.0,
+            True,
+            return_debug_mask=False,
+            scale=self.scale,
+            # -1 on both sides leaves ROCm's calculate_swa() holding AOTriton's
+            # BottomRightAligned sentinel; any explicit bound overwrites it and
+            # degrades the mask to top-left, which is wrong for a decode query.
+            window_size_left=-1,
+            window_size_right=-1,
+            seqused_k=seqused_k,
+            block_table=None,
+            num_splits=None,
+        )
+        if self.out_transform is not None:
+            out = self.out_transform(out, lse.transpose(0, 1))
+        output.copy_(out)
+        return output
 
 
 class TorchTitanVarlenInnerAttentionDiffKVImpl(TorchTitanVarlenInnerAttentionImpl):
