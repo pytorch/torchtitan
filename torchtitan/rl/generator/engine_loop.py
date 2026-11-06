@@ -220,14 +220,18 @@ class EngineLoop:
         for group_id in group_ids:
             self._group_min_policy_versions.pop(group_id, None)
         # Nothing is held once the queue closes (shutdown or a crash): drop late releases.
-        if self._holds_session_kv and self._rank == 0 and not self._queue.closed:
-            self._queue.put(SessionReleaseMessage(group_ids=group_ids))
+        if self._holds_session_kv and self._rank == 0:
+            self._queue.put(
+                SessionReleaseMessage(group_ids=group_ids), drop_if_closed=True
+            )
 
     def release_sessions(self, session_ids: list[str]) -> None:
         """RANK 0: release the held KV of sessions whose rollout ended (a no-op unless the
         engine holds session KV)."""
-        if self._holds_session_kv and self._rank == 0 and not self._queue.closed:
-            self._queue.put(SessionReleaseMessage(session_ids=session_ids))
+        if self._holds_session_kv and self._rank == 0:
+            self._queue.put(
+                SessionReleaseMessage(session_ids=session_ids), drop_if_closed=True
+            )
 
     def log_engine_stats(self, step: int) -> None:
         """Log the engine's per-step stats, if it has any (rank 0)."""
@@ -636,10 +640,13 @@ class EngineLoopQueue:
         """Whether `close` has been called."""
         return self._closed_reason is not None
 
-    def put(self, message: EngineLoopMessage) -> None:
-        """Enqueue `message`; it lands on the next iteration of `event_loop`. Raises once closed."""
+    def put(self, message: EngineLoopMessage, *, drop_if_closed: bool = False) -> None:
+        """Enqueue `message`; it lands on the next iteration of `event_loop`. Once closed, raises,
+        or drops `message` if `drop_if_closed`."""
         with self._lock:
             if self._closed_reason is not None:
+                if drop_if_closed:
+                    return
                 raise RuntimeError(self._closed_reason)
             # asyncio.Queue is not thread-safe, so hand the put to the loop that owns it.
             self._event_loop.call_soon_threadsafe(self._queue.put_nowait, message)
