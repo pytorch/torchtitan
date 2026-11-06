@@ -550,7 +550,7 @@ class Controller(Configurable):
             *,
             request_id: str,
             group_id: int,
-            routing_session_id: str | None = None,
+            routing_session_id: str,
             sampling_config: SamplingConfig | None = None,
         ) -> Completion | None:
             return await generator_router.generate.call_one(
