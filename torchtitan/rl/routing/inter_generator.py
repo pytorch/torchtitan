@@ -16,6 +16,7 @@ from typing import Any
 from torchtitan.config import Configurable
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.system import ServiceHandle
+from torchtitan.rl.rollout.types import Prompt
 from torchtitan.rl.routing.strategies import (
     RoutingStrategy,
     StickySessionRoutingStrategy,
@@ -269,7 +270,7 @@ class InterGeneratorRouter(Configurable):
 
     async def generate(
         self,
-        prompt_token_ids: list[int],
+        prompt: Prompt,
         *,
         request_id: str,
         group_id: int,
@@ -280,7 +281,7 @@ class InterGeneratorRouter(Configurable):
         """Route one generation call to a generator and return its completion."""
         return await self._route(
             "generate",
-            prompt_token_ids,
+            prompt,
             request_id=request_id,
             group_id=group_id,
             # Generator.generate also requires this field for its

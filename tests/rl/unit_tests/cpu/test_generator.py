@@ -14,6 +14,8 @@ metrics that ride with it), the SamplingParams contract, and the vLLM metric tim
 
 import asyncio
 import concurrent.futures
+import dataclasses
+from collections import OrderedDict
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import cast
@@ -24,6 +26,7 @@ import torch
 
 import torchtitan.rl.generator.generator as generator_module
 import torchtitan.rl.generator.vllm.engine as vllm_engine_module
+from renderers import PlaceholderRange
 from torchstore import RankRole
 from torchtitan.components.optim import AdamW
 from torchtitan.config import DebugConfig, PrecisionConfig
@@ -53,6 +56,7 @@ from torchtitan.rl.generator.vllm.worker import (
     TorchTitanGPUWorker,
 )
 from torchtitan.rl.observability import metrics as m
+from torchtitan.rl.rollout.types import Prompt, PromptImage
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.rl.routing.strategies import LeastLoadedRoutingStrategy
 from vllm.config import (
@@ -90,6 +94,7 @@ class _FakeLLMEngine:
     def __init__(self):
         self.add_requests = []
         self.reset_prefix_cache_calls = []
+        self.reset_encoder_cache_calls = 0
         self.renderer = _FakeRenderer()
 
     def add_request(self, *args, **kwargs):
@@ -100,6 +105,9 @@ class _FakeLLMEngine:
 
     def reset_prefix_cache(self, *args, **kwargs):
         self.reset_prefix_cache_calls.append((args, kwargs))
+
+    def reset_encoder_cache(self):
+        self.reset_encoder_cache_calls += 1
 
 
 def _sample(*, token_ids=(10, 11), finish_reason="stop"):
@@ -142,6 +150,7 @@ def _vllm_engine(*, reset_kv_cache_on_model_state_dict_load=False, model=None):
     )
     engine._get_model = lambda: model
     engine._session_kv_holder = None
+    engine._decode_image_file = None
     return engine
 
 
@@ -319,7 +328,7 @@ def test_build_sampling_params_seed_defaults_to_none():
 def _engine_request(request_id: str, *, min_policy_version: int, group_id: int = 3):
     request = EngineRequest(
         request_id=request_id,
-        prompt_token_ids=[1, 2],
+        prompt=Prompt(token_ids=[1, 2]),
         sampling=SamplingConfig(),
         group_id=group_id,
         routing_session_id="group=3/rollout=0",
@@ -327,6 +336,16 @@ def _engine_request(request_id: str, *, min_policy_version: int, group_id: int =
     )
     request.min_policy_version = min_policy_version
     return request
+
+
+def _image_prompt() -> Prompt:
+    """Text, a (1, 4, 4)-patch image as 4 placeholders, text."""
+    image = PromptImage(key="k", source_path="k.png", grid_thw=(1, 4, 4), data=b"k")
+    return Prompt(
+        token_ids=[1, 7, 7, 7, 7, 2],
+        images=(image,),
+        image_placeholders=(PlaceholderRange(offset=1, length=4),),
+    )
 
 
 def test_admission_passes_group_id_as_priority_and_arrival_time():
@@ -375,13 +394,109 @@ def test_admission_salts_prompt_with_min_policy_version():
     assert kwargs["prompt"]["cache_salt"] == "6"
 
 
+def test_generate_shares_one_bytes_object_per_image_file(monkeypatch):
+    # The samples of a group arrive as separate calls, each with its own copy of the file;
+    # sharing one object lets the decision broadcast to TP ranks pickle it once.
+    monkeypatch.setattr(generator_module, "_NUM_SHARED_IMAGE_FILES", 2)
+    generator = SimpleNamespace(_image_files=OrderedDict())
+    first = PromptImage(
+        key="k", source_path="k.png", grid_thw=(1, 4, 4), data=bytes(b"x" * 8)
+    )
+    second = dataclasses.replace(first, data=bytes(bytearray(b"x" * 8)))
+    assert second.data is not first.data
+
+    def prompt(*images: PromptImage, offset: int = 1) -> Prompt:
+        placeholders = tuple(
+            PlaceholderRange(offset=offset + 4 * index, length=4)
+            for index in range(len(images))
+        )
+        return Prompt(token_ids=[], images=images, image_placeholders=placeholders)
+
+    [shared_first] = Generator._share_image_files(generator, prompt(first)).images
+    shared = Generator._share_image_files(generator, prompt(second, offset=9))
+
+    assert shared.images[0].data is shared_first.data
+    assert shared.image_placeholders == (PlaceholderRange(offset=9, length=4),)
+    # Bounded: the oldest file goes once more distinct files arrive.
+    others = [dataclasses.replace(first, key=key) for key in ("a", "b")]
+    Generator._share_image_files(generator, prompt(*others))
+    assert list(generator._image_files) == ["a", "b"]
+
+
 def test_admission_with_kv_reset_does_not_salt_prompt():
     engine = _vllm_engine(reset_kv_cache_on_model_state_dict_load=True)
+    engine._decode_image_file = lambda image: torch.zeros(
+        1, 32, 32, 3, dtype=torch.uint8
+    )
+    image_request = _engine_request("r1", min_policy_version=6)
+    image_request.prompt = _image_prompt()
 
-    engine.add_requests([_engine_request("r0", min_policy_version=6)])
+    engine.add_requests([_engine_request("r0", min_policy_version=6), image_request])
 
-    _, kwargs = cast(_FakeLLMEngine, engine._engine).add_requests[0]
-    assert kwargs["prompt"]["cache_salt"] is None
+    [(_, text_kwargs), (_, image_kwargs)] = cast(
+        _FakeLLMEngine, engine._engine
+    ).add_requests
+    assert text_kwargs["prompt"]["cache_salt"] is None
+    assert image_kwargs["prompt"].get("cache_salt") is None
+    # The engine resets its encoder cache on every load instead.
+    assert image_kwargs["prompt"]["mm_hashes"] == {"image": ["k"]}
+
+
+def test_admission_submits_image_prompts_as_multimodal_inputs():
+    engine = _vllm_engine()
+    loaded = torch.zeros(1, 32, 32, 3, dtype=torch.uint8)
+    engine._decode_image_file = lambda image: loaded
+    request = _engine_request("r0", min_policy_version=6)
+    request.prompt = _image_prompt()
+
+    assert (
+        engine.add_requests([request, _engine_request("r1", min_policy_version=6)])
+        == []
+    )
+
+    [(_, image_kwargs), (_, text_kwargs)] = cast(
+        _FakeLLMEngine, engine._engine
+    ).add_requests
+    prompt = image_kwargs["prompt"]
+    assert prompt["type"] == "multimodal"
+    assert prompt["prompt_token_ids"] == [1, 7, 7, 7, 7, 2]
+    assert prompt["cache_salt"] == "6"
+    # The image hash carries the pinned version: encoder outputs follow the vision weights.
+    assert prompt["mm_hashes"] == {"image": ["k@6"]}
+    assert prompt["mm_kwargs"]["image"][0]["images"].data is loaded
+    assert text_kwargs["prompt"]["type"] == "token"
+
+
+def test_admission_rejects_image_prompts_without_an_image_source():
+    engine = _vllm_engine()
+    request = _engine_request("r0", min_policy_version=6)
+    request.prompt = _image_prompt()
+
+    [(request_id, error)] = engine.add_requests([request])
+
+    assert request_id == "r0" and "Controller.Config.image_processor" in str(error)
+    assert cast(_FakeLLMEngine, engine._engine).add_requests == []
+
+
+def test_admission_rejects_only_the_request_whose_image_does_not_decode():
+    # A truncated dataset file fails its rollout, not the generator.
+    engine = _vllm_engine()
+
+    def decode_image_file(image):
+        raise RuntimeError("decode_png: truncated file")  # what torchvision raises
+
+    engine._decode_image_file = decode_image_file
+    corrupt = _engine_request("corrupt", min_policy_version=6)
+    corrupt.prompt = _image_prompt()
+
+    [(request_id, error)] = engine.add_requests(
+        [corrupt, _engine_request("text", min_policy_version=6)]
+    )
+
+    assert request_id == "corrupt" and isinstance(error, ValueError)
+    assert "k.png" in str(error) and "truncated" in str(error)
+    llm_engine = cast(_FakeLLMEngine, engine._engine)
+    assert [kwargs["request_id"] for _, kwargs in llm_engine.add_requests] == ["text"]
 
 
 def test_admission_rejects_only_the_invalid_request():
@@ -501,19 +616,27 @@ def test_shutdown_closes_the_renderer():
     engine._engine.renderer.shutdown.assert_called_once_with()
 
 
+@pytest.mark.parametrize("serves_images", [False, True])
 @pytest.mark.parametrize("reset_kv_cache", [False, True])
 def test_reset_kv_cache_on_model_state_dict_load_controls_cache_reset(
-    reset_kv_cache: bool,
+    reset_kv_cache: bool, serves_images: bool
 ):
     model = SimpleNamespace(load_model_state_dict=lambda fetch: None)
     engine = _vllm_engine(
         reset_kv_cache_on_model_state_dict_load=reset_kv_cache, model=model
     )
+    if serves_images:
+        engine._decode_image_file = lambda image: torch.zeros(
+            1, 32, 32, 3, dtype=torch.uint8
+        )
 
     engine.load_model_state_dict(lambda state_dict: state_dict.keys())
 
+    fake = cast(_FakeLLMEngine, engine._engine)
     expected = [((), {"reset_running_requests": True})] if reset_kv_cache else []
-    assert cast(_FakeLLMEngine, engine._engine).reset_prefix_cache_calls == expected
+    assert fake.reset_prefix_cache_calls == expected
+    # Unsalted image hashes would let new requests reuse old encoder outputs.
+    assert fake.reset_encoder_cache_calls == int(reset_kv_cache and serves_images)
 
 
 def test_sampling_config_rejects_top_p_below_one():
@@ -612,6 +735,7 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_p
             debug=DebugConfig(),
             reset_kv_cache_on_model_state_dict_load=True,
             model_state_dict_load_mode="cpu_prefetch",
+            image_processor=None,
             rank=0,
             generator_name="generator",
             output_dir=str(tmp_path),
@@ -660,6 +784,7 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dic
         debug=config.debug,
         reset_kv_cache_on_model_state_dict_load=False,
         model_state_dict_load_mode="cpu_prefetch",
+        image_processor=None,
         rank=0,
         generator_name="generator",
         output_dir=str(tmp_path),
