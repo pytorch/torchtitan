@@ -8,8 +8,6 @@
 
 from __future__ import annotations
 
-import itertools
-import math
 import os
 from collections.abc import Sequence
 from dataclasses import replace
@@ -85,7 +83,6 @@ from torchtitan.trainer import Trainer
 _TRAINING_LR = 5e-5
 _ROUTER_LR_MULTIPLIER = 0.125
 _MUSE_SPARK_HF_ASSETS_PATH = "./assets/hf/Muse-Spark-Open-816B-A42B"
-_MUSE_GLIMMER_MAX_IMAGE_TOKENS = 4096
 _MUSE_SPARK_FUSED_SWIGLU_OVERRIDE = (
     "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"
 )
@@ -228,52 +225,6 @@ def _use_flex_flash_attention(model_config: MuseSparkModel.Config) -> None:
         attention.inner_attention = inner_attention
 
 
-def _resize_to_muse_glimmer_patch_grid(
-    height: int,
-    width: int,
-    *,
-    patch_size: int,
-    merge_size: int,
-    max_image_tokens: int = _MUSE_GLIMMER_MAX_IMAGE_TOKENS,
-    **_: object,
-) -> tuple[int, int, int, int]:
-    """Select the closest-aspect-ratio merged-patch grid under the token cap."""
-    merged_patch_size = patch_size * merge_size
-    ideal_grid_h = height / merged_patch_size
-    ideal_grid_w = width / merged_patch_size
-    aspect_ratio = ideal_grid_w / ideal_grid_h if ideal_grid_h > 0 else 1.0
-    if ideal_grid_h * ideal_grid_w > max_image_tokens:
-        ideal_grid_h = math.sqrt(max_image_tokens / aspect_ratio)
-        ideal_grid_w = ideal_grid_h * aspect_ratio
-
-    candidates = list(
-        set(
-            itertools.product(
-                [math.floor(ideal_grid_h), math.ceil(ideal_grid_h)],
-                [math.floor(ideal_grid_w), math.ceil(ideal_grid_w)],
-            )
-        )
-    )
-    candidates = [
-        (grid_h, grid_w)
-        for grid_h, grid_w in candidates
-        if grid_h >= 1 and grid_w >= 1 and grid_h * grid_w <= max_image_tokens
-    ]
-    if not candidates:
-        candidates = [(max(1, round(ideal_grid_h)), max(1, round(ideal_grid_w)))]
-
-    grid_h, grid_w = min(
-        candidates,
-        key=lambda grid: abs(grid[0] / grid[1] - height / width),
-    )
-    return (
-        grid_h * merged_patch_size,
-        grid_w * merged_patch_size,
-        0,
-        0,
-    )
-
-
 def _muse_spark_mm_dataloader(
     model_config: MuseSparkModel.Config,
     dataset: SingleDatasetConfig,
@@ -282,6 +233,9 @@ def _muse_spark_mm_dataloader(
 
     from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
     from torchtitan.components.data.multimodal.mm_datasets import VisionProcessor
+    from torchtitan.components.data.multimodal.utils.image import (
+        resize_to_muse_glimmer_patch_grid,
+    )
 
     vision_encoder = model_config.vision_encoder
     if vision_encoder is None:
@@ -295,7 +249,7 @@ def _muse_spark_mm_dataloader(
         patch_size=vision_encoder.patch_size,
         temporal_patch_size=vision_encoder.patch_temporal,
         spatial_merge_size=vision_encoder.downsample_factor,
-        resize_fn=_resize_to_muse_glimmer_patch_grid,
+        resize_fn=resize_to_muse_glimmer_patch_grid,
         # The released processor_config.json resamples with LANCZOS.
         image_interpolation_mode=TVF.InterpolationMode.LANCZOS,
         image_mean=(0.5, 0.5, 0.5),
