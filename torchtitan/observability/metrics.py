@@ -17,12 +17,15 @@ from datetime import datetime
 from typing import Any, ClassVar
 
 import torch
+from tensorboard.compat.proto.summary_pb2 import (  # generated protobuf class
+    Summary,  # pyrefly: ignore [missing-module-attribute]
+)
 from torch.distributed.pipelining.schedules import (
     get_schedule_class,
     ScheduleDualPipeV,
     ScheduleZBVZeroBubble,
 )
-from torch.utils.tensorboard import SummaryWriter
+from torch.utils.tensorboard import FileWriter
 
 from torchtitan.components.optim import OptimizersContainer
 from torchtitan.config import Configurable
@@ -167,13 +170,26 @@ class TensorBoardLogger(BaseLogger):
         tag: str | None = None,
     ):
         self.tag = tag
-        self.writer = SummaryWriter(log_dir, max_queue=1000)
+        self.writer = FileWriter(log_dir, max_queue=1000)
+        # Without TensorFlow, TensorBoard opens, appends to and closes the events file
+        # for every event, which is slow on a network filesystem (FUSE/NFS). Keep one
+        # file open instead. The writer's thread still does every write and flush.
+        event_writer = self.writer.event_writer
+        event_writer._async_writer._writer._writer = open(event_writer._file_name, "ab")
         logger.info(f"TensorBoard logging enabled. Logs will be saved at {log_dir}")
 
     def log(self, metrics: dict[str, Any], step: int) -> None:
-        for k, v in metrics.items():
-            tag = k if self.tag is None else f"{self.tag}/{k}"
-            self.writer.add_scalar(tag, v, step)
+        # One event per step: the writer queue (1000 events) then holds 1000 steps.
+        summary = Summary(
+            value=[
+                Summary.Value(
+                    tag=k if self.tag is None else f"{self.tag}/{k}",
+                    simple_value=float(v),
+                )
+                for k, v in metrics.items()
+            ]
+        )
+        self.writer.add_summary(summary, step)
 
     def close(self) -> None:
         self.writer.close()
