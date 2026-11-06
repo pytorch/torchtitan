@@ -351,7 +351,7 @@ def _measure_pool(mode, results):
     parameter = torch.nn.Parameter(torch.ones(8 * 1024 * 1024, device="cuda"))
     inputs = torch.ones_like(parameter)
     accelerator_graph_manager.maybe_initialize()
-    optimizer = torch.optim.SGD([parameter], lr=0.01)
+    optimizer = torch.optim.SGD([parameter], lr=0.01, foreach=True)
 
     def eval_body():
         scratch = torch.empty_like(parameter)
