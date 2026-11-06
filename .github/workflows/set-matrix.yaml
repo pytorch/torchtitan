@@ -87,9 +87,9 @@ jobs:
             "name": "rocm",
             "runner": "${ROCM_RUNNER}",
             "gpu-arch-type": "rocm",
-            "gpu-arch-version": "10.0",
+            "gpu-arch-version": "10.1",
             "docker-image": "torchtitan-rocm-ubuntu-22.04-clang12",
-            "index-url": "https://download.pytorch.org/whl/nightly/rocm10.0",
+            "index-url": "https://download.pytorch.org/whl/nightly/rocm10.1",
             "torch-version": ""
           }
           EOF
