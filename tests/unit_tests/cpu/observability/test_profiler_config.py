@@ -6,10 +6,12 @@
 
 import pytest
 
+from torchtitan.observability.kernel_spans import KernelSpanRecorder
 from torchtitan.observability.profiler import (
     CuspyTraceProfiler,
     KinetoTraceProfiler,
     MemorySnapshotProfiler,
+    Profiler,
 )
 
 
@@ -34,3 +36,11 @@ def test_trace_profiler_allows_default_schedule() -> None:
 def test_memory_snapshot_freq_must_be_positive() -> None:
     with pytest.raises(ValueError, match="must be greater than zero"):
         MemorySnapshotProfiler.Config(freq=0)
+
+
+def test_profiler_rejects_kineto_with_kernel_spans() -> None:
+    with pytest.raises(ValueError, match="Kineto cannot profile CUDA"):
+        Profiler.Config(
+            trace=KinetoTraceProfiler.Config(),
+            kernel_spans=KernelSpanRecorder.Config(),
+        )

@@ -150,6 +150,15 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
         def __post_init__(self) -> None:
             if (
+                self.profiler.kernel_spans is not None
+                and self.training.disable_accelerator_graphs
+            ):
+                raise ValueError(
+                    "profiler.kernel_spans requires accelerator graphs: kernels "
+                    "are named from their CUDA graph nodes. Set "
+                    "training.disable_accelerator_graphs=False."
+                )
+            if (
                 self.debug.spmd_typechecking
                 and self.parallelism.pipeline_parallel_degree > 1
             ):
