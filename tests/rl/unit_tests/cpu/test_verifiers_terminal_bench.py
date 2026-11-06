@@ -26,7 +26,6 @@ from torchtitan.config import ConfigLoader
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.rl.controller.controller import Controller
 from torchtitan.rl.examples.verifiers import env_server
-from torchtitan.rl.examples.verifiers.terminal_bench import taskset
 from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
     TerminalBenchTerminusHarness,
     TerminalBenchTerminusHarnessConfig,
@@ -230,7 +229,6 @@ def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
     assert environment.taskset == config.training_dataloader.dataset.verifiers_taskset
     assert config.training_dataloader.dataset.verifiers_taskset.dataset == TRAIN_DATASET
     assert config.validation_dataset.verifiers_taskset.dataset == EVAL_DATASET
-    assert config.verifiers_env_server.local_taskset_module == taskset.__name__
     worker_config = resolve_env_config(env_config_data(environment))
     assert worker_config.agent.harness == environment.agent.harness
     assert isinstance(
@@ -240,8 +238,8 @@ def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
 
 def test_env_server_workers_skip_the_trainer_imports(monkeypatch) -> None:
     """A pool worker loads the broker's ``__main__``, runs the pickled ``log_setup``, then
-    resolves the env config, whose taskset id is the local alias. It must find the taskset
-    and the harness without importing torch, vLLM or Monarch.
+    resolves the env config, whose taskset id names the repo-root plugin package. It must
+    find the taskset and the harness without importing torch, vLLM or Monarch.
     """
     captured = {}
 
@@ -259,7 +257,6 @@ def test_env_server_workers_skip_the_trainer_imports(monkeypatch) -> None:
     env_server._run_env_server_process(
         environment=env_config_data(config.environment),
         serve=config.serve,
-        local_taskset_module=config.local_taskset_module,
         address_queue=None,
         death_pipe=None,
     )
