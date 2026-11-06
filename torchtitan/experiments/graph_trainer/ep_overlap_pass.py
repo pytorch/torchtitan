@@ -24,9 +24,7 @@ For each selected forward/backward region:
   ``custom[_EP_TOKEN_EXCHANGE_WAIT]``;
 * marker counts and labels must match across chunks;
 * forward emits marker pairs in chunk order 0 then 1, backward emits 1 then 0;
-* MoE-root chunking pairs both chunks' first-marker setup before launching the
-  first marker pair; wider transformer-root chunking keeps the regular
-  wait-gated per-chunk closure schedule for every marker;
+* both chunks' first-marker setup precedes the first launch pair;
 * token-count sync CPU copies, when present in the first marker closure, are
   launched before their CPU scalar/list consumers;
 * after each marker pair, ready non-collective body work is emitted as filler
@@ -582,7 +580,6 @@ def _build_region_phases(
     exchanges_by_chunk: dict[int, tuple[_TokenExchange, ...]],
     order: dict[fx.Node, int],
     owner_by_node: dict[fx.Node, ChunkOwner],
-    pair_first_token_exchange: bool,
     rewrite_token_count_sync_copies: bool,
 ) -> tuple[tuple[fx.Node, ...], ...]:
     """Step 4: construct wait-gated phases for one scheduled region."""
@@ -672,7 +669,7 @@ def _build_region_phases(
             )
 
     for exchange_idx in range(len(exchanges_by_chunk[0])):
-        if exchange_idx == 0 and pair_first_token_exchange:
+        if exchange_idx == 0:
             paired_sync_parts = tuple(
                 sync_parts_by_chunk[chunk_id] for chunk_id in chunk_order
             )
@@ -793,7 +790,6 @@ def _plan_region(
     *,
     order: dict[fx.Node, int],
     owner_by_node: dict[fx.Node, ChunkOwner],
-    pair_first_token_exchange: bool,
     rewrite_token_count_sync_copies: bool,
 ) -> _ScheduledRegion | None:
     """Steps 2-4: validate one chunked region and build its schedule phases."""
@@ -851,7 +847,6 @@ def _plan_region(
         exchanges_by_chunk=exchanges_by_chunk,
         order=order,
         owner_by_node=owner_by_node,
-        pair_first_token_exchange=pair_first_token_exchange,
         rewrite_token_count_sync_copies=rewrite_token_count_sync_copies,
     )
     return _ScheduledRegion(region=region, phases=phases) if phases else None
@@ -914,7 +909,6 @@ def _schedule_ep_overlap_regions(
     module_pattern: str,
     require_all_to_all: bool,
     reorder: bool = True,
-    pair_first_token_exchange: bool = False,
 ) -> int:
     """Run validation or scheduling for all chunked regions matching a pattern."""
     order = ordered_nodes(gm)
@@ -933,7 +927,6 @@ def _schedule_ep_overlap_regions(
                 region,
                 order=order,
                 owner_by_node=owner_by_node,
-                pair_first_token_exchange=pair_first_token_exchange,
                 rewrite_token_count_sync_copies=reorder,
             )
         )
@@ -962,7 +955,6 @@ def ep_overlap_validate_pass(
     *,
     module_pattern: str,
     require_all_to_all: bool = False,
-    pair_first_token_exchange: bool = False,
 ) -> fx.GraphModule:
     """Validate the already chunked graph without changing node order."""
     del example_inputs
@@ -971,7 +963,6 @@ def ep_overlap_validate_pass(
         module_pattern=module_pattern,
         require_all_to_all=require_all_to_all,
         reorder=False,
-        pair_first_token_exchange=pair_first_token_exchange,
     )
     logger.info(
         "Validated %d ep_overlap chunked region(s): module=%s",
@@ -987,7 +978,6 @@ def ep_overlap_schedule_pass(
     *,
     module_pattern: str,
     require_all_to_all: bool = True,
-    pair_first_token_exchange: bool = False,
 ) -> fx.GraphModule:
     """Reorder already chunked regions around EP all-to-alls."""
     del example_inputs
@@ -995,7 +985,6 @@ def ep_overlap_schedule_pass(
         gm,
         module_pattern=module_pattern,
         require_all_to_all=require_all_to_all,
-        pair_first_token_exchange=pair_first_token_exchange,
     )
     logger.info(
         "Applied ep_overlap scheduling to %d chunked region(s): module=%s",

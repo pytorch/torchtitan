@@ -194,8 +194,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         enable_passes: bool = True,
         compile_extra_passes: list[str] | None = None,
         compile_ep_overlap_enabled: bool = False,
-        compile_ep_overlap_chunk_dim: str = "batch",
-        compile_ep_overlap_module_fqn: str = "layers.*",
+        compile_ep_overlap_module_fqn: str = "layers.*.feed_forward",
         compile_inductor_compilation: str = "regional",
         compile_disable_passes: list[str] | None = None,
         numerics_changing_optim: bool = False,
@@ -216,7 +215,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             compile_enable_passes=enable_passes,
             compile_extra_passes=compile_extra_passes,
             compile_ep_overlap_enabled=compile_ep_overlap_enabled,
-            compile_ep_overlap_chunk_dim=compile_ep_overlap_chunk_dim,
             compile_ep_overlap_module_fqn=compile_ep_overlap_module_fqn,
             compile_inductor_compilation=compile_inductor_compilation,
             compile_disable_passes=compile_disable_passes,
@@ -604,7 +602,6 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
             GraphTrainerCompileConfig(
                 ep_overlap=EpOverlapConfig(
                     enabled=True,
-                    chunk_dim="seq",
                     module_fqn="layers.*.feed_forward",
                 ),
             ),
@@ -698,7 +695,6 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
             graph_model,
             GraphTrainer,
             compile_ep_overlap_enabled=True,
-            compile_ep_overlap_chunk_dim="seq",
             compile_ep_overlap_module_fqn="layers.*.feed_forward",
         )
 
