@@ -147,12 +147,9 @@ class DeepSeekV4Model(Decoder):
         parallelism: ParallelismConfig,
     ) -> None:
         from torchtitan.distributed.fsdp import (
-            require_fsdp2_backend,
             resolve_fsdp_mesh,
             resolve_sparse_fsdp_mesh,
         )
-
-        require_fsdp2_backend(parallelism, "DeepSeek V4")
 
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
         edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallelism_context)

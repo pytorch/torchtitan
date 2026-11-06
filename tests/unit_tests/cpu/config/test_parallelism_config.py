@@ -104,10 +104,6 @@ def test_parallelism_config_rejects_unknown_fsdp_symm_mem_scope() -> None:
         )
 
 
-def test_parallelism_config_defaults_to_fsdp2() -> None:
-    assert ParallelismConfig().fsdp_backend == "fsdp2"
-
-
 def test_parallelism_config_rejects_unknown_fsdp_backend() -> None:
     with pytest.raises(
         ValueError, match=r"fsdp_backend must be one of .* \(got 'fsdp1'\)"

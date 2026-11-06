@@ -45,6 +45,17 @@ def validate_model_training_config(
         LocalTokenDispatcher,
     )
 
+    if parallelism.fsdp_backend == "flex_shard":
+        # Decoder._apply_fsdp has the only FlexShard path, so a model that
+        # overrides it would shard with FSDP2.
+        model_cls = model._owner
+        if getattr(model_cls, "_apply_fsdp", None) is not Decoder._apply_fsdp:
+            name = type(model).__qualname__ if model_cls is None else model_cls.__name__
+            raise ValueError(
+                f"{name} does not support parallelism.fsdp_backend='flex_shard' "
+                "yet; only decoders that use Decoder._apply_fsdp do."
+            )
+
     if isinstance(model, Decoder.Config):
         if model.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
             raise NotImplementedError(

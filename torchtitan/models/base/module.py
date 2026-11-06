@@ -256,7 +256,7 @@ class Module(nn.Module, Configurable):
         # FlexShard stores parameters as local shards; initialize each through
         # the DTensor view FSDP2 would give it, so that initialization stays
         # parallelism-agnostic and matches FSDP2's.
-        self._param_init[name](as_fsdp2_dtensor(param))
+        self._param_init[name](as_fsdp2_dtensor(param, param))
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         """Initialize this module's own buffers.

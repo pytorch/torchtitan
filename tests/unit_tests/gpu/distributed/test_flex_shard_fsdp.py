@@ -22,7 +22,7 @@ from torchtitan.config import PrecisionConfig
 from torchtitan.config.configs import DebugConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.distributed.fsdp import set_requires_gradient_sync
+from torchtitan.distributed.fsdp import set_is_last_accumulation_step
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.llama3 import build_model_config
@@ -94,7 +94,11 @@ class TestFlexShardDecoder(DTensorTestBase):
             losses = []
             for microbatch in range(microbatches):
                 if microbatches > 1:
-                    set_requires_gradient_sync(model, microbatch == microbatches - 1)
+                    set_is_last_accumulation_step(
+                        model,
+                        microbatch == microbatches - 1,
+                        fsdp_backend=parallelism.fsdp_backend,
+                    )
                 generator = torch.Generator().manual_seed(
                     1000 * step + 10 * microbatch + self.rank
                 )

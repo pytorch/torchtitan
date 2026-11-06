@@ -71,11 +71,8 @@ class MultimodalModel(Decoder):
     ) -> None:
         from torchtitan.distributed.fsdp import (
             apply_fsdp_to_multimodal_encoder,
-            require_fsdp2_backend,
             resolve_fsdp_mesh,
         )
-
-        require_fsdp2_backend(parallelism, "multimodal models")
 
         # Encoders are CP-invariant, so FSDP shards them over dp_shard only.
         # That differs from the decoder, so they always get their own FSDP

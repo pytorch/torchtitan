@@ -235,27 +235,17 @@ def llama3_debugmodel_ce_loss(
     return config
 
 
-def llama3_debugmodel_ce_loss_no_accelerator_graphs(
-    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
-) -> Trainer.Config:
-    """Debug model with standard CrossEntropyLoss and without accelerator graphs.
-
-    The FSDP2 baseline for ``llama3_debugmodel_flex_shard``.
-    """
-    config = llama3_debugmodel_ce_loss(seq_len=seq_len)
-    config.training.disable_accelerator_graphs = True
-    return config
-
-
 def llama3_debugmodel_flex_shard(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    """``llama3_debugmodel_ce_loss_no_accelerator_graphs`` sharded by FlexShard.
+    """``llama3_debugmodel_ce_loss`` sharded by FlexShard, without accelerator graphs.
 
-    FlexShard does not support ChunkedLossWrapper or accelerator graphs yet. Training
-    is bitwise identical to the FSDP2 baseline.
+    FlexShard does not support ChunkedLossWrapper or accelerator graphs yet.
+    Training is bitwise identical to FSDP2, which
+    ``--override parallelism.fsdp_backend=fsdp2`` selects.
     """
-    config = llama3_debugmodel_ce_loss_no_accelerator_graphs(seq_len=seq_len)
+    config = llama3_debugmodel_ce_loss(seq_len=seq_len)
+    config.training.disable_accelerator_graphs = True
     config.parallelism = dataclasses.replace(
         config.parallelism, fsdp_backend="flex_shard"
     )

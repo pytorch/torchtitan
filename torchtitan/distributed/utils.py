@@ -660,13 +660,13 @@ def clip_grad_norm_(
     # over dp_shard alone keeps (dp_shard, cp, tp). So group gradients by mesh.
     # FlexShard grads are plain local shards; their FSDP2 DTensor views carry
     # the mesh their norm must be reduced over.
-    from torchtitan.distributed.flex_shard_fsdp import grad_as_fsdp2_dtensor
+    from torchtitan.distributed.flex_shard_fsdp import as_fsdp2_dtensor
 
     params_by_mesh: dict[DeviceMesh | None, list[torch.Tensor]] = defaultdict(list)
     grads_by_mesh: dict[DeviceMesh | None, list[torch.Tensor]] = defaultdict(list)
     for p in parameters:
-        grad = grad_as_fsdp2_dtensor(p)
-        if grad is not None:
+        if p.grad is not None:
+            grad = as_fsdp2_dtensor(p.grad, p)
             mesh = grad.device_mesh if isinstance(grad, DTensor) else None
             params_by_mesh[mesh].append(p)
             grads_by_mesh[mesh].append(grad)
