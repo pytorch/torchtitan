@@ -199,8 +199,11 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
             max_turns=120,
+            # Room for one validation pass beside training (`validation.steps` is the task count
+            # here, not -1).
             max_concurrent_rollouts=async_loop.max_active_rollout_groups
-            * async_loop.num_samples_per_prompt,
+            * async_loop.num_samples_per_prompt
+            + async_loop.validation.steps,
         ),
         renderer=from_renderers(
             Qwen35RendererConfig(
@@ -218,7 +221,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             console_log_keys_validation=[
                 "validation_reward/_mean",
                 "validation_reward/_max",
-                "timing/validation/",
+                "timing/validate",
             ],
         ),
         precision=PrecisionConfig(dtype="float32"),
@@ -342,8 +345,11 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
             max_turns=120,
+            # Room for one validation pass beside training (`validation.steps` is the task count
+            # here, not -1).
             max_concurrent_rollouts=async_loop.max_active_rollout_groups
-            * async_loop.num_samples_per_prompt,
+            * async_loop.num_samples_per_prompt
+            + async_loop.validation.steps,
         ),
         renderer=from_renderers(
             Qwen35RendererConfig(
@@ -361,7 +367,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             console_log_keys_validation=[
                 "validation_reward/_mean",
                 "validation_reward/_max",
-                "timing/validation/",
+                "timing/validate",
             ],
         ),
         precision=PrecisionConfig(dtype="float32"),
@@ -462,8 +468,11 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
             max_turns=8,
+            # Room for one validation pass beside training (`validation.steps` is the task count
+            # here, not -1).
             max_concurrent_rollouts=async_loop.max_active_rollout_groups
-            * async_loop.num_samples_per_prompt,
+            * async_loop.num_samples_per_prompt
+            + async_loop.validation.steps,
         ),
         renderer=from_renderers(
             CustomRendererConfig(
@@ -481,7 +490,7 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
             console_log_keys_validation=[
                 "validation_reward/_mean",
                 "validation_reward/_max",
-                "timing/validation/",
+                "timing/validate",
             ],
         ),
         trainer=Trainer.Config(

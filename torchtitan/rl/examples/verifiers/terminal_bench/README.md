@@ -55,8 +55,8 @@ them.
 7. **Training.** The batcher feeds the trainer, and the generators load the new weights
    after each step.
 
-Validation takes the same path on Terminal-Bench 2.1, one greedy sample per task, at
-the start and end of training.
+Validation takes the same path on Terminal-Bench 2.1, one greedy sample per task: beside
+training from the start, and once more after the last step.
 
 | What | Where |
 | --- | --- |

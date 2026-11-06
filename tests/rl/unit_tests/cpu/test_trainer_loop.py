@@ -89,6 +89,7 @@ def fake_controller(events: list[str], *, on_push=None, on_pull=None) -> Control
     )
     controller.start_step = 0
     controller._trainer_policy_version = 0
+    controller._validation_tasks = {}
     trainer = SimpleNamespace(
         sync_log_step=_Endpoint(),
         forward_backward=_Endpoint(forward_backward),

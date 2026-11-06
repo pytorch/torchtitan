@@ -867,10 +867,8 @@ def rl_grpo_fsdp2_gen_tp2_no_compile() -> Controller.Config:
     config.trainer.parallelism.data_parallel_shard_degree = 2
     config.trainer.parallelism.tensor_parallel_degree = 1
     config.generator.parallelism.tensor_parallel_degree = 2
-    # Covers validation beside training on several generators, then the blocking final pass.
-    config.async_loop.validation = ValidationConfig(
-        steps=20, freq=2, overlap_training=True
-    )
+    # Covers validation passes beside training on several generators, then the final pass.
+    config.async_loop.validation = ValidationConfig(steps=20, freq=2)
     return _configure_ci(
         config,
         steps=5,

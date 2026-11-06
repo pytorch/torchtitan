@@ -159,7 +159,7 @@ def _qwen3_4b_dapo_math_config(
                 "validation_reward/_mean",
                 "validation_reward/_max",
                 "validation/response_length/mean",
-                "timing/validation/",
+                "timing/validate",
             ],
         ),
         trainer=Trainer.Config(
@@ -455,7 +455,7 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
                 "validation_reward/_mean",
                 "validation_reward/_max",
                 "validation/response_length/mean",
-                "timing/validation/",
+                "timing/validate",
             ],
         ),
         precision=PrecisionConfig(dtype="bfloat16"),

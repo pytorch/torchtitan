@@ -46,10 +46,6 @@ class SamplingConfig:
             )
 
 
-# Overlapped validation group ids count down from here; the engine schedules them after all training.
-OVERLAPPED_VALIDATION_FIRST_GROUP_ID = -1_000_000
-
-
 @dataclass(kw_only=True, slots=True)
 class EngineRequest:
     """One `generate` call's request for the engine, awaiting admission; what a `LoopDecision` broadcasts."""
@@ -58,16 +54,18 @@ class EngineRequest:
     prompt_token_ids: list[int]  # [prompt_tokens]
     sampling: SamplingConfig
     group_id: int
-    """Rollout group id. Sets the vLLM priority (`_vllm_priority` in `vllm/engine.py`): lower is
-    admitted first and preempted last. Training ids grow as groups start. Validation ids count
-    down and restart every pass, so a pass runs in arrival order (not newest first):
-    - blocking validation: -1, -2, ... -> priority -1, before training;
-    - overlapped validation: -1_000_000, -1_000_001, ... -> priority 2**31 - 1, after training.
+    """Rollout group id; also sets the vLLM priority (smaller is admitted first and preempted last):
 
-        waiting, in arrival order:  g7 turn 1   g9 turn 1   g4 turn 2   val -1      val -2
-        priority:                   7           9           4           -1          -1
-        vLLM admits:                val -1      val -2      g4 turn 2   g7 turn 1   g9 turn 1
-                                                            ^ g4 started before g7
+        requests     group ids                                        vLLM priority
+        training     0, 1, 2, ...: one per group                      the group id: older groups first
+        validation   negative: -(step * num_prompts + prompt + 1)     2**31 - 1: after all training
+
+    Validation shares one priority, so it runs in arrival order, after every training request:
+
+        waiting, in arrival order:  g7 turn 1   val -1      g9 turn 1   g4 turn 2   val -2
+        priority:                   7           2**31 - 1   9           4           2**31 - 1
+        vLLM admits:                g4 turn 2   g7 turn 1   g9 turn 1   val -1      val -2
+                                    ^ g4 started before g7
     """
     routing_session_id: str
     arrival_time: float
