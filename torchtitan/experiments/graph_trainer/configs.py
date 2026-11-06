@@ -10,6 +10,7 @@ from typing import Literal
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.experiments.ce_collectives.configs import CECollectivesConfig
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
@@ -177,6 +178,17 @@ class PagedStashConfig:
 class GraphTrainerCompileConfig:
     enable_async_tensor_parallel: bool = False
     """Whether to pipeline tensor-parallel collectives with matrix multiplications."""
+
+    ce_collectives: CECollectivesConfig | None = None
+    """Opt-in copy-engine collectives for SimpleFSDP, applied after bucketing.
+
+    All-gather requires one multicast-capable NVLink domain. Reduce-scatter
+    additionally requires numerics_changing_optim because its accumulation
+    order can differ from NCCL. None keeps the original collectives.
+    """
+
+    ce_workspace_size_mib: int = 128
+    """Shared CE exchange storage per FSDP group; larger chunks reduce overhead."""
 
     extra_passes: list[str] = field(default_factory=list)
     """Names of graph passes registered with ``register_graph_pass`` to apply,

@@ -105,6 +105,13 @@ def compute_config_fingerprint(
         "compile:full_recompute_save_ops:"
         f"{compile_config.full_recompute_save_ops}\n".encode()
     )
+    if compile_config.ce_collectives is not None:
+        h.update(
+            f"compile:ce_collectives:{dataclasses.asdict(compile_config.ce_collectives)}\n".encode()
+        )
+        h.update(
+            f"compile:ce_workspace_size_mib:{compile_config.ce_workspace_size_mib}\n".encode()
+        )
     h.update(
         f"compile:ep_overlap:enabled:{compile_config.ep_overlap.enabled}\n".encode()
     )
@@ -138,6 +145,8 @@ def _register_coor_ops() -> None:
     _register_distributed_opaque_types()
     from torch.distributed._ops import device_mesh as _dm_ops  # noqa: F401
     from torch.distributed.tensor import _collective_utils  # noqa: F401
+
+    from torchtitan.experiments.graph_trainer import ce_collectives  # noqa: F401
 
 
 def _validate_config_fingerprint(
