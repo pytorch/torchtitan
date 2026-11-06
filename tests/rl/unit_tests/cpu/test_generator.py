@@ -959,9 +959,3 @@ def test_cuda_graph_rejects_nonpositive_max_num_seqs():
             max_model_len=4096,
             expert_sequence_parallel_size=1,
         )
-
-
-def test_inference_parallelism_disables_dense_sequence_parallelism():
-    parallelism = InferenceParallelismConfig(tensor_parallel_degree=4)
-
-    assert not parallelism.to_training().enable_sequence_parallel
