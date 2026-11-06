@@ -19,6 +19,7 @@ areas:
       - torchtitan_recipes/tests/rl/
       - tests/rl/
       - scripts/rl/
+      - torchtitan_verifiers_
     reviewers: [felipemello1, pzhan9, wwwjn]
 
   - name: rl_attention

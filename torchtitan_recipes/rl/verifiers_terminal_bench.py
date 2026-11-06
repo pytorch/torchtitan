@@ -52,13 +52,8 @@ from torchtitan.rl.examples.verifiers.rollouter import (
     VerifiersRollouter,
 )
 from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
-    register_harness_alias,
     TerminalBenchTerminusHarnessConfig,
 )
-from torchtitan.rl.examples.verifiers.terminal_bench.taskset import (
-    TerminalTasksetConfig,
-)
-from torchtitan.rl.examples.verifiers.worker_setup import register_local_taskset_alias
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
@@ -80,6 +75,7 @@ from torchtitan.rl.trainer.losses import DAPOLoss, GRPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
 from verifiers.v1.configs.agent import TimeoutConfig as AgentTimeoutConfig
 from verifiers.v1.tasksets.harbor import HarborEnvConfig
+from verifiers.v1.utils.loaders import taskset_config_type
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
@@ -90,33 +86,37 @@ def terminal_bench_rollouter_config(
     train_dataset: str,
     validation_dataset: str,
     *,
+    taskset_id: str,
     max_context_length: int,
     max_turns: int,
     max_concurrent_rollouts: int,
-    taskset_config_cls: type[TerminalTasksetConfig] = TerminalTasksetConfig,
 ) -> VerifiersRollouter.Config:
     """Build the Terminal-Bench rollouter: Harbor datasets by id, local Docker, in-sandbox Terminus-2.
 
     Args:
         train_dataset: Harbor dataset id for training, e.g. ``"local/tmax@v1"``.
         validation_dataset: Harbor dataset id for validation; must differ from ``train_dataset``.
+        taskset_id: Verifiers id of the top-level package that exports the taskset and the
+            Env. This repo's recipes pass ``"torchtitan_verifiers_terminal_bench"``; a
+            launcher outside this repo passes its own package. The package's ``__all__``
+            exports exactly one Taskset (``TerminalTaskset`` or a subclass) and one Env
+            (e.g. ``HarborEnv``). The taskset config class is the one that Taskset declares.
         max_context_length: The generator's sequence length; the generation server caps
             each rollout at it.
         max_turns: The agent turn limit, which Verifiers enforces.
         max_concurrent_rollouts: Sizes the env server. Set it to the number of rollouts
             the controller keeps in flight, or the excess queues in the env server and
             the generators idle.
-        taskset_config_cls: ``TerminalTasksetConfig`` or a subclass. Every env-server worker
-            imports its module, which must export a Taskset bound to it and an Env (e.g.
-            ``HarborEnv``), like ``terminal_bench/taskset.py``. Runtime and harness are
-            fields of the returned config.
+
+    The harness is the example's Terminus-2 (``torchtitan_verifiers_terminal_bench``).
+    Runtime and harness options are fields of the returned config.
     """
     if train_dataset == validation_dataset:
         raise ValueError(
             "Training and Terminal-Bench evaluation must use different datasets"
         )
 
-    taskset_id = register_local_taskset_alias(taskset_config_cls.__module__)
+    taskset_config_cls = taskset_config_type(taskset_id)
     return VerifiersRollouter.Config(
         training_dataloader=IterableRolloutDataLoader.Config(
             dataset=VerifiersTaskDataset.Config(
@@ -138,7 +138,7 @@ def terminal_bench_rollouter_config(
             environment=HarborEnvConfig(
                 agent=vf.AgentConfig(
                     harness=TerminalBenchTerminusHarnessConfig(
-                        id=register_harness_alias(), version="0.22.0"
+                        id="torchtitan_verifiers_terminal_bench", version="0.22.0"
                     ),
                     runtime=vf.DockerConfig(),
                     max_turns=max_turns,
@@ -207,6 +207,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
         rollouter=terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
+            taskset_id="torchtitan_verifiers_terminal_bench",
             max_context_length=max_context_length,
             max_turns=120,
             max_concurrent_rollouts=async_loop.max_active_rollout_groups
@@ -345,6 +346,7 @@ def rl_dapo_qwen35_35b_a3b_terminal_bench_dist_moe() -> Controller.Config:
         rollouter=terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
+            taskset_id="torchtitan_verifiers_terminal_bench",
             max_context_length=max_context_length,
             max_turns=120,
             max_concurrent_rollouts=async_loop.max_active_rollout_groups
@@ -475,6 +477,7 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
         rollouter=terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
+            taskset_id="torchtitan_verifiers_terminal_bench",
             max_context_length=max_context_length,
             max_turns=8,
             max_concurrent_rollouts=async_loop.max_active_rollout_groups

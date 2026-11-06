@@ -139,8 +139,9 @@ python -m torchtitan.rl.examples.verifiers.terminal_bench.prepare_tmax \
 - Without Harbor Hub access, pre-populate `~/.cache/harbor` with an exported task tree.
 - To use other datasets, change the ids passed to `terminal_bench_rollouter_config` in the recipe file.
   The training and validation datasets must differ. For another sandbox or agent, set
-  `verifiers_env_server.environment.agent.runtime` or `.harness` on the returned config;
-  for another env, pass a `taskset_config_cls` defined in your own module.
+  `verifiers_env_server.environment.agent.runtime` or `.harness` on the returned config.
+  For another env, pass `taskset_id`: the name of your own top-level package that exports
+  a `TerminalTaskset` subclass and an Env (e.g. `HarborEnv`) in `__all__`.
 
 ## If every reward is 0
 

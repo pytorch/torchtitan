@@ -27,9 +27,8 @@ package and dependencies: [`dapo_math/`](./dapo_math) (single-turn math) and
 2. [`env_server.py`](./env_server.py) currently spawns and owns the Verifiers server as
    a separate local process on the TitanRL controller host. The configured
    Verifiers runtime is independent: for example, `SubprocessConfig` or
-   `DockerConfig` for the agent. The server and each of its pool workers first run
-   [`worker_setup.py`](./worker_setup.py). Every worker imports that module, so it
-   must not import torch.
+   `DockerConfig` for the agent. Each pool worker imports the taskset and harness by
+   id (below), so the modules it imports must not import torch.
 3. [`generation_server.py`](./generation_server.py) exposes TitanRL's `GenerateFn` through the
    HTTP token-generation protocol expected by Verifiers. It also retains the
    policy-version span and metrics that are absent from Verifiers traces.
@@ -47,17 +46,41 @@ actor. That would require routable ZMQ and generation-server addresses plus
 actor-owned startup and shutdown; the current integration does not provide
 that placement mode.
 
+## Taskset ids
+
+Verifiers imports a taskset, harness or env by the name of a top-level package. It
+takes the one subclass of each base class that the package lists in `__all__`. Each
+env-server worker resolves the ids again in a fresh process, so the package must be
+importable there:
+
+```text
+id "torchtitan_verifiers_terminal_bench" -> import torchtitan_verifiers_terminal_bench
+                                            Taskset, Harness and Env from its __all__
+id "torchtitan_verifiers_dapo_math"      -> import torchtitan_verifiers_dapo_math
+                                            Taskset from its __all__
+```
+
+The two examples keep their code in this folder and re-export it from those repo-root
+packages. TorchTitan ships them (`pyproject.toml`), so they need no install step. An
+editable install (`pip install -e .`) lists top-level packages when it runs: re-run it
+once after pulling a new one.
+
 ## Add an experiment
 
+For your own env, ship a top-level package in your own project, list its `Taskset`
+(and its `Env` or `Harness`, if any) in `__all__`, and pass the package name as the id.
+An in-repo example ships its package at the repo root, as `torchtitan_verifiers_<name>/`:
+`pyproject.toml`, the labeler and the reviewer routing already match that prefix.
 Create one package per task, with its own dependency list:
 
 ```text
-verifiers/
+torchtitan_verifiers_my_task/
+  __init__.py          # __all__ = ["MyTaskset"], re-exported from my_task/data.py
+torchtitan/rl/examples/verifiers/
   data.py
   env_server.py
   generation_server.py
   rollouter.py
-  worker_setup.py
   my_task/
     __init__.py
     recipe module
@@ -67,7 +90,7 @@ verifiers/
 ```
 
 1. In `data.py`, define the Verifiers `Taskset` and `TasksetConfig`.
-2. In `rollouter.py`, put that config in
+2. In `rollouter.py`, put that config, with `id="torchtitan_verifiers_my_task"`, in
    `VerifiersTaskDataset.Config.verifiers_taskset`. Configure the agent,
    harness, runtime, and worker pool, but leave
    `verifiers_env_server.environment.taskset` unset; `VerifiersRollouter`

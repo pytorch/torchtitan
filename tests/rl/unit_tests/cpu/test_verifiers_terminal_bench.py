@@ -7,7 +7,6 @@
 """CPU checks for the Terminal-Bench Verifiers recipe."""
 
 import asyncio
-import importlib
 import itertools
 import pickle
 import subprocess
@@ -41,23 +40,30 @@ from verifiers.v1.runtimes import ProgramResult
 from verifiers.v1.serve import env_config_data
 from verifiers.v1.tasksets.harbor import HarborEnvConfig, taskset as harbor_taskset
 from verifiers.v1.utils.compile import resolve_runtime_config
-from verifiers.v1.utils.loaders import load_harness, resolve_env_config
+from verifiers.v1.utils.loaders import (
+    environment_class,
+    load_harness,
+    resolve_env_config,
+)
 
 TRAIN_DATASET = "local/tmax@v1"
 EVAL_DATASET = "terminal-bench/terminal-bench-2-1"
 MAX_CONTEXT_LENGTH = 32768
 MAX_TURNS = 64
 MAX_CONCURRENT_ROLLOUTS = 64
+TASKSET_ID = "torchtitan_verifiers_terminal_bench"
 
 
-def _rollouter_config(train_dataset: str, validation_dataset: str, **options):
+def _rollouter_config(
+    train_dataset: str, validation_dataset: str, taskset_id: str = TASKSET_ID
+):
     return terminal_bench_rollouter_config(
         train_dataset,
         validation_dataset,
+        taskset_id=taskset_id,
         max_context_length=MAX_CONTEXT_LENGTH,
         max_turns=MAX_TURNS,
         max_concurrent_rollouts=MAX_CONCURRENT_ROLLOUTS,
-        **options,
     )
 
 
@@ -235,7 +241,6 @@ def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
     assert environment.taskset == config.training_dataloader.dataset.verifiers_taskset
     assert config.training_dataloader.dataset.verifiers_taskset.dataset == TRAIN_DATASET
     assert config.validation_dataset.verifiers_taskset.dataset == EVAL_DATASET
-    assert config.verifiers_env_server.local_taskset_module == taskset.__name__
     worker_config = resolve_env_config(env_config_data(environment))
     assert worker_config.agent.harness == environment.agent.harness
     assert isinstance(
@@ -243,33 +248,45 @@ def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
     )
 
 
-def test_taskset_config_cls_module_is_the_env_server_plugin(
-    tmp_path, monkeypatch
-) -> None:
-    """The env server's plugin module is the module of the taskset class passed in."""
-    (tmp_path / "caller_pkg").mkdir()
-    (tmp_path / "caller_pkg" / "__init__.py").write_text("")
-    (tmp_path / "caller_pkg" / "terminal_bench.py").write_text(
+def test_taskset_id_picks_the_taskset_config_and_env(tmp_path, monkeypatch) -> None:
+    """A caller's own top-level package, passed as ``taskset_id``, supplies the taskset and
+    the env. The harness stays the example's Terminus-2."""
+    (tmp_path / "caller_terminal_bench").mkdir()
+    (tmp_path / "caller_terminal_bench" / "__init__.py").write_text(
+        "import verifiers.v1 as vf\n"
+        "from verifiers.v1.tasksets.harbor import HarborEnv, HarborTask\n"
         "from torchtitan.rl.examples.verifiers.terminal_bench.taskset import (\n"
+        "    TerminalTaskset,\n"
         "    TerminalTasksetConfig,\n"
         ")\n\n\n"
-        "class RemoteSandboxTasksetConfig(TerminalTasksetConfig):\n"
-        "    pass\n"
+        "class CallerTasksetConfig(TerminalTasksetConfig):\n"
+        "    pass\n\n\n"
+        "class CallerTaskset(TerminalTaskset, vf.Taskset[HarborTask, CallerTasksetConfig]):\n"
+        "    config: CallerTasksetConfig\n\n\n"
+        "class CallerEnv(HarborEnv):\n"
+        "    pass\n\n\n"
+        "__all__ = ['CallerEnv', 'CallerTaskset']\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
-    caller = importlib.import_module("caller_pkg.terminal_bench")
-    rollouter = _rollouter_config(
-        TRAIN_DATASET,
-        EVAL_DATASET,
-        taskset_config_cls=caller.RemoteSandboxTasksetConfig,
+    config = _rollouter_config(
+        TRAIN_DATASET, EVAL_DATASET, taskset_id="caller_terminal_bench"
     )
-    assert rollouter.verifiers_env_server.local_taskset_module == caller.__name__
+
+    worker_config = resolve_env_config(
+        env_config_data(config.verifiers_env_server.environment)
+    )
+    assert type(worker_config.taskset).__name__ == "CallerTasksetConfig"
+    assert environment_class(worker_config.taskset.id).__name__ == "CallerEnv"
+    assert worker_config.agent.harness.id == "torchtitan_verifiers_terminal_bench"
+    assert isinstance(
+        load_harness(worker_config.agent.harness), TerminalBenchTerminusHarness
+    )
 
 
 def test_env_server_workers_skip_the_trainer_imports(monkeypatch) -> None:
     """A pool worker loads the broker's ``__main__``, runs the pickled ``log_setup``, then
-    resolves the env config, whose taskset id is the local alias. It must find the taskset
-    and the harness without importing torch, vLLM or Monarch.
+    resolves the env config, whose taskset id names the repo-root plugin package. It must
+    find the taskset and the harness without importing torch, vLLM or Monarch.
     """
     captured = {}
 
@@ -287,7 +304,6 @@ def test_env_server_workers_skip_the_trainer_imports(monkeypatch) -> None:
     env_server._run_env_server_process(
         environment=env_config_data(config.environment),
         serve=config.serve,
-        local_taskset_module=config.local_taskset_module,
         address_queue=None,
         death_pipe=None,
     )
