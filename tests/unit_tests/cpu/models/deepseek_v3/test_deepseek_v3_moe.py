@@ -118,6 +118,41 @@ class TestDeepSeekV3Router(unittest.TestCase):
             torch.tensor([[0]]),
         )
 
+    def test_compiled_selection_breaks_ties_toward_lower_ids(self):
+        router = DeepSeekV3Router.Config(
+            num_experts=8,
+            gate=HiMidLoLinear.Config(in_features=4, out_features=8),
+            score_func=Sigmoid.Config(),
+            num_expert_groups=4,
+            num_limited_groups=2,
+            top_k=2,
+        ).build()
+        # Groups 0-2 tie at 1.0, so groups 0 and 1 are kept; experts 0 and 1 tie at 0.5.
+        scores_TE = torch.tensor([[0.5, 0.5, 0.25, 0.75, 0.5, 0.5, 0.125, 0.125]])
+
+        with patch("torch.compiler.is_compiling", return_value=True):
+            topk_ids_TK = router._select_experts(scores_TE)
+
+        torch.testing.assert_close(topk_ids_TK, torch.tensor([[3, 0]]))
+
+    def test_rejects_group_limits_that_would_repeat_ids(self):
+        # (num_expert_groups, num_limited_groups, top_k, error) for 16 experts.
+        for groups, kept, top_k, error in (
+            (4, 5, 4, "must be <= num_expert_groups"),
+            (8, 1, 4, "must be >= top_k"),
+            (None, 2, 4, "num_expert_groups is not"),
+        ):
+            with self.subTest(groups=groups, kept=kept, top_k=top_k):
+                with self.assertRaisesRegex(ValueError, error):
+                    DeepSeekV3Router.Config(
+                        num_experts=16,
+                        gate=HiMidLoLinear.Config(in_features=4, out_features=16),
+                        score_func=Sigmoid.Config(),
+                        num_expert_groups=groups,
+                        num_limited_groups=kept,
+                        top_k=top_k,
+                    )
+
     def test_model_config_uses_deepseek_v3_router(self):
         config = build_model_config(
             "236B", seq_len=2048, parallelism=ParallelismConfig()
