@@ -1,0 +1,48 @@
+{
+ "id": "G-45",
+ "title": "Cross-module (forward): layers.*, ffn_norm: add + _fused_rms_norm",
+ "phases": [
+  "forward"
+ ],
+ "scope": [
+  "cross-module"
+ ],
+ "fusion_kind": "normalization + pointwise",
+ "location": {
+  "module_fqn_pattern": "layers.*, layers.*.ffn_norm",
+  "graph_nodes_example": [
+   "add_2",
+   "_fused_rms_norm_3"
+  ],
+  "source": "torchtitan/torchtitan/models/qwen3/model.py:61; torchtitan/torchtitan/models/common/nn_modules.py:155"
+ },
+ "ops": [
+  "aten._fused_rms_norm.default",
+  "aten.add.Tensor"
+ ],
+ "kernels_per_instance": 2.0,
+ "instances_per_step": 48,
+ "shapes_dtypes": "bfloat16[32768, 2048], float32[32768, 1]",
+ "external_bytes_per_instance": 537001984,
+ "measured_us_per_instance": 95.89,
+ "measured_ms_total": 4.603,
+ "ideal_us_per_instance": 77.55,
+ "ideal_ms_total": 3.722,
+ "gap_ms_total": 0.881,
+ "gap_pct_of_step": 0.046,
+ "bitwise_tier": "T1",
+ "bitwise_notes": "contains reductions (_fused_rms_norm): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+ "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+ "evidence": "measured",
+ "how_found": "XM-max component: L1 components of one phase/layer/stage joined across module FQNs (barrier-free edges) (candidate #72, XM-max)",
+ "overlaps_with": [
+  "G-30"
+ ],
+ "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.9 ms",
+ "lift": {
+  "pass_name": "lift_fusion_region_g45",
+  "num_sites": 96,
+  "in_default_selection": true,
+  "not_liftable_reason": ""
+ }
+}

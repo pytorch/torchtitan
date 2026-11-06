@@ -1,0 +1,77 @@
+{
+ "id": "G-90",
+ "title": "Intra-module (forward), hand-built per chunk: loss: _to_copy + _log_softmax + nll_loss_forward + div",
+ "derived_from": "G-09",
+ "instances_per_step": 8,
+ "instances": [
+  [
+   "_to_copy_675",
+   "_log_softmax",
+   "nll_loss_forward",
+   "getitem_2754",
+   "getitem_2755",
+   "div_144"
+  ],
+  [
+   "_to_copy_679",
+   "_log_softmax_1",
+   "nll_loss_forward_1",
+   "getitem_2756",
+   "getitem_2757",
+   "div_146"
+  ],
+  [
+   "_to_copy_683",
+   "_log_softmax_2",
+   "nll_loss_forward_2",
+   "getitem_2758",
+   "getitem_2759",
+   "div_148"
+  ],
+  [
+   "_to_copy_687",
+   "_log_softmax_3",
+   "nll_loss_forward_3",
+   "getitem_2760",
+   "getitem_2761",
+   "div_150"
+  ],
+  [
+   "_to_copy_691",
+   "_log_softmax_4",
+   "nll_loss_forward_4",
+   "getitem_2762",
+   "getitem_2763",
+   "div_152"
+  ],
+  [
+   "_to_copy_695",
+   "_log_softmax_5",
+   "nll_loss_forward_5",
+   "getitem_2764",
+   "getitem_2765",
+   "div_154"
+  ],
+  [
+   "_to_copy_699",
+   "_log_softmax_6",
+   "nll_loss_forward_6",
+   "getitem_2766",
+   "getitem_2767",
+   "div_156"
+  ],
+  [
+   "_to_copy_703",
+   "_log_softmax_7",
+   "nll_loss_forward_7",
+   "getitem_2768",
+   "getitem_2769",
+   "div_158"
+  ]
+ ],
+ "phases": [
+  "forward"
+ ],
+ "bitwise_tier": "T1",
+ "notes": "G-09 lifted per chunk; G-09 measured 16.34 ms/step for 8 chunks (2.04 ms each), ideal 4.33 ms"
+}

@@ -1,0 +1,1 @@
+lift_fusion_region_g01,lift_fusion_region_g02,lift_fusion_region_g07,lift_fusion_region_g06,lift_fusion_region_g17,lift_fusion_region_g19

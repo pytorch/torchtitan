@@ -1,0 +1,68 @@
+{
+ "id": "G-02",
+ "title": "Cross-module (forward): attention.k_norm, attention.q_norm, attention.qkv_linear, attention.rope: clone + _fused_rms_norm + index + _to_copy + mul + neg + cat + add",
+ "phases": [
+  "forward"
+ ],
+ "scope": [
+  "cross-module"
+ ],
+ "fusion_kind": "normalization + pointwise",
+ "location": {
+  "module_fqn_pattern": "layers.*.attention.k_norm, layers.*.attention.q_norm, layers.*.attention.qkv_linear, layers.*.attention.rope",
+  "graph_nodes_example": [
+   "clone",
+   "clone_1",
+   "clone_2",
+   "_fused_rms_norm_1",
+   "_fused_rms_norm_2",
+   "index",
+   "_to_copy_5",
+   "mul",
+   "neg",
+   "cat",
+   "mul_1",
+   "add"
+  ],
+  "source": "torchtitan/torchtitan/models/common/attention/attention.py:194-196; torchtitan/torchtitan/models/common/nn_modules.py:155; torchtitan/torchtitan/models/common/rope.py:170-171"
+ },
+ "ops": [
+  "aten._fused_rms_norm.default",
+  "aten._to_copy.default",
+  "aten.add.Tensor",
+  "aten.cat.default",
+  "aten.clone.default",
+  "aten.index.Tensor",
+  "aten.mul.Tensor",
+  "aten.neg.default"
+ ],
+ "kernels_per_instance": 20.0,
+ "instances_per_step": 48,
+ "shapes_dtypes": "float32[32768, 32, 128], float32[32768, 4, 128], bfloat16[32768, 4, 128], bfloat16[32768, 32, 128]",
+ "external_bytes_per_instance": 1317797888,
+ "measured_us_per_instance": 2307.56,
+ "measured_ms_total": 110.763,
+ "ideal_us_per_instance": 190.3,
+ "ideal_ms_total": 9.134,
+ "gap_ms_total": 101.629,
+ "gap_pct_of_step": 5.345,
+ "bitwise_tier": "T1",
+ "bitwise_notes": "contains reductions (_fused_rms_norm): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+ "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+ "evidence": "measured",
+ "how_found": "XM-max component: L1 components of one phase/layer/stage joined across module FQNs (barrier-free edges) (candidate #1, XM-max)",
+ "overlaps_with": [
+  "G-04",
+  "G-10",
+  "G-21",
+  "G-53",
+  "G-61"
+ ],
+ "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 4.7 ms",
+ "lift": {
+  "pass_name": "lift_fusion_region_g02",
+  "num_sites": 48,
+  "in_default_selection": true,
+  "not_liftable_reason": ""
+ }
+}

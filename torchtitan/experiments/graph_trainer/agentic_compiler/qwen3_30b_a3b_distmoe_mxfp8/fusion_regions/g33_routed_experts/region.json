@@ -1,0 +1,46 @@
+{
+ "id": "G-33",
+ "title": "Intra-module (forward): feed_forward.routed_experts: _to_copy + dist_moe.prepare_mxfp8_weight",
+ "phases": [
+  "forward"
+ ],
+ "scope": [
+  "intra-module"
+ ],
+ "fusion_kind": "pointwise chain",
+ "location": {
+  "module_fqn_pattern": "layers.*.feed_forward.routed_experts",
+  "graph_nodes_example": [
+   "_to_copy_13",
+   "prepare_mxfp8_weight"
+  ],
+  "source": "torchtitan/torchtitan/experiments/graph_trainer/simple_fsdp.py:268-366"
+ },
+ "ops": [
+  "aten._to_copy.default",
+  "dist_moe.prepare_mxfp8_weight.default"
+ ],
+ "kernels_per_instance": 2.0,
+ "instances_per_step": 48,
+ "shapes_dtypes": "bfloat16[16, 2, 768, 2048], float8_e4m3fn[16, 1536, 2048], float8_e8m0fnu[24576, 64], float8_e8m0fnu[32768, 48]",
+ "external_bytes_per_instance": 264241152,
+ "measured_us_per_instance": 81.97,
+ "measured_ms_total": 3.935,
+ "ideal_us_per_instance": 38.16,
+ "ideal_ms_total": 1.832,
+ "gap_ms_total": 2.103,
+ "gap_pct_of_step": 0.111,
+ "bitwise_tier": "T0",
+ "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+ "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+ "evidence": "measured",
+ "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #58, L1)",
+ "overlaps_with": [],
+ "notes": "",
+ "lift": {
+  "pass_name": "lift_fusion_region_g33",
+  "num_sites": 48,
+  "in_default_selection": true,
+  "not_liftable_reason": ""
+ }
+}

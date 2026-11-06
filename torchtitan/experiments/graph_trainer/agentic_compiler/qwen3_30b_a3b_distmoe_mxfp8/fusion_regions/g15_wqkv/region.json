@@ -1,0 +1,51 @@
+{
+ "id": "G-15",
+ "title": "T3 GEMM epilogue (backward): attention.qkv_linear.wqkv, attention_norm: _scaled_mm_v2 + _fused_rms_norm_backward + add",
+ "phases": [
+  "backward"
+ ],
+ "scope": [
+  "cross-module"
+ ],
+ "fusion_kind": "GEMM epilogue",
+ "location": {
+  "module_fqn_pattern": "layers.*.attention.qkv_linear.wqkv, layers.*.attention_norm",
+  "graph_nodes_example": [
+   "_scaled_mm_v2_98",
+   "_fused_rms_norm_backward_4",
+   "add_257"
+  ],
+  "source": "torchtitan/torchtitan/quantization/mxfp8/linear.py:129; torchtitan/torchtitan/models/common/nn_modules.py:155"
+ },
+ "ops": [
+  "aten._fused_rms_norm_backward.default",
+  "aten._scaled_mm_v2.default",
+  "aten.add.Tensor"
+ ],
+ "kernels_per_instance": 4.0,
+ "instances_per_step": 48,
+ "shapes_dtypes": "bfloat16[32768, 2048], bfloat16[2048]",
+ "external_bytes_per_instance": 737550336,
+ "measured_us_per_instance": 320.9,
+ "measured_ms_total": 15.403,
+ "ideal_us_per_instance": 174.61,
+ "ideal_ms_total": 8.381,
+ "gap_ms_total": 7.022,
+ "gap_pct_of_step": 0.369,
+ "bitwise_tier": "T3",
+ "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+ "blockers": "needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue).",
+ "evidence": "measured",
+ "how_found": "T3 epilogue: L1 component consuming a GEMM output (candidate #30, T3-epi)",
+ "overlaps_with": [
+  "G-34",
+  "G-51"
+ ],
+ "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 4.7 ms | GEMM _scaled_mm_v2_98: 180.5 us measured vs 174.6 us flops-ideal (GEMM-own gap 0.3 ms of this region's gap); glue part 140.4 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 6.7 ms. | estimated: ideal uses flops/peak for the GEMM",
+ "lift": {
+  "pass_name": "lift_fusion_region_g15",
+  "num_sites": 48,
+  "in_default_selection": true,
+  "not_liftable_reason": ""
+ }
+}
