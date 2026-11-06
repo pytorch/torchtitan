@@ -46,6 +46,10 @@ class SamplingConfig:
             )
 
 
+# Overlapped validation group ids count down from here; the engine schedules them after all training.
+OVERLAPPED_VALIDATION_FIRST_GROUP_ID = -1_000_000
+
+
 @dataclass(kw_only=True, slots=True)
 class EngineRequest:
     """One `generate` call's request for the engine, awaiting admission; what a `LoopDecision` broadcasts."""
@@ -54,9 +58,11 @@ class EngineRequest:
     prompt_token_ids: list[int]  # [prompt_tokens]
     sampling: SamplingConfig
     group_id: int
-    """Rollout group id. Sets the vLLM priority: lower is admitted first and preempted last.
-    Training ids grow as groups start. Validation ids count down (-1, -2, ...) and restart every run,
-    so all validation gets priority -1: it runs in arrival order (not newest first), before training.
+    """Rollout group id. Sets the vLLM priority (`_vllm_priority` in `vllm/engine.py`): lower is
+    admitted first and preempted last. Training ids grow as groups start. Validation ids count
+    down and restart every pass, so a pass runs in arrival order (not newest first):
+    - blocking validation: -1, -2, ... -> priority -1, before training;
+    - overlapped validation: -1_000_000, -1_000_001, ... -> priority 2**31 - 1, after training.
 
         waiting, in arrival order:  g7 turn 1   g9 turn 1   g4 turn 2   val -1      val -2
         priority:                   7           9           4           -1          -1

@@ -30,6 +30,7 @@ from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import (
     EngineRequest,
     FinishedRequest,
+    OVERLAPPED_VALIDATION_FIRST_GROUP_ID,
     RequestMetricsInputs,
     SamplingConfig,
 )
@@ -273,9 +274,8 @@ class VLLMEngine(GenerationEngine):
         engine_kwargs["max_num_seqs"] = max_num_seqs
         if max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
-        # Smaller `priority` runs first and is preempted last; we pass `EngineRequest.group_id`
-        # (-1 for all validation), so older groups have higher priority (see its docstring).
-        # TODO: validation (priority -1) runs before training. Revisit once validation overlaps training.
+        # Smaller `priority` runs first and is preempted last; `_vllm_priority` (below) maps each
+        # group id to one.
         engine_kwargs["scheduling_policy"] = "priority"
         # Which sliding-window / Mamba (GDN) state blocks are hashed into the prefix
         # cache; full-attention groups hash every block regardless.
@@ -374,7 +374,7 @@ class VLLMEngine(GenerationEngine):
                     prompt=engine_input,
                     params=_build_sampling_params(request.sampling),
                     arrival_time=request.arrival_time,
-                    priority=max(request.group_id, -1),
+                    priority=_vllm_priority(request.group_id),
                 )
                 if self._session_kv_holder is not None:
                     self._session_kv_holder.track(
@@ -479,6 +479,20 @@ def _build_sampling_params(sampling: SamplingConfig) -> SamplingParams:
         #   (start_token, version) boundaries; today we keep only the per-turn min/max.
         output_kind=RequestOutputKind.FINAL_ONLY,
     )
+
+
+def _vllm_priority(group_id: int) -> int:
+    """vLLM request priority for a rollout group id: lower is admitted first and preempted last.
+
+    Example:
+        _vllm_priority(7)           # 7: training, older groups first
+        _vllm_priority(-3)          # -1: blocking validation, before training, in arrival order
+        _vllm_priority(-1_000_003)  # 2**31 - 1: overlapped validation, after all training
+    """
+    if group_id <= OVERLAPPED_VALIDATION_FIRST_GROUP_ID:
+        # 2**31 - 1 (int32 max) sorts after every training group id.
+        return 2**31 - 1
+    return max(group_id, -1)
 
 
 def _finished_request(request_output: RequestOutput) -> FinishedRequest:

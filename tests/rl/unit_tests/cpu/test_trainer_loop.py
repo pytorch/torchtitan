@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from torchtitan.rl.actors.system import TrainerHandle
-from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.controller.controller import Controller, ValidationConfig
 
 TRAINER_PUSH_KEY = "timing/weight_sync/trainer_push_model_state_dict"
 GENERATOR_PULL_KEY = "timing/weight_sync/generator_pull_model_state_dict"
@@ -50,7 +50,7 @@ class _Endpoint:
         return await self.call(*args, **kwargs)
 
 
-def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
+def fake_controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
     """A controller with only the state `_trainer_loop` reads; each actor call appends to `events`."""
     version = 0
 
@@ -84,6 +84,7 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
             target_offpolicy_steps=1,
             max_offpolicy_steps=None,
             num_prompts_per_train_step=5,
+            validation=ValidationConfig(),
         )
     )
     controller.start_step = 0
@@ -152,7 +153,7 @@ def _run(controller: Controller, *, num_training_steps: int) -> None:
 
 def test_push_then_pull_then_release_after_each_optimizer_step() -> None:
     events: list[str] = []
-    _run(_controller(events), num_training_steps=2)
+    _run(fake_controller(events), num_training_steps=2)
 
     assert events == [
         "fwd_bwd 1",
@@ -179,7 +180,7 @@ def test_optimizer_step_waits_for_the_previous_push() -> None:
             await asyncio.sleep(0)
 
     events: list[str] = []
-    _run(_controller(events, on_push=slow_push), num_training_steps=2)
+    _run(fake_controller(events, on_push=slow_push), num_training_steps=2)
 
     # Forward/backward 2 overlaps push 1; optimizer step 2 waits for it to finish.
     assert events.index("fwd_bwd 2") < events.index("push end")
@@ -192,7 +193,7 @@ def test_next_push_waits_for_the_previous_pull() -> None:
             await asyncio.sleep(0)
 
     events: list[str] = []
-    _run(_controller(events, on_pull=slow_pull), num_training_steps=2)
+    _run(fake_controller(events, on_pull=slow_pull), num_training_steps=2)
 
     # Push 2 must not overwrite the TorchStore key while pull 1 reads it.
     second_push = [i for i, event in enumerate(events) if event == "push start"][1]
@@ -201,13 +202,13 @@ def test_next_push_waits_for_the_previous_pull() -> None:
 
 def test_last_push_and_pull_finish_before_the_loop_returns() -> None:
     events: list[str] = []
-    _run(_controller(events), num_training_steps=1)
+    _run(fake_controller(events), num_training_steps=1)
 
     assert events[-3:] == ["push end", "pull 1", "release 5 trained"]
 
 
 def test_push_and_pull_times_are_logged_one_step_late() -> None:
-    controller = _controller([])
+    controller = fake_controller([])
     _run(controller, num_training_steps=2)
 
     first, second = controller.logged_metrics
@@ -223,6 +224,6 @@ def test_push_failure_fails_the_loop() -> None:
     async def failing_push():
         raise RuntimeError("push failed")
 
-    controller = _controller([], on_push=failing_push)
+    controller = fake_controller([], on_push=failing_push)
     with pytest.raises(RuntimeError, match="push failed"):
         _run(controller, num_training_steps=2)

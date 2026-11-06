@@ -754,18 +754,18 @@ class TestIsValidationSwitch:
     def test_is_validation_uses_validation_allow_list_and_prefix(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        logger_inst = self._logger(
-            console_log_keys_validation=["validation/reward/_mean"]
-        )
+        # Default validation allow list; compute_rollout_metrics emits "validation_reward".
+        logger_inst = self._logger()
         records = [
             m.Metric("loss/mean", m.NoReduce(0.5)),
-            m.Metric("validation/reward/_mean", m.NoReduce(1.0)),
+            m.Metric("validation_reward", m.SummaryStats.from_list([0.0, 1.0])),
         ]
         with caplog.at_level(logging.INFO):
             logger_inst.log(0, records, is_validation=True)
         msg = next(r.getMessage() for r in caplog.records if "Step:" in r.getMessage())
         assert "Validation | Step:  0" in msg
-        assert "validation/reward/_mean: 1.0" in msg
+        assert "validation_reward/_mean: 0.5" in msg
+        assert "validation_reward/_max: 1.0" in msg
         assert "loss/mean" not in msg
 
     def test_empty_train_list_silences_console(
