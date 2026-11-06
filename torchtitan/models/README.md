@@ -32,7 +32,7 @@ The folder should be organized as follows
 - `sharding.py`
   - Define declarative constructors that return the `ShardingConfig` (or `SpmdType`) of the model's own components. TP, SP, EP and inner-attention local SPMD regions are expressed this way instead of a runtime `parallelize_module` plan.
   - Reuse the shared constructors in `torchtitan/models/common/decoder_sharding.py`, `moe/sharding.py` and `vision_encoder_sharding.py` (`token_embedding_sharding_config`, `norm_sharding_config`, `residual_activation_placement`, `colwise_sharding_config`, `rowwise_sharding_config`, `moe_sharding_config`, ...) where possible; skip this file when they cover the whole model.
-  - Declare the mesh axes in canonical outer-to-inner SPMD order: `(dp, cp, tp)` for dense (attention/MLP/norm/embed/lm_head) and `(dp_replicate, edp_shard, ep)` for sparse (MoE expert weights). `Module._parallelize` resolves the mesh from the declared axes.
+  - Declare the mesh axes in canonical outer-to-inner SPMD order: `(dp, cp, tp)` for dense (attention/MLP/norm/embed/lm_head) and `(edp_replicate, edp_shard, ep)` for sparse (MoE expert weights). `Module._parallelize` resolves the mesh from the declared axes.
 - `model.py`
   - `BaseModel.parallelize()` applies declarative model parallelism, activation checkpointing, and FSDP/HSDP in order.
   - Override `parallelize()` only when the model needs a different lifecycle order, and override `_apply_fsdp()` when it has a model-family-specific FSDP structure.

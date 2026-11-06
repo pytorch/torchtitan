@@ -26,7 +26,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
+from torchtitan.distributed.fsdp import apply_fsdp_to_decoder, resolve_sparse_fsdp_mesh
 from torchtitan.distributed.parallelism_context import (
     DistributedTopology,
     MeshAxisName,
@@ -707,10 +707,10 @@ class TestParallelismContextMeshOperations(unittest.TestCase):
             ["dp_replicate", "dp_shard"]
         )
         self.assertIsNone(dp_replicate_fsdp_mesh)  # Both dimensions have size 1
-        dp_replicate_edp_shard_mesh = parallelism_context.get_optional_mesh(
-            ["dp_replicate", "edp_shard"]
+        edp_replicate_edp_shard_mesh = parallelism_context.get_optional_mesh(
+            ["edp_replicate", "edp_shard"]
         )
-        self.assertIsNone(dp_replicate_edp_shard_mesh)  # Both dimensions have size 1
+        self.assertIsNone(edp_replicate_edp_shard_mesh)  # Both dimensions have size 1
 
         # Test get_optional_mesh returns None when all dimensions have size 1
         self.assertIsNone(parallelism_context.get_optional_mesh("tp"))
@@ -782,6 +782,38 @@ class TestParallelismContextMeshOperations(unittest.TestCase):
         self.assertTrue(parallelism_context.ep_enabled)
         self.assertTrue(parallelism_context.dp_replicate_enabled)
         self.assertTrue(parallelism_context.dp_shard_enabled)
+        # Routed experts default to the dense replicate degree.
+        self.assertEqual(parallelism_context.edp_replicate, 2)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"expert_data_parallel_replicate_degree \(3\) must divide "
+            r"data_parallel_replicate_degree \(2\)",
+        ):
+            ParallelismContext(
+                dp_replicate=2,
+                dp_shard=2,
+                cp=1,
+                tp=1,
+                pp=1,
+                ep=2,
+                world_size=4,
+                enable_sequence_parallel=False,
+                edp_replicate=3,
+            )
+
+        with self.assertRaisesRegex(ValueError, r"requires expert_parallel_degree > 1"):
+            ParallelismContext(
+                dp_replicate=2,
+                dp_shard=2,
+                cp=1,
+                tp=1,
+                pp=1,
+                ep=1,
+                world_size=4,
+                enable_sequence_parallel=False,
+                edp_replicate=1,
+            )
 
         with self.assertRaisesRegex(
             ValueError,
@@ -829,6 +861,68 @@ class TestDenseStorageAxes(DTensorTestBase):
             self.assertNotIn("fsdp", axes)
             self.assertIn("dp", axes)
             self.assertIn("dp_shard", axes)
+
+
+class TestExpertReplicateAxis(DTensorTestBase):
+    """Routed experts with fewer HSDP replicas than dense parameters."""
+
+    @property
+    def world_size(self):
+        return 8
+
+    @with_comms
+    def test_expert_copy_spans_consecutive_dense_replicas(self):
+        with patch(
+            "torchtitan.distributed.parallelism_context.device_type", self.device_type
+        ):
+            pd = ParallelismContext(
+                dp_replicate=4,
+                dp_shard=2,
+                cp=1,
+                tp=1,
+                pp=1,
+                ep=2,
+                world_size=8,
+                enable_sequence_parallel=False,
+                edp_replicate=2,
+            )
+            pd.build_mesh()
+
+            # Dense replicas are rank pairs (0, 1), (2, 3), ...; K = 4 // 2 = 2
+            # consecutive replicas hold one copy of the routed experts.
+            self.assertEqual(pd.edp_shard, 2)
+            sparse_mesh = pd._global_meshes["sparse"]
+            self.assertEqual(
+                sparse_mesh.mesh_dim_names, ("pp", "edp_replicate", "edp_shard", "ep")
+            )
+            self.assertEqual(
+                sparse_mesh.mesh.tolist(), torch.arange(8).view(1, 2, 2, 2).tolist()
+            )
+
+            dense_replica = self.rank // 2
+            # EP stays inside the dense replica of this rank.
+            self.assertEqual(
+                pd.get_mesh("ep").mesh.tolist(),
+                [2 * dense_replica, 2 * dense_replica + 1],
+            )
+            # Expert FSDP spans the two dense replicas of this rank's expert copy.
+            expert_copy_start = 4 * (self.rank // 4)
+            self.assertEqual(
+                pd.get_mesh("edp_shard").mesh.tolist(),
+                [
+                    expert_copy_start + self.rank % 2,
+                    expert_copy_start + 2 + self.rank % 2,
+                ],
+            )
+            self.assertEqual(
+                pd.get_mesh("edp_replicate").mesh.tolist(),
+                [self.rank % 4, self.rank % 4 + 4],
+            )
+
+            _, dp_mesh_dims = resolve_sparse_fsdp_mesh(pd)
+            assert dp_mesh_dims is not None
+            self.assertEqual(dp_mesh_dims.shard, "edp_shard")
+            self.assertEqual(dp_mesh_dims.replicate, "edp_replicate")
 
 
 class TestOneDimensionalMeshesSkipFakeAxes(DTensorTestBase):
@@ -1000,13 +1094,13 @@ class TestParallelismContextWorld8MeshOperations(DTensorTestBase):
             self.assertEqual(
                 dp_replicate_fsdp_mesh.shape, (2, 2)
             )  # (dp_replicate, dp_shard)
-            # edp_shard mesh only exists when ep > 1, so dp_replicate_edp_shard should be None when ep=1
-            dp_replicate_edp_shard_mesh = parallelism_context.get_optional_mesh(
-                ["dp_replicate", "edp_shard"]
+            # Expert axes only exist when ep > 1, so the expert HSDP mesh is None when ep=1
+            edp_replicate_edp_shard_mesh = parallelism_context.get_optional_mesh(
+                ["edp_replicate", "edp_shard"]
             )
             self.assertIsNone(
-                dp_replicate_edp_shard_mesh
-            )  # edp_shard disabled when ep=1
+                edp_replicate_edp_shard_mesh
+            )  # edp_replicate and edp_shard disabled when ep=1
             # Test get_mesh returns valid meshes for enabled dimensions (size > 1)
             self.assertIsNotNone(parallelism_context.get_mesh("tp"))
             self.assertIsNotNone(parallelism_context.get_mesh("dp_replicate"))

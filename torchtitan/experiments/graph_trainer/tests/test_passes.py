@@ -230,9 +230,9 @@ class TestDefaultTransformerBlockBuckets(TestCase):
                 return SimpleNamespace(
                     _flatten=lambda name: make_mesh(name, 2),
                 )
-            if axis == ["dp_replicate", "edp_shard"]:
+            if axis == ["edp_replicate", "edp_shard"]:
                 return {
-                    "dp_replicate": make_mesh("expert_dp_replicate", 2),
+                    "edp_replicate": make_mesh("expert_dp_replicate", 2),
                     "edp_shard": make_mesh("edp_shard", 2),
                 }
             return None

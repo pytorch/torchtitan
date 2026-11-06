@@ -185,7 +185,23 @@ class ParallelismConfig:
     (edp_shard * ep) cover the same ranks, so
     dp_shard * cp * tp == edp_shard * ep. EP borrows ranks from FSDP and TP:
     edp_shard = dp_shard * cp * tp / ep.
-    pp and dp_replicate are outer dimensions unaffected by this constraint.
+    pp is an outer dimension unaffected by this constraint, and so is
+    dp_replicate unless `expert_data_parallel_replicate_degree` is set.
+    """
+
+    expert_data_parallel_replicate_degree: int | None = None
+    """
+    HSDP replicate degree of routed experts when expert parallelism is enabled.
+    None uses `data_parallel_replicate_degree`, so dense parameters and routed
+    experts have the same number of replicas.
+
+    A smaller value must divide `data_parallel_replicate_degree`. Then
+    K = data_parallel_replicate_degree / expert_data_parallel_replicate_degree
+    consecutive dense replicas hold one copy of the routed experts: EP groups
+    stay inside one dense replica and expert FSDP spans the K replicas, so
+    edp_shard = K * dp_shard * cp * tp / ep. This keeps dense FSDP small (e.g.
+    inside one scale-up domain) when one copy of the experts needs more devices.
+    Requires expert_parallel_degree > 1.
     """
 
     save_parallelism_folder: str | None = None

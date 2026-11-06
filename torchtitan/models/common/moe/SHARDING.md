@@ -48,5 +48,5 @@ dispatch and computation.
   identify which rows of `routed_output_RD` is from which expert.
   Currently, `output_postprocess` only takes in `routed_output_RD`,
   and thus the same operation must be applied to all of the expert outputs.
-  So its parameters should use `Replicate` on `dp_replicate`,
+  So its parameters should use `Replicate` on `edp_replicate`,
   `edp_shard`, and `ep`.
