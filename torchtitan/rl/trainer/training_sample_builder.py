@@ -13,11 +13,12 @@ import statistics
 from dataclasses import dataclass, field
 
 import numpy as np
+from renderers import PlaceholderRange
 
 from torchtitan.config import Configurable
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import Rollout, RolloutGroup
-from torchtitan.rl.rollout.types import RolloutTurnID
+from torchtitan.rl.rollout.types import PromptImage, RolloutTurnID
 
 
 @dataclass(kw_only=True, slots=True)
@@ -57,6 +58,11 @@ class TrainingSample:
     """[L] generator logprobs; 0.0 where loss_mask is False."""
     advantage: np.ndarray  # float32
     """[L] advantage on assistant tokens, 0.0 elsewhere."""
+    images: tuple[PromptImage, ...] = ()
+    """Every image in `token_ids`: the last turn's prompt images (images only appear in
+    prompts, and that prompt is a prefix of `token_ids`)."""
+    image_placeholders: tuple[PlaceholderRange, ...] = ()
+    """Where each of `images` sits in `token_ids` (see `Prompt.image_placeholders`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +97,8 @@ class _SampleInProgress:
     loss_mask: list[np.ndarray] = field(default_factory=list)
     logprobs: list[np.ndarray] = field(default_factory=list)
     advantage: list[np.ndarray] = field(default_factory=list)
+    images: tuple[PromptImage, ...] = ()
+    image_placeholders: tuple[PlaceholderRange, ...] = ()
 
     def to_training_sample(self) -> TrainingSample:
         return TrainingSample(
@@ -101,6 +109,8 @@ class _SampleInProgress:
             loss_mask=np.concatenate(self.loss_mask),
             logprobs=np.concatenate(self.logprobs, dtype=np.float32),
             advantage=np.concatenate(self.advantage),
+            images=self.images,
+            image_placeholders=self.image_placeholders,
         )
 
 
@@ -321,9 +331,14 @@ class TrainingSampleBuilder(Configurable):
                     f"{prev_len}; build it with `split_prompt`"
                 )
 
-            # True when this prompt continues the previous one (prefix-preserving);
-            # False when the env edited history -> open a new training_sample (branch).
-            extends_prev = prompt_prefix_len == prev_len
+            # True when this prompt continues the previous one (prefix-preserving, also in
+            # its images: equal placeholder tokens can show another image); False when the
+            # env edited history -> open a new training_sample (branch).
+            extends_prev = prompt_prefix_len == prev_len and (
+                sample_in_progress is None
+                or rollout_turn.prompt_images[: len(sample_in_progress.images)]
+                == sample_in_progress.images
+            )
             if sample_in_progress is not None and not extends_prev:
                 training_samples.append(sample_in_progress.to_training_sample())
                 sample_in_progress = None
@@ -392,6 +407,8 @@ class TrainingSampleBuilder(Configurable):
                 np.zeros(num_delta, dtype=np.float32),
                 np.full(num_completion, rollout_advantage, dtype=np.float32),
             ]
+            sample_in_progress.images = rollout_turn.prompt_images
+            sample_in_progress.image_placeholders = rollout_turn.prompt_image_placeholders
             # Widen the segment's version span to include this turn (the min stays the opening turn's).
             sample_in_progress.max_policy_version = max(
                 sample_in_progress.max_policy_version, rollout_turn.max_policy_version

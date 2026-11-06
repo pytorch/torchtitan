@@ -283,8 +283,8 @@ class Controller(Configurable):
         """The model's image preprocessing, for image prompts, e.g.
         `ImageProcessor.Config(**QWEN3_5_IMAGE_PROCESSOR)`. The renderer computes each
         image's patch grid and number of placeholder tokens with it, and the generator
-        decodes and patchifies the image files with it, so both see the same pixels.
-        None: text prompts only."""
+        and the trainer turn the image files into pixel values with it, so all three
+        agree. None: text prompts only."""
 
         renderer: RendererConfig
         """The model's chat template; renders messages to token ids and parses completions
@@ -419,12 +419,6 @@ class Controller(Configurable):
                         "image_processor is set, but the generator model "
                         f"({type(self.generator.model).__qualname__}) has no vision encoder."
                     )
-                # TODO: remove once the batcher and the trainer take image inputs.
-                raise NotImplementedError(
-                    "image_processor is set, but training on image prompts is not "
-                    "supported yet: the trainer would see their placeholder tokens "
-                    "without the images."
-                )
             if self.trainer.parallelism.enable_sequence_parallel:
                 sp_degree = self.trainer.parallelism.tensor_parallel_degree
                 max_context_length = self.trainer.model.max_context_length
@@ -692,6 +686,7 @@ class Controller(Configurable):
                 temperature=self._sampling.temperature,
                 output_dir=config.dump_folder,
                 enable_structured_logging=config.trainer.debug.enable_structured_logging,
+                image_processor=config.image_processor,
             )
 
             await self._rollouter.setup_async(
