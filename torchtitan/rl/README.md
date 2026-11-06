@@ -120,7 +120,7 @@ Most experiments configure four pieces:
 rollouter = Rollouter.Config(
     training_dataloader=IterableRolloutDataLoader.Config(dataset=MyDataset.Config()),
     validation_dataset=MyValidationDataset.Config(),
-    worker=RolloutWorker.Config(
+    worker=MessageEnvRolloutWorker.Config(
         message_env=MyEnv.Config(),
         rubric=Rubric.Config(
             reward_fns=[RewardCorrect.Config(weight=1.0)]
@@ -129,7 +129,7 @@ rollouter = Rollouter.Config(
 )
 ```
 
-Subclass `RolloutWorker` or `Rollouter` only when an experiment changes their
+Subclass `MessageEnvRolloutWorker` or `Rollouter` only when an experiment changes their
 behavior. For example, the Verifiers integration keeps a custom
 `VerifiersRollouter` because it owns an external environment server and a
 different rollout protocol.

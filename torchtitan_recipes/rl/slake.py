@@ -55,7 +55,7 @@ from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
-from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
+from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.trainer.batcher import Batcher
@@ -160,7 +160,7 @@ def rl_muse_spark_816b_a42b_slake_lora_gb300(
             validation_dataset=SlakeDataset.Config(
                 data_dir=slake_data_dir, split="test", seed=99
             ),
-            worker=RolloutWorker.Config(
+            worker=MessageEnvRolloutWorker.Config(
                 rubric=Rubric.Config(reward_fns=[RewardSlakeAnswer.Config(weight=1.0)]),
                 message_env=SlakeEnv.Config(),
                 token_env=TokenEnv.Config(
