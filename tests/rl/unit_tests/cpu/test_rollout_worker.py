@@ -17,7 +17,8 @@ from torchtitan.components.renderer import from_renderers
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 from torchtitan.rl.generator.types import SamplingConfig
-from torchtitan.rl.rollout import RolloutStatus
+from torchtitan.rl.rollout import RolloutGroup, RolloutStatus
+from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.message_env import MessageEnvInitOutput, MessageEnvStepOutput
 from torchtitan.rl.rollout.rollouter import RolloutWorker
 from torchtitan.rl.rollout.rubric import RubricOutput
@@ -237,6 +238,47 @@ class _CountingMessageEnv:
 
     async def close(self) -> None:
         pass
+
+
+def test_a_rollout_that_raises_is_kept_but_left_out_of_the_advantage() -> None:
+    class _FirstRolloutFails(_GenerateFn):
+        async def __call__(self, prompt_token_ids, **kwargs) -> Completion:
+            if kwargs["request_id"].startswith("group=7/rollout=0/"):
+                raise ConnectionError("generator unreachable")
+            return await super().__call__(prompt_token_ids, **kwargs)
+
+    async def release_session_fn(**kwargs) -> None:
+        pass
+
+    async def run() -> RolloutGroup:
+        worker = RolloutWorker(
+            SimpleNamespace(
+                rubric=_Config(_Rubric()),
+                message_env=_MessageEnvConfig(),
+                token_env=_TokenEnvConfig(),
+                advantage=AdvantageEstimator.Config(),
+            )
+        )
+        await worker.setup_async(
+            tokenizer_config=HuggingFaceTokenizer.Config(),
+            renderer_config=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
+            hf_assets_path="tests/assets/tokenizer",
+        )
+        return await worker.run_group(
+            generate_fn=_FirstRolloutFails(),
+            release_session_fn=release_session_fn,
+            sample="sample",
+            group_id=7,
+            group_size=3,
+            sampling=SamplingConfig(),
+        )
+
+    failed, *scored = asyncio.run(run()).rollouts
+    assert failed.status is RolloutStatus.ERROR_SYSTEM
+    assert "generator unreachable" in failed.logs["error"]
+    assert (failed.reward, failed.advantage) == (None, None)
+    # `_Rubric` rewards rollout_id + 1, so 2 and 3, centered on their mean 2.5.
+    assert [rollout.advantage for rollout in scored] == [-0.5, 0.5]
 
 
 def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:

@@ -39,6 +39,9 @@ class AdvantageEstimator(Configurable):
     def __call__(self, group: RolloutGroup) -> list[float]:
         """Return per-rollout advantages, in group order."""
         rewards = [rollout.reward for rollout in group.rollouts]
+        # Empty when no rollout of the group was scored (every one is ERROR_SYSTEM).
+        if not rewards:
+            return []
         group_mean = sum(rewards) / len(rewards)
         denom = (
             (statistics.pstdev(rewards) + 1e-6) if self.should_std_normalize else 1.0
