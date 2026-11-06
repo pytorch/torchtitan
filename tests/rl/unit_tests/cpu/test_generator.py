@@ -914,13 +914,13 @@ def test_cuda_graph_full_mode_drops_sizes_above_max_model_len():
     )
     cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(**kwargs)
     assert cfg.cudagraph_capture_sizes[-2:] == [512, 1000]
-    cfg = VLLMCudaGraphConfig(
-        mode="FULL", capture_sizes=[512, 2048]
-    ).get_vllm_compilation_config(**kwargs)
-    assert cfg.cudagraph_capture_sizes == [512]
+    cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(
+        **{**kwargs, "max_num_seqs": 1500}
+    )
+    assert cfg.cudagraph_capture_sizes[-1] == 1000
     with pytest.raises(ValueError, match="max_model_len"):
         VLLMCudaGraphConfig(
-            mode="FULL", capture_sizes=[2048]
+            mode="FULL", capture_sizes=[512, 2048]
         ).get_vllm_compilation_config(**kwargs)
     # FULL_DECODE_ONLY captures one-token requests, so a decode batch above max_model_len is fine.
     cfg = VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY").get_vllm_compilation_config(
