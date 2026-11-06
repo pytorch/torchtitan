@@ -13,6 +13,7 @@ import spmd_types as spmd
 import torch
 import torch_remat as remat
 
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.common.linear import Linear
 
 from .attention import InnerAttention
@@ -35,17 +36,33 @@ __all__ = [
 # P = packed per-head KV channels (N + V)
 
 
+@local_compile("mla_kv", batch_invariant=True)
 def materialize_mla_kv(
     q_THK: torch.Tensor,
     kv_THP: torch.Tensor,
     k_shared_TR: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Materialize per-head K/V from packed KV and a shared key."""
+    """Build per-head keys and values from projected KV and a shared key.
+
+    Args:
+        q_THK: Query whose last dimension gives the full per-head key width.
+        kv_THP: Projected packed key/value channels, split into unrotated keys
+            and values using the query and shared-key widths.
+        k_shared_TR: Rotated key channels broadcast across attention heads.
+
+    Returns:
+        Per-head keys shaped (T, H, K) and values shaped (T, H, V). Compiled
+        training materializes values instead of returning the packed-KV view.
+    """
     nope_head_dim = q_THK.shape[-1] - k_shared_TR.shape[-1]
     value_head_dim = kv_THP.shape[-1] - nope_head_dim
     k_nope_THN, v_THV = torch.split(kv_THP, [nope_head_dim, value_head_dim], dim=-1)
     k_shared_THR = k_shared_TR.unsqueeze(1).expand(-1, k_nope_THN.shape[1], -1)
     k_THK = torch.cat((k_nope_THN, k_shared_THR), dim=-1)
+    # A fresh V lets compiled backward write the complete packed KV gradient.
+    # Eager execution and inference retain the cheaper split view.
+    if torch.compiler.is_compiling() and torch.is_grad_enabled():
+        v_THV = v_THV.contiguous()
     return k_THK, v_THV
 
 

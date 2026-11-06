@@ -112,7 +112,9 @@ class UlyssesMLAAttention(Ulysses, MLAAttention):
             src=spmd.S(_TOKEN_DIM),
             dst=spmd.R,
             backward_options={"op_dtype": k_shared_TR.dtype},
-            async_op=True,
+            # Compiled materialization needs a regular tensor. Waiting inside
+            # redistribute preserves autograd; AsyncCollectiveTensor.wait() does not.
+            async_op=False,
         )
         kv_THP = self.project_mla_kv(kv_c_normed_TL)
         remat.recompute_needs_tensor(q_THK, kv_THP)
