@@ -6182,9 +6182,8 @@ class TestSelectiveActivationRematPass(TestCase):
         for inp in bwd_loss.all_input_nodes:
             self.assertEqual(inp.name, a_name)
 
-    def test_multiple_model_layer_regions_recompute_errors(self):
-        # Two disjoint *model-layer* backward regions that both need remat is
-        # still unsupported and must error (remat handles a single such region).
+    def test_multiple_model_layer_regions_recompute_independently(self):
+        # A shared forward value gets a private recomputed copy in each region.
         graph = torch.fx.Graph()
         inp1 = graph.placeholder("inp1")
         inp2 = graph.placeholder("inp2")
@@ -6192,7 +6191,7 @@ class TestSelectiveActivationRematPass(TestCase):
         b = graph.call_function(torch.ops.aten.clone.default, args=(inp2,))
         bwd1 = graph.call_function(torch.ops.aten.add.Tensor, args=(a, a))
         sep = graph.call_function(torch.ops.aten.neg.default, args=(inp1,))
-        bwd2 = graph.call_function(torch.ops.aten.mul.Tensor, args=(b, b))
+        bwd2 = graph.call_function(torch.ops.aten.mul.Tensor, args=(a, b))
         graph.output((bwd1, sep, bwd2))
         for node in (a, b):
             node.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
@@ -6202,8 +6201,15 @@ class TestSelectiveActivationRematPass(TestCase):
         bwd2.meta["custom"] = {"module_fqn": "layers.1.attention"}
 
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
-        with self.assertRaisesRegex(RuntimeError, "disjoint backward regions"):
-            selective_activation_remat_pass(gm)
+        inputs = (torch.arange(4, dtype=torch.float32), torch.ones(4))
+        expected = gm(*inputs)
+        result = selective_activation_remat_pass(gm)
+        result.graph.lint()
+        self.assertEqual(result(*inputs), expected)
+        self.assertIsNot(bwd1.args[0], bwd2.args[0])
+        self.assertEqual(bwd1.args[0].args, (inp1,))
+        self.assertEqual(bwd2.args[0].args, (inp1,))
+        self.assertNotIn(a, result.graph.nodes)
 
     def test_forward_consumer_keeps_original(self):
         """When a must_recompute node has both forward and backward
