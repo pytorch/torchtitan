@@ -235,6 +235,11 @@ class GptOssModel(Decoder):
                     "fused_binary_activation",
                     "rope",
                     "fp32_to_bf16_split",
+                    # TODO: on ROCm (MI350X CI), GPT-OSS with router regions on gave a different
+                    # step-1 grad norm in two runs of the same code. Qwen3 MoE (same router, no
+                    # gate bias) matched its golden in both, and on CUDA the router's fwd + bwd is
+                    # bitwise across runs. Cause not found. Turn it on for ROCm once it is.
+                    *(["moe_router_topk"] if torch.version.hip is None else []),
                 ]
             )
         )

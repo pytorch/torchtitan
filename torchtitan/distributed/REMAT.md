@@ -270,11 +270,16 @@ which regions are saved or recomputed.
 ## Forward side effects
 
 State accumulated for logging or optimizer-step updates must advance only on
-the original forward. The always-retained MoE `routing_decision` region owns
-expert selection and quantile-histogram observation, while token-count
-accumulation explicitly ignores checkpoint replay. Both reuse the routing map
-built for dispatch and auxiliary loss. Kimi K2.7 QK-clipping statistics also
+the original forward. The MoE `routing_decision` region owns expert selection
+(retained with `moe_router_topk` off; with it on, replay recomputes the same
+selection), while token-count accumulation and quantile-histogram
+observation explicitly ignore checkpoint replay. Token counts come from the
+per-expert sums in the router's `_score_and_select_experts`; the histogram reads
+the routing map built for dispatch. Kimi K2.7 QK-clipping statistics also
 ignore replay. Auxiliary-loss accumulation uses an always-retained region.
+Replay picks the same experts only if the recomputed router input and gate
+GEMM are bitwise equal to the original forward's;
+`test_router_grads_match_without_remat_with_topk_region` guards this.
 
 The currently supported transformer blocks do not advance RNG state
 inside their forwards, so they do not require a `RecomputeStateHook`. Any future
@@ -325,5 +330,6 @@ ActivationRematConfig(
 Without EP there is no communication to save, so the local expert ordering
 and the score-weighted scatter-add are ordinary operations. Operations outside
 these regions, including token-shard zero-fill and branch addition, are
-recomputed. Routing decisions are retained separately to keep expert selection
-identical during replay.
+recomputed. Routing decisions are retained separately (with `moe_router_topk`
+off) to keep expert selection identical during replay; with it on, replay
+recomputes them (see Forward side effects).
