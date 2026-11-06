@@ -31,6 +31,7 @@ from torchtitan.components.checkpointer import (
     EMA,
     LR_SCHEDULER,
     MODEL,
+    ModelWrapper,
     OPTIMIZER,
     TRAIN_STATE,
 )
@@ -124,7 +125,14 @@ class TorchFTCheckpointManager(CheckpointManager):
                 optimizers._refresh_cached_state_dict()
                 ret = {}
                 for k, v in self.states.items():
-                    if k in {MODEL, OPTIMIZER, LR_SCHEDULER, TRAIN_STATE, EMA}:
+                    if k == MODEL:
+                        # Called from the torchft quorum thread, possibly mid-forward.
+                        # Module.state_dict() would run FSDP2's pre-hook, which swaps
+                        # the unsharded params back to sharded DTensors under the
+                        # running forward. The cache shares the sharded param storage.
+                        assert isinstance(v, ModelWrapper)
+                        ret[k] = v.cached_state_dict
+                    elif k in {OPTIMIZER, LR_SCHEDULER, TRAIN_STATE, EMA}:
                         ret[k] = v.state_dict()
                 return ret
 
