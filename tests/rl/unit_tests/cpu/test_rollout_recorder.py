@@ -13,6 +13,7 @@ import json
 
 import numpy as np
 import pytest
+from renderers import PlaceholderRange
 
 from torchtitan.rl.rollout import Rollout, RolloutGroup, RolloutStatus, RolloutTurn
 
@@ -20,7 +21,7 @@ from torchtitan.rl.rollout.recorder import (
     KeepExtremeRewardsFilter,
     RolloutSampleRecorder,
 )
-from torchtitan.rl.rollout.types import RolloutTurnID
+from torchtitan.rl.rollout.types import PromptImage, RolloutTurnID
 
 
 def _recorder(tmp_path, **config_kwargs) -> RolloutSampleRecorder:
@@ -178,6 +179,36 @@ def _record_one(tmp_path, rollout: Rollout) -> dict:
     return record
 
 
+def test_prompt_images_are_recorded_without_their_file_bytes(tmp_path) -> None:
+    image = PromptImage(
+        hash_value="k", source_path="a.png", grid_thw=(1, 4, 4), data=b"\xff\xd8"
+    )
+    turn = dataclasses.replace(
+        _turn(completion_logprobs=[-0.5]),
+        prompt_delta_images=(image,),
+        prompt_delta_image_placeholders=(PlaceholderRange(offset=1, length=4),),
+    )
+    rollout = Rollout(
+        group_id=0,
+        rollout_id=0,
+        status=RolloutStatus.COMPLETED,
+        turns=[turn],
+        reward=1.0,
+    )
+
+    [recorded] = _record_one(tmp_path, rollout)["turns"]
+
+    assert recorded["prompt_delta_images"] == [
+        {
+            "hash_value": "k",
+            "source_path": "a.png",
+            "grid_thw": [1, 4, 4],
+            "offset": 1,
+            "length": 4,
+        }
+    ]
+
+
 def test_empty_turns_rollout(tmp_path) -> None:
     # A rollout with no turns (e.g. a prompt too long): no turns, no crash.
     rollout = Rollout(
@@ -235,8 +266,9 @@ def test_encode_turn_covers_all_rollout_turn_fields(tmp_path) -> None:
     recorder = _recorder(tmp_path, log_tensors=True, log_logprobs=True)
     encoded = recorder._encode_turn(_turn(completion_logprobs=[-0.5, -1.5]))
 
-    # rollout_id is flattened to turn_id; metrics is not JSON-serializable.
-    dropped_or_flattened = {"metrics", "rollout_id"}
+    # rollout_id is flattened to turn_id; metrics is not JSON-serializable;
+    # prompt_delta_image_placeholders is folded into each prompt_delta_images entry.
+    dropped_or_flattened = {"metrics", "rollout_id", "prompt_delta_image_placeholders"}
     for field in dataclasses.fields(RolloutTurn):
         if field.name in dropped_or_flattened:
             continue

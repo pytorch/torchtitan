@@ -13,6 +13,7 @@ from typing import Any
 
 from monarch.actor import Actor, concurrent_endpoint, current_rank
 
+from torchtitan.components.data.multimodal.image_processor import ImageProcessor
 from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
@@ -47,11 +48,13 @@ class RolloutWorkerActor(Actor):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
+        image_processor_config: ImageProcessor.Config | None = None,
     ) -> None:
         await self._worker.setup_async(
             tokenizer_config=tokenizer_config,
             renderer_config=renderer_config,
             hf_assets_path=hf_assets_path,
+            image_processor_config=image_processor_config,
         )
 
     @concurrent_endpoint

@@ -11,7 +11,7 @@ from enum import StrEnum
 from typing import Any, Protocol, TYPE_CHECKING
 
 import numpy as np
-from renderers import Message
+from renderers import Message, PlaceholderRange
 
 from torchtitan.rl.observability import metrics as m
 
@@ -24,6 +24,81 @@ _TRUNCATED = frozenset(
     {"truncated_length", "truncated_prompt_too_long", "truncated_max_turns"}
 )
 _ERROR = frozenset({"error_parse", "error_timeout", "error_abort", "error"})
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class PromptImage:
+    """One image of a prompt: the image file and its patch grid. Where the image sits in
+    the prompt's tokens is the prompt's (`Prompt.image_placeholders`).
+
+    Prompts carry the image file's bytes instead of pixels; the generator and the
+    trainer turn them into pixel values (`ImageProcessor.resize_and_normalize`, then
+    `patchify`).
+
+    Example (a 64x64-patch image):
+
+        PromptImage(
+            hash_value="9f2c...",
+            source_path="./assets/datasets/geometry3k/images/train/00000_0.png",
+            grid_thw=(1, 64, 64),
+            data=b"\\xff\\xd8\\xff\\xe0...",  # the JPEG file
+        )
+    """
+
+    hash_value: str
+    """Hash of `data`, the image file's content (`hash_image_file`). The generator also
+    passes it to vLLM as the image's multimodal hash (salted with the policy version), so
+    requests showing the same file share encoder outputs and prefix-cache entries."""
+
+    source_path: str
+    """Where the rollout worker read `data`: the image part's path in the prompt's message,
+    on the rollout worker's file system. Only error messages and the rollout recorder use it;
+    the generator and the trainer read `data`, not this path."""
+
+    grid_thw: tuple[int, int, int]
+    """Raw patch grid ``(T, H, W)`` before spatial merging."""
+
+    data: bytes = field(repr=False, compare=False)
+    """The image file's bytes (JPEG, PNG, ...). Not compared: ``hash_value`` is their hash."""
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class Prompt:
+    """What `GenerateFn` generates from: the prompt's tokens and the images its placeholder
+    tokens stand for.
+
+    Each image is a run of placeholder tokens in `token_ids`, at its `image_placeholders`
+    entry, and its `PromptImage` names the file that fills them. This is the form the
+    renderer emits (``RenderedTokens``), vLLM takes (prompt ids, placeholder ranges and mm
+    hashes, one list each) and the trainer packs, so no layer converts it.
+
+    Example (a text prompt, and a prompt whose 4 image placeholders start at token 1):
+
+        Prompt(token_ids=[1, 2, 3])
+        Prompt(
+            token_ids=[1, 9, 9, 9, 9, 2],
+            images=(PromptImage(hash_value="9f2c...", ...),),
+            image_placeholders=(PlaceholderRange(offset=1, length=4),),
+        )
+    """
+
+    token_ids: list[int]  # [num_prompt_tokens]
+    """The tokenized prompt, including each image's placeholder tokens."""
+
+    images: tuple[PromptImage, ...] = ()
+    """Images whose placeholder tokens are in `token_ids`, in prompt order. Empty for text."""
+
+    image_placeholders: tuple[PlaceholderRange, ...] = ()
+    """Where each image sits in `token_ids`: ``images[i]`` fills ``token_ids[offset : offset +
+    length]`` of ``image_placeholders[i]``. ``length`` is the image's number of placeholder
+    tokens (`ImageProcessor.num_placeholder_tokens`)."""
+
+    def __post_init__(self) -> None:
+        if len(self.images) != len(self.image_placeholders):
+            raise ValueError(
+                f"A prompt has {len(self.images)} images but "
+                f"{len(self.image_placeholders)} image placeholder ranges."
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +166,7 @@ class GenerateFn(Protocol):
 
     async def __call__(
         self,
-        prompt_token_ids: list[int],
+        prompt: Prompt,
         *,
         request_id: str,
         group_id: int,
@@ -101,7 +176,7 @@ class GenerateFn(Protocol):
         """Run one generation.
 
         Args:
-            prompt_token_ids: The tokenized prompt to generate from.
+            prompt: The prompt to generate from: its tokens and images.
             request_id: Unique per call; identifies the exact turn (e.g. ".../turn=2") in logs.
             group_id: Rollout group this call belongs to. Calls of one group share a prefix
                 cache namespace, so siblings and later turns can reuse the group's KV.
@@ -160,9 +235,11 @@ class RolloutTurn:
     `rollout_to_training_samples` packs the rollout into training tokens.
 
     A turn doesn't store its full prompt. It stores how many leading tokens it copies from the previous
-    turn's prompt + completion, then its new tokens (`prompt_messages` stay in full):
+    turn's prompt + completion, then its new tokens and the images among them (`prompt_messages` stay
+    in full):
 
         full prompt = (previous prompt + completion)[:prompt_prefix_len] + prompt_delta_token_ids
+        full prompt images = previous prompt's images before prompt_prefix_len + prompt_delta_images
 
     Example: the previous turn's prompt is [0, 1, 2] and its completion [3].
 
@@ -186,6 +263,14 @@ class RolloutTurn:
 
     prompt_delta_token_ids: np.ndarray  # [num_prompt_tokens - prompt_prefix_len] int32
     """The prompt after its first `prompt_prefix_len` tokens."""
+
+    prompt_delta_images: tuple[PromptImage, ...] = ()
+    """The images in `prompt_delta_token_ids`; the images before `prompt_prefix_len` are the
+    previous turn's."""
+
+    prompt_delta_image_placeholders: tuple[PlaceholderRange, ...] = ()
+    """Where each of `prompt_delta_images` sits in the full prompt (see
+    `Prompt.image_placeholders`)."""
 
     completion_token_ids: np.ndarray  # [num_completion_tokens] int32
     """This turn's completion token ids."""
@@ -226,33 +311,60 @@ class RolloutTurn:
         return self.prompt_prefix_len + len(self.prompt_delta_token_ids)
 
 
-def split_prompt(
-    prompt_token_ids: list[int], previous_token_ids: list[int]
-) -> tuple[int, np.ndarray]:
+def split_prompt(prompt: Prompt, previous: Prompt) -> tuple[int, np.ndarray]:
     """Split a prompt into the part shared with the previous turn and the new part.
 
+    The shared prefix is the longest run of equal tokens that also shows the same images. An
+    image that is not the previous turn's image at the same place (e.g. another file with the
+    same number of placeholder tokens) ends the prefix at its first placeholder token, so every
+    changed image is in the new part.
+
     Args:
-        prompt_token_ids: this turn's full prompt.
-        previous_token_ids: the previous turn's prompt + completion; [] on the first turn.
+        prompt: this turn's full prompt.
+        previous: the previous turn's prompt + completion, with the previous prompt's images;
+            ``Prompt(token_ids=[])`` on the first turn.
 
     Returns:
-        `(prompt_prefix_len, prompt_delta_token_ids)`: the length of the longest shared prefix, and the
+        `(prompt_prefix_len, prompt_delta_token_ids)`: the length of the shared prefix, and the
         prompt after it.
 
-    Example:
-        split_prompt([0, 1, 2, 3, 4, 5], previous_token_ids=[0, 1, 2, 3])  # -> (4, array([4, 5])): continues
-        split_prompt([0, 1, 9, 3], previous_token_ids=[0, 1, 2, 3])        # -> (2, array([9, 3])): history edited
-        split_prompt([0, 1, 2], previous_token_ids=[])                     # -> (0, array([0, 1, 2])): first turn
+    Example (``Prompt(...)`` abbreviated to its token ids where it has no images):
+        split_prompt([0, 1, 2, 3, 4, 5], previous=[0, 1, 2, 3])  # -> (4, array([4, 5])): continues
+        split_prompt([0, 1, 9, 3], previous=[0, 1, 2, 3])        # -> (2, array([9, 3])): history edited
+        split_prompt([0, 1, 2], previous=[])                     # -> (0, array([0, 1, 2])): first turn
+
+        # Tokens 1-2 are image placeholders in both, but the image changed from a to b:
+        split_prompt(
+            Prompt(token_ids=[0, 7, 7, 3], images=(b,), image_placeholders=(PlaceholderRange(1, 2),)),
+            previous=Prompt(token_ids=[0, 7, 7, 3], images=(a,), image_placeholders=(PlaceholderRange(1, 2),)),
+        )  # -> (1, array([7, 7, 3]))
     """
+    prompt_token_ids, previous_token_ids = prompt.token_ids, previous.token_ids
     # Common case: the prompt extends the previous turn. One list compare, no Python loop.
     if prompt_token_ids[: len(previous_token_ids)] == previous_token_ids:
         prefix_len = len(previous_token_ids)
     else:
         prefix_len = 0
-        for token, previous in zip(prompt_token_ids, previous_token_ids):
-            if token != previous:
+        for token, previous_token in zip(prompt_token_ids, previous_token_ids):
+            if token != previous_token:
                 break
             prefix_len += 1
+    # Equal placeholder tokens can show another image: end the prefix at the first image in it
+    # that the previous prompt does not have at the same place.
+    for index, placeholder in enumerate(prompt.image_placeholders):
+        if placeholder.offset >= prefix_len:
+            break
+        if (
+            index >= len(previous.images)
+            or prompt.images[index].hash_value != previous.images[index].hash_value
+            or (placeholder.offset, placeholder.length)
+            != (
+                previous.image_placeholders[index].offset,
+                previous.image_placeholders[index].length,
+            )
+        ):
+            prefix_len = placeholder.offset
+            break
     return prefix_len, np.asarray(prompt_token_ids[prefix_len:], dtype=np.int32)
 
 

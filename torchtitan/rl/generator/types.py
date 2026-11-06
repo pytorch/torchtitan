@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from torchtitan.rl.rollout.types import Prompt
+
 
 @dataclass(kw_only=True, slots=True)
 class SamplingConfig:
@@ -51,7 +53,8 @@ class EngineRequest:
     """One `generate` call's request for the engine, awaiting admission; what a `LoopDecision` broadcasts."""
 
     request_id: str
-    prompt_token_ids: list[int]  # [prompt_tokens]
+    prompt: Prompt
+    """The prompt's tokens and images, with the image files' bytes (not pixels)."""
     sampling: SamplingConfig
     group_id: int
     """Rollout group id. Sets the vLLM priority: lower is admitted first and preempted last.

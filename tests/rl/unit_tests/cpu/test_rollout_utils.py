@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from renderers import PlaceholderRange
 from torchtitan.rl.rollout import Rollout, RolloutGroup, RolloutStatus, RolloutTurn
-from torchtitan.rl.rollout.types import RolloutTurnID, split_prompt
+from torchtitan.rl.rollout.types import Prompt, PromptImage, RolloutTurnID, split_prompt
 
 from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 
@@ -50,7 +51,10 @@ def _scored_rollout(
     previous_token_ids: list[int] = []
     for rollout_turn in turns:
         prompt_token_ids = rollout_turn.prompt_delta_token_ids
-        prefix_len, delta = split_prompt(prompt_token_ids, previous_token_ids)
+        prefix_len, delta = split_prompt(
+            Prompt(token_ids=list(prompt_token_ids)),
+            previous=Prompt(token_ids=previous_token_ids),
+        )
         rollout_turn.prompt_prefix_len = prefix_len
         rollout_turn.prompt_delta_token_ids = delta
         previous_token_ids = (
@@ -246,8 +250,46 @@ def test_prefix_that_is_not_the_longest_raises(
 )
 def test_split_prompt(prompt, previous, expected) -> None:
     prompt_prefix_len, prompt_delta_token_ids = split_prompt(
-        prompt, previous_token_ids=previous
+        Prompt(token_ids=prompt), previous=Prompt(token_ids=previous)
     )
+    assert (prompt_prefix_len, prompt_delta_token_ids.tolist()) == expected
+
+
+def _image(hash_value: str) -> PromptImage:
+    return PromptImage(
+        hash_value=hash_value,
+        source_path=f"{hash_value}.png",
+        grid_thw=(1, 2, 2),
+        data=b"",
+    )
+
+
+@pytest.mark.parametrize(
+    "previous_image, previous_placeholder, expected",
+    [
+        ("a", PlaceholderRange(offset=1, length=2), (4, [5])),  # same image: continues
+        ("b", PlaceholderRange(offset=1, length=2), (1, [7, 7, 3, 5])),  # image changed
+        ("a", PlaceholderRange(offset=2, length=2), (1, [7, 7, 3, 5])),  # image moved
+        (None, None, (1, [7, 7, 3, 5])),  # no image before
+    ],
+)
+def test_split_prompt_ends_the_prefix_at_a_changed_image(
+    previous_image, previous_placeholder, expected
+) -> None:
+    # Tokens 1-2 are equal placeholder tokens in both prompts; only the images differ.
+    prompt = Prompt(
+        token_ids=[0, 7, 7, 3, 5],
+        images=(_image("a"),),
+        image_placeholders=(PlaceholderRange(offset=1, length=2),),
+    )
+    previous = Prompt(
+        token_ids=[0, 7, 7, 3],
+        images=(_image(previous_image),) if previous_image else (),
+        image_placeholders=(previous_placeholder,) if previous_placeholder else (),
+    )
+
+    prompt_prefix_len, prompt_delta_token_ids = split_prompt(prompt, previous=previous)
+
     assert (prompt_prefix_len, prompt_delta_token_ids.tolist()) == expected
 
 
