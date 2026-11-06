@@ -16,12 +16,13 @@ import dataclasses
 from typing import cast
 
 import torch
-from torch.distributed.tensor import DTensor, Replicate
+from torch.distributed.tensor import DTensor
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.models.interfaces import supports_multimodal
 from vllm.utils import torch_utils as _torch_utils
 
 from torchtitan.components.checkpointer import CheckpointManager
@@ -235,9 +236,18 @@ def _patch_vllm_all_reduce() -> None:
 
 
 @support_torch_compile(
+    # The forward arguments whose size follows the step's number of tokens, and which of
+    # their dims that is. vLLM marks that dim dynamic for torch.compile, so one compiled
+    # graph serves every step size.
     dynamic_arg_dims={
+        # (num_tokens,)
         "input_ids": 0,
-        "positions": 0,
+        # (num_tokens,) for 1D RoPE; (3, num_tokens) for M-RoPE models serving image prompts
+        # (temporal, height and width positions). The token dim is the last one in both,
+        # hence -1, as in vLLM's Qwen2-VL.
+        "positions": -1,
+        # (num_tokens, dim): what vLLM passes multimodal models instead of input_ids.
+        "inputs_embeds": 0,
     }
 )
 class VLLMModelWrapper(Module):
@@ -257,7 +267,6 @@ class VLLMModelWrapper(Module):
 
     is_text_generation_model = True  # Required for vLLM runner validation
     supports_pp = False  # Pipeline parallelism not supported yet
-    supports_multimodal = False
 
     def __init__(
         self,
@@ -287,7 +296,12 @@ class VLLMModelWrapper(Module):
             )
         device = cast(torch.device, vllm_config.device_config.device)
         self.model, self.parallelism_context = build_inference_model(
-            self.config, parallelism=parallelism, precision=precision, device=device
+            self.config,
+            parallelism=parallelism,
+            precision=precision,
+            device=device,
+            # Text-only generators drop the vision encoder; VLLMMultimodalModelWrapper keeps it.
+            keep_vision_encoder=supports_multimodal(self),
         )
         # TorchTitanGPUModelRunner pads a step to a multiple of TP when TP shards the
         # routed tokens.
@@ -438,30 +452,35 @@ class VLLMModelWrapper(Module):
             raise ValueError("Either input_ids or inputs_embeds must be provided")
 
         with self.parallelism_context.activate_spmd():
-            # Rows past the real token count are padding that vLLM added (true
-            # for padding). Only the MoE reads this mask: Dist-MoE routes those
-            # rows to expert -1. Attention takes its metadata from vLLM, which
-            # already excludes padding.
-            model_kwargs = {}
-            if self._dist_moe_runtime is not None:
-                assert self._num_valid_tokens is not None
-                num_tokens = input_ids.shape[0]
-                model_kwargs["padding_mask"] = (
-                    torch.arange(num_tokens, device=input_ids.device)
-                    >= self._num_valid_tokens
-                )
-                self._dist_moe_runtime.set_num_local_input_tokens_per_call(
-                    self._dist_moe_num_local_input_tokens(num_tokens)
-                )
             h = self.model(
-                input_ids, attention_metadata=None, positions=positions, **model_kwargs
+                input_ids,
+                attention_metadata=None,
+                positions=positions,
+                **self._prepare_step_kwargs(input_ids.shape[0]),
             )
-        # Inference disables sequence parallelism, so final hidden states should
-        # already be replicated before returning to vLLM.
-        if isinstance(h, DTensor):
-            assert all(isinstance(p, Replicate) for p in h.placements)
-            h = h._local_tensor
         return h
+
+    def _prepare_step_kwargs(self, num_tokens: int) -> dict[str, torch.Tensor]:
+        """Set this step's Dist-MoE token count and return the layers' padding-mask kwarg.
+
+        Call once per forward.
+        """
+        # Rows past the real token count are padding that vLLM added (true
+        # for padding). Only the MoE reads this mask: Dist-MoE routes those
+        # rows to expert -1. Attention takes its metadata from vLLM, which
+        # already excludes padding.
+        if self._dist_moe_runtime is None:
+            return {}
+        assert self._num_valid_tokens is not None
+        self._dist_moe_runtime.set_num_local_input_tokens_per_call(
+            self._dist_moe_num_local_input_tokens(num_tokens)
+        )
+        return {
+            "padding_mask": torch.arange(
+                num_tokens, device=self._num_valid_tokens.device
+            )
+            >= self._num_valid_tokens
+        }
 
     def compute_logits(
         self,

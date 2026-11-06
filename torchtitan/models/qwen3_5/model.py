@@ -328,7 +328,7 @@ class Qwen35Model(MultimodalModel):
           │
           ├─ _prepare_multimodal_embeds
           │    ├─ tok_embeddings(tokens)              → text embeddings
-          │    ├─ _get_vision_embeds(pixel_values)     → vision embeddings
+          │    ├─ get_vision_embeds(pixel_values)      → vision embeddings
           │    │    └─ vision_encoder(pixel_values)     → merge patches
           │    ├─ get_vision_positions              → locate vision regions
           │    └─ _scatter_vision_embeds                → scatter into text sequence
@@ -524,7 +524,7 @@ class Qwen35Model(MultimodalModel):
             input_dict["aux_loss_denominators"] = global_routing_token_counts
         return inputs, labels, input_dict, loss_kwargs
 
-    def _get_vision_embeds(
+    def get_vision_embeds(
         self,
         pixel_values: torch.Tensor,
         *,
@@ -593,7 +593,7 @@ class Qwen35Model(MultimodalModel):
                 grid_thw=(1, grid_size, grid_size),
                 device=inputs_embeds.device,
             )
-        vision_embeds, num_tokens = self._get_vision_embeds(
+        vision_embeds, num_tokens = self.get_vision_embeds(
             pixel_values, grid_thw=grid_thw
         )
         if image_is_dummy:
@@ -626,7 +626,7 @@ class Qwen35Model(MultimodalModel):
                 grid_thw=(1, grid_size, grid_size),
                 device=inputs_embeds.device,
             )
-        vision_embeds, num_tokens = self._get_vision_embeds(
+        vision_embeds, num_tokens = self.get_vision_embeds(
             pixel_values_videos, grid_thw=grid_thw_videos
         )
         if video_is_dummy:
