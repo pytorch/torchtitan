@@ -105,10 +105,10 @@ class GenerateFn(Protocol):
             request_id: Unique per call; identifies the exact turn (e.g. ".../turn=2") in logs.
             group_id: Rollout group this call belongs to. Calls of one group share a prefix
                 cache namespace, so siblings and later turns can reuse the group's KV.
-            routing_session_id: Stable key for the routing session this call belongs
-                to (e.g. "group=7/rollout=3"). Routers send same-key calls to the same
-                generator when possible. With vLLM, `VLLMSessionKVHolder` also keeps the
-                session's KV on GPU between its calls.
+            routing_session_id: One key per rollout, the same for all its turns (e.g.
+                "group=7/rollout=3"). Sticky routing sends same-key calls to the same
+                generator. With vLLM, `VLLMSessionKVHolder` keeps the key's KV on GPU between
+                its calls, so two rollouts that share a key also share one hold.
             sampling_config: Optional per-call sampling overrides.
 
         Returns:

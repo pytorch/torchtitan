@@ -154,7 +154,8 @@ class Generator(Configurable):
         later turns reuse its KV across model state dict loads, while new groups use the current
         version.
         Enable this to clear prefix-cache entries and preempt running requests; the engine
-        then recomputes their KV under the new weights when they resume."""
+        then recomputes their KV under the new weights when they resume. With vLLM, also set
+        ``VLLMEngine.Config.session_kv_holder=None``."""
 
         model_state_dict_load_mode: ModelStateDictLoadMode = "cpu_prefetch"
         """How a model state dict load moves the StorageVolume snapshot into the engine's weights.

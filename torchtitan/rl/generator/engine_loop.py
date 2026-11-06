@@ -219,13 +219,14 @@ class EngineLoop:
         # consistent snapshot of the pins, send releases through the queue instead.
         for group_id in group_ids:
             self._group_min_policy_versions.pop(group_id, None)
-        if self._holds_session_kv and self._rank == 0:
+        # Nothing is held once the queue closes (shutdown or a crash): drop late releases.
+        if self._holds_session_kv and self._rank == 0 and not self._queue.closed:
             self._queue.put(SessionReleaseMessage(group_ids=group_ids))
 
     def release_sessions(self, session_ids: list[str]) -> None:
         """RANK 0: release the held KV of sessions whose rollout ended (a no-op unless the
         engine holds session KV)."""
-        if self._holds_session_kv and self._rank == 0:
+        if self._holds_session_kv and self._rank == 0 and not self._queue.closed:
             self._queue.put(SessionReleaseMessage(session_ids=session_ids))
 
     def log_engine_stats(self, step: int) -> None:

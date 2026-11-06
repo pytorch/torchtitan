@@ -325,6 +325,16 @@ def test_session_releases_are_queued_only_when_the_engine_holds_session_kv(
         assert engine_loop._queue.empty() is not holds_session_kv
 
 
+def test_session_releases_after_close_are_dropped(runner) -> None:
+    engine = _FakeEngine()
+    engine.holds_session_kv = True
+    engine_loop = _bare_loop(event_loop=runner.get_loop(), engine=engine)
+    engine_loop._queue.close(CloseMessage(), reason="generator is closed")
+    # Rollouts that end during shutdown, or after a crash, release their sessions late.
+    engine_loop.release_sessions(["s0"])
+    engine_loop.release_groups([3])
+
+
 def test_load_takes_precedence_over_queued_requests(runner) -> None:
     engine_loop = _bare_loop(event_loop=runner.get_loop())
     request = _request()
