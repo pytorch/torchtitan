@@ -41,6 +41,10 @@ from torchtitan.models.common.moe import (
     sharding as moe_sharding,
     TokenChoiceTopKRouter,
 )
+from torchtitan.models.common.moe.token_dispatcher import (
+    LocalDispatchMetadata,
+    LocalTokenDispatcher,
+)
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.kimi_k3.moe import KimiLatentMoE
 from torchtitan.models.muse_spark.moe import MuseSparkMoE
@@ -730,6 +734,97 @@ class TestMoE(unittest.TestCase):
                 grouped_linear.sharding_config.state_shardings["weight"],
                 dense_param_placement(tp=spmd.R),
             )
+
+
+class TestScoreAndScatterAdd(unittest.TestCase):
+    def test_dispatcher_combine_runs_backend_override(self):
+        # AutogradCPU stands in for an out-of-tree backend's dispatch key.
+        op = torch.ops.torchtitan.score_and_scatter_add.default
+        num_calls = 0
+
+        def backend_kernel(*args):
+            nonlocal num_calls
+            num_calls += 1
+            return op.decompose(*args)
+
+        dispatcher = LocalTokenDispatcher(
+            LocalTokenDispatcher.Config(num_experts=4, top_k=2)
+        )
+        g = torch.Generator().manual_seed(0)
+        routed_ND = torch.randn(64, 16, generator=g).to(torch.bfloat16)
+        scores_N = torch.rand(64, generator=g)
+        token_indices_N = torch.randperm(64, generator=g) // 2
+        x_TD = torch.randn(32, 16, generator=g).to(torch.bfloat16)
+        grad_TD = torch.randn(32, 16, generator=g).to(torch.bfloat16)
+
+        def fwd_bwd(combine):
+            routed = routed_ND.clone().requires_grad_(True)
+            scores = scores_N.clone().requires_grad_(True)
+            out = combine(routed, scores)
+            out.backward(grad_TD)
+            return out.detach(), routed.grad, scores.grad
+
+        def dispatcher_combine(routed, scores):
+            metadata = LocalDispatchMetadata(
+                token_indices_experts_sorted_N=token_indices_N,
+                topk_scores_experts_sorted_N=scores,
+            )
+            return dispatcher.combine(routed, metadata, x_TD)
+
+        lib = torch.library.Library("torchtitan", "IMPL")
+        try:
+            lib.impl("score_and_scatter_add", backend_kernel, "AutogradCPU")
+            overridden = fwd_bwd(dispatcher_combine)
+        finally:
+            lib._destroy()
+        self.assertEqual(num_calls, 1)
+        expected = fwd_bwd(
+            lambda routed, scores: op.decompose(
+                torch.zeros_like(x_TD), routed, scores, token_indices_N
+            )
+        )
+        for actual, want in zip(overridden, expected, strict=True):
+            self.assertEqual(actual.dtype, want.dtype)
+            self.assertTrue(torch.equal(actual, want))
+        fwd_bwd(dispatcher_combine)
+        self.assertEqual(num_calls, 1)
+
+    def test_compile_runs_backend_override(self):
+        # The backend kernel doubles the result, so the compiled output shows
+        # whether the compiled graph went through it.
+        op = torch.ops.torchtitan.score_and_scatter_add.default
+        num_calls = 0
+
+        def backend_kernel(*args):
+            nonlocal num_calls
+            num_calls += 1
+            return op.decompose(*args) * 2
+
+        dispatcher = LocalTokenDispatcher(
+            LocalTokenDispatcher.Config(num_experts=4, top_k=2)
+        )
+
+        def combine(routed_ND, scores_N, token_indices_N, x_TD):
+            metadata = LocalDispatchMetadata(
+                token_indices_experts_sorted_N=token_indices_N,
+                topk_scores_experts_sorted_N=scores_N,
+            )
+            return dispatcher.combine(routed_ND, metadata, x_TD)
+
+        args = (torch.randn(8, 4), torch.rand(8), torch.arange(8) // 2)
+        x_TD = torch.randn(4, 4)
+        torch._dynamo.reset()
+        lib = torch.library.Library("torchtitan", "IMPL")
+        try:
+            lib.impl("score_and_scatter_add", backend_kernel, "AutogradCPU")
+            compiled = torch.compile(combine, backend="eager", fullgraph=True)
+            out = compiled(*args, x_TD)
+        finally:
+            lib._destroy()
+            torch._dynamo.reset()
+        self.assertGreater(num_calls, 0)
+        expected = op.decompose(torch.zeros_like(x_TD), *args) * 2
+        self.assertTrue(torch.equal(out, expected))
 
 
 if __name__ == "__main__":
