@@ -203,11 +203,9 @@ class TensorBoardLogger(BaseLogger):
 
 
 class WandBLogger(BaseLogger):
-    """Logger implementation for Weights & Biases.
+    """Logger implementation for Weights & Biases: each `log` call is one row, with `trainer/step`.
 
-    Each `log` call is its own W&B row, with the training step under `trainer/step`. W&B's
-    `_step` counts rows, so a later log for an already logged step keeps its own row:
-
+    Example:
         log({"loss": 2.1}, step=10)               -> row _step=0, trainer/step=10
         log({"validation_loss": 2.3}, step=10)    -> row _step=1, trainer/step=10
     """
@@ -252,10 +250,8 @@ class WandBLogger(BaseLogger):
             dir=log_dir,
             config=config_dict,
         )
-        # With `step=`, W&B drops a later log to a step it already sent. So rows log without it,
-        # and generated charts plot `trainer/step`. "max": the runs table shows the newest step,
-        # not the step of the last row (a validation row can be logged for an older step).
-        self.wandb.define_metric("trainer/step", summary="max")
+        # Generated charts plot `trainer/step` on the x-axis.
+        self.wandb.define_metric("trainer/step")
         self.wandb.define_metric("*", step_metric="trainer/step")
         logger.info("WandB logging enabled")
 
@@ -264,7 +260,8 @@ class WandBLogger(BaseLogger):
             (k if self.tag is None else f"{self.tag}/{k}"): v
             for k, v in metrics.items()
         }
-        # Without `step=`, W&B sends each row at once (commit=True by default).
+        # No `step=`: W&B ignores a log to a step below its current one, and validation can log at
+        # an older step. Without it, each call is a new row, sent at once (commit=True by default).
         self.wandb.log({**wandb_metrics, "trainer/step": step})
 
     def close(self) -> None:

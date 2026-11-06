@@ -31,9 +31,10 @@ Add `WandBLogger.Config()` to `metrics.loggers` in your recipe. Set
 `WANDB_PROJECT` to select the W&B project; the default is `torchtitan`.
 
 Each log call is its own W&B row, and every row carries the training step as
-`trainer/step`, the x-axis of the generated charts. So validation logged at a
-step that training already logged keeps its own row. W&B's `_step` (`Step` in
-the UI) counts rows, not training steps:
+`trainer/step`, the x-axis of the generated charts. The logger passes no `step=`
+to `wandb.log`: W&B ignores a log to a step below its current one, and validation
+can log at a step that training already logged. W&B's `_step` (`Step` in the UI)
+counts rows:
 - A saved panel with `Step` on its x-axis must switch to `trainer/step`. Runs
   from before this change have no `trainer/step`.
 - `WANDB_RESUME_FROM` and `WANDB_FORK_FROM` take `<run>?_step=N`. To rewind to
