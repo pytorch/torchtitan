@@ -216,6 +216,19 @@ class MoonViTRoPE(ComplexRoPE):
             raise ValueError("MoonViT RoPE does not support frequency scaling.")
         super().__init__(config)
 
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Keep spatial rotation in the enclosing vision block's compile region."""
+        return self.apply_rotary_emb(
+            query, key, self._reshape_cache(query, positions), inverse=inverse
+        )
+
     def _precompute_cache(self) -> torch.Tensor:
         inv_freq_F = 1.0 / (
             self.theta ** (torch.arange(0, self.dim, 4, dtype=torch.float32) / self.dim)
