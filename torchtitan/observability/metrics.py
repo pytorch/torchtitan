@@ -173,23 +173,31 @@ class TensorBoardLogger(BaseLogger):
         self.writer = FileWriter(log_dir, max_queue=1000)
         # Without TensorFlow, TensorBoard opens, appends to and closes the events file
         # for every event, which is slow on a network filesystem (FUSE/NFS). Keep one
-        # file open instead. The writer's thread still does every write and flush.
+        # unbuffered file open, so each event reaches the file when the thread writes it.
+        # Safe here: EventFileWriter.__init__ already flushed its file_version event.
+        # TODO: delete this swap once TensorBoard's no-TensorFlow file layer keeps a file
+        # open (https://github.com/tensorflow/tensorboard/issues/5286). tensorboard is unpinned;
+        # private: EventFileWriter._async_writer, _AsyncWriter._writer, RecordWriter._writer.
         event_writer = self.writer.event_writer
-        event_writer._async_writer._writer._writer = open(event_writer._file_name, "ab")
+        record_writer = event_writer._async_writer._writer
+        # If TensorBoard renames RecordWriter._writer, the assignment would silently do nothing.
+        if not hasattr(record_writer, "_writer"):
+            raise RuntimeError(
+                f"TensorBoard's {type(record_writer)} has no _writer field"
+            )
+        record_writer._writer = open(event_writer._file_name, "ab", buffering=0)
         logger.info(f"TensorBoard logging enabled. Logs will be saved at {log_dir}")
 
     def log(self, metrics: dict[str, Any], step: int) -> None:
-        # One event per step: the writer queue (1000 events) then holds 1000 steps.
-        summary = Summary(
-            value=[
-                Summary.Value(
-                    tag=k if self.tag is None else f"{self.tag}/{k}",
-                    simple_value=float(v),
-                )
-                for k, v in metrics.items()
-            ]
-        )
-        self.writer.add_summary(summary, step)
+        # One event per step, so each slot of the writer queue (max_queue) holds a whole step.
+        values = []
+        for k, v in metrics.items():
+            tag = k if self.tag is None else f"{self.tag}/{k}"
+            try:
+                values.append(Summary.Value(tag=tag, simple_value=float(v)))
+            except (TypeError, ValueError) as error:
+                logger.warning(f"TensorBoard skips {tag}={v!r} at step {step}: {error}")
+        self.writer.add_summary(Summary(value=values), step)
 
     def close(self) -> None:
         self.writer.close()
