@@ -271,13 +271,17 @@ def graph_trainer_qwen3_235b_a22b_dist_moe_mxfp8_256gpu() -> GraphTrainer.Config
     )
 
 
-def graph_trainer_qwen3_30b_a3b_dist_moe_mxfp8_8gpu() -> GraphTrainer.Config:
-    """Match ``qwen3_30b_a3b_pretrain_8gpu_gb300_fp8mx_config``.
+def qwen3_30b_a3b_dist_moe_mxfp8_8gpu() -> Trainer.Config:
+    """Match ``qwen3_30b_a3b_pretrain_8gpu_gb300_fp8mx_config`` with the eager ``Trainer``.
 
     Both run EP8 without PP on 8 GPUs with GBS 512 and MBS 8 (8 microbatches
     per step), a BF16 LM head, and CUDA graphs. EP spans every rank, so FSDP
     cannot shard expert optimizer state; BF16 Adam moments (Megatron keeps
     FP32) leave memory headroom without recompute.
+
+    The model's local compile regions plus ``moe_aux_loss`` compile the glue
+    that GraphTrainer captures with the whole step. Dist-MoE fuses SwiGLU into
+    its expert GEMMs, so no activation override applies.
     """
     parallelism = ParallelismConfig(
         data_parallel_shard_degree=8,
@@ -296,19 +300,31 @@ def graph_trainer_qwen3_30b_a3b_dist_moe_mxfp8_8gpu() -> GraphTrainer.Config:
         global_batch_size=512,
         moment_dtype="bfloat16",
     )
+    config = _with_dist_moe_mxfp8(config)
+    config.model.local_compile.regions.append("moe_aux_loss")
+    return config
+
+
+def graph_trainer_qwen3_30b_a3b_dist_moe_mxfp8_8gpu() -> GraphTrainer.Config:
+    """``qwen3_30b_a3b_dist_moe_mxfp8_8gpu`` with GraphTrainer."""
     return _to_graph_trainer(
-        _with_dist_moe_mxfp8(config), GraphTrainerQwen3Model.Config
+        qwen3_30b_a3b_dist_moe_mxfp8_8gpu(), GraphTrainerQwen3Model.Config
     )
 
 
-def graph_trainer_gpt_oss_120b_mxfp8_64gpu() -> GraphTrainer.Config:
-    """Match ``gpt_oss_120b_pretrain_64gpu_gb300_fp8mx_config`` where supported.
+def gpt_oss_120b_mxfp8_64gpu() -> Trainer.Config:
+    """Match ``gpt_oss_120b_pretrain_64gpu_gb300_fp8mx_config`` where supported,
+    with the eager ``Trainer``.
 
     Both run EP16 without PP on 64 GPUs with GBS 1280 and MBS 4 (5
     microbatches per step) and MXFP8 attention projections and LM head.
     Megatron also runs MXFP8 experts and CUDA graphs. Here experts stay BF16
     behind the all-to-all dispatcher, whose host-synchronized split sizes rule
     out CUDA graphs, so this recipe runs without them.
+
+    The model's local compile regions (including ``fused_binary_activation``
+    for its clamped SwiGLU) plus ``moe_aux_loss`` compile the glue that
+    GraphTrainer captures with the whole step.
     """
     parallelism = ParallelismConfig(
         data_parallel_shard_degree=64,
@@ -329,4 +345,10 @@ def graph_trainer_gpt_oss_120b_mxfp8_64gpu() -> GraphTrainer.Config:
         micro_batch_size=4,
         global_batch_size=1280,
     )
-    return _to_graph_trainer(config, GraphTrainerGptOssModel.Config)
+    config.model.local_compile.regions.append("moe_aux_loss")
+    return config
+
+
+def graph_trainer_gpt_oss_120b_mxfp8_64gpu() -> GraphTrainer.Config:
+    """``gpt_oss_120b_mxfp8_64gpu`` with GraphTrainer."""
+    return _to_graph_trainer(gpt_oss_120b_mxfp8_64gpu(), GraphTrainerGptOssModel.Config)
