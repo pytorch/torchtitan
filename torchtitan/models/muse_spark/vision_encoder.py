@@ -160,11 +160,9 @@ class NaViTRoPE(ComplexRoPE):
         positions_TC = positions
         if torch.compiler.is_compiling():
             cache_LF2 = torch.view_as_real(self.cache)
-            col_TF2 = cache_LF2[positions_TC[:, 1]]
-            row_TF2 = cache_LF2[positions_TC[:, 0]]
+            row_TF2, col_TF2 = cache_LF2[positions_TC].unbind(1)
             return torch.cat((col_TF2, row_TF2), dim=-2).flatten(-2).unsqueeze(1)
-        col_TF = self.cache[positions_TC[:, 1]]
-        row_TF = self.cache[positions_TC[:, 0]]
+        row_TF, col_TF = self.cache[positions_TC].unbind(1)
         return torch.cat((col_TF, row_TF), dim=-1).unsqueeze(1)
 
 

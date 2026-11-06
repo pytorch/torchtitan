@@ -229,9 +229,7 @@ class QwenVisionRoPE(CosSinRoPE):
             raise ValueError(
                 "Qwen vision RoPE requires positions of shape (num_tokens, 2)."
             )
-        row_TF2 = self.cache[positions[:, 0]]
-        col_TF2 = self.cache[positions[:, 1]]
-        spatial_TR2 = torch.cat((row_TF2, col_TF2), dim=-2)
+        spatial_TR2 = self.cache[positions].flatten(1, 2)
         cos_TR, sin_TR = spatial_TR2.unbind(-1)
         return torch.cat((cos_TR, cos_TR, sin_TR, sin_TR), dim=-1).unsqueeze(1)
 

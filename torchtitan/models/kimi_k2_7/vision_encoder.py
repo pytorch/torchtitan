@@ -257,11 +257,9 @@ class MoonViTRoPE(ComplexRoPE):
             )
         if torch.compiler.is_compiling():
             cache_PF2 = torch.view_as_real(self.cache)
-            col_TF2 = cache_PF2[positions[:, 1]]
-            row_TF2 = cache_PF2[positions[:, 0]]
+            row_TF2, col_TF2 = cache_PF2[positions].unbind(1)
             return torch.stack((col_TF2, row_TF2), dim=-2).flatten(-3).unsqueeze(1)
-        col_TF = self.cache[positions[:, 1]]
-        row_TF = self.cache[positions[:, 0]]
+        row_TF, col_TF = self.cache[positions].unbind(1)
         return torch.stack((col_TF, row_TF), dim=-1).flatten(-2).unsqueeze(1)
 
 
