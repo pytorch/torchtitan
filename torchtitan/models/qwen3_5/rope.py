@@ -22,6 +22,8 @@ class MRoPE(CosSinRoPE):
     positions it falls back to the plain ``CosSinRoPE`` per-token lookup.
     """
 
+    _cache_init_is_pure = True
+
     @dataclass(kw_only=True, slots=True)
     class Config(CosSinRoPE.Config):
         mrope_section: list[int] = field(default_factory=lambda: [24, 20, 20])

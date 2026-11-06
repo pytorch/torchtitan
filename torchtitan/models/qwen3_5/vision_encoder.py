@@ -33,7 +33,7 @@ from torchtitan.models.common import Linear
 
 from torchtitan.models.common.flops import active_parameter_flops_per_token
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
-from torchtitan.models.common.rope import _maybe_check_max_pos, CosSinRoPE
+from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     get_packed_vision_grids,
@@ -174,6 +174,8 @@ class QwenVisionRoPE(CosSinRoPE):
     ``max_context_length`` is the exclusive bound on either coordinate.
     """
 
+    _cache_init_is_pure = True
+
     @dataclass(kw_only=True, slots=True)
     class Config(CosSinRoPE.Config):
         pass
@@ -227,7 +229,6 @@ class QwenVisionRoPE(CosSinRoPE):
             raise ValueError(
                 "Qwen vision RoPE requires positions of shape (num_tokens, 2)."
             )
-        _maybe_check_max_pos(positions, max_valid_pos=self.cache.shape[0] - 1)
         row_TF2 = self.cache[positions[:, 0]]
         col_TF2 = self.cache[positions[:, 1]]
         spatial_TR2 = torch.cat((row_TF2, col_TF2), dim=-2)

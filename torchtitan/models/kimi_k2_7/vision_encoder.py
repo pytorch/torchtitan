@@ -33,7 +33,7 @@ from torchtitan.models.common import Linear
 
 from torchtitan.models.common.flops import active_parameter_flops_per_token
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
-from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE
+from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     get_packed_vision_grids,
@@ -203,6 +203,8 @@ class MoonViTRoPE(ComplexRoPE):
     ``max_context_length`` is the exclusive bound on either coordinate.
     """
 
+    _cache_init_is_pure = True
+
     @dataclass(kw_only=True, slots=True)
     class Config(ComplexRoPE.Config):
         pass
@@ -253,7 +255,6 @@ class MoonViTRoPE(ComplexRoPE):
             raise ValueError(
                 "MoonViT RoPE requires positions of shape (num_tokens, 2)."
             )
-        _maybe_check_max_pos(positions, max_valid_pos=self.cache.shape[0] - 1)
         if torch.compiler.is_compiling():
             cache_PF2 = torch.view_as_real(self.cache)
             col_TF2 = cache_PF2[positions[:, 1]]
