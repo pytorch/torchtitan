@@ -111,8 +111,10 @@ class TestFSDPEmbedding(DTensorTestBase):
                 self.assertIsInstance(embedding, FSDPModule)
                 parameter = embedding.weight
                 self.assertIsInstance(parameter, DTensor)
-                optimizer = torch.optim.SGD(model.parameters(), lr=0.125)
-                reference_optimizer = torch.optim.SGD(reference.parameters(), lr=0.125)
+                optimizer = torch.optim.SGD(model.parameters(), lr=0.125, foreach=True)
+                reference_optimizer = torch.optim.SGD(
+                    reference.parameters(), lr=0.125, foreach=True
+                )
 
                 for step in range(3):
                     # Different DP batches exercise gradient averaging; repeated
