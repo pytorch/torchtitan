@@ -224,29 +224,52 @@ interval runs from first scheduling to first token, not just GPU compute. These
 single-host, short-context debug-model results do not establish production
 performance.
 
-### Concurrent TP cache-pressure sample
+### Long-context generator benchmark
 
-A separate Qwen3-8B generator benchmark used one TP group on H100s, four
-interleaved four-turn sessions with two concurrent requests, FULL CUDA graphs,
-and 4 GiB of Store DRAM per worker. Prompts began with 8,192 tokens; each turn
-generated 32 tokens and added 192 input tokens. Each run had two warmup cycles
-and five measured cycles (80 measured requests).
-Three OFF/ON pairs compared native GPU prefix caching with the same GPU cache
-plus Mooncake. The GPU cache had 80 blocks to exercise CPU reloads.
+Tested `12c278b330` with real Qwen3-8B weights and fixed synthetic token histories.
+OFF and ON use identical prompts and GPU cache limits. GPU lookup and native LRU
+eviction remain enabled; the cache fits two active requests but not all four
+sessions. This measures one generator, without trainer work or cross-generator
+transfers.
 
-| TP | OFF sessions/s | ON sessions/s | Change | Median requests with CPU hits |
-| --- | ---: | ---: | ---: | ---: |
-| 2 | 0.8362 | 0.9395 | +12.36% | 25 / 80 |
-| 4 | 1.2580 | 1.3621 | +8.27% | 34 / 80 |
+| Setting | Value |
+| --- | --- |
+| Hardware / model | One host; 2 or 4 H100s; Qwen3-8B, BF16; TP=2 or 4, DP=EP=1 |
+| Workload | Four interleaved sessions × four turns; two requests submitted together; 32,768 initial tokens, 32 greedy output + 192 new input tokens per turn |
+| GPU cache | 288 × 256-token blocks/rank; no session holder |
+| Store | 64 GiB DRAM/worker: 128 GiB total for TP=2, 256 GiB for TP=4; RDMA via `mlx5_0`; disk disabled |
+| Execution | FULL CUDA graphs; no torch.compile; async scheduling; token budget 8,192; maximum context 40,960; fixed policy version |
+| Measurement | Three alternating-order OFF/ON pairs; two warmup + five measured cycles/run; 80 requests / 20 completed sessions; median per-run statistics |
 
-With a roomy 512-block GPU cache, neither arm needed CPU reloads; throughput
-changed by +1.65% (TP=2) and -2.05% (TP=4). These are generator throughput
-measurements, not cross-generator or full RL training speedups.
+| Metric | TP=2 OFF → ON | TP=4 OFF → ON |
+| --- | ---: | ---: |
+| Requests with Store hits | 0 → 60 / 80 | 0 → 60 / 80 |
+| Computed prefill tokens | 2,648,320 → 677,120 (−74.4%) | 2,648,320 → 677,120 (−74.4%) |
+| Mean queue + prefill | 1,353.8 → 559.9 ms (−58.6%) | 793.3 → 466.5 ms (−41.2%) |
+| Mean request latency | 1,998.8 → 936.1 ms (−53.2%) | 1,202.4 → 711.8 ms (−40.8%) |
+| Completed four-turn sessions/s | 0.2458 → 0.4845 (**+97.1%**) | 0.4054 → 0.6124 (**+51.1%**) |
+| Time for 20 sessions, including transfer draining | 81.36 → 41.28 s | 49.33 → 32.66 s |
 
-The recompute comparison had identical greedy tokens in TP=2 and two differing
-requests out of 80 in TP=4. GPU-cache and CPU-cache arms reused different prefix
-lengths, so these measurements do not establish bitwise numerical parity.
-The sample predates the config validation and session-release changes in this PR;
-GPU session holding was disabled.
+All later turns reused Store KV, about 4.5 GiB per initial sequence across TP
+shards. Paired throughput gains were 97.1–97.3% for TP=2 and 49.9–51.3% for TP=4.
+Long prefixes make avoided prefill outweigh lookup, transfer, and coordination
+costs. The 64 GiB/worker budget retained these prefixes without reported Store
+save/load failures; it is a tested budget, not a minimum requirement.
+
+An earlier 8K test with 4 GiB/worker had allocation failures and only 25/80
+(TP=2) or 34/80 (TP=4) Store-hit requests, yielding +12.4% / +8.3% throughput.
+Increasing that budget to 16 GiB/worker restored all 60 later-turn hits in a
+single follow-up pair per TP degree (+39.1% / +15.7%).
+
+With a roomy 1,024-block GPU cache at 32K, both modes instead had 60/80 GPU hits
+and zero Store hits: throughput changed by −0.6% / −1.2% in one control pair.
+Offload helps when valuable prefixes have left GPU memory. These results do not
+measure multi-host transfer or full RL training speedup.
+
+TP ranks agreed on tokens and cache counts. Separate single-request reload/cold
+probes matched greedy tokens and logprobs. Concurrent OFF/ON runs differed on
+2/80 greedy outputs per TP setting, so this is not a bitwise-parity claim.
+A TP=2 ON rerun on `ea87a42c46` confirmed 60/80 Store hits and 0.4861 sessions/s
+after the subsequent config-validation and session-release changes.
 
 See the [architecture overview](https://vllm.ai/blog/2026-05-06-mooncake-store).
