@@ -95,6 +95,39 @@ class _EPBlock(Module):
         return out_TD.float().square().sum()
 
 
+class _PostW2(_EPBlock):
+    """Reference DeepEP experts with router scores applied after W2."""
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        num_tokens = x_TD.shape[0]
+        token_ids_T1 = torch.arange(num_tokens, device=x_TD.device).unsqueeze(-1)
+        offsets_1K = torch.arange(_TOP_K, device=x_TD.device).unsqueeze(0)
+        expert_ids_TK = (token_ids_T1 + offsets_1K) % self.num_experts
+        # Scores depend on the gate, so the router gets a gradient too.
+        scores_TK = torch.sigmoid(self.gate(x_TD)).gather(1, expert_ids_TK)
+        routing_map_TE = torch.zeros(
+            num_tokens, self.num_experts, dtype=torch.bool, device=x_TD.device
+        ).scatter_(1, expert_ids_TK, True)
+        experts = self.routed_experts
+        routed_RD, counts_E, metadata = experts.token_dispatcher.dispatch(
+            x_TD, scores_TK, expert_ids_TK, routing_map_TE
+        )
+        offsets_E = counts_E.cumsum(dim=0, dtype=torch.int32)
+        gate_up_R2F = experts.w13(routed_RD, offsets_E)
+        hidden_RF = experts.activation_fn(gate_up_R2F, offsets=offsets_E)
+        routed_output_RD = experts.w2(hidden_RF, offsets_E)
+        routed_output_RD = routed_output_RD * metadata.routed_scores_R.to(
+            routed_output_RD.dtype
+        ).reshape(-1, 1)
+        out_TD = experts.token_dispatcher.combine(
+            routed_output_RD,
+            metadata,
+            x_TD,
+        )
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD.float().square().sum()
+
+
 class _Model(Module):
     def __init__(self, block: Module):
         super().__init__()
@@ -127,7 +160,8 @@ class _EPActivationCheckpointing(DTensorTestBase):
         self,
         ac_configs: tuple,
         *,
-        num_replays: int,
+        num_dispatch_replays: int,
+        num_combine_replays: int,
         dispatcher_config,
         buffer_type,
         dispatch_method: str,
@@ -160,12 +194,20 @@ class _EPActivationCheckpointing(DTensorTestBase):
                     self.device_type, torch.bfloat16
                 )
                 ac_model.load_state_dict(baseline.state_dict())
+                reference = None
+                if isinstance(dispatcher_config, DeepEPTokenDispatcher.Config):
+                    reference = _Model(_PostW2(num_experts, dispatcher_config)).to(
+                        self.device_type, torch.bfloat16
+                    )
+                    reference.load_state_dict(baseline.state_dict())
                 activation_remat.apply(ac_model)
-                # As in training, the buffer is created after AC is applied. Both
+                # As in training, the buffer is created after AC is applied. All
                 # models share it, so the baseline also runs deterministic when
                 # the AC model replays.
                 baseline.layers["0"].routed_experts.token_dispatcher.init_buffer()
                 ac_model.layers["0"].routed_experts.token_dispatcher.init_buffer()
+                if reference is not None:
+                    reference.layers["0"].routed_experts.token_dispatcher.init_buffer()
 
                 num_calls = {"dispatch": 0, "combine": 0}
                 original = {
@@ -219,11 +261,29 @@ class _EPActivationCheckpointing(DTensorTestBase):
                     else:
                         actual = _run_forward_backward(ac_model, x_TD)
 
+                if reference is not None:
+                    reference_values = _run_forward_backward(reference, x_TD)
+                    # Compare pre-W2 absorption with the previous post-W2 scoring.
+                    bf16_rtol = 2 * torch.finfo(torch.bfloat16).eps
+                    for value, reference_value in zip(expected, reference_values):
+                        error_norm = torch.linalg.vector_norm(
+                            value.float() - reference_value.float()
+                        )
+                        reference_norm = torch.linalg.vector_norm(
+                            reference_value.float()
+                        )
+                        self.assertLessEqual(
+                            error_norm.item(), bf16_rtol * reference_norm.item()
+                        )
+
                 # Forward dispatch and combine, plus their backward passes.
                 self.assertEqual(baseline_calls, {"dispatch": 2, "combine": 2})
                 self.assertEqual(
                     num_calls,
-                    {"dispatch": 2 + num_replays, "combine": 2 + num_replays},
+                    {
+                        "dispatch": 2 + num_dispatch_replays,
+                        "combine": 2 + num_combine_replays,
+                    },
                     msg=f"unexpected EP communication replays: {num_calls}",
                 )
                 if exact:
@@ -247,7 +307,8 @@ class TestDeepEPActivationCheckpointing(_EPActivationCheckpointing):
     def _check_deepep_activation_checkpointing(self, ac_configs, *, num_replays):
         self._check_ep_activation_checkpointing(
             ac_configs,
-            num_replays=num_replays,
+            num_dispatch_replays=num_replays,
+            num_combine_replays=0,
             dispatcher_config=DeepEPTokenDispatcher.Config(
                 num_experts=4 * self.world_size,
                 top_k=_TOP_K,
@@ -309,7 +370,8 @@ class TestHybridEPActivationCheckpointing(_EPActivationCheckpointing):
             with self.subTest(capacity_factor=capacity_factor):
                 self._check_ep_activation_checkpointing(
                     ac_configs,
-                    num_replays=num_replays,
+                    num_dispatch_replays=num_replays,
+                    num_combine_replays=num_replays,
                     dispatcher_config=HybridEPTokenDispatcher.Config(
                         num_experts=4 * self.world_size,
                         top_k=_TOP_K,

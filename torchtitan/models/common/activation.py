@@ -27,9 +27,15 @@ class BinaryActivationFn(Function[torch.Tensor], ABC):
     class Config(Function.Config):
         pass
 
-    # recompile_limit=16: ~3 graphs per static F; DeepSeek-V3 at TP8 needs 10 (default 8).
+    # recompile_limit=16: ~3 graphs per static F, twice that for an F seen with and
+    # without scores (DeepEP routed experts next to a shared expert of the same F).
+    # DeepSeek-V3 at TP8 needs 10 (default 8).
     # Backward stacks the gate and up gradients into [..., 2, F]. Both limits at 0 make Inductor write
     # each gradient into its half, not one kernel that picks a half per element. Both are needed.
+    # batch_invariant=True holds for the forward. With scores, the backward sums each row's
+    # score gradient, and these options make that sum depend on the row's position. DeepEP
+    # without debug.deterministic receives rows in a new order each step, so router grads
+    # differ in the last bits run to run. Dropping the options fixes it but costs 1.6-1.8x here.
     @local_compile(
         "fused_binary_activation",
         batch_invariant=True,
@@ -37,7 +43,11 @@ class BinaryActivationFn(Function[torch.Tensor], ABC):
         options={"max_pointwise_cat_inputs": 0, "max_complex_pointwise_cat_inputs": 0},
     )
     def __call__(
-        self, gate_up: torch.Tensor, *, offsets: torch.Tensor | None = None
+        self,
+        gate_up: torch.Tensor,
+        *,
+        offsets: torch.Tensor | None = None,
+        scores: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Apply the activation to ``gate_up``: ``[..., 0, :]`` is gate, ``[..., 1, :]`` is up.
 
@@ -49,24 +59,33 @@ class BinaryActivationFn(Function[torch.Tensor], ABC):
             offsets: for routed experts, where each expert's rows end. Rows past
                 ``offsets[-1]`` are padding that a kernel may skip (FusedSwiGLU does).
                 This compiled path computes every row and never reads ``offsets``.
+            scores: optional ``[R]``, one routing score per row of a ``[R, 2, F]``
+                ``gate_up``: output row ``r`` is multiplied by ``scores[r]``. With fp32
+                scores, the compiled region multiplies in fp32 and rounds once.
+                Subclasses that override ``__call__`` may round more (FusedSwiGLU
+                rounds the scores to the output dtype first).
 
         Example:
 
             hidden_TF = activation_fn(w13(x_TD))  # w13 returns [T, 2, F]
+            hidden_RF = activation_fn(gate_up_R2F, scores=scores_R)  # row r * scores[r]
         """
         # Keep F static. Without this, the second F this region sees (e.g. dense FFN,
         # then experts) makes Dynamo recompile it for any F, and that kernel divides by
         # a runtime F: ~1.9x slower fwd+bwd, ~1.25x slower no-grad forward.
         torch._dynamo.mark_static(gate_up, -1)
         gate, up = gate_up.unbind(-2)
-        return self._activation_fn(gate, up)
+        hidden = self._activation_fn(gate, up)
+        if scores is None:
+            return hidden
+        return (hidden * scores.unsqueeze(-1)).to(hidden.dtype)
 
     @abstractmethod
     def _activation_fn(self, gate: torch.Tensor, up: torch.Tensor, /) -> torch.Tensor:
         """Return the activation of ``gate`` and ``up``, both ``[..., F]``.
 
-        Runs inside the compiled region, so it must compile with ``fullgraph=True`` and
-        stay elementwise: the region is marked batch invariant.
+        Runs inside the compiled region: it must compile with ``fullgraph=True`` and stay
+        elementwise, which keeps the forward batch invariant (``batch_invariant=True``).
         """
 
 

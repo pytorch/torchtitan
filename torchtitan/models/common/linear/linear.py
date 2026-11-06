@@ -15,6 +15,7 @@
 
 import math
 from dataclasses import dataclass
+from typing import ClassVar
 
 import spmd_types as spmd
 import torch
@@ -406,6 +407,7 @@ class GroupedLinear(Module):
         in_features: int
         out_features: int
         num_linears: int = 1
+        bias: ClassVar[bool] = False
 
     def __init__(self, config: Config):
         super().__init__()

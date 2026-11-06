@@ -230,6 +230,45 @@ class TestSwiGLULocalCompile(unittest.TestCase):
         torch.testing.assert_close(grad_gate, reference_grad_gate)
         torch.testing.assert_close(grad_up, reference_grad_up)
 
+    def test_scores_scale_rows_in_one_kernel(self):
+        from torch._inductor.utils import run_and_get_code
+
+        swiglu = SwiGLU.Config().build()
+        gate_up = torch.randn(
+            256, 2, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
+        scores = torch.rand(256, device="cuda", requires_grad=True)
+        grad_output = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16)
+
+        with torch.no_grad():
+            no_grad_output, codes = run_and_get_code(
+                lambda: swiglu(gate_up, scores=scores)
+            )
+        # The multiply is part of the activation kernel, not a second pass.
+        self.assertEqual(sum(code.count("@triton.jit") for code in codes), 1)
+        output = swiglu(gate_up, scores=scores)
+        # Generator (no grad) and trainer (grad) get the same bits.
+        self.assertTrue(torch.equal(output, no_grad_output))
+        grad_gate_up, grad_scores = torch.autograd.grad(
+            output, (gate_up, scores), grad_output
+        )
+
+        reference_gate_up = gate_up.detach().float().requires_grad_()
+        reference_scores = scores.detach().clone().requires_grad_()
+        gate, up = reference_gate_up.unbind(-2)
+        reference_output = F.silu(gate) * up * reference_scores.unsqueeze(-1)
+        reference_grad_gate_up, reference_grad_scores = torch.autograd.grad(
+            reference_output, (reference_gate_up, reference_scores), grad_output
+        )
+
+        # fp32 math, rounded once to bf16: equal to the fp32 reference rounded once,
+        # except where exp's last bit crosses a rounding boundary (~3e-6 of elements).
+        # Rounding the activation or the scores to bf16 first changes ~34%.
+        mismatch = (output != reference_output.bfloat16()).float().mean().item()
+        self.assertLess(mismatch, 1e-3)
+        torch.testing.assert_close(grad_gate_up, reference_grad_gate_up.bfloat16())
+        torch.testing.assert_close(grad_scores, reference_grad_scores)
+
     def test_forward_and_backward_are_batch_invariant(self):
         swiglu = SwiGLU.Config().build()
         gate = torch.randn(

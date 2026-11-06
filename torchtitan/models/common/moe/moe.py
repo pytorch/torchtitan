@@ -42,7 +42,11 @@ from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 
-from .token_dispatcher import LocalTokenDispatcher
+from .token_dispatcher import (
+    DeepEPDispatchMetadata,
+    DeepEPTokenDispatcher,
+    LocalTokenDispatcher,
+)
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
@@ -86,6 +90,12 @@ class RoutedExperts(Module):
                 raise ValueError("w13 output and w2 input dimensions must match")
             if self.w2.num_linears != 1:
                 raise ValueError("w2 must contain one down projection")
+            if isinstance(self.token_dispatcher, DeepEPTokenDispatcher.Config) and (
+                self.output_postprocess is not None or self.w2.bias
+            ):
+                raise ValueError(
+                    "DeepEP does not support output_postprocess or a w2 bias"
+                )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -146,7 +156,16 @@ class RoutedExperts(Module):
             remat.recompute_needs_tensor(routed_input_RD)
             gate_up_R2F = self.w13(routed_input_RD.bfloat16(), offsets_E)
             remat.recompute_needs_tensor(gate_up_R2F)
-            hidden_RF = self.activation_fn(gate_up_R2F, offsets=offsets_E)
+            routed_scores_R = None
+            if isinstance(metadata, DeepEPDispatchMetadata):
+                # DeepEP's combine only sums: scale W2's input instead (Config rejects a
+                # w2 bias and an output postprocess, so this equals scaling W2's output).
+                # The activation reads the dispatch region's scores, so pin them.
+                routed_scores_R = metadata.routed_scores_R
+                remat.recompute_needs_tensor(routed_scores_R)
+            hidden_RF = self.activation_fn(
+                gate_up_R2F, offsets=offsets_E, scores=routed_scores_R
+            )
             routed_output_RD = self.w2(hidden_RF, offsets_E)
             # A real dtype cast and the output postprocess read the w2 output with
             # bare ops, so pin it only then. In the common bf16 case without a
