@@ -260,8 +260,8 @@ class WandBLogger(BaseLogger):
             (k if self.tag is None else f"{self.tag}/{k}"): v
             for k, v in metrics.items()
         }
-        # No `step=`: W&B ignores a log to a step below its current one, and validation can log at
-        # an older step. Without it, each call is a new row, sent at once (commit=True by default).
+        # No `step=`: W&B ignores a log to a step it already sent, e.g. validation at a step that
+        # training already logged. Without it, each call is a new row, sent at once (commit=True by default).
         self.wandb.log({**wandb_metrics, "trainer/step": step})
 
     def close(self) -> None:
