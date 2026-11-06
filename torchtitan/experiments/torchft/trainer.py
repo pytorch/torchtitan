@@ -120,6 +120,14 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         )
         self.device_memory_monitor = build_device_memory_monitor()
 
+    def _sum_loss_token_count(self, loss_token_count: torch.Tensor) -> torch.Tensor:
+        # The all-reduce hook sums gradients over the participating replicas, so sum their
+        # loss tokens too. A replica that does not participate contributes zero to both.
+        return dist_utils.dist_sum_tensor(
+            super()._sum_loss_token_count(loss_token_count),
+            extra_pg=self.ft_manager.loss_sync_pg,
+        )
+
     def _initialize_model(
         self,
         *,
@@ -369,58 +377,15 @@ class FaultTolerantTrainer(Configurable):
         # All groups form one optimizer step. Each microbatch group forms one
         # complete PP step, or one local forward/backward when PP is disabled.
         microbatch_groups: list[list[TrainingMicrobatch]] = []
-        local_loss_token_counts: torch.Tensor | None = None
-        local_routing_token_counts: torch.Tensor | None = None
         for _ in range(self.gradient_accumulation_steps):
-            microbatch_group = []
-            for _ in range(self.num_pp_microbatches):
-                microbatch = next(data_iterator)
-                if local_loss_token_counts is None:
-                    local_loss_token_counts = torch.zeros_like(
-                        microbatch.loss_token_counts
-                    )
-                    local_routing_token_counts = torch.zeros_like(
-                        microbatch.routing_token_counts
-                    )
-                local_loss_token_counts.add_(microbatch.loss_token_counts)
-                assert local_routing_token_counts is not None
-                local_routing_token_counts.add_(microbatch.routing_token_counts)
-                microbatch_group.append(microbatch)
-            microbatch_groups.append(microbatch_group)
-
-        assert local_loss_token_counts is not None
-        assert local_routing_token_counts is not None
-        local_main_loss_token_count = (
-            local_loss_token_counts
-            if local_loss_token_counts.ndim == 0
-            else local_loss_token_counts[0]
-        )
-        num_loss_objectives = local_loss_token_counts.numel()
-        global_token_counts = torch.cat(
-            (
-                local_loss_token_counts.reshape(-1),
-                local_routing_token_counts.reshape(-1),
+            microbatch_groups.append(
+                [next(data_iterator) for _ in range(self.num_pp_microbatches)]
             )
-        ).to(engine.device)
-        if parallelism_context.dp_enabled:
-            global_token_counts = dist_utils.dist_sum_tensor(
-                global_token_counts, parallelism_context.get_mesh("dp")
-            )
-        global_loss_token_counts = global_token_counts[:num_loss_objectives].reshape(
-            local_loss_token_counts.shape
-        )
-        global_routing_token_counts = global_token_counts[num_loss_objectives:].reshape(
-            local_routing_token_counts.shape
-        )
+        # The denominators cover this replica's DP ranks only: the replicas' quorum starts inside
+        # forward_backward. So each replica's auxiliary losses weigh its share of the loss tokens.
         forward_backward_result = engine.forward_backward(
             microbatch_groups=microbatch_groups,
-            global_loss_token_counts=global_loss_token_counts,
-            global_routing_token_counts=global_routing_token_counts,
-        )
-        global_main_loss_token_count = (
-            global_loss_token_counts
-            if global_loss_token_counts.ndim == 0
-            else global_loss_token_counts[0]
+            aux_loss_denominators=engine.step_aux_loss_denominators(microbatch_groups),
         )
 
         grad_norm = engine.optim_step()
@@ -430,30 +395,26 @@ class FaultTolerantTrainer(Configurable):
         if not should_log:
             return
 
-        accumulated_loss = forward_backward_result.loss
+        # Losses are sums; divide by the step's loss tokens (at least 1, so a
+        # step with none logs 0).
+        num_global_loss_tokens = int(engine.global_loss_token_count)
+        loss_token_divisor = max(num_global_loss_tokens, 1)
+        loss_sum = forward_backward_result.loss
         mean_num_flops = self._local_num_flops_since_last_log
+        # FT addition: use ft_manager.loss_sync_pg for extra process group
+        ft_pg = engine.ft_manager.loss_sync_pg
 
-        if parallelism_context.dp_cp_enabled:
-            # FT addition: use ft_manager.loss_sync_pg for extra process group
-            ft_pg = engine.ft_manager.loss_sync_pg
-            loss_mesh = parallelism_context.get_mesh("loss")
+        # The step's count covers the replicas in ft_pg (_sum_loss_token_count),
+        # so the loss sum must cover them too, even without DP or CP. Counting
+        # over replicas keeps the logged loss from jumping when replicas leave or rejoin.
+        if parallelism_context.dp_cp_enabled or ft_pg is not None:
+            loss_mesh = parallelism_context.get_optional_mesh("loss")
 
-            # For global_avg_loss, we want the average loss across all ranks:
-            # accumulated_loss = local_loss_sum / global_valid_tokens
-            # global_avg_loss = sum(local_loss_sum) / global_valid_tokens
-            #                 = sum(accumulated_loss)
-            #
-            # For global_max_loss, we want the max of local average losses across ranks:
-            # local_avg_loss = local_loss_sum / local_valid_tokens
-            #                = (accumulated_loss * global_valid_tokens) / local_valid_tokens
-            # global_max_loss = max(local_avg_loss)
-            local_avg_loss = (
-                accumulated_loss
-                * global_main_loss_token_count
-                / local_main_loss_token_count
-            )
-            global_avg_loss, global_max_loss, global_ntokens_seen = (
-                dist_utils.dist_sum(accumulated_loss, loss_mesh, ft_pg),
+            # global_avg_loss: the summed loss over all ranks / the step's loss tokens.
+            # global_max_loss: the max over ranks of this rank's mean loss.
+            local_avg_loss = loss_sum / max(engine.local_loss_token_count, 1)
+            global_loss_sum, global_max_loss, global_ntokens_seen = (
+                dist_utils.dist_sum(loss_sum, loss_mesh, ft_pg),
                 dist_utils.dist_max(local_avg_loss, loss_mesh, ft_pg),
                 dist_utils.dist_sum(
                     torch.tensor(
@@ -465,6 +426,7 @@ class FaultTolerantTrainer(Configurable):
                     ft_pg,
                 ),
             )
+            global_avg_loss = global_loss_sum / loss_token_divisor
             dp_mesh = parallelism_context.get_optional_mesh("dp")
             if dp_mesh is not None or ft_pg is not None:
                 mean_num_flops = dist_utils.dist_sum(
@@ -478,17 +440,21 @@ class FaultTolerantTrainer(Configurable):
                     mean_num_flops /= dp_mesh.size()
             # ft_pg is None in semi-sync training.
             if ft_pg is not None:
-                # Avoid artificial jumps in logged loss when replicas leave or rejoin.
-                global_avg_loss /= ft_pg.size()
                 mean_num_flops /= ft_pg.size()
         else:
-            global_avg_loss = global_max_loss = accumulated_loss.item()
+            global_avg_loss = global_max_loss = (
+                float(loss_sum.item()) / loss_token_divisor
+            )
             global_ntokens_seen = engine.ntokens_seen
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             "lr": lr,
-            **collect_aux_loss_metrics(engine.parallelism_context),
+            **collect_aux_loss_metrics(
+                engine.parallelism_context,
+                num_loss_tokens=num_global_loss_tokens,
+                extra_pg=ft_pg,
+            ),
         }
         self.metrics_processor.log(
             engine.num_completed_steps,

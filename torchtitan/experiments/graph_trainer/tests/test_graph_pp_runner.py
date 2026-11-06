@@ -288,6 +288,27 @@ class GraphRuntimeTraceTest(unittest.TestCase):
 
         _build_test_stage_graphs(stage, (x,), {}, None, {})
 
+    def test_float_stage_kwargs_get_no_input_grad(self) -> None:
+        class ScaledStage(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = nn.Parameter(torch.ones(4))
+
+            def forward(self, x, *, scale):
+                return x * self.weight / scale
+
+        stage = _make_test_stage(
+            ScaledStage(), is_last=False, output_grads=torch.empty(2, 4)
+        )
+
+        _build_test_stage_graphs(
+            stage, (torch.randn(2, 4),), {"scale": torch.tensor(2.0)}, None, {}
+        )
+
+        # Only x's grad goes to the previous stage; a float kwarg such as the aux-loss
+        # denominators is stage-local, so the grads match the grad send slots.
+        self.assertEqual(stage.graphs.meta.num_input_grad_values, 1)
+
     def test_last_graph_build_does_not_run_real_pretrace_forward_or_loss(
         self,
     ) -> None:
@@ -1154,7 +1175,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 (x,),
                 {},
                 target,
-                {"global_loss_token_counts": torch.tensor(8)},
+                {},
                 loss_fn=loss_fn,
                 trainer_config=trainer_config,
                 parallelism_context=types.SimpleNamespace(),
@@ -1196,7 +1217,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 (x,),
                 {},
                 target,
-                {"global_loss_token_counts": torch.tensor(8)},
+                {},
                 loss_fn=loss_fn,
                 trainer_config=trainer_config,
                 parallelism_context=types.SimpleNamespace(),
@@ -1212,7 +1233,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             (x,),
             {},
             target,
-            {"global_loss_token_counts": torch.tensor(8)},
+            {},
             unsharded_param_values=unsharded_params,
             buffer_values=flat_buffers,
             runtime_validate=True,
@@ -1221,7 +1242,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             (x,),
             {},
             target,
-            {"global_loss_token_counts": torch.tensor(8)},
+            {},
             unsharded_param_values=unsharded_params,
             buffer_values=flat_buffers,
             grad_accumulators=accumulators,
@@ -2510,22 +2531,15 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         )
         x = torch.randn(16, 16, requires_grad=True)
         labels = torch.randint(0, 33, (16,))
-        global_loss_token_counts = torch.tensor(float(labels.numel()))
 
-        _build_test_stage_graphs(
-            stage,
-            (x,),
-            {},
-            labels,
-            {"global_loss_token_counts": global_loss_token_counts},
-        )
+        _build_test_stage_graphs(stage, (x,), {}, labels, {})
 
         state = list(model.parameters())
         loss, saved = stage.graphs.forward(
             (x,),
             {},
             labels,
-            {"global_loss_token_counts": global_loss_token_counts},
+            {},
             unsharded_param_values=state,
             buffer_values=[],
         )
@@ -2534,7 +2548,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             (),
         )
 
-        expected_loss, _ = loss_fn(model(x), labels, global_loss_token_counts)
+        expected_loss, _ = loss_fn(model(x), labels)
         expected_grads = torch.autograd.grad(
             expected_loss,
             [*model.parameters(), x],

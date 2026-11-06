@@ -50,14 +50,9 @@ class _TrainerActorEndpoints:
         microbatch_groups: (
             list[list[TrainingMicrobatch]] | list[list[RDMAMicrobatch]]
         ),
-        global_loss_token_counts: torch.Tensor,
-        global_routing_token_counts: torch.Tensor,
+        aux_loss_denominators: torch.Tensor,
     ) -> dict[str, float] | None:
-        return await super().forward_backward(
-            microbatch_groups,
-            global_loss_token_counts,
-            global_routing_token_counts,
-        )
+        return await super().forward_backward(microbatch_groups, aux_loss_denominators)
 
     @concurrent_endpoint
     async def optim_step(

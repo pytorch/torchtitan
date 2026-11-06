@@ -59,7 +59,7 @@ def make_fwd_bwd_step(model, loss_fn):
     """Return a function that computes loss and explicit parameter gradients.
 
     Calling convention:
-        ``(inputs, labels, global_loss_token_counts, extra_kwargs)``
+        ``(inputs, labels, extra_kwargs)``
         ``-> (loss, *parameter_gradients)``
 
     ``model`` and ``loss_fn`` are captured in the closure so neither shows up
@@ -67,18 +67,14 @@ def make_fwd_bwd_step(model, loss_fn):
     to thread its parameters/buffers as static graph inputs.
     """
 
-    def fwd_bwd_step(inputs, labels, global_loss_token_counts, extra_kwargs):
+    def fwd_bwd_step(inputs, labels, extra_kwargs):
         pred = model(inputs, **extra_kwargs)
         # The loss function is not a submodule of the model, so
         # annotate_module_fqns won't tag it. Annotate it here so that
         # downstream passes (bucketing, SAC, kernel annotations) can
         # attribute loss nodes in the traced graph.
-        loss = compute_annotated_loss(
-            loss_fn,
-            pred,
-            labels,
-            {"global_loss_token_counts": global_loss_token_counts},
-        )
+        # The loss is a sum; the engine divides the gradients by the loss-token count.
+        loss = compute_annotated_loss(loss_fn, pred, labels, {})
         named_params = [
             (name, parameter)
             for name, parameter in model.named_parameters(remove_duplicate=False)
@@ -143,13 +139,7 @@ class GraphTrainerJointStageGraphs(JointStageGraphs):
         grad_accumulators: list[Any] | None = None,
         runtime_validate: bool = False,
     ) -> tuple[Any, list[Any]]:
-        global_loss_token_counts = loss_kwargs["global_loss_token_counts"]
-        outputs = self._run(
-            self._model_input(args),
-            target,
-            global_loss_token_counts,
-            kwargs,
-        )
+        outputs = self._run(self._model_input(args), target, kwargs)
         if len(outputs) != self.num_param_grads + 1:
             raise ValueError(
                 "SPMD joint forward/backward output count mismatch: "
@@ -193,7 +183,7 @@ def construct_joint_train_step_passes(
 
 def _trace_joint_stage_graph(
     stage: GraphPipelineStage,
-    runtime_args: tuple[Any, Any, Any, dict[str, Any]],
+    runtime_args: tuple[Any, Any, dict[str, Any]],
     *,
     loss_fn: Callable,
     compile_config: GraphTrainerCompileConfig,
@@ -291,13 +281,8 @@ def _trace_spmd_stage_graph(
         )
 
     # Calling convention:
-    # (model_input, target, global_loss_token_counts, model_kwargs)
-    runtime_args: tuple[Any, Any, Any, dict[str, Any]] = (
-        args[0],
-        target,
-        loss_kwargs["global_loss_token_counts"],
-        kwargs,
-    )
+    # (model_input, target, model_kwargs)
+    runtime_args: tuple[Any, Any, dict[str, Any]] = (args[0], target, kwargs)
     traced: TracedResult
     runtime_meshes: list[DeviceMesh] | None
     traced, runtime_meshes = _trace_joint_stage_graph(

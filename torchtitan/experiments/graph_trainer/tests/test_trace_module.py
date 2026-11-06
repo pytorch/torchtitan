@@ -270,6 +270,9 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine.max_num_documents = None
         engine.preprocess_inputs_kwargs = {}
         engine.ntokens_seen = 0
+        engine.local_loss_token_count = 0
+        # Set by forward_backward: 1 routed token per loss token.
+        engine._aux_loss_denominators = torch.tensor([1.0])
         engine._forward_backward_num_flops = 0
         engine.flops_estimator = lambda inputs: inputs["input"].numel()
         microbatches = [
@@ -278,25 +281,23 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                 labels=torch.tensor([index + 1]),
                 positions=torch.tensor([index + 2]),
                 padding_mask=torch.tensor([False]),
-                loss_token_counts=torch.tensor(1),
+                loss_token_count=torch.tensor(1),
                 routing_token_counts=torch.tensor([1]),
             )
             for index in range(2)
         ]
 
-        prepared_groups = engine._preprocess_microbatch_groups(
-            [microbatches], global_routing_token_counts=torch.tensor([2])
-        )
+        prepared_groups = engine._preprocess_microbatch_groups([microbatches])
         engine._pp_forward_backward_microbatch_group = MagicMock(
             return_value=(torch.tensor(3.0), [{}, {}])
         )
         loss, loss_metrics = engine._forward_backward_body(
             prepared_groups,
-            torch.tensor(2),
             defer_fsdp_gradient_reduction=False,
         )
 
         assert engine.ntokens_seen == 2
+        assert engine.local_loss_token_count == 2
         assert engine._forward_backward_num_flops == 2
         torch.testing.assert_close(loss, torch.tensor(3.0))
         assert loss_metrics == [[{}, {}]]
@@ -304,22 +305,18 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         assert len(call.kwargs["inputs"]) == 2
         assert len(call.kwargs["model_kwargs"]) == 2
         assert len(call.kwargs["labels"]) == 2
-        assert len(call.kwargs["loss_kwargs"]) == 2
-        for mb_loss_kwargs in call.kwargs["loss_kwargs"]:
-            torch.testing.assert_close(
-                mb_loss_kwargs["global_loss_token_counts"], torch.tensor(2)
-            )
+        assert call.kwargs["loss_kwargs"] == [{}, {}]
         assert call.kwargs["finalize_gradients"]
 
         engine.parallelism_context.pp_enabled = True
         engine.pp_has_first_stage = True
         engine.pp_has_last_stage = True
         engine._forward_backward_num_flops = 0
-        pp_prepared_groups = engine._preprocess_microbatch_groups(
-            [microbatches], global_routing_token_counts=torch.tensor([2])
-        )
+        engine.local_loss_token_count = 0
+        pp_prepared_groups = engine._preprocess_microbatch_groups([microbatches])
         torch.testing.assert_close(pp_prepared_groups, prepared_groups)
         assert engine._forward_backward_num_flops == 2
+        assert engine.local_loss_token_count == 2
 
     def test_graph_runtime_receives_shared_loss_kwargs(self):
         from types import SimpleNamespace
@@ -339,7 +336,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             kwargs["losses"].extend([torch.tensor(1.0), torch.tensor(2.0)])
 
         engine.pp_schedule = SimpleNamespace(step=MagicMock(side_effect=step))
-        loss_kwargs = {"global_loss_token_counts": torch.tensor(2)}
+        loss_kwargs: dict[str, torch.Tensor] = {}
 
         loss, loss_metrics = engine._pp_forward_backward_microbatch_group(
             inputs=[(torch.ones(1),), (torch.ones(1),)],
@@ -388,6 +385,9 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine.max_num_documents = None
         engine.preprocess_inputs_kwargs = {}
         engine.ntokens_seen = 0
+        engine.local_loss_token_count = 0
+        # Set by forward_backward: routed tokens [2, 1] per 2 loss tokens.
+        engine._aux_loss_denominators = torch.tensor([1.0, 0.5])
         engine._forward_backward_num_flops = 0
         engine.flops_estimator = lambda inputs: inputs["input"].numel()
         microbatch = TokenizedTrainingMicrobatch(
@@ -395,12 +395,12 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             labels=main_labels,
             positions=torch.arange(2),
             padding_mask=torch.tensor([False, False]),
-            loss_token_counts=torch.tensor([2, 1]),
+            loss_token_count=torch.tensor(2),
             routing_token_counts=torch.tensor([2, 1]),
         )
 
         [(arg_mbs, kwarg_mbs, target_mbs)] = engine._preprocess_microbatch_groups(
-            [[microbatch]], global_routing_token_counts=torch.tensor([2, 1])
+            [[microbatch]]
         )
 
         assert len(arg_mbs) == 1 and len(arg_mbs[0]) == 1
@@ -2372,13 +2372,10 @@ class TestTraceContextParallel(FSDPTest):
                             positions=positions,
                             labels=labels,
                             padding_mask=torch.zeros_like(labels, dtype=torch.bool),
-                            loss_token_counts=torch.tensor(labels.numel()),
+                            loss_token_count=torch.tensor(labels.numel()),
                             routing_token_counts=torch.tensor([labels.numel()]),
                         )
                     ],
-                    global_loss_token_counts=torch.tensor(
-                        labels.numel(), device=trainer.engine.device
-                    ),
                 )
                 assert trainer.engine._traced_step is not None
                 code_lines = trainer.engine._traced_step.gm.graph.python_code(

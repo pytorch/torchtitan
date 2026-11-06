@@ -78,18 +78,13 @@ def get_mtp_token_counts(
     padding_mask: torch.Tensor,
     num_mtp_layers: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return loss-token and routed-token counts for the main and MTP depths."""
-    loss_token_counts = [target_mask.sum()]
+    """Return the loss-token count and the routed-token counts of the main and MTP depths.
+
+    Every depth's loss is divided by the main loss-token count, so only routing is
+    counted per depth.
+    """
     routing_token_counts = [(~padding_mask).sum()]
     for depth in range(1, num_mtp_layers + 1):
-        shifted_target_mask = roll_mtp_sequence(
-            target_mask,
-            shift=depth,
-            positions=positions,
-            padding_mask=padding_mask,
-            fill_value=False,
-        )
-        assert isinstance(shifted_target_mask, torch.Tensor)
         _, routing_mask = roll_mtp_sequence(
             padding_mask,
             shift=depth,
@@ -98,9 +93,8 @@ def get_mtp_token_counts(
             fill_value=True,
             return_valid_mask=True,
         )
-        loss_token_counts.append(shifted_target_mask.sum())
         routing_token_counts.append(routing_mask.sum())
-    return torch.stack(loss_token_counts), torch.stack(routing_token_counts)
+    return target_mask.sum(), torch.stack(routing_token_counts)
 
 
 class MTPTransformerBlock(TransformerBlock):
@@ -274,7 +268,7 @@ class MTPDecoder(Decoder):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        global_routing_token_counts: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[
         torch.Tensor | tuple[torch.Tensor, ...],
@@ -346,7 +340,7 @@ class MTPDecoder(Decoder):
         loss_kwargs = {name: input_dict.pop(name) for name in loss_kwargs}
         main_tokens = input_dict.pop("input")
         main_labels = input_dict.pop("labels")
-        input_dict["aux_loss_denominators"] = global_routing_token_counts
+        input_dict["aux_loss_denominators"] = aux_loss_denominators
         if self.mtp_layers is None:
             return main_tokens, main_labels, input_dict, loss_kwargs
 
@@ -530,10 +524,14 @@ class MTPCrossEntropyLoss(Loss[tuple[torch.Tensor, ...]]):
         self,
         pred: tuple[torch.Tensor, ...],
         labels: tuple[torch.Tensor, ...],
-        global_loss_token_counts: torch.Tensor | None = None,
         **loss_inputs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        """Compute the weighted objective from aligned prediction/label pairs."""
+        """Compute the weighted objective from aligned prediction/label pairs.
+
+        Every depth's loss is a sum; the engine divides all of them by the main
+        objective's loss-token count, as the DeepSeek-V3 report divides every
+        depth by the input length T (eq. 24).
+        """
         del loss_inputs
         if not isinstance(pred, tuple) or not isinstance(labels, tuple):
             raise ValueError(
@@ -551,27 +549,7 @@ class MTPCrossEntropyLoss(Loss[tuple[torch.Tensor, ...]]):
                 "prediction."
             )
         mtp_weight = self.mtp_scale / num_mtp_layers
-        if global_loss_token_counts is not None and global_loss_token_counts.ndim != 1:
-            raise ValueError(
-                "MTPCrossEntropyLoss requires a per-objective "
-                "global_loss_token_counts vector."
-            )
-        if (
-            global_loss_token_counts is not None
-            and global_loss_token_counts.numel() != len(pred)
-        ):
-            raise ValueError(
-                "MTPCrossEntropyLoss requires one denominator per prediction, "
-                f"got {global_loss_token_counts.numel()} for {len(pred)} predictions."
-            )
-        if global_loss_token_counts is None:
-            loss_token_counts: tuple[torch.Tensor | None, ...] = (None,) * len(pred)
-        else:
-            with spmd.no_typecheck():
-                loss_token_counts = tuple(
-                    count.clamp_min(1) for count in global_loss_token_counts.unbind()
-                )
-        main_loss, _ = self.cross_entropy_loss(pred[0], labels[0], loss_token_counts[0])
+        main_loss, _ = self.cross_entropy_loss(pred[0], labels[0])
         mtp_loss = pred[0].new_zeros((), dtype=torch.float32)
         if spmd.is_type_checking():
             mtp_loss = spmd.mutate_type(
@@ -579,14 +557,8 @@ class MTPCrossEntropyLoss(Loss[tuple[torch.Tensor, ...]]):
                 src=spmd.R,
                 dst={"dp": spmd.P, "cp": spmd.P, "tp": spmd.I},
             )
-        for depth, (mtp_pred, mtp_labels) in enumerate(
-            zip(pred[1:], labels[1:], strict=True), 1
-        ):
-            depth_loss, _ = self.cross_entropy_loss(
-                mtp_pred,
-                mtp_labels,
-                loss_token_counts[depth],
-            )
+        for mtp_pred, mtp_labels in zip(pred[1:], labels[1:], strict=True):
+            depth_loss, _ = self.cross_entropy_loss(mtp_pred, mtp_labels)
             mtp_loss = mtp_loss + depth_loss * mtp_weight
         loss = main_loss + mtp_loss
         return loss, {}

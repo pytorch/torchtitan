@@ -17,7 +17,10 @@ import numpy as np
 import pytest
 
 from torchtitan.observability.metrics import TensorBoardLogger, WandBLogger
-from torchtitan.rl.controller.metrics import compute_rollout_metrics
+from torchtitan.rl.controller.metrics import (
+    combine_microbatch_metrics,
+    compute_rollout_metrics,
+)
 
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
@@ -809,3 +812,18 @@ class TestIsValidationSwitch:
             is_validation=True,
         )
         assert [step for _, step in backend.calls] == [0, 1]
+
+
+def test_microbatch_loss_metrics_add_token_sums_and_take_max() -> None:
+    combined = combine_microbatch_metrics(
+        [
+            {"loss/ratio_clipped_frac": 1.0, "trainer/entropy/mean": 4.0, "x/max": 2.0},
+            {"loss/ratio_clipped_frac": 2.0, "trainer/entropy/mean": 6.0, "x/max": 5.0},
+        ]
+    )
+
+    assert combined == {
+        "loss/ratio_clipped_frac": 3.0,
+        "trainer/entropy/mean": 10.0,
+        "x/max": 5.0,
+    }

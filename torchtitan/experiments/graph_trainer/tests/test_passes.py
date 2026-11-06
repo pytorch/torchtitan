@@ -3461,10 +3461,6 @@ class TestBucketingPrefetchOrder(FSDPTest):
         positions = torch.arange(self.SEQ_LEN, device="cuda", dtype=torch.int32).repeat(
             self.BATCH_SIZE
         )
-        global_loss_token_counts = torch.tensor(
-            num_tokens, dtype=torch.float, device="cuda"
-        )
-
         # One accumulation step traces the model and applies all graph passes.
         trainer.engine.forward_backward(
             microbatch_groups=[
@@ -3474,13 +3470,13 @@ class TestBucketingPrefetchOrder(FSDPTest):
                         positions=positions,
                         labels=labels,
                         padding_mask=torch.zeros_like(labels, dtype=torch.bool),
-                        loss_token_counts=torch.tensor(labels.numel()),
+                        loss_token_count=torch.tensor(labels.numel()),
                         routing_token_counts=torch.tensor([labels.numel()]),
                     )
                 ]
             ],
-            global_loss_token_counts=global_loss_token_counts,
-            global_routing_token_counts=global_loss_token_counts.unsqueeze(0),
+            # Every token is routed and is a loss token.
+            aux_loss_denominators=torch.tensor([1.0]),
         )
 
         layer_ids = self._get_bucketed_ag_layer_order(trainer.engine._traced_step.gm)

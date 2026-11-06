@@ -40,7 +40,7 @@ from torchtitan.experiments.graph_trainer.precompile import (
     _register_coor_ops,
 )
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
-from torchtitan.models.common.aux_loss import AuxLoss
+from torchtitan.models.common.aux_loss import aux_loss_denominators, AuxLoss
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
 from torchtitan.observability.logging import init_logger
@@ -212,17 +212,6 @@ def _precompile_aot_fx_trace(
 
     dummy_inputs = torch.randint(0, vocab_size, (num_tokens,), device=device)
     dummy_labels = torch.randint(0, vocab_size, (num_tokens,), device=device)
-    # Match Trainer.train_step, which passes dense loss normalization as a
-    # standalone int64 scalar tensor on the training device.
-    global_num_tokens = (
-        num_tokens
-        * parallelism_context.dp_shard
-        * parallelism_context.dp_replicate
-        * parallelism_context.cp
-    )
-    dummy_global_loss_token_counts = torch.tensor(
-        global_num_tokens, dtype=torch.int64, device=device
-    )
     extra_kwargs: dict[str, Any] = {}
 
     if isinstance(model_config, Decoder.Config) and model_config.layers:
@@ -245,22 +234,15 @@ def _precompile_aot_fx_trace(
         if not uses_aux_loss:
             uses_aux_loss = model_config.first_moe is not None
         if uses_aux_loss:
-            _, routing_token_counts = get_mtp_token_counts(
+            loss_token_count, routing_token_counts = get_mtp_token_counts(
                 target_mask=torch.ones_like(dummy_labels, dtype=torch.bool),
                 positions=positions,
                 padding_mask=extra_kwargs["padding_mask"],
                 num_mtp_layers=config.dataloader.num_mtp_layers,
             )
-            num_pp_microbatches = (
-                config.parallelism.num_pp_microbatches
-                if parallelism_context.pp_enabled
-                else 1
-            )
-            extra_kwargs["aux_loss_denominators"] = routing_token_counts * (
-                parallelism_context.dp_replicate
-                * parallelism_context.dp_shard
-                * num_pp_microbatches
-            )
+            extra_kwargs["aux_loss_denominators"] = aux_loss_denominators(
+                routing_token_counts, loss_token_count
+            ).to(device)
 
     # TODO: Add CP support by generating a permutation and
     # sharding inputs here.
@@ -288,7 +270,7 @@ def _precompile_aot_fx_trace(
             fwd_bwd_fn,
             module=model,
             precompile_meshes=get_spmd_precompile_meshes(parallelism_context),
-        )(dummy_inputs, dummy_labels, dummy_global_loss_token_counts, extra_kwargs)
+        )(dummy_inputs, dummy_labels, extra_kwargs)
     logger.info(
         f"Traced graph has {len(list(traced_result.gm.graph.nodes))} nodes, "
         f"{len(traced_result.state_fqns)} state entries"

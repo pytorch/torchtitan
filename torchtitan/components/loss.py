@@ -43,10 +43,14 @@ class Loss(Function[LossResult], Generic[LossInputT], ABC):
         self,
         pred: LossInputT,
         labels: LossInputT,
-        global_loss_token_counts: torch.Tensor | None = None,
         **loss_inputs: Any,
     ) -> LossResult:
-        """Return the scaled loss and any metrics computed by the loss."""
+        """Return the loss summed over this microbatch's loss tokens, and its metrics.
+
+        The training engine divides every gradient by the step's loss-token count,
+        so a loss must not divide by a token count itself. Mean and fraction
+        metrics (``/mean``, ``/frac``) are token sums too; their consumer divides.
+        """
         ...
 
 
@@ -364,7 +368,6 @@ class CrossEntropyLoss(Loss[torch.Tensor]):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_loss_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> LossResult:
         del kwargs
@@ -381,19 +384,9 @@ class CrossEntropyLoss(Loss[torch.Tensor]):
             z = lse.square().sum()
             loss = ce + self.z_loss_weight * z
             metrics = {"ce_loss/mean": ce.detach(), "z_loss/mean": z.detach()}
-
-        # loss: V->P, annotate global_loss_token_counts
+        # loss: V->P
         if current_spmd_mesh() is not None:
             spmd.assert_type(ce, {"dp": spmd.P, "cp": spmd.P})
-            if global_loss_token_counts is not None:
-                spmd.assert_type(
-                    global_loss_token_counts,
-                    {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
-                )
-
-        if global_loss_token_counts is not None:
-            loss = loss / global_loss_token_counts
-            metrics = {k: v / global_loss_token_counts for k, v in metrics.items()}
         return loss, metrics
 
 
@@ -420,21 +413,13 @@ class MSELoss(Loss[torch.Tensor]):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_loss_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> LossResult:
         del kwargs
         loss = self._loss_fn(pred, labels)
-        # loss: V->P, annotate global_loss_token_counts
+        # loss: V->P
         if current_spmd_mesh() is not None:
             spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P})
-            if global_loss_token_counts is not None:
-                spmd.assert_type(
-                    global_loss_token_counts,
-                    {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
-                )
-        if global_loss_token_counts is not None:
-            loss = loss / global_loss_token_counts
         return loss, {}
 
 
@@ -680,8 +665,8 @@ def loss_metric_reduce_op(key: str) -> Literal["sum", "max", "min"]:
     """How loss metric ``key`` is combined across chunks, microbatches and ranks.
 
     Keys ending in ``/mean``, ``/frac``, ``_mean`` or ``_frac`` are summed:
-    they are normalized by the global valid-token count, so their sum is the
-    global value. Keys ending in ``/max`` or ``/min`` take the max or min.
+    they are token sums, and their consumer divides the global sum by the
+    loss-token count. Keys ending in ``/max`` or ``/min`` take the max or min.
     """
     if key.endswith(("/mean", "/frac", "_mean", "_frac")):
         return "sum"
@@ -693,6 +678,23 @@ def loss_metric_reduce_op(key: str) -> Literal["sum", "max", "min"]:
         f"Do not know how to reduce metric '{key}'. "
         "Use a /mean, /frac, _mean, _frac, /max, or /min suffix."
     )
+
+
+def divide_token_sum_metrics(
+    metrics: dict[str, float], num_loss_tokens: int
+) -> dict[str, float]:
+    """Divide the token-sum metrics (``/mean``, ``_mean``, ``/frac``, ``_frac``) by the loss-token count.
+
+    Example:
+        divide_token_sum_metrics({"loss/mean": 3.0, "x/max": 5.0}, num_loss_tokens=10)
+        # -> {"loss/mean": 0.3, "x/max": 5.0}
+    """
+    # A step with no loss tokens has all-zero sums; dividing by 1 keeps them zero.
+    divisor = max(num_loss_tokens, 1)
+    return {
+        key: value / divisor if loss_metric_reduce_op(key) == "sum" else value
+        for key, value in metrics.items()
+    }
 
 
 _LOCAL_REDUCE_FNS = {"sum": torch.add, "max": torch.maximum, "min": torch.minimum}
@@ -755,7 +757,7 @@ class ChunkedLossWrapper(Loss[LossInput]):
     2. Split each hidden state and its labels into N chunks along seq dim
     3. Detach each hidden-state chunk at the lm_head boundary
     4. Disable FSDP reshard on lm_head across all outputs and chunks
-    5. For each chunk: lm_head on each output -> loss_fn(logits, labels, gvt) -> backward()
+    5. For each chunk: lm_head on each output -> loss_fn(logits, labels) -> backward()
     6. Assemble one full gradient [T, D] per output via GradAccumulator
     7. Backward through the decoder once with all accumulated gradients
 
@@ -806,7 +808,6 @@ class ChunkedLossWrapper(Loss[LossInput]):
         self,
         pred: LossInput,
         labels: LossInput,
-        global_loss_token_counts: torch.Tensor | None = None,
         **loss_inputs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute chunked loss.
@@ -944,7 +945,6 @@ class ChunkedLossWrapper(Loss[LossInput]):
                     chunk_loss, chunk_metrics = self.loss_fn(
                         logits,
                         label_chunks,
-                        global_loss_token_counts,
                         **loss_inputs,
                     )
                     # Free logits before backward.

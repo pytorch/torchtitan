@@ -417,7 +417,7 @@ class Qwen35Model(MultimodalModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        global_routing_token_counts: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Build masks, CP-shard, SPMD-wrap (+ deltanet annotation), and return."""
@@ -519,7 +519,7 @@ class Qwen35Model(MultimodalModel):
         if any(
             isinstance(layer.feed_forward, MoE.Config) for layer in self.config.layers
         ):
-            input_dict["aux_loss_denominators"] = global_routing_token_counts
+            input_dict["aux_loss_denominators"] = aux_loss_denominators
         return inputs, labels, input_dict, loss_kwargs
 
     def _get_vision_embeds(

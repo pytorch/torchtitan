@@ -6,11 +6,12 @@
 
 """Auxiliary-loss gradient injection and distributed metric collection.
 
-Normalization: every auxiliary loss is scaled by the explicit routed-token
-count supplied by its owning model block, so the contributions stay
-comparable across parallelism degrees.  The per-step
-metric is the mean over loss instances (layers) of that scaled value, summed
-over data-parallel ranks and pipeline stages.
+Normalization: every auxiliary loss is divided by the step's routed tokens
+per loss token (``aux_loss_denominators``), and the training engine later
+divides every gradient by the step's loss-token count. Each microbatch's mean
+auxiliary loss is then weighted by its share of the step's routed tokens.
+The per-step metric is the mean over loss instances (layers) of that weighted
+value, summed over data-parallel ranks and pipeline stages.
 
 The metric accumulates in the model forward.  ``inject()`` wraps the
 accumulation in a retained ``torch_remat`` region (``recompute=False``), so
@@ -29,6 +30,7 @@ from typing import ClassVar
 
 import spmd_types as spmd
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 import torch_remat as remat
 from torch import nn
@@ -42,9 +44,31 @@ from torchtitan.tools.utils import device_type
 
 __all__ = [
     "AuxLoss",
+    "aux_loss_denominators",
     "collect_aux_loss_metrics",
     "register_aux_loss_zero_hook",
 ]
+
+
+def aux_loss_denominators(
+    routing_token_counts: torch.Tensor, loss_token_count: torch.Tensor
+) -> torch.Tensor:
+    """Return a step's auxiliary-loss denominators: its routed tokens per loss token,
+    one per routing depth, as fp32 on the counts' device.
+
+    The engine divides every gradient by the step's N loss tokens afterwards, so a
+    microbatch with R_mb routed tokens weights its mean auxiliary loss by R_mb / R.
+
+    Example:
+        aux_loss_denominators(torch.tensor([8, 6]), torch.tensor(4))  # -> tensor([2.0, 1.5])
+        aux_loss_denominators(torch.tensor([0]), torch.tensor(0))  # -> tensor([1.0])
+    """
+    # Both counts clamp to 1: a step with no loss tokens keeps its weights R_mb / R, and an
+    # all-padding step (R = N = 0) gets 1 instead of 0, whose inverse would turn its zero
+    # auxiliary gradients into NaN.
+    return routing_token_counts.clamp_min(1).to(torch.float32) / (
+        loss_token_count.clamp_min(1)
+    )
 
 
 class _AuxLossInjection(torch.autograd.Function):
@@ -79,8 +103,8 @@ class AuxLoss(Module):
     rolls these into the ``group_acc`` registers, which
     ``collect_aux_loss_metrics`` reduces for logging.
 
-    The owning model block passes the applicable routed-token denominator to
-    ``inject`` on every forward.
+    The owning model block passes the step's denominator (from
+    ``aux_loss_denominators``) to ``inject`` on every forward.
     Metric accumulation happens in the forward inside ``inject()``, which
     wraps it in a retained ``torch_remat`` region (``recompute=False``) so
     ``torch_remat``-based checkpointing never re-runs the accumulation.
@@ -197,7 +221,8 @@ class AuxLoss(Module):
         Args:
             raw_sum: Unnormalized per-microbatch loss value (differentiable).
             carrier: The tensor whose backward path carries the gradient.
-            denominator: Step-global routed-token count for the owning block.
+            denominator: The step's routed tokens per loss token for the
+                owning block (``aux_loss_denominators``).
 
         Returns:
             ``carrier`` unchanged (identity forward).
@@ -219,13 +244,13 @@ class AuxLoss(Module):
     ) -> torch.Tensor:
         """Accumulate this microbatch's metric value and inject the gradient."""
         # Scaling the loss is local arithmetic on a per-step scalar. The
-        # denominator is reduced outside the model forward, so it carries
+        # denominator is computed outside the model forward, so it carries
         # no mesh annotation for the ambient one. The loss's own type varies
         # with the layout (TP is Invariant with EP token sharding, Replicate
         # without), so no single restated type fits; the injection itself still
         # runs through the checker.
         with spmd.no_typecheck():
-            scale = 1.0 / denominator.clamp_min(1)
+            scale = 1.0 / denominator
             injected = raw_sum * (self.coeff * scale)
         # Accumulate the metric in the forward.  The mask is the canonical
         # no_grad side-effect pattern (as for the MoE usage counters) and
@@ -255,11 +280,17 @@ def _zero_aux_losses(model_parts) -> None:
 
 def collect_aux_loss_metrics(
     parallelism_context: ParallelismContext,
+    *,
+    num_loss_tokens: int,
+    extra_pg: dist.ProcessGroup | None = None,
 ) -> dict[str, float]:
     """Reduce the current step's ``group_acc`` registers for logging.
 
     Returns ``{metric_name}/mean`` per group, ``{}`` if none configured.  All
-    ranks call this at log time.
+    ranks call this at log time with the step's loss-token count, which
+    divides the accumulated values as the engine divides the gradients.
+    ``extra_pg`` also sums the values over a group outside the mesh (TorchFT
+    replicas) whose loss tokens ``num_loss_tokens`` counts.
 
     TODO(#4202): migrate aux-loss metric collection to the distributed tensor
     logging framework once it lands.
@@ -282,16 +313,18 @@ def collect_aux_loss_metrics(
     for key, total in sorted(group_accs.items()):
         mesh_name, tag = key
         reduce_mesh = parallelism_context.get_optional_mesh(mesh_name)
-        for mesh in (reduce_mesh, pp_mesh):
-            if mesh is None:
+        for group in (reduce_mesh, pp_mesh, extra_pg):
+            if group is None:
                 continue
             # Sum: each coordinate contributes its own data, and every layer
             # lives on exactly one pipeline stage, so summing over the reduce
             # mesh and the stages counts every layer once.  Dividing by the
             # build-time instance count below (identical on every rank) then
             # gives the mean over all layers.
-            total = all_reduce(total, reduceOp="sum", group=mesh)
-        metrics[f"{tag}/mean"] = float(total.item()) / AuxLoss._group_counts[key]
+            total = all_reduce(total, reduceOp="sum", group=group)
+        metrics[f"{tag}/mean"] = (
+            float(total.item()) / max(num_loss_tokens, 1) / AuxLoss._group_counts[key]
+        )
     return metrics
 
 

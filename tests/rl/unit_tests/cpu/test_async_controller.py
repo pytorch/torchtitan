@@ -174,20 +174,35 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     )
     assert batch is not None
     assert group_is_trainable
-    assert batch.global_loss_token_counts[0] > 0
-    assert batch.global_routing_token_counts.shape == (1,)
+    microbatches = [
+        microbatch
+        for group in batch.microbatch_groups
+        for row in group
+        for microbatch in row
+    ]
+    assert batch.num_loss_tokens > 0
+    assert batch.num_loss_tokens == sum(
+        int(microbatch.loss_token_count) for microbatch in microbatches
+    )
+    torch.testing.assert_close(
+        batch.routing_token_counts,
+        sum(microbatch.routing_token_counts for microbatch in microbatches),
+    )
     assert batch.group_ids == [0, 1]
 
 
-def test_batcher_prepares_per_depth_mtp_token_counts() -> None:
+def test_batcher_prepares_per_depth_mtp_routing_token_counts() -> None:
     batcher = _build_batcher(num_prompts_per_train_step=1, num_mtp_layers=2)
     batch, _ = batcher.add_training_samples(
         training_sample_group=_trainable_group(1, num_samples=2)
     )
 
     assert batch is not None
-    assert batch.global_loss_token_counts.shape == (3,)
-    assert batch.global_routing_token_counts.shape == (3,)
+    microbatch = batch.microbatch_groups[0][0][0]
+    # One loss-token count (the main objective's); routing counts per depth.
+    assert microbatch.loss_token_count.shape == ()
+    assert microbatch.routing_token_counts.shape == (3,)
+    assert batch.routing_token_counts.shape == (3,)
 
 
 def test_batcher_warns_after_each_batch_of_untrainable_groups(
@@ -283,7 +298,7 @@ def test_batcher_uses_flat_rank_capacity_and_reports_padding() -> None:
     microbatch = batch.microbatch_groups[0][0][0]
     assert microbatch.positions.tolist() == [0, 1, 2, 0, 1, 2, 0, 1]
     assert not microbatch.padding_mask.any()
-    torch.testing.assert_close(microbatch.loss_token_counts, torch.tensor([8]))
+    torch.testing.assert_close(microbatch.loss_token_count, torch.tensor(8))
     assert _metric_value(batch, "train_batch/padding_frac") == 0.0
 
 
@@ -303,7 +318,7 @@ def test_flat_rank_packing_preserves_padding_mask() -> None:
     assert batch is not None
     microbatch = batch.microbatch_groups[0][0][0]
     assert microbatch.positions.tolist() == [0, 1, 2, 3, 0, 1, 2, 3]
-    torch.testing.assert_close(microbatch.loss_token_counts, torch.tensor([3]))
+    torch.testing.assert_close(microbatch.loss_token_count, torch.tensor(3))
     assert microbatch.padding_mask.tolist() == [
         False,
         False,

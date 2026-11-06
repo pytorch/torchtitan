@@ -11,12 +11,7 @@ import torch
 import torch.nn as nn
 from torch.testing._internal.common_utils import TestCase
 
-from torchtitan.components.loss import (
-    ChunkedLossWrapper,
-    cross_entropy_loss,
-    IGNORE_INDEX,
-    Loss,
-)
+from torchtitan.components.loss import ChunkedLossWrapper, cross_entropy_loss, Loss
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
@@ -51,7 +46,6 @@ class _WeightedTwoOutputLoss(Loss[tuple[torch.Tensor, ...]]):
         self,
         pred: torch.Tensor | tuple[torch.Tensor, ...],
         labels: torch.Tensor | tuple[torch.Tensor, ...],
-        global_loss_token_counts: torch.Tensor | None = None,
         **loss_inputs,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         del loss_inputs
@@ -59,8 +53,6 @@ class _WeightedTwoOutputLoss(Loss[tuple[torch.Tensor, ...]]):
         loss = self._loss_fn(
             pred[0], labels[0]
         ) + self.auxiliary_weight * self._loss_fn(pred[1], labels[1])
-        if global_loss_token_counts is not None:
-            loss = loss / global_loss_token_counts
         return loss, {}
 
 
@@ -74,9 +66,9 @@ def _make_model_and_loss(dim, vocab_size, num_chunks=4, with_param_grads=False):
     return model, chunked_loss
 
 
-def _chunked_loss_and_grads(model, chunked_loss, hidden_states, labels, gvt):
+def _chunked_loss_and_grads(model, chunked_loss, hidden_states, labels):
     h = hidden_states.detach().requires_grad_(True)
-    loss, _ = chunked_loss(h, labels, gvt)
+    loss, _ = chunked_loss(h, labels)
     if isinstance(chunked_loss, ChunkedLossWrapperWithParamGrads):
         h_grad, w_grad = torch.autograd.grad(loss, [h, model.output.weight])
     else:
@@ -93,7 +85,6 @@ class TestChunkedLossWrapperWithParamGrads(TestCase):
                 torch.manual_seed(42)
                 D, V = 32, 64
                 labels = torch.randint(0, V, (num_tokens,))
-                global_loss_token_counts = float((labels != IGNORE_INDEX).sum().item())
                 hidden_states = torch.randn(num_tokens, D)
 
                 model_a, loss_a_fn = _make_model_and_loss(D, V, num_chunks)
@@ -103,10 +94,10 @@ class TestChunkedLossWrapperWithParamGrads(TestCase):
                 model_b.output.load_state_dict(model_a.output.state_dict())
 
                 loss_a, h_grad_a, w_grad_a = _chunked_loss_and_grads(
-                    model_a, loss_a_fn, hidden_states, labels, global_loss_token_counts
+                    model_a, loss_a_fn, hidden_states, labels
                 )
                 loss_b, h_grad_b, w_grad_b = _chunked_loss_and_grads(
-                    model_b, loss_b_fn, hidden_states, labels, global_loss_token_counts
+                    model_b, loss_b_fn, hidden_states, labels
                 )
 
                 self.assertEqual(loss_b, loss_a)

@@ -6,7 +6,6 @@
 
 import copy
 import itertools
-from functools import partial
 from unittest.mock import patch
 
 import torch
@@ -85,13 +84,13 @@ def _compare(actual, expected, label):
         raise RuntimeError(f"{label}: maximum absolute difference {difference}")
 
 
-def _recover_from_chunk_failure(model, loss_fn, count, set_policy, device):
+def _recover_from_chunk_failure(model, loss_fn, set_policy, device):
     # Fail with earlier microbatches' full or HSDP partial gradients live.
     for _ in range(2):
         set_policy(False)
         inputs = model.sample_inputs(device)
         labels = torch.randint(16, (8,), device=device)
-        loss, _ = loss_fn(model(inputs), labels, count)
+        loss, _ = loss_fn(model(inputs), labels)
         loss.backward()
     set_policy(True)
     inputs = model.sample_inputs(device)
@@ -110,7 +109,7 @@ def _recover_from_chunk_failure(model, loss_fn, count, set_policy, device):
 
     loss_fn.loss_fn = fail_second_chunk
     try:
-        loss_fn(hidden, labels, count)
+        loss_fn(hidden, labels)
     except RuntimeError as error:
         if str(error) != "controlled chunk failure":
             raise
@@ -150,13 +149,14 @@ def _exercise_pipeline_accumulation(rank, world_size, device):
         fully_shard(model, mesh=mesh)
         loss_fn = ChunkedLossWrapper.Config(num_chunks=4).build()
         loss_fn.set_lm_head(model.lm_head)
-        count = torch.tensor(48, device=device)
+        # 2 accumulations x 3 microbatches x 8 labels on each rank.
+        num_loss_tokens = 48
         stage = PipelineStage(model, 0, 1, device, group=pipeline_groups[rank])
         schedule = _build_pipeline_schedule(
             parallelism=ParallelismConfig(pipeline_parallel_schedule=schedule_name),
             num_microbatches=3,
             stages=[stage],
-            loss_fn=partial(loss_fn, global_loss_token_counts=count),
+            loss_fn=loss_fn,
         )
         optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
         reference_optimizer = torch.optim.SGD(
@@ -198,11 +198,8 @@ def _exercise_pipeline_accumulation(rank, world_size, device):
                         f"reductions at finalization, got {reduce_scatter.call_count}"
                     )
                 for value, target, loss in zip(inputs, targets, losses, strict=True):
-                    expected_loss = (
-                        torch.nn.functional.cross_entropy(
-                            reference.lm_head(reference(value)), target, reduction="sum"
-                        )
-                        / count
+                    expected_loss = torch.nn.functional.cross_entropy(
+                        reference.lm_head(reference(value)), target, reduction="sum"
                     )
                     expected_loss.backward()
                     _compare(loss.detach(), expected_loss.detach(), f"{label}/loss")
@@ -210,8 +207,10 @@ def _exercise_pipeline_accumulation(rank, world_size, device):
                 model.named_parameters(), reference.named_parameters(), strict=True
             ):
                 if parameter.requires_grad:
+                    # Losses are sums: divide once by the loss tokens, as optim_step does.
+                    parameter.grad.div_(num_loss_tokens)
                     dist.all_reduce(expected.grad)
-                    expected.grad.div_(world_size)
+                    expected.grad.div_(world_size * num_loss_tokens)
                     _compare(
                         parameter.grad.full_tensor(),
                         expected.grad,
@@ -235,17 +234,16 @@ def _exercise_multi_output_head(device, world_size):
     loss_fn = ChunkedLossWrapper.Config(num_chunks=2).build()
     loss_fn.set_lm_head(model.lm_head)
 
-    def two_output_loss(predictions, labels, count):
+    def two_output_loss(predictions, labels):
         losses = [
             torch.nn.functional.cross_entropy(prediction, label, reduction="sum")
             for prediction, label in zip(predictions, labels, strict=True)
         ]
-        return (losses[0] + 0.25 * losses[1]) / count, {}
+        return losses[0] + 0.25 * losses[1], {}
 
     loss_fn.loss_fn = two_output_loss
     inputs = model.sample_inputs(device)
     labels = tuple(torch.randint(16, (8,), device=device) for _ in range(2))
-    count = torch.tensor(16, device=device)
     hidden = model(inputs)
     events = []
     forward_hook = model.lm_head.register_forward_pre_hook(
@@ -271,7 +269,7 @@ def _exercise_multi_output_head(device, world_size):
             patch.object(model.lm_head, "unshard", record_unshard),
             patch.object(group, "reshard", record_reshard),
         ):
-            loss, _ = loss_fn((hidden, hidden * 0.5), labels, count)
+            loss, _ = loss_fn((hidden, hidden * 0.5), labels)
     finally:
         forward_hook.remove()
     if events != ["unshard"] + ["forward"] * (2 * loss_fn.num_chunks) + ["reshard"]:
@@ -280,7 +278,6 @@ def _exercise_multi_output_head(device, world_size):
     expected_loss, _ = two_output_loss(
         (reference.lm_head(ref_hidden), reference.lm_head(ref_hidden * 0.5)),
         labels,
-        count,
     )
     expected_loss.backward()
     _compare(loss.detach(), expected_loss.detach(), "multi-output/loss")
@@ -344,7 +341,8 @@ class TestChunkedLossFSDP(DTensorTestBase):
                 reference_optimizer = torch.optim.SGD(
                     reference.parameters(), lr=0.01, momentum=0.9
                 )
-                count = torch.tensor(24, device=device)
+                # 3 microbatches x 8 labels on each rank.
+                num_loss_tokens = 24
 
                 def set_policy(final):
                     model.set_requires_gradient_sync(final or not deferred)
@@ -353,7 +351,7 @@ class TestChunkedLossFSDP(DTensorTestBase):
                     if replicated:
                         model.set_requires_all_reduce(final)
 
-                _recover_from_chunk_failure(model, loss_fn, count, set_policy, device)
+                _recover_from_chunk_failure(model, loss_fn, set_policy, device)
 
                 for step in range(3):
                     optimizer.zero_grad(set_to_none=True)
@@ -386,7 +384,7 @@ class TestChunkedLossFSDP(DTensorTestBase):
                                 with patch.object(
                                     model.lm_head, "unshard", record_unshard
                                 ):
-                                    loss, _ = loss_fn(hidden, labels, count)
+                                    loss, _ = loss_fn(hidden, labels)
                             finally:
                                 forward_hook.remove()
                             if events != ["unshard"] + ["forward"] * loss_fn.num_chunks:
@@ -405,13 +403,10 @@ class TestChunkedLossFSDP(DTensorTestBase):
                                     "Chunked loss changed the caller's FSDP policy"
                                 )
                             loss.backward()
-                            expected_loss = (
-                                torch.nn.functional.cross_entropy(
-                                    reference.lm_head(reference(inputs)),
-                                    labels,
-                                    reduction="sum",
-                                )
-                                / count
+                            expected_loss = torch.nn.functional.cross_entropy(
+                                reference.lm_head(reference(inputs)),
+                                labels,
+                                reduction="sum",
                             )
                             expected_loss.backward()
                             _compare(loss.detach(), expected_loss.detach(), "loss")
@@ -430,8 +425,10 @@ class TestChunkedLossFSDP(DTensorTestBase):
                         strict=True,
                     ):
                         if parameter.requires_grad:
+                            # Losses are sums: divide once by the loss tokens, as optim_step does.
+                            parameter.grad.div_(num_loss_tokens)
                             dist.all_reduce(expected.grad)
-                            expected.grad.div_(self.world_size)
+                            expected.grad.div_(self.world_size * num_loss_tokens)
                             _compare(
                                 parameter.grad.full_tensor(),
                                 expected.grad,

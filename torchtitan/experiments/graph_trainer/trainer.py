@@ -233,8 +233,6 @@ class GraphTrainingEngine(TrainingEngine):
     def _preprocess_microbatch_groups(
         self,
         microbatch_groups: list[list[TrainingMicrobatch]],
-        *,
-        global_routing_token_counts: torch.Tensor,
     ) -> list[tuple[Any, ...]]:
         """Prepare GraphRuntime schedule inputs for AOT single-stage execution."""
         # The traced loss only receives the shared loss arguments, on both the
@@ -249,8 +247,7 @@ class GraphTrainingEngine(TrainingEngine):
             )
         if self.parallelism_context.pp_enabled:
             pp_microbatch_groups = super()._preprocess_microbatch_groups(
-                microbatch_groups,
-                global_routing_token_counts=global_routing_token_counts,
+                microbatch_groups
             )
             # Drop the per-microbatch loss arguments, rejected above, so both
             # paths return (arg_mbs, kwarg_mbs, target_mbs).
@@ -283,13 +280,14 @@ class GraphTrainingEngine(TrainingEngine):
                         parallelism_context=self.parallelism_context,
                         parallelism=self.config.parallelism,
                         max_num_documents=self.max_num_documents,
-                        global_routing_token_counts=global_routing_token_counts,
+                        aux_loss_denominators=self._aux_loss_denominators,
                         **self.preprocess_inputs_kwargs,
                     )
                     self.ntokens_seen += (
                         self.config.training.num_tokens_per_microbatch_per_dp_rank
                         // self.parallelism_context.cp
                     )
+                    self.local_loss_token_count += int(microbatch.loss_token_count)
                 arg_mbs.append((inputs_mb,))
                 kwarg_mbs.append(extra_kwargs_mb)
                 target_mbs.append(labels_mb)
@@ -300,7 +298,6 @@ class GraphTrainingEngine(TrainingEngine):
     def _forward_backward_body(
         self,
         microbatch_groups: list[tuple[Any, ...]],
-        global_loss_token_counts: torch.Tensor,
         *,
         defer_fsdp_gradient_reduction: bool,
     ) -> LossAndMetrics:
@@ -313,10 +310,7 @@ class GraphTrainingEngine(TrainingEngine):
                 inputs=inputs,
                 model_kwargs=model_kwargs,
                 labels=labels,
-                loss_kwargs=[
-                    {"global_loss_token_counts": global_loss_token_counts}
-                    for _ in model_kwargs
-                ],
+                loss_kwargs=[{} for _ in model_kwargs],
                 finalize_gradients=True,
             )
             detached_loss = loss.detach()
@@ -370,7 +364,6 @@ class GraphTrainingEngine(TrainingEngine):
     def _page_stashed_forward_backward_body(
         self,
         microbatch_groups: list[tuple[Any, ...]],
-        global_loss_token_counts: torch.Tensor,
         *,
         defer_fsdp_gradient_reduction: bool,
     ) -> LossAndMetrics:
@@ -391,7 +384,6 @@ class GraphTrainingEngine(TrainingEngine):
             partial(
                 self._forward_backward_body,
                 microbatch_groups,
-                global_loss_token_counts,
                 defer_fsdp_gradient_reduction=defer_fsdp_gradient_reduction,
             )
         )

@@ -99,8 +99,9 @@ from typing import Any
 
 # PYTORCH_CUDA_ALLOC_CONF is set in torchtitan/rl/__init__.py (before torch is imported)
 # and in train.py; see the note there.
-import torch  # noqa: F401
+import torch
 
+from torchtitan.components.loss import divide_token_sum_metrics
 from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import (
@@ -109,6 +110,7 @@ from torchtitan.config import (
     OverrideConfig,
     PrecisionConfig,
 )
+from torchtitan.models.common.aux_loss import aux_loss_denominators
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.system import ActorSystem, TrainerHandle
 from torchtitan.rl.controller.metrics import (
@@ -1148,9 +1150,8 @@ class Controller(Configurable):
                     max_offpolicy_steps=self.config.async_loop.max_offpolicy_steps,
                 )
 
-                # TODO(async): can't stream microbatches (interleave pack->train) -- the loss is normalized by
-                #   global counts over ALL microbatches, needed before any fwd/bwd. To
-                #   support streaming, accumulate raw loss/token counts across microbatches and scale before optimizer.
+                # TODO(async): stream microbatches (interleave pack->train). Losses are sums and optim_step
+                #   divides by the step's loss-token count, so only the batcher and this loop need to change.
                 with (
                     sl.log_trace_span("forward_backward"),
                     step_timer.record("timing/step/forward_backward"),
@@ -1158,6 +1159,11 @@ class Controller(Configurable):
                     # TODO: each rank's first read is never hidden (~0.5 GB/s per rank, 4 ranks over TCP).
                     # Sending the RDMAMicrobatches during the previous optim_step would hide it.
                     try:
+                        # The auxiliary losses divide by the step's routed tokens per loss token.
+                        step_aux_loss_denominators = aux_loss_denominators(
+                            packed.routing_token_counts,
+                            torch.tensor(packed.num_loss_tokens),
+                        )
                         # Send each DP rank only its column of the grid.
                         fwd_bwd_results = await asyncio.gather(
                             *(
@@ -1166,8 +1172,7 @@ class Controller(Configurable):
                                         [row[dp_rank] for row in group]
                                         for group in packed.microbatch_groups
                                     ],
-                                    packed.global_loss_token_counts,
-                                    packed.global_routing_token_counts,
+                                    step_aux_loss_denominators,
                                 )
                                 for dp_rank, trainer_at_dp_rank in enumerate(
                                     self.trainer.by_dp_rank
@@ -1176,10 +1181,13 @@ class Controller(Configurable):
                         )
                         # Under PP, only trainer ranks holding the last stage
                         # compute the loss; the others return None.
-                        fwd_bwd_metrics = next(
-                            rank_metrics
-                            for rank_metrics in fwd_bwd_results[0].values()
-                            if rank_metrics is not None
+                        fwd_bwd_metrics = divide_token_sum_metrics(
+                            next(
+                                rank_metrics
+                                for rank_metrics in fwd_bwd_results[0].values()
+                                if rank_metrics is not None
+                            ),
+                            packed.num_loss_tokens,
                         )
                     finally:
                         # With RDMA, every rank has read its column (or the step failed).
@@ -1264,9 +1272,7 @@ class Controller(Configurable):
                             m.NoReduce(pull_s),
                         ),
                         *compute_perf_ratio_metrics(
-                            num_global_valid_tokens=int(
-                                packed.global_loss_token_counts[0]
-                            ),
+                            num_global_valid_tokens=packed.num_loss_tokens,
                             time_metrics=time_metrics,
                         ),
                     ],

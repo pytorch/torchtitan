@@ -197,7 +197,7 @@ class TestPrecompileMain(unittest.TestCase):
 
                     model._get_attention_metadata.assert_called_once()
                     trace.assert_called_once()
-                    extra_kwargs = trace.call_args.args[3]
+                    extra_kwargs = trace.call_args.args[2]
                     self.assertIs(extra_kwargs["attention_metadata"], metadata)
                     self.assertIs(
                         model._get_attention_metadata.call_args.kwargs["positions"],

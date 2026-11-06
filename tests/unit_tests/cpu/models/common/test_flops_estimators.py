@@ -175,6 +175,7 @@ def test_lazy_preprocessing_counts_flops_for_streamed_groups():
                     SimpleNamespace(
                         as_input_dict=lambda: {"input": torch.empty(num_tokens)},
                         to_input_dict=lambda *args, **kwargs: {},
+                        loss_token_count=torch.tensor(num_tokens),
                     )
                 ]
 
@@ -186,7 +187,8 @@ def test_lazy_preprocessing_counts_flops_for_streamed_groups():
             cp=1,
             activate_spmd=contextlib.nullcontext,
         ),
-        _global_routing_token_counts=torch.tensor([12]),
+        _aux_loss_denominators=torch.tensor([1.0]),
+        local_loss_token_count=0,
         _forward_backward_num_flops=0,
         device=torch.device("cpu"),
         max_num_documents=None,
@@ -209,7 +211,6 @@ def test_lazy_preprocessing_counts_flops_for_streamed_groups():
     TrainingEngine._forward_backward_body(
         engine,
         StreamedGroups(),
-        torch.tensor(12),
         defer_fsdp_gradient_reduction=False,
         preprocess_microbatch_groups_lazily=True,
     )

@@ -53,7 +53,7 @@ def _run(
                 parallelism_context=pd,
                 parallelism=ParallelismConfig(),
                 # The training engine passes it to every model; this one has no aux loss.
-                global_routing_token_counts=torch.tensor([1]),
+                aux_loss_denominators=torch.tensor([1.0]),
             ),
             B,
             S,

@@ -167,7 +167,6 @@ def build_minimal_trainer(
                     engine._traced_step = minimal_fx_tracer(fwd_bwd_fn, module=model,)(
                         inputs,
                         labels,
-                        loss_kwargs["global_loss_token_counts"],
                         model_kwargs,
                     )
                 if trainer.config.compile.enable_passes:
@@ -197,7 +196,6 @@ def build_minimal_trainer(
             outputs = engine._test_graph_call(
                 inputs,
                 labels,
-                loss_kwargs["global_loss_token_counts"],
                 model_kwargs,
             )
             params = tuple(
@@ -210,9 +208,7 @@ def build_minimal_trainer(
             )
             return outputs[0]
 
-        def run_direct_graph_accumulation(
-            microbatch_groups, global_loss_token_counts
-        ) -> LossAndMetrics:
+        def run_direct_graph_accumulation(microbatch_groups) -> LossAndMetrics:
             """Run all groups through the test's unsplit graph adapter."""
             accumulated_loss = None
             loss_metrics = []
@@ -221,7 +217,7 @@ def build_minimal_trainer(
                     inputs=inputs,
                     labels=labels,
                     model_kwargs=model_kwargs,
-                    loss_kwargs={"global_loss_token_counts": global_loss_token_counts},
+                    loss_kwargs={},
                 ).detach()
                 if accumulated_loss is None:
                     accumulated_loss = loss.clone()

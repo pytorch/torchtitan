@@ -285,7 +285,7 @@ class KimiK3Model(MultimodalModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        global_routing_token_counts: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Build metadata, CP-shard inputs, and annotate K3 layouts."""
@@ -343,7 +343,7 @@ class KimiK3Model(MultimodalModel):
         loss_kwargs = {name: input_dict.pop(name) for name in loss_kwargs}
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
-        input_dict["aux_loss_denominators"] = global_routing_token_counts
+        input_dict["aux_loss_denominators"] = aux_loss_denominators
         return inputs, labels, input_dict, loss_kwargs
 
     def _prepare_multimodal_embeds(

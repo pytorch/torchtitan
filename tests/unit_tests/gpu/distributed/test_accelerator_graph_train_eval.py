@@ -88,7 +88,7 @@ def _validate_loss(validator, model_parts, prepared, *, step):
     rows = [
         SimpleNamespace(
             labels=item[1],
-            loss_token_counts=torch.ones(1, dtype=torch.int64),
+            loss_token_count=torch.ones((), dtype=torch.int64),
             to_input_dict=lambda device, item=item: {"prepared": item},
         )
         for item in prepared

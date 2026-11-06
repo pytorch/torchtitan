@@ -15,6 +15,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from torchtitan.rl.actors.system import TrainerHandle
 from torchtitan.rl.controller.controller import Controller
@@ -54,8 +55,9 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
     """A controller with only the state `_trainer_loop` reads; each actor call appends to `events`."""
     version = 0
 
-    async def forward_backward(*args):
+    async def forward_backward(microbatch_groups, aux_loss_denominators):
         events.append(f"fwd_bwd {version + 1}")
+        controller.aux_loss_denominators_by_call.append(aux_loss_denominators)
         return _RankValues({"loss/mean": 1.0})
 
     async def optim_step(**kwargs):
@@ -86,6 +88,7 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
             num_prompts_per_train_step=5,
         )
     )
+    controller.aux_loss_denominators_by_call = []
     controller.start_step = 0
     controller._trainer_policy_version = 0
     trainer = SimpleNamespace(
@@ -132,8 +135,8 @@ def _batch_queue(num_batches: int) -> asyncio.Queue:
         queue.put_nowait(
             SimpleNamespace(
                 microbatch_groups=[],
-                global_loss_token_counts=[1],
-                global_routing_token_counts=None,
+                num_loss_tokens=1,
+                routing_token_counts=torch.tensor([4]),
                 group_ids=[],
                 min_policy_versions=[0],
                 metrics=[],
@@ -152,7 +155,8 @@ def _run(controller: Controller, *, num_training_steps: int) -> None:
 
 def test_push_then_pull_then_release_after_each_optimizer_step() -> None:
     events: list[str] = []
-    _run(_controller(events), num_training_steps=2)
+    controller = _controller(events)
+    _run(controller, num_training_steps=2)
 
     assert events == [
         "fwd_bwd 1",
@@ -171,6 +175,10 @@ def test_push_then_pull_then_release_after_each_optimizer_step() -> None:
         "pull 2",
         "release 5 trained",
     ]
+    # Each step's call divides its auxiliary losses by the batch's 4 routed tokens per loss token.
+    torch.testing.assert_close(
+        controller.aux_loss_denominators_by_call, [torch.tensor([4.0])] * 2
+    )
 
 
 def test_optimizer_step_waits_for_the_previous_push() -> None:

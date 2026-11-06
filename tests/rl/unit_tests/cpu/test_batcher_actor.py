@@ -134,7 +134,7 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
     # int64 fields (2 KiB) cross processes by ref; the token counts go by value.
     assert isinstance(batch_b.microbatch_groups[0][0][0].fields["input"], _TensorRef)
     assert isinstance(
-        batch_b.microbatch_groups[0][0][0].fields["loss_token_counts"], torch.Tensor
+        batch_b.microbatch_groups[0][0][0].fields["loss_token_count"], torch.Tensor
     )
 
     def comparable(batch) -> dict:

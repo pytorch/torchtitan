@@ -95,7 +95,7 @@ def test_eval_wrapper_returns_each_real_run(monkeypatch, num_groups):
         labels=torch.ones(1, 1, dtype=torch.long),
         positions=torch.zeros(1, 1, dtype=torch.long),
         padding_mask=torch.zeros(1, 1, dtype=torch.bool),
-        loss_token_counts=torch.tensor(1),
+        loss_token_count=torch.tensor(1),
         routing_token_counts=torch.tensor([1]),
     )
     loader = _ClosableLoader([row] * num_groups)
@@ -152,7 +152,7 @@ def test_validation_preprocessing_uses_validation_document_limit(monkeypatch):
         labels=torch.ones(1, 1, dtype=torch.long),
         positions=torch.zeros(1, 1, dtype=torch.long),
         padding_mask=torch.zeros(1, 1, dtype=torch.bool),
-        loss_token_counts=torch.tensor(1),
+        loss_token_count=torch.tensor(1),
         routing_token_counts=torch.tensor([1]),
     )
     validator = _generic_validator(_ClosableLoader([row]))
@@ -180,7 +180,7 @@ def test_validation_logs_loss_metrics(monkeypatch):
             labels=torch.ones(1, num_tokens, dtype=torch.long),
             positions=torch.zeros(1, num_tokens, dtype=torch.long),
             padding_mask=torch.zeros(1, num_tokens, dtype=torch.bool),
-            loss_token_counts=torch.tensor(num_tokens),
+            loss_token_count=torch.tensor(num_tokens),
             routing_token_counts=torch.tensor([num_tokens]),
         )
 
@@ -213,7 +213,7 @@ def test_generic_validator_closes_temporary_loader(monkeypatch, raises):
             labels=torch.ones(1, 1, dtype=torch.long),
             positions=torch.zeros(1, 1, dtype=torch.long),
             padding_mask=torch.zeros(1, 1, dtype=torch.bool),
-            loss_token_counts=torch.tensor(1),
+            loss_token_count=torch.tensor(1),
             routing_token_counts=torch.tensor([1]),
         )
 
@@ -310,7 +310,7 @@ def test_flux_validator_closes_temporary_loader(monkeypatch, raises):
         labels=torch.zeros(1, 1, 2, 2),
         t5=torch.zeros(1, 1),
         clip=torch.zeros(1, 1),
-        loss_token_counts=torch.tensor(4),
+        loss_token_count=torch.tensor(4),
         routing_token_counts=torch.tensor([4]),
     )
     loader = _ClosableLoader([microbatch, microbatch])
@@ -355,7 +355,7 @@ def test_flux_validator_generates_at_batch_image_dimensions(monkeypatch):
                 labels=labels,
                 t5=torch.zeros(1, 1),
                 clip=torch.zeros(1, 1),
-                loss_token_counts=torch.tensor(labels.numel()),
+                loss_token_count=torch.tensor(labels.numel()),
                 routing_token_counts=torch.tensor([labels.numel()]),
             )
         ]
@@ -428,7 +428,7 @@ def test_generic_validator_raises_on_zero_valid_tokens(monkeypatch):
         labels=torch.full((1, 1), IGNORE_INDEX, dtype=torch.long),
         positions=torch.zeros(1, 1, dtype=torch.long),
         padding_mask=torch.zeros(1, 1, dtype=torch.bool),
-        loss_token_counts=torch.tensor(0),
+        loss_token_count=torch.tensor(0),
         routing_token_counts=torch.tensor([1]),
     )
     loader = _ClosableLoader([microbatch])
@@ -449,7 +449,7 @@ def test_pipeline_validator_does_not_keep_outputs(monkeypatch):
             labels=torch.ones(1, 1, dtype=torch.long),
             positions=torch.zeros(1, 1, dtype=torch.long),
             padding_mask=torch.zeros(1, 1, dtype=torch.bool),
-            loss_token_counts=torch.tensor(1),
+            loss_token_count=torch.tensor(1),
             routing_token_counts=torch.tensor([1]),
         )
 

@@ -59,7 +59,7 @@ from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.attention import FlexInnerAttention
-from torchtitan.models.common.aux_loss import AuxLoss
+from torchtitan.models.common.aux_loss import aux_loss_denominators, AuxLoss
 from torchtitan.tools.utils import has_cuda_capability
 from torchtitan.trainer import Trainer
 
@@ -68,6 +68,12 @@ NUM_STEPS = 5
 BATCH_SIZE = 4
 SEQ_LEN = 128
 NUM_TOKENS = BATCH_SIZE * SEQ_LEN
+
+
+def _divide_gradients_by_num_tokens(model: nn.Module) -> None:
+    """The engine's optim_step divide: losses are sums over the step's loss tokens."""
+    gradients = [p.grad for p in model.parameters() if p.grad is not None]
+    torch._foreach_div_(gradients, torch.tensor(float(NUM_TOKENS), device="cuda"))
 
 
 def _set_deterministic(seed: int = SEED) -> None:
@@ -225,9 +231,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             parallelism_context=self.parallelism_context,
             max_num_documents=BATCH_SIZE,
         )
-        global_loss_token_counts = torch.tensor(
-            NUM_TOKENS, dtype=torch.float, device="cuda"
-        )
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
         for _ in range(NUM_STEPS):
@@ -242,17 +245,19 @@ class BitwiseDeterministicBase(unittest.TestCase):
                             padding_mask=torch.zeros_like(
                                 self.labels, dtype=torch.bool
                             ),
-                            loss_token_counts=torch.tensor(self.labels.numel()),
+                            loss_token_count=torch.tensor(self.labels.numel()),
                             routing_token_counts=torch.tensor([self.labels.numel()]),
                         )
                     ]
                 ],
-                global_loss_token_counts=global_loss_token_counts,
-                global_routing_token_counts=global_loss_token_counts.unsqueeze(0),
+                # Every token is routed and is a loss token.
+                aux_loss_denominators=torch.tensor([1.0]),
             )
+            _divide_gradients_by_num_tokens(model)
             optimizer.step()
 
-        return result.loss.detach().clone(), hash_model(model), hash_gradient(model)
+        loss = result.loss.detach() / NUM_TOKENS
+        return loss, hash_model(model), hash_gradient(model)
 
     def _run_steps_with_precompile(
         self, model: nn.Module, *, enable_passes: bool = True
@@ -293,24 +298,20 @@ class BitwiseDeterministicBase(unittest.TestCase):
         )
         fwd_bwd_fn = make_fwd_bwd_step(model, trainer.engine.loss_fn)
 
-        global_loss_token_counts = torch.tensor(
-            NUM_TOKENS, dtype=torch.float, device="cuda"
-        )
         extra_kwargs: dict[str, object] = {
             "positions": self.positions,
             **self._get_extra_kwargs(model),
         }
         if next(self.model_config.traverse(AuxLoss.Config), None) is not None:
-            extra_kwargs["aux_loss_denominators"] = global_loss_token_counts.unsqueeze(
-                0
-            )
+            extra_kwargs["aux_loss_denominators"] = aux_loss_denominators(
+                torch.tensor([NUM_TOKENS]), torch.tensor(NUM_TOKENS)
+            ).cuda()
         maybe_register_blockmask_pytree_node()
 
         # Step 1: Trace the graph
         traced_result = minimal_fx_tracer(fwd_bwd_fn, module=model)(
             self.inputs,
             self.labels,
-            global_loss_token_counts,
             extra_kwargs,
         )
 
@@ -335,7 +336,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
 
             example_inputs = flatten_runtime_inputs(
                 model,
-                (self.inputs, self.labels, global_loss_token_counts, extra_kwargs),
+                (self.inputs, self.labels, extra_kwargs),
                 {},
             )
             loaded_result = precompile_fx_trace_load(
@@ -351,7 +352,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             outputs = run_traced(loaded_result, module=model)(
                 self.inputs,
                 self.labels,
-                global_loss_token_counts,
                 extra_kwargs,
             )
             loss = outputs[0]
@@ -363,9 +363,11 @@ class BitwiseDeterministicBase(unittest.TestCase):
             ]
             for param, grad in zip(params, grads):
                 param.grad = grad
+            _divide_gradients_by_num_tokens(model)
             optimizer.step()
 
-        return loss.detach().clone(), hash_model(model), hash_gradient(model)
+        loss = loss.detach() / NUM_TOKENS
+        return loss, hash_model(model), hash_gradient(model)
 
     def _assert_runs_match(
         self,

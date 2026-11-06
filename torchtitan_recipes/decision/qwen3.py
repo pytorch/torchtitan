@@ -113,7 +113,6 @@ class AnswerTokenLoss(ChunkedLossWrapper):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_loss_token_counts: torch.Tensor | None = None,
         **loss_inputs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         is_supervised_T = labels != IGNORE_INDEX
@@ -126,9 +125,7 @@ class AnswerTokenLoss(ChunkedLossWrapper):
             is_supervised_T, size=self.max_num_supervised, fill_value=-1
         ).squeeze(-1)
         labels_S = labels[index_S].masked_fill(index_S < 0, IGNORE_INDEX)
-        return super().__call__(
-            pred[index_S], labels_S, global_loss_token_counts, **loss_inputs
-        )
+        return super().__call__(pred[index_S], labels_S, **loss_inputs)
 
 
 def qwen3_1_7b_decision(parallelism: ParallelismConfig | None = None) -> Trainer.Config:

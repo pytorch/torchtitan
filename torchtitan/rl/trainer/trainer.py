@@ -225,9 +225,9 @@ class Trainer(Configurable):
         """Reduce forward/backward metrics across the loss mesh.
 
         Args:
-            sum_reduced_metrics: Per-rank shares to be SUM-reduced. Each
-                value must be pre-normalized so that summing across ranks
-                reconstructs the global metric.
+            sum_reduced_metrics: Per-rank token sums (mean/frac keys) to be
+                SUM-reduced; the controller divides them by the step's
+                loss-token count.
             max_reduced_metrics: Per-rank values to be MAX-reduced.
 
         Returns:
@@ -256,8 +256,7 @@ class Trainer(Configurable):
         microbatch_groups: (
             list[list[TrainingMicrobatch]] | list[list[RDMAMicrobatch]]
         ),
-        global_loss_token_counts: torch.Tensor,
-        global_routing_token_counts: torch.Tensor,
+        aux_loss_denominators: torch.Tensor,
     ) -> dict[str, float] | None:
         """Run one optimizer step's forward/backward microbatches.
 
@@ -266,14 +265,15 @@ class Trainer(Configurable):
                 `[num_groups][num_microbatches_per_group][dp_degree]` grid. Under PP, each group runs
                 as one pipeline step. `RDMAMicrobatch`es when `rdma_min_tensor_bytes` is set,
                 read a few ahead of training.
-            global_loss_token_counts: Per-objective loss-token counts across the
-                global batch.
-            global_routing_token_counts: Per-depth non-padding routing-token
-                counts across the global batch.
+            aux_loss_denominators: The step's routed tokens per loss token over every DP rank,
+                one per routing depth (`aux_loss.aux_loss_denominators`), computed by the
+                controller.
 
         Returns:
             dict[str, float] | None: Globally-reduced metrics, or ``None`` on
                 ranks without the last pipeline stage, which compute no loss.
+                /mean and /frac metrics are token sums: the caller divides them
+                by the step's loss-token count.
 
         Example:
             # dp_degree=2, tp=2, one microbatch per group,
@@ -318,13 +318,14 @@ class Trainer(Configurable):
             microbatch_groups = RDMAMicrobatchPrefetcher(microbatches)
         result = engine.forward_backward(
             microbatch_groups=microbatch_groups,
-            global_loss_token_counts=global_loss_token_counts,
-            global_routing_token_counts=global_routing_token_counts,
+            aux_loss_denominators=aux_loss_denominators,
         )
         self._num_flops = result.num_flops
         if not engine.pp_has_last_stage:
             return None
         microbatch_metrics: list[dict[str, float]] = []
+        # TODO: pick the cross-rank reduce with loss_metric_reduce_op, so /min keys take
+        # the min across ranks too (no RL loss emits /min today).
         for group_metrics in result.loss_metrics:
             for loss_metrics in group_metrics:
                 microbatch_metrics.append(
@@ -427,7 +428,10 @@ class Trainer(Configurable):
                     device_mem_stats.num_alloc_retries
                 ),
                 "trainer/memory/num_ooms": float(device_mem_stats.num_ooms),
-                **collect_aux_loss_metrics(engine.parallelism_context),
+                **collect_aux_loss_metrics(
+                    engine.parallelism_context,
+                    num_loss_tokens=int(engine.global_loss_token_count),
+                ),
                 **(
                     {"trainer/mfu_percent": performance["mfu_percent"]}
                     if "mfu_percent" in performance
