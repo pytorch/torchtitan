@@ -802,7 +802,7 @@ class EPDispatchMetadata:
 
 
 class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
-    """Token dispatcher using DeepEP v2's unified ``ElasticBuffer`` dispatch/combine.
+    """Token dispatcher using DeepEP v2's unified ``EPBuffer`` dispatch/combine.
 
     DeepEP v2 (>= 2.0.0) collapses the v1 high-throughput (HT) and low-latency (LL)
     paths into a single ``buffer.dispatch``/``combine``. Compact dispatch is gathered
@@ -844,6 +844,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
         self.hidden_dim = config.hidden_dim
         self.cuda_graph_compatible = config.cuda_graph_compatible
+        self._split_dispatch_launch_wait = False
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
@@ -908,6 +909,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             remat_region_name=self.remat_region_name("ep_communication.dispatch"),
             recompute=self._replays_communication(),
             cuda_graph_compatible=self.cuda_graph_compatible,
+            split_launch_wait=self._split_dispatch_launch_wait,
         )
 
         metadata = EPDispatchMetadata(state=state)
@@ -920,9 +922,9 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         metadata: EPDispatchMetadata,
         x_TD: torch.Tensor,
     ) -> torch.Tensor:
-        """Combine tokens via DeepEP and wait for completion."""
+        """Combine tokens via DeepEP; the combine op waits for completion itself."""
         del x_TD
-        from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
+        from torchtitan.distributed.deepep.deepep import combine_tokens
 
         # combine_tokens applies routing scores with bare ops.
         remat.recompute_needs_tensor(routed_output_RD)
@@ -933,7 +935,6 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             remat_region_name=self.remat_region_name("ep_communication.combine"),
             recompute=self._replays_communication(),
         )
-        sync_combine()
         return combined_TD
 
 

@@ -23,7 +23,10 @@ from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
-from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import (
+    DeepEPTokenDispatcher,
+    HybridEPTokenDispatcher,
+)
 from torchtitan.models.deepseek_v3 import (
     build_model_config as build_deepseek_v3_model_config,
 )
@@ -100,6 +103,46 @@ def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
                     )
                 ),
                 kwargs={"non_blocking_capacity_factor": 1.0},
+            )
+        ],
+    )
+
+
+def graph_trainer_deepseek_v3_debugmodel_deepep(
+    *,
+    parallelism: ParallelismConfig | None = None,
+) -> GraphTrainer.Config:
+    """Debug model on the DeepEP compact dispatcher.
+
+    The compact dispatch waits on the host for the receive counts, so CUDA graphs
+    stay off. Enable ``config.compile.deepep_dispatch_overlap`` to split dispatch
+    and schedule the shared experts between its launch and wait.
+    """
+    if parallelism is None:
+        parallelism = ParallelismConfig(expert_parallel_degree=2)
+    base = deepseek_v3_debugmodel(attn_backend="flex", parallelism=parallelism)
+    base.model = build_model_config(
+        "debugmodel",
+        attn_backend="flex",
+        seq_len=base.training.max_context_length,
+        parallelism=base.parallelism,
+    )
+    config = to_graph_trainer_config(base, GraphTrainerDeepSeekV3Model.Config)
+    config.compile = GraphTrainerCompileConfig()
+    config.training.disable_cuda_graphs = True
+    return apply_transforms(
+        config,
+        [
+            TokenDispatcherTransform(
+                dispatcher=DeepEPTokenDispatcher,
+                # Each EP rank dispatches one CP x TP shard of a microbatch.
+                num_max_tokens_per_rank=(
+                    config.training.num_tokens_per_microbatch_per_dp_rank
+                    // (
+                        config.parallelism.context_parallel_degree
+                        * config.parallelism.tensor_parallel_degree
+                    )
+                ),
             )
         ],
     )
