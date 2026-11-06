@@ -250,6 +250,27 @@ class TestImageProcessorStages(unittest.TestCase):
         # (64 / 32) * (96 / 32) merged tokens for one frame.
         self.assertEqual(processor.num_placeholder_tokens(1, 64, 96), 6)
 
+    def test_resized_size_matches_decode_and_resize(self):
+        # A renderer counts placeholder tokens from the size in the file header with
+        # resized_size; it must be the size decode_and_resize produces, for a
+        # pixel-budget resize and for a NaViT resize that pads.
+        kimi_style = dict(
+            patch_size=14,
+            temporal_patch_size=1,
+            resize_fn=resize_to_navit_patch_grid,
+            patch_order="raster",
+            max_patches=256,
+            max_patches_per_side=16,
+        )
+        for overrides in (dict(min_pixels=32 * 32, max_pixels=256 * 256), kimi_style):
+            processor = _image_processor_config(**overrides).build()
+            for height, width in ((200, 300), (48, 64), (900, 40)):
+                image = Image.fromarray(np.zeros((height, width, 3), dtype=np.uint8))
+                _, resized_h, resized_w, _ = processor.decode_and_resize(image).shape
+                self.assertEqual(
+                    processor.resized_size(height, width), (resized_h, resized_w)
+                )
+
     def test_normalize_and_patchify_rejects_float_items(self):
         # In-place normalization would otherwise overwrite the caller's tensor.
         processor = _image_processor_config().build()
