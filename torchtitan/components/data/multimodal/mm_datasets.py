@@ -65,6 +65,8 @@ import grain.python as grain
 import numpy as np
 import torch
 import torchvision.transforms.v2.functional as TVF
+from renderers import build_training_sample, Message
+from renderers.base import ImagePart
 
 from torchtitan.components.data.dataset import (
     DatasetConfig as GrainDatasetConfig,
@@ -74,11 +76,12 @@ from torchtitan.components.data.dataset import (
 from torchtitan.components.data.sources import HuggingFaceStreamingSource
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.components.tokenizer import MultiModalTokenizer
+from torchtitan.components.renderer import RendererConfig
+from torchtitan.components.tokenizer import HuggingFaceTokenizer, MultiModalTokenizer
 
 from .utils.audio import resample_waveform
 from .utils.image import calculate_vision_tokens, process_image, resize_to_pixel_budget
-from .utils.text import insert_vision_placeholders
+from .utils.text import expand_image_placeholders, insert_vision_placeholders
 from .utils.video import process_video
 
 
@@ -234,6 +237,44 @@ def _process_video_text_sample(
     return {**text_fields, "pixel_values_videos": [processed_video]}
 
 
+def _process_images(
+    images: list[Any],
+    *,
+    patch_size: int,
+    temporal_patch_size: int,
+    spatial_merge_size: int,
+    **image_kwargs: Any,
+) -> tuple[list[torch.Tensor], list[int]] | None:
+    """Process images and count each one's encoder output rows.
+
+    Returns None, so the caller drops the sample, if any image fails.
+    """
+    processed_images: list[torch.Tensor] = []
+    num_image_tokens: list[int] = []
+    for image in images:
+        processed_image = process_image(
+            image,
+            patch_size=patch_size,
+            merge_size=spatial_merge_size,
+            **image_kwargs,
+        )
+        if processed_image is None:
+            logger.warning("Cannot process all images for sample. Dropping")
+            return None
+        processed_images.append(processed_image)
+        num_image_tokens.append(
+            calculate_vision_tokens(
+                num_frames=1,
+                height=processed_image.shape[1],
+                width=processed_image.shape[2],
+                patch_size=patch_size,
+                spatial_merge_size=spatial_merge_size,
+                temporal_patch_size=temporal_patch_size,
+            )[0]
+        )
+    return processed_images, num_image_tokens
+
+
 def _process_mm_sample(
     texts: list[str | None],
     images: list[bytes | None],
@@ -241,15 +282,7 @@ def _process_mm_sample(
     patch_size: int,
     temporal_patch_size: int,
     spatial_merge_size: int,
-    min_pixels: int,
-    max_pixels: int,
-    image_mean: tuple[float, ...],
-    image_std: tuple[float, ...],
-    resize_fn: Callable[..., tuple[int, int, int, int]],
-    max_patches: int,
-    max_patches_per_side: int,
-    image_interpolation_mode: TVF.InterpolationMode = TVF.InterpolationMode.BICUBIC,
-    **kwargs,
+    **image_kwargs,
 ) -> dict[str, Any] | None:
     """Common processing logic for multimodal samples.
 
@@ -280,42 +313,18 @@ def _process_mm_sample(
     if not texts or len(texts) != len(images):
         return None
 
-    processed_images = []
-    num_image_tokens = []
-
-    for idx, img in enumerate(images):
-        if img is not None:
-            # Resize (to multiples of patch_size x merge_size) and normalize images
-            processed_img = process_image(
-                img,
-                patch_size=patch_size,
-                merge_size=spatial_merge_size,
-                min_pixels=min_pixels,
-                max_pixels=max_pixels,
-                image_mean=image_mean,
-                image_std=image_std,
-                resize_fn=resize_fn,
-                image_interpolation_mode=image_interpolation_mode,
-                max_patches=max_patches,
-                max_patches_per_side=max_patches_per_side,
-            )
-            if processed_img is not None:
-                num_tokens, _, _ = calculate_vision_tokens(
-                    num_frames=1,
-                    height=processed_img.shape[1],
-                    width=processed_img.shape[2],
-                    patch_size=patch_size,
-                    spatial_merge_size=spatial_merge_size,
-                    temporal_patch_size=temporal_patch_size,
-                )
-                processed_images.append(processed_img)
-                num_image_tokens.append(num_tokens)
-                # Keep the accepted image at this aligned position as a placeholder.
-                texts[idx] = None
-
-    if len(processed_images) != len([_ for _ in images if _ is not None]):
-        logger.warning("Cannot process all images for sample. Dropping")
+    processed = _process_images(
+        [image for image in images if image is not None],
+        patch_size=patch_size,
+        temporal_patch_size=temporal_patch_size,
+        spatial_merge_size=spatial_merge_size,
+        **image_kwargs,
+    )
+    if processed is None:
         return None
+    processed_images, num_image_tokens = processed
+    # Keep each image at its aligned position as a placeholder.
+    texts = [None if image is not None else text for text, image in zip(texts, images)]
 
     # Replace image placeholders (None) with image token sequences
     processed_text = insert_vision_placeholders(
@@ -417,12 +426,11 @@ def _filter_overlong_sample(
     return processed
 
 
-class VisionProcessor(SampleProcessor):
-    """Processes image-text and video-text rows for Grain."""
+class _ImageProcessor(SampleProcessor):
+    """Shared image settings of the Grain image sample processors."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
-        sample_processor: Callable
         patch_size: int = 16
         temporal_patch_size: int = 2
         spatial_merge_size: int = 2
@@ -440,13 +448,25 @@ class VisionProcessor(SampleProcessor):
         self._tokenizer = context.tokenizer
         self._max_context_length = context.max_context_length
 
+
+class VisionProcessor(_ImageProcessor):
+    """Processes image-text and video-text rows for Grain."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(_ImageProcessor.Config):
+        sample_processor: Callable
+
+    def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
+        super().__init__(config, context=context)
+        self._sample_processor = config.sample_processor
+
     def __call__(
         self,
         sample: dict[str, Any],
         rng: np.random.Generator,
     ) -> dict[str, Any] | None:
         del rng
-        processed = self._config.sample_processor(
+        processed = self._sample_processor(
             sample=sample,
             tokenizer=self._tokenizer,
             patch_size=self._config.patch_size,
@@ -463,6 +483,106 @@ class VisionProcessor(SampleProcessor):
         )
         return _filter_overlong_sample(
             processed,
+            max_context_length=self._max_context_length,
+        )
+
+
+class MultiModalChatProcessor(_ImageProcessor):
+    """Processes chat rows with images for Grain.
+
+    ``messages_fn`` returns chat messages whose image parts are
+    ``{"type": "image", "image": <bytes, path, or PIL image>}``. The renderer emits
+    one image token per image part, which is expanded to the encoder's output row
+    count. Only tokens the renderer marks as model output get loss.
+
+    Example::
+
+        MultiModalChatProcessor.Config(
+            messages_fn=vqa_messages,
+            renderer=MuseSparkRendererConfig(),
+            patch_size=16,
+        )
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(_ImageProcessor.Config):
+        messages_fn: Callable[[dict[str, Any]], list[Message]]
+        renderer: RendererConfig
+
+    def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
+        super().__init__(config, context=context)
+        if not isinstance(context.tokenizer, HuggingFaceTokenizer):
+            raise ValueError("Chat renderers require a HuggingFaceTokenizer.")
+        self._messages_fn = config.messages_fn
+        self._renderer = config.renderer.build(tokenizer=context.tokenizer)
+
+    def __call__(
+        self,
+        sample: dict[str, Any],
+        rng: np.random.Generator,
+    ) -> dict[str, Any] | None:
+        del rng
+        messages = self._messages_fn(sample)
+        if not messages or messages[-1]["role"] != "assistant":
+            raise ValueError("Chat samples must end with an assistant message.")
+        rendered = build_training_sample(
+            self._renderer, messages, ensure_final_stop=True
+        )
+        if rendered.multi_modal_data is not None:
+            raise ValueError(
+                "MultiModalChatProcessor expands images itself; use a renderer "
+                "that emits one image token per image."
+            )
+
+        images = [
+            cast(ImagePart, part)["image"]
+            for message in messages
+            for part in (
+                message["content"] if isinstance(message.get("content"), list) else ()
+            )
+            if part.get("type") == "image"
+        ]
+        config = self._config
+        processed = _process_images(
+            images,
+            patch_size=config.patch_size,
+            temporal_patch_size=config.temporal_patch_size,
+            spatial_merge_size=config.spatial_merge_size,
+            min_pixels=config.min_pixels,
+            max_pixels=config.max_pixels,
+            image_mean=config.image_mean,
+            image_std=config.image_std,
+            resize_fn=config.resize_fn,
+            image_interpolation_mode=config.image_interpolation_mode,
+            max_patches=config.max_patches,
+            max_patches_per_side=config.max_patches_per_side,
+        )
+        if processed is None:
+            return None
+        processed_images, num_image_tokens = processed
+        tokenizer = self._tokenizer
+        token_ids, loss_mask = expand_image_placeholders(
+            rendered.token_ids,
+            [bool(target) for target in rendered.loss_mask],
+            num_image_tokens,
+            # pyrefly: ignore [missing-attribute]
+            image_id=tokenizer.image_id,
+            # pyrefly: ignore [missing-attribute]
+            image_start_id=tokenizer.vision_start_id,
+            # pyrefly: ignore [missing-attribute]
+            image_end_id=tokenizer.vision_end_id,
+        )
+        tokens = torch.tensor(token_ids)
+        labels = tokens[1:].clone()
+        # Label j predicts token j + 1, so shift the mask with the labels.
+        labels[~torch.tensor(loss_mask[1:])] = IGNORE_INDEX
+        return _filter_overlong_sample(
+            {
+                "input_ids": tokens[:-1],
+                "labels": labels,
+                "positions": torch.arange(len(tokens) - 1),
+                "pixel_values": processed_images,
+            },
             max_context_length=self._max_context_length,
         )
 

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from renderers import Message, Renderer, ToolSpec
 
+from torchtitan.components.renderer import require_text_content
 from torchtitan.config import Configurable
 from torchtitan.rl.rollout.message_env import MessageEnv
 from torchtitan.rl.rollout.types import Completion, RolloutStatus, split_prompt
@@ -129,6 +130,7 @@ class TokenEnv(Configurable):
 
         # Copy our running conversation (messages) so we avoid mutating previous states
         self._messages = list(env_init_output.init_prompt_messages)
+        require_text_content(self._messages)
 
         # Render messages into tokens
         self._tools = env_init_output.tools if env_init_output.tools else None
@@ -235,6 +237,7 @@ class TokenEnv(Configurable):
         # Update this when such cases arise.
 
         # Create a new list to avoid mutating previous states
+        require_text_content(step_output.env_messages)
         self._messages = (
             self._messages + [completion_message] + step_output.env_messages
         )

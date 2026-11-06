@@ -23,7 +23,7 @@ from torchtitan.components.data.sources import (
 )
 from torchtitan.components.data.types import DatasetBuildContext
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.components.renderer import RendererConfig
+from torchtitan.components.renderer import RendererConfig, require_text_content
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 
@@ -191,6 +191,7 @@ class ChatProcessor(SampleProcessor):
     ) -> TextSequence | None:
         if not messages or messages[-1]["role"] != "assistant":
             raise ValueError("Chat samples must end with an assistant message.")
+        require_text_content(messages)
         # TODO(data-sft-supervision): Support per-turn loss weighting.
         rendered = build_training_sample(
             renderer,
@@ -198,8 +199,6 @@ class ChatProcessor(SampleProcessor):
             tools=tools,
             ensure_final_stop=True,
         )
-        if rendered.multi_modal_data is not None:
-            raise ValueError("ChatProcessor supports text-only samples.")
 
         sequence = self._create_sequence(rendered.token_ids)
         if sequence is None:
