@@ -244,7 +244,9 @@ class InterGeneratorRouter(Configurable):
                 # up to the generator's implementation; with
                 # model_state_dict_load_mode="gpu_fetch", in-flight requests
                 # stall for the transfer.
-                await h.rank0_actor.load_model_state_dict.call_one(policy_version)
+                await h.rank0_actor.load_model_state_dict.call_one(
+                    policy_version, drain=False
+                )
             else:
                 # Drain: stop routing to this generator and wait for in-flight
                 # work to finish before pulling, then re-admit it.
@@ -255,7 +257,9 @@ class InterGeneratorRouter(Configurable):
                 try:
                     with sl.log_trace_span("router_drain_wait"):
                         await h.idle.wait()
-                    await h.rank0_actor.load_model_state_dict.call_one(policy_version)
+                    await h.rank0_actor.load_model_state_dict.call_one(
+                        policy_version, drain=True
+                    )
                 finally:
                     self._set_serving(h, serving=True)
 

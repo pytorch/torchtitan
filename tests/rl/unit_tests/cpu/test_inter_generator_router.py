@@ -429,8 +429,8 @@ def test_drain_excludes_syncing_generator_from_routes():
         await pull_task
         assert [h.serving.is_set() for h in router._generators] == [True, True]
         assert [actor.load_model_state_dict.calls for actor in actors] == [
-            [((1,), {})],
-            [((1,), {})],
+            [((1,), {"drain": True})],
+            [((1,), {"drain": True})],
         ]
 
     asyncio.run(_run())
@@ -476,8 +476,8 @@ def test_drain_pulls_idle_generators_while_busy_generator_drains():
         assert await route_task == "gen0"
         await pull_task
         assert [actor.load_model_state_dict.calls for actor in actors] == [
-            [((2,), {})],
-            [((2,), {})],
+            [((2,), {"drain": True})],
+            [((2,), {"drain": True})],
         ]
 
     asyncio.run(_run())
@@ -497,7 +497,7 @@ def test_hot_swap_keeps_generators_serving_during_pull():
 
         actor.load_model_state_dict.release.set()
         await pull_task
-        assert actor.load_model_state_dict.calls == [((3,), {})]
+        assert actor.load_model_state_dict.calls == [((3,), {"drain": False})]
 
     asyncio.run(_run())
 
@@ -567,8 +567,8 @@ def test_pull_model_state_dict_pulls_every_generator():
 
         assert all(len(actor.prefetch_model_state_dict.calls) == 1 for actor in actors)
         assert [actor.load_model_state_dict.calls for actor in actors] == [
-            [((7,), {})],
-            [((7,), {})],
+            [((7,), {"drain": True})],
+            [((7,), {"drain": True})],
         ]
 
     asyncio.run(_run())
