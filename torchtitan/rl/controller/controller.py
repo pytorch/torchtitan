@@ -604,8 +604,9 @@ class Controller(Configurable):
                 group_id=group_id,
                 routing_session_id=routing_session_id,
                 sampling_config=sampling_config,
-                # The group id decides: a rollouter may reuse one GenerateFn for every group (the
-                # Verifiers example does). Negative ids are validation.
+                # Negative group ids are validation; their generation metrics keep the
+                # `validation_generator/*` names. Decided per request, because a rollouter may reuse one
+                # GenerateFn for every group (the Verifiers example does).
                 metrics_prefix="validation_generator" if group_id < 0 else "generator",
             )
 
@@ -862,9 +863,8 @@ class Controller(Configurable):
         """
         # TODO: investigate using pass@k for validation.
         t_validate_start = time.perf_counter()
-        if (
-            not self._validation_samples
-        ):  # steps=0 (e.g. loss guard CI) or an empty source
+        # steps=0 (e.g. loss guard CI) or an empty source
+        if not self._validation_samples:
             return []
         greedy = replace(self._sampling, temperature=0.0, top_p=1.0)
 
