@@ -236,8 +236,8 @@ def compute_policy_age_metrics(
 
 
 def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metric]:
-    """Build rollout-derived metrics: lengths, truncation, reward breakdown, and each turn's
-    per-generation metrics (the latter keep their own generator-side keys, unprefixed).
+    """Build rollout-derived metrics: lengths, truncation, errors, reward breakdown, and each turn's
+    metrics (the latter keep their own keys, unprefixed).
 
     Args:
         prefix: Metric namespace (e.g. `"rollout"` or `"validation"`).
@@ -260,6 +260,9 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
     ]
 
     truncated = [float(rollout.status.is_truncated()) for rollout in rollouts]
+    # Errors and timeouts (e.g. an agent task past its deadline): their reward alone can look
+    # like a wrong answer's.
+    errored = [float(rollout.status.is_error()) for rollout in rollouts]
     rewards = [rollout.reward for rollout in rollouts if rollout.reward is not None]
     num_turns = [float(len(rollout.turns)) for rollout in rollouts]
 
@@ -276,6 +279,7 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
         m.Metric(f"{prefix}/num_turns", m.Mean.from_list(num_turns)),
         m.Metric(f"{prefix}/num_turns", m.Max.from_list(num_turns)),
         m.Metric(f"{prefix}/truncation_rate", m.Mean.from_list(truncated)),
+        m.Metric(f"{prefix}/error_rate", m.Mean.from_list(errored)),
         m.Metric(f"{prefix}_reward", m.SummaryStats.from_list(rewards)),
     ]
 
@@ -289,8 +293,8 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
         for name, values in sorted(values_by_name.items())
     )
 
-    # Per-generation turn metrics (latencies, output tokens) measured by the generator.
-    # They carry their own keys (e.g. "generator/..."), so they ride through unprefixed.
+    # Turn metrics: the generator's (latencies, output tokens; e.g. "generator/...") and any a
+    # rubric adds (e.g. "math_verify/..."). They carry their own keys, so they ride through unprefixed.
     # Fold across turns: group metrics outlive the rollouts (until the step is logged),
     # and every full GC walks them.
     out.extend(

@@ -145,18 +145,18 @@ class ValidationConfig:
     Each pass is logged at the step it started on. A failed pass fails the run.
     Example: freq=25, 100 steps, each pass lasts 60 steps (1 char = 5 steps):
 
-        step     0    25   50   75   100   | after training
-        train    ====================
+        step     0    25   50   75   100  125  150  175
+        train    ====================|  training ends at 100
         one_pass_at_a_time=False: every due pass starts
-        pass 0   ============              ends at 60, logged at 0
-        pass 25       ============         ends at 85, logged at 25
-        pass 50            ============    logged at 50
-        pass 75                 =======    logged at 75
-        final                          ==  after the open passes end, logged at 100
+        pass 0   ============                  logged at 0
+        pass 25       ============             logged at 25
+        pass 50            ============        logged at 50
+        pass 75                 ============   logged at 75
+        final                               ============ starts when the open passes end, logged at 100
         one_pass_at_a_time=True: due steps 25 and 50 merge into one pass, started at step 60
-        pass 0   ============              logged at 0
-        pass 60              ==========    logged at 60
-        final                          ==  after pass 60 ends, logged at 100
+        pass 0   ============                  logged at 0
+        pass 60              ============      logged at 60
+        final                            ============ logged at 100
     """
 
     steps: int = 20
@@ -604,8 +604,8 @@ class Controller(Configurable):
                 group_id=group_id,
                 routing_session_id=routing_session_id,
                 sampling_config=sampling_config,
-                # From the group id, not the caller: a rollouter may reuse one GenerateFn for every
-                # group (the Verifiers example does). Negative ids are validation.
+                # The group id decides: a rollouter may reuse one GenerateFn for every group (the
+                # Verifiers example does). Negative ids are validation.
                 metrics_prefix="validation_generator" if group_id < 0 else "generator",
             )
 
@@ -809,7 +809,19 @@ class Controller(Configurable):
             rollout_groups.append(result)
 
         rollouts = [rollout for group in rollout_groups for rollout in group.rollouts]
-        metrics = compute_rollout_metrics(prefix="validation", rollouts=rollouts)
+        # Validation rows hold validation keys only. A turn metric such as a rubric's
+        # `math_verify/timeouts` is in training rows too, and this row logs at an older step,
+        # which would drop TensorBoard's later training points of that key.
+        metrics = [
+            (
+                metric
+                if metric.key.startswith("validation")
+                else m.Metric(f"validation/{metric.key}", metric.value)
+            )
+            for metric in compute_rollout_metrics(
+                prefix="validation", rollouts=rollouts
+            )
+        ]
         metrics.append(
             m.Metric("validation/group_failures", m.Sum(float(num_failed_groups)))
         )
@@ -850,8 +862,9 @@ class Controller(Configurable):
         """
         # TODO: investigate using pass@k for validation.
         t_validate_start = time.perf_counter()
-        steps = self.config.async_loop.validation.steps
-        if steps == 0:  # skip validation (e.g. loss guard CI)
+        if (
+            not self._validation_samples
+        ):  # steps=0 (e.g. loss guard CI) or an empty source
             return []
         greedy = replace(self._sampling, temperature=0.0, top_p=1.0)
 
@@ -862,6 +875,7 @@ class Controller(Configurable):
         self.rollout_recorder.record(is_validation=True, rollout_groups=rollout_groups)
 
         t_validate_s = time.perf_counter() - t_validate_start
+        # The pass's wall time. Training runs meanwhile and never waits for it.
         validation_metrics.append(m.Metric("timing/validate", m.NoReduce(t_validate_s)))
         return validation_metrics
 
@@ -999,10 +1013,10 @@ class Controller(Configurable):
                 *background_tasks, trainer_task, return_exceptions=True
             )
 
-        # Wait for the passes still running instead of cancelling them: their scores still count.
-        # The final pass starts only after they end. After a resume at the last step, the first
-        # pass has the same step, so the same group ids, and two in-flight requests with one id
-        # are fatal in the engine.
+        # Wait for the passes still running: their scores still count. The final pass starts only
+        # after they end. After a resume at the last step, the first pass has the same step, so the
+        # same group ids, and two in-flight requests with one id are fatal in the engine. Both then
+        # log at that step, and TensorBoard keeps only the final pass's point.
         # TODO: stop the training rollouts still running here; they run until close()
         # (`Rollouter.run_group_rollouts` shields them), and these passes run after them in vLLM.
         await self._wait_for_validation()
@@ -1019,8 +1033,8 @@ class Controller(Configurable):
     ) -> asyncio.Task[list[m.Metric]]:
         """Start the validation pass for policy `step`; `_log_finished_validation` logs it at `step`.
 
-        The pass samples once ``after`` (this step's weight pull) ends, so it starts on policy `step`
-        or newer; without ``after``, the generators must already hold policy `step`.
+        The pass samples once `after` (this step's weight pull) ends, so it starts on policy `step`
+        or newer; without `after`, the generators must already hold policy `step`.
         """
         # TODO: this pass's rollouts compete with training rollouts for env-server sandboxes, which
         # have no request priority; the generators already serve training first (`EngineRequest.group_id`).
@@ -1047,12 +1061,10 @@ class Controller(Configurable):
         self._log_finished_validation()
 
     def _log_finished_validation(self) -> None:
-        """Log each ended pass at the step it started at, oldest first; raise a failed pass's error,
-        so a failed pass fails the run. Per-prompt errors don't raise: they count in
-        `validation/group_failures`.
+        """Log ended passes oldest first, each at its start step; a failed pass raises.
 
-        Oldest first, because TensorBoard drops a tag's points at or after a step it sees again.
         Example: pass 0 running, pass 25 ended -> nothing logs. Pass 0 ends -> rows 0, then 25.
+        Oldest first: TensorBoard drops a tag's points at or after a step it sees again.
         """
         for step, task in list(self._validation_tasks.items()):
             if not task.done():
@@ -1411,7 +1423,7 @@ class Controller(Configurable):
             can_start = not (validation.one_pass_at_a_time and self._validation_tasks)
             # The last step starts no pass: the final pass after training covers it.
             if is_validation_due and can_start and step < num_training_steps:
-                # The pass, not the trainer, waits for this step's weight pull.
+                # The pass waits for this step's weight pull; training goes on.
                 self._start_validation(step=step, after=pull_task)
                 is_validation_due = False
 

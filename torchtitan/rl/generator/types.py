@@ -58,7 +58,8 @@ class EngineRequest:
 
         requests     group ids                                        vLLM priority
         training     0, 1, 2, ...: one per group                      the group id: older groups first
-        validation   negative: -(step * num_prompts + prompt + 1)     2**31 - 1: after all training
+        validation   negative, unique per pass                        2**31 - 1: after all training
+                     (`Controller._collect_validation_rollouts`)
 
     Validation shares one priority, so it runs in arrival order, after every training request:
 
