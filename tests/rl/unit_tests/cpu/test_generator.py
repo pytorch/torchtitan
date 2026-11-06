@@ -904,25 +904,24 @@ def test_cuda_graph_full_mode_extends_capture_sizes_to_chunk():
     assert 500 in cfg.cudagraph_capture_sizes  # decode batch captured exactly
 
 
-def test_cuda_graph_full_mode_drops_sizes_above_max_model_len():
-    # A dummy request longer than max_model_len overruns its KV block table.
+def test_cuda_graph_full_mode_caps_sizes_at_the_largest_step():
+    # A step packs at most max_num_seqs requests of at most max_model_len tokens each.
     kwargs = dict(
         max_num_seqs=8,
         max_model_len=1000,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
     )
+    # Packed prefills reach the 2048-token budget, so it is graphed.
     cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(**kwargs)
+    assert cfg.cudagraph_capture_sizes[-2:] == [1024, 2048]
+    one_request = {**kwargs, "max_num_seqs": 1}
+    cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(**one_request)
     assert cfg.cudagraph_capture_sizes[-2:] == [512, 1000]
-    cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(
-        **{**kwargs, "max_num_seqs": 1500}
-    )
-    assert cfg.cudagraph_capture_sizes[-1] == 1000
-    with pytest.raises(ValueError, match="max_model_len"):
+    with pytest.raises(ValueError, match="no step reaches"):
         VLLMCudaGraphConfig(
             mode="FULL", capture_sizes=[512, 2048]
-        ).get_vllm_compilation_config(**kwargs)
-    # FULL_DECODE_ONLY captures one-token requests, so a decode batch above max_model_len is fine.
+        ).get_vllm_compilation_config(**one_request)
     cfg = VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY").get_vllm_compilation_config(
         **{**kwargs, "max_num_seqs": 1500}
     )
