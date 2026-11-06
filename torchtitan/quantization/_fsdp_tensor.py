@@ -139,6 +139,7 @@ from dataclasses import fields, is_dataclass
 from typing import Any
 
 import torch
+from torch.distributed.fsdp.experimental import AllGatherInput
 from torch.utils import _pytree as pytree
 from torch.utils._python_dispatch import return_and_correct_aliasing
 
@@ -406,7 +407,11 @@ class _ShardedFSDPTensor(_FSDPTensorBase):
         else:
             source = comm_tensor.to(dtype).contiguous()
         metadata = outer_size if shard_dim == 0 else (tuple(outer_size), shard_dim)
-        return (source,), metadata
+        # FSDP reads a plain tensor as rows of the padded sharded parameter and
+        # concatenates them along its shard dim, which would scramble a moved
+        # nonzero shard dim, so gather that along dim 0 instead.
+        payload = source if shard_dim == 0 else AllGatherInput(source, dim=0)
+        return (payload,), metadata
 
     def fsdp_post_all_gather(
         self, all_gather_outputs, metadata, param_dtype, *, out=None
