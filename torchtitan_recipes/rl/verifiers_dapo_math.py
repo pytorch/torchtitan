@@ -35,16 +35,14 @@ from torchtitan.rl.controller.controller import (
     ValidationConfig,
 )
 from torchtitan.rl.examples.verifiers.dapo_math.data import VerifiersMathTasksetConfig
-from torchtitan.rl.examples.verifiers.data import (
-    register_local_taskset_alias,
-    VerifiersTaskDataset,
-)
+from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
 from torchtitan.rl.examples.verifiers.env_server import VerifiersEnvServer
 from torchtitan.rl.examples.verifiers.generation_server import GenerationServer
 from torchtitan.rl.examples.verifiers.rollouter import (
     RewardFromVerifiers,
     VerifiersRollouter,
 )
+from torchtitan.rl.examples.verifiers.worker_setup import register_local_taskset_alias
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
