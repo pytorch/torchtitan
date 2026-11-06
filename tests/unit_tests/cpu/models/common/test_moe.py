@@ -101,8 +101,9 @@ def _forward_with_routed_mask(
         remat_should_recompute=lambda name: False,
         _maybe_zero_fill_routed_output_to_tp_partial=lambda out: out,
         shared_experts=None,
+        _record_shared_expert_input_ready=lambda x: None,
         _maybe_all_reduce_moe_output_across_tp=lambda out: out,
-        _add_shared_experts_and_reduce_across_tp=lambda out, x: out,
+        _add_shared_experts_and_reduce_across_tp=lambda out, x, ready=None: out,
     )
     moe_cls.forward(cast(Any, moe), torch.zeros(4, 3), padding_mask_T=padding_mask_T)
     return routed_mask_T
@@ -162,6 +163,69 @@ class _IdentityW2(nn.Module):
 
 
 class TestMoE(unittest.TestCase):
+    def test_shared_combine_forwards_readiness_in_both_reduction_modes(self):
+        """Both combine paths retain the event recorded before routed work."""
+        x_TD = torch.zeros(2, 4)
+        routed_TD = torch.ones_like(x_TD)
+        shared_TD = torch.full_like(x_TD, 2)
+        ready = cast(torch.cuda.Event, object())
+        for batch_invariant in (False, True):
+            with self.subTest(batch_invariant=batch_invariant):
+                run_shared = unittest.mock.Mock(return_value=shared_TD)
+                reduce_tp = unittest.mock.Mock(side_effect=lambda out, **kw: out)
+                moe = SimpleNamespace(
+                    shared_experts=object(),
+                    _run_shared_experts=run_shared,
+                    _maybe_zero_fill_routed_output_to_tp_partial=lambda out: out,
+                    _maybe_all_reduce_moe_output_across_tp=reduce_tp,
+                    remat_region_name=lambda name: name,
+                )
+                with patch(
+                    "torchtitan.models.common.moe.moe.is_in_batch_invariant_mode",
+                    return_value=batch_invariant,
+                ):
+                    output_TD = MoE._add_shared_experts_and_reduce_across_tp(
+                        cast(Any, moe), routed_TD, x_TD, ready
+                    )
+                run_shared.assert_called_once_with(x_TD, ready)
+                self.assertEqual(reduce_tp.call_count, 2 if batch_invariant else 1)
+                torch.testing.assert_close(
+                    output_TD, routed_TD + shared_TD, rtol=0, atol=0
+                )
+
+    def test_shared_overlap_rejects_unsupported_cpu_and_missing_branch(self):
+        """The CUDA opt-in raises instead of silently ignoring unsupported modes."""
+        config = make_moe_config(
+            num_experts=2,
+            router=make_router_config(
+                dim=4,
+                num_experts=2,
+                gate_param_init={},
+                score_func=Sigmoid.Config(),
+            ),
+            routed_experts=make_routed_experts_config(
+                dim=4,
+                hidden_dim=8,
+                num_experts=2,
+                top_k=1,
+                param_init={},
+                enable_ep=False,
+            ),
+            shared_experts=make_shared_expert_ffn_config(
+                dim=4,
+                hidden_dim=8,
+                w13_param_init={},
+                w2_param_init={},
+                enable_sp=False,
+            ),
+            enable_sp=False,
+        )
+        enabled = replace(config, overlap_shared_experts=True)
+        with self.assertRaisesRegex(ValueError, "requires CUDA inputs"):
+            enabled.build()(torch.randn(2, 4))
+        with self.assertRaisesRegex(ValueError, "requires shared experts"):
+            replace(enabled, shared_experts=None)
+
     def test_make_router_config_requires_score_func(self):
         with self.assertRaisesRegex(TypeError, "score_func"):
             make_router_config(
