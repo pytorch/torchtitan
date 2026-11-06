@@ -276,9 +276,9 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
     model_config = build_model_config(model_flavor, parallelism=ParallelismConfig())
     with torch.device("meta"):
         model = model_config.build()
+    model.half()
     model.to_empty(device="cpu")
     model.init_states(buffer_device=torch.device("cpu"))
-    model.half()
 
     state_dict = ModelWrapper(model)._get_state_dict()
     print(f"  Loading checkpoint: {checkpoint_path}")
