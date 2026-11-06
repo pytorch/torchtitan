@@ -34,9 +34,10 @@ def _json_default(value: Any) -> Any:
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
-def _log_write_error(write: Future) -> None:
-    if write.exception() is not None:
-        logger.error("Failed to write rollout samples", exc_info=write.exception())
+def _log_write_error(write_future: Future) -> None:
+    error = write_future.exception()
+    if error is not None:
+        logger.error("Failed to write rollout samples", exc_info=error)
 
 
 class KeepExtremeRewardsFilter(Configurable):
@@ -128,7 +129,7 @@ class RolloutSampleRecorder(Configurable):
         # I/O; one thread keeps the lines in call order. The file stays open: reopening
         # it per call is slow on a network filesystem (FUSE/NFS).
         self._file = self._path.open("a", encoding="utf-8")
-        self._writer = ThreadPoolExecutor(
+        self._write_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="rollout_recorder"
         )
 
@@ -152,8 +153,8 @@ class RolloutSampleRecorder(Configurable):
             # Rollout messages can hold objects json.dumps can't serialize
             # natively, e.g. tool-calling results
             lines.append(json.dumps(record, default=_json_default) + "\n")
-        write = self._writer.submit(self._append, "".join(lines))
-        write.add_done_callback(_log_write_error)
+        write_future = self._write_executor.submit(self._append, "".join(lines))
+        write_future.add_done_callback(_log_write_error)
 
     def _append(self, text: str) -> None:
         self._file.write(text)
@@ -161,7 +162,7 @@ class RolloutSampleRecorder(Configurable):
 
     def close(self) -> None:
         """Wait until every recorded rollout is in the file, then close it."""
-        self._writer.shutdown(wait=True)
+        self._write_executor.shutdown(wait=True)
         self._file.close()
 
     def _encode_rollout(self, rollout: Rollout) -> dict:
