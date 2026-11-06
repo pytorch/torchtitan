@@ -496,7 +496,7 @@ def test_fsdp_hooks_support_a_non_zero_shard_dim():
     sharded_weight = _LinearShardedTensorWithMXFP8Compute(
         torch.randn(2, 48, 128, device="cuda", dtype=torch.bfloat16)
     )
-    (comm_N2K,), metadata = sharded_weight.fsdp_pre_all_gather(
+    (payload,), metadata = sharded_weight.fsdp_pre_all_gather(
         _StubMesh(2),
         torch.Size([2, 96, 128]),
         None,
@@ -504,6 +504,8 @@ def test_fsdp_hooks_support_a_non_zero_shard_dim():
         _StubMixedPrecisionPolicy(),
     )
 
+    assert payload.dim == 0
+    comm_N2K = payload.tensor
     assert comm_N2K.shape == (48, 2, 128)
     gathered_N2K = torch.randn(96, 2, 128, device="cuda", dtype=torch.bfloat16)
     unsharded, inner_tensors = sharded_weight.fsdp_post_all_gather(
