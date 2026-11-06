@@ -6,18 +6,16 @@
 
 from __future__ import annotations
 
-import fnmatch
 import logging
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any, cast, Literal, overload
 
 import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.distributed.checkpoint.stateful import Stateful
-from torch.distributed.device_mesh import DeviceMesh
 from torch.optim import Optimizer
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
@@ -27,7 +25,6 @@ from torchtitan.distributed.flex_shard import (
     ComputeLayout,
     DistMuon as FlexShardDistMuon,
 )
-from torchtitan.distributed.utils import build_alternative_fsdp_mesh
 
 from .utils import (
     get_flat_optim_state_dict,
@@ -191,11 +188,13 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
 
     Note:
         The CTA cap is disabled by default because it is a workload-dependent
-        memory/performance tradeoff. Enabling it builds explicit redistribution
-        meshes backed by resource-independent NCCL child communicators and
-        passes them through ``BucketConfig``. Each communicator adds fixed
+        memory/performance tradeoff. Enabling it uses resource-independent NCCL
+        communicators for optimizer redistribution. Each communicator adds fixed
         memory and may reduce throughput; the cap benefits workloads only when
         the reduction in all-peer connection state outweighs that overhead.
+        FlexShard's constructor prepares transports collectively. Automatic
+        transport setup requires the same constructor sequence on every WORLD
+        rank, including PP stages with different local buckets.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -225,19 +224,30 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         """Limit NCCL CTAs for DistMuon redistribution only; ``<= 0`` disables.
 
         All-to-all opens connection buffers for every peer and channel. A lower
-        CTA cap reduces this connection state on dedicated child communicators
-        of the ``dp_shard``/``edp_shard`` groups, while FSDP keeps its original
+        CTA cap reduces this connection state on dedicated transport communicators,
+        including combined DP/TP groups, while FSDP keeps its original
         communicators. Each child adds fixed workspace memory, and fewer CTAs
         may reduce all-to-all bandwidth.
 
-        A positive value requires NCCL on the FSDP shard axes. Other backends
+        A positive value requires NCCL on the transport axes. Other backends
         raise ``ValueError``; fake warns and keeps the storage groups without
-        modeling the cap.
+        modeling the cap. Explicit ``BucketConfig.mesh`` values require the
+        cap to be disabled; their communicator options belong to the caller.
 
         TODO: Replace this temporary all-to-all connection-memory workaround
         with lower-memory redistribution, such as a pull-based symmetric-memory
         implementation.
         """
+
+        def __post_init__(self) -> None:
+            if self.max_nccl_ctas_for_comms > 0 and any(
+                bucket.mesh is not None for bucket in self.bucket_configs
+            ):
+                raise ValueError(
+                    "Explicit BucketConfig.mesh requires "
+                    "max_nccl_ctas_for_comms <= 0; set communicator options "
+                    "when constructing the mesh"
+                )
 
     def __init__(
         self,
@@ -245,58 +255,11 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         *,
         params: Iterable[dict[str, Any]] | Iterable[Tensor],
     ) -> None:
-        param_groups = tuple(cast(Iterable[dict[str, Any]], params))
-        bucket_configs = config.bucket_configs
-        if config.max_nccl_ctas_for_comms > 0:
-            if len(param_groups) != 1:
-                raise ValueError("DistMuon requires exactly one parameter group")
-            param_group = param_groups[0]
-            group_names = param_group.get("param_names")
-            if group_names is None:
-                raise ValueError("DistMuon requires param_names")
-            named_parameters = tuple(
-                zip(group_names, param_group["params"], strict=True)
-            )
-
-            resolved_bucket_configs = []
-            # OptimizersContainer builds this instance for one local model part;
-            # reuse meshes across its buckets without keeping a run-wide cache.
-            redistribution_mesh_by_storage_mesh: dict[DeviceMesh, DeviceMesh] = {}
-            for bucket_config in bucket_configs:
-                matched_parameter = next(
-                    (
-                        parameter
-                        for fqn, parameter in named_parameters
-                        if any(
-                            fnmatch.fnmatchcase(fqn, pattern)
-                            for pattern in bucket_config.patterns
-                        )
-                    ),
-                    None,
-                )
-                if matched_parameter is None:
-                    resolved_bucket_configs.append(bucket_config)
-                    continue
-                storage_mesh = cast(Any, matched_parameter).device_mesh
-                if storage_mesh not in redistribution_mesh_by_storage_mesh:
-                    redistribution_mesh_by_storage_mesh[
-                        storage_mesh
-                    ] = build_alternative_fsdp_mesh(
-                        storage_mesh,
-                        max_ctas=config.max_nccl_ctas_for_comms,
-                    )
-                resolved_bucket_configs.append(
-                    replace(
-                        bucket_config,
-                        mesh=redistribution_mesh_by_storage_mesh[storage_mesh],
-                    )
-                )
-            bucket_configs = resolved_bucket_configs
-
         super().__init__(
-            param_groups,
+            cast(Iterable[dict[str, Any]], params),
             compute_sharding_by_fqn=config.compute_sharding_by_fqn,
-            bucket_configs=bucket_configs,
+            bucket_configs=config.bucket_configs,
+            max_nccl_ctas_for_comms=config.max_nccl_ctas_for_comms,
             lr=config.lr,
             weight_decay=config.weight_decay,
             momentum=config.momentum,
