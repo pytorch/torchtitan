@@ -50,6 +50,28 @@ describe the released model.
 | Expert parallelism | Supported |
 | Pipeline parallelism | Supported |
 
+## Tokenizer and Chat Rendering
+
+The released checkpoint ships a tiktoken BPE with remote tokenizer code, while
+TorchTitan's `HuggingFaceTokenizer` loads `tokenizer.json`. Convert it once:
+
+```bash
+python -m scripts.checkpoint_conversion.convert_kimi_k3_tokenizer \
+    <Kimi-K3 checkpoint dir> <assets dir>
+```
+
+The script also checks the converted tokenizer against K3's own tokenizer and
+`KimiK3Renderer` against the checkpoint's `apply_chat_template`. Use a directory
+holding `tokenizer.json` next to the checkpoint's config and weights (symlinks are
+enough) as `hf_assets_path`.
+
+`KimiK3Renderer` (`renderer.py`) renders K3's XTML chat encoding for RL and parses
+completions into reasoning and answer. Select it with
+`from_renderers(CustomRendererConfig(import_path="torchtitan.models.kimi_k3.renderer.KimiK3Renderer"))`;
+`thinking` and `thinking_effort` mirror `apply_chat_template`'s arguments
+(`thinking_effort` defaults to `"max"`, as the checkpoint does). Tool calls are not
+supported yet.
+
 ## Numerical Parity
 
 The parity script reduces the released Hugging Face configuration to match
