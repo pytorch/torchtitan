@@ -11,7 +11,7 @@ checkpoint parameter names stay in TorchTitan.
 | --- | --- | --- |
 | Correctness reference or a new accelerator | `AllToAllTokenDispatcher` | Uses PyTorch collectives. Variable token counts require a CPU sync; disable accelerator graphs. |
 | Quantized grouped GEMMs with the reference dispatcher | `TorchAOTokenDispatcher` | Adds per-expert padding to all-to-all. Also supports EP=1. |
-| NVIDIA training or inference with a separate grouped-GEMM implementation | `DeepEPTokenDispatcher` | Requires DeepEP v2. Training uses compact dispatch with a CPU sync; disable training accelerator graphs. Inference under `no_grad` can use `cuda_graph_compatible=True` for the static expand layout. |
+| NVIDIA training or inference with a separate grouped-GEMM implementation | `DeepEPTokenDispatcher` | Requires DeepEP v2. Dispatch uses the expand layout (rows grouped by expert). Training syncs with the CPU to size it; disable training accelerator graphs. Inference under `no_grad` can use `cuda_graph_compatible=True` to skip the sync. |
 | NVIDIA training with graph-captured EP communication, including graph trainer | `HybridEPTokenDispatcher` | Requires the HybridEP branch and a supported NVLink/network topology. Set `non_blocking_capacity_factor` for CPU-free dispatch. |
 | Blackwell BF16 or MXFP8 training with integrated communication and compute | Dist-MoE | Requires SM100 or newer and `precision.param_dtype="bfloat16"`. Start with the [Dist-MoE recipes and runtime guide](../dist_moe/README.md). |
 

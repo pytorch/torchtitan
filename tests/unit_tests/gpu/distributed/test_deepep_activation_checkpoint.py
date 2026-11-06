@@ -30,6 +30,7 @@ from torchtitan.models.common.activation import SwiGLU
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.moe.token_dispatcher import (
+    AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
     HybridEPTokenDispatcher,
 )
@@ -92,7 +93,9 @@ class _EPBlock(Module):
         )
         # The loss is a bare consumer of the routed-expert output.
         remat.recompute_needs_tensor(out_TD)
-        return out_TD.float().square().sum()
+        # Weight tokens differently, so a combine that returns rows to the wrong tokens
+        # changes the loss and the grads.
+        return (out_TD.float().square() * (token_ids_T1 + 1)).sum()
 
 
 class _Model(Module):
@@ -276,6 +279,138 @@ class TestDeepEPActivationCheckpointing(_EPActivationCheckpointing):
             (FullActivationRematConfig(), ActivationRematConfig(save_regions=[])),
             num_replays=1,
         )
+
+    @with_comms
+    def test_matches_all_to_all_dispatcher(self):
+        # The stock all-to-all dispatcher is the reference. With the same weights and
+        # routing (top-2 of 4 * world experts: some tokens send both picks to one rank,
+        # some split them), DeepEP's expand path matches it up to bf16 rounding: the output,
+        # the input grad, the gate grad (through the routing scores) and the expert grads.
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("ep",),
+        )
+        set_spmd_meshes(
+            dense_mesh=mesh,
+            sparse_mesh=mesh,
+            dense_sp_enabled=False,
+        )
+        num_experts = 4 * self.world_size
+        with (
+            torch.autograd.set_multithreading_enabled(False),
+            set_current_spmd_mesh(mesh),
+        ):
+            torch.manual_seed(42)
+            deepep_dispatcher = DeepEPTokenDispatcher.Config(
+                num_experts=num_experts,
+                top_k=_TOP_K,
+                hidden_dim=_MODEL_DIM,
+                num_max_tokens_per_rank=_NUM_TOKENS,
+            )
+            deepep = _Model(_EPBlock(num_experts, deepep_dispatcher)).to(
+                self.device_type, torch.bfloat16
+            )
+            all_to_all_dispatcher = AllToAllTokenDispatcher.Config(
+                num_experts=num_experts, top_k=_TOP_K
+            )
+            all_to_all = _Model(_EPBlock(num_experts, all_to_all_dispatcher)).to(
+                self.device_type, torch.bfloat16
+            )
+            all_to_all.load_state_dict(deepep.state_dict())
+            deepep.layers["0"].routed_experts.token_dispatcher.init_buffer()
+            torch.manual_seed(self.rank)
+            x_TD = torch.randn(
+                _NUM_TOKENS,
+                _MODEL_DIM,
+                device=self.device_type,
+                dtype=torch.bfloat16,
+            )
+            outputs = []
+            for model in (deepep, all_to_all):
+                # Also compare the [T, D] output: a row returned to the wrong token
+                # changes it even where the summed loss barely moves.
+                model.layers["0"].routed_experts.register_forward_hook(
+                    lambda module, args, out_TD: outputs.append(out_TD.detach())
+                )
+            # No-grad forward first: the host-synced path validation runs.
+            with torch.no_grad():
+                deepep(x_TD)
+                all_to_all(x_TD)
+            actual = _run_forward_backward(deepep, x_TD)
+            expected = _run_forward_backward(all_to_all, x_TD)
+            # Assert only after both ranks finish every collective.
+            no_grad_actual, no_grad_expected, actual_output, expected_output = outputs
+            for actual_tensor, expected_tensor in zip(
+                [no_grad_actual, actual_output, *actual],
+                [no_grad_expected, expected_output, *expected],
+                strict=True,
+            ):
+                error = (actual_tensor - expected_tensor).float().norm()
+                self.assertLess((error / expected_tensor.float().norm()).item(), 1e-2)
+
+    @with_comms
+    def test_saved_dispatch_keeps_one_row_per_token(self):
+        # A saved dispatch keeps recv_x for the replayed expert GEMM. Token t picks experts
+        # t to t + 3 of 8, so of every 8 tokens each rank receives 7, as 16 rows: 16384
+        # rows from 7168 tokens. Remat keeps one row per token, and replay rebuilds the
+        # 16384 rows bitwise.
+        from torchtitan.distributed.deepep import deepep
+
+        num_tokens, num_experts, top_k = 4096, 4 * self.world_size, 4
+        deepep.get_buffer(
+            torch.distributed.group.WORLD,
+            hidden=_MODEL_DIM,
+            num_max_tokens_per_rank=num_tokens,
+            num_topk=top_k,
+        )
+        token_ids_T1 = torch.arange(num_tokens, device=self.device_type).unsqueeze(-1)
+        offsets_1K = torch.arange(top_k, device=self.device_type).unsqueeze(0)
+        expert_ids_TK = (token_ids_T1 + offsets_1K) % num_experts
+        scores_TK = torch.full((num_tokens, top_k), 0.5, device=self.device_type)
+        expert_inputs = []
+
+        def experts(rows_RD: torch.Tensor) -> torch.Tensor:
+            expert_inputs.append(rows_RD.detach().cpu())
+            return rows_RD.square()
+
+        def block(x_TD: torch.Tensor) -> torch.Tensor:
+            rows_RD, _, _ = deepep.dispatch_tokens(
+                x_TD,
+                expert_ids_TK,
+                scores_TK,
+                num_experts // self.world_size,
+                num_experts,
+                num_tokens_per_rank=num_tokens,
+                remat_region_name="dispatch",
+                recompute=False,
+            )
+            # A replayed consumer: remat keeps its input from the forward.
+            return remat.region(experts, "experts", recompute=True)(rows_RD).sum()
+
+        checkpointed = remat.checkpoint(region_name="block")(block)
+        torch.manual_seed(self.rank)
+        x_TD = torch.randn(
+            num_tokens,
+            _MODEL_DIM,
+            device=self.device_type,
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        allocated_before = torch.cuda.memory_allocated()
+        loss = checkpointed(x_TD)
+        kept_bytes = torch.cuda.memory_allocated() - allocated_before
+        loss.backward()
+
+        num_rows, num_received_tokens = 16384, 7168
+        rows_RD, replayed_rows_RD = expert_inputs
+        self.assertEqual(rows_RD.shape[0], num_rows)
+        self.assertTrue(torch.equal(rows_RD, replayed_rows_RD))
+        # Kept: one row per received token (3.5 MiB; all 16384 rows without the hooks,
+        # 8 MiB), plus under 1 MiB of per-row token ids, scores and DeepEP's routing
+        # handle. The bound sits halfway between the two row counts.
+        row_bytes = _MODEL_DIM * rows_RD.element_size()
+        self.assertLess(kept_bytes, (num_rows + num_received_tokens) * row_bytes // 2)
 
 
 @unittest.skipUnless(
