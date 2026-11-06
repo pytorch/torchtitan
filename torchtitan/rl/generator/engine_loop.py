@@ -337,6 +337,9 @@ class EngineLoop:
                         )
                     return
 
+                # TODO: a release decided together with its own not-yet-admitted generate call (a rollout
+                # cancelled or timed out right after sending it) runs before `add_requests`, so that call
+                # holds its session KV again until LRU eviction. Apply releases after admission.
                 self._engine.release_sessions(
                     decision.released_session_ids, decision.released_group_ids
                 )
