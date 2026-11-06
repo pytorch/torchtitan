@@ -129,8 +129,8 @@ rollouter = Rollouter.Config(
 
 Subclass `RolloutWorker` or `Rollouter` only when an experiment changes their
 behavior. For example, the Verifiers integration keeps a custom
-`VerifiersRollouter` because it owns an external environment server, and a
-`VerifiersRolloutWorker` because Verifiers runs a different rollout protocol.
+`VerifiersRolloutWorker` because Verifiers runs the env and its agent loop, and a
+`VerifiersRollouter` that copies the training taskset into the worker's env config.
 
 The default path handles rollout, scoring, batching, training, and model state dict transfer.
 

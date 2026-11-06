@@ -14,7 +14,4 @@ from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
 )
 from torchtitan.rl.examples.verifiers.terminal_bench.taskset import TerminalTaskset
 
-# Verifiers 0.4.0 runs a taskset with the Env its package exports.
-from verifiers.v1.tasksets.harbor import HarborEnv
-
-__all__ = ["HarborEnv", "TerminalBenchTerminusHarness", "TerminalTaskset"]
+__all__ = ["TerminalBenchTerminusHarness", "TerminalTaskset"]

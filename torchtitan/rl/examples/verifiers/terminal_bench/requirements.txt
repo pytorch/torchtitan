@@ -1,5 +1,5 @@
 # Install alongside torchtitan/rl/requirements.txt.
-verifiers==0.4.0
+verifiers==0.4.1
 harbor==0.24.0
 # Harbor's Dockerfile WORKDIR parser needs it; Harbor lists it only in its cloud extras.
 dockerfile-parse==2.0.1

@@ -402,6 +402,9 @@ class _GeneratingWorker:
             raise
         return RolloutGroup(group_id=group_id, rollouts=[])
 
+    async def close(self) -> None:
+        pathlib.Path(self.marker_dir, "closed").touch()
+
 
 class _GeneratingWorkerConfig:
     def __init__(self, marker_dir: str) -> None:
@@ -423,7 +426,7 @@ def test_cancel_group_and_wait_for_generate_calls_on_real_worker_processes(
     """Sent right after `run_group`, `cancel_group` finds the group (Monarch starts one sender's
     concurrent calls in order) and returns once it stopped, while its generate call still runs.
     `wait_for_generate_calls` returns only after that call's reply, so `Rollouter.close` never stops
-    a worker the router still owes."""
+    a worker the router still owes. Stopping the process closes the worker."""
 
     async def run() -> None:
         mesh = this_host().spawn_procs(per_host={"cpus": 1})
@@ -457,5 +460,6 @@ def test_cancel_group_and_wait_for_generate_calls_on_real_worker_processes(
         finally:
             cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
             await mesh.stop()
+        assert (tmp_path / "closed").exists()
 
     asyncio.run(run())

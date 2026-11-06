@@ -10,17 +10,24 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import signal
+import subprocess
+import sys
+import time
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
 
+import numpy as np
 import pytest
 
 pytest.importorskip("verifiers")
 
 from aiohttp import ClientSession
 
-from torchtitan.rl.actors.system import ActorSystem
+from torchtitan.rl.examples.verifiers import rollouter as verifiers_rollouter
+
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskSample
 from torchtitan.rl.examples.verifiers.generation_server import (
     _parse_sampling_config,
@@ -33,7 +40,6 @@ from torchtitan.rl.examples.verifiers.rollouter import (
     log_failed_rollout,
     VERIFIERS_REWARD_KEY,
     verifiers_rollout_logs,
-    VerifiersRollouter,
     VerifiersRolloutWorker,
 )
 from torchtitan.rl.generator.types import SamplingConfig
@@ -41,6 +47,7 @@ from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.rubric import RubricOutput
 from torchtitan.rl.rollout.types import Completion, Rollout, RolloutStatus
+from verifiers.v1.utils.scope import run_scope
 
 
 # vLLM's wording, which the generation server keeps.
@@ -63,8 +70,8 @@ def _recorded_error(
 
 
 def test_train_client_config_carries_an_in_tree_renderer() -> None:
-    """The renderer config reaches environment-server workers inside Verifiers' client
-    config; an in-tree renderer named by `CustomRendererConfig` survives that trip."""
+    """Verifiers keys its clients and renderers by the client config's JSON; an in-tree
+    renderer named by `CustomRendererConfig` survives that round trip."""
     from renderers import CustomRendererConfig
     from verifiers.v1.configs.client import TrainClientConfig
 
@@ -236,105 +243,136 @@ def test_muse_glimmer_renderer_survives_verifiers_worker_config() -> None:
     assert parsed.tool_calls[0].arguments == {"query": "hello"}
 
 
-def test_verifiers_worker_sends_muse_glimmer_renderer_config(monkeypatch) -> None:
+def test_container_watchdog_removes_a_killed_workers_containers(tmp_path) -> None:
+    """A worker killed by SIGKILL runs no cleanup; its watchdog still removes its containers."""
+    docker_log = tmp_path / "docker.log"
+    fake_docker = tmp_path / "docker"
+    # The second `ps` lists a container whose `docker run` was in flight at the first one.
+    fake_docker.write_text(
+        "#!/bin/sh\n"
+        f'echo "$@" >> {docker_log}\n'
+        'if [ "$1" = ps ]; then\n'
+        f"  if [ -e {tmp_path}/swept ]; then echo container-3; exit; fi\n"
+        f"  touch {tmp_path}/swept; echo container-1; echo container-2\n"
+        "fi\n"
+    )
+    fake_docker.chmod(0o755)
+    worker = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import time\n"
+            "from torchtitan.rl.examples.verifiers import rollouter\n"
+            "rollouter._SECOND_SWEEP_DELAY_SEC = 1\n"
+            "rollouter._start_container_watchdog('run-1')\n"
+            "print('armed', flush=True)\n"
+            "time.sleep(600)\n",
+        ],
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    assert worker.stdout.readline() == "armed\n"
+    time.sleep(1)
+    assert not docker_log.exists()  # it waits for the worker to exit
+    # Kill the worker's whole process group: the watchdog, in its own session, survives.
+    os.killpg(worker.pid, signal.SIGKILL)
+    worker.wait()
+
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and not (
+        docker_log.exists() and "container-3" in docker_log.read_text()
+    ):
+        time.sleep(0.1)
+    assert docker_log.read_text().splitlines() == [
+        "ps -aq --filter label=verifiers.run=run-1",
+        "rm -f container-1 container-2",
+        "ps -aq --filter label=verifiers.run=run-1",
+        "rm -f container-3",
+    ]
+
+
+def test_verifiers_worker_serves_its_env_with_its_renderer_until_close(
+    monkeypatch, tmp_path
+) -> None:
+    import contextlib
+
     from renderers import CustomRendererConfig
     from torchtitan.components.renderer import from_renderers
     from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
-    env_client = SimpleNamespace(wait_for_server_startup=AsyncMock())
-    monkeypatch.setattr(
-        "torchtitan.rl.examples.verifiers.rollouter.VerifiersEnvClient",
-        lambda _: env_client,
-    )
+    events = []
 
+    @contextlib.asynccontextmanager
+    async def serving():
+        events.append("serving")
+        yield
+        events.append("stopped serving")
+
+    async def record(event: str) -> None:
+        events.append(event)
+
+    environment = object()
+    monkeypatch.setattr(
+        "torchtitan.rl.examples.verifiers.rollouter.load_environment",
+        lambda config: SimpleNamespace(serving=serving),
+    )
+    # A fake `docker` on PATH logs the watchdog's calls.
+    docker_log = tmp_path / "docker.log"
+    fake_docker = tmp_path / "docker"
+    fake_docker.write_text(f'#!/bin/sh\necho "$@" >> {docker_log}\n')
+    fake_docker.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+    monkeypatch.setattr(verifiers_rollouter, "_SECOND_SWEEP_DELAY_SEC", 1)
+    monkeypatch.setenv("VF_RUN_ID", "launcher-run")
+    monkeypatch.setattr(
+        "torchtitan.rl.examples.verifiers.rollouter.resolve_env_config",
+        lambda config: config,
+    )
     worker = object.__new__(VerifiersRolloutWorker)
     worker._verifiers_config = SimpleNamespace(
-        env_server_address="tcp://127.0.0.1:1",
-        connection_timeout_sec=5.0,
-        renderer_multiplex=8,
+        environment=environment, renderer_multiplex=8
     )
     worker._generation_server = SimpleNamespace(
-        start=AsyncMock(), base_url="http://127.0.0.1:2/v1"
+        start=lambda: record("generation server started"),
+        close=lambda: record("generation server closed"),
+        base_url="http://127.0.0.1:2/v1",
     )
+    worker._verifiers_env_serving = contextlib.AsyncExitStack()
     renderers_config = CustomRendererConfig(
         import_path="torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer",
         reasoning_strength="low",
     )
-    config = from_renderers(renderers_config)
 
-    asyncio.run(
-        worker.setup_async(
+    async def run() -> None:
+        await worker.setup_async(
             tokenizer_config=cast(HuggingFaceTokenizer.Config, None),
-            renderer_config=config,
+            renderer_config=from_renderers(renderers_config),
             hf_assets_path="muse-checkpoint",
         )
-    )
+        assert events == ["generation server started", "serving"]
+        await worker.close()
 
+    asyncio.run(run())
+    assert events == [
+        "generation server started",
+        "serving",
+        "stopped serving",
+        "generation server closed",
+    ]
     sent = worker._verifiers_train_client_config
     # The worker's agents call its own generation server.
     assert sent.base_url == "http://127.0.0.1:2/v1"
     assert sent.renderer == renderers_config
     assert sent.renderer_model_name == "muse-checkpoint"
-
-
-def test_setup_spawns_workers_with_the_env_server_address_and_close_stops_the_env_server_first() -> None:
-    from renderers import Qwen3RendererConfig
-    from torchtitan.components.renderer import from_renderers
-
-    events = []
-
-    class _Workers:
-        def __init__(self) -> None:
-            self.setup_async = SimpleNamespace(call=AsyncMock())
-            self.wait_for_generate_calls = SimpleNamespace(call=AsyncMock())
-
-    class _ActorSystem:
-        async def spawn_rollout_workers(self, config, *, num_workers, num_threads):
-            events.append(("spawn", config.env_server_address))
-            return _Workers()
-
-        async def stop_rollout_workers(self) -> None:
-            events.append(("stop_workers",))
-
-    async def start() -> str:
-        events.append(("start_env_server",))
-        return "tcp://127.0.0.1:5555"
-
-    async def close_env_server() -> None:
-        events.append(("close_env_server",))
-
-    worker = VerifiersRolloutWorker.Config(
-        rubric="rubric",
-        generation_server=GenerationServer.Config(max_rollout_tokens=64),
-    )
-    rollouter = object.__new__(VerifiersRollouter)
-    rollouter._config = SimpleNamespace(
-        worker=worker, worker_pool_size=2, num_threads_per_worker=3
-    )
-    rollouter._verifiers_config = rollouter._config
-    rollouter._verifiers_env_server = SimpleNamespace(
-        start=start, close=close_env_server
-    )
-    rollouter._worker_actors = None
-    rollouter._actor_system = None
-    rollouter._inflight_run_group_calls = set()
-
-    async def run() -> None:
-        await rollouter.setup_async(
-            actor_system=cast(ActorSystem, _ActorSystem()),
-            tokenizer_config="tokenizer_config",
-            renderer_config=from_renderers(Qwen3RendererConfig()),
-            hf_assets_path="hf_assets_path",
-        )
-        await rollouter.close()
-
-    asyncio.run(run())
-    assert events == [
-        ("start_env_server",),
-        ("spawn", "tcp://127.0.0.1:5555"),
-        ("close_env_server",),
-        ("stop_workers",),
+    # After a clean close the watchdog sweeps once, for the label Verifiers stamps: this
+    # worker's own id, under the launcher's. No second sweep follows.
+    time.sleep(2)
+    assert docker_log.read_text().splitlines() == [
+        f"ps -aq --filter label=verifiers.run={run_scope()}"
     ]
+    assert run_scope().startswith("launcher-run-")
 
 
 def test_trainable_token_spans() -> None:
@@ -358,7 +396,7 @@ def test_verifiers_trace_preserves_generation_metadata() -> None:
         branches=[
             SimpleNamespace(
                 nodes=[node],
-                token_ids=[10, 11, 12, 13],
+                token_ids=np.array([10, 11, 12, 13], dtype=np.int32),
                 logprobs=[0.0, 0.0, -0.2, -0.3],
             )
         ],
@@ -407,7 +445,7 @@ def test_verifiers_multiturn_trace_matches_titanrl_rollout_structure() -> None:
         branches=[
             SimpleNamespace(
                 nodes=[first_node, second_node],
-                token_ids=[10, 11, 12, 13],
+                token_ids=np.array([10, 11, 12, 13], dtype=np.int32),
                 logprobs=[0.0, -0.1, 0.0, -0.2],
             )
         ],
@@ -454,12 +492,12 @@ def test_verifiers_second_branch_stores_its_prompt_as_a_delta_on_the_first() -> 
         branches=[
             SimpleNamespace(
                 nodes=[shared, first_leaf],
-                token_ids=[10, 11, 12, 13],
+                token_ids=np.array([10, 11, 12, 13], dtype=np.int32),
                 logprobs=[0.0, -0.1, 0.0, -0.2],
             ),
             SimpleNamespace(
                 nodes=[shared, second_leaf],
-                token_ids=[10, 11, 14, 15],
+                token_ids=np.array([10, 11, 14, 15], dtype=np.int32),
                 logprobs=[0.0, -0.1, 0.0, -0.3],
             ),
         ],
@@ -512,7 +550,7 @@ def test_verifiers_trace_attaches_env_replies_to_the_preceding_turn() -> None:
         branches=[
             SimpleNamespace(
                 nodes=branch_nodes,
-                token_ids=[0] * len(branch_nodes),
+                token_ids=np.array([0] * len(branch_nodes), dtype=np.int32),
                 logprobs=[0.0] * len(branch_nodes),
             )
             for branch_nodes in (
@@ -883,6 +921,11 @@ def test_validate_token_ids(token_ids, accepted) -> None:
         _validate_token_ids(token_ids, field_name="token_ids")
 
 
+def _env_whose_rollouts_end_as(episode: object) -> SimpleNamespace:
+    """A Verifiers env stand-in: every `run_slot` returns `episode`."""
+    return SimpleNamespace(run_slot=AsyncMock(return_value=episode))
+
+
 @pytest.mark.parametrize(
     "trace_ok, trace_errors, expected",
     [
@@ -925,12 +968,8 @@ def test_rollout_whose_first_model_call_failed_has_no_turns(
     worker._generation_server = SimpleNamespace(
         model_id="model", pop_generation_metadata=lambda trace_id: None
     )
-    worker._verifiers_env_client = SimpleNamespace(
-        run=AsyncMock(
-            return_value=SimpleNamespace(
-                ok=True, is_timeout=False, errors=[], traces=[trace]
-            )
-        )
+    worker._verifiers_env = _env_whose_rollouts_end_as(
+        SimpleNamespace(ok=True, is_timeout=False, errors=[], traces=[trace])
     )
     worker._verifiers_train_client_config = object()
 
@@ -938,7 +977,9 @@ def test_rollout_whose_first_model_call_failed_has_no_turns(
         rollout = asyncio.run(
             worker._run_verifiers_rollout(
                 release_session_fn=AsyncMock(),
-                sample=VerifiersTaskSample(verifiers_task_data={"name": "huge-task"}),
+                slot=SimpleNamespace(
+                    task=SimpleNamespace(data=SimpleNamespace(name="huge-task"))
+                ),
                 sampling=SamplingConfig(),
                 group_id=1,
                 rollout_id=2,
@@ -1127,7 +1168,11 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
         calls=[],
         nodes=[node],
         branches=[
-            SimpleNamespace(nodes=[node], token_ids=[10, 11], logprobs=[0.0, -0.1])
+            SimpleNamespace(
+                nodes=[node],
+                token_ids=np.array([10, 11], dtype=np.int32),
+                logprobs=[0.0, -0.1],
+            )
         ],
     )
     worker = object.__new__(VerifiersRolloutWorker)
@@ -1137,12 +1182,8 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
             min_policy_version=0, max_policy_version=0, metrics=[]
         ),
     )
-    worker._verifiers_env_client = SimpleNamespace(
-        run=AsyncMock(
-            return_value=SimpleNamespace(
-                ok=True, is_timeout=False, errors=[], traces=[trace]
-            )
-        )
+    worker._verifiers_env = _env_whose_rollouts_end_as(
+        SimpleNamespace(ok=True, is_timeout=False, errors=[], traces=[trace])
     )
     worker._verifiers_train_client_config = object()
 
@@ -1150,7 +1191,7 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
         rollout = asyncio.run(
             worker._run_verifiers_rollout(
                 release_session_fn=AsyncMock(),
-                sample=VerifiersTaskSample(verifiers_task_data={"name": "slow-task"}),
+                slot=SimpleNamespace(),
                 sampling=SamplingConfig(),
                 group_id=1,
                 rollout_id=2,
@@ -1194,12 +1235,8 @@ def test_rollout_releases_every_trace_session_even_if_one_release_fails(caplog) 
     worker._generation_server = SimpleNamespace(
         model_id="model", pop_generation_metadata=popped_trace_ids.append
     )
-    worker._verifiers_env_client = SimpleNamespace(
-        run=AsyncMock(
-            return_value=SimpleNamespace(
-                ok=True, is_timeout=False, errors=[], traces=traces
-            )
-        )
+    worker._verifiers_env = _env_whose_rollouts_end_as(
+        SimpleNamespace(ok=True, is_timeout=False, errors=[], traces=traces)
     )
     worker._verifiers_train_client_config = object()
     release_session_fn = AsyncMock(side_effect=[RuntimeError("router down"), None])
@@ -1208,7 +1245,7 @@ def test_rollout_releases_every_trace_session_even_if_one_release_fails(caplog) 
         rollout = asyncio.run(
             worker._run_verifiers_rollout(
                 release_session_fn=release_session_fn,
-                sample=VerifiersTaskSample(verifiers_task_data={"name": "task"}),
+                slot=SimpleNamespace(),
                 sampling=SamplingConfig(),
                 group_id=1,
                 rollout_id=0,
@@ -1237,7 +1274,7 @@ def test_a_rollout_that_raises_is_kept_but_left_out_of_the_advantage(
 ) -> None:
     async def run_single_rollout(*, group_id, rollout_id, **kwargs):
         if rollout_id < num_raised:
-            raise RuntimeError("env server request failed")
+            raise RuntimeError("Verifiers episode failed")
         return Rollout(
             group_id=group_id, rollout_id=rollout_id, status=RolloutStatus.COMPLETED
         )
@@ -1248,8 +1285,24 @@ def test_a_rollout_that_raises_is_kept_but_left_out_of_the_advantage(
             for rollout in rollouts
         ]
 
+    class _Task:
+        """A Verifiers task type: built from its validated data and the taskset's task config."""
+
+        def __init__(self, data, task_config) -> None:
+            self.data = data
+
+        @staticmethod
+        def data_type():
+            return SimpleNamespace(model_validate=lambda data: data)
+
     worker = object.__new__(VerifiersRolloutWorker)
     worker._generation_server = SimpleNamespace(set_generate_fn=lambda fn: None)
+    worker._verifiers_env = SimpleNamespace(
+        taskset=SimpleNamespace(
+            task_type=lambda: _Task, config=SimpleNamespace(task=None)
+        ),
+        slots=lambda task, n: [task] * n,
+    )
     worker._run_verifiers_rollout = run_single_rollout
     worker.score_group = score_group
     worker.advantage_estimator = AdvantageEstimator.Config().build()
@@ -1258,7 +1311,7 @@ def test_a_rollout_that_raises_is_kept_but_left_out_of_the_advantage(
         worker.run_group(
             generate_fn=AsyncMock(),
             release_session_fn=AsyncMock(),
-            sample=None,
+            sample=VerifiersTaskSample(verifiers_task_data={}),
             group_id=1,
             group_size=3,
             sampling=SamplingConfig(),
@@ -1268,7 +1321,7 @@ def test_a_rollout_that_raises_is_kept_but_left_out_of_the_advantage(
     failed, scored = group.rollouts[:num_raised], group.rollouts[num_raised:]
     for rollout in failed:
         assert rollout.status is RolloutStatus.ERROR_SYSTEM
-        assert "env server request failed" in rollout.logs["error"]
+        assert "Verifiers episode failed" in rollout.logs["error"]
         assert (rollout.reward, rollout.advantage) == (None, None)
     assert [rollout.advantage for rollout in scored] == advantages
 
@@ -1285,6 +1338,24 @@ def test_parse_sampling_config_requires_temperature_top_p_max_tokens() -> None:
             _parse_sampling_config(
                 {key: value for key, value in sampling_params.items() if key != name}
             )
+
+
+def test_parse_sampling_config_accepts_top_k_and_min_p_only_switched_off() -> None:
+    sampling_params = {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "max_tokens": 5,
+        "stop_token_ids": [1],
+    }
+    # What Verifiers' train client sends with every request.
+    config = _parse_sampling_config({**sampling_params, "top_k": -1, "min_p": 0.0})
+    assert config.max_tokens == 5
+    with pytest.raises(ValueError, match=r"sampling_params\.top_k=20 is unsupported"):
+        _parse_sampling_config({**sampling_params, "top_k": 20, "min_p": 0.0})
+    with pytest.raises(
+        ValueError, match=r"sampling_params\.min_p=0\.05 is unsupported"
+    ):
+        _parse_sampling_config({**sampling_params, "min_p": 0.05})
 
 
 def test_parse_sampling_config_requires_stop_token_ids() -> None:

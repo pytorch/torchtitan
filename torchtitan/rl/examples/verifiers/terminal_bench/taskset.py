@@ -29,7 +29,7 @@ class TerminalTaskset(HarborTaskset, vf.Taskset[HarborTask, TerminalTasksetConfi
 
     # TODO: delete this once Verifiers falls back to the image's WORKDIR and Harbor's 600 s verifier
     # timeout for a task.toml without them. Today it reads only task.toml:
-    # https://github.com/PrimeIntellect-ai/verifiers/blob/v0.4.0/verifiers/v1/tasksets/harbor/taskset.py#L700-L712
+    # https://github.com/PrimeIntellect-ai/verifiers/blob/v0.4.1/verifiers/v1/tasksets/harbor/taskset.py#L800-L824
     def load(self) -> Iterator[HarborTask]:
         # Harbor is an optional Verifiers extra: import it only when tasks load.
         from harbor.environments.definition import parse_dockerfile_workdir
