@@ -35,22 +35,22 @@ class GptOssGroupedLinear(GroupedLinear):
         input_RI: torch.Tensor,
         offsets_E: torch.Tensor,
         *,
-        routed_scores_R: torch.Tensor | None = None,
+        scores_R: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        output_RO = super().forward(
-            input_RI, offsets_E, routed_scores_R=routed_scores_R
-        )
+        output_RO = super().forward(input_RI, offsets_E, scores_R=scores_R)
         bias_RO = self._expand_grouped_bias(
             self.bias.flatten(1), offsets_E, output_RO.shape[0]
         )
-        if routed_scores_R is not None:
-            bias_RO = bias_RO.to(output_RO.dtype) * routed_scores_R.to(
+        if scores_R is not None:
+            bias_RO = (bias_RO * scores_R.reshape(-1, 1).to(torch.float32)).to(
                 output_RO.dtype
-            ).reshape(-1, 1)
+            )
+        # Match the matmul's policy: replaying even this cheap add after a saved
+        # matmul would force retention of its full routed output.
         return remat.region(
             self._add_grouped_bias,
             self.remat_region_name("bias_add"),
-            recompute=self.remat_should_recompute("bias_add"),
+            recompute=self.remat_should_recompute("grouped_mm"),
         )(output_RO, bias_RO.reshape_as(output_RO))
 
     @staticmethod

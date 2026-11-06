@@ -430,23 +430,30 @@ class GroupedLinear(Module):
         input_RI: torch.Tensor,
         offsets_E: torch.Tensor,
         *,
-        routed_scores_R: torch.Tensor | None = None,
+        scores_R: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Apply each grouped linear to rows selected by cumulative offsets.
 
         Args:
             input_RI: Input rows grouped by the selected linear.
             offsets_E: Exclusive cumulative row end for each group.
-            routed_scores_R: Optional per-row scores absorbed into the input.
+            scores_R: Optional per-row scores absorbed into the input before
+                projection. MoE typically uses this on W2 to reduce activation
+                retention by scoring the input instead of the routed output.
 
         Returns:
             Output rows with an optional ``num_linears`` axis before the output
             feature axis.
         """
-        if routed_scores_R is not None:
+        if scores_R is not None:
             # The bare multiply reads scores produced by the dispatch region.
-            remat.recompute_needs_tensor(routed_scores_R)
-            input_RI = input_RI * routed_scores_R.to(input_RI.dtype).reshape(-1, 1)
+            remat.recompute_needs_tensor(scores_R)
+            # Type promotion computes the product in float32 without materializing
+            # a float32 copy of the input, which the multiply would save for
+            # backward (twice the bytes of the input itself).
+            input_RI = (input_RI * scores_R.reshape(-1, 1).to(torch.float32)).to(
+                input_RI.dtype
+            )
         output_shape = self.weight.shape[1:-1]
         weight_EOI = self.weight.flatten(1, -2)
         output_RO = remat.region(

@@ -38,6 +38,7 @@ from torchtitan.models.common.moe.token_dispatcher import (
     DeepEPTokenDispatcher,
     HybridEPTokenDispatcher,
 )
+from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 
 deep_ep = pytest.importorskip("deep_ep")
@@ -58,6 +59,7 @@ class _EPBlock(Module):
         *,
         grouped_linear_cls: type[GroupedLinear],
         activation_fn: BinaryActivationFn.Config,
+        output_postprocess: Module.Config | None,
     ):
         super().__init__()
         # RoutedExperts.forward runs after EP has selected this rank's local
@@ -78,7 +80,9 @@ class _EPBlock(Module):
             out_features=_MODEL_DIM,
         ).build()
         routed_experts.activation_fn = activation_fn.build()
-        routed_experts.output_postprocess = None
+        routed_experts.output_postprocess = (
+            output_postprocess.build() if output_postprocess is not None else None
+        )
         routed_experts.token_dispatcher = dispatcher_config.build()
         self.gate = torch.nn.Linear(_MODEL_DIM, num_experts, bias=False)
         with torch.no_grad():
@@ -93,7 +97,7 @@ class _EPBlock(Module):
         offsets_1K = torch.arange(_TOP_K, device=x_TD.device).unsqueeze(0)
         expert_ids_TK = (token_ids_T1 + offsets_1K) % self.num_experts
         # Scores depend on the gate, so the router gets a gradient too.
-        scores_TK = torch.sigmoid(self.gate(x_TD)).gather(1, expert_ids_TK)
+        scores_TK = torch.sigmoid(self.gate(x_TD).float()).gather(1, expert_ids_TK)
         routing_map_TE = torch.zeros(
             num_tokens, self.num_experts, dtype=torch.bool, device=x_TD.device
         ).scatter_(1, expert_ids_TK, True)
@@ -117,7 +121,7 @@ class _PostW2(_EPBlock):
         offsets_1K = torch.arange(_TOP_K, device=x_TD.device).unsqueeze(0)
         expert_ids_TK = (token_ids_T1 + offsets_1K) % self.num_experts
         # Scores depend on the gate, so the router gets a gradient too.
-        scores_TK = torch.sigmoid(self.gate(x_TD)).gather(1, expert_ids_TK)
+        scores_TK = torch.sigmoid(self.gate(x_TD).float()).gather(1, expert_ids_TK)
         routing_map_TE = torch.zeros(
             num_tokens, self.num_experts, dtype=torch.bool, device=x_TD.device
         ).scatter_(1, expert_ids_TK, True)
@@ -126,12 +130,14 @@ class _PostW2(_EPBlock):
             x_TD, scores_TK, expert_ids_TK, routing_map_TE
         )
         offsets_E = counts_E.cumsum(dim=0, dtype=torch.int32)
-        gate_up_R2F = experts.w13(routed_RD, offsets_E)
+        gate_up_R2F = experts.w13(routed_RD.bfloat16(), offsets_E)
         hidden_RF = experts.activation_fn(gate_up_R2F, offsets=offsets_E)
-        routed_output_RD = experts.w2(hidden_RF, offsets_E)
-        routed_output_RD = routed_output_RD * metadata.routed_scores_R.to(
-            routed_output_RD.dtype
-        ).reshape(-1, 1)
+        routed_output_RD = experts.w2(hidden_RF, offsets_E).type_as(routed_RD)
+        if experts.output_postprocess is not None:
+            routed_output_RD = experts.output_postprocess(routed_output_RD)
+        routed_output_RD = (
+            routed_output_RD * metadata.routed_scores_R.reshape(-1, 1).to(torch.float32)
+        ).to(routed_output_RD.dtype)
         out_TD = experts.token_dispatcher.combine(
             routed_output_RD,
             metadata,
@@ -177,7 +183,8 @@ class _EPActivationCheckpointing(DTensorTestBase):
         num_combine_replays: int,
         dispatcher_config,
         expert_configs: tuple[
-            tuple[type[GroupedLinear], BinaryActivationFn.Config], ...
+            tuple[type[GroupedLinear], BinaryActivationFn.Config, Module.Config | None],
+            ...,
         ],
         buffer_type,
         dispatch_method: str,
@@ -196,13 +203,16 @@ class _EPActivationCheckpointing(DTensorTestBase):
             dense_sp_enabled=False,
         )
         num_experts = 4 * self.world_size
-        for activation_remat, (grouped_linear_cls, activation_fn) in itertools.product(
-            ac_configs, expert_configs
-        ):
+        for activation_remat, (
+            grouped_linear_cls,
+            activation_fn,
+            output_postprocess,
+        ) in itertools.product(ac_configs, expert_configs):
             with (
                 self.subTest(
                     ac=type(activation_remat).__qualname__,
                     linear=grouped_linear_cls.__name__,
+                    postprocess=output_postprocess is not None,
                 ),
                 torch.autograd.set_multithreading_enabled(False),
                 set_current_spmd_mesh(mesh),
@@ -214,6 +224,7 @@ class _EPActivationCheckpointing(DTensorTestBase):
                         dispatcher_config,
                         grouped_linear_cls=grouped_linear_cls,
                         activation_fn=activation_fn,
+                        output_postprocess=output_postprocess,
                     )
                 ).to(self.device_type, torch.bfloat16)
                 ac_model = _Model(
@@ -222,6 +233,7 @@ class _EPActivationCheckpointing(DTensorTestBase):
                         dispatcher_config,
                         grouped_linear_cls=grouped_linear_cls,
                         activation_fn=activation_fn,
+                        output_postprocess=output_postprocess,
                     )
                 ).to(self.device_type, torch.bfloat16)
                 ac_model.load_state_dict(baseline.state_dict())
@@ -233,6 +245,7 @@ class _EPActivationCheckpointing(DTensorTestBase):
                             dispatcher_config,
                             grouped_linear_cls=grouped_linear_cls,
                             activation_fn=activation_fn,
+                            output_postprocess=output_postprocess,
                         )
                     ).to(self.device_type, torch.bfloat16)
                     reference.load_state_dict(baseline.state_dict())
@@ -302,6 +315,11 @@ class _EPActivationCheckpointing(DTensorTestBase):
                     # Compare pre-W2 absorption with the previous post-W2 scoring.
                     bf16_rtol = 2 * torch.finfo(torch.bfloat16).eps
                     for value, reference_value in zip(expected, reference_values):
+                        if output_postprocess is not None and exact:
+                            torch.testing.assert_close(
+                                value, reference_value, rtol=0, atol=0
+                            )
+                            continue
                         error_norm = torch.linalg.vector_norm(
                             value.float() - reference_value.float()
                         )
@@ -352,8 +370,18 @@ class TestDeepEPActivationCheckpointing(_EPActivationCheckpointing):
                 num_max_tokens_per_rank=_NUM_TOKENS,
             ),
             expert_configs=(
-                (GroupedLinear, SwiGLU.Config()),
-                (GptOssGroupedLinear, ClampedSwiGLU.Config()),
+                (GroupedLinear, SwiGLU.Config(), None),
+                (GptOssGroupedLinear, ClampedSwiGLU.Config(), None),
+                (
+                    GroupedLinear,
+                    SwiGLU.Config(),
+                    RMSNorm.Config(normalized_shape=_MODEL_DIM),
+                ),
+                (
+                    GptOssGroupedLinear,
+                    ClampedSwiGLU.Config(),
+                    RMSNorm.Config(normalized_shape=_MODEL_DIM),
+                ),
             ),
             buffer_type=deep_ep.ElasticBuffer,
             dispatch_method="dispatch",
@@ -419,7 +447,7 @@ class TestHybridEPActivationCheckpointing(_EPActivationCheckpointing):
                         num_max_tokens_per_rank=_NUM_TOKENS,
                         non_blocking_capacity_factor=capacity_factor,
                     ),
-                    expert_configs=((GroupedLinear, SwiGLU.Config()),),
+                    expert_configs=((GroupedLinear, SwiGLU.Config(), None),),
                     buffer_type=deep_ep.HybridEPBuffer,
                     dispatch_method="dispatch_with_permute",
                     combine_method="combine_with_unpermute",

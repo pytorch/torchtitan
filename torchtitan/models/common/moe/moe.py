@@ -41,11 +41,7 @@ from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 
-from .token_dispatcher import (
-    DeepEPDispatchMetadata,
-    DeepEPTokenDispatcher,
-    LocalTokenDispatcher,
-)
+from .token_dispatcher import DeepEPDispatchMetadata, LocalTokenDispatcher
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
@@ -89,11 +85,6 @@ class RoutedExperts(Module):
                 raise ValueError("w13 output and w2 input dimensions must match")
             if self.w2.num_linears != 1:
                 raise ValueError("w2 must contain one down projection")
-            if (
-                isinstance(self.token_dispatcher, DeepEPTokenDispatcher.Config)
-                and self.output_postprocess is not None
-            ):
-                raise ValueError("DeepEP does not support output_postprocess")
 
     def __init__(self, config: Config):
         super().__init__()
@@ -155,9 +146,12 @@ class RoutedExperts(Module):
             gate_up_R2F = self.w13(routed_input_RD.bfloat16(), offsets_E)
             remat.recompute_needs_tensor(gate_up_R2F)
             hidden_RF = self.activation_fn(gate_up_R2F, offsets=offsets_E)
-            if isinstance(metadata, DeepEPDispatchMetadata):
+            if (
+                isinstance(metadata, DeepEPDispatchMetadata)
+                and self.output_postprocess is None
+            ):
                 routed_output_RD = self.w2(
-                    hidden_RF, offsets_E, routed_scores_R=metadata.routed_scores_R
+                    hidden_RF, offsets_E, scores_R=metadata.routed_scores_R
                 )
             else:
                 routed_output_RD = self.w2(hidden_RF, offsets_E)
@@ -174,6 +168,16 @@ class RoutedExperts(Module):
             routed_output_RD = routed_output_RD.type_as(routed_input_RD)
             if self.output_postprocess is not None:
                 routed_output_RD = self.output_postprocess(routed_output_RD)
+                if isinstance(metadata, DeepEPDispatchMetadata):
+                    # A nonlinear postprocess must run before score multiplication.
+                    remat.recompute_needs_tensor(
+                        routed_output_RD, metadata.routed_scores_R
+                    )
+                    # Promote the product without saving a float32 output copy.
+                    routed_output_RD = (
+                        routed_output_RD
+                        * metadata.routed_scores_R.reshape(-1, 1).to(torch.float32)
+                    ).to(routed_output_RD.dtype)
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
