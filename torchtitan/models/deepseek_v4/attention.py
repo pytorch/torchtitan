@@ -18,17 +18,16 @@ from torchtitan.models.common.attention import (
     InnerAttention,
     VarlenAttentionMetadata,
 )
-
 from torchtitan.models.common.attn_gym import AuxRequest, gather_attn
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
-
 from .compressor import compressed_cu_seqlens, Compressor, Indexer, SparseIndexerLoss
+from .metadata import build_sparse_metadata, SparseAttentionMetadata
 
 
 def _packed_cu_seqlens(
-    attention_metadata: VarlenAttentionMetadata | None,
+    attention_metadata: VarlenAttentionMetadata | SparseAttentionMetadata | None,
 ) -> torch.Tensor | None:
     """Document offsets for packed inputs, or None for one causal sequence."""
     return None if attention_metadata is None else attention_metadata.cu_seq_q
@@ -62,21 +61,30 @@ class DSV4InnerAttention(InnerAttention):
         softmax_scale: float
         index_topk: int
         aux_loss: SparseIndexerLoss.Config | None = None
+        document_alignment: int | None = None
 
-        def build_attention_metadata(
+        def build_attention_metadata(  # pyrefly: ignore [bad-override]
             self,
             positions: torch.Tensor,
             *,
             padding_mask: torch.Tensor | None = None,
             max_num_documents: int | None = None,
             max_context_length: int | None = None,
-        ) -> VarlenAttentionMetadata:
+        ) -> VarlenAttentionMetadata | SparseAttentionMetadata:
             """Build document offsets shared by DSV4 sparse attention components."""
-            return create_varlen_metadata_for_document(
+            varlen = create_varlen_metadata_for_document(
                 positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
                 max_context_length=max_context_length,
+            )
+            if self.compress_ratio <= 1:
+                return varlen
+            return build_sparse_metadata(
+                varlen,
+                positions,
+                self.compress_ratio,
+                aligned=self.document_alignment is not None,
             )
 
     def __init__(self, config: Config) -> None:
@@ -99,6 +107,7 @@ class DSV4InnerAttention(InnerAttention):
         topk_scores_TK=None,
         aux_loss_denominator=None,
         padding_mask_T=None,
+        attention_metadata=None,
     ) -> torch.Tensor:
         """``cmp_topk_TK`` holds indices into ``cmp_k_SD``; -1 marks unused slots.
 
@@ -109,9 +118,13 @@ class DSV4InnerAttention(InnerAttention):
         if cu_seqlens is not None:
             # SWA passes an empty compressed pool: every document's span is empty.
             cu_seqlens_k = (
-                compressed_cu_seqlens(cu_seqlens, self.compress_ratio)
-                if self.compress_ratio > 1
-                else torch.zeros_like(cu_seqlens)
+                attention_metadata.cu_seq_cmp
+                if isinstance(attention_metadata, SparseAttentionMetadata)
+                else (
+                    compressed_cu_seqlens(cu_seqlens, self.compress_ratio)
+                    if self.compress_ratio > 1
+                    else torch.zeros_like(cu_seqlens)
+                )
             )
         with spmd.no_typecheck():
             # gather_attn takes [B, H, T, D]; the KV latent has one head.
@@ -146,6 +159,7 @@ class DSV4InnerAttention(InnerAttention):
                     carrier=out_THD,
                     denominator=aux_loss_denominator,
                     padding_mask_T=padding_mask_T,
+                    attention_metadata=attention_metadata,
                 )
         # Kernel output is opaque to SPMD typechecking; it keeps q's layout.
         if spmd.is_type_checking():
@@ -195,6 +209,16 @@ class HeavilyCompressedAttention(DSV4InnerAttention):
         *,
         attention_metadata=None,
     ) -> torch.Tensor:
+        if isinstance(attention_metadata, SparseAttentionMetadata):
+            return self._gather_attn(
+                q,
+                swa_k,
+                cmp_k,
+                attention_metadata.causal_cmp,
+                attn_sink,
+                attention_metadata.cu_seq_q,
+                attention_metadata=attention_metadata,
+            )
         # Every compressed block that ends at or before the query is attended:
         # query t sees positions s < (t + 1) // compress_ratio, counted from the
         # start of its document when packed.
@@ -225,39 +249,26 @@ class CompressedSparseAttention(DSV4InnerAttention):
         q,
         swa_k,
         cmp_k,
-        idx_q,
-        idx_k,
-        idx_w,
+        topk_indices,
         attn_sink,
         *,
+        topk_scores=None,
         attention_metadata=None,
         aux_loss_denominator=None,
         padding_mask_T=None,
     ) -> torch.Tensor:
         cu_seqlens = _packed_cu_seqlens(attention_metadata)
-        with spmd.no_typecheck():
-            cmp_topk, topk_scores = Indexer.select(
-                idx_q,
-                idx_k,
-                idx_w,
-                max_seqlen=q.size(0)
-                if attention_metadata is None
-                else attention_metadata.max_k,
-                ratio=self.compress_ratio,
-                topk=self.index_topk,
-                cu_seqlens=cu_seqlens,
-                return_scores=self.training and self.aux_loss is not None,
-            )
         return self._gather_attn(
             q,
             swa_k,
             cmp_k,
-            cmp_topk,
+            topk_indices,
             attn_sink,
             cu_seqlens,
             topk_scores_TK=topk_scores,
             aux_loss_denominator=aux_loss_denominator,
             padding_mask_T=padding_mask_T,
+            attention_metadata=attention_metadata,
         )
 
 
@@ -420,15 +431,32 @@ class DeepSeekV4Attention(Attention):
         kv = torch.cat([kv_nope, kv_rope.squeeze(1)], dim=-1)
 
         cu_seqlens = _packed_cu_seqlens(attention_metadata)
-        cmp_k = idx_q = idx_k = idx_w = None
+        cmp_k = topk_indices = topk_scores = None
         if self.compress_ratio > 1 and hasattr(self, "indexer"):
-            idx_q, idx_k, idx_w = self.indexer(
-                x.detach(), qr.detach(), positions=positions, cu_seqlens=cu_seqlens
+            topk_indices, topk_scores = self.indexer(
+                x.detach(),
+                qr.detach(),
+                positions=positions,
+                cu_seqlens=cu_seqlens,
+                attention_metadata=attention_metadata,
+                topk=self.inner_attention.index_topk,
+                return_scores=self.training
+                and self.inner_attention.aux_loss is not None,
             )
         if self.compress_ratio == 4:
-            cmp_k = self.compressor(x, positions=positions, cu_seqlens=cu_seqlens)
+            cmp_k = self.compressor(
+                x,
+                positions=positions,
+                cu_seqlens=cu_seqlens,
+                attention_metadata=attention_metadata,
+            )
         elif self.compress_ratio > 1:
-            cmp_k = self.compressor_128(x, positions=positions, cu_seqlens=cu_seqlens)
+            cmp_k = self.compressor_128(
+                x,
+                positions=positions,
+                cu_seqlens=cu_seqlens,
+                attention_metadata=attention_metadata,
+            )
 
         attn_sink_param = self.attn_sink.weight.squeeze(-1)
         if self.compress_ratio == 4:
@@ -436,10 +464,9 @@ class DeepSeekV4Attention(Attention):
                 q,
                 kv,
                 cmp_k,
-                idx_q,
-                idx_k,
-                idx_w,
+                topk_indices,
                 attn_sink_param,
+                topk_scores=topk_scores,
                 attention_metadata=attention_metadata,
                 aux_loss_denominator=aux_loss_denominator,
                 padding_mask_T=padding_mask,
