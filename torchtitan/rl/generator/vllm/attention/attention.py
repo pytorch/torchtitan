@@ -34,7 +34,11 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.tools.utils import activate_cuda_flash_attention_impl, set_default_dtype
+from torchtitan.tools.utils import (
+    activate_cuda_flash_attention_impl,
+    get_cuda_flash_attention_impl,
+    set_default_dtype,
+)
 
 
 class _FA4PageSize:
