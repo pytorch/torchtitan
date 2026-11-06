@@ -93,6 +93,18 @@ class TestTokenizerIntegration(unittest.TestCase):
             # No chat template should be set
             self.assertIsNone(tok._chat_template)
 
+    def test_bpe_merges_starting_with_hash_are_loaded(self):
+        """vocab.json + merges.txt keeps merges like "# #", not just the header."""
+        with open(os.path.join(self.temp_dir, "vocab.json"), "w") as f:
+            json.dump({"#": 0, "##": 1, "a": 2, "b": 3, "ab": 4}, f)
+        with open(os.path.join(self.temp_dir, "merges.txt"), "w") as f:
+            f.write("#version: 0.2\n# #\na b\n")
+
+        tok = HuggingFaceTokenizer(tokenizer_path=self.temp_dir)
+
+        self.assertEqual(tok.encode("##", add_bos=False, add_eos=False), [1])
+        self.assertEqual(tok.encode("ab", add_bos=False, add_eos=False), [4])
+
     def test_same_bos_eos_token_is_inferred_for_both_ids(self):
         """Tokenizers like GPT-2 use one token as both BOS and EOS."""
         with tempfile.TemporaryDirectory() as tmpdir:
