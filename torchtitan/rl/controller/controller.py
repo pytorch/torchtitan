@@ -1027,7 +1027,7 @@ class Controller(Configurable):
             )
             await asyncio.wait([self._validation_task])
             self._log_finished_validation(step=num_training_steps)
-            # Both passes log the same keys; at one step, W&B would keep only one of them.
+            # Both passes log the same keys, so each gets its own step.
             final_pass_step += 1
         if pre_validation_task is not None:
             # Done and succeeded: a failed pass raised when it was logged.
