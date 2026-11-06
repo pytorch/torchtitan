@@ -120,7 +120,7 @@ def compute_training_performance_metrics(
     elapsed_time: float,
     non_data_parallel_size: int,
     num_flops: float,
-    gpu_peak_flops: float,
+    gpu_peak_flops: float | None,
     has_quantization: bool,
 ) -> dict[str, float]:
     """Compute per-device throughput, TFLOPS, and optional MFU."""
@@ -131,7 +131,7 @@ def compute_training_performance_metrics(
         "tokens_per_second": tokens_per_second,
         "tflops": tflops,
     }
-    if not has_quantization:
+    if not has_quantization and gpu_peak_flops is not None:
         metrics["mfu_percent"] = 100 * device_flops_per_second / gpu_peak_flops
     return metrics
 
@@ -417,7 +417,7 @@ class MetricsProcessor(Configurable):
     device_memory_monitor: DeviceMemoryMonitor
     color: NoColor | Color
 
-    gpu_peak_flops: float
+    gpu_peak_flops: float | None
     ntokens_since_last_log: int
     data_loading_times: list[float]
     time_last_log: float
