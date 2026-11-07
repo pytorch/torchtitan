@@ -72,7 +72,7 @@ class DAPOLoss(Loss[torch.Tensor]):
 
     def __call__(
         self,
-        pred: torch.Tensor,
+        logits: torch.Tensor,
         labels: torch.Tensor,
         global_loss_token_counts: torch.Tensor | None = None,
         *,
@@ -84,7 +84,7 @@ class DAPOLoss(Loss[torch.Tensor]):
         """Compute the per-token clip-higher surrogate loss.
 
         Args:
-            pred: [T, V] current-policy logits.
+            logits: [T, V] current-policy logits.
             labels: [T] pre-shifted target token ids.
             generator_logprobs: [T] logprobs from the sampling policy.
             temperature: [T] temperature each token was sampled at.
@@ -99,7 +99,7 @@ class DAPOLoss(Loss[torch.Tensor]):
         """
         # Score tokens under the distribution vLLM sampled from.
         trainer_logprobs, token_entropy = compute_logprobs(
-            pred,
+            logits,
             labels,
             vocab_parallel_group=spmd_mesh_group("tp"),
             return_entropy=True,
