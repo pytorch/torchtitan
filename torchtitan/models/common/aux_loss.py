@@ -29,7 +29,6 @@ from typing import ClassVar
 
 import spmd_types as spmd
 import torch
-import torch.nn.functional as F
 import torch_remat as remat
 from torch import nn
 from torch.distributed._functional_collectives import all_reduce
@@ -160,17 +159,6 @@ class AuxLoss(Module):
                 backward_options={"op_dtype": partial_E.dtype},
             )
         return partial_E
-
-    @staticmethod
-    def _norm_sum_scores_over_tokens(
-        scores_TE: torch.Tensor,
-        padding_mask_T: torch.Tensor | None,
-    ) -> torch.Tensor:
-        """Return local per-expert sums of normalized router scores."""
-        probs_TE = F.normalize(scores_TE, p=1, dim=-1)
-        if padding_mask_T is not None:
-            probs_TE = probs_TE * ~padding_mask_T.unsqueeze(-1)
-        return probs_TE.sum(dim=0)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is None:

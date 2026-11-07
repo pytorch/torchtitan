@@ -226,6 +226,7 @@ class KimiK3Model(MultimodalModel):
                     "gated_rmsnorm",
                     "fused_binary_activation",
                     "fp32_to_bf16_split",
+                    "moe_router_topk",
                     "attention_residual",
                 ]
             )

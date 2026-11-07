@@ -22,6 +22,7 @@ import torch
 import torch.nn.functional as F
 import torch_remat as remat
 from spmd_types.checker import typecheck
+from torch import nn
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -33,6 +34,7 @@ from torchtitan.distributed.activation_remat import (
     DefaultActivationRematConfig,
     FullActivationRematConfig,
 )
+from torchtitan.distributed.spmd_types import spmd_local_context
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.aux_loss import (
@@ -49,6 +51,7 @@ from torchtitan.models.common.moe import (
     BatchWiseLoadBalanceLoss,
     MicrobatchWiseLoadBalanceLoss,
     MoE,
+    TokenChoiceTopKRouter,
 )
 from torchtitan.models.gpt_oss import build_model_config as gpt_oss_build_model_config
 from torchtitan.models.qwen3 import build_model_config as qwen3_build_model_config
@@ -103,6 +106,38 @@ def _make_inputs(T: int, E: int, K: int):
     return scores_TE, scores_TE.gather(dim=-1, index=ids_TK), _routing_map(ids_TK, E)
 
 
+def _stats(
+    scores_TE: torch.Tensor,
+    routing_map_TE: torch.Tensor,
+    padding_mask_T: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(local_counts_E, local_prob_sums_E)`` as the router region computes them."""
+    with spmd_local_context("dp"):
+        if padding_mask_T is not None:
+            routing_map_TE = routing_map_TE & ~padding_mask_T.unsqueeze(-1)
+        probs_TE = F.normalize(scores_TE, p=1, dim=-1)
+        if padding_mask_T is not None:
+            probs_TE = probs_TE * ~padding_mask_T.unsqueeze(-1)
+        return routing_map_TE.to(scores_TE.dtype).sum(dim=0), probs_TE.sum(dim=0)
+
+
+def _identity_score_router(
+    num_experts: int, top_k: int, aux_loss: AuxLoss.Config
+) -> TokenChoiceTopKRouter:
+    """Training router whose scores are its input: its region's statistics run on test scores."""
+    config = make_router_config(
+        dim=num_experts,
+        num_experts=num_experts,
+        gate_param_init={},
+        score_func=Sigmoid.Config(),
+        top_k=top_k,
+    )
+    config.aux_loss = aux_loss
+    router = config.build()
+    router.score_func = nn.Identity()
+    return router.train()
+
+
 def _make_loss(
     coeff: float, per_step_denominator: int
 ) -> MicrobatchWiseLoadBalanceLoss:
@@ -149,8 +184,7 @@ class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
         loss = _make_loss(self.coeff, self.denominator)
 
         out_TK = loss(
-            scores_TE,
-            routing_map_TE,
+            *_stats(scores_TE, routing_map_TE),
             carrier=carrier_TK,
             denominator=loss.test_denominator,
         )
@@ -183,8 +217,7 @@ class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
         for _ in range(3):
             scores_TE, carrier_TK, routing_map_TE = _make_inputs(self.T, self.E, self.K)
             out_TK = loss(
-                scores_TE,
-                routing_map_TE,
+                *_stats(scores_TE, routing_map_TE),
                 carrier=carrier_TK,
                 denominator=loss.test_denominator,
             )
@@ -199,49 +232,6 @@ class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
         )
         self.assertEqual(loss.instance_acc.item(), 0.0)
 
-    def test_masked_routing_rows_do_not_affect_aux_loss(self):
-        scores_TE, carrier_TK, routing_map_TE = _make_inputs(self.T, self.E, self.K)
-        full_routing_map_TE = routing_map_TE.clone()
-        routing_map_TE[self.T // 2 :] = False
-        loss = _make_loss(self.coeff, self.denominator)
-
-        padding_mask_T = ~routing_map_TE.any(dim=-1)
-        out_TK = loss(
-            scores_TE,
-            routing_map_TE,
-            carrier=carrier_TK,
-            padding_mask_T=padding_mask_T,
-            denominator=loss.test_denominator,
-        )
-        out_TK.sum().backward()
-        _zero_aux_losses([loss])
-
-        ref_scores_TE = scores_TE.detach().clone().requires_grad_(True)
-        ref_aux = _reference_loss(
-            ref_scores_TE,
-            routing_map_TE,
-            self.K,
-            coeff=self.coeff / self.denominator,
-            padding_mask_T=padding_mask_T,
-        )
-        (ref_aux + (ref_scores_TE * full_routing_map_TE).sum()).backward()
-
-        ref_metric = _reference_loss(
-            scores_TE.detach(),
-            routing_map_TE,
-            self.K,
-            padding_mask_T=padding_mask_T,
-        )
-        self.assertAlmostEqual(
-            AuxLoss.group_acc[_METRIC_KEY].item(),
-            ref_metric.item() / self.denominator,
-            places=4,
-        )
-        self.assertLess(
-            (scores_TE.grad - ref_scores_TE.grad).abs().max().item(),
-            1e-10,
-        )
-
     def test_no_double_count_with_remat_checkpointing(self):
         """inject() keeps the accumulation in its own retained remat region, so
         replaying an enclosing checkpoint counts each forward exactly once."""
@@ -250,8 +240,7 @@ class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
 
         def _forward_once(module, carrier, scores_TE, routing_map_TE):
             return module(
-                scores_TE,
-                routing_map_TE,
+                *_stats(scores_TE, routing_map_TE),
                 carrier=carrier,
                 denominator=module.test_denominator,
             ).sum()
@@ -287,10 +276,8 @@ class TestBatchWiseLoadBalanceLoss(_AuxLossTestCase):
 
         outputs = [
             loss(
-                scores,
-                routing_map,
+                *_stats(scores, routing_map, padding_mask),
                 carrier=carrier,
-                padding_mask_T=padding_mask,
                 denominator=denominator_t,
             )
             for (scores, carrier, routing_map), padding_mask in zip(
@@ -362,8 +349,7 @@ class TestBatchWiseLoadBalanceLoss(_AuxLossTestCase):
                 ids_TK = torch.topk(scores_TE.detach(), k=K, dim=-1).indices
                 carrier_TK = scores_TE.gather(dim=-1, index=ids_TK)
                 return self.aux_loss(
-                    scores_TE,
-                    _routing_map(ids_TK, E),
+                    *_stats(scores_TE, _routing_map(ids_TK, E)),
                     carrier=carrier_TK,
                     denominator=denominator,
                 )
@@ -587,29 +573,29 @@ class TestLoadBalanceLossSpmdTypes(DTensorTestBase):
         checker = typecheck(local=False) if use_typecheck else contextlib.nullcontext()
         _clear_aux_loss_registry()
         denominator = torch.tensor(1.0, dtype=torch.float64)
+        router = _identity_score_router(
+            E, K, MicrobatchWiseLoadBalanceLoss.Config(coeff=_COEFF)
+        )
+        loss = router.aux_loss
         with set_current_spmd_mesh(dense_mesh), checker:
             torch.manual_seed(0)
             global_scores_TE = torch.rand(T, E, dtype=torch.float64)
             with spmd.no_typecheck():
-                # Distinct ids per token, like torch.topk in the router, so each
-                # token contributes exactly K one-hot entries.
-                global_ids_TK = torch.topk(torch.rand(T, E), k=K, dim=-1).indices
+                # The router's top-k: distinct ids per token, so each token
+                # contributes exactly K one-hot entries.
+                global_ids_TK = torch.topk(global_scores_TE, k=K, dim=-1).indices
                 local_scores = global_scores_TE[t_start : t_start + t_blk].contiguous()
-                local_ids_TK = global_ids_TK[t_start : t_start + t_blk].contiguous()
-                local_map = _routing_map(local_ids_TK, E)
 
             spmd.assert_type(local_scores, placement)
-            spmd.assert_type(local_ids_TK, placement)
-            spmd.assert_type(local_map, placement)
 
-            loss = MicrobatchWiseLoadBalanceLoss(
-                MicrobatchWiseLoadBalanceLoss.Config(coeff=_COEFF)
-            )
             local_scores.requires_grad_(True)
-            carrier_TK = local_scores.gather(dim=-1, index=local_ids_TK)
+            routing = router._score_and_select_experts(
+                local_scores, None, padding_mask_T=None
+            )
+            carrier_TK = routing.topk_scores_TK
             out_TK = loss(
-                local_scores,
-                local_map,
+                routing.local_counts_E,
+                routing.local_prob_sums_E,
                 carrier=carrier_TK,
                 denominator=denominator,
             )
@@ -675,39 +661,36 @@ class TestLoadBalanceLossSpmdTypes(DTensorTestBase):
         shard, t_blk = cp_rank * tp + tp_rank, t_dp // (cp * tp)
         t_start = dp_start + shard * t_blk
 
+        router = _identity_score_router(
+            E, K, BatchWiseLoadBalanceLoss.Config(coeff=_COEFF, num_experts=E)
+        )
+        loss = router.aux_loss
         with set_current_spmd_mesh(dense_mesh), typecheck(local=False):
             torch.manual_seed(0)
             global_scores_TE = torch.rand(T, E, dtype=torch.float64)
             with spmd.no_typecheck():
-                global_ids_TK = torch.topk(torch.rand(T, E), k=K, dim=-1).indices
+                global_ids_TK = torch.topk(global_scores_TE, k=K, dim=-1).indices
                 global_padding_mask_T = torch.zeros(T, dtype=torch.bool)
                 global_padding_mask_T[:3] = True
                 global_padding_mask_T[t_dp : t_dp + 7] = True
                 denominator = int((~global_padding_mask_T).sum())
                 local_scores = global_scores_TE[t_start : t_start + t_blk].contiguous()
-                local_ids_TK = global_ids_TK[t_start : t_start + t_blk].contiguous()
                 local_padding_mask_T = global_padding_mask_T[
                     t_start : t_start + t_blk
                 ].contiguous()
-                full_local_map = _routing_map(local_ids_TK, E)
-                local_map = full_local_map & ~local_padding_mask_T.unsqueeze(-1)
 
-            placement = dense_sequence_parallel_placement()
-            spmd.assert_type(local_scores, placement)
-            spmd.assert_type(local_ids_TK, placement)
-            spmd.assert_type(local_map, placement)
+            spmd.assert_type(local_scores, dense_sequence_parallel_placement())
             spmd.assert_type(local_padding_mask_T, token_id_placement(enable_sp=True))
 
-            loss = BatchWiseLoadBalanceLoss(
-                BatchWiseLoadBalanceLoss.Config(coeff=_COEFF, num_experts=E)
-            )
             local_scores.requires_grad_(True)
-            carrier_TK = local_scores.gather(dim=-1, index=local_ids_TK)
+            routing = router._score_and_select_experts(
+                local_scores, None, padding_mask_T=local_padding_mask_T
+            )
+            carrier_TK = routing.topk_scores_TK
             out_TK = loss(
-                local_scores,
-                local_map,
+                routing.local_counts_E,
+                routing.local_prob_sums_E,
                 carrier=carrier_TK,
-                padding_mask_T=local_padding_mask_T,
                 denominator=torch.tensor(float(denominator), dtype=torch.float64),
             )
 
