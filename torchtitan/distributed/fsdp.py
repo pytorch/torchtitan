@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from typing import Any, cast, TYPE_CHECKING
+from typing import Any, cast, NamedTuple, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -29,14 +29,17 @@ from torchtitan.models.common.moe import MoE
 __all__ = [
     "apply_fsdp_to_decoder",
     "apply_fsdp_to_multimodal_encoder",
+    "decoder_fsdp_groups",
     "disable_fsdp_gradient_division",
     "enable_fsdp_symm_mem",
+    "FSDPGroup",
     "post_validate_fsdp_for_accelerator_graph",
     "get_fsdp_reshard_after_forward_policy",
     "linear_param_shard_placements",
     "mixed_precision_policy",
     "resolve_fsdp_mesh",
     "resolve_sparse_fsdp_mesh",
+    "set_is_last_accumulation_step",
 ]
 
 logger = logging.getLogger(__name__)
@@ -80,6 +83,7 @@ def _fsdp_unit_holds_only_embedding_weights(
 
 
 if TYPE_CHECKING:
+    from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
     from torchtitan.models.common.decoder import Decoder
 
 
@@ -117,6 +121,137 @@ def linear_param_shard_placements(
         if (bias := getattr(child, "bias", None)) is not None:
             placements[bias] = Shard(bias.ndim - 1)
     return placements
+
+
+class FSDPGroup(NamedTuple):
+    """Modules that ``apply_fsdp_to_decoder`` passes to one ``fully_shard`` call.
+
+    ``placements`` holds every parameter whose placement isn't ``Shard(0)``,
+    plus all routed-expert parameters. ``routed_experts`` is the block's routed
+    experts, which expert parallelism shards over a separate mesh.
+    """
+
+    modules: list[nn.Module]
+    reshard_after_forward: bool
+    placements: dict[nn.Parameter, Shard]
+    routed_experts: nn.Module | None = None
+
+
+def decoder_fsdp_groups(
+    model: "Decoder",
+    dp_mesh: DeviceMesh,
+    *,
+    reshard_after_forward_policy: str,
+    pp_enabled: bool,
+    ep_degree: int = 1,
+    edp_mesh: DeviceMesh | None = None,
+) -> tuple[FSDPGroup | None, FSDPGroup | None, list[FSDPGroup]]:
+    """Return a decoder's FSDP groups as ``(embedding, head, blocks)``.
+
+    The embedding group also holds the norm and output projection when weights
+    are tied, and there is no head group then. Each transformer block is a
+    group. The root group, ``fully_shard(model)``, takes the parameters left
+    over and doesn't reshard after forward.
+
+    Args:
+        model: The decoder.
+        dp_mesh: The FSDP mesh, as for ``apply_fsdp_to_decoder``.
+        reshard_after_forward_policy: "default", "always" or "never".
+        pp_enabled: Whether pipeline parallelism is enabled.
+        ep_degree: The expert-parallel degree.
+        edp_mesh: The FSDP mesh for routed experts when ``ep_degree > 1``.
+    """
+    reshard_after_forward = get_fsdp_reshard_after_forward_policy(
+        reshard_after_forward_policy, pp_enabled
+    )
+    embedding = head = None
+    if model.enable_weight_tying:
+        # When weights are tied, tok_embeddings and output share the same parameter.
+        # Group them together in one FSDP unit to avoid duplicate all-gathers.
+        embedding = FSDPGroup(
+            [
+                m
+                for m in (model.tok_embeddings, model.norm, model.lm_head)
+                if m is not None
+            ],
+            reshard_after_forward_policy == "always",
+            {},
+        )
+    else:
+        if model.tok_embeddings is not None:
+            embedding = FSDPGroup([model.tok_embeddings], reshard_after_forward, {})
+        # As an optimization, do not reshard_after_forward the last layers
+        # by default since FSDP would prefetch them immediately.
+        if model.norm is not None and model.lm_head is not None:
+            head = FSDPGroup(
+                [model.norm, model.lm_head],
+                reshard_after_forward_policy == "always",
+                {},
+            )
+
+    blocks = []
+    for transformer_block in model.layers.values():
+        # A stacked Linear keeps W1/W3 separate from the matrix-row dimension.
+        # Shard matrix rows so every rank retains both projections.
+        placements = linear_param_shard_placements(transformer_block)
+        moe = next(
+            (m for m in transformer_block.children() if isinstance(m, MoE)), None
+        )
+        if moe is not None:
+            if ep_degree > 1:
+                assert edp_mesh is not None
+                expert_sharding_size = edp_mesh["edp_shard"].size() * ep_degree
+            else:
+                # FSDP cuts dim 0 only over its shard axes: ``dp_shard``,
+                # plus ``cp`` when CP is on (see ``resolve_fsdp_mesh``).
+                # ``dp_replicate`` replicates, and ``tp`` shards other dims
+                # via the TP plan, so neither divides dim 0.
+                expert_sharding_size = dp_mesh["dp_shard"].size()
+                if "cp" in (dp_mesh.mesh_dim_names or ()):
+                    expert_sharding_size *= dp_mesh["cp"].size()
+            placements.update(
+                {param: Shard(0) for param in moe.routed_experts.parameters()}
+            )
+            # Experts may shard their output features when there are more
+            # expert shards than experts.
+            if expert_sharding_size > moe.num_experts:
+                placements.update(
+                    linear_param_shard_placements(
+                        moe.routed_experts,
+                        include_unstacked_grouped=True,
+                    )
+                )
+        blocks.append(
+            FSDPGroup(
+                [transformer_block],
+                reshard_after_forward,
+                placements,
+                None if moe is None else moe.routed_experts,
+            )
+        )
+    return embedding, head, blocks
+
+
+def set_is_last_accumulation_step(
+    model_part: nn.Module,
+    is_last_accumulation_step: bool,
+    *,
+    fsdp_backend: "FlexShardConfig | None",
+) -> None:
+    """Set whether the next backward is the last of gradient accumulation.
+
+    Only the last backward reduces gradients and reshards parameters after
+    backward. Earlier ones keep the parameters unsharded, and the next backward
+    accumulates into their grads.
+    """
+    if fsdp_backend is None:
+        # FlexShard has no equivalent: every backward waits for its gradient
+        # reductions and releases its prefetch.
+        cast(FSDPModule, model_part).set_is_last_backward(is_last_accumulation_step)
+    # pyrefly: ignore [not-callable]
+    model_part.set_reshard_after_backward(is_last_accumulation_step)
+    # pyrefly: ignore [not-callable]
+    model_part.set_requires_gradient_sync(is_last_accumulation_step)
 
 
 def resolve_fsdp_mesh(
@@ -366,154 +501,89 @@ def apply_fsdp_to_decoder(
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
-    reshard_after_forward = get_fsdp_reshard_after_forward_policy(
-        reshard_after_forward_policy, pp_enabled
+    embedding, head, blocks = decoder_fsdp_groups(
+        model,
+        dp_mesh,
+        reshard_after_forward_policy=reshard_after_forward_policy,
+        pp_enabled=pp_enabled,
+        ep_degree=ep_degree,
+        edp_mesh=edp_mesh,
     )
-    if model.enable_weight_tying:
-        # When weights are tied, tok_embeddings and output share the same parameter.
-        # Group them together in one FSDP unit to avoid duplicate all-gathers.
-        modules = [
-            m
-            for m in (model.tok_embeddings, model.norm, model.lm_head)
-            if m is not None
-        ]
+    if embedding is not None:
         fully_shard(
-            modules,
+            embedding.modules,
             **fsdp_config,
-            reshard_after_forward=reshard_after_forward_policy == "always",
+            reshard_after_forward=embedding.reshard_after_forward,
         )
-    else:
-        if model.tok_embeddings is not None:
-            fully_shard(
-                model.tok_embeddings,
-                **fsdp_config,
-                reshard_after_forward=reshard_after_forward,
-            )
-            # Embedding backward needs only grad_output and the token indices,
-            # not the weight, so skip the backward all-gather. The flag covers
-            # the whole FSDP unit, so only set it when the unit holds nothing
-            # but embedding weights (e.g. a learned norm weight inside
-            # tok_embeddings would be read after being freed).
-            if _fsdp_unit_holds_only_embedding_weights(
-                cast(FSDPModule, model.tok_embeddings), model
-            ):
-                model.tok_embeddings.set_unshard_in_backward(False)
-        # As an optimization, do not reshard_after_forward the last layers
-        # by default since FSDP would prefetch them immediately.
-        if model.norm is not None and model.lm_head is not None:
-            fully_shard(
-                [model.norm, model.lm_head],
-                **fsdp_config,
-                reshard_after_forward=reshard_after_forward_policy == "always",
-            )
-
-    for layer_id, transformer_block in model.layers.items():
-        # A stacked Linear keeps W1/W3 separate from the matrix-row dimension.
-        # Shard matrix rows so every rank retains both projections.
-        stacked_param_placements = linear_param_shard_placements(transformer_block)
-        # NOTE: In an MoE layer, we use shard_placement_fn to apply different
-        # FSDP mesh and shard placement to different parameters:
-        # - When EP > 1: routed-expert parameters use edp_mesh, while other
-        #   parameters use dp_mesh.
-        # - When EP = 1: all params use the same FSDP mesh, but experts may
-        #   shard their output features when FSDP degree > num_experts
-        # Dense blocks use the default mesh with only stacked-parameter
-        # placement overrides.
-        moe = next(
-            (m for m in transformer_block.children() if isinstance(m, MoE)), None
+        # Embedding backward needs only grad_output and the token indices,
+        # not the weight, so skip the backward all-gather. The flag covers
+        # the whole FSDP unit, so only set it when the unit holds nothing
+        # but embedding weights (e.g. a learned norm weight inside
+        # tok_embeddings would be read after being freed).
+        if not model.enable_weight_tying and _fsdp_unit_holds_only_embedding_weights(
+            cast(FSDPModule, model.tok_embeddings), model
+        ):
+            model.tok_embeddings.set_unshard_in_backward(False)
+    if head is not None:
+        fully_shard(
+            head.modules,
+            **fsdp_config,
+            reshard_after_forward=head.reshard_after_forward,
         )
-        if moe is not None:
-            routed_experts = moe.routed_experts
-            num_experts = moe.num_experts
 
-            if ep_degree > 1:
-                assert edp_mesh is not None
-                expert_sharding_size = edp_mesh["edp_shard"].size() * ep_degree
-            else:
-                # FSDP cuts dim 0 only over its shard axes: ``dp_shard``,
-                # plus ``cp`` when CP is on (see ``resolve_fsdp_mesh``).
-                # ``dp_replicate`` replicates, and ``tp`` shards other dims
-                # via the TP plan, so neither divides dim 0.
-                dp_storage_mesh = fsdp_config["mesh"]
-                expert_sharding_size = dp_storage_mesh["dp_shard"].size()
-                if "cp" in dp_storage_mesh.mesh_dim_names:
-                    expert_sharding_size *= dp_storage_mesh["cp"].size()
-
-            expert_param_placements = {
-                param: Shard(0) for param in routed_experts.parameters()
-            }
-            if expert_sharding_size > num_experts:
-                expert_param_placements.update(
-                    linear_param_shard_placements(
-                        routed_experts,
-                        include_unstacked_grouped=True,
-                    )
-                )
-            if ep_degree == 1:
-                param_placements = stacked_param_placements.copy()
-                param_placements.update(expert_param_placements)
-                fully_shard(
-                    transformer_block,
-                    **fsdp_config,
-                    reshard_after_forward=reshard_after_forward,
-                    # dict.get returns None for parameters that use the default
-                    # Shard(0), matching shard_placement_fn's contract.
-                    shard_placement_fn=param_placements.get,
-                )
-            else:
-                # ep_degree > 1: per-param mesh
-                from torch.distributed.fsdp._fully_shard._fsdp_common import (
-                    FSDPMeshInfo,
-                    ShardPlacementResult,
-                )
-                from torch.distributed.fsdp._fully_shard._fsdp_init import (
-                    _get_mesh_info,
-                )
-
-                assert edp_mesh is not None
-
-                # Delegate to FSDP2's mesh-info builder. When mesh_dims is set
-                # it extracts and FLATTENS the DP submesh from the full SPMD
-                # mesh.
-                edp_mesh_info = _get_mesh_info(edp_mesh, edp_mesh_dims)
-                dp_mesh_info = _get_mesh_info(dp_mesh, dp_mesh_dims)
-                # _get_mesh_info is typed to the DataParallelMeshInfo base; with
-                # a shard dim it always yields FSDPMeshInfo/HSDPMeshInfo.
-                assert isinstance(edp_mesh_info, FSDPMeshInfo)
-                assert isinstance(dp_mesh_info, FSDPMeshInfo)
-
-                def _shard_placement_fn(
-                    param: nn.Parameter,
-                    _expert_param_placements: dict[
-                        nn.Parameter, Shard
-                    ] = expert_param_placements,
-                    _stacked: dict[nn.Parameter, Shard] = stacked_param_placements,
-                    _edp_mesh_info: FSDPMeshInfo = edp_mesh_info,
-                    _dp_mesh_info: FSDPMeshInfo = dp_mesh_info,
-                ) -> ShardPlacementResult:
-                    if (placement := _expert_param_placements.get(param)) is not None:
-                        return ShardPlacementResult(
-                            placement=placement, mesh_info=_edp_mesh_info
-                        )
-                    else:
-                        return ShardPlacementResult(
-                            placement=_stacked.get(param, Shard(0)),
-                            mesh_info=_dp_mesh_info,
-                        )
-
-                fully_shard(
-                    transformer_block,
-                    **fsdp_config,
-                    reshard_after_forward=reshard_after_forward,
-                    shard_placement_fn=_shard_placement_fn,
-                )
-        else:
+    for block in blocks:
+        if ep_degree == 1 or block.routed_experts is None:
+            # dict.get returns None for parameters that use the default
+            # Shard(0), matching shard_placement_fn's contract.
             fully_shard(
-                transformer_block,
+                block.modules,
                 **fsdp_config,
-                reshard_after_forward=reshard_after_forward,
-                shard_placement_fn=stacked_param_placements.get,
+                reshard_after_forward=block.reshard_after_forward,
+                shard_placement_fn=block.placements.get,
             )
+            continue
+        # With EP > 1, routed-expert parameters use edp_mesh, while other
+        # parameters use dp_mesh: a mesh per parameter.
+        from torch.distributed.fsdp._fully_shard._fsdp_common import (
+            FSDPMeshInfo,
+            ShardPlacementResult,
+        )
+        from torch.distributed.fsdp._fully_shard._fsdp_init import _get_mesh_info
+
+        assert edp_mesh is not None
+
+        # Delegate to FSDP2's mesh-info builder. When mesh_dims is set
+        # it extracts and FLATTENS the DP submesh from the full SPMD
+        # mesh.
+        edp_mesh_info = _get_mesh_info(edp_mesh, edp_mesh_dims)
+        dp_mesh_info = _get_mesh_info(dp_mesh, dp_mesh_dims)
+        # _get_mesh_info is typed to the DataParallelMeshInfo base; with
+        # a shard dim it always yields FSDPMeshInfo/HSDPMeshInfo.
+        assert isinstance(edp_mesh_info, FSDPMeshInfo)
+        assert isinstance(dp_mesh_info, FSDPMeshInfo)
+
+        expert_params = set(block.routed_experts.parameters())
+
+        def _shard_placement_fn(
+            param: nn.Parameter,
+            _placements: dict[nn.Parameter, Shard] = block.placements,
+            _expert_params: set[nn.Parameter] = expert_params,
+            _edp_mesh_info: FSDPMeshInfo = edp_mesh_info,
+            _dp_mesh_info: FSDPMeshInfo = dp_mesh_info,
+        ) -> ShardPlacementResult:
+            return ShardPlacementResult(
+                placement=_placements.get(param, Shard(0)),
+                mesh_info=(
+                    _edp_mesh_info if param in _expert_params else _dp_mesh_info
+                ),
+            )
+
+        fully_shard(
+            block.modules,
+            **fsdp_config,
+            reshard_after_forward=block.reshard_after_forward,
+            shard_placement_fn=_shard_placement_fn,
+        )
 
     fully_shard(model, **fsdp_config)
 

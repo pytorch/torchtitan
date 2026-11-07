@@ -12,6 +12,7 @@ from typing import get_args, Literal, TypeAlias
 import torch
 
 from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
+from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
 
 
 FSDPSymmMemScope: TypeAlias = Literal["all", "dense", None]
@@ -72,6 +73,16 @@ class ParallelismConfig:
     "dense" skips any module with routed experts. An MoE transformer block is
     one FSDP module, so its attention parameters are skipped along with its
     experts.
+    """
+
+    fsdp_backend: FlexShardConfig | None = None
+    """
+    How parameters are sharded over ``dp_shard``. ``None`` applies PyTorch's FSDP2
+    ``fully_shard``. ``FlexShardConfig()`` applies FlexShard
+    (meta-pytorch/flex_shard), with one ``fsdp2_compatible`` bucket per FSDP2
+    group, so training is bitwise identical to FSDP2. FlexShard does not support
+    HSDP, tensor, context, expert or pipeline parallelism, symmetric-memory
+    communication or CPU offloading yet.
     """
 
     tensor_parallel_degree: int = 1
