@@ -42,6 +42,8 @@ def build_rl_model_configs(
         freeze_moe_routing  frozen router gate and expert bias, no aux loss
                             (FreezeMoERoutingTransform), so trainer and generator
                             expert choices don't drift apart
+    Generator only: the ``qkv_norm_rope`` local_compile region; remove it from
+    ``config.generator.model.local_compile.regions`` to opt out.
     Per-role transforms go through ``apply_transforms(config.generator, ...)``.
     """
     if fp32_lm_head:
@@ -63,4 +65,6 @@ def build_rl_model_configs(
         cast(Decoder.Config, transform_model_config_(model_config, transforms))
         for model_config in model_configs
     )
+    # With a backward the eager q/k norm is faster, so the trainer keeps it.
+    generator_model.local_compile.regions.append("qkv_norm_rope")
     return trainer_model, generator_model

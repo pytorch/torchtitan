@@ -38,7 +38,7 @@ from torch.nn.attention.varlen import (
 from typing_extensions import TypeVar
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
-from torchtitan.distributed.local_compile import compile
+from torchtitan.distributed.local_compile import compile, local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import Linear
@@ -68,6 +68,7 @@ __all__ = [
     "get_fixed_block_mask_mod",
     "get_sliding_window_mask_mod",
     "local_head_split",
+    "split_qkv",
 ]
 
 
@@ -120,10 +121,13 @@ class Attention(Module):
 
 
 class QKVLinear(Module):
-    """Single fused linear projection, split along R dimension.
+    """Single fused linear projection for q, k and v.
 
-    Uses a single linear layer and splits the output along the R dimension,
-    where R = n_heads // n_kv_heads + 2 (Q-heads-per-KV-group + K + V).
+    ``forward`` returns the packed ``wqkv`` output, ``[T, n_kv_heads * R * head_dim]`` with
+    R = n_heads // n_kv_heads + 2 (the q heads of a KV group, then k, then v). Callers split it
+    with ``split_qkv``, for example inside a compiled region so the head copies fuse into the
+    ops that read q, k and v.
+
     Reduces kernel launch overhead compared to three separate projections.
 
     Compatible with ColwiseParallel on the ``wqkv`` linear layer.
@@ -150,46 +154,54 @@ class QKVLinear(Module):
             )
         self.wqkv = config.wqkv.build()
         self.heads_per_kv = config.n_heads // config.n_kv_heads
-        self.r_dim = self.heads_per_kv + 2
 
-    @spmd.local_map(
-        out_types=(
-            (
-                {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
-                spmd.PartitionSpec(("dp", "cp"), "tp", None),
-            ),
-        )
-        * 3
-    )
-    def forward(
-        self, x: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # Fused QKV: single matmul, then reshape and split along R dim.
-        # [T, n_kv_heads * R * head_dim] -> [T, n_kv_heads, R, head_dim]
-        # Use -1 for n_kv_heads so TP sharding is handled automatically.
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         qkv = self.wqkv(x)
-        # The split below copies the wqkv projection output with bare ops.
+        # Every caller copies qkv with bare ops (split_qkv), so one mark here covers them all.
         remat.recompute_needs_tensor(qkv)
-        num_tokens = qkv.shape[0]
-        with spmd.local():  # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
-            qkv = qkv.view(num_tokens, -1, self.r_dim, self.head_dim)
-            if spmd.is_type_checking():
-                spmd.assert_type(
-                    qkv,
-                    spmd.V,
-                    spmd.PartitionSpec(("dp", "cp"), "tp", None, None),
-                )
+        return qkv
 
-        local_num_tokens = qkv.shape[0]
-        xq, xk, xv = torch.split(qkv, [self.heads_per_kv, 1, 1], dim=-2)
-        # split leaves xk/xv as strided views into the fused buffer; vLLM
-        # attention/KV-cache kernels read raw memory assuming a contiguous
-        # head-major layout, so materialize all three contiguously here.
-        return (
-            xq.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
-            xk.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
-            xv.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
-        )
+
+@spmd.local_map(
+    out_types=(
+        (
+            {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
+            spmd.PartitionSpec(("dp", "cp"), "tp", None),
+        ),
+    )
+    * 3
+)
+def split_qkv(
+    qkv: torch.Tensor, *, heads_per_kv: int, head_dim: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Split the packed ``QKVLinear`` output into contiguous q, k and v.
+
+    Example (2 q heads per KV group, so R = 4):
+        qkv [T, n_kv_heads * 4 * head_dim] -> q [T, 2 * n_kv_heads, head_dim],
+                                              k and v [T, n_kv_heads, head_dim]
+    """
+    # [T, n_kv_heads * R * head_dim] -> [T, n_kv_heads, R, head_dim]
+    # Use -1 for n_kv_heads so TP sharding is handled automatically.
+    num_tokens = qkv.shape[0]
+    with spmd.local():  # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
+        qkv = qkv.view(num_tokens, -1, heads_per_kv + 2, head_dim)
+        if spmd.is_type_checking():
+            spmd.assert_type(
+                qkv,
+                spmd.V,
+                spmd.PartitionSpec(("dp", "cp"), "tp", None, None),
+            )
+
+    local_num_tokens = qkv.shape[0]
+    xq, xk, xv = torch.split(qkv, [heads_per_kv, 1, 1], dim=-2)
+    # split leaves xk/xv as strided views into the fused buffer; vLLM
+    # attention/KV-cache kernels read raw memory assuming a contiguous
+    # head-major layout, so materialize all three contiguously here.
+    return (
+        xq.reshape(local_num_tokens, -1, head_dim).contiguous(),
+        xk.reshape(local_num_tokens, -1, head_dim).contiguous(),
+        xv.reshape(local_num_tokens, -1, head_dim).contiguous(),
+    )
 
 
 class GQAttention(Attention):
@@ -286,20 +298,8 @@ class GQAttention(Attention):
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # The projection's linear declares its own remat regions.
-        xq_THK, xk_THK, xv_THV = self.qkv_linear(x_TD)
-
-        # Optional QK normalization (before RoPE, per Qwen3)
-        if self.q_norm is not None or self.k_norm is not None:
-            assert self.q_norm is not None and self.k_norm is not None
-            remat.recompute_needs_tensor(xq_THK)
-            xq_THK = self.q_norm(xq_THK)
-            remat.recompute_needs_tensor(xk_THK)
-            xk_THK = self.k_norm(xk_THK)
-
-        # Apply rotary embeddings
-        if self.rope is not None:
-            remat.recompute_needs_tensor(xq_THK, xk_THK)
-            xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
+        qkv = self.qkv_linear(x_TD)
+        xq_THK, xk_THK, xv_THV = self._prepare_query_key_value(qkv, positions)
 
         out_THV = remat.region(
             self.inner_attention,
@@ -317,6 +317,45 @@ class GQAttention(Attention):
         out_THV = out_THV.contiguous()
         out_TD = out_THV.view(out_THV.shape[0], -1)
         return self.wo(out_TD)
+
+    # Compiled, the head copies fuse into the q/k norm and RoPE reads. emulate_precision_casts
+    # rounds the normed q/k to bf16 before RoPE, as the eager modules do; without it ~31%
+    # of q elements differ from eager. No pointwise autotuning: kernel configs
+    # picked by timing can round differently from run to run.
+    @local_compile(
+        "qkv_norm_rope",
+        batch_invariant=False,
+        options={
+            "emulate_precision_casts": True,
+            "triton.autotune_pointwise": False,
+        },
+    )
+    def _prepare_query_key_value(
+        self, qkv: torch.Tensor, positions: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Split the packed ``QKVLinear`` output and return q, k, v as attention reads them. Norms and RoPE run only if configured.
+
+        query: split -> q_norm -> RoPE
+        key:   split -> k_norm -> RoPE
+        value: split
+        """
+        xq_THK, xk_THK, xv_THV = split_qkv(
+            qkv,
+            heads_per_kv=self.qkv_linear.heads_per_kv,
+            head_dim=self.qkv_linear.head_dim,
+        )
+
+        if self.q_norm is not None or self.k_norm is not None:
+            assert self.q_norm is not None and self.k_norm is not None
+            remat.recompute_needs_tensor(xq_THK)
+            xq_THK = self.q_norm(xq_THK)
+            remat.recompute_needs_tensor(xk_THK)
+            xk_THK = self.k_norm(xk_THK)
+
+        if self.rope is not None:
+            remat.recompute_needs_tensor(xq_THK, xk_THK)
+            xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
+        return xq_THK, xk_THK, xv_THV
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

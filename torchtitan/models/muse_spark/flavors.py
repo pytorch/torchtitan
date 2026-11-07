@@ -22,6 +22,7 @@ from torchtitan.config.transform import (
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
+    QKVLinear,
     SlidingWindowFlexInnerAttention,
     SlidingWindowVarlenInnerAttention,
     VarlenInnerAttention,
@@ -92,7 +93,6 @@ from .model import (
     MuseSparkLMHead,
     MuseSparkModel,
     MuseSparkNormPreservingResidualConnection,
-    MuseSparkQKVLinear,
     MuseSparkRMSNorm,
     MuseSparkRMSNormWithInputScale,
     MuseSparkTransformerBlock,
@@ -389,7 +389,7 @@ def _attention_config(
         n_kv_heads=num_kv_heads,
         head_dim=head_dim,
         dim=dim,
-        qkv_linear=MuseSparkQKVLinear.Config(
+        qkv_linear=QKVLinear.Config(
             head_dim=head_dim,
             n_heads=num_heads,
             n_kv_heads=num_kv_heads,
