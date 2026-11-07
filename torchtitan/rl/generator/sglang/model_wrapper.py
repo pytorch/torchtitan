@@ -33,6 +33,7 @@ from torchtitan.models.common.attention import (
     VarlenInnerAttention,
 )
 from torchtitan.models.common.attention.gdn import GDN
+from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.attention.linear_attention import LinearAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
@@ -49,16 +50,17 @@ from torchtitan.rl.generator.inference_model import (
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.sglang.attention import SGLangInnerAttention
 from torchtitan.rl.generator.sglang.gdn import SGLangInnerGDN
+from torchtitan.rl.generator.sglang.kda import SGLangInnerKDA
 
 logger = logging.getLogger(__name__)
 
 
 def replace_sglang_layer_configs(model_config: Decoder.Config) -> Decoder.Config:
     """Replace each layer's inner attention with ``SGLangInnerAttention``, or, for GDN
-    layers, ``SGLangInnerGDN``.
+    and KDA layers, ``SGLangInnerGDN`` and ``SGLangInnerKDA``.
 
-    Only GDN and softmax attention with the varlen backend, full or sliding-window, are
-    supported; other layers raise ``ValueError``. MLA layers keep their projection of
+    Only GDN, KDA and softmax attention with the varlen backend, full or sliding-window,
+    are supported; other layers raise ``ValueError``. MLA layers keep their projection of
     the latent to per-head K/V, which SGLang caches. The inner attention keeps the
     trainer attention's sharding config.
     """
@@ -86,12 +88,30 @@ def replace_sglang_layer_configs(model_config: Decoder.Config) -> Decoder.Config
                 )
             )
             continue
+        if isinstance(attention_cfg, KDA.Config):
+            sglang_inner_kda_cfg = SGLangInnerKDA.Config(
+                layer_id=layer_id,
+                num_heads=attention_cfg.n_heads,
+                head_dim=attention_cfg.head_dim,
+                conv_kernel_size=attention_cfg.conv_kernel_size,
+                lower_bound=attention_cfg.inner_attention.kernel.lower_bound,
+                sharding_config=attention_cfg.inner_attention.sharding_config,
+            )
+            new_layers.append(
+                dataclasses.replace(
+                    layer_cfg,
+                    attention=dataclasses.replace(
+                        attention_cfg, inner_attention=sglang_inner_kda_cfg
+                    ),
+                )
+            )
+            continue
         if isinstance(attention_cfg, LinearAttention.Config) or not isinstance(
             attention_cfg, Attention.Config
         ):
             raise ValueError(
-                f"layers[{layer_id}]: the SGLang engine supports softmax attention "
-                f"and GDN only, got {type(attention_cfg).__qualname__}"
+                f"layers[{layer_id}]: the SGLang engine supports softmax attention, "
+                f"GDN and KDA only, got {type(attention_cfg).__qualname__}"
             )
         if isinstance(attention_cfg, GptOssAttention.Config):
             # TODO: rescale the attention output by the sinks, from the log-sum-exp
@@ -214,7 +234,7 @@ class _DecoderBody(Module):
                 "attn",
                 (
                     inner.linear_attention
-                    if isinstance(inner, SGLangInnerGDN)
+                    if isinstance(inner, (SGLangInnerGDN, SGLangInnerKDA))
                     else inner.radix_attention
                 ),
             )
