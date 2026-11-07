@@ -30,7 +30,8 @@ Debug models with random weights start from the trainer's weights, loaded throug
 same in-place model state dict load.
 
 Runs in the B200 RL CI job.
-Run each class in its own launch with the SGLang environment (see
+Run each class in its own launch, with as many processes as its TP degree (one for
+TestSGLangBitwiseParityMLA, else two), with the SGLang environment (see
 torchtitan/rl/generator/sglang/README.md; the Dist-MoE class also needs the dist_moe
 package):
     torchrun --nproc_per_node=2 -m pytest \
@@ -57,6 +58,9 @@ from torchtitan.config.transform import apply_transforms
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.models.common.dist_moe import DistMoeRuntime
+from torchtitan.models.deepseek_v3 import (
+    build_model_config as build_deepseek_v3_model_config,
+)
 from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
@@ -79,7 +83,7 @@ from tests.rl.unit_tests.gpu.test_bitwise_parity import (
     qwen3_5_debug_bitwise_config,
 )
 
-# Each class runs under its own two-GPU torchrun launch.
+# Each class runs under its own torchrun launch (see the module docstring).
 pytestmark = pytest.mark.multi_gpu
 
 
@@ -376,16 +380,21 @@ class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):
     sync_weights_from_trainer = True
 
 
-def _debug_model_config(build_model_config, **kwargs) -> Controller.Config:
-    """A model's debug flavor at TP 2 on both sides, in the batch-invariant Qwen3 MoE
-    debug recipe."""
+def _debug_model_config(
+    build_model_config, *, tensor_parallel_degree: int = 2, **kwargs
+) -> Controller.Config:
+    """A model's debug flavor with the same TP on both sides, in the batch-invariant
+    Qwen3 MoE debug recipe."""
     config = rl_grpo_qwen3_moe_debug_varlen_batch_invariant()
     trainer_parallelism = dataclasses.replace(
         config.trainer.parallelism,
         data_parallel_shard_degree=1,
+        tensor_parallel_degree=tensor_parallel_degree,
         expert_parallel_degree=1,
     )
-    generator_parallelism = InferenceParallelismConfig(tensor_parallel_degree=2)
+    generator_parallelism = InferenceParallelismConfig(
+        tensor_parallel_degree=tensor_parallel_degree
+    )
     trainer_model, generator_model = build_rl_model_configs(
         build_model_config,
         "debugmodel",
@@ -419,6 +428,26 @@ class TestSGLangBitwiseParitySlidingWindow(SGLangBitwiseParityTestBase):
             build_muse_glimmer_model_config,
             # Its lm_head soft-caps the logits, which the fp32 lm_head does not.
             fp32_lm_head=False,
+        )
+    )
+    sync_weights_from_trainer = True
+
+
+class TestSGLangBitwiseParityMLA(SGLangBitwiseParityTestBase):
+    """DeepSeek V3 debug model with random weights: MLA, whose per-head K/V SGLang
+    caches. One GPU: TP 2 needs EP 2 for its MoE, where the trainer's MoE with shared
+    experts is not batch-invariant.
+
+    TODO(https://github.com/pytorch/torchtitan/pull/5829): run at TP 2 / EP 2, which
+    covers MLA's head-sharded path.
+    """
+
+    __test__ = True
+    config_fn = staticmethod(
+        functools.partial(
+            _debug_model_config,
+            build_deepseek_v3_model_config,
+            tensor_parallel_degree=1,
         )
     )
     sync_weights_from_trainer = True
