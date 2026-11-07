@@ -21,7 +21,6 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.base.module import Module
 
 
@@ -152,34 +151,8 @@ class RMSNorm(nn.RMSNorm, Module):
     # ShardingConfig keys use "input" for both RMSNorm and LayerNorm; some
     # PyTorch versions name the RMSNorm argument "x".
     # pyrefly: ignore[bad-param-name-override]
-    def forward(
-        self, input: torch.Tensor, *, residual: torch.Tensor | None = None
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Normalize ``input``. With a residual, add it first and also return the sum.
-
-        Example:
-            norm(h)                     -> rms_norm(h)
-            norm(ffn_out, residual=h)   -> (rms_norm(h + ffn_out), h + ffn_out)
-        """
-        if residual is None:
-            return super().forward(input)
-        return self._add_rmsnorm(input, residual)
-
-    # Only calls with a residual compile, so the add runs inside the norm kernel.
-    # Compiled q/k head norms would be slower (2.6 vs 1.7 us, 64 tokens, GB300).
-    # emulate_precision_casts rounds the sum to bf16 before the norm, as eager
-    # does. Without it, the trainer's (grad) and generator's (no_grad) kernels
-    # round differently: up to 22% of outputs differ by one bf16 step.
-    @local_compile(
-        "add_rmsnorm",
-        batch_invariant=False,
-        options={"emulate_precision_casts": True},
-    )
-    def _add_rmsnorm(
-        self, input: torch.Tensor, residual: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        residual = residual + input
-        return super().forward(residual), residual
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return super().forward(input)
 
 
 __all__ = [

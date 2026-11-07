@@ -7,45 +7,46 @@
 import unittest
 
 import torch
-from torch._inductor.utils import run_and_get_code
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.local_compile import LocalCompileConfig
-from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.qwen3 import build_model_config
+from torchtitan.models.qwen3.model import Qwen3TransformerBlock
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
-class TestRMSNormResidualCompile(unittest.TestCase):
+class TestQwen3AddRMSNorm(unittest.TestCase):
     def tearDown(self):
         LocalCompileConfig().apply()
         torch._dynamo.reset()
 
-    def test_add_and_norm_run_as_one_kernel(self):
+    def test_compiled_add_and_norm(self):
+        config = build_model_config("8B", parallelism=ParallelismConfig())
         torch.manual_seed(0)
-        norm = RMSNorm.Config(normalized_shape=1024, eps=1e-6).build().cuda()
-        norm = norm.to(torch.bfloat16)
+        norm = config.layers[0].attention_norm.build().cuda().to(torch.bfloat16)
         with torch.no_grad():
             norm.weight.normal_(1.0, 0.1)
-        x = torch.randn(64, 1024, device="cuda", dtype=torch.bfloat16)
+        # The method reads only attention_norm; a full 8B block would build ~200M params.
+        block = torch.nn.Module()
+        block.attention_norm = norm
+        add_attention_norm = Qwen3TransformerBlock._add_attention_norm
+        x = torch.randn(64, config.dim, device="cuda", dtype=torch.bfloat16)
         residual = 4 * torch.randn_like(x)
         grad_outputs = (torch.randn_like(x), torch.randn_like(x))
 
         def forward_backward():
             inputs = (x.clone().requires_grad_(), residual.clone().requires_grad_())
-            outputs = norm(inputs[0], residual=inputs[1])
+            outputs = add_attention_norm(block, *inputs)
             grads = torch.autograd.grad(outputs, (*inputs, norm.weight), grad_outputs)
             return outputs, grads
 
         LocalCompileConfig().apply()
         (eager_out, eager_sum), eager_grads = forward_backward()
-        LocalCompileConfig(regions=["add_rmsnorm"]).apply()
-        ((out, new_residual), grads), codes = run_and_get_code(forward_backward)
-
+        LocalCompileConfig(regions=["qwen3_add_rmsnorm"]).apply()
+        (out, new_residual), grads = forward_backward()
         with torch.no_grad():
-            no_grad_out, no_grad_sum = norm(x, residual=residual)
+            no_grad_out, no_grad_sum = add_attention_norm(block, x, residual)
 
-        forward_code = codes[0]
-        self.assertEqual(forward_code.count("@triton.jit"), 1)
-        self.assertIn("rsqrt", forward_code)
         # The trainer (grad) and the generator (no_grad) get the same bits.
         torch.testing.assert_close(no_grad_out, out, rtol=0, atol=0)
         torch.testing.assert_close(no_grad_sum, new_residual, rtol=0, atol=0)

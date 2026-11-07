@@ -12,7 +12,7 @@ import spmd_types as spmd
 import torch
 import torch_remat as remat
 
-from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
 from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     FlexAttentionMetadata,
@@ -58,10 +58,11 @@ class Qwen3TransformerBlock(TransformerBlock):
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominator: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return ``(ffn_out, residual)`` unsummed; the next block's ``attention_norm`` adds them.
+        """Return ``(ffn_out, residual)`` unsummed; the next block adds them.
 
-        With the ``add_rmsnorm`` region on, that add runs inside the norm kernel.
-        The first block gets ``residual=None``: its ``x`` is the residual stream.
+        The next block adds them in ``_add_attention_norm``, in the norm's kernel
+        when the ``qwen3_add_rmsnorm`` region is on. The first block gets
+        ``residual=None``: its ``x`` is the residual stream.
 
         Example (the stream entering this block is h = residual + x):
             ffn_out, residual = block(x, ..., residual=residual)
@@ -71,7 +72,7 @@ class Qwen3TransformerBlock(TransformerBlock):
             residual = x
             attention_input = self.attention_norm(x)
         else:
-            attention_input, residual = self.attention_norm(x, residual=residual)
+            attention_input, residual = self._add_attention_norm(x, residual)
         attn_out = self.attention(attention_input, attention_metadata, positions)
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)
@@ -86,6 +87,21 @@ class Qwen3TransformerBlock(TransformerBlock):
         else:
             ffn_out = self.feed_forward(self.ffn_norm(x))
         return ffn_out, x
+
+    # Compiled, the add runs inside the norm kernel; eager runs two kernels.
+    # emulate_precision_casts rounds the sum to bf16 before the norm, as eager
+    # does. Without it, the trainer's (grad) and generator's (no_grad) kernels
+    # round differently: up to 22% of outputs differ by one bf16 step.
+    @local_compile(
+        "qwen3_add_rmsnorm",
+        batch_invariant=False,
+        options={"emulate_precision_casts": True},
+    )
+    def _add_attention_norm(
+        self, x: torch.Tensor, residual: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        residual = residual + x
+        return self.attention_norm(residual), residual
 
 
 class Qwen3Model(Decoder):
@@ -119,7 +135,7 @@ class Qwen3Model(Decoder):
                     "fused_binary_activation",
                     "rope",
                     "fp32_to_bf16_split",
-                    "add_rmsnorm",
+                    "qwen3_add_rmsnorm",
                 ]
             )
         )
@@ -170,10 +186,10 @@ class Qwen3Model(Decoder):
             )
         # The next pipeline stage takes one tensor, so every stage ends with the sum.
         # A stage without layers passes its input through (residual stays None).
-        # TODO: fuse this add into the root norm, self.norm(h, residual=residual): one
-        # kernel fewer per forward. Under sequence parallelism the root norm gathers its
-        # output through out_dst_shardings, which Module._redistribute_outputs skips
-        # for tuple outputs, so that gather must move out of the norm first.
+        # TODO: fuse this add into the root norm, as _add_attention_norm does for the
+        # attention norm: one kernel fewer per forward. Under sequence parallelism the
+        # root norm all-gathers its output (pre_lm_head_norm_sharding_config), so that
+        # region would wrap a collective and needs its own TP test.
         if residual is not None:
             h = residual + h
         h = self.norm(h) if self.norm is not None else h

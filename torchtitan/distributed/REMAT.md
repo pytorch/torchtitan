@@ -252,6 +252,12 @@ for backward, so a saved add keeps nothing resident, its inputs need no
 marker, and replay skips it. Only the adds are wrapped; a trailing norm, such
 as Muse Glimmer's post-norm, stays a bare operation with a marker on its input.
 
+Qwen3 has no trailing add. Its blocks return the FFN output and the residual
+stream unsummed, and the next block adds them inside its attention norm
+(`Qwen3TransformerBlock._add_attention_norm`). Both are checkpoint inputs of
+the next block, so it keeps one more `[T, D]` tensor than a block that takes
+their sum, and its replay recomputes the add with the norm.
+
 ## Random state
 
 All policies require `preserve_rng_state=False`. Random state that can advance

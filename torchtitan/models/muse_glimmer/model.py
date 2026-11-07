@@ -69,8 +69,6 @@ class RMSGainCenterNorm(RMSNorm):
         super().__init__(config)
         self.gain_center = config.gain_center
 
-    # Glimmer's blocks add their residuals outside the norm, so it takes no residual.
-    # pyrefly: ignore[bad-override]
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         w: torch.Tensor = self.weight + self.gain_center
         return F.rms_norm(input, self.normalized_shape, w, self.eps)

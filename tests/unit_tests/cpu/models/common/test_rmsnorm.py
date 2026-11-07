@@ -60,15 +60,6 @@ class TestRMSNorm(unittest.TestCase):
         out = norm(x)
         self.assertEqual(out.shape, torch.Size([2, 10, 32]))
 
-    def test_forward_with_residual(self):
-        """With a residual, forward adds it first and returns the norm and the sum."""
-        norm = RMSNorm.Config(normalized_shape=32).build()
-        x = torch.randn(10, 32)
-        residual = torch.randn(10, 32)
-        out, new_residual = norm(x, residual=residual)
-        torch.testing.assert_close(new_residual, residual + x, rtol=0, atol=0)
-        torch.testing.assert_close(out, norm(residual + x), rtol=0, atol=0)
-
     def test_normalized_shape_required_at_config_init(self):
         """normalized_shape is a required field and must be passed to Config()."""
         # Can be passed at construction

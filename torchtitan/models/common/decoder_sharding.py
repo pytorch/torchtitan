@@ -182,7 +182,7 @@ def norm_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     activation = residual_activation_placement(enable_sp=enable_sp)
     return ShardingConfig(
         state_shardings=state,
-        in_src_shardings={"input": activation, "residual": activation},
+        in_src_shardings={"input": activation},
         out_src_shardings=activation,
     )
 
