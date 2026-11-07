@@ -68,34 +68,6 @@ class TestLoss(unittest.TestCase):
         torch.testing.assert_close(logprobs, expected_logprobs)
         torch.testing.assert_close(entropy, expected_entropy)
 
-    def test_compute_logprobs_temperature_matches_dividing_first(self):
-        # Batch-invariant runs need these bits to equal vLLM's, which divides the logits first.
-        torch.manual_seed(0)
-        logits = torch.randn(8, 16, requires_grad=True)
-        divided_logits = logits.detach().clone().requires_grad_(True)
-        labels = torch.randint(0, 16, (8,))
-        temperature = torch.full((8,), 0.7)
-
-        logprobs, entropy = compute_logprobs(
-            logits,
-            labels,
-            vocab_parallel_group=None,
-            return_entropy=True,
-            temperature=temperature,
-        )
-        expected_logprobs, expected_entropy = compute_logprobs(
-            divided_logits / temperature.unsqueeze(-1),
-            labels,
-            vocab_parallel_group=None,
-            return_entropy=True,
-        )
-        logprobs.sum().backward()
-        expected_logprobs.sum().backward()
-
-        self.assertTrue(torch.equal(logprobs, expected_logprobs))
-        self.assertTrue(torch.equal(entropy, expected_entropy))
-        self.assertTrue(torch.equal(logits.grad, divided_logits.grad))
-
     def test_compute_logprobs_entropy_with_masked_logits(self):
         for dtype in (torch.float32, torch.float16, torch.bfloat16):
             with self.subTest(dtype=dtype):

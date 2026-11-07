@@ -97,8 +97,7 @@ class DAPOLoss(Loss[torch.Tensor]):
             (loss, metrics) where loss is a scalar tensor and metrics is a dict of
             scalar tensors pre-normalized for SUM reduction across DP ranks.
         """
-        # Score tokens under the distribution vLLM sampled from. Dividing by a per-token fp32
-        # tensor matches vLLM's op, so batch-invariant runs stay bitwise equal to the generator.
+        # Score tokens under the distribution vLLM sampled from.
         trainer_logprobs, token_entropy = compute_logprobs(
             pred,
             labels,
