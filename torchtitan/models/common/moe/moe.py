@@ -106,10 +106,7 @@ class RoutedExperts(Module):
     def _w13_and_activation(
         self, routed_input_RD: torch.Tensor, offsets_E: torch.Tensor
     ) -> torch.Tensor:
-        """Apply w13, then the activation, to the routed rows: ``[R, D] -> [R, F]``.
-
-        GptOssRoutedExperts overrides it to add w13's bias inside the activation region.
-        """
+        """Apply w13, then the activation, to the routed rows: ``[R, D] -> [R, F]``."""
         gate_up_R2F = self.w13(routed_input_RD, offsets_E)
         remat.recompute_needs_tensor(gate_up_R2F)
         return self.activation_fn(gate_up_R2F, offsets=offsets_E)

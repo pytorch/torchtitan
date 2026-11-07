@@ -1055,8 +1055,9 @@ class TestRematRegions(unittest.TestCase):
                     "routed_experts.w13.grouped_mm",
                     "routed_experts.w2.grouped_mm",
                 ]
+                # GptOssRoutedExperts adds w13's bias inside the activation, so only w2
+                # declares a bias_add region.
                 if isinstance(routed_experts, GptOssRoutedExperts):
-                    # w13's bias add runs with the activation, outside any remat region.
                     expected_names.append("routed_experts.w2.bias_add")
                 self.assertEqual(
                     [entry.name for entry in trace.entries], expected_names

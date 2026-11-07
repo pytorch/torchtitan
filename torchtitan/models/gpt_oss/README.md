@@ -34,6 +34,10 @@ are applied after it instead. Other dispatchers retain post-expert scoring.
 The equality holds in exact arithmetic; moving the scores changes BF16 rounding
 and can change outputs and gradients.
 
+With the `w13_bias_activation` region compiled (the default), w13's bias add and the
+clamped SwiGLU run in one region, and SwiGLU reads the FP32 sum. HF rounds the biased
+w13 output to BF16 first, so the default no longer matches HF's rounding.
+
 CI already runs CP and PP on the debug model:
 - `gpt_oss_pp+fsdp+cp+ep+sacop` (`gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac`)
 - `gpt_oss_pp+fsdp+ep+sacop`

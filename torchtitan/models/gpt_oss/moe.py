@@ -7,18 +7,13 @@
 
 from __future__ import annotations
 
-import functools
 from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch import nn
-from torch.utils.checkpoint import (
-    checkpoint,
-    CheckpointPolicy,
-    create_selective_checkpoint_contexts,
-)
+from torch.utils.checkpoint import checkpoint
 
 from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.common.activation import BinaryActivationFn
@@ -157,8 +152,8 @@ class GptOssRoutedExperts(RoutedExperts):
     ) -> torch.Tensor:
         gate_up_R2F = self.w13(routed_input_RD, offsets_E, with_bias=False)
         remat.recompute_needs_tensor(gate_up_R2F)
-        # Dynamic rows and a copy of the bias, for PP + FSDP2. See GptOssGroupedLinear.forward,
-        # whose TODO also covers this copy.
+        # Marking rows dynamic from the first call saves one recompile. The bias copy is for
+        # PP + FSDP2: see GptOssGroupedLinear.forward, whose TODO also covers this copy.
         if not torch.compiler.is_compiling():
             torch._dynamo.maybe_mark_dynamic(gate_up_R2F, 0)
         return add_bias_and_activate(
@@ -166,8 +161,9 @@ class GptOssRoutedExperts(RoutedExperts):
         )
 
 
-# recompile_limit=16 covers the graphs per process: one for 2+ rows and one each for 0 and
-# 1 rows (EP ranks with few tokens), twice if the process runs both grad and no_grad. Up to 6.
+# Graphs per process: one for 2+ rows and one each for 0 and 1 rows (EP ranks with few
+# tokens), twice if the process runs both grad and no_grad. Up to 6. recompile_limit=16
+# leaves room for more: under fullgraph, the first graph past the limit raises.
 # The options match fused_binary_activation, whose __call__ this region inlines.
 @local_compile(
     "w13_bias_activation",
@@ -193,32 +189,22 @@ def add_bias_and_activate(
         gate_up_R2F: torch.Tensor, bias_E2F: torch.Tensor
     ) -> torch.Tensor:
         gate_up_RO = gate_up_R2F.flatten(1)
-        # Region off: add_grouped_bias compiles on its own. Mark its rows dynamic for PP,
-        # as GptOssGroupedLinear.forward does.
+        # Outside a Dynamo trace, add_grouped_bias compiles on its own. Mark its rows dynamic
+        # for PP, as GptOssGroupedLinear.forward does.
         if not torch.compiler.is_compiling():
             torch._dynamo.maybe_mark_dynamic(gate_up_RO, 0)
         biased_RO = add_grouped_bias(gate_up_RO, bias_E2F.flatten(1), offsets_E)
         return activation_fn(biased_RO.view_as(gate_up_R2F), offsets=offsets_E)
 
-    # Region off: run the bias and activation regions as they are. A checkpoint here would
-    # rerun both in backward and fuse nothing.
+    # The checkpoint steers the compiler's partitioner, so it helps only when Dynamo traces
+    # this code (this region or an outer compile). Otherwise run the two regions as they are:
+    # a checkpoint would rerun both in backward and fuse nothing.
     if not torch.compiler.is_compiling():
         return biased_activation(gate_up_R2F, bias_E2F)
-    # Compiled as is, the region would save the biased [R, 2F] for the activation's
-    # backward, so the forward still writes it. Recomputing the whole function in backward
-    # fuses the add into one forward and one backward kernel, and saves gate_up_R2F instead.
-    # MUST_RECOMPUTE forces that recompute. A plain checkpoint leaves it to the partitioner.
-    # The activation then reads the add's unrounded fp32 result. Eager reads it rounded to bf16.
+    # Backward recomputes this function, so the region saves only gate_up_R2F and never writes
+    # the biased [R, 2F]. The add then fuses into one forward and one backward kernel.
+    # The activation reads the add's unrounded fp32 sum. The region-off path rounds it to bf16.
     # TODO: add the bias inside w13's GEMM once torch._grouped_mm accepts one (today it raises
-    # "Bias not supported yet"). That saves this region's recompute in backward, and the
-    # checkpoint goes away.
-    return checkpoint(
-        biased_activation,
-        gate_up_R2F,
-        bias_E2F,
-        use_reentrant=False,
-        context_fn=functools.partial(
-            create_selective_checkpoint_contexts,
-            lambda ctx, op, *args, **kwargs: CheckpointPolicy.MUST_RECOMPUTE,
-        ),
-    )
+    # "Bias not supported yet"; issue draft: felipemello1/pytorch#25). The recompute and this
+    # checkpoint then go away.
+    return checkpoint(biased_activation, gate_up_R2F, bias_E2F, use_reentrant=False)

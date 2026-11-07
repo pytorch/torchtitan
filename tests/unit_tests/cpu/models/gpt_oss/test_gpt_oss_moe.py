@@ -143,6 +143,30 @@ def test_w13_bias_activation_matches_unfused(reset_local_compile) -> None:
         torch.testing.assert_close(actual, reference)
 
 
+def test_w13_bias_activation_saves_only_gate_up(reset_local_compile) -> None:
+    """The region recomputes the bias add in backward, so it never saves the biased sum.
+
+    Example: 7 rows, F = 6: saves gate_up [7, 2, 6]. Saving the biased sum would show [7, 6].
+    """
+    LocalCompileConfig(regions=["w13_bias_activation"]).apply()
+    gate_up_R2F = torch.randn(7, 2, 6, requires_grad=True)
+    saved_shapes = []
+
+    def record_shape(saved: torch.Tensor) -> torch.Tensor:
+        saved_shapes.append(tuple(saved.shape))
+        return saved
+
+    with torch.autograd.graph.saved_tensors_hooks(record_shape, lambda saved: saved):
+        add_bias_and_activate(
+            gate_up_R2F=gate_up_R2F,
+            bias_E2F=torch.randn(3, 2, 6, requires_grad=True),
+            offsets_E=torch.tensor([2, 2, 5], dtype=torch.int32),
+            activation_fn=ClampedSwiGLU.Config().build(),
+        )
+    assert (7, 2, 6) in saved_shapes
+    assert (7, 6) not in saved_shapes
+
+
 @pytest.mark.parametrize(
     "regions",
     [["grouped_expert_bias"], ["grouped_expert_bias", "w13_bias_activation"]],
