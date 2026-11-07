@@ -1063,37 +1063,40 @@ def test_passes_start_at_every_due_step() -> None:
     asyncio.run(run())
 
 
-def test_one_pass_at_a_time_merges_due_steps() -> None:
-    """With `one_pass_at_a_time`, due steps that come while a pass runs merge into one pass, which
-    starts at the end of the step in which the running pass ends. The last step starts no pass."""
+def test_skip_new_if_prev_not_finished() -> None:
+    """With `skip_new_if_prev_not_finished`, a due step starts no pass while an earlier pass runs.
+    A step that is not due starts none either, even after that pass ends."""
     controller, validation = _controller_for_validation(
-        ValidationConfig(freq=1, one_pass_at_a_time=True)
+        ValidationConfig(freq=2, skip_new_if_prev_not_finished=True)
     )
 
     async def run() -> None:
         queue: asyncio.Queue = asyncio.Queue(maxsize=1)
         trainer = asyncio.create_task(
-            controller._trainer_loop(queue, num_training_steps=5)
+            controller._trainer_loop(queue, num_training_steps=7)
         )
         await _train(controller, queue, 1)
-        await _run_until(lambda: validation.started_steps == [1])
-        # Step 2 is due while pass 1 runs.
         await _train(controller, queue, 2)
-        validation.end(1)
-        await _run_until(lambda: controller._validation_tasks[1].done())
-        # Pass 1 is logged in step 3, and one pass starts for steps 2 and 3.
+        await _run_until(lambda: validation.started_steps == [2])
+        # Step 4 is due while pass 2 runs: skipped.
         await _train(controller, queue, 3)
-        await _run_until(lambda: validation.started_steps == [1, 3])
-        assert _logged_steps(controller, is_validation=True) == [1]
-
-        # Step 4 is due while pass 3 runs; step 5 is the last step.
         await _train(controller, queue, 4)
-        validation.end(3)
-        await _run_until(lambda: controller._validation_tasks[3].done())
+        assert list(controller._validation_tasks) == [2]
+
+        # Pass 2 is logged in step 5, which is not due.
+        validation.end(2)
+        await _run_until(lambda: controller._validation_tasks[2].done())
         await _train(controller, queue, 5)
+        assert controller._validation_tasks == {}
+        assert _logged_steps(controller, is_validation=True) == [2]
+
+        await _train(controller, queue, 6)
+        await _run_until(lambda: validation.started_steps == [2, 6])
+        validation.end(6)
+        await _run_until(lambda: controller._validation_tasks[6].done())
+        await _train(controller, queue, 7)
         await asyncio.wait_for(trainer, timeout=5)
-        assert validation.started_steps == [1, 3]
-        assert _logged_steps(controller, is_validation=True) == [1, 3]
+        assert _logged_steps(controller, is_validation=True) == [2, 6]
 
     asyncio.run(run())
 
