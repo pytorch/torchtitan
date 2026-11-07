@@ -43,8 +43,6 @@ class RolloutWorkerActor(Actor):
         asyncio.get_running_loop().set_default_executor(
             ThreadPoolExecutor(max_workers=num_threads)
         )
-        # TODO: os.nice(10), inherited by agent subprocesses, so ranks on a shared host win CPU
-        #   fights; decide from a multi-node run.
         self._worker = worker_config.build()
         # group id -> the `run_group` call running it here, for `cancel_group`.
         self._group_tasks: dict[int, asyncio.Task] = {}
