@@ -59,7 +59,8 @@ class GenerationEngine(Configurable, abc.ABC):
         mooncake_master_address: ``host:port`` of the Mooncake Store master the
             controller started when ``config.uses_mooncake_store``, else None.
         rank: Global rank of this process.
-        generator_name: Name of the generator, for engine metrics.
+        generator_name: Name of the generator, unique within a run and shared by its
+            ranks; names engine metrics and per-generator connector resources.
         output_dir: Output directory, for engine metrics.
     """
 
