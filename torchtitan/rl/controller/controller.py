@@ -833,10 +833,8 @@ class Controller(Configurable):
             rollout_groups.append(result)
 
         rollouts = [rollout for group in rollout_groups for rollout in group.rollouts]
-        # A rubric's turn metrics (e.g. `math_verify/timeouts`) use the same keys in training and
-        # validation, and a pass logs at a step that training also logged. Prefix them with
-        # `validation/` so they stay off the training charts. Keys already named for validation
-        # (`validation_generator/...`) stay.
+        # A rubric's turn metrics (e.g. `math_verify/timeouts`) use the same keys in training. Prefix
+        # them with `validation/` to keep them off the training charts; `validation*` keys stay as is.
         metrics = [
             (
                 metric
