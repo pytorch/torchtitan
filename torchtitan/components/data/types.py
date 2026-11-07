@@ -8,7 +8,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import grain.python as grain
 import torch
@@ -106,3 +106,15 @@ class DatasetIterationPolicy:
     dp_rank: int
     dp_world_size: int
     streaming_shuffle_buffer_size: int
+    map_dataset_dp_sharding: Literal["contiguous", "strided"] = "contiguous"
+
+    def __post_init__(self) -> None:
+        if self.dp_world_size < 1 or not 0 <= self.dp_rank < self.dp_world_size:
+            raise ValueError(
+                f"dp_rank={self.dp_rank} must be within [0, dp_world_size={self.dp_world_size})"
+            )
+        if self.map_dataset_dp_sharding not in ("contiguous", "strided"):
+            raise ValueError(
+                "map_dataset_dp_sharding must be 'contiguous' or 'strided', "
+                f"got {self.map_dataset_dp_sharding!r}"
+            )
