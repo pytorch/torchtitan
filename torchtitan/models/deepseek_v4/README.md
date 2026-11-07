@@ -39,6 +39,9 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 NGPU=4 \
 ## Status
 
 The AdamW debug model has been smoke-tested with 4 GPUs using FSDP2, TP2, EP2,
-and the `spmd_types` backend. The optional MTP path is available through
+and the `spmd_types` backend. It has also been checked with PP2 (1F1B, GPipe
+and Interleaved1F1B) on 2 GPUs. Under PP, MTP and dry runs on a fake process
+group are not supported. The DistMuon recipes reject PP at config time: that
+pairing has not been validated yet. The optional MTP path is available through
 `deepseek_v4_mtp_debugmodel`. Checkpoint compatibility and larger-scale
 convergence validation should be completed before adding production recipes.

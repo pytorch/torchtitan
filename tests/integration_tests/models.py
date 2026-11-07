@@ -245,6 +245,30 @@ def deepseek_v4_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
     return config
 
 
+def deepseek_v4_debugmodel_tp2_pp2_ep2() -> Trainer.Config:
+    from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_debugmodel
+
+    config = deepseek_v4_debugmodel(
+        seq_len=512, parallelism=ParallelismConfig(expert_parallel_degree=2)
+    )
+    config.optim.optimizer = OptimizersContainer.Config(
+        optimizers=[AdamW.Config(pattern=r".*", lr=8e-4, fused=False)]
+    )
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 1
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.context_parallel_degree = 1
+    config.parallelism.pipeline_parallel_degree = 2
+    # 4 virtual stages: hash-routed layer 1 lands on stage 1, so it needs the
+    # token ids from the input_ids_T model kwarg.
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.num_pp_microbatches = 2
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    config.training.steps = 10
+    config.training.disable_accelerator_graphs = True
+    return config
+
+
 def deepseek_v4_debugmodel_fsdp4_ep4() -> Trainer.Config:
     from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_debugmodel
 
@@ -732,6 +756,18 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             # step 1. The same config trains cleanly on a real 4-GPU PG
             # (grad_norm ~3.8), so keep it on a real PG until the Fake PG
             # collective aliasing under spmd_types is fixed.
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[deepseek_v4_debugmodel_tp2_pp2_ep2],
+            test_descr="DeepSeek V4 AdamW TP+PP+EP",
+            test_name="deepseek_v4_tp+pp+ep",
+            ngpu=4,
+            # Sparse attention / indexer kernels are CUDA-only and unvalidated
+            # on ROCm.
+            skip_rocm_test=True,
+            # PP needs a real PG: DeepSeek V4 rejects PP on a fake PG, whose
+            # static stage metadata assumes [T, dim] hidden states.
             use_real_pg=True,
         ),
         IntegrationTestDefinition(
