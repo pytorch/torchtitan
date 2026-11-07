@@ -167,7 +167,7 @@ class LocalTokenDispatcher(Module):
             token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N,
             row_of_route_N,
-        ) = self._sort_and_gather(x_TD, topk_scores_TK, topk_expert_ids_TK)
+        ) = self._reorder_by_expert(x_TD, topk_scores_TK, topk_expert_ids_TK)
         metadata = LocalDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
@@ -176,7 +176,7 @@ class LocalTokenDispatcher(Module):
         )
         return routed_input_RD, num_local_tokens_per_expert_E, metadata
 
-    def _sort_and_gather(
+    def _reorder_by_expert(
         self,
         x_TD: torch.Tensor,
         topk_scores_TK: torch.Tensor,
@@ -391,6 +391,8 @@ def _sort_routes(
         return _argsort_expert_ids(expert_ids_N, num_experts), None
     num_routes = expert_ids_N.numel()
     routes_N = torch.arange(num_routes, device=expert_ids_N.device)
+    # Both branches invert with an inline index_put: _inverse_permutation (a scatter_)
+    # measured ~3% slower at decode (Qwen3.5-35B-A3B, 64 tokens, GB300).
     if num_routes <= _MAX_PAIRWISE_RANK_ROUTES:
         key_N = expert_ids_N * num_routes + routes_N
         # (N, N) compare; row i counts the keys smaller than key i. Fuses to one kernel.
@@ -824,7 +826,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N,
             row_of_route_N,
-        ) = self._sort_and_gather(x_TD, topk_scores_TK, topk_expert_ids_TK)
+        ) = self._reorder_by_expert(x_TD, topk_scores_TK, topk_expert_ids_TK)
 
         with maybe_set_sparse_mesh():
             ep_group = spmd_mesh_group(MeshAxisName.EP)
@@ -1084,12 +1086,12 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         # num_local_tokens_per_expert_E is already the
         # full per-expert count.
         num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
-        # TODO: call self._sort_and_gather here and _CombineGatherSum after the
+        # TODO: call self._reorder_by_expert here and _CombineGatherSum after the
         # _unpermute in combine, so EP=1 gets the same compiled gather-sum as EP>1
         # (~10 lines, and _local_reorder goes). Not done yet: no test runs TorchAO at
         # EP=1 (its test runs EP=2). Keep _local_reorder until then: compiled,
-        # _sort_and_gather detaches the sorted scores, and this combine's scatter-add
-        # would then drop the score gradient.
+        # _reorder_by_expert detaches the sorted scores, and this combine's
+        # scatter-add would then drop the score gradient.
         (
             routed_input_ND,
             token_indices_experts_sorted_N,
