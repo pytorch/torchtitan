@@ -94,6 +94,11 @@ class MuseSparkQKVLinear(Module):
 
     def __init__(self, config: Config):
         super().__init__()
+        if config.n_heads % config.n_kv_heads != 0:
+            raise ValueError(
+                f"n_heads ({config.n_heads}) must be divisible by "
+                f"n_kv_heads ({config.n_kv_heads}) for fused QKV"
+            )
         self.wqkv = config.wqkv.build()
         self.head_dim = config.head_dim
         self.heads_per_kv = config.n_heads // config.n_kv_heads
@@ -115,7 +120,7 @@ class MuseSparkQKVLinear(Module):
     * 3
 )
 def _split_qkv(
-    qkv: torch.Tensor, heads_per_kv: int, head_dim: int
+    qkv: torch.Tensor, *, heads_per_kv: int, head_dim: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Split the packed ``wqkv`` output into contiguous q, k and v, as ``QKVLinear`` does."""
     # [T, n_kv_heads * R * head_dim] -> [T, n_kv_heads, R, head_dim], R = heads_per_kv + 2.
@@ -226,7 +231,9 @@ class MuseSparkAttention(GQAttention):
         # The q/k copies fuse into the norms, and the norm backward writes the qkv grad
         # directly.
         query_TNH, key_TKH, value_TKH = _split_qkv(
-            qkv, self.qkv_linear.heads_per_kv, self.qkv_linear.head_dim
+            qkv,
+            heads_per_kv=self.qkv_linear.heads_per_kv,
+            head_dim=self.qkv_linear.head_dim,
         )
         if self.q_norm is not None or self.k_norm is not None:
             if self.q_norm is None or self.k_norm is None:
