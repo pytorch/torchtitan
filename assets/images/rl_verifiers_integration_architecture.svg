@@ -12,11 +12,11 @@
 </text>
 <rect x="50" y="85" width="1200" height="260" rx="18" fill="#ffffff" stroke="#1a73e8" stroke-width="3"/>
 <text x="650" y="120" fill="#174ea6" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="700" text-anchor="middle">
-<tspan x="650" dy="0">TorchTitan Controller / VerifiersRollouter process</tspan>
+<tspan x="650" dy="0">TorchTitan rollout worker processes / VerifiersRolloutWorker</tspan>
 </text>
 <rect x="90" y="150" width="170" height="60" rx="12" fill="#e8f0fe" stroke="#5f6368" stroke-width="2"/>
-<text x="175" y="185" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="500" text-anchor="middle">
-<tspan x="175" dy="0">VerifiersRollouter</tspan>
+<text x="175" y="185" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="500" text-anchor="middle">
+<tspan x="175" dy="0">VerifiersRolloutWorker</tspan>
 </text>
 <rect x="300" y="150" width="130" height="60" rx="12" fill="#e8f0fe" stroke="#5f6368" stroke-width="2"/>
 <text x="365" y="185" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="500" text-anchor="middle">
