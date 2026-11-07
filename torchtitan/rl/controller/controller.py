@@ -1069,9 +1069,6 @@ class Controller(Configurable):
                 break
             # We put a group in. We may get a batch back
             # if there are enough accumulated trainable groups to return one.
-            # TODO: a group crosses here, and in the worker's `run_group` reply, as one Monarch
-            #   message, which torchmonarch caps at 10 GiB (`codec_max_frame_length`). Send larger
-            #   groups per rollout, or as RDMA handles to their arrays.
             with sl.log_trace_span("batcher_add_group"):
                 (
                     maybe_training_batch,

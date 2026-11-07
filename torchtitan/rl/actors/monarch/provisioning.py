@@ -293,10 +293,9 @@ def spawn_cpu_procs(num_procs: int) -> ProcMesh:
     return this_host().spawn_procs(per_host={"cpus": num_procs})
 
 
-# Rollout workers need no GPU, and on a trainer or generator host every GPU belongs to a rank.
-# An empty CUDA_VISIBLE_DEVICES keeps any CUDA context a worker's libraries open off those GPUs.
-# TODO: cap glibc's memory pools (MALLOC_ARENA_MAX=2) here if a worker's memory grows step
-#   over step: each pool keeps its peak after frees. Not measured on a long run yet.
+# Every GPU of a job host belongs to a trainer or generator rank, on a one-node run too. An empty
+# CUDA_VISIBLE_DEVICES keeps any CUDA context a worker's libraries open off those GPUs. The cost:
+# an env that needs a GPU in the worker (e.g. a local reward model) can't run there.
 ROLLOUT_WORKER_ENV = {"CUDA_VISIBLE_DEVICES": ""}
 
 
