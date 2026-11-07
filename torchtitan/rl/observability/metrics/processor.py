@@ -82,8 +82,8 @@ class MetricsProcessor(Configurable):
 
         console_log_keys_validation: list[str] | None = field(
             default_factory=lambda: [
-                "validation_reward/_mean",
-                "validation_reward/_max",
+                "validation/reward/_mean",
+                "validation/reward/_max",
                 "validation/response_length/mean",
                 "timing/validate",
             ]

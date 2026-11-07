@@ -1065,7 +1065,7 @@ def test_passes_start_at_every_due_step() -> None:
 
 def test_skip_new_if_prev_not_finished() -> None:
     """With `skip_new_if_prev_not_finished`, a due step starts no pass while an earlier pass runs.
-    A step that is not due starts none either, even after that pass ends."""
+    A skipped step never starts its pass later, even after the running pass ends."""
     controller, validation = _controller_for_validation(
         ValidationConfig(freq=2, skip_new_if_prev_not_finished=True)
     )
@@ -1073,7 +1073,7 @@ def test_skip_new_if_prev_not_finished() -> None:
     async def run() -> None:
         queue: asyncio.Queue = asyncio.Queue(maxsize=1)
         trainer = asyncio.create_task(
-            controller._trainer_loop(queue, num_training_steps=7)
+            controller._trainer_loop(queue, num_training_steps=9)
         )
         await _train(controller, queue, 1)
         await _train(controller, queue, 2)
@@ -1088,15 +1088,20 @@ def test_skip_new_if_prev_not_finished() -> None:
         await _run_until(lambda: controller._validation_tasks[2].done())
         await _train(controller, queue, 5)
         assert controller._validation_tasks == {}
-        assert _logged_steps(controller, is_validation=True) == [2]
 
+        # Pass 6 ends just before due step 8: step 8 logs it first, then starts its own pass.
         await _train(controller, queue, 6)
-        await _run_until(lambda: validation.started_steps == [2, 6])
+        await _train(controller, queue, 7)
         validation.end(6)
         await _run_until(lambda: controller._validation_tasks[6].done())
-        await _train(controller, queue, 7)
+        await _train(controller, queue, 8)
+        await _run_until(lambda: validation.started_steps == [2, 6, 8])
+
+        validation.end(8)
+        await _run_until(lambda: controller._validation_tasks[8].done())
+        await _train(controller, queue, 9)
         await asyncio.wait_for(trainer, timeout=5)
-        assert _logged_steps(controller, is_validation=True) == [2, 6]
+        assert _logged_steps(controller, is_validation=True) == [2, 6, 8]
 
     asyncio.run(run())
 
@@ -1237,6 +1242,7 @@ def test_close_cancels_running_passes_before_closing_the_rollouter() -> None:
     validation = _FakeValidation()
     controller.validate = validation
     passes_done_at_rollouter_close: list[bool] = []
+    passes: list[asyncio.Task] = []
 
     async def close_rollouter() -> None:
         passes_done_at_rollouter_close.append(all(task.done() for task in passes))
@@ -1250,7 +1256,6 @@ def test_close_cancels_running_passes_before_closing_the_rollouter() -> None:
         passes.extend(controller._validation_tasks.values())
         await asyncio.wait_for(controller.close(), timeout=5)
 
-    passes: list[asyncio.Task] = []
     asyncio.run(run())
     assert all(task.cancelled() for task in passes)
     assert passes_done_at_rollouter_close == [True]
