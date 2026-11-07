@@ -484,6 +484,7 @@ def test_qwen3_recipes_resolve(monkeypatch, recipe):
             "fused_binary_activation",
             "rope",
             "fp32_to_bf16_split",
+            "add_rmsnorm",
         ]
 
 
