@@ -872,10 +872,8 @@ def test_validation_group_ids_and_sampled_policies(step, group_ids) -> None:
     assert reduced["validation/mixed_policy_rollouts/mean"] == 0.5
 
 
-def test_validation_rows_share_no_key_with_training_rows() -> None:
-    """A validation row logs at its pass's start step, an older step than the training rows
-    logged meanwhile. TensorBoard drops a tag's points at or after a step it sees again, so a
-    shared key would lose training points. A timed-out rollout counts in `validation/error_rate`."""
+def test_validation_counts_errored_rollouts() -> None:
+    """A rollout that ends in an error or a timeout counts in `validation/error_rate`."""
 
     def rollout(*, group_id: int, status: RolloutStatus) -> Rollout:
         turn = RolloutTurn(
@@ -886,16 +884,6 @@ def test_validation_rows_share_no_key_with_training_rows() -> None:
             completion_logprobs=np.array([-0.1], dtype=np.float32),
             min_policy_version=0,
             max_policy_version=0,
-            # As the generator and the DAPO-Math rubric add them.
-            metrics=[
-                m.Metric(
-                    "validation_generator/queue_time_ms"
-                    if group_id < 0
-                    else "generator/queue_time_ms",
-                    m.Mean(1.0),
-                ),
-                m.Metric("math_verify/timeouts", m.Sum(1.0)),
-            ],
         )
         return Rollout(
             group_id=group_id, rollout_id=0, status=status, reward=0.0, turns=[turn]
@@ -920,17 +908,7 @@ def test_validation_rows_share_no_key_with_training_rows() -> None:
     )
 
     validation = m.MetricsProcessor._aggregate_metrics(validation_metrics)
-    training = m.MetricsProcessor._aggregate_metrics(
-        compute_rollout_metrics(
-            prefix="rollout",
-            rollouts=[rollout(group_id=3, status=RolloutStatus.COMPLETED)],
-        )
-    )
-    assert validation.keys() & training.keys() == set()
-    assert validation["validation/math_verify/timeouts/sum"] == 1.0
-    assert validation["validation_generator/queue_time_ms/mean"] == 1.0
     assert validation["validation/error_rate/mean"] == 1.0
-    assert training["rollout/error_rate/mean"] == 0.0
 
 
 class _FakeValidation:
@@ -1012,8 +990,7 @@ async def _train(controller: Controller, queue: asyncio.Queue, step: int) -> Non
 
 def test_passes_start_at_every_due_step() -> None:
     """Training keeps stepping while passes run, and every due step starts its own pass once that
-    step's weight pull ends. A pass that ends before an older one waits for it: passes are logged
-    oldest first, each at the step it started at."""
+    step's weight pull ends. Each pass is logged at the step it ends."""
     events: list[str] = []
     pulls_may_end = asyncio.Event()
     controller, validation = _controller_for_validation(
@@ -1045,19 +1022,19 @@ def test_passes_start_at_every_due_step() -> None:
         await _train(controller, queue, 4)
         await _run_until(lambda: validation.started_steps == [2, 4])
 
-        # Pass 4 ends first, so it waits for pass 2.
+        # Pass 4 ends first: step 5 logs it, while pass 2 still runs.
         validation.end(4)
         await _run_until(lambda: controller._validation_tasks[4].done())
         await _train(controller, queue, 5)
-        assert _logged_steps(controller, is_validation=True) == []
+        assert _logged_steps(controller, is_validation=True) == [5]
 
         validation.end(2)
         await _run_until(lambda: controller._validation_tasks[2].done())
         await _train(controller, queue, 6)
         await asyncio.wait_for(trainer, timeout=5)
-        # The last step starts no pass; it logs both passes, oldest first.
+        # The last step starts no pass; it logs pass 2.
         assert validation.started_steps == [2, 4]
-        assert _logged_steps(controller, is_validation=True) == [2, 4]
+        assert _logged_steps(controller, is_validation=True) == [5, 6]
         assert _logged_steps(controller, is_validation=False) == [1, 2, 3, 4, 5, 6]
 
     asyncio.run(run())
@@ -1083,7 +1060,7 @@ def test_defer_new_if_not_finished() -> None:
             await _train(controller, queue, step)
         assert list(controller._validation_tasks) == [2]
 
-        # Step 7 logs pass 2 first, then starts one pass for steps 4 and 6.
+        # Step 7 logs pass 2, then starts one pass for steps 4 and 6.
         validation.end(2)
         await _run_until(lambda: controller._validation_tasks[2].done())
         await _train(controller, queue, 7)
@@ -1096,7 +1073,7 @@ def test_defer_new_if_not_finished() -> None:
         await _train(controller, queue, 9)
         await asyncio.wait_for(trainer, timeout=5)
         assert validation.started_steps == [2, 7]
-        assert _logged_steps(controller, is_validation=True) == [2, 7]
+        assert _logged_steps(controller, is_validation=True) == [7, 9]
 
     asyncio.run(run())
 
@@ -1178,51 +1155,35 @@ def test_run_fails_when_the_engine_loops_exit_mid_run() -> None:
         asyncio.run(asyncio.wait_for(controller.run(), timeout=10))
 
 
-@pytest.mark.parametrize(
-    "start_step, open_steps",
-    [
-        # Passes 0 and 3 still run when training ends.
-        (0, [0, 3]),
-        # Resumed at the last step: the first pass has the final pass's step, so its group ids.
-        (4, [4]),
-    ],
-)
-def test_run_waits_for_open_passes_then_runs_the_final_pass(
-    start_step, open_steps
+@pytest.mark.parametrize("validate_after_training", [False, True])
+def test_run_logs_ended_passes_then_runs_the_final_pass_if_asked(
+    validate_after_training,
 ) -> None:
-    """The first pass runs while training starts. Passes still running when training ends are
-    awaited and logged at their start steps; only then does the final pass start."""
+    """When training ends, run() logs the passes that ended, leaves the running ones to close(),
+    and runs the final pass only with `validate_after_training`."""
     controller, validation = _controller_for_run()
-    controller.start_step = start_step
+    controller.config.async_loop.validation = ValidationConfig(
+        validate_after_training=validate_after_training
+    )
 
-    # Stands in for `_trainer_loop`, which the tests above cover.
+    # Stands in for `_trainer_loop`, which the tests above cover: 4 steps, pass 3 still runs.
     async def trainer_loop(queue, *, num_training_steps: int) -> None:
-        assert validation.started_steps == [start_step]
-        for step in open_steps[1:]:
-            controller._start_validation(step=step)
-        await _run_until(lambda: validation.started_steps == open_steps)
-        # Training ends before the open passes do; the final pass's end is set last.
-        for delay, step in enumerate([*open_steps, 4], start=1):
-            asyncio.get_running_loop().call_later(0.01 * delay, validation.end, step)
+        controller._start_validation(step=3)
+        await _run_until(lambda: validation.started_steps == [0, 3])
+        validation.end(0)
+        await _run_until(lambda: controller._validation_tasks[0].done())
+        controller._trainer_policy_version = 4
 
     controller._trainer_loop = trainer_loop
+    validation.end(4)
 
     asyncio.run(asyncio.wait_for(controller.run(), timeout=5))
 
-    assert validation.events == [
-        *[("start", step) for step in open_steps],
-        *[("end", step) for step in open_steps],
-        ("start", 4),
-        ("end", 4),
-    ]
-    assert _logged_steps(controller, is_validation=True) == [*open_steps, 4]
-    first_metrics, final_metrics = controller._log_reward_delta.call_args.args
-    assert m.MetricsProcessor._aggregate_metrics(first_metrics) == {
-        "validation_reward/mean": float(start_step)
-    }
-    assert m.MetricsProcessor._aggregate_metrics(final_metrics) == {
-        "validation_reward/mean": 4.0
-    }
+    final_steps = [4] if validate_after_training else []
+    assert validation.started_steps == [0, 3, *final_steps]
+    assert _logged_steps(controller, is_validation=True) == [4, *final_steps]
+    assert list(controller._validation_tasks) == [3]
+    assert controller._log_reward_delta.called == validate_after_training
 
 
 def test_close_cancels_running_passes_before_closing_the_rollouter() -> None:

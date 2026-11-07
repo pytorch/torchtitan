@@ -138,27 +138,28 @@ logger = logging.getLogger(__name__)
 
 @dataclass(kw_only=True, slots=True)
 class ValidationConfig:
-    """Held-out validation: a pass at the start, one every `freq` steps, and one after training.
+    """Held-out validation: a pass at the start, one every `freq` steps, and one after training if asked.
 
-    Passes run beside training, and training never waits for one. In vLLM, their requests run after
-    all training requests. A weight sync during a pass makes it sample several policies
-    (`validation/{min,max}_policy_version`). Each pass is logged at the step it started on.
-    An error that ends a pass fails the run; a prompt whose rollout raises counts in
+    Passes run beside training; training never waits for one. A pass is logged at the step it ends.
+    Passes still running when training ends are dropped. If a pass crashes (e.g. the generator
+    dies), training stops with that error; a prompt whose rollout fails only counts in
     `validation/group_failures`.
-    Example: freq=25, 100 steps, each pass lasts 60 steps (1 char = 5 steps):
+    Example: freq=25, 100 steps, each pass lasts 30 steps (1 char = 5 steps):
 
-        step     0    25   50   75   100  125  150  175
-        train    ====================|  training ends at 100
+        step     0    25   50   75   100  125
+        train    ====================|          training ends at 100
         defer_new_if_not_finished=False: every due pass starts
-        pass 0   ============                  logged at 0
-        pass 25       ============             logged at 25
-        pass 50            ============        logged at 50
-        pass 75                 ============   logged at 75
-        final                               ============ starts when the open passes end, logged at 100
-        defer_new_if_not_finished=True: due steps 25 and 50 start one pass when pass 0 ends
-        pass 0   ============                  logged at 0
-        pass 60              ============      logged at 60
-        final                            ============ logged at 100
+        pass 0   ======                         logged at 30
+        pass 25       ======                    logged at 55
+        pass 50            ======               logged at 80
+        pass 75                 ======          dropped: still running at 100
+        defer_new_if_not_finished=True: a due pass waits for the running one
+        pass 0   ======                         logged at 30
+        pass 30        ======                   due at 25, logged at 60
+        pass 60              ======             due at 50, logged at 90
+        pass 90                    ======       due at 75, dropped
+        validate_after_training=True adds:
+        final                        ======     logged at 100
     """
 
     steps: int = 20
@@ -172,6 +173,9 @@ class ValidationConfig:
     pass ends, then starts at once. Due steps that come meanwhile share that one pass. Use it when
     the env server can't host several passes beside training."""
 
+    validate_after_training: bool = False
+    """Run one more pass on the final policy after the last step. The GPUs wait for it."""
+
     def __post_init__(self) -> None:
         if self.steps < -1:
             raise ValueError(
@@ -179,9 +183,10 @@ class ValidationConfig:
             )
         if self.freq is not None and self.freq <= 0:
             raise ValueError(f"validation freq must be positive, got {self.freq}")
-        if self.steps == 0 and self.freq is not None:
+        if self.steps == 0 and (self.freq is not None or self.validate_after_training):
             raise ValueError(
-                f"validation freq={self.freq} needs steps != 0; steps=0 disables validation"
+                f"validation freq={self.freq} and validate_after_training="
+                f"{self.validate_after_training} need steps != 0; steps=0 disables validation"
             )
         if self.defer_new_if_not_finished and self.freq is None:
             raise ValueError(
@@ -518,8 +523,7 @@ class Controller(Configurable):
         )
         # Held-out prompts, built once in setup_async, so every pass scores the same prompts.
         self._validation_samples: list[object] = []
-        # Passes not logged yet, by the step each started at, oldest first. One key per step is
-        # enough: run() starts the final pass only after the open passes end.
+        # Running passes, by the step each started at.
         self._validation_tasks: dict[int, asyncio.Task[list[m.Metric]]] = {}
 
     async def close(self):
@@ -816,20 +820,7 @@ class Controller(Configurable):
             rollout_groups.append(result)
 
         rollouts = [rollout for group in rollout_groups for rollout in group.rollouts]
-        # Validation rows share no key with training rows. A turn metric such as a rubric's
-        # `math_verify/timeouts` is in training rows too, and this row logs at an older step,
-        # which would drop TensorBoard's later training points of that key. `validation_reward`
-        # and `validation_generator/*` (see `_make_generate_fn`) already start with "validation".
-        metrics = [
-            (
-                metric
-                if metric.key.startswith("validation")
-                else m.Metric(f"validation/{metric.key}", metric.value)
-            )
-            for metric in compute_rollout_metrics(
-                prefix="validation", rollouts=rollouts
-            )
-        ]
+        metrics = compute_rollout_metrics(prefix="validation", rollouts=rollouts)
         metrics.append(
             m.Metric("validation/group_failures", m.Sum(float(num_failed_groups)))
         )
@@ -1019,15 +1010,20 @@ class Controller(Configurable):
                 *background_tasks, trainer_task, return_exceptions=True
             )
 
-        # Wait for the passes still running: their scores still count. The final pass starts only
-        # after they end. After a resume at the last step, the first pass has the same step, so the
-        # same group ids, and two in-flight requests with one id are fatal in the engine.
-        # TODO: stop the training rollouts still running here; they run until close()
-        # (`Rollouter.run_group_rollouts` shields them), and these passes run after them in vLLM.
-        await self._wait_for_validation()
-        final_validation = self._start_validation(step=num_training_steps)
-        await self._wait_for_validation()
-        self._log_reward_delta(first_validation.result(), final_validation.result())
+        # Log the passes that ended after the last step's check. close() cancels the rest.
+        last_step = self._trainer_policy_version
+        self._log_finished_validation(step=last_step)
+        # With no step trained (a resume at the last step), the first pass already scores the
+        # final policy, with the same group ids.
+        if async_loop.validation.validate_after_training and last_step > self.start_step:
+            # TODO: cancel the training rollouts still running here. They run until close()
+            # (`Rollouter.run_group_rollouts` shields them), and this pass waits behind them.
+            final_metrics = await self.validate(step=num_training_steps)
+            self.metrics_processor.log(
+                step=last_step, metrics=final_metrics, is_validation=True
+            )
+            if first_validation.done():
+                self._log_reward_delta(first_validation.result(), final_metrics)
 
     async def _generator_loop(self) -> None:
         """Wait until every generator's engine loop exits; raise as soon as one crashes."""
@@ -1036,7 +1032,7 @@ class Controller(Configurable):
     def _start_validation(
         self, *, step: int, after: asyncio.Task[float] | None = None
     ) -> asyncio.Task[list[m.Metric]]:
-        """Start the validation pass for policy `step`; `_log_finished_validation` logs it at `step`.
+        """Start the validation pass for policy `step`; `_log_finished_validation` logs it when it ends.
 
         The pass samples once `after` (this step's weight pull) ends, so it starts on policy `step`
         or newer; without `after`, the generators must already hold policy `step`.
@@ -1059,25 +1055,17 @@ class Controller(Configurable):
         )
         return task
 
-    @sl.log_trace_span("wait_for_validation")
-    async def _wait_for_validation(self) -> None:
-        """After training: wait until every running pass ends, then log them oldest first."""
-        await asyncio.gather(*self._validation_tasks.values(), return_exceptions=True)
-        self._log_finished_validation()
+    def _log_finished_validation(self, *, step: int) -> None:
+        """Log every pass that has ended at `step`, the training step it ended in; a failed pass raises.
 
-    def _log_finished_validation(self) -> None:
-        """Log ended passes oldest first, each at its start step; a failed pass raises.
-
-        Example: pass 0 running, pass 25 ended -> nothing logs. Pass 0 ends -> rows 0, then 25.
-        Oldest first: TensorBoard drops a tag's points at or after a step it sees again.
+        Example: passes 0 and 25 both end during step 30 -> two validation rows at step 30.
         """
-        for step, task in list(self._validation_tasks.items()):
-            if not task.done():
-                return
-            del self._validation_tasks[step]
-            self.metrics_processor.log(
-                step=step, metrics=task.result(), is_validation=True
-            )
+        for start_step, task in list(self._validation_tasks.items()):
+            if task.done():
+                del self._validation_tasks[start_step]
+                self.metrics_processor.log(
+                    step=step, metrics=task.result(), is_validation=True
+                )
 
     def _log_reward_delta(
         self, first_metrics: list[m.Metric], final_metrics: list[m.Metric]
@@ -1422,7 +1410,7 @@ class Controller(Configurable):
                 )
 
             # Never awaits a pass: validation must not stall training.
-            self._log_finished_validation()
+            self._log_finished_validation(step=step)
             if validation.freq is not None and step % validation.freq == 0:
                 is_validation_due = True
             is_deferred = validation.defer_new_if_not_finished and bool(
