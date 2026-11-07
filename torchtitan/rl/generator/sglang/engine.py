@@ -53,6 +53,7 @@ from torchtitan.rl.generator.sglang.batch_invariance import (
 )
 from torchtitan.rl.generator.sglang.model_wrapper import replace_sglang_layer_configs
 from torchtitan.rl.generator.sglang.registry import (
+    CONTEXT_LENGTH_MARGIN,
     register_to_sglang,
     TORCHTITAN_CONFIG_PARSER,
 )
@@ -175,6 +176,7 @@ class SGLangEngine(GenerationEngine):
         # SGLang honors per-request seeds only in its deterministic mode, which
         # _build_server_args turns on with DebugConfig.seed.
         self._honors_request_seeds = debug.seed is not None
+        self._max_context_length = model.max_context_length
         if not dist.is_initialized():
             # As vLLM's external_launcher: the actor framework launched this process
             # with the torch elastic env (RANK, WORLD_SIZE, LOCAL_RANK, MASTER_ADDR,
@@ -277,7 +279,7 @@ class SGLangEngine(GenerationEngine):
             # as with vLLM's gpu_memory_utilization=0.8.
             mem_fraction_static=gpu_memory_limit,
             max_running_requests=max_num_seqs,
-            context_length=model.max_context_length,
+            context_length=model.max_context_length + CONTEXT_LENGTH_MARGIN,
             attention_backend=TORCHTITAN_VARLEN_ATTENTION_BACKEND,
             # Smaller `priority` runs first and is preempted last; EngineRequest.group_id
             # (-1 for all validation) puts older groups first (see its docstring).
@@ -361,7 +363,9 @@ class SGLangEngine(GenerationEngine):
         rejected: list[tuple[str, Exception]] = []
         for request in requests:
             try:
-                sampling_params = self._build_sampling_params(request.sampling)
+                sampling_params = self._build_sampling_params(
+                    request.sampling, prompt_length=len(request.prompt_token_ids)
+                )
             except ValueError as error:
                 rejected.append((request.request_id, error))
                 continue
@@ -426,8 +430,16 @@ class SGLangEngine(GenerationEngine):
         assert not unqueued, f"not in SGLang's waiting queue: {sorted(unqueued)}"
         return rejected
 
-    def _build_sampling_params(self, sampling: SamplingConfig) -> SamplingParams:
-        """Translate a ``SamplingConfig`` into SGLang ``SamplingParams`` (n=1)."""
+    def _build_sampling_params(
+        self, sampling: SamplingConfig, *, prompt_length: int
+    ) -> SamplingParams:
+        """Translate a ``SamplingConfig`` into SGLang ``SamplingParams`` (n=1).
+
+        As in vLLM, prompt and output together take at most the model's
+        ``max_context_length`` tokens; SGLang's own cap is above it (see
+        ``CONTEXT_LENGTH_MARGIN``). SGLang rejects a prompt of ``max_context_length``
+        tokens or more.
+        """
         if sampling.seed is not None and not self._honors_request_seeds:
             raise ValueError(
                 "SGLangEngine samples with per-request seeds only when the generator's "
@@ -436,7 +448,9 @@ class SGLangEngine(GenerationEngine):
         params = SamplingParams(
             temperature=sampling.temperature,
             top_p=sampling.top_p,
-            max_new_tokens=sampling.max_tokens,
+            max_new_tokens=min(
+                sampling.max_tokens, max(self._max_context_length - prompt_length, 0)
+            ),
             stop_token_ids=sampling.stop_token_ids,
             sampling_seed=sampling.seed,
             n=1,

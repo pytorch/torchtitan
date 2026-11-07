@@ -31,6 +31,13 @@ TORCHTITAN_ARCHITECTURE = "TorchTitanForCausalLM"
 # ``ServerArgs.model_config_parser`` value selecting the TorchTitan config parser.
 TORCHTITAN_CONFIG_PARSER = "torchtitan"
 
+# SGLang caps a request at context_len - 1 tokens and rejects prompts of
+# context_len - 6 tokens or more (max_req_len and max_req_input_len in its
+# TpModelWorker). SGLangEngine sets SGLang's context length this many tokens above
+# the model's max_context_length, so SGLang accepts the prompts vLLM accepts (up to
+# max_context_length - 1 tokens), and caps each request's output itself.
+CONTEXT_LENGTH_MARGIN = 6
+
 
 def _model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
     """Build the HF-shaped config dict SGLang reads before it builds the model.
@@ -53,7 +60,8 @@ def _model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
         "num_key_value_heads": n_kv_heads,
         "head_dim": head_dim,
         "num_hidden_layers": len(cfg.layers),
-        "max_position_embeddings": cfg.max_context_length,
+        # SGLang rejects a context length above this.
+        "max_position_embeddings": cfg.max_context_length + CONTEXT_LENGTH_MARGIN,
         # The wrapper builds and ties the TorchTitan model itself.
         "tie_word_embeddings": False,
         # Requests pass their stop token ids; the model config does not know the

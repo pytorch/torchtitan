@@ -17,6 +17,10 @@ Test bitwise parity between the SGLang generator and the TorchTitan trainer.
   3. test_trainer_vs_sglang_decode_after_model_state_dict_load:
       Test 1 after perturbed trainer weights are loaded into SGLang in place (CUDA
       graphs kept) and requests move to the next policy version's cache salt.
+  4. test_context_length_limits:
+      As in vLLM, a prompt of max_context_length - 1 tokens runs and stops at
+      max_context_length tokens in total, and a prompt of max_context_length
+      tokens is rejected.
 
 Runs in the B200 RL CI job. Run with the SGLang environment (see
 torchtitan/rl/generator/sglang/README.md):
@@ -86,6 +90,7 @@ class TestSGLangBitwiseParityVarlen(unittest.TestCase):
             dist_utils.init_distributed(CommConfig(), base_folder=base_folder)
 
         cls.precision = config.precision
+        cls.max_context_length = config.generator.model.max_context_length
         cls.model, cls.device, cls.parallelism_context = build_trainer_model(config)
         # Same workaround as test_bitwise_parity: the trainer and the generator
         # build equal but separate meshes in this process.
@@ -181,6 +186,35 @@ class TestSGLangBitwiseParityVarlen(unittest.TestCase):
                     trainer_lps[i][len(prompt) - 1 :],
                     gen_lps[i],
                 )
+
+    def test_context_length_limits(self):
+        lengths = [self.max_context_length - 1, self.max_context_length]
+        requests = [
+            EngineRequest(
+                request_id=f"{time.monotonic_ns()}-{length}",
+                prompt_token_ids=self.prompt_ids[0][:1] * length,
+                sampling=SamplingConfig(
+                    temperature=1.0, max_tokens=self.MAX_GEN_TOKENS, stop_token_ids=[]
+                ),
+                group_id=i,
+                routing_session_id=f"context-{i}",
+                arrival_time=time.time(),
+            )
+            for i, length in enumerate(lengths)
+        ]
+        for request in requests:
+            request.min_policy_version = self.policy_version
+        rejected = self.engine.add_requests(requests)
+        self.assertEqual(
+            [request_id for request_id, _ in rejected], [requests[1].request_id]
+        )
+        finished = []
+        while self.engine.has_unfinished_requests():
+            finished.extend(self.engine.step())
+        self.assertEqual(
+            [result.request_id for result in finished], [requests[0].request_id]
+        )
+        self.assertEqual(len(finished[0].token_ids), 1)
 
     def test_sglang_decode_batch_invariance(self):
         single_ids, single_lps = self._generate(self.prompt_ids[:1])
