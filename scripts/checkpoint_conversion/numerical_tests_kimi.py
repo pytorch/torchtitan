@@ -195,15 +195,15 @@ def run_tt(model_flavor, checkpoint_path, ref, dtype, vision_dtype, force_hf_rou
     model_config = build_model_config(model_flavor, parallelism=ParallelismConfig())
     with torch.device("meta"):
         model = model_config.build()
-    model.to_empty(device="cpu")
-    # Cast before init_states so the complex64 ComplexRoPE cache survives.
+    # Set both precisions before materializing and initializing buffers.
     model.to(dtype)
+    model.vision_encoder.to(vision_dtype)
+    model.to_empty(device="cpu")
     model.init_states(buffer_device=torch.device("cpu"))
     state_dict = ModelWrapper(model)._get_state_dict()
     dcp.load(state_dict, checkpoint_id=checkpoint_path)
     model.to(device)
 
-    model.vision_encoder.to(vision_dtype)  # mixed precision: ViT in vision_dtype
     for layer in model.layers.values():
         layer.attention.inner_attention.inner_attention = _SDPA(is_causal=True)
     for layer in model.vision_encoder.layers.values():

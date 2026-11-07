@@ -180,8 +180,8 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
 def _build_tt_model(tt_config, dtype: torch.dtype) -> KimiK3Model:
     with torch.device("meta"):
         model = tt_config.build()
-    model.to_empty(device="cpu")
     model.to(dtype=dtype)
+    model.to_empty(device="cpu")
     model.init_states(buffer_device=torch.device("cpu"))
     return model.eval()
 

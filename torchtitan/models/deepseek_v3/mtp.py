@@ -200,7 +200,7 @@ class MTPDecoder(Decoder):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
-        mtp_layers: list = field(default_factory=list)
+        mtp_layers: list[MTPTransformerBlock.Config] = field(default_factory=list)
 
         def build_flops_estimator(
             self,

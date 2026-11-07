@@ -171,6 +171,8 @@ class DeepSeekV4Model(Decoder):
     class Config(Decoder.Config):
         dim: int
         vocab_size: int
+        # pyrefly: ignore [bad-override]
+        layers: list[DeepSeekV4TransformerBlock.Config]
         local_compile: LocalCompileConfig = field(
             default_factory=lambda: LocalCompileConfig(
                 regions=[

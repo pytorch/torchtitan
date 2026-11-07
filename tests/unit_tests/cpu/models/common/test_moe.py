@@ -102,6 +102,7 @@ def _forward_with_routed_mask(
         _maybe_zero_fill_routed_output_to_tp_partial=lambda out: out,
         shared_experts=None,
         _maybe_all_reduce_moe_output_across_tp=lambda out: out,
+        _add_shared_experts_and_reduce_across_tp=lambda out, x: out,
     )
     moe_cls.forward(cast(Any, moe), torch.zeros(4, 3), padding_mask_T=padding_mask_T)
     return routed_mask_T
