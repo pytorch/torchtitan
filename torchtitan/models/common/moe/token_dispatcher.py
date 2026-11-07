@@ -35,8 +35,6 @@ class _PermuteRows(torch.autograd.Function):
     1. Its backward can't assume ``perm`` is a permutation, so it adds the grads into
        a zero-filled tensor: a sort, a fill and an accumulate.
     2. A permutation moves each row once, so gathering by ``inv`` gives the same grads.
-    3. ``_permute`` + ``_unpermute``, fwd+bwd, 16k tokens, DeepSeek-V3 EP2 rank, one
-       GB300: 9.3 ms with indexing, 4.1 ms with gathers.
     """
 
     @staticmethod
