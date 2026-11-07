@@ -56,6 +56,7 @@ from torchtitan.models.common.moe.sharding import shared_experts_sharding_config
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
 from torchtitan.models.common.vision_encoder import (
+    InvariantColumnParallelLinear,
     InvariantRowParallelLinear,
     VisionAttention,
     VisionMLP,
@@ -154,6 +155,18 @@ def _linear(
         bias=True,
         param_init=_LINEAR_INIT,
         sharding_config=sharding_config,
+    )
+
+
+def _vision_column_parallel_linear(
+    in_features: int, out_features: int
+) -> InvariantColumnParallelLinear.Config:
+    return InvariantColumnParallelLinear.Config(
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        param_init=_LINEAR_INIT,
+        sharding_config=vision_colwise_sharding_config(),
     )
 
 
@@ -273,9 +286,7 @@ def _qwen35_vision_encoder_config(
                 sharding_config=vision_attention_sharding_config(rope_cache_dp=spmd.V),
             ),
             mlp=VisionMLP.Config(
-                fc1=_linear(
-                    dim, ffn_dim, sharding_config=vision_colwise_sharding_config()
-                ),
+                fc1=_vision_column_parallel_linear(dim, ffn_dim),
                 fc2=_vision_row_parallel_linear(ffn_dim, dim),
             ),
         ),
@@ -292,11 +303,7 @@ def _qwen35_vision_encoder_config(
                 eps=layer_norm_eps,
                 sharding_config=invariant_norm_sharding_config(),
             ),
-            fc1=_linear(
-                merged_hidden_size,
-                merged_hidden_size,
-                sharding_config=vision_colwise_sharding_config(),
-            ),
+            fc1=_vision_column_parallel_linear(merged_hidden_size, merged_hidden_size),
             fc2=_vision_row_parallel_linear(merged_hidden_size, out_hidden_size),
             sharding_config=vision_merger_sharding_config(),
         ),

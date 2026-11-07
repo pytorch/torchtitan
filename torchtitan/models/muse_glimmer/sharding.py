@@ -80,15 +80,3 @@ def cp_replicated_vision_sharding_config() -> ShardingConfig:
         out_src_shardings=activation,
         out_dst_shardings=activation,
     )
-
-
-def perception_emb_norm_sharding_config(*, enable_sp: bool) -> ShardingConfig:
-    """Scaleless norm on the projected vision features before fusion.
-
-    With SP, its output is gathered to TP-replicated so each rank can select
-    vision rows for its local token shard.
-    """
-    vision_norm = cp_replicated_vision_sharding_config()
-    if enable_sp:
-        vision_norm.out_dst_shardings = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.R})
-    return vision_norm

@@ -18,9 +18,11 @@ from torch import nn
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
-from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
+    maybe_replicate_invariant,
+    spmd_dense_sp_enabled,
     spmd_local_context,
 )
 from torchtitan.models.base.model import FlopsEstimator
@@ -681,11 +683,13 @@ class MuseSparkModel(MultimodalModel):
         vision_features_TO = vision_adapter(
             vision_encoder(pixel_values_TP, grid_thw=grid_thw_I3)
         )
-        vision_embeds_TD = (
-            perception_emb_norm(vision_projection(vision_features_TO))
-            * tok_embeddings.multiplier
-        )
-        return vision_embeds_TD
+        vision_embeds_TD = perception_emb_norm(vision_projection(vision_features_TO))
+        if spmd_dense_sp_enabled():
+            # Each rank selects vision rows for its own token shard.
+            vision_embeds_TD = maybe_replicate_invariant(
+                vision_embeds_TD, MeshAxisName.TP
+            )
+        return vision_embeds_TD * tok_embeddings.multiplier
 
     def _get_audio_bank(
         self,
@@ -703,10 +707,13 @@ class MuseSparkModel(MultimodalModel):
             waveforms_SC,
             waveform_padded_lengths_N=waveform_padded_lengths_N,
         )
-        audio_embeds_TD = (
-            perception_emb_norm(audio_features_TD) * tok_embeddings.multiplier
-        )
-        return audio_embeds_TD
+        audio_embeds_TD = perception_emb_norm(audio_features_TD)
+        if spmd_dense_sp_enabled():
+            # Each rank selects audio rows for its own token shard.
+            audio_embeds_TD = maybe_replicate_invariant(
+                audio_embeds_TD, MeshAxisName.TP
+            )
+        return audio_embeds_TD * tok_embeddings.multiplier
 
     def _prepare_visual_embeds(
         self,

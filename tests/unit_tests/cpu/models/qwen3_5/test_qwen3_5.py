@@ -83,8 +83,10 @@ def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
     import spmd_types as spmd
     from spmd_types import SpmdType
     from torchtitan.distributed.parallelism_context import MeshAxisName
-    from torchtitan.models.common.linear import Linear
-    from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
+    from torchtitan.models.common.vision_encoder import (
+        InvariantColumnParallelLinear,
+        InvariantRowParallelLinear,
+    )
 
     config = cast(
         Qwen35Model.Config,
@@ -93,11 +95,17 @@ def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
     vision_encoder = config.vision_encoder
     assert vision_encoder is not None
 
-    assert type(vision_encoder.block.mlp.fc1) is Linear.Config
+    assert type(vision_encoder.block.mlp.fc1) is InvariantColumnParallelLinear.Config
     assert type(vision_encoder.block.mlp.fc2) is InvariantRowParallelLinear.Config
     assert type(vision_encoder.block.attn.proj) is InvariantRowParallelLinear.Config
-    assert type(vision_encoder.merger.fc1) is Linear.Config
+    assert type(vision_encoder.merger.fc1) is InvariantColumnParallelLinear.Config
     assert type(vision_encoder.merger.fc2) is InvariantRowParallelLinear.Config
+
+    # The column projections replicate their input themselves.
+    for projection in (vision_encoder.block.mlp.fc1, vision_encoder.merger.fc1):
+        sharding = projection.sharding_config
+        assert sharding is not None
+        assert sharding.in_dst_shardings is None
 
     for projection in (
         vision_encoder.block.mlp.fc2,
