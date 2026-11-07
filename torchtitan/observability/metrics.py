@@ -206,8 +206,8 @@ class WandBLogger(BaseLogger):
     """Logger implementation for Weights & Biases: each `log` call is one row, with `trainer/step`.
 
     Example:
-        log({"loss": 2.1}, step=10)               -> row _step=0, trainer/step=10
-        log({"validation_loss": 2.3}, step=10)    -> row _step=1, trainer/step=10
+        log({"loss": 2.1}, step=10)                       -> row _step=0, trainer/step=10
+        log({"validation_metrics/loss": 2.3}, step=10)    -> row _step=1, trainer/step=10
     """
 
     @dataclass(kw_only=True, slots=True)
