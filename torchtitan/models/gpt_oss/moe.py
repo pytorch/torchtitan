@@ -41,13 +41,16 @@ class GptOssGroupedLinear(GroupedLinear):
     ) -> torch.Tensor:
         output_RO = super().forward(input_RI, offsets_E, scores_R=scores_R)
         flat_output_RO = output_RO.flatten(1)
-        # Mark rows dynamic from the first call. Without it, PP fails in backward:
+        # Mark rows dynamic from the first call (scores_R has the same rows). Without it,
+        # PP fails in backward:
         # 1. Microbatch A's forward compiles a graph for A's row count.
         # 2. Microbatch B's forward has other rows and compiles a dynamic-rows graph.
         # 3. A's backward replays the region on B's graph, which saves other tensors.
         # Dynamo can't trace this call, so skip it when the caller itself is compiled.
         if not torch.compiler.is_compiling():
             torch._dynamo.maybe_mark_dynamic(flat_output_RO, 0)
+            if scores_R is not None:
+                torch._dynamo.maybe_mark_dynamic(scores_R, 0)
         # Match the matmul's policy: replaying even this cheap add after a saved
         # matmul would force retention of its full routed output.
         add_bias = remat.region(
