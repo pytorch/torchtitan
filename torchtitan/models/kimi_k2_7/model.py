@@ -57,6 +57,18 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
         register_qk_clip_hook(optimizers, model_parts, parallelism_context)
 
+    def pipeline(self, **kwargs: Any):
+        """Partition the model; QK clip ignores the schedule's shape-inference forward."""
+        from torchtitan.models.kimi_k2_7.qk_clip import (
+            register_qk_clip_shape_inference_cleanup,
+        )
+
+        pp_schedule, model_parts, has_first_stage, has_last_stage = super().pipeline(
+            **kwargs
+        )
+        register_qk_clip_shape_inference_cleanup(pp_schedule, model_parts)
+        return pp_schedule, model_parts, has_first_stage, has_last_stage
+
     pipeline_first_stage_module_fqns = ("vision_encoder",)
 
     """Kimi K2.5: DeepSeekV3 language model with a MoonViT3d vision encoder.

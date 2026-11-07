@@ -8,15 +8,17 @@
 
 import unittest
 from types import SimpleNamespace
-from typing import cast
 from unittest.mock import patch
 
 import pytest
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch_remat as remat
-from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.pipelining import PipelineStage
+from torch.distributed.pipelining.schedules import ScheduleInterleaved1F1B
 from torch.distributed.tensor import distribute_tensor, Shard
 from torch.distributed.tensor.debug import CommDebugMode
 from torch.nn.attention.flex_attention import create_block_mask
@@ -34,6 +36,7 @@ from torchtitan.models.kimi_k2_7.qk_clip import (
     qk_clip,
     QKClipFlexInnerAttention,
     register_qk_clip_hook,
+    register_qk_clip_shape_inference_cleanup,
 )
 
 
@@ -137,8 +140,58 @@ class QKClipTest(unittest.TestCase):
             torch.tensor([3.0, 4.0]),
         )
 
-    def test_optimizer_hook_runs_qk_clip(self) -> None:
-        model = nn.Linear(2, 2, bias=False)
+
+class _RecordingStage(nn.Module):
+    """Pipeline stage stand-in that records its input's per-column max as head maxima."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.proj = nn.Linear(2, 2)
+        self.inner_attention = _qk_clip_config().build()
+
+    def forward(self, x_TH: torch.Tensor) -> torch.Tensor:
+        max_scores_1HT = x_TH.detach().amax(dim=0)[None, :, None]
+        self.inner_attention._process_aux(SimpleNamespace(max_scores=max_scores_1HT))
+        return self.proj(x_TH)
+
+
+class QKClipSingleRankTest(unittest.TestCase):
+    """One gloo rank: dp * cp == 1, as in PP-only or one-GPU runs."""
+
+    def setUp(self) -> None:
+        dist.init_process_group("gloo", store=dist.HashStore(), rank=0, world_size=1)
+        self.addCleanup(dist.destroy_process_group)
+
+    @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
+    def test_optimizer_hook_runs_without_loss_mesh(self) -> None:
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            world_size=1,
+            enable_sequence_parallel=False,
+        )
+        # One QK-clip layer with one head. FSDP leaves its weights as DTensors
+        # on the size-1 dp_shard mesh.
+        attention = DeepSeekMLAAttention.__new__(DeepSeekMLAAttention)
+        nn.Module.__init__(attention)
+        attention.q_lora_rank = 1
+        attention.qk_nope_head_dim = 1
+        attention.qk_head_dim = 2
+        attention.v_head_dim = 1
+        attention.wq_b = nn.Linear(1, 2, bias=False)
+        attention.inner_attention = _qk_clip_mla_attention()
+        attention.inner_attention.wkv_b = nn.Linear(1, 2, bias=False)
+        mesh = parallelism_context.get_mesh("dp_shard")
+        for projection in (attention.wq_b, attention.inner_attention.wkv_b):
+            projection.weight = nn.Parameter(
+                distribute_tensor(projection.weight.detach(), mesh, (Shard(0),))
+            )
+        max_logits_H = attention.inner_attention.inner_attention.max_attention_logits_H
+        max_logits_H.append(torch.tensor([400.0]))
         optimizers = OptimizersContainer.Config(
             optimizers=[
                 AdamW.Config(
@@ -148,29 +201,36 @@ class QKClipTest(unittest.TestCase):
                     fused=False,
                 )
             ],
-        ).build(model_parts=[model])
-        reduction_mesh = cast(
-            DeviceMesh,
-            SimpleNamespace(size=lambda: 1),
-        )
+        ).build(model_parts=[attention])
 
-        def get_mesh(mesh_name: str) -> DeviceMesh:
-            self.assertEqual(mesh_name, "loss")
-            return reduction_mesh
+        # dp * cp == 1 leaves the "loss" mesh inactive: the hook must work without it.
+        register_qk_clip_hook(optimizers, [attention], parallelism_context)
+        for param in attention.parameters():
+            param.grad = torch.zeros_like(param)
+        optimizers.step()
 
-        parallelism_context = cast(
-            ParallelismContext,
-            SimpleNamespace(get_mesh=get_mesh),
-        )
-        with patch("torchtitan.models.kimi_k2_7.qk_clip.qk_clip") as mock_qk_clip:
-            register_qk_clip_hook(optimizers, [model], parallelism_context)
-            model.weight.grad = torch.zeros_like(model.weight)
-            optimizers.step()
+        # qk_clip skipped the all-reduce and consumed the recorded maximum.
+        self.assertFalse(max_logits_H)
 
-        mock_qk_clip.assert_called_once_with(
-            [model],
-            reduction_mesh=reduction_mesh,
+    def test_pipeline_shape_inference_maxima_are_dropped(self) -> None:
+        # Two stages on one rank. The first step runs one extra forward per stage
+        # to learn shapes; stage 1 runs it on uninitialized memory.
+        stage_modules = [_RecordingStage(), _RecordingStage()]
+        schedule = ScheduleInterleaved1F1B(
+            [
+                PipelineStage(module, stage_index, 2, torch.device("cpu"))
+                for stage_index, module in enumerate(stage_modules)
+            ],
+            n_microbatches=2,
+            loss_fn=lambda output, target: output.sum(),
         )
+        register_qk_clip_shape_inference_cleanup(schedule, stage_modules)
+
+        schedule.step(torch.randn(4, 2), target=torch.zeros(4, 2))
+
+        # One maximum per microbatch, none from the shape-inference forward.
+        for module in stage_modules:
+            self.assertEqual(len(module.inner_attention.max_attention_logits_H), 2)
 
 
 @pytest.mark.multi_gpu
