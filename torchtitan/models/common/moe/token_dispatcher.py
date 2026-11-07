@@ -65,9 +65,9 @@ class LocalDispatchMetadata:
 
     token_indices_experts_sorted_N: torch.Tensor  # noqa: N815
     topk_scores_experts_sorted_N: torch.Tensor  # noqa: N815
-    # Set by a compiled dispatch (inference or training): each flat route's row in the
-    # expert-sorted order and the unsorted scores, for the gather-sum combine.
+    # Each flat route's row in the expert-sorted order; set only by a compiled dispatch.
     row_of_route_N: torch.Tensor | None = None  # noqa: N815
+    # The unsorted scores, read by the gather-sum combine.
     topk_scores_TK: torch.Tensor | None = None  # noqa: N815
 
 
@@ -265,8 +265,8 @@ class LocalTokenDispatcher(Module):
             x_TD,
         )
 
-    @staticmethod
     def _score_and_scatter_add(
+        self,
         routed_output_ND: torch.Tensor,
         topk_scores_N: torch.Tensor,
         token_indices_N: torch.Tensor,
@@ -323,7 +323,7 @@ def _sort_routes_and_gather(
 
     The inference form of ``LocalTokenDispatcher._local_reorder``. Compiled, it also
     returns ``row_of_route_N``, each route's row in the expert-sorted order, for the
-    compiled combine; eager returns ``None`` and combine scatter-adds as before.
+    compiled combine; eager returns ``None``, so combine scatter-adds.
 
     Returns:
         routed_input_ND, token_indices_experts_sorted_N, topk_scores_experts_sorted_N,
@@ -333,12 +333,16 @@ def _sort_routes_and_gather(
         expert ids [[2, 0], [0, 1]] sort the flat routes as 1, 2, 3, 0, so
         row_of_route_N = [3, 0, 1, 2] and token_indices_experts_sorted_N = [0, 1, 1, 0].
     """
-    expert_sort_N, row_of_route_N = _sort_routes(topk_expert_ids_TK, num_experts)
-    token_indices_experts_sorted_N = expert_sort_N // topk_expert_ids_TK.shape[1]
+    route_indices_experts_sorted_N, row_of_route_N = _sort_routes(
+        topk_expert_ids_TK, num_experts
+    )
+    token_indices_experts_sorted_N = (
+        route_indices_experts_sorted_N // topk_expert_ids_TK.shape[1]
+    )
     return (
         x_TD[token_indices_experts_sorted_N],
         token_indices_experts_sorted_N,
-        topk_scores_TK.reshape(-1)[expert_sort_N],
+        topk_scores_TK.reshape(-1)[route_indices_experts_sorted_N],
         row_of_route_N,
     )
 
@@ -353,10 +357,12 @@ def _sort_routes_for_training(
         token_indices_experts_sorted_N, topk_scores_experts_sorted_N, row_of_route_N
         (``None`` in eager).
     """
-    expert_sort_N, row_of_route_N = _sort_routes(topk_expert_ids_TK, num_experts)
+    route_indices_experts_sorted_N, row_of_route_N = _sort_routes(
+        topk_expert_ids_TK, num_experts
+    )
     return (
-        expert_sort_N // topk_expert_ids_TK.shape[1],
-        topk_scores_TK.reshape(-1)[expert_sort_N],
+        route_indices_experts_sorted_N // topk_expert_ids_TK.shape[1],
+        topk_scores_TK.reshape(-1)[route_indices_experts_sorted_N],
         row_of_route_N,
     )
 
@@ -364,39 +370,38 @@ def _sort_routes_for_training(
 def _sort_routes(
     topk_expert_ids_TK: torch.Tensor, num_experts: int
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Return the stable expert sort of the flat routes and, compiled, each route's row.
+    """Stable-sort the flat routes by expert; compiled, also return each route's row.
 
+    eager:                argsort(stable=True); row None (eager combine scatters)
     compiled, N <= 2048:  pairwise rank (below), one kernel with the sort
     compiled, larger:     argsort(stable=True), same order, then its inverse
-    eager:                argsort(stable=True); row None (eager combine scatters)
 
     Pairwise rank: give each route a unique key that orders routes by expert, then by
     route index (key = expert_id * N + route). A route's row in the stable sort is the
     number of routes with a smaller key.
 
     Example (N = 4):
-        expert ids    [2, 0, 0, 1]
-        keys          [8, 1, 2, 7]   expert_id * 4 + route
-        row of route  [3, 0, 1, 2]   number of smaller keys
-        sort          [1, 2, 3, 0]   route at each row
+        expert ids                      [2, 0, 0, 1]
+        keys                            [8, 1, 2, 7]   expert_id * 4 + route
+        row_of_route_N                  [3, 0, 1, 2]   number of smaller keys
+        route_indices_experts_sorted_N  [1, 2, 3, 0]   route at each row
     """
     expert_ids_N = topk_expert_ids_TK.reshape(-1)
+    if not torch.compiler.is_compiling():
+        return _argsort_expert_ids(expert_ids_N, num_experts), None
     num_routes = expert_ids_N.numel()
     routes_N = torch.arange(num_routes, device=expert_ids_N.device)
-    compiling = torch.compiler.is_compiling()
-    if compiling and num_routes <= _MAX_PAIRWISE_RANK_ROUTES:
+    if num_routes <= _MAX_PAIRWISE_RANK_ROUTES:
         key_N = expert_ids_N * num_routes + routes_N
         # (N, N) compare; row i counts the keys smaller than key i. Fuses to one kernel.
         row_of_route_N = (key_N[None, :] < key_N[:, None]).sum(dim=1)
-        expert_sort_N = torch.empty_like(row_of_route_N)
-        expert_sort_N[row_of_route_N] = routes_N
-        return expert_sort_N, row_of_route_N
-    expert_sort_N = _argsort_expert_ids(expert_ids_N, num_experts)
-    row_of_route_N = None
-    if compiling:
-        row_of_route_N = torch.empty_like(expert_sort_N)
-        row_of_route_N[expert_sort_N] = routes_N
-    return expert_sort_N, row_of_route_N
+        route_indices_experts_sorted_N = torch.empty_like(row_of_route_N)
+        route_indices_experts_sorted_N[row_of_route_N] = routes_N
+        return route_indices_experts_sorted_N, row_of_route_N
+    route_indices_experts_sorted_N = _argsort_expert_ids(expert_ids_N, num_experts)
+    row_of_route_N = torch.empty_like(route_indices_experts_sorted_N)
+    row_of_route_N[route_indices_experts_sorted_N] = routes_N
+    return route_indices_experts_sorted_N, row_of_route_N
 
 
 @local_compile("moe_dispatch_combine", batch_invariant=False)
@@ -407,13 +412,10 @@ def _gather_weighted_sum(
 ) -> torch.Tensor:
     """Combine expert outputs per token as a score-weighted sum of its top_k rows.
 
-        compiled:  gather each token's top_k rows, sum in float32 (float64 for float64
-                   rows), round once
-        eager:     never called: dispatch leaves row_of_route_N None, so combine runs
-                   ``LocalTokenDispatcher._score_and_scatter_add``, which rounds each
-                   product and each partial sum (a gather-sum is ~3 * top_k eager kernels)
-
-    Both are deterministic: no atomics, and each token sums its rows in a fixed order.
+    Gathers each token's top_k rows, sums them in at least float32, and rounds once. Runs
+    only compiled: in eager, dispatch leaves row_of_route_N None and combine uses
+    ``_score_and_scatter_add`` (one rounding per route). Deterministic: no atomics, fixed
+    order.
 
     Example:
         row_of_route_N = [3, 0, 1, 2] gives token 0 rows 3 and 0, so
@@ -438,9 +440,8 @@ def _sum_routes_per_token(
     num_tokens: int,
     top_k: int,
 ) -> torch.Tensor:
-    """Sum each token's ``top_k`` expert-sorted rows in float32 (float64 for float64
-    rows): the backward of ``x_TD[token_indices]``, reached only from a compiled
-    training dispatch."""
+    """Sum each token's ``top_k`` expert-sorted rows in at least float32: the backward of
+    ``x_TD[token_indices]``, reached only from a compiled training dispatch."""
     rows_TKD = grad_routed_ND[row_of_route_N].view(
         num_tokens, top_k, grad_routed_ND.shape[-1]
     )
@@ -463,7 +464,7 @@ def _gather_weighted_sum_backward(
     """Gradients of ``_gather_weighted_sum`` w.r.t. the expert outputs and the scores.
 
     grad_routed[n] = grad_out[token[n]] * score_sorted[n]
-    grad_score_sorted[n] = <rows[n], grad_out[token[n]]>  (float32 or wider), then unsorted
+    grad_score_sorted[n] = <rows[n], grad_out[token[n]]> in at least float32, then unsorted
 
     Reached only from a compiled training dispatch (eager training keeps the
     scatter-add and autograd's backward of it).
@@ -1083,6 +1084,12 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         # num_local_tokens_per_expert_E is already the
         # full per-expert count.
         num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
+        # TODO: call self._sort_and_gather here and _CombineGatherSum after the
+        # _unpermute in combine, so EP=1 gets the same compiled gather-sum as EP>1
+        # (~10 lines, and _local_reorder goes). Not done yet: no test runs TorchAO at
+        # EP=1 (its test runs EP=2). Keep _local_reorder until then: compiled,
+        # _sort_and_gather detaches the sorted scores, and this combine's scatter-add
+        # would then drop the score gradient.
         (
             routed_input_ND,
             token_indices_experts_sorted_N,
