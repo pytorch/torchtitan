@@ -11,10 +11,7 @@ from typing import Any, TYPE_CHECKING
 
 import torch
 
-from torchtitan.models.common.moe import MoE
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
-
-from .moe import DeepSeekV4Router
 
 if TYPE_CHECKING:
     from .model import DeepSeekV4Model
@@ -127,12 +124,8 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
                         ),
                     }
                 )
-            feed_forward = model_config.layers[layer_id].feed_forward
-            if (
-                isinstance(feed_forward, MoE.Config)
-                and isinstance(feed_forward.router, DeepSeekV4Router.Config)
-                and layer_id < feed_forward.router.n_hash_layers
-            ):
+            # pyrefly: ignore [missing-attribute]
+            if layer_id < model_config.layers[0].feed_forward.router.n_hash_layers:
                 self.from_hf_map.update(
                     {
                         f"layers.{layer_id}.ffn.gate.tid2eid": f"layers.{layer_id}.feed_forward.router.tid2eid",
