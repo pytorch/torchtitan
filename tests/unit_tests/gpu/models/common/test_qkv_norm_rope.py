@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import importlib
 import unittest
 from unittest.mock import patch
 
@@ -22,16 +23,19 @@ from torchtitan.distributed.parallelism_context import ParallelismContext
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
 
-# Qwen3: q/k norms + CosSinRoPE. Llama 3: no norms, ComplexRoPE.
-@pytest.mark.parametrize("model", ["qwen3", "llama3"])
-def test_qkv_norm_rope_region_matches_eager(model):
-    if model == "qwen3":
-        from torchtitan.models.qwen3 import build_model_config
-    else:
-        from torchtitan.models.llama3 import build_model_config
+# Qwen3: q/k norms + CosSinRoPE. Llama 3: no norms, ComplexRoPE. Muse Glimmer overrides the
+# method with a q scale; its debug layer 0 is sliding window with RoPE, layer 3 global with none.
+@pytest.mark.parametrize(
+    "model, layer_id",
+    [("qwen3", 0), ("llama3", 0), ("muse_glimmer", 0), ("muse_glimmer", 3)],
+)
+def test_qkv_norm_rope_region_matches_eager(model, layer_id):
+    build_model_config = importlib.import_module(
+        f"torchtitan.models.{model}"
+    ).build_model_config
     torch.manual_seed(0)
     config = build_model_config("debugmodel", parallelism=ParallelismConfig())
-    attention = config.layers[0].attention.build().cuda()
+    attention = config.layers[layer_id].attention.build().cuda()
     qkv_linear = attention.qkv_linear
     fp32_params = {name: p.detach().clone() for name, p in attention.named_parameters()}
     token_counts = (64, 37, 1)
