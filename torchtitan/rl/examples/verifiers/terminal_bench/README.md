@@ -26,33 +26,30 @@ them.
         |     +---------------|-----------------^------------------------+
         |               group v                 | finished group
 +-------|------- rollout worker processes (VerifiersRolloutWorker) ------+
-|  GenerationServer        send tasks, convert traces, score the group   |
-|  (localhost HTTP)                     |      ^                         |
-+-------^-------------------------------|------|-------------------------+
-        | 4. token ids          1. task |      | 6. trace, reward
-+-------|-------------------------------v------|-------------------------+
-|  Verifiers env server (spawned process)                                |
-|  per rollout: interception server (chat messages <-> token ids)        |
-|               and a Docker runtime                                     |
-+-------^---------------------------------|------------------------------+
-        | 3. chat request   2. Terminus-2 |
-        |    each turn      5. test.sh    v
-+-------|---------- Docker container, one per rollout -------------------+
+|  GenerationServer  <-- 4. token ids --  Verifiers env, one episode per |
+|  (localhost HTTP)                       rollout: interception server   |
+|                                         (chat <-> token ids), Docker   |
+|  6. convert traces, score the group     runtime                        |
++---------------------------------------------^-------------|------------+
+                               3. chat request|             | 2. Terminus-2
+                                    each turn |             | 5. test.sh
++---------------------------------------------|-------------v------------+
+|  Docker container, one per rollout                                     |
 |  Terminus-2 agent <--> tmux shell                                      |
 |  tests/test.sh -> reward file                                          |
 +------------------------------------------------------------------------+
 ```
 
 1. **Task.** The controller sends each group to a rollout worker process
-   (`VerifiersRolloutWorker`), which sends the sampled task to the env server once per
-   rollout in the group.
-2. **Agent.** The env server starts a container from the task's `docker_image` and runs
+   (`VerifiersRolloutWorker`), which runs one Verifiers episode per rollout in the group.
+2. **Agent.** The worker starts a container from the task's `docker_image` and runs
    Terminus-2 in it ([`harness.py`](./harness.py)). The agent types commands into a
    tmux shell and reads the screen back.
-3. **Model call.** Each agent turn is a chat request to Verifiers' interception server,
-   which records the turn in the rollout's trace.
-4. **Generation.** The request reaches the rollout worker's `GenerationServer` as token
-   ids, goes to the generator router and is served by the vLLM generators.
+3. **Model call.** Each agent turn is a chat request to the worker's Verifiers
+   interception server, which records the turn in the rollout's trace.
+4. **Generation.** The interception server renders the chat to token ids and sends them
+   to the worker's `GenerationServer`; they go to the generator router and are served by
+   the vLLM generators.
 5. **Grading.** When the agent stops, Verifiers runs the task's `tests/test.sh` in the
    container and reads the reward file it writes.
 6. **Trace.** The rollout worker turns the trace into rollout turns, with the exact
@@ -68,9 +65,9 @@ the start and end of training.
 | --- | --- |
 | Recipes: model, parallelism, generator, training loop, and the Verifiers setup (datasets, harness, Docker runtime, timeouts) | `torchtitan_recipes/rl/verifiers_terminal_bench.py` |
 | Terminus-2 harness and the program it runs in the container, copied from Verifiers 0.3.1 to expose reasoning in the history and summarization | [`harness.py`](./harness.py), [`terminus_harness.py`](./terminus_harness.py) |
-| Harbor taskset, declared here so the env-server worker imports it | [`taskset.py`](./taskset.py) |
+| Harbor taskset with each task's WORKDIR and verifier timeout; Verifiers imports it through `torchtitan_verifiers_terminal_bench/` | [`taskset.py`](./taskset.py) |
 | Offline TMax to Harbor task conversion | [`prepare_tmax.py`](./prepare_tmax.py) |
-| Bridge: task dataset, env server, generation server, trace to turns | [Verifiers integration](../README.md) |
+| Bridge: task dataset, rollout worker, generation server, trace to turns | [Verifiers integration](../README.md) |
 | CPU tests | `tests/rl/unit_tests/cpu/test_verifiers_terminal_bench*.py` |
 
 ## Run
@@ -145,9 +142,9 @@ python -m torchtitan.rl.examples.verifiers.terminal_bench.prepare_tmax \
 - Without Harbor Hub access, pre-populate `~/.cache/harbor` with an exported task tree.
 - To use other datasets, change the ids passed to `terminal_bench_rollouter_config` in the recipe file.
   The training and validation datasets must differ. For another sandbox or agent, set
-  `verifiers_env_server.environment.agent.runtime` or `.harness` on the returned config.
+  `worker.environment.agent.runtime` or `.harness` on the returned config.
   For another env, pass `taskset_id`: the name of your own top-level package that exports
-  a `TerminalTaskset` subclass and an Env (e.g. `HarborEnv`) in `__all__`.
+  a `TerminalTaskset` subclass in `__all__` (and an Env, only if it needs its own).
 
 ## If every reward is 0
 

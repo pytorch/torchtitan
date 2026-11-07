@@ -28,12 +28,13 @@ renderer test asserts equality with ``apply_chat_template`` across roles, tool s
 reasoning states. Treat that test as the spec -- if the template changes upstream, it
 fails first.
 
-Implements the ``renderers.Renderer`` Protocol. Muse Glimmer is not in the library yet;
-TorchTitan and Verifiers both select it with ``CustomRendererConfig``. Workers import
-this class and validate its options with ``MuseGlimmerRendererConfig``.
+Implements the ``renderers.Renderer`` Protocol. TorchTitan and Verifiers both select it
+with ``CustomRendererConfig``. Workers import this class and validate its options with
+``MuseGlimmerRendererConfig`` below.
 
-TODO: upstream this to PrimeIntellect-ai/renderers (renderer -> renderers/muse_glimmer.py,
-atem.py -> a tool parser in renderers/parsers.py), then delete both files.
+TODO: renderers 0.2.0 ships its own Muse Glimmer renderer (``renderers.MuseGlimmerRendererConfig``,
+name ``"muse-glimmer"``). Check that it renders and parses the same tokens as this one
+(``test_muse_glimmer_renderer.py``), switch the recipes to it, then delete this file and ``atem.py``.
 """
 
 from __future__ import annotations

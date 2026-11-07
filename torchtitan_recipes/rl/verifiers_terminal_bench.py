@@ -13,8 +13,6 @@ Terminal-Bench 2.1 Harbor dataset, which the ``harbor`` CLI downloads into
 The Muse Glimmer example is capped at its model's 16K context length.
 """
 
-import math
-
 import verifiers.v1 as vf
 
 from renderers import CustomRendererConfig, Qwen35RendererConfig
@@ -45,7 +43,6 @@ from torchtitan.rl.controller.controller import (
     ValidationConfig,
 )
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
-from torchtitan.rl.examples.verifiers.env_server import VerifiersEnvServer
 from torchtitan.rl.examples.verifiers.generation_server import GenerationServer
 from torchtitan.rl.examples.verifiers.rollouter import (
     RewardFromVerifiers,
@@ -75,12 +72,9 @@ from torchtitan.rl.routing.strategies import (
 from torchtitan.rl.trainer.losses import DAPOLoss, GRPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
 from verifiers.v1.configs.agent import TimeoutConfig as AgentTimeoutConfig
-from verifiers.v1.tasksets.harbor import HarborEnvConfig
 from verifiers.v1.utils.loaders import taskset_config_type
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
-
-_ENV_SERVER_WORKERS = 16
 
 
 def terminal_bench_rollouter_config(
@@ -90,7 +84,6 @@ def terminal_bench_rollouter_config(
     taskset_id: str,
     max_context_length: int,
     max_turns: int,
-    max_concurrent_rollouts: int,
 ) -> VerifiersRollouter.Config:
     """Build the Terminal-Bench rollouter: Harbor datasets by id, local Docker, in-sandbox Terminus-2.
 
@@ -98,16 +91,13 @@ def terminal_bench_rollouter_config(
         train_dataset: Harbor dataset id for training, e.g. ``"local/tmax@v1"``.
         validation_dataset: Harbor dataset id for validation; must differ from ``train_dataset``.
         taskset_id: Verifiers id of the top-level package that exports the taskset and the
-            Env. This repo's recipes pass ``"torchtitan_verifiers_terminal_bench"``; a
-            launcher outside this repo passes its own package. The package's ``__all__``
-            exports exactly one Taskset (``TerminalTaskset`` or a subclass) and one Env
-            (e.g. ``HarborEnv``). The taskset config class is the one that Taskset declares.
+            Env, if any. This repo's recipes pass ``"torchtitan_verifiers_terminal_bench"``;
+            a launcher outside this repo passes its own package. The package's ``__all__``
+            exports exactly one Taskset (``TerminalTaskset`` or a subclass) and may export
+            one Env. The taskset config class is the one that Taskset declares.
         max_context_length: The generator's sequence length; the generation server caps
             each rollout at it.
         max_turns: The agent turn limit, which Verifiers enforces.
-        max_concurrent_rollouts: Sizes the env server. Set it to the number of rollouts
-            the controller keeps in flight, or the excess queues in the env server and
-            the generators idle.
 
     The harness is the example's Terminus-2 (``torchtitan_verifiers_terminal_bench``).
     Runtime and harness options are fields of the returned config.
@@ -135,8 +125,8 @@ def terminal_bench_rollouter_config(
             seed=99,
             shuffle=False,
         ),
-        verifiers_env_server=VerifiersEnvServer.Config(
-            environment=HarborEnvConfig(
+        worker=VerifiersRolloutWorker.Config(
+            environment=vf.SingleAgentEnvConfig(
                 agent=vf.AgentConfig(
                     harness=TerminalBenchTerminusHarnessConfig(
                         id="torchtitan_verifiers_terminal_bench", version="0.22.0"
@@ -148,13 +138,6 @@ def terminal_bench_rollouter_config(
                     timeout=AgentTimeoutConfig(setup=600, rollout=7200),
                 ),
             ),
-            serve=vf.ServeConfig(
-                pool=vf.StaticPoolConfig(num_workers=_ENV_SERVER_WORKERS),
-                max_concurrent=math.ceil(max_concurrent_rollouts / _ENV_SERVER_WORKERS),
-                address="tcp://127.0.0.1:0",
-            ),
-        ),
-        worker=VerifiersRolloutWorker.Config(
             rubric=Rubric.Config(
                 reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
                 error_reward=0.0,
@@ -162,8 +145,12 @@ def terminal_bench_rollouter_config(
             generation_server=GenerationServer.Config(
                 max_rollout_tokens=max_context_length
             ),
-            connection_timeout_sec=1800.0,
         ),
+        # TODO: tune after a TB run with Docker; 16 is the env server's old pool size.
+        worker_pool_size=16,
+        # Verifiers renders each turn on the worker's default executor; 32 threads, as each
+        # old pool worker had (Python's default on a large host), so renders don't queue.
+        num_threads_per_worker=32,
     )
 
 
@@ -213,8 +200,6 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             taskset_id="torchtitan_verifiers_terminal_bench",
             max_context_length=max_context_length,
             max_turns=120,
-            max_concurrent_rollouts=async_loop.max_active_rollout_groups
-            * async_loop.num_samples_per_prompt,
         ),
         renderer=from_renderers(
             Qwen35RendererConfig(
@@ -352,8 +337,6 @@ def rl_dapo_qwen35_35b_a3b_terminal_bench_dist_moe() -> Controller.Config:
             taskset_id="torchtitan_verifiers_terminal_bench",
             max_context_length=max_context_length,
             max_turns=120,
-            max_concurrent_rollouts=async_loop.max_active_rollout_groups
-            * async_loop.num_samples_per_prompt,
         ),
         renderer=from_renderers(
             Qwen35RendererConfig(
@@ -483,8 +466,6 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
             taskset_id="torchtitan_verifiers_terminal_bench",
             max_context_length=max_context_length,
             max_turns=8,
-            max_concurrent_rollouts=async_loop.max_active_rollout_groups
-            * async_loop.num_samples_per_prompt,
         ),
         renderer=from_renderers(
             CustomRendererConfig(

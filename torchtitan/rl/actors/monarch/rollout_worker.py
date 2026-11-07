@@ -123,3 +123,8 @@ class RolloutWorkerActor(Actor):
     @concurrent_endpoint
     async def sync_log_step(self, step: int) -> None:
         sl.set_step(step)
+
+    async def __cleanup__(self, exc: Exception | None) -> None:
+        """Monarch runs this on a graceful stop (`mesh.stop()`), after cancelling the endpoint
+        calls. A killed process skips it."""
+        await self._worker.close()

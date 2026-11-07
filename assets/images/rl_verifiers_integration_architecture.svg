@@ -20,7 +20,7 @@
 </text>
 <rect x="300" y="150" width="130" height="60" rx="12" fill="#e8f0fe" stroke="#5f6368" stroke-width="2"/>
 <text x="365" y="185" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="500" text-anchor="middle">
-<tspan x="365" dy="0">EnvClient</tspan>
+<tspan x="365" dy="0">env.run_slot</tspan>
 </text>
 <rect x="520" y="150" width="190" height="60" rx="12" fill="#e8f0fe" stroke="#5f6368" stroke-width="2"/>
 <text x="615" y="176" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="500" text-anchor="middle">
@@ -51,11 +51,11 @@
 </text>
 <rect x="50" y="730" width="1200" height="400" rx="18" fill="#ffffff" stroke="#188038" stroke-width="3"/>
 <text x="650" y="765" fill="#137333" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="700" text-anchor="middle">
-<tspan x="650" dy="0">Verifiers EnvServer Process(es)</tspan>
+<tspan x="650" dy="0">Verifiers Env, in the same rollout worker process</tspan>
 </text>
 <rect x="90" y="810" width="140" height="65" rx="12" fill="#e6f4ea" stroke="#5f6368" stroke-width="2"/>
 <text x="160" y="847.5" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="500" text-anchor="middle">
-<tspan x="160" dy="0">EnvServer</tspan>
+<tspan x="160" dy="0">Env</tspan>
 </text>
 <rect x="270" y="805" width="210" height="75" rx="12" fill="#e6f4ea" stroke="#5f6368" stroke-width="2"/>
 <text x="375" y="824.5" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="500" text-anchor="middle">
@@ -114,7 +114,7 @@
 <path d="M365 210 V370 H650 V700 H160 V810" fill="none" stroke="#5f6368" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" marker-start="url(#gray)" marker-end="url(#gray)"/>
 <rect x="615" y="675" width="70" height="27" rx="5" fill="#ffffff" stroke="none" stroke-width="0"/>
 <text x="650" y="692" fill="#3c4043" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="700" text-anchor="middle">
-<tspan x="650" dy="0">ZMQ</tspan>
+<tspan x="650" dy="0">call</tspan>
 </text>
 <path d="M230 842 H270" fill="none" stroke="#5f6368" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#gray)"/>
 <rect x="220" y="782" width="80" height="27" rx="5" fill="#ffffff" stroke="none" stroke-width="0"/>

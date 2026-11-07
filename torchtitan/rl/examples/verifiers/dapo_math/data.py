@@ -54,7 +54,7 @@ class VerifiersMathTaskset(vf.Taskset[VerifiersMathTask, VerifiersMathTasksetCon
     config: VerifiersMathTasksetConfig
 
     def load(self) -> list[VerifiersMathTask]:
-        """Build the tasks consumed by both the dataset and environment server."""
+        """Build the tasks the controller samples; rollout workers rebuild each from its data."""
         dataset, num_tasks = _load_math_dataset(self.config.dataset)
         return [
             VerifiersMathTask(

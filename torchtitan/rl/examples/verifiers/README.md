@@ -20,49 +20,43 @@ package and dependencies: [`dapo_math/`](./dapo_math) (single-turn math) and
 ![TorchTitan and Verifiers integration architecture](../../../../assets/images/rl_verifiers_integration_architecture.svg)
 
 1. [`data.py`](./data.py) loads a Verifiers taskset in the TitanRL controller,
-   where TitanRL samples each rollout task. It converts the task's typed data
-   to a plain dictionary because `VerifiersEnvClient` sends that data as
-   msgpack over ZMQ to the separately spawned environment-server process. The
-   server reconstructs the typed task before running the Verifiers environment.
-2. [`env_server.py`](./env_server.py) currently spawns and owns the Verifiers server as
-   a separate local process on the TitanRL controller host. `VerifiersRollouter`
-   starts it from the controller, before it spawns the rollout workers. The configured
-   Verifiers runtime is independent: for example, `SubprocessConfig` or
-   `DockerConfig` for the agent. Each pool worker imports the taskset and harness by
-   id (below), so the modules it imports must not import torch.
-3. [`generation_server.py`](./generation_server.py) exposes TitanRL's `GenerateFn` through the
-   HTTP token-generation protocol expected by Verifiers. Each rollout worker runs one.
-   It also retains the policy-version span and metrics that are absent from
-   Verifiers traces.
-4. `rollouter.py` runs each group in a TitanRL rollout worker process
+   where TitanRL samples each rollout task. It sends each task as a plain dictionary
+   of its typed data; the rollout worker rebuilds the typed task from it, so workers
+   never load the dataset.
+2. `rollouter.py` runs each group in a TitanRL rollout worker process
    (`VerifiersRolloutWorker`), so the controller receives finished groups only, as
-   with native rollouts. Each worker sends samples to Verifiers, points their
-   agents at its own generation server, and converts the returned trace graph into
-   TitanRL `RolloutTurn` objects. TitanRL then applies its rubric and advantage
-   estimator normally.
+   with native rollouts. Each worker loads the Verifiers env once and serves it
+   (`env.serving()`) until the worker stops. Each rollout of a group is its own
+   Verifiers episode: one `env.run_slot` per slot of `env.slots(task, group_size)`, all
+   on the worker's event loop, as Verifiers' own runner does. The configured Verifiers
+   runtime is independent: for example,
+   `SubprocessConfig` or `DockerConfig` for the agent.
+3. [`generation_server.py`](./generation_server.py) exposes TitanRL's `GenerateFn` through the
+   HTTP token-generation protocol expected by Verifiers. Each rollout worker runs one,
+   and its agents' model calls reach it on localhost. It also retains the
+   policy-version span and metrics that are absent from Verifiers traces.
+4. The worker converts each returned trace graph into TitanRL `RolloutTurn`
+   objects. TitanRL then applies its rubric and advantage estimator normally.
 
 The training dataset is the single source of the environment taskset config.
-`VerifiersRollouter.Config` copies it into the environment-server config, so an
-experiment must not configure the same taskset a second time.
+`VerifiersRollouter.Config` copies it into `worker.environment`, so an experiment must
+not configure the same taskset a second time.
 
-For CPU-heavy environments, increase the env server's process pool
-(`verifiers_env_server.serve.pool`) first. Each TitanRL rollout worker decodes one
-returned trace at a time, so at high rollout rates also raise the rollouter's
-`worker_pool_size`. A future implementation could instead place the environment server in a Monarch
-actor. That would require routable ZMQ and generation-server addresses plus
-actor-owned startup and shutdown; the current integration does not provide
-that placement mode.
+The rollout workers run the env's CPU work (the agent loop, the renderer and the trace
+decode), so for CPU-heavy environments raise the rollouter's `worker_pool_size`. Each
+worker renders on its `num_threads_per_worker` threads (4 by default); raise it if
+renders queue.
 
 ## Taskset ids
 
 Verifiers imports a taskset, harness or env by the name of a top-level package. It
 takes the one subclass of each base class that the package lists in `__all__`. Each
-env-server worker resolves the ids again in a fresh process, so the package must be
+rollout worker resolves the ids again in its own process, so the package must be
 importable there:
 
 ```text
 id "torchtitan_verifiers_terminal_bench" -> import torchtitan_verifiers_terminal_bench
-                                            Taskset, Harness and Env from its __all__
+                                            Taskset and Harness from its __all__
 id "torchtitan_verifiers_dapo_math"      -> import torchtitan_verifiers_dapo_math
                                             Taskset from its __all__
 ```
@@ -85,7 +79,6 @@ torchtitan_verifiers_my_task/
   __init__.py          # __all__ = ["MyTaskset"], re-exported from my_task/data.py
 torchtitan/rl/examples/verifiers/
   data.py
-  env_server.py
   generation_server.py
   rollouter.py
   my_task/
@@ -98,10 +91,10 @@ torchtitan/rl/examples/verifiers/
 
 1. In `data.py`, define the Verifiers `Taskset` and `TasksetConfig`.
 2. In `rollouter.py`, put that config, with `id="torchtitan_verifiers_my_task"`, in
-   `VerifiersTaskDataset.Config.verifiers_taskset`. Configure the agent,
-   harness, runtime, and worker pool, but leave
-   `verifiers_env_server.environment.taskset` unset; `VerifiersRollouter`
-   derives it from the training dataset.
+   `VerifiersTaskDataset.Config.verifiers_taskset`. Configure the agent, harness and
+   runtime in `VerifiersRolloutWorker.Config.environment`, but leave
+   `environment.taskset` unset; `VerifiersRollouter` derives it from the training
+   dataset.
 3. In `recipe module`, select the rollouter from `Controller.Config`.
 4. Place the module under `torchtitan/rl/examples` or pass its fully qualified
    module path to `--module`.
@@ -116,4 +109,4 @@ python -m torchtitan.rl.train \
 
 See [DAPO Math](./dapo_math) for a complete single-turn example and
 [Terminal-Bench](./terminal_bench) for a multi-turn agent example. This
-integration pins Verifiers 0.4.0 and uses its `verifiers.v1` API.
+integration pins Verifiers 0.4.1 and uses its `verifiers.v1` API.

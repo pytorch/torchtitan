@@ -9,21 +9,31 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import urllib.request
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 pytest.importorskip("verifiers")
 
 import verifiers.v1 as vf
+from renderers import Qwen3RendererConfig
+from tokenizers import Tokenizer
 
-from torchtitan.components.renderer import RenderersConfigAdapter
+from torchtitan.components.renderer import from_renderers, RenderersConfigAdapter
 
 from torchtitan.config import ConfigLoader
 from torchtitan.rl.examples.dapo_math import DapoMathSample
 from torchtitan.rl.examples.verifiers.dapo_math import data
-from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
+from torchtitan.rl.examples.verifiers.data import (
+    VerifiersTaskDataset,
+    VerifiersTaskSample,
+)
 from torchtitan.rl.examples.verifiers.rollouter import VerifiersRollouter
+from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.rollout.types import Completion, RolloutStatus
 from torchtitan_recipes.rl.verifiers_dapo_math import _verifiers_math_rollouter_config
 from verifiers.v1.harnesses.null import NullHarnessConfig as VerifiersNullHarnessConfig
 
@@ -126,17 +136,97 @@ def test_validation_pass_reads_each_task_once(monkeypatch) -> None:
 
 def test_verifiers_environment_uses_no_sandbox() -> None:
     rollouter_config = _verifiers_math_rollouter_config(max_rollout_tokens=10240)
-    config = rollouter_config.verifiers_env_server
+    config = rollouter_config.worker
 
     assert isinstance(config.environment, vf.SingleAgentEnvConfig)
     assert isinstance(config.environment.agent.runtime, vf.SubprocessConfig)
     assert isinstance(config.environment.agent.harness, VerifiersNullHarnessConfig)
-    assert isinstance(config.serve.pool, vf.StaticPoolConfig)
-    assert config.serve.pool.num_workers == 1
     assert (
         config.environment.taskset
         == rollouter_config.training_dataloader.dataset.verifiers_taskset
     )
+
+
+def test_a_group_runs_end_to_end_in_a_rollout_worker() -> None:
+    """One group through a real `VerifiersRolloutWorker`: the Verifiers env and agent, the
+    renderer client, the generation server, the trace decode and the reward. Only the
+    generator is fake: rollout 0 answers right, rollout 1 wrong.
+
+    Fails when a Verifiers or renderers upgrade changes what the generation server receives
+    or what a trace holds; the other tests use fake traces.
+    """
+    # The null harness installs its chat program's packages through uv, from uv's index:
+    # PyPI unless UV_DEFAULT_INDEX or UV_INDEX_URL names another. CI and the release check
+    # install Verifiers just before, so this skips only off-network.
+    index = (
+        os.environ.get("UV_DEFAULT_INDEX")
+        or os.environ.get("UV_INDEX_URL")
+        or "https://pypi.org/simple"
+    )
+    try:
+        urllib.request.urlopen(f"{index.rstrip('/')}/openai/", timeout=10).close()
+    except OSError as error:
+        pytest.skip(
+            f"uv's package index is unreachable ({error}); the null harness needs it"
+        )
+    tokenizer = Tokenizer.from_file("tests/assets/tokenizer/tokenizer.json")
+    end_of_turn = tokenizer.token_to_id("<|im_end|>")
+    answers = [r"The answer is \boxed{2}.", r"I think \boxed{3}."]
+
+    async def generate_fn(prompt_token_ids, *, request_id, group_id, **kwargs):
+        # run_group gives rollout i the seed 100 + i.
+        answer = answers[kwargs["sampling_config"].seed - 100]
+        token_ids = tokenizer.encode(answer, add_special_tokens=False).ids
+        token_ids.append(end_of_turn)
+        return Completion(
+            min_policy_version=3,
+            max_policy_version=4,
+            request_id=request_id,
+            token_ids=token_ids,
+            token_logprobs=[-0.5] * len(token_ids),
+            finish_reason="stop",
+            metrics=[],
+        )
+
+    worker = _verifiers_math_rollouter_config(max_rollout_tokens=2048).worker.build()
+
+    async def run():
+        await worker.setup_async(
+            tokenizer_config=None,
+            renderer_config=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
+            hf_assets_path="tests/assets/tokenizer",
+        )
+        try:
+            return await worker.run_group(
+                generate_fn=generate_fn,
+                release_session_fn=AsyncMock(),
+                sample=VerifiersTaskSample(
+                    verifiers_task_data={
+                        "idx": 0,
+                        "prompt": "What is 1 + 1?",
+                        "ground_truth": "2",
+                    }
+                ),
+                group_id=5,
+                group_size=2,
+                sampling=SamplingConfig(
+                    temperature=1.0, top_p=1.0, max_tokens=64, seed=100
+                ),
+            )
+        finally:
+            await worker.close()
+
+    group = asyncio.run(run())
+    right, wrong = sorted(group.rollouts, key=lambda rollout: rollout.rollout_id)
+    assert [right.status, wrong.status] == [RolloutStatus.COMPLETED] * 2
+    assert [right.reward, wrong.reward] == [1.0, 0.0]
+    [turn] = right.turns
+    assert turn.completion_token_ids.tolist() == tokenizer.encode(
+        answers[0], add_special_tokens=False
+    ).ids + [end_of_turn]
+    assert turn.completion_logprobs.tolist() == [-0.5] * len(turn.completion_token_ids)
+    assert (turn.min_policy_version, turn.max_policy_version) == (3, 4)
+    assert turn.completion_message["content"].endswith(r"\boxed{2}.")
 
 
 def test_verifiers_config_keeps_dapo_training_recipe() -> None:
