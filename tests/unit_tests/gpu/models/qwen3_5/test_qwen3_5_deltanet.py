@@ -25,7 +25,7 @@ from torchtitan.models.common.attention.cp_gdn import ContextParallelInnerGDN
 from torchtitan.models.common.attention.cp_linear_attention import (
     ContextParallelLinearAttentionMetadata,
 )
-from torchtitan.models.common.attention.gdn import GDN, InnerGDN
+from torchtitan.models.common.attention.gdn import GDN, GDNKernel, InnerGDN
 
 # Tensor shape suffixes: B batch, L seq len, H heads, K key head dim,
 # V value head dim.
@@ -759,6 +759,90 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         for parameter in model.parameters():
             self.assertIsNotNone(parameter.grad)
             self.assertTrue(torch.isfinite(parameter.grad).all())
+
+    def test_deterministic_backward_bypasses_normalization_autotuner(self):
+        if not torch.cuda.is_available():
+            raise unittest.SkipTest("CUDA is unavailable")
+
+        from attn_gym.linear.kda.bwd.triton.l2norm_bwd import l2norm_bwd_kernel
+
+        torch.manual_seed(42)
+        kernel = GDNKernel.Config().build()
+        cu_seqlens = torch.tensor([0, 64, 128], device="cuda", dtype=torch.int32)
+        was_deterministic = torch.are_deterministic_algorithms_enabled()
+        try:
+            for batch_invariant in (False, True):
+                for deterministic in (True, False):
+                    with self.subTest(
+                        batch_invariant=batch_invariant, deterministic=deterministic
+                    ):
+                        torch.use_deterministic_algorithms(deterministic)
+                        q_LHK = torch.randn(
+                            128,
+                            1,
+                            128,
+                            device="cuda",
+                            dtype=torch.bfloat16,
+                            requires_grad=True,
+                        )
+                        k_LHK = torch.randn_like(q_LHK, requires_grad=True)
+                        v_LHV = torch.randn_like(q_LHK, requires_grad=True)
+                        decay_LH = torch.full(
+                            (128, 1), -0.1, device="cuda", requires_grad=True
+                        )
+                        update_gate_LH = torch.full(
+                            (128, 1),
+                            0.5,
+                            device="cuda",
+                            dtype=torch.bfloat16,
+                            requires_grad=True,
+                        )
+                        with (
+                            mock.patch(
+                                "torchtitan.models.common.attention.gdn."
+                                "is_in_batch_invariant_mode",
+                                return_value=batch_invariant,
+                            ),
+                            mock.patch.object(
+                                l2norm_bwd_kernel,
+                                "run",
+                                side_effect=RuntimeError("Normalization autotuner ran"),
+                            ) as autotuner,
+                        ):
+                            output_LHV = kernel(
+                                q_LHK,
+                                k_LHK,
+                                v_LHV,
+                                decay_LH,
+                                update_gate_LH,
+                                cu_seqlens=cu_seqlens,
+                            )
+                            loss = output_LHV.float().square().mean()
+                            if deterministic:
+                                loss.backward()
+                                autotuner.assert_not_called()
+                                for input_tensor in (
+                                    q_LHK,
+                                    k_LHK,
+                                    v_LHV,
+                                    decay_LH,
+                                    update_gate_LH,
+                                ):
+                                    self.assertIsNotNone(input_tensor.grad)
+                                    self.assertTrue(
+                                        torch.isfinite(input_tensor.grad).all()
+                                    )
+                                    self.assertGreater(
+                                        input_tensor.grad.abs().max().item(), 0
+                                    )
+                            else:
+                                with self.assertRaisesRegex(
+                                    RuntimeError, "Normalization autotuner ran"
+                                ):
+                                    loss.backward()
+                                autotuner.assert_called_once()
+        finally:
+            torch.use_deterministic_algorithms(was_deterministic)
 
     def test_fused_varlen_matches_independent_document_forwards(self):
         # BF16 tolerance absorbs differing packed and per-document chunk boundaries.
