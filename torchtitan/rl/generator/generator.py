@@ -451,7 +451,7 @@ class Generator(Configurable):
         self._torchstore_loop = asyncio.get_running_loop()
 
     @sl.log_trace_span("load_model_state_dict")
-    async def load_model_state_dict(self, version: int) -> None:
+    async def load_model_state_dict(self, version: int, *, drain: bool) -> None:
         """Queues a model state dict load for `version` and blocks until the engine loop has finished loading.
         Loads queued together are applied once, at the highest version.
 
@@ -459,13 +459,13 @@ class Generator(Configurable):
         completed and this load copies the prefetched weights to the GPU. With
         ``"gpu_fetch"``, this load reads the weights from the StorageVolume.
 
-        NOTE: In-flight requests are NOT drained here — the endpoint never drains; a caller that wants
-        an idle engine holds off new `generate` calls until the queue drains, then calls this.
-
         Args:
             version: Policy version to load
+            drain: If True, finish every admitted request before loading, and hold back
+                `generate` calls that arrive meanwhile until the load is applied. If False,
+                load mid-flight ("hot swap").
         """
-        await self._engine_loop.load_model_state_dict(version)
+        await self._engine_loop.load_model_state_dict(version, drain=drain)
 
     @sl.log_trace_span("prefetch_model_state_dict")
     async def prefetch_model_state_dict(self) -> None:

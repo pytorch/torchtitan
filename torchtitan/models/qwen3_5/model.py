@@ -342,6 +342,8 @@ class Qwen35Model(MultimodalModel):
 
     @dataclass(kw_only=True, slots=True)
     class Config(MultimodalModel.Config):
+        # pyrefly: ignore [bad-override]
+        layers: list[Qwen35TransformerBlock.Config]
         vision_encoder: Qwen35VisionEncoder.Config | None = None
         local_compile: LocalCompileConfig = field(
             default_factory=lambda: LocalCompileConfig(

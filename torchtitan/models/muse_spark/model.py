@@ -466,6 +466,7 @@ class MuseSparkModel(MultimodalModel):
         )
         # pyrefly: ignore [bad-override]
         tok_embeddings: MuseSparkEmbeddingWithNorm.Config
+        # pyrefly: ignore [bad-override]
         layers: list[MuseSparkTransformerBlock.Config]
         residual_dtype: torch.dtype = torch.float32
         final_norm_input_dtype: torch.dtype | None = None

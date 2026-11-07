@@ -211,6 +211,7 @@ class KimiK3Model(MultimodalModel):
 
     @dataclass(kw_only=True, slots=True)
     class Config(MultimodalModel.Config):
+        # pyrefly: ignore [bad-override]
         layers: list[KimiK3TransformerBlock.Config]
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config

@@ -124,7 +124,7 @@ if [[ "${VALIDATION_SUITE}" == rl* ]]; then
     python -m pip install "nvidia-cuda-nvcc==13.2.*"
   fi
   if [[ "${VALIDATION_SUITE}" == "rl-b200" ]]; then
-    python -m pip install "flash-attn-4[cu13]>=4.0.0b34"
+    python -m pip install "flash-attn-4[cu13]>=4.0.0b38"
   fi
   if [[ "${VALIDATION_SUITE}" == "rl-b200" ]]; then
     python -m pip install "git+https://github.com/meta-pytorch/dist_moe.git@main"
