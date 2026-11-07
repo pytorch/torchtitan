@@ -874,25 +874,26 @@ def test_validation_group_ids_and_sampled_policies(step, group_ids) -> None:
 
 def test_validation_turn_metrics_get_the_validation_prefix() -> None:
     """A rubric's turn metric gets `validation/`; keys that already start with `validation` stay."""
-
-    def rollout(*, group_id: int, status: RolloutStatus) -> Rollout:
-        turn = RolloutTurn(
-            rollout_id=RolloutTurnID(group_id=group_id, rollout_id=0, turn_id=0),
-            prompt_prefix_len=0,
-            prompt_delta_token_ids=np.array([1], dtype=np.int32),
-            completion_token_ids=np.array([2], dtype=np.int32),
-            completion_logprobs=np.array([-0.1], dtype=np.float32),
-            min_policy_version=0,
-            max_policy_version=0,
-            metrics=[
-                m.Metric("math_verify/timeouts", m.Sum(1.0)),
-                m.Metric("validation_generator/queue_time_ms", m.Mean(2.0)),
-            ],
-        )
-        return Rollout(
-            group_id=group_id, rollout_id=0, status=status, reward=0.0, turns=[turn]
-        )
-
+    turn = RolloutTurn(
+        rollout_id=RolloutTurnID(group_id=-1, rollout_id=0, turn_id=0),
+        prompt_prefix_len=0,
+        prompt_delta_token_ids=np.array([1], dtype=np.int32),
+        completion_token_ids=np.array([2], dtype=np.int32),
+        completion_logprobs=np.array([-0.1], dtype=np.float32),
+        min_policy_version=0,
+        max_policy_version=0,
+        metrics=[
+            m.Metric("math_verify/timeouts", m.Sum(1.0)),
+            m.Metric("validation_generator/queue_time_ms", m.Mean(2.0)),
+        ],
+    )
+    rollout = Rollout(
+        group_id=-1,
+        rollout_id=0,
+        status=RolloutStatus.COMPLETED,
+        reward=0.0,
+        turns=[turn],
+    )
     controller = object.__new__(Controller)
     controller._validation_samples = ["prompt"]
     controller.generator_router = SimpleNamespace(
@@ -900,10 +901,7 @@ def test_validation_turn_metrics_get_the_validation_prefix() -> None:
     )
     controller._rollouter = SimpleNamespace(
         run_group_rollouts=AsyncMock(
-            return_value=RolloutGroup(
-                group_id=-1,
-                rollouts=[rollout(group_id=-1, status=RolloutStatus.COMPLETED)],
-            )
+            return_value=RolloutGroup(group_id=-1, rollouts=[rollout])
         )
     )
 
@@ -1187,8 +1185,9 @@ def test_run_logs_ended_passes_then_runs_the_final_pass_if_asked(
     """What run() does when training ends. Resumed at step 1, it stopped at policy 3 of 4:
 
     pass 1:      ended          -> logged at step 3, the last trained step
-    pass 2:      still running  -> left in `_validation_tasks` for close() to cancel
-    final pass:  only with `validate_after_training` -> runs, logged at step 3
+    pass 2:      still running  -> dropped: left in `_validation_tasks` for close() to cancel
+    final pass:  only with `validate_after_training`. Pass 2 ends during it, so pass 2 and
+                 then the final pass are logged at step 3.
     """
     controller, validation = _controller_for_run()
     controller.start_step = 1
@@ -1203,16 +1202,32 @@ def test_run_logs_ended_passes_then_runs_the_final_pass_if_asked(
         await _run_until(lambda: controller._validation_tasks[1].done())
         controller._trainer_policy_version = 3
 
+    async def validate(*, step: int) -> list[m.Metric]:
+        # The final pass takes its group ids from step 5 (num_training_steps + 1).
+        if step == 5:
+            validation.end(2)
+            await _run_until(lambda: controller._validation_tasks[2].done())
+            validation.end(5)
+        return await validation(step=step)
+
     controller._trainer_loop = trainer_loop
-    # The final pass takes its group ids from step 5 (num_training_steps + 1).
-    validation.end(5)
+    controller.validate = validate
 
     asyncio.run(asyncio.wait_for(controller.run(), timeout=5))
 
-    final_steps = [5] if validate_after_training else []
-    assert validation.started_steps == [1, 2, *final_steps]
-    assert _logged_steps(controller, is_validation=True) == [3] * (1 + len(final_steps))
-    assert list(controller._validation_tasks) == [2]
+    logged_passes = [1, 2, 5] if validate_after_training else [1]
+    assert validation.started_steps == [1, 2, 5][: 2 + validate_after_training]
+    assert _logged_steps(controller, is_validation=True) == [3] * len(logged_passes)
+    assert [
+        m.MetricsProcessor._aggregate_metrics(call.kwargs["metrics"])[
+            "validation_reward/mean"
+        ]
+        for call in controller.metrics_processor.log.call_args_list
+        if call.kwargs["is_validation"]
+    ] == logged_passes
+    assert list(controller._validation_tasks) == (
+        [] if validate_after_training else [2]
+    )
     assert controller._log_reward_delta.called == validate_after_training
 
 

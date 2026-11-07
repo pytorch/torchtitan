@@ -140,23 +140,30 @@ logger = logging.getLogger(__name__)
 class ValidationConfig:
     """Held-out validation passes that run beside training; the training loop never waits for one.
 
-    A pass runs each held-out prompt once and is logged at the step it ends.
-    Example: freq=25, 100 steps, each pass takes 30 steps (1 char = 5 steps):
+    A pass runs each held-out prompt once and is logged at the step it ends. The generators serve
+    validation before training, so training rollouts can slow down while a pass runs.
+
+    Example: freq=25, defer_new_if_not_finished=True, 100 steps, each pass takes 30 steps
+    (1 char = 5 steps):
 
         step       0    25   50   75   100
         training   ====================|        training ends at 100
         pass 0     ======                       logged at 30
         pass 30          ======                 due at 25, logged at 60
         pass 60                ======           due at 50, logged at 90
-        pass 90                      ======     due at 75, dropped: running at 100
+        pass 90                      ======     due at 75, still running at 100 (see below)
         final                          ======   logged at 100 (validate_after_training=True)
+
+    A pass still running when training ends is dropped, unless it ends during the final pass
+    (pass 90 here): then it is logged at 100, just before the final pass.
 
     Errors:
         one prompt's rollout raises   -> the pass goes on and counts it in `validation/group_failures`
         any other error in the pass   -> raised at the step the pass ends; the run stops
     """
 
-    # TODO(naming): rename to `num_prompts`; core's `Validator.Config.steps` counts batches.
+    # TODO(naming): rename to `num_prompts`; the trainer's `Validator.Config.steps`
+    # (components/validator.py) counts batches.
     steps: int = 20
     """Maximum held-out prompts per pass, one greedy rollout each. -1: every prompt of a finite
     validation dataset. 0: no validation."""
@@ -167,8 +174,8 @@ class ValidationConfig:
 
     defer_new_if_not_finished: bool = True
     """True: at most one pass runs at a time during training; a due pass waits for the running one
-    to end. False: every due pass starts. vLLM and the Terminal-Bench env server have room for
-    one pass beside training, so False can overload them.
+    to end. False: every due pass starts. The generators and the Terminal-Bench env server are
+    sized for one pass beside training, so with False, two passes can slow training rollouts.
 
         freq=10, each pass takes 15 steps:
         True:  passes start at 0, 15, 30, ...       (pass 15 was due at 10; it waits for pass 0)
@@ -826,9 +833,10 @@ class Controller(Configurable):
             rollout_groups.append(result)
 
         rollouts = [rollout for group in rollout_groups for rollout in group.rollouts]
-        # Training rows carry the same turn-metric keys (e.g. a rubric's `math_verify/timeouts`),
-        # and a pass logs at a step that training also logged. Prefix them, so validation values
-        # stay off the training charts.
+        # A rubric's turn metrics (e.g. `math_verify/timeouts`) use the same keys in training and
+        # validation, and a pass logs at a step that training also logged. Prefix them with
+        # `validation/` so they stay off the training charts. Keys already named for validation
+        # (`validation_generator/...`) stay.
         metrics = [
             (
                 metric
@@ -899,8 +907,10 @@ class Controller(Configurable):
           group_buffer.close()  (wakes _data_input_loop / _rollout_loop / _batcher_loop blocked on the buffer)
           -> task.cancel()      (wakes anything blocked on training_batch_queue.put/get; close does NOT wake these)
           -> gather(..., return_exceptions=True)
-          -> log the validation passes that ended; close() cancels the ones still running
-          -> with `validate_after_training`, run the final pass and log it at the last trained step
+          -> log the validation passes that ended
+          -> with `validate_after_training`, run the final pass, then log the passes that ended
+             during it and the final pass, all at the last trained step
+          -> warn about the passes still running; close() cancels them
         Shutdown (crash):    any loop raises -> appears in `done` -> run() re-raises -> same finally.
         """
         # Setup objects (modules, configs, dataset, actor handles) live until exit. Freeze them
@@ -1430,8 +1440,8 @@ class Controller(Configurable):
             is_deferred = validation.defer_new_if_not_finished and bool(
                 self._validation_tasks
             )
-            # No pass at the last step: training ends right after, and passes still running then are
-            # dropped. `validate_after_training` scores the final policy.
+            # No pass at the last step: training ends right after, and run() does not wait for
+            # running passes. `validate_after_training` scores the final policy.
             if is_validation_due and not is_deferred and step < num_training_steps:
                 self._start_validation(step=step, after=pull_task)
                 is_validation_due = False
