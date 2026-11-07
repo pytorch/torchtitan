@@ -55,7 +55,8 @@ class GenerationEngine(Configurable, abc.ABC):
         model_state_dict_load_mode: ``"cpu_prefetch"`` allocates the pinned CPU buffers of
             ``prefetched_model_state_dict``; ``"gpu_fetch"`` does not.
         rank: Global rank of this process.
-        generator_name: Name of the generator, for engine metrics.
+        generator_name: Name of the generator, unique within a run and shared by its
+            ranks; names engine metrics and per-generator connector resources.
         output_dir: Output directory, for engine metrics.
     """
 
