@@ -96,7 +96,7 @@ class MuseSparkNaViTAdapter(Module):
         return self.act_fn(self.c_proj(self.act_fn(self.c_fc(value_MO))))
 
 
-class NaViTRoPE(ComplexRoPE):
+class VisionRopeFreq(ComplexRoPE):
     """One-based spatial coordinates with contiguous column/row complex pairs."""
 
     @dataclass(kw_only=True, slots=True)
@@ -107,7 +107,7 @@ class NaViTRoPE(ComplexRoPE):
 
     def __init__(self, config: Config) -> None:
         if config.scaling is not None:
-            raise ValueError("NaViTRoPE does not support frequency scaling")
+            raise ValueError("VisionRopeFreq does not support frequency scaling")
         super().__init__(config)
 
     def _precompute_cache(self) -> torch.Tensor:
@@ -521,6 +521,6 @@ class NaViTEncoder(Module):
 __all__ = [
     "MuseSparkNaViTAdapter",
     "NaViTEncoder",
-    "NaViTRoPE",
+    "VisionRopeFreq",
     "reorder_patch_vector_channel_temporal",
 ]

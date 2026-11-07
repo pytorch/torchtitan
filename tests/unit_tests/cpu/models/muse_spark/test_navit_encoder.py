@@ -10,12 +10,14 @@ import torch
 from spmd_types.checker import typecheck
 from torchtitan.models.common.rope import IdentityRoPE
 from torchtitan.models.muse_spark.flavors import muse_spark_navit_encoder_config
-from torchtitan.models.muse_spark.vision_encoder import NaViTRoPE
+from torchtitan.models.muse_spark.vision_encoder import VisionRopeFreq
 
 
 def test_rope_frequency_meta_initialization_matches_hf():
     with torch.device("meta"):
-        rope = NaViTRoPE.Config(dim=96, max_context_length=9, theta=10000.0).build()
+        rope = VisionRopeFreq.Config(
+            dim=96, max_context_length=9, theta=10000.0
+        ).build()
     assert rope.cache.device.type == "meta"
     rope.to_empty(device="cpu")
     rope.init_states(buffer_device=torch.device("cpu"))

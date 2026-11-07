@@ -27,9 +27,9 @@ from torchtitan.models.common.rope import (
     YaRNScalingConfig,
 )
 from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
-from torchtitan.models.muse_spark.vision_encoder import NaViTRoPE
+from torchtitan.models.muse_spark.vision_encoder import VisionRopeFreq
 from torchtitan.models.qwen3_5.rope import MRoPE
-from torchtitan.models.qwen3_5.vision_encoder import QwenVisionRoPE
+from torchtitan.models.qwen3_5.vision_encoder import VisionRotaryEmbedding
 
 
 class TestApplyRotaryEmbCosSin(unittest.TestCase):
@@ -142,7 +142,7 @@ class TestRoPEPositionBoundsComplex(unittest.TestCase):
             ** (torch.arange(0, self.head_dim // 2, 2).float() / (self.head_dim // 2))
         )
         grad_outputs = (torch.randn_like(xq), torch.randn_like(xk))
-        for rope_cls in (VisionRotaryEmbedding2D, NaViTRoPE):
+        for rope_cls in (VisionRotaryEmbedding2D, VisionRopeFreq):
             with self.subTest(rope_cls=rope_cls.__name__):
                 rope = rope_cls.Config(
                     dim=self.head_dim, max_context_length=self.max_context_length
@@ -207,7 +207,7 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
             (coordinates[:, :1] * inv_freq, coordinates[:, 1:] * inv_freq), dim=-1
         ).repeat(1, 2)
         cache = torch.cat((angles.cos(), angles.sin()), dim=-1).unsqueeze(1)
-        rope = QwenVisionRoPE.Config(
+        rope = VisionRotaryEmbedding.Config(
             dim=self.head_dim, max_context_length=self.max_context_length
         ).build()
         expected = CosSinRoPE.apply_rotary_emb(xq, xk, cache)

@@ -111,7 +111,7 @@ from .sharding import (
     residual_gate_sharding_config,
     transformer_block_sharding_config,
 )
-from .vision_encoder import MuseSparkNaViTAdapter, NaViTEncoder, NaViTRoPE
+from .vision_encoder import MuseSparkNaViTAdapter, NaViTEncoder, VisionRopeFreq
 from .vision_encoder_sharding import (
     cp_replicated_vision_sharding_config,
     navit_encoder_sharding_config,
@@ -673,7 +673,7 @@ def muse_spark_navit_encoder_config(
                 latent_dim=latent_dim,
                 num_heads=num_heads,
                 rope=(
-                    NaViTRoPE.Config(
+                    VisionRopeFreq.Config(
                         dim=head_dim,
                         max_context_length=max_rope_positions,
                         theta=rope_theta,

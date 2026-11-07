@@ -167,7 +167,7 @@ def _compute_2d_positions(
     return positions_TC
 
 
-class QwenVisionRoPE(CosSinRoPE):
+class VisionRotaryEmbedding(CosSinRoPE):
     """Two-dimensional RoPE with row/column frequencies and rotate-half.
 
     Coordinates are zero-based ``(row, column)`` pairs in token order.
@@ -180,7 +180,9 @@ class QwenVisionRoPE(CosSinRoPE):
 
     def __init__(self, config: Config):
         if config.scaling is not None:
-            raise ValueError("QwenVisionRoPE does not support frequency scaling.")
+            raise ValueError(
+                "VisionRotaryEmbedding does not support frequency scaling."
+            )
         super().__init__(config)
 
     def _precompute_cache(self) -> torch.Tensor:
