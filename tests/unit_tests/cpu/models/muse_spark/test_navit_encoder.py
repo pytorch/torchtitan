@@ -40,7 +40,7 @@ def test_position_sampling_and_permutation_spmd_types(grid_order):
     encoder_kwargs = dict(
         latent_dim=32,
         num_heads=2,
-        num_layers=0,
+        num_layers=1,
         patch_size=2,
         downsample_factor=2,
         sparse_attention_factor=2,
@@ -51,8 +51,8 @@ def test_position_sampling_and_permutation_spmd_types(grid_order):
     config.pos_emb_grid_order = grid_order
     encoder = config.build()
     encoder.init_states()
-    rope = config.block.attn.rope.build()
-    rope.init_states()
+    attention = encoder.layers["0"].attn
+    rope = attention.rope
     device = torch.device("cpu")
     expected = encoder._get_pos_emb(4, 6, device)
     expected.square().sum().backward()
@@ -70,15 +70,17 @@ def test_position_sampling_and_permutation_spmd_types(grid_order):
             encoder.positional_embedding_vlm,
             {"dp": spmd.R, "cp": spmd.I, "tp": spmd.I},
         )
-        spmd.assert_type(rope.cache, {"dp": spmd.R, "cp": spmd.I, "tp": spmd.R})
+        spmd.assert_type(
+            rope.cache, config.block.attn.rope.sharding_config.state_shardings["cache"]
+        )
         positions = encoder._get_pos_emb(4, 6, device)
         rope_positions = encoder._make_rope_positions(4, 6, device)
         permutation, _ = encoder._get_sparse_perm_and_slens(4, 6, device)
         spmd.assert_type(positions, activation)
         spmd.assert_type(rope_positions[permutation], activation)
-        spmd.assert_type(
-            rope.prepare_positions(rope_positions[permutation]),
-            {"dp": spmd.V, "cp": spmd.I, "tp": spmd.R},
+        attention._redistribute_inputs(
+            (positions.clone(),),
+            {"positions": rope.prepare_positions(rope_positions[permutation])},
         )
         restored = positions[permutation][torch.argsort(permutation)]
         spmd.assert_type(restored, activation)
@@ -104,7 +106,16 @@ def test_position_sampling_and_permutation_spmd_types(grid_order):
     )
     assert rope_positions.shape == (24, 2)
     query, key = torch.randn(2, 24, 2, 16)
-    rope = config.block.attn.rope.build()
+    attention = disabled_encoder.layers["0"].attn
+    rope = attention.rope
     rotated_query, rotated_key = rope(query, key, positions=rope_positions)
     assert rotated_query is query
     assert rotated_key is key
+    with spmd.set_current_mesh(mesh, local_axes=("dp",)), typecheck(local=False):
+        rope_positions = disabled_encoder._make_rope_positions(4, 6, device)
+        inputs = spmd.mutate_type(
+            torch.zeros(24, config.latent_dim), src=spmd.R, dst=activation
+        )
+        attention._redistribute_inputs(
+            (inputs,), {"positions": rope.prepare_positions(rope_positions)}
+        )
