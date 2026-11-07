@@ -87,3 +87,15 @@ def qwen38_flash_next_debugmodel_mm() -> Trainer.Config:
     config.debug.deterministic = True
     config.metrics.loggers = [TensorBoardLogger.Config()]
     return config
+
+
+def qwen38_flash_next_debugmodel_tp2() -> Trainer.Config:
+    config = qwen38_flash_next_debugmodel(
+        parallelism=ParallelismConfig(
+            tensor_parallel_degree=2,
+            expert_parallel_degree=2,
+            enable_sequence_parallel=True,
+        )
+    )
+    config.debug.spmd_typechecking = True
+    return config

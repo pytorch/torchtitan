@@ -85,16 +85,25 @@ class NGramTable(Embedding):
     def __init__(self, config: Config):
         super().__init__(config)
         self.row_mesh = None
+        self._owner_rank = 0
 
     def _parallelize(self, parallelism_context: ParallelismContext) -> None:
         global_shape = torch.Size((self.num_embeddings, self.embedding_dim))
         global_stride = self.weight.stride()
         self.row_mesh = parallelism_context.get_optional_mesh("dp")
+        tp_mesh = parallelism_context.get_optional_mesh("tp")
+        if self.row_mesh is None and tp_mesh is not None:
+            self.row_mesh = parallelism_context.get_mesh("dp_shard")
         if self.row_mesh is not None and self.num_embeddings % self.row_mesh.size():
             # SPMD meta allocation pads uneven shards; owners store only valid rows.
             raise ValueError("PLE requires num_embeddings divisible by the DP degree")
         super()._parallelize(parallelism_context)
         if self.row_mesh is not None:
+            num_feature_owners = 1 if tp_mesh is None else tp_mesh.size()
+            feature_owner = 0 if tp_mesh is None else tp_mesh.get_local_rank()
+            self._owner_rank = (
+                self.row_mesh.get_local_rank() * num_feature_owners + feature_owner
+            )
             # Use the backbone storage mesh to preserve its norm reduction order.
             storage_mesh, _ = resolve_fsdp_mesh(parallelism_context)
             assert storage_mesh.mesh_dim_names is not None
@@ -131,7 +140,7 @@ class NGramTable(Embedding):
         with torch.random.fork_rng(
             devices=devices, device_type=self.weight.device.type
         ):
-            torch.manual_seed(torch.initial_seed() + self.row_mesh.get_local_rank())
+            torch.manual_seed(torch.initial_seed() + self._owner_rank)
             self._init_param(
                 "weight",
                 torch.nn.Parameter(

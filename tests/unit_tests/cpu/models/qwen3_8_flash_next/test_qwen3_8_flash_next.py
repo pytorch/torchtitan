@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -81,6 +82,15 @@ def test_unsupported_attention_configs_are_explicit(config):
         build_model_config(
             "debugmodel", parallelism=ParallelismConfig(context_parallel_degree=2)
         )
+    for flavor in ("debugmodel", "debugmodel_mm", "125B-A6B"):
+        with pytest.raises(ValueError, match="must divide QSA KV heads"):
+            build_model_config(
+                flavor,
+                seq_len=16,
+                parallelism=ParallelismConfig(
+                    tensor_parallel_degree=4, expert_parallel_degree=4
+                ),
+            )
     for indexer_ratio, attention_ratio in ((8, 4), (4, 8), (8, 8)):
         attention = copy.deepcopy(config.layers[3].attention)
         attention.indexer.compress_ratio = indexer_ratio
@@ -747,3 +757,125 @@ def test_optimizer_resets_auxiliary_losses_once_with_remat(config):
         AuxLoss._group_counts.update(saved_counts)
         AuxLoss.group_acc.clear()
         AuxLoss.group_acc.update(saved_acc)
+
+
+def test_qsa_teacher_packets_preserve_tail_and_tp_gradient_scaling():
+    from torch.nn.attention import sdpa_kernel, SDPBackend
+    from torchtitan.models.qwen3_8_flash_next import attention as qsa
+
+    torch.manual_seed(42)
+    T, R, B, H, K = 273, 4, 3, 2, 4
+    J = B * R + R - 1
+    indices = torch.full((T, J), -1, dtype=torch.long)
+    for i in range(T):
+        complete = min((i + 1) // R, B)
+        if complete:
+            indices[i, : complete * R] = torch.arange(complete * R)
+        tail = (i + 1) % R
+        if tail:
+            indices[i, B * R : B * R + tail] = torch.arange(i + 1 - tail, i + 1)
+    indices[::97] = -1
+    scores = torch.randn(T, B)
+    invalid_blocks = indices[:, : B * R].reshape(T, B, R)[:, :, 0] < 0
+    scores = scores.masked_fill(invalid_blocks, -torch.inf).requires_grad_()
+    oracle_scores = scores.detach().clone().requires_grad_()
+    query = torch.randn(T, H, K, requires_grad=True)
+    key = torch.randn(T, 1, K, requires_grad=True)
+    value = torch.randn(T, 1, K, requires_grad=True)
+    remote_query = torch.randn(T, H, K)
+    remote_key = torch.randn(T, 1, K)
+    scale = K**-0.5
+
+    def teacher_chunk(q, k, start, stop):
+        selected = indices[start:stop]
+        valid = selected >= 0
+        q_chunk = q[start:stop].unsqueeze(2)
+        keys = k[selected.clamp_min(0)].transpose(1, 2).repeat_interleave(H, 1)
+        logits = (q_chunk.float() * keys.float()).sum(-1) * scale
+        logits = logits.masked_fill(~valid[:, None], torch.finfo(torch.float32).min)
+        return logits.softmax(-1).sum(1) / (2 * H) * valid
+
+    remote_chunks, expected_outputs = [], []
+    expected_raw_sum = oracle_scores.new_zeros(())
+    with torch.no_grad():
+        local_teachers = [
+            teacher_chunk(query, key, start, start + 16) for start in range(0, T, 16)
+        ]
+        remote_teachers = [
+            teacher_chunk(remote_query, remote_key, start, start + 16)
+            for start in range(0, T, 16)
+        ]
+        for start in range(0, T, 16):
+            selected = indices[start : start + 16]
+            with sdpa_kernel(SDPBackend.MATH):
+                expected_outputs.append(
+                    F.scaled_dot_product_attention(
+                        query[start : start + 16].unsqueeze(2),
+                        key[selected.clamp_min(0)].transpose(1, 2),
+                        value[selected.clamp_min(0)].transpose(1, 2),
+                        attn_mask=(selected >= 0)[:, None, None],
+                        scale=scale,
+                        enable_gqa=True,
+                    ).squeeze(2)
+                )
+        for start in range(0, len(remote_teachers), 16):
+            remote_chunks.append(
+                torch.cat(
+                    [chunk[:, : B * R] for chunk in remote_teachers[start : start + 16]]
+                )
+            )
+    for chunk_index, start in enumerate(range(0, T, 16)):
+        teacher = local_teachers[chunk_index] + remote_teachers[chunk_index]
+        blocks = teacher[:, : B * R].unflatten(-1, (B, R)).amax(-1)
+        expected_raw_sum = expected_raw_sum + qsa.QSAIndexerLoss.block_kl(
+            oracle_scores[start : start + 16], blocks
+        )
+
+    inner = (
+        qsa.QSAInnerAttention.Config(
+            compress_ratio=R,
+            indexer_loss=qsa.QSAIndexerLoss.Config(coeff=1.0, reduce_mesh="loss"),
+        )
+        .build()
+        .train()
+    )
+    communication_shapes, captured = [], []
+    original_inject = inner.indexer_loss.inject
+
+    def collective(local, operation, group):
+        assert operation == "sum"
+        remote = remote_chunks[len(communication_shapes)]
+        assert local.shape == remote.shape
+        communication_shapes.append(list(local.shape))
+        return local + remote
+
+    def inject(raw_sum, **kwargs):
+        captured.append(raw_sum)
+        return original_inject(raw_sum, **kwargs)
+
+    with patch.object(qsa, "spmd_mesh_group", return_value=object()), patch.object(
+        qsa, "spmd_mesh_size", return_value=2
+    ), patch.object(qsa, "all_reduce", side_effect=collective), patch.object(
+        qsa, "wait_tensor", side_effect=lambda x: x
+    ), patch.object(
+        inner.indexer_loss, "inject", side_effect=inject
+    ):
+        output = inner(
+            query,
+            key,
+            value,
+            selected_indices_TJ=indices,
+            scores_TB=scores,
+            scale=scale,
+            enable_gqa=True,
+            aux_loss_denominator=torch.tensor(float(T)),
+        )
+
+    assert communication_shapes == [[256, 12], [17, 12]]
+    torch.testing.assert_close(output, torch.cat(expected_outputs), atol=0, rtol=0)
+    torch.testing.assert_close(captured[0], expected_raw_sum, atol=0, rtol=0)
+    actual_grad = torch.autograd.grad(output.sum() * 0, scores)[0]
+    expected_grad = torch.autograd.grad(
+        expected_raw_sum * ((1.0 / T) / 2), oracle_scores
+    )[0]
+    torch.testing.assert_close(actual_grad, expected_grad, atol=0, rtol=0)

@@ -63,7 +63,9 @@ Zero gradients allow AdamW state/decay updates on entirely empty steps.
 
 ## Build and train
 
-Supported parallelism is FSDP and EP. TP, PP and CP are rejected at config time.
+Supported parallelism is FSDP, TP with or without sequence parallelism, and EP.
+PP and CP are rejected at config time. TP degree must divide the two QSA KV
+heads, so degrees 1 and 2 are supported.
 Flavors are `debugmodel`, `debugmodel_mm`, and `125B-A6B`.
 
 ```python
@@ -130,6 +132,17 @@ The FP32 table parameters, gradients and two AdamW moments total 762.94 GiB
 globally, or 95.37 GiB per owner with DP=8, before the backbone and activations.
 Removing the gather does not make the complete default FP32 AdamW state fit on
 eight GB300s; released-model capacity and throughput remain unqualified.
+
+## Tensor parallelism
+
+TP keeps residual/PLE activations replicated, shards QSA heads and lexical
+feature columns in addition to DP row ownership, and reduces detached head probabilities before pooling each block. The
+replicated indexer contributes its KL gradient once across the TP ranks.
+
+```bash
+NGPU=2 MODULE=torchtitan_recipes.tests.models.qwen3_8_flash_next \
+  CONFIG=qwen38_flash_next_debugmodel_tp2 ./run_train.sh
+```
 
 ## Numerical coverage
 

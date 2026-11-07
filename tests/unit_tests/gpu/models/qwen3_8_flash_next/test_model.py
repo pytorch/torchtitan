@@ -35,6 +35,8 @@ pytestmark = pytest.mark.multi_gpu
 
 
 class TestFlashNextFSDP(DTensorTestBase):
+    tp_degree = 1
+
     @property
     def world_size(self) -> int:
         return 2
@@ -42,18 +44,22 @@ class TestFlashNextFSDP(DTensorTestBase):
     @with_comms
     def test_owned_ple_training_and_async_checkpoint(self):
         """Exercise FSDP+EP, persistent rows, fused AdamW and remat."""
+        num_dp_ranks = self.world_size // self.tp_degree
         parallelism = ParallelismConfig(
-            data_parallel_shard_degree=self.world_size, expert_parallel_degree=2
+            data_parallel_shard_degree=num_dp_ranks,
+            tensor_parallel_degree=self.tp_degree,
+            expert_parallel_degree=2,
+            enable_sequence_parallel=self.tp_degree > 1,
         )
         pc = ParallelismContext(
             dp_replicate=1,
-            dp_shard=self.world_size,
+            dp_shard=num_dp_ranks,
             cp=1,
-            tp=1,
+            tp=self.tp_degree,
             pp=1,
             ep=2,
             world_size=self.world_size,
-            enable_sequence_parallel=False,
+            enable_sequence_parallel=self.tp_degree > 1,
         )
         recipe = qwen38_flash_next_debugmodel(seq_len=32, parallelism=parallelism)
         device = torch.device(self.device_type, self.rank)
@@ -90,8 +96,12 @@ class TestFlashNextFSDP(DTensorTestBase):
                     parameter = table.weight
                     self.assertIsInstance(parameter, DTensor)
                     self.assertEqual(
-                        parameter.to_local().shape[0] * self.world_size,
+                        parameter.to_local().shape[0] * num_dp_ranks,
                         table.num_embeddings,
+                    )
+                    self.assertEqual(
+                        parameter.to_local().shape[1] * self.tp_degree,
+                        table.embedding_dim,
                     )
                     observed_rows = []
                     hook = table.register_forward_pre_hook(
@@ -106,7 +116,7 @@ class TestFlashNextFSDP(DTensorTestBase):
                     ):
                         for microbatch in range(2):
                             tokens = torch.arange(32, device=device).add(
-                                32 * self.rank + microbatch
+                                32 * (self.rank // self.tp_degree) + microbatch
                             )
                             input_dict = {
                                 "input": tokens,
@@ -129,14 +139,14 @@ class TestFlashNextFSDP(DTensorTestBase):
                                     parallelism_context=pc,
                                     parallelism=parallelism,
                                     global_routing_token_counts=torch.tensor(
-                                        [32.0 * 2 * self.world_size], device=device
+                                        [32.0 * 2 * num_dp_ranks], device=device
                                     ),
                                 )
                                 logits_TV = model(input_T, **model_kwargs)
                                 loss = F.cross_entropy(
                                     logits_TV.float(), labels_T, reduction="sum"
                                 )
-                                (loss / (32 * 2 * self.world_size)).backward()
+                                (loss / (32 * 2 * num_dp_ranks)).backward()
                             self.assertIs(table.weight, parameter)
                             self.assertEqual(parameter.dtype, torch.float32)
                     hook.remove()
@@ -186,3 +196,7 @@ class TestFlashNextFSDP(DTensorTestBase):
             dist.barrier()
             if self.rank == 0:
                 shutil.rmtree(path[0])
+
+
+class TestFlashNextTP(TestFlashNextFSDP):
+    tp_degree = 2
