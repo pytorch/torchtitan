@@ -205,7 +205,7 @@ def split_qkv(
     )
 
 
-# The region of `GQAttention._prepare_query_key_value` and of subclasses that override it.
+# The region of `GQAttention._prepare_query_key_value` and of overrides that reuse it (Muse Glimmer).
 # Compiled, the head copies fuse into the q/k norm and RoPE reads. emulate_precision_casts
 # rounds the normed q/k to bf16 before RoPE, as the eager modules do; without it ~31%
 # of q elements differ from eager. No pointwise autotuning: kernel configs

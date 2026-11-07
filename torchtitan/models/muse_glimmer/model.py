@@ -163,7 +163,8 @@ class Attention(GQAttention):
             if torch.compiler.is_compiling():
                 # emulate_precision_casts rounds a Python float to bf16 before a bf16 multiply,
                 # but eager multiplies by it in fp32. Writing the multiply in fp32 matches eager.
-                # TODO: use the plain multiply once emulate_precision_casts keeps Python floats in fp32.
+                # TODO(felipemello1/pytorch#24): use the plain multiply once emulate_precision_casts
+                # keeps Python floats in fp32.
                 xq = (xq.float() * self.scale_query_by).to(xq.dtype)
             else:
                 # Eager keeps the plain multiply: the fp32 form launches 3 kernels instead of 1.
