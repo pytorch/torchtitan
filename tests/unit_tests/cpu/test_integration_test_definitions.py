@@ -184,7 +184,7 @@ def test_parse_multiple_integration_test_suites() -> None:
 
 def test_specialized_moe_backends_have_ep_coverage() -> None:
     specialized_names = {
-        "deepseek_v3_fsdp+hybridep",
+        "fsdp+hybridep",
         "qwen3_fsdp+deepep",
     }
     h100_model_tests = [
@@ -192,8 +192,8 @@ def test_specialized_moe_backends_have_ep_coverage() -> None:
     ]
 
     for test in h100_model_tests:
-        config = test.configs[0]()
-        assert config.parallelism.expert_parallel_degree > 1
+        for config_fn in test.configs:
+            assert config_fn().parallelism.expert_parallel_degree > 1
 
 
 def test_models_select_fake_and_real_pg_cases() -> None:

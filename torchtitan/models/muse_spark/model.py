@@ -526,6 +526,7 @@ class MuseSparkModel(MultimodalModel):
                     "loss",
                     "fused_binary_activation",
                     "fp32_to_bf16_split",
+                    "moe_masked_output_postprocess",
                     "rope",
                     "muse_spark_attention_output",
                     "muse_spark_attention_qk",
