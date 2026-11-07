@@ -9,10 +9,12 @@
 from collections.abc import Set
 from contextlib import nullcontext
 
-from vllm.config import CUDAGraphMode
-from vllm.forward_context import BatchDescriptor
+from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.utils.math_utils import round_up
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker import gpu_model_runner as vllm_gpu_model_runner
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker as GPUWorker
@@ -103,6 +105,27 @@ class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
 
 class TorchTitanGPUModelRunner(GPUModelRunner):
     """V1 runner with sequence-parallel padding and FULL-graph decode specialization."""
+
+    @staticmethod
+    def kv_connector_no_forward(
+        scheduler_output: SchedulerOutput, vllm_config: VllmConfig
+    ) -> ModelRunnerOutput:
+        transfer = vllm_config.kv_transfer_config
+        if transfer is None or transfer.kv_connector != "MooncakeStoreConnector":
+            return GPUModelRunner.kv_connector_no_forward(scheduler_output, vllm_config)
+
+        # TODO(acisseJZhong): upstream to vLLM: its kv_connector_no_forward
+        # passes wait_for_save=False, so Mooncake never submits finish-time saves
+        # (e.g. hybrid tails pinned after the last forward) scheduled on a step
+        # without a forward. Submit them before get_finished, as on forward
+        # steps: get_finished retires the ledger of finished requests that have
+        # no queued save job.
+        with (
+            set_forward_context(None, vllm_config),
+            GPUModelRunner.maybe_get_kv_connector_output(scheduler_output) as output,
+        ):
+            pass
+        return ModelRunnerOutput.with_kv_conn_output_only(output)
 
     def load_model(self, load_dummy_weights: bool = False) -> None:
         super().load_model(load_dummy_weights)
