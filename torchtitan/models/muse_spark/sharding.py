@@ -47,9 +47,7 @@ def audio_wrapper_sharding_config(input_name: str) -> ShardingConfig:
     invariant = SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I})
     return ShardingConfig(
         in_src_shardings={input_name: invariant},
-        in_dst_shardings={input_name: invariant},
         out_src_shardings=invariant,
-        out_dst_shardings=invariant,
     )
 
 
@@ -69,9 +67,7 @@ def transformer_block_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     activation = muse_spark_activation_placement(enable_sp=enable_sp)
     return ShardingConfig(
         in_src_shardings={"x": activation},
-        in_dst_shardings={"x": activation},
         out_src_shardings=activation,
-        out_dst_shardings=activation,
     )
 
 
@@ -82,9 +78,7 @@ def residual_gate_sharding_config(*, enable_sp: bool) -> ShardingConfig:
             "gate": dense_param_placement(tp=spmd.R if enable_sp else spmd.I)
         },
         in_src_shardings={"stream_TD": activation, "branch_TD": activation},
-        in_dst_shardings={"stream_TD": activation, "branch_TD": activation},
         out_src_shardings=activation,
-        out_dst_shardings=activation,
     )
 
 
@@ -96,9 +90,7 @@ def compressed_moe_linear_sharding_config(*, has_bias: bool = False) -> Sharding
     return ShardingConfig(
         state_shardings=state,
         in_src_shardings={"input": activation},
-        in_dst_shardings={"input": activation},
         out_src_shardings=activation,
-        out_dst_shardings=activation,
     )
 
 
@@ -116,10 +108,6 @@ def audio_encoder_sharding_config() -> ShardingConfig:
     invariant = SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I})
     return ShardingConfig(
         in_src_shardings={
-            "waveforms_SC": invariant,
-            "waveform_padded_lengths_N": invariant,
-        },
-        in_dst_shardings={
             "waveforms_SC": invariant,
             "waveform_padded_lengths_N": invariant,
         },

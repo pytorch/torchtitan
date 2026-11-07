@@ -569,9 +569,11 @@ helpers from ``torchtitan/models/common/decoder_sharding.py`` and
 - ``_replicate_sharding_config(module)`` — for modules that should have
   Replicate params/buffers without TP sharding (dynamically enumerates
   params and buffers to avoid ``_shard_states`` errors)
-- ``ShardingConfig(in_src_shardings=..., in_dst_shardings=...)`` —
-  for input redistribution at module boundaries (e.g. attention,
-  MLP gather from Shard(1) to Replicate)
+- ``ShardingConfig(in_src_shardings=..., out_src_shardings=...)`` --
+  declares (and asserts) activation layouts at module boundaries. It
+  never inserts collectives: layout changes (e.g. the SP all-gather
+  before attention/MLP) are explicit ``spmd.redistribute`` calls; see the
+  ``_add_tp_boundary`` mixins in ``hf_sharding.py``
 
 Do NOT use ``register_forward_pre_hook`` / ``register_forward_hook``
 to manually convert DTensor ↔ local tensors. Do NOT use

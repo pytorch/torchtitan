@@ -473,7 +473,6 @@ class TestMoE(unittest.TestCase):
             with self.subTest(enable_sp=enable_sp):
                 moe_config = moe_sharding.moe_sharding_config(enable_sp=enable_sp)
                 assert moe_config.in_src_shardings is not None
-                self.assertIsNone(moe_config.in_dst_shardings)
                 self.assertEqual(
                     _per_axis_types(moe_config.in_src_shardings["padding_mask_T"]),
                     _per_axis_types(token_id_placement()),
@@ -482,7 +481,6 @@ class TestMoE(unittest.TestCase):
                 router_config = moe_sharding.router_sharding_config()
                 router_inputs = router_config.in_src_shardings
                 assert router_inputs is not None
-                self.assertIsNone(router_config.in_dst_shardings)
                 self.assertEqual(
                     _per_axis_types(router_inputs["x_TD"])[MeshAxisName.TP],
                     spmd.S(0),
@@ -515,9 +513,6 @@ class TestMoE(unittest.TestCase):
         assert moe_config.in_src_shardings is not None
         assert shared_config.in_src_shardings is not None
         assert w13_config.in_src_shardings is not None
-        self.assertIsNone(moe_config.in_dst_shardings)
-        self.assertIsNone(shared_config.in_dst_shardings)
-        self.assertIsNone(w13_config.in_dst_shardings)
         self.assertEqual(
             _per_axis_types(moe_config.in_src_shardings["x_TD"])[MeshAxisName.TP],
             spmd.S(0),
@@ -670,12 +665,10 @@ class TestMoE(unittest.TestCase):
                 self.assertEqual(
                     _per_axis_types(w2_output).get(MeshAxisName.TP), expected
                 )
-                self.assertIsNone(w2.out_dst_shardings)
                 self.assertEqual(
                     _per_axis_types(routed_output).get(MeshAxisName.TP),
                     spmd.S(0),
                 )
-                self.assertIsNone(routed.out_dst_shardings)
 
     def test_explicit_padding_mask_sharding_with_sp(self):
         moe = MoE.__new__(MoE)

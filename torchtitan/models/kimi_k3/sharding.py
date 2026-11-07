@@ -69,9 +69,7 @@ def inner_kda_sharding_config() -> ShardingConfig:
     }
     return ShardingConfig(
         in_src_shardings=kernel_inputs,
-        in_dst_shardings=kernel_inputs,
         out_src_shardings=head_placement,
-        out_dst_shardings=head_placement,
         local_spmd=True,
     )
 

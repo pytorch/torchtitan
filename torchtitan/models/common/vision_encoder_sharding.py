@@ -62,11 +62,7 @@ def invariant_norm_sharding_config() -> ShardingConfig:
         in_src_shardings={
             "input": _vision_activation_placement(),
         },
-        in_dst_shardings={
-            "input": _vision_activation_placement(),
-        },
         out_src_shardings=_vision_activation_placement(),
-        out_dst_shardings=_vision_activation_placement(),
     )
 
 
@@ -80,11 +76,7 @@ def vision_invariant_linear_sharding_config() -> ShardingConfig:
         in_src_shardings={
             "input": _vision_activation_placement(),
         },
-        in_dst_shardings={
-            "input": _vision_activation_placement(),
-        },
         out_src_shardings=_vision_activation_placement(),
-        out_dst_shardings=_vision_activation_placement(),
     )
 
 
@@ -121,9 +113,6 @@ def vision_rowwise_sharding_config() -> ShardingConfig:
         in_src_shardings={
             "input": input_layout,
         },
-        in_dst_shardings={
-            "input": input_layout,
-        },
         out_src_shardings=_vision_activation_placement(),
     )
 
@@ -149,11 +138,6 @@ def vision_inner_attention_sharding_config() -> ShardingConfig:
     attention_layout = _vision_activation_placement(tp=spmd.S(1))
     return ShardingConfig(
         in_src_shardings={
-            "q_THK": attention_layout,
-            "k_THK": attention_layout,
-            "v_THV": attention_layout,
-        },
-        in_dst_shardings={
             "q_THK": attention_layout,
             "k_THK": attention_layout,
             "v_THV": attention_layout,
