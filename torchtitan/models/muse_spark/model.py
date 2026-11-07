@@ -29,6 +29,7 @@ from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     FlexAttentionMetadata,
     GQAttention,
+    QKVLinear,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.aux_loss import AuxLoss
@@ -79,6 +80,66 @@ def build_dummy_audio_inputs(
     return waveforms_SC, waveform_padded_lengths_N
 
 
+class MuseSparkQKVLinear(Module):
+    """Fused q/k/v projection that returns the packed ``wqkv`` output.
+
+    ``MuseSparkAttention`` splits it inside its compiled q/k region, so the head copies fuse
+    into the q/k norms. The Config subclasses ``QKVLinear.Config``: the HF state-dict adapter
+    and the quantization transform find fused projections by that type.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(QKVLinear.Config):
+        pass
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.wqkv = config.wqkv.build()
+        self.head_dim = config.head_dim
+        self.heads_per_kv = config.n_heads // config.n_kv_heads
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        qkv = self.wqkv(x_TD)
+        # The split in MuseSparkAttention._prepare_query_key_value copies qkv with bare ops.
+        remat.recompute_needs_tensor(qkv)
+        return qkv
+
+
+@spmd.local_map(
+    out_types=(
+        (
+            {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
+            spmd.PartitionSpec(("dp", "cp"), "tp", None),
+        ),
+    )
+    * 3
+)
+def _split_qkv(
+    qkv: torch.Tensor, heads_per_kv: int, head_dim: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Split the packed ``wqkv`` output into contiguous q, k and v, as ``QKVLinear`` does."""
+    # [T, n_kv_heads * R * head_dim] -> [T, n_kv_heads, R, head_dim], R = heads_per_kv + 2.
+    # Use -1 for n_kv_heads so TP sharding is handled automatically.
+    num_tokens = qkv.shape[0]
+    with spmd.local():  # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
+        qkv = qkv.view(num_tokens, -1, heads_per_kv + 2, head_dim)
+        if spmd.is_type_checking():
+            spmd.assert_type(
+                qkv,
+                spmd.V,
+                spmd.PartitionSpec(("dp", "cp"), "tp", None, None),
+            )
+
+    local_num_tokens = qkv.shape[0]
+    xq, xk, xv = torch.split(qkv, [heads_per_kv, 1, 1], dim=-2)
+    # vLLM attention/KV-cache kernels read contiguous head-major memory.
+    return (
+        xq.reshape(local_num_tokens, -1, head_dim).contiguous(),
+        xk.reshape(local_num_tokens, -1, head_dim).contiguous(),
+        xv.reshape(local_num_tokens, -1, head_dim).contiguous(),
+    )
+
+
 class MuseSparkAttention(GQAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(GQAttention.Config):
@@ -116,12 +177,11 @@ class MuseSparkAttention(GQAttention):
         attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        qkv = self.qkv_linear.wqkv(x_TD)
+        qkv = self.qkv_linear(x_TD)
         output_gate_TO = None
         if self.output_gate is not None:
             output_gate_TO = self.output_gate(x_TD)
 
-        remat.recompute_needs_tensor(qkv)
         query_TNH, key_TKH, value_TKH = self._prepare_query_key_value(qkv, positions)
 
         output_TNH = remat.region(
@@ -165,7 +225,9 @@ class MuseSparkAttention(GQAttention):
         """
         # The q/k copies fuse into the norms, and the norm backward writes the qkv grad
         # directly.
-        query_TNH, key_TKH, value_TKH = self.qkv_linear.split(qkv)
+        query_TNH, key_TKH, value_TKH = _split_qkv(
+            qkv, self.qkv_linear.heads_per_kv, self.qkv_linear.head_dim
+        )
         if self.q_norm is not None or self.k_norm is not None:
             if self.q_norm is None or self.k_norm is None:
                 raise ValueError("MuseSparkAttention needs both q_norm and k_norm.")
