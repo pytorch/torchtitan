@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch import nn
@@ -86,6 +87,7 @@ def add_grouped_bias(
     return output_RO + bias_RO.to(output_RO.dtype)
 
 
+@spmd.register_local_autograd_function
 class _GatherGroupedBias(torch.autograd.Function):
     """Gather of per-expert biases whose backward sums each expert's rows with a GEMM.
 

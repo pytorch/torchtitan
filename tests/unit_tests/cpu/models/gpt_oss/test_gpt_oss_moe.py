@@ -5,9 +5,27 @@
 # LICENSE file in the root directory of this source tree.
 
 import pytest
+import spmd_types as spmd
 import torch
+from spmd_types.checker import typecheck
+from torch.distributed.device_mesh import init_device_mesh
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 
+from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.activation import ClampedSwiGLU
+from torchtitan.models.gpt_oss.moe import add_grouped_bias, GptOssGroupedLinear
+
+
+@pytest.fixture
+def reset_local_compile():
+    LocalCompileConfig().apply()
+    torch._dynamo.reset()
+    yield
+    LocalCompileConfig().apply()
 
 
 def _reference_swiglu(gate, up, limit: float = 7.0):
@@ -51,3 +69,68 @@ def test_clamped_swiglu_rejects_invalid_policy(field: str, value: float) -> None
     """Invalid kernel policy is rejected by the source activation config."""
     with pytest.raises(ValueError, match=f"{field} must be finite and positive"):
         ClampedSwiGLU.Config(**{field: value})
+
+
+def _repeat_interleave_bias(output_RO, bias_EO, offsets_E, *, scores_R=None):
+    """Reference: expand each expert's bias over its rows; padding rows get zeros."""
+    counts_E = torch.diff(torch.cat((offsets_E.new_zeros(1), offsets_E)))
+    tail = output_RO.shape[0] - offsets_E[-1]
+    bias_RO = torch.cat(
+        (
+            bias_EO.repeat_interleave(counts_E.long(), dim=0),
+            bias_EO.new_zeros(tail, bias_EO.shape[-1]),
+        )
+    )
+    if scores_R is not None:
+        bias_RO = bias_RO * scores_R.unsqueeze(-1)
+    return output_RO + bias_RO
+
+
+@pytest.mark.parametrize("with_scores", [False, True])
+@pytest.mark.parametrize("regions", [[], ["grouped_expert_bias"]])
+def test_grouped_bias_matches_repeat_interleave(
+    reset_local_compile, regions, with_scores
+) -> None:
+    torch.manual_seed(0)
+    LocalCompileConfig(regions=regions).apply()
+    # 3 experts own rows 0-1, (none), 2-4; rows 5-6 are padding.
+    offsets_E = torch.tensor([2, 2, 5], dtype=torch.int32)
+    tensors = [torch.randn(7, 6), torch.randn(3, 6), torch.rand(7), torch.randn(7, 6)]
+    output_RO, bias_EO, scores_R, grad_RO = (t.double() for t in tensors)
+    results = []
+    for fn in (_repeat_interleave_bias, add_grouped_bias):
+        inputs = [
+            t.clone().requires_grad_(True) for t in (output_RO, bias_EO, scores_R)
+        ]
+        out_RO = fn(*inputs[:2], offsets_E, scores_R=inputs[2] if with_scores else None)
+        out_RO.backward(grad_RO)
+        results.append((out_RO.detach(), *(t.grad for t in inputs)))
+    for reference, actual in zip(*results, strict=True):
+        torch.testing.assert_close(actual, reference)
+
+
+class TestGptOssGroupedLinearSPMD(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 2
+
+    @property
+    def device_type(self):
+        return "cpu"
+
+    @with_comms
+    def test_grouped_bias_propagates_spmd_types(self):
+        mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("tp",))
+        layer = GptOssGroupedLinear.Config(
+            group_size=3, in_features=8, out_features=4
+        ).build()
+        input_RI = torch.randn(7, 8, dtype=torch.bfloat16)
+        offsets_E = torch.tensor([2, 2, 5], dtype=torch.int32)
+
+        with set_current_spmd_mesh(mesh), typecheck(strict_mode="strict", local=True):
+            spmd.assert_type(input_RI, {"tp": spmd.V})
+            spmd.assert_type(layer.weight, {"tp": spmd.R})
+            spmd.assert_type(layer.bias, {"tp": spmd.R})
+            spmd.assert_type(offsets_E, {"tp": spmd.V})
+            output_RO = layer(input_RI, offsets_E)
+            spmd.assert_type(output_RO, {"tp": spmd.V})
