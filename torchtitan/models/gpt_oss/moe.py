@@ -9,10 +9,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch import nn
 
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.common.linear import GroupedLinear
 
 # Shape suffix legend: R = routed rows, E = experts, I = input features,
@@ -38,40 +40,96 @@ class GptOssGroupedLinear(GroupedLinear):
         scores_R: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_RO = super().forward(input_RI, offsets_E, scores_R=scores_R)
-        bias_RO = self._expand_grouped_bias(
-            self.bias.flatten(1), offsets_E, output_RO.shape[0]
-        )
-        if scores_R is not None:
-            bias_RO = (bias_RO * scores_R.reshape(-1, 1).to(torch.float32)).to(
-                output_RO.dtype
-            )
+        flat_output_RO = output_RO.flatten(1)
+        # Mark rows dynamic from the first call (scores_R has the same rows). Without it,
+        # PP fails in backward:
+        # 1. Microbatch A's forward compiles a graph for A's row count.
+        # 2. Microbatch B's forward has other rows and compiles a dynamic-rows graph.
+        # 3. A's backward replays the region on B's graph, which saves other tensors.
+        # Dynamo can't trace this call, so skip it when the caller itself is compiled.
+        if not torch.compiler.is_compiling():
+            torch._dynamo.maybe_mark_dynamic(flat_output_RO, 0)
+            if scores_R is not None:
+                torch._dynamo.maybe_mark_dynamic(scores_R, 0)
         # Match the matmul's policy: replaying even this cheap add after a saved
         # matmul would force retention of its full routed output.
-        return remat.region(
-            self._add_grouped_bias,
+        add_bias = remat.region(
+            add_grouped_bias,
             self.remat_region_name("bias_add"),
             recompute=self.remat_should_recompute("grouped_mm"),
-        )(output_RO, bias_RO.reshape_as(output_RO))
+        )
+        # Pass a copy of the bias. Under PP, FSDP2 keeps an fp32 .grad on the bf16 bias between
+        # microbatches, and Dynamo raises when it compiles a parameter input whose .grad has
+        # another dtype. The copy costs one [E, O] kernel per projection per forward.
+        # TODO: pass self.bias once Dynamo copies a tensor's grad_dtype before its .grad
+        # (issue draft: felipemello1/pytorch#23).
+        biased_RO = add_bias(
+            flat_output_RO, self.bias.flatten(1).clone(), offsets_E, scores_R=scores_R
+        )
+        return biased_RO.view_as(output_RO)
+
+
+# TODO: add w13's bias inside the fused_binary_activation region (RoutedExperts must then
+# pass the bias to the activation). Without grad: one kernel instead of two. With grad it
+# only pays if SwiGLU's backward recomputes the add, so SwiGLU would read the fp32 sum
+# instead of today's bf16-rounded w13 output: not bitwise.
+#
+# recompile_limit=16 covers the graphs per process: 3 per width (w13, w2), one for 2+ rows
+# and one each for 0 and 1 rows (EP ranks with few tokens), twice if the process runs both
+# grad and no_grad. Up to 12.
+@local_compile("grouped_expert_bias", batch_invariant=True, recompile_limit=16)
+def add_grouped_bias(
+    output_RO: torch.Tensor,
+    bias_EO: torch.Tensor,
+    offsets_E: torch.Tensor,
+    *,
+    scores_R: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Add each routed row's expert bias: ``output_RO[r] + bias_EO[expert of row r]``.
+
+    Rows past ``offsets_E[-1]`` are padding and get no bias. With ``scores_R``
+    (router scores absorbed into W2's input), each row's bias is scaled by its score.
+
+    Example:
+        offsets_E = [2, 3] (expert 0 owns rows 0-1, expert 1 row 2), 4 rows:
+        out[0:2] += bias[0], out[2] += bias[1], out[3] unchanged.
+    """
+    # w13 and w2 call this with different widths; keep each one static.
+    torch._dynamo.mark_static(output_RO, -1)
+    row_ids_R = torch.arange(
+        output_RO.shape[0], device=offsets_E.device, dtype=offsets_E.dtype
+    )
+    expert_ids_R = torch.searchsorted(offsets_E, row_ids_R, right=True)
+    bias_RO = _GatherGroupedBias.apply(bias_EO, expert_ids_R)
+    if scores_R is not None:
+        # Eager autograd saves the gathered [R, O] bias for the score grad. The compiled
+        # region (the default) saves only the [E + 1, O] bias and gathers again.
+        bias_RO = bias_RO * scores_R.reshape(-1, 1).to(torch.float32)
+    return output_RO + bias_RO.to(output_RO.dtype)
+
+
+@spmd.register_local_autograd_function
+class _GatherGroupedBias(torch.autograd.Function):
+    """Gather of per-expert biases whose backward sums each expert's rows with a GEMM.
+
+    The autograd backward of a gathered or repeat-interleaved bias is a scatter-add
+    over all rows (sort-based or atomic, bf16 accumulation). A one-hot ``[E + 1, R]``
+    matrix times the gradient sums the rows deterministically, accumulating in fp32.
+    """
 
     @staticmethod
-    def _expand_grouped_bias(
-        bias_EO: torch.Tensor,
-        offsets_E: torch.Tensor,
-        output_rows: int,
+    def forward(  # pyrefly: ignore[bad-override]
+        ctx, bias_EO: torch.Tensor, expert_ids_R: torch.Tensor
     ) -> torch.Tensor:
-        """Expand expert bias across routed rows and zero-valued tail padding."""
-        counts_E = torch.diff(torch.cat((offsets_E.new_zeros(1), offsets_E)))
-        tail_count = (output_rows - offsets_E[-1]).unsqueeze(0).to(counts_E.dtype)
-        padded_bias = torch.cat((bias_EO, bias_EO.new_zeros(1, bias_EO.shape[-1])))
-        return padded_bias.repeat_interleave(
-            torch.cat((counts_E, tail_count)).long(),
-            dim=0,
-            output_size=output_rows,
-        )
+        ctx.save_for_backward(expert_ids_R)
+        ctx.num_experts = bias_EO.shape[0]
+        # Padding rows (expert id E) index the appended zero row.
+        padded_bias_EO = torch.cat((bias_EO, bias_EO.new_zeros(1, bias_EO.shape[-1])))
+        return padded_bias_EO[expert_ids_R]
 
-    def _add_grouped_bias(
-        self,
-        output_RO: torch.Tensor,
-        bias_RO: torch.Tensor,
-    ) -> torch.Tensor:
-        return output_RO + bias_RO.to(output_RO.dtype)
+    @staticmethod
+    def backward(ctx, grad_RO: torch.Tensor):  # pyrefly: ignore[bad-override]
+        (expert_ids_R,) = ctx.saved_tensors
+        one_hot_ER = grad_RO.new_zeros(ctx.num_experts + 1, grad_RO.shape[0])
+        one_hot_ER.scatter_(0, expert_ids_R.long().unsqueeze(0), 1)
+        return torch.mm(one_hot_ER, grad_RO)[: ctx.num_experts], None

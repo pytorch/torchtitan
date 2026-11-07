@@ -23,6 +23,8 @@ s * (W2(h) + b2) = W2(s * h) + s * b2
 ```
 
 Input and bias scaling multiply in FP32 and cast back to the projection dtype.
+With the `grouped_expert_bias` region compiled (the default), the scaled bias is
+not cast back: it is added to W2's output in FP32 and rounded once.
 W2 and its bias addition share the `grouped_mm` remat policy. Replaying even a
 cheap bias addition after a saved W2 would require retaining W2's full routed
 output; saving both avoids that dependency. Bias scaling adds pointwise
