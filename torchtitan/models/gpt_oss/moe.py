@@ -59,8 +59,8 @@ class GptOssGroupedLinear(GroupedLinear):
 # instead of today's bf16-rounded w13 output: not bitwise.
 #
 # recompile_limit=16: w13 and w2 widths x (static, dynamic rows) is 4 graphs in grad mode;
-# no_grad adds 2 (it starts dynamic); EP ranks with 0 or 1 rows add one graph per width
-# and mode: 14 at most (default limit 8).
+# no_grad adds 2 (it starts dynamic); 0-row and 1-row calls (EP ranks with few tokens) each
+# add one graph per width and mode (+8): 14 at most (default limit 8).
 @local_compile("grouped_expert_bias", batch_invariant=True, recompile_limit=16)
 def add_grouped_bias(
     output_RO: torch.Tensor,
