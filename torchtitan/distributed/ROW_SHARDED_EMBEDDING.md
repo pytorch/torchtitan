@@ -99,6 +99,14 @@ uneven and empty shards when the supplied weight has the correct local shape.
 Qwen rejects CPU offload, deferred FSDP gradient reduction, and a reduction dtype
 different from the master dtype.
 
+Real PP uses PyTorch's group-level FSDP finalization: backbone gradients
+accumulate in FP32 on each requester before DP reduction. The lookup sums each
+microbatch's BF16 requester gradients in FP32 on row owners and accumulates
+those owner gradients. Both compute the same globally token-normalized sum with
+different floating-point association. PP training therefore has separate native
+determinism and C4 coverage, without a claim of bitwise parity with the former
+full-table FSDP path.
+
 ## Capacity
 
 The released table is `320,001,536 x 160`: 51,200,245,760 parameters.
@@ -117,10 +125,9 @@ At eight owners the table alone costs 95.37 GiB per owner; at four it costs
 meta inventory's default FP32 AdamW state exceeds eight GB300s even with ideal
 balance. Released-model capacity and throughput are unqualified.
 
-Current Qwen support uses DP owners. A PP stage without PLE should own no table
-and join no lookup collectives; PP ranks on other stages do not add capacity to
-the table's owner mesh. Separate feature-column owners are supported by the
-helper, while their model integration belongs to the TP/PP stack increments.
+Qwen partitions rows over DP and feature columns over TP. A PP stage without PLE
+owns no table and joins no lookup collectives; PP ranks on other stages do not
+add capacity to the table's owner mesh.
 
 ## Validation
 
@@ -144,5 +151,3 @@ ten-step loss/norm, and all 763 final checkpoint tensors bitwise. Full remat and
 resume after five updates, including loading a plain-row checkpoint, preserve
 the same result. Both sources use the same committed deterministic GDN policy.
 The owned lookup also has reduced-model parity with a full-table FSDP embedding.
-Changing ownership or collective reduction trees can change floating-point
-summation order; these checks qualify the tested layouts.

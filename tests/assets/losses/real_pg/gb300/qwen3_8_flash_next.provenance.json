@@ -1,0 +1,286 @@
+{
+  "schema_version": 1,
+  "purpose": "Strict numerical regression of the reduced Flash-Next training fixture on GB300 GPUs",
+  "golden_sha256": "db49eb5b179a3ca7756bb41b16c7b4a8e5f84a10177bd1468595d2d92338f7f4",
+  "source": {
+    "repository": "pytorch/torchtitan",
+    "upstream_base": "29f784e075b19d1aa09576bc3bb88faf9554b433",
+    "computation_commit": "a25004be4c162f9af5596ca7cf12a0ad82fccd90",
+    "computation_url": "https://github.com/shuhuayu/torchtitan/commit/a25004be4c162f9af5596ca7cf12a0ad82fccd90",
+    "gdn_determinism_commit": "bc22fd5f7a29a77d60a435728d8562ef886b3bbe",
+    "files_sha256": {
+      "scripts/_checkpoint_test_config.py": "ca3c576d1a4080f2b3cdb38b84c263be692aa63346049a94ff43da399c650e53",
+      "scripts/loss_compare.py": "3773c8093311b691fe4c4aa6eaa425f5ea02b87fb180cd767a6c0acbbd25514c",
+      "tests/assets/c4_test/data.json": "07a274d2f6c903fd1c491260be302f99383930d31656f50de33ef467af6643b1",
+      "tests/assets/tokenizer/tokenizer.json": "a9eb477ec2c2520fa45c2e73078e930ca57d316fe8cce2f45842ac3cc48f5271",
+      "tests/assets/tokenizer/tokenizer_config.json": "acf745f72b6b8f4dd11ee38fa1931022978d408c0a3477495c8ab27086082697",
+      "tests/integration_tests/gb300.py": "0ec17d2a548fd940d50b4e909d1ebb4b87ab1a8bc5828f2158b241fe04f1a9e1",
+      "tests/integration_tests/run_tests.py": "2df6465cd03427f4aa0b35360465a0021de0c2d8d01d2bfb721264b00f61805f",
+      "torchtitan/components/checkpointer/base.py": "37fc5e9ba36c627dc3a11ad6ec2d1af649cf86e503bc8b2911504d8a4e6485dc",
+      "torchtitan/components/optim/optim.py": "31c46ea8080a0bccd10df4a52f332dd74325903a7950826acffa8dbec5e886e3",
+      "torchtitan/components/optim/optimizer.py": "649dcbb22d02292465727fa113582a8dcd580dd51aed7e45b8831ddd81fbd67a",
+      "torchtitan/distributed/row_sharded_embedding.py": "e5f47c16d123797c18f008c7b383794fba94af49b0031f03c95f9ac36b4aabed",
+      "torchtitan/distributed/utils.py": "cf90fe5b64cf8978ce458f31b836071a77d1505b88aeb81e4566e24408e67404",
+      "torchtitan/models/common/attention/cp_gdn.py": "3773b38d4fffdc9472d7a45ab8453800253fbcbdd2a781b7be0278edb4c96baa",
+      "torchtitan/models/common/attention/gdn.py": "3ca00cc8a324f2beab600bf11e0e7c6ab9b016443d4f687a36c72dbdc4b10a53",
+      "torchtitan/models/qwen3_8_flash_next/__init__.py": "6c24df602fabee22b1e94ed73a5b4de8098ea056d3e9e293a35bbddfa36b6e5e",
+      "torchtitan/models/qwen3_8_flash_next/attention.py": "b0dd4193cfb4d279561a7eb15255b7ea35e36ab0026983f636f40e1b5fe30ed1",
+      "torchtitan/models/qwen3_8_flash_next/embedding.py": "9cbca9a82905f87efea86fa14005094c7762d71274c057279d4be3f210127f11",
+      "torchtitan/models/qwen3_8_flash_next/flavors.py": "5c1620318994477979ae142f82813af7af19e87911d87ae3d2270fbf1128e0b2",
+      "torchtitan/models/qwen3_8_flash_next/model.py": "b465073de193808375e7a9efd153a73ff2a3b78bd220cd54a9b0dd5c0c35cadb",
+      "torchtitan/models/qwen3_8_flash_next/moe.py": "d477467306c6b530c1fce2946be698cc4e150b0d6af8bae1cc5cb31f55ae4384",
+      "torchtitan/models/qwen3_8_flash_next/norm.py": "4378fec390fd51a87fb5f23d993907fa6acfbd4d22928393efdff900664769ca",
+      "torchtitan/models/qwen3_8_flash_next/residual.py": "e32c770d27f500b3db6bc886aae37444b26c5dbb4845d179eb029836c5f5fad5",
+      "torchtitan/models/qwen3_8_flash_next/rope.py": "428427e9ccb005d0d4b00bece5253c86a6879baef64a50407140bb6c6db04d45",
+      "torchtitan/models/qwen3_8_flash_next/sharding.py": "47947072785ffb2de49f64454571e26787e927539e0ac3e0a86cf8aa33683369",
+      "torchtitan/models/qwen3_8_flash_next/state_dict_adapter.py": "eaeca1eae13d22e18207afa21d037d09ba0d0d7e28d614f78554839491659212",
+      "torchtitan_recipes/tests/models/llama3.py": "a248bb7d8e9b72b304281491fd594e8f7ad2f0a53dac03672f9e36e8057853f9",
+      "torchtitan_recipes/tests/models/qwen3_8_flash_next.py": "9d0e4f7651fc6f0f9e85dea2501271fd6a370ef78287996bb0e1ecf4d6559d11"
+    },
+    "computation_tree": "b1f71203c5002635139e7f58384b704bc456efff"
+  },
+  "reference": {
+    "architecture_checkpoint": "Qwen/Qwen3.8-Flash-Next",
+    "checkpoint_revision": "de4b8e4d43b917e7706784d8bb445c9af86a3540",
+    "transformers_revision": "494470d677d05d44153d235d795e0d01040307ab"
+  },
+  "hardware": {
+    "gpu": "NVIDIA GB300",
+    "gpu_count": 2,
+    "allocated_gpu_count": 8,
+    "hosts": 1,
+    "allocated_hosts": 2
+  },
+  "software": {
+    "torch": "2.16.0.dev20261030+cu132",
+    "torch_revision": "bf270c3251d8e84723cedbf5b60eaa60cacaa3f2",
+    "cuda": "13.2",
+    "python": "3.12.13",
+    "machine": "aarch64",
+    "packages": {
+      "torch": {
+        "version": "2.16.0.dev20261030+cu132"
+      },
+      "attn-gym": {
+        "version": "0.0.17"
+      },
+      "triton": {
+        "version": "3.9.0+gitb7ddcf86"
+      },
+      "transformers": {
+        "version": "5.21.0.dev0",
+        "vcs_commit": "494470d677d05d44153d235d795e0d01040307ab"
+      },
+      "torch-remat": {
+        "version": "0.2.2"
+      },
+      "spmd-types": {
+        "version": "0.3.1"
+      },
+      "nvidia-cutlass-dsl": {
+        "version": "4.8.1"
+      },
+      "torch-checkpointing": {
+        "version": "0.1.1"
+      }
+    },
+    "nccl": [
+      2,
+      32,
+      3
+    ],
+    "runtime_archive_sha256": "5d6ed6915814b6f62de90e3bd48f65df70b508d05e166df6a833da46f98e5ab2"
+  },
+  "fixture": {
+    "module": "torchtitan_recipes.tests.models.qwen3_8_flash_next",
+    "config": "qwen38_flash_next_debugmodel_tp2",
+    "seed_config": "qwen38_flash_next_debugmodel",
+    "initialization": "Independently recreated random model-only FP32 seed checkpoint before each launch",
+    "steps": 10,
+    "metrics": [
+      "loss",
+      "grad_norm"
+    ],
+    "metric_storage": "Full-precision TensorBoard scalars with round-trip float text",
+    "grad_norm": "Global norm before clipping; max_norm=1.0",
+    "seed": 42,
+    "deterministic": true,
+    "deterministic_warn_only": false,
+    "parallelism": {
+      "fsdp": 1,
+      "tp": 2,
+      "ep": 2,
+      "sp": true,
+      "pp": 1,
+      "cp": 1
+    },
+    "training_dtype": "float32",
+    "parameter_dtype": "bfloat16",
+    "reduce_dtype": "float32",
+    "data": "tests/assets/c4_test/data.json; Grain, repeat=True, shuffle=False",
+    "tokenizer_assets": "tests/assets/tokenizer",
+    "seq_len": 64,
+    "eos_token_id": 2003,
+    "tokens_per_microbatch_per_dp_rank": 128,
+    "optimizer": {
+      "name": "AdamW",
+      "fused": true,
+      "lr": 0.0008,
+      "betas": [
+        0.9,
+        0.95
+      ],
+      "eps": 1e-08,
+      "weight_decay": 0.1
+    },
+    "scheduler": {
+      "warmup_steps": 2,
+      "decay_type": "linear",
+      "decay_ratio": 0.8,
+      "min_lr_factor": 0.0
+    },
+    "indexer_loss_coeff": 1.0,
+    "moe_aux_loss_coeff": 0.001,
+    "activation_remat": null,
+    "local_compile_regions": [],
+    "accelerator_graphs_disabled": true,
+    "spmd_typechecking": true,
+    "qsa_attention": "SDPA MATH",
+    "gdn": "Attention Gym fused kernels with deterministic L2 normalization",
+    "ple_table": {
+      "row_ownership": "DP",
+      "feature_column_ownership": "TP",
+      "master_dtype": "float32",
+      "selected_vector_dtype": "bfloat16",
+      "optimizer": "Dense local AdamW with the same hyperparameters as the backbone"
+    }
+  },
+  "qualification": {
+    "independent_remote_launches": 2,
+    "bitwise_metrics_per_launch": 20,
+    "registered_export_matches_both_independent_launches": true,
+    "export_command": "python -m tests.integration_tests.run_tests OUTPUT --test_suite gb300 --execution_mode real_pg --gpu_arch gb300 --ngpu 2 --test_name qwen3_8_flash_next_tp+ep_numerics --export-numerics",
+    "replay_command": "python -m tests.integration_tests.run_tests OUTPUT --test_suite gb300 --execution_mode real_pg --gpu_arch gb300 --ngpu 2 --test_name qwen3_8_flash_next_tp+ep_numerics",
+    "independent_mast_jobs": 1,
+    "registered_replay_matches_golden": true,
+    "registered_export_matches_previous_golden": true,
+    "golden_regenerated": false,
+    "mast_job": "qwen38-fn-01a17bc3-dct-gb300-row-owned-stack-golden-v2-dcrkszfv",
+    "tenant": "msl_infra_pytorch_dct"
+  },
+  "native_dtensor_validation": {
+    "source_snapshot": "bdc26ae0edee1f01f99303e1fc8f390f368306cc",
+    "persistent_table_storage": "DTensor; DP rows and TP feature columns",
+    "gradient_boundary": "to_local(grad_placements=weight.placements)",
+    "files_sha256": {
+      "torchtitan/distributed/row_sharded_embedding.py": "71c60f60ac9c0e86d531e13ededa89905413411bbba5257670af1e539559807a",
+      "torchtitan/distributed/utils.py": "11910a1dcf3c54cec3896998e21222ae4c3053901fdaf6d89670dd722108da7f",
+      "torchtitan/components/checkpointer/base.py": "2bd520490169c93d8c4a3d1a70054a96ffb1082db67cab68f007d21a242ba38d",
+      "torchtitan/models/qwen3_8_flash_next/embedding.py": "cb81158efd1e298e7e2d6cfe596a30a7fe8898309dd0f7d925d0f75d59de7416",
+      "torchtitan/models/qwen3_8_flash_next/model.py": "ee0d8d01f8b0865705117007b3cee89096895533b588a9817afba2729af1078a",
+      "torchtitan/models/qwen3_8_flash_next/sharding.py": "47947072785ffb2de49f64454571e26787e927539e0ac3e0a86cf8aa33683369",
+      "torchtitan/models/qwen3_8_flash_next/state_dict_adapter.py": "d6511b04cc493370f7611d7e116ea54674a4a9a03d6599342c15f0555648955f"
+    },
+    "registered_replay": {
+      "bitwise_equal": true,
+      "values": 20,
+      "torch": "2.16.0.dev20261030+cu132",
+      "torch_revision": "bf270c3251d8e84723cedbf5b60eaa60cacaa3f2",
+      "gpu": "NVIDIA GB300",
+      "gpus": 2,
+      "seed": 42,
+      "deterministic": true,
+      "golden_sha256": "db49eb5b179a3ca7756bb41b16c7b4a8e5f84a10177bd1468595d2d92338f7f4",
+      "export_numerics": false
+    },
+    "eight_gpu_training": {
+      "source_snapshot": "bdc26ae0edee1f01f99303e1fc8f390f368306cc",
+      "baseline": "a725047d451e2efa6b4c141dc338585dca7f8a24",
+      "mast_job": "qwen38-fn-01a1b222-dct-gb300-dtensor-stack-v2-sb702lrl",
+      "tenant": "msl_infra_pytorch_dct",
+      "hosts": 2,
+      "gpus_per_host": 4,
+      "steps": 10,
+      "pp": {
+        "dp_shard": 2,
+        "tp": 2,
+        "ep": 4,
+        "pp": 2,
+        "num_virtual_stages": 4,
+        "schedule": "Interleaved1F1B",
+        "full_remat": true
+      },
+      "hsdp": {
+        "dp_replicate": 2,
+        "dp_shard": 2,
+        "tp": 2,
+        "ep": 4,
+        "pp": 1,
+        "spmd_typechecking": true,
+        "full_remat": true
+      },
+      "comparisons": {
+        "pp_b": {
+          "loss_norm_bitwise_equal": true,
+          "checkpoint": {
+            "entries": 2866,
+            "tensors": 763,
+            "different": [],
+            "bitwise_equal": true
+          }
+        },
+        "pp_b_repeat": {
+          "loss_norm_bitwise_equal": true,
+          "checkpoint": {
+            "entries": 2866,
+            "tensors": 763,
+            "different": [],
+            "bitwise_equal": true
+          }
+        },
+        "pp_b_resume": {
+          "loss_norm_bitwise_equal": true,
+          "checkpoint": {
+            "entries": 2866,
+            "tensors": 763,
+            "different": [],
+            "bitwise_equal": true
+          }
+        },
+        "hsdp_b": {
+          "loss_norm_bitwise_equal": true,
+          "checkpoint": {
+            "entries": 2874,
+            "tensors": 763,
+            "different": [],
+            "bitwise_equal": true
+          }
+        }
+      },
+      "all_48_training_processes_exit_zero": true,
+      "child_runtime_verified_all_cases": true,
+      "runtime": {
+        "torch": "2.16.0.dev20261030+cu132",
+        "torch_revision": "bf270c3251d8e84723cedbf5b60eaa60cacaa3f2"
+      },
+      "postprocessing": {
+        "performed_locally": true,
+        "gpu_job_state": "FAILED_after_training",
+        "wrapper_error": "Expected tb_baseline; actual recipe writes tb.",
+        "actual_tensorboard_folder": "tb",
+        "production_or_runtime_changes": false,
+        "downloaded_training_artifacts": 60
+      }
+    },
+    "review_followup": {
+      "gdn_prerequisite_commit": "f521fcb782986ee00504f475759e9a19fe8d2cdd",
+      "training_and_optimizer_code_unchanged": true,
+      "changed_production_file": "torchtitan/models/qwen3_8_flash_next/state_dict_adapter.py",
+      "hf_change": "Derive local HF part offsets from mesh coordinates; rank-local loading retains the target meta layout from to_hf placeholders.",
+      "hf_coverage": "Four-rank CPU distributed safetensors save/load covers DP, TP, HSDP and empty owners without format-conversion collectives.",
+      "ple_weight_decay": 0.1,
+      "optimizer_policy": "Keep the qualified backbone AdamW settings on the table, including decay of untouched rows.",
+      "golden_regenerated": false
+    }
+  }
+}

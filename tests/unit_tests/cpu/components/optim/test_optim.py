@@ -125,6 +125,7 @@ def test_optim_builds_owned_components(enable_accelerator_graph: bool) -> None:
     optimizer_config.build.assert_called_once_with(
         model_parts=[model],
         enable_accelerator_graph=enable_accelerator_graph,
+        pp_mesh=optim.parallelism_context.get_optional_mesh("pp"),
     )
     config.lr_scheduler.build.assert_called_once_with(
         optimizers=optimizers,
@@ -183,6 +184,7 @@ def test_optim_accelerator_graph_falls_back_for_unsupported_device(
     optimizer_build.assert_called_once_with(
         model_parts=[model],
         enable_accelerator_graph=False,
+        pp_mesh=optim.parallelism_context.get_optional_mesh("pp"),
     )
     gradient_clipper_config.build.assert_called_once_with()
     wrap.assert_not_called()

@@ -9,7 +9,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -17,6 +17,7 @@ import torch.nn.functional as F
 import torch_remat as remat
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed import ParallelismContext
 from torchtitan.models.qwen3_8_flash_next import build_model_config
 from torchtitan.models.qwen3_8_flash_next.attention import (
     QSAIndexerLoss,
@@ -634,6 +635,65 @@ def test_adapter_roundtrip_and_numeric_shard_order(config):
     del incomplete[shard]
     with pytest.raises(ValueError, match="requires all"):
         adapter.from_hf(incomplete)
+
+
+def test_original_ids_and_gradients_survive_a_pipeline_split(config):
+    torch.manual_seed(42)
+    config.layers = [copy.deepcopy(config.layers[3]), copy.deepcopy(config.layers[1])]
+    config.layers[1].attention = copy.deepcopy(config.layers[0].attention)
+    full = config.build().eval()
+    full.init_states()
+    first, last = copy.deepcopy(full), copy.deepcopy(full)
+    del first.layers["1"]
+    first.norm = first.lm_head = first.hyper_connection_mixer = None
+    del last.layers["0"]
+    last.tok_embeddings = None
+    ids = torch.randint(0, 63, (25,))
+    positions = torch.cat((torch.arange(11), torch.arange(14)))
+    metadata = full._get_attention_metadata(positions=positions)
+    expected = full(
+        ids,
+        positions=positions,
+        document_positions=positions,
+        ple_input_ids=ids,
+        attention_metadata=metadata,
+    )
+    hidden = first(
+        ids,
+        positions=positions,
+        document_positions=positions,
+        ple_input_ids=ids,
+        attention_metadata=metadata,
+    )
+    actual = last(
+        hidden,
+        positions=positions,
+        ple_input_ids=ids,
+        document_positions=positions,
+        attention_metadata=metadata,
+    )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    actual.square().mean().backward()
+    expected.square().mean().backward()
+    for stage in (first, last):
+        for name, parameter in stage.named_parameters():
+            # Splitting the graph can reorder FP32 gradient additions.
+            torch.testing.assert_close(
+                parameter.grad,
+                dict(full.named_parameters())[name].grad,
+                rtol=1e-5,
+                atol=1e-7,
+                msg=lambda message: f"{name}: {message}",
+            )
+
+
+def test_pipeline_rejects_fake_static_single_stream_metadata(config):
+    with torch.device("meta"):
+        model = config.build()
+    context = Mock(spec=ParallelismContext)
+    with patch("torch.distributed.get_backend", return_value="fake"):
+        with pytest.raises(ValueError, match="four residual streams"):
+            model.pipeline(parallelism_context=context)
 
 
 @pytest.mark.parametrize("all_padding", [False, True])
