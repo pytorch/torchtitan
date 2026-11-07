@@ -10,6 +10,7 @@ import asyncio
 import random
 from types import SimpleNamespace
 
+import pytest
 from renderers import ParsedResponse, Qwen3RendererConfig
 
 from torchtitan.components.renderer import from_renderers
@@ -281,6 +282,59 @@ def test_a_rollout_that_raises_is_kept_but_left_out_of_the_advantage() -> None:
     assert [rollout.advantage for rollout in scored] == [-0.5, 0.5]
 
 
+def test_cancelled_group_waits_for_every_sibling_release() -> None:
+    """A cancelled group returns only after each sibling released its session: the controller
+    releases the group next, and no sibling's router call may still be in flight."""
+
+    async def run() -> None:
+        started = asyncio.Semaphore(0)
+
+        async def generate_fn(prompt_token_ids, **kwargs) -> Completion:
+            started.release()
+            await asyncio.Event().wait()
+
+        # Router round trips of different lengths: the slow one must finish too.
+        delays = iter([0.01, 0.3])
+        released = []
+
+        async def release_session_fn(*, routing_session_id: str) -> None:
+            await asyncio.sleep(next(delays))
+            released.append(routing_session_id)
+
+        worker = _CustomWorker(
+            SimpleNamespace(
+                custom_setting="custom",
+                rubric=_Config(_Rubric()),
+                message_env=_MessageEnvConfig(),
+                token_env=_TokenEnvConfig(),
+                advantage=_Config(_AdvantageEstimator()),
+            )
+        )
+        await worker.setup_async(
+            tokenizer_config=HuggingFaceTokenizer.Config(),
+            renderer_config=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
+            hf_assets_path="tests/assets/tokenizer",
+        )
+        group = asyncio.create_task(
+            worker.run_group(
+                generate_fn=generate_fn,
+                release_session_fn=release_session_fn,
+                sample="sample",
+                group_id=7,
+                group_size=2,
+                sampling=SamplingConfig(),
+            )
+        )
+        for _ in range(2):
+            await asyncio.wait_for(started.acquire(), timeout=10)
+        group.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await group
+        assert sorted(released) == ["group=7/rollout=0", "group=7/rollout=1"]
+
+    asyncio.run(run())
+
+
 def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
     # TokenEnv returns each prompt as a delta. Delta prompts must pack into the same samples as full
     # prompts: a turn joins the last sample iff its prompt extends the previous turn's prompt + completion.
@@ -344,3 +398,4 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
             ] == expected
 
     asyncio.run(run())
+

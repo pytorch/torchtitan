@@ -45,9 +45,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# How long `Rollouter.close` waits for in-flight `run_group` calls before stopping their workers anyway.
-# Drains took under 0.3 s once the generators closed; 30 s only covers a group stuck in a slow env step.
-_RUN_GROUP_DRAIN_TIMEOUT_S = 30.0
+# How long shutdown waits: `Rollouter.close` for in-flight `run_group` and generate calls, and a
+# cancelled dispatch for `cancel_group`. `close`'s drains took under 0.3 s once the generators closed;
+# 30 s only covers a group stuck in a slow env step.
+_SHUTDOWN_DRAIN_TIMEOUT_S = 30.0
 
 
 class Rollouter(Configurable):
@@ -184,22 +185,25 @@ class Rollouter(Configurable):
         )
 
     async def close(self) -> None:
-        """Wait for in-flight `run_group` calls, then stop the rollout worker pool.
+        """Wait for in-flight `run_group` calls and generate calls, then stop the rollout worker pool.
 
         Close the generators first, so pending `generate_fn` calls fail fast:
 
-            generators closed -> generate_fn raises -> run_group returns -> stop_rollout_workers()
-            run_group still running after _RUN_GROUP_DRAIN_TIMEOUT_S       -> stop_rollout_workers()
+            generators closed -> generate_fn raises -> run_group returns
+              -> the router answered every generate call, also a cancelled group's -> stop_rollout_workers()
+            still waiting after _SHUTDOWN_DRAIN_TIMEOUT_S                          -> stop_rollout_workers()
 
         Why wait: if a worker stops while the generator router still owes it a reply, Monarch fails the
         router and the finished job exits 130.
         """
+        worker_actors = self._worker_actors
         actor_system = self._actor_system
         self._worker_actors = None
         self._actor_system = None
+        deadline = asyncio.get_running_loop().time() + _SHUTDOWN_DRAIN_TIMEOUT_S
         calls = tuple(self._inflight_run_group_calls)
         if calls:
-            _, pending = await asyncio.wait(calls, timeout=_RUN_GROUP_DRAIN_TIMEOUT_S)
+            _, pending = await asyncio.wait(calls, timeout=_SHUTDOWN_DRAIN_TIMEOUT_S)
             if pending:
                 logger.warning(
                     "Stopping rollout workers with %d run_group calls still running; "
@@ -209,6 +213,17 @@ class Rollouter(Configurable):
                 for call in pending:
                     call.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
+        if worker_actors is not None:
+            try:
+                async with asyncio.timeout_at(deadline):
+                    await worker_actors.wait_for_generate_calls.call()
+            except Exception:
+                # A timeout, or a worker that already died: stop the workers anyway.
+                logger.warning(
+                    "Stopping rollout workers before every generate call was answered; "
+                    "the job may exit 130",
+                    exc_info=True,
+                )
         if actor_system is not None:
             await actor_system.stop_rollout_workers()
 
@@ -262,8 +277,22 @@ class Rollouter(Configurable):
         )
         self._inflight_run_group_calls.add(call)
         call.add_done_callback(self._on_run_group_call_done)
-        # Shield `call` from the controller's end-of-training cancel, so `close` can still wait for it.
-        return await asyncio.shield(call)
+        try:
+            # Shield `call`: a cancel stops the group on its worker (below), and `close` still waits
+            # for a group whose `cancel_group` failed.
+            return await asyncio.shield(call)
+        except asyncio.CancelledError:
+            # Monarch runs a call to completion even when its caller is cancelled, so stop the
+            # group on its worker (see `RolloutWorkerActor.cancel_group`).
+            # TODO(monarch): drop cancel_group once Monarch forwards a caller's cancel to the callee.
+            try:
+                async with asyncio.timeout(_SHUTDOWN_DRAIN_TIMEOUT_S):
+                    await self._worker_actors.cancel_group.call(group_id)
+            except Exception:
+                logger.exception(
+                    "cancel_group(%d) failed; the group may keep running", group_id
+                )
+            raise
 
     def _on_run_group_call_done(self, call: asyncio.Future[RolloutGroup]) -> None:
         self._inflight_run_group_calls.discard(call)
@@ -403,7 +432,8 @@ class RolloutWorker(Configurable):
         # reuse across the group_size rollouts (truest spot is the worker's first-turn render).
         try:
             # produce the rollouts. With return_exceptions, a failing sibling doesn't end the gather
-            # early: see `rollouts_from_gather`.
+            # early (see `rollouts_from_gather`), and a cancel still waits for each sibling's
+            # `finally` (session release).
             results = await asyncio.gather(
                 *(
                     self._run_single_rollout(
@@ -533,8 +563,6 @@ class RolloutWorker(Configurable):
 
             status = env_step.status
         except Exception as error:
-            # TODO: at shutdown, every rollout still generating lands here with a ~40-line remote
-            # traceback. Raise a typed error on generator close and log it at info, without the traceback.
             logger.exception(
                 "rollout %s/rollout=%d failed after %d turn(s); marking ERROR_SYSTEM",
                 group_id,
@@ -543,12 +571,15 @@ class RolloutWorker(Configurable):
             )
             status = RolloutStatus.ERROR_SYSTEM
             logs["error"] = repr(error)
-
-        try:
-            await release_session_fn(routing_session_id=routing_session_id)
-        except Exception:
-            # Not fatal: `max_sessions` evicts an unreleased session.
-            logger.exception("releasing routing session %s failed", routing_session_id)
+        finally:
+            # Also on a cancel, so a cancelled rollout releases its session like a failed one.
+            try:
+                await release_session_fn(routing_session_id=routing_session_id)
+            except Exception:
+                # Not fatal: `max_sessions` evicts an unreleased session.
+                logger.exception(
+                    "releasing routing session %s failed", routing_session_id
+                )
         return Rollout(
             group_id=group_id,
             rollout_id=rollout_id,

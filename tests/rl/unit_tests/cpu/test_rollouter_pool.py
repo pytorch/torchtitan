@@ -9,7 +9,13 @@
 import asyncio
 import functools
 import gc
+import pathlib
+import sys
 from types import SimpleNamespace
+
+import cloudpickle
+import pytest
+from monarch.actor import ActorError, this_host
 
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.monarch import (
@@ -83,10 +89,28 @@ class _SetupEndpoint:
         self.calls.append(kwargs)
 
 
+class _CancelGroupEndpoint:
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+        self.called, self.release = asyncio.Event(), asyncio.Event()
+
+    async def call(self, group_id: int) -> None:
+        self.calls.append(group_id)
+        self.called.set()
+        await self.release.wait()
+
+
+class _WaitForGenerateCallsEndpoint:
+    async def call(self) -> None:
+        pass
+
+
 class _WorkerActorMesh:
     def __init__(self) -> None:
         self.setup_async = _SetupEndpoint()
         self.run_group = _ChooseRunGroupEndpoint()
+        self.cancel_group = _CancelGroupEndpoint()
+        self.wait_for_generate_calls = _WaitForGenerateCallsEndpoint()
         self.stopped = False
 
     async def stop(self) -> None:
@@ -247,6 +271,8 @@ async def _dispatch_then_cancel_caller(
         )
     )
     await actor_mesh.run_group.started.wait()
+    # Let the worker's cancel_group return at once.
+    actor_mesh.cancel_group.release.set()
     dispatch.cancel()
     await asyncio.gather(dispatch, return_exceptions=True)
 
@@ -282,7 +308,7 @@ def test_close_waits_for_run_group_of_cancelled_caller(monkeypatch) -> None:
 
 def test_close_stops_waiting_after_drain_timeout(monkeypatch) -> None:
     async def run() -> None:
-        monkeypatch.setattr(rollouter_module, "_RUN_GROUP_DRAIN_TIMEOUT_S", 0.0)
+        monkeypatch.setattr(rollouter_module, "_SHUTDOWN_DRAIN_TIMEOUT_S", 0.0)
         actor_mesh = _WorkerActorMesh()
         rollouter = _rollouter_without_datasets()
         worker_mesh = await _setup(rollouter, actor_mesh, monkeypatch)
@@ -292,5 +318,144 @@ def test_close_stops_waiting_after_drain_timeout(monkeypatch) -> None:
 
         assert worker_mesh.stopped
         assert not rollouter._inflight_run_group_calls
+
+    asyncio.run(run())
+
+
+def test_cancelled_dispatch_cancels_the_group_on_its_worker(monkeypatch) -> None:
+    """A cancelled caller stops the group on its worker before the cancel propagates."""
+
+    async def run() -> None:
+        actor_mesh = _WorkerActorMesh()
+        rollouter = _rollouter_without_datasets()
+        await _setup(rollouter, actor_mesh, monkeypatch)
+
+        dispatch = asyncio.create_task(
+            rollouter.run_group_rollouts(
+                generate_fn="generate_fn",
+                release_session_fn="release_session_fn",
+                sample="sample",
+                group_id=5,
+                group_size=2,
+                sampling="sampling",
+            )
+        )
+        await actor_mesh.run_group.started.wait()
+        dispatch.cancel()
+        await actor_mesh.cancel_group.called.wait()
+        # The cancel waits until the worker stopped the group.
+        assert not dispatch.done()
+        actor_mesh.cancel_group.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await dispatch
+        assert actor_mesh.cancel_group.calls == [5]
+        # The shielded run_group call still runs; finish it so close() doesn't wait for it.
+        actor_mesh.run_group.release.set()
+        await rollouter.close()
+
+    asyncio.run(run())
+
+
+def test_cancelled_dispatch_stops_waiting_for_a_cancel_group_that_hangs(
+    monkeypatch, caplog
+) -> None:
+    async def run() -> None:
+        monkeypatch.setattr(rollouter_module, "_SHUTDOWN_DRAIN_TIMEOUT_S", 0.05)
+        actor_mesh = _WorkerActorMesh()  # its cancel_group never returns
+        rollouter = _rollouter_without_datasets()
+        await _setup(rollouter, actor_mesh, monkeypatch)
+
+        dispatch = asyncio.create_task(
+            rollouter.run_group_rollouts(
+                generate_fn="generate_fn",
+                release_session_fn="release_session_fn",
+                sample="sample",
+                group_id=5,
+                group_size=2,
+                sampling="sampling",
+            )
+        )
+        await actor_mesh.run_group.started.wait()
+        dispatch.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(dispatch, timeout=5)
+        assert "cancel_group(5) failed" in caplog.text
+        actor_mesh.run_group.release.set()
+        await rollouter.close()
+
+    asyncio.run(run())
+
+
+class _GeneratingWorker:
+    """A rollout worker whose group waits on one slow generate call. On a cancel it cleans up
+    slowly (e.g. env.close()), then marks the group cancelled in a file."""
+
+    def __init__(self, marker_dir: str) -> None:
+        self.marker_dir = marker_dir
+
+    async def run_group(self, *, generate_fn, group_id: int, **kwargs) -> RolloutGroup:
+        try:
+            await generate_fn([1], request_id="r", group_id=group_id)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.5)
+            pathlib.Path(self.marker_dir, f"{group_id}.cancelled").touch()
+            raise
+        return RolloutGroup(group_id=group_id, rollouts=[])
+
+
+class _GeneratingWorkerConfig:
+    def __init__(self, marker_dir: str) -> None:
+        self.marker_dir = marker_dir
+
+    def build(self) -> _GeneratingWorker:
+        return _GeneratingWorker(self.marker_dir)
+
+
+async def _slow_generate(marker_dir: str, prompt_token_ids, **kwargs) -> None:
+    # A router call still running when its rollout is cancelled; the marker is its reply.
+    await asyncio.sleep(1.5)
+    pathlib.Path(marker_dir, "replied").touch()
+
+
+def test_cancel_group_and_wait_for_generate_calls_on_real_worker_processes(
+    tmp_path,
+) -> None:
+    """Sent right after `run_group`, `cancel_group` finds the group (Monarch starts one sender's
+    concurrent calls in order) and returns once it stopped, while its generate call still runs.
+    `wait_for_generate_calls` returns only after that call's reply, so `Rollouter.close` never stops
+    a worker the router still owes."""
+
+    async def run() -> None:
+        mesh = this_host().spawn_procs(per_host={"cpus": 1})
+        # The worker processes can't import this test module, so ship the fakes by value.
+        cloudpickle.register_pickle_by_value(sys.modules[__name__])
+        try:
+            workers = mesh.spawn(
+                "rollout_worker",
+                RolloutWorkerActor,
+                worker_config=_GeneratingWorkerConfig(str(tmp_path)),
+                num_threads=1,
+                structured_logger_init_fn=None,
+            )
+            group = workers.run_group.choose(
+                generate_fn=functools.partial(_slow_generate, str(tmp_path)),
+                release_session_fn=None,
+                sample=None,
+                group_id=7,
+                group_size=1,
+                sampling=None,
+            )
+            await workers.cancel_group.call(7)
+            assert (tmp_path / "7.cancelled").exists()
+            with pytest.raises(ActorError):
+                await group
+            assert not (tmp_path / "replied").exists()
+            await workers.wait_for_generate_calls.call()
+            assert (tmp_path / "replied").exists()
+            # The worker keeps serving after a cancel.
+            await workers.sync_log_step.call(1)
+        finally:
+            cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
+            await mesh.stop()
 
     asyncio.run(run())
