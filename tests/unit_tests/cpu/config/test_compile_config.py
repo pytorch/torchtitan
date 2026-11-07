@@ -11,7 +11,12 @@ import pytest
 import torch
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
-from torchtitan.components.loss import compute_logprobs, cross_entropy_loss, mse_loss
+from torchtitan.components.loss import (
+    compute_logprobs,
+    cross_entropy_and_logsumexp,
+    cross_entropy_loss,
+    mse_loss,
+)
 from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.attention.attention import _compiled_create_block_mask
@@ -129,27 +134,22 @@ def test_loss_functions_use_local_compile(monkeypatch) -> None:
     compiled_names = []
 
     def fake_compile(reference, **kwargs):
-        del kwargs
         compiled_names.append(reference.__name__)
-        return reference
+        # Each region returns its compile kwargs, so a call shows which region ran.
+        return lambda *args, **fn_kwargs: kwargs
 
     monkeypatch.setattr(torch, "compile", fake_compile)
     LocalCompileConfig(regions=["loss"]).apply()
+    labels = torch.tensor([0, 3])
 
-    assert [
-        name
-        for name in compiled_names
-        if name
-        in {
-            cross_entropy_loss.__name__,
-            mse_loss.__name__,
-            compute_logprobs.__name__,
+    # fp32 logits get the region with no Inductor options; bf16 logits get the fast exp.
+    for ce_function in (cross_entropy_loss, cross_entropy_and_logsumexp):
+        assert ce_function(torch.randn(2, 4), labels) == {"fullgraph": True}
+        assert ce_function(torch.randn(2, 4, dtype=torch.bfloat16), labels) == {
+            "fullgraph": True,
+            "options": {"use_fast_math": True},
         }
-    ] == [
-        cross_entropy_loss.__name__,
-        mse_loss.__name__,
-        compute_logprobs.__name__,
-    ]
+    assert {mse_loss.__name__, compute_logprobs.__name__} <= set(compiled_names)
 
 
 def test_moe_aux_loss_uses_local_compile(monkeypatch) -> None:

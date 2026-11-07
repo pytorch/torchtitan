@@ -222,6 +222,9 @@ class SoftCappedLinear(Linear):
     # dz * temp * (1 - tanh^2) * (1/temp) * mult (4 fp32 roundings). A custom
     # autograd.Function bwd (recompute tanh from the saved bf16 logits) can cancel
     # temp * (1/temp) into dz * mult * (1 - tanh^2) (2 roundings).
+    # TODO: the fp32 output sends cross-entropy to its fp32 region (`cross_entropy_loss` in
+    # components/loss.py), which reads twice the bytes of bf16 logits. Fusing this soft cap
+    # into the loss's compiled region would let it read the bf16 logits instead.
     @local_compile("muse_glimmer_logit_postprocess", batch_invariant=True)
     def postprocess_logits(self, logits: torch.Tensor) -> torch.Tensor:
         logits = logits.float()
