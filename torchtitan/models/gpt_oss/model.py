@@ -24,6 +24,7 @@ from torchtitan.models.common.attention import (
     FlexAttentionMetadata,
     InnerAttention,
     QKVLinear,
+    split_qkv,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
@@ -122,7 +123,11 @@ class GptOssAttention(Attention):
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
         """
-        q, k, v = self.qkv_linear(x)
+        q, k, v = split_qkv(
+            self.qkv_linear(x),
+            heads_per_kv=self.qkv_linear.heads_per_kv,
+            head_dim=self.qkv_linear.head_dim,
+        )
 
         q, k = self.rope(q, k, positions)
 

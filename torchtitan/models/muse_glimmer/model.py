@@ -29,6 +29,7 @@ from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     FlexAttentionMetadata,
     GQAttention,
+    split_qkv,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import TransformerBlock
@@ -116,7 +117,11 @@ class Attention(GQAttention):
         x_TD = maybe_gather_tp_input(self, x_TD)
 
         num_tokens = x_TD.shape[0]
-        xq, xk, xv = self.qkv_linear(x_TD)
+        xq, xk, xv = split_qkv(
+            self.qkv_linear(x_TD),
+            heads_per_kv=self.qkv_linear.heads_per_kv,
+            head_dim=self.qkv_linear.head_dim,
+        )
 
         # QK normalization before RoPE. Query is additionally scaled by a
         # tuned constant (k is only normalized).

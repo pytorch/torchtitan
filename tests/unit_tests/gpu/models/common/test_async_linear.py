@@ -36,7 +36,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import AsyncTensorParallelTransform
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.models.common.attention import QKVLinear
+from torchtitan.models.common.attention import QKVLinear, split_qkv
 from torchtitan.models.common.decoder_sharding import (
     colwise_sharding_config,
     dense_sequence_parallel_placement,
@@ -231,14 +231,20 @@ class TestAsyncQKVNumerics(DTensorTestBase):
             dtype=torch.bfloat16,
             requires_grad=True,
         )
-        expected = stock(x_TD)
+        expected = split_qkv(
+            stock(x_TD), heads_per_kv=stock.heads_per_kv, head_dim=stock.head_dim
+        )
         torch.stack([output.sum() for output in expected]).sum().backward()
 
         x_local_TD = x_TD.detach().chunk(R, 0)[self.rank].contiguous().requires_grad_()
         mesh = parallelism_context.spmd_dense_mesh()
         with set_current_spmd_mesh(mesh), typecheck(local=False):
             spmd.assert_type(x_local_TD, input_layout)
-            actual = async_qkv(x_local_TD)
+            actual = split_qkv(
+                async_qkv(x_local_TD),
+                heads_per_kv=async_qkv.heads_per_kv,
+                head_dim=async_qkv.head_dim,
+            )
             torch.stack([output.sum() for output in actual]).sum().backward()
 
         for actual_projection, expected_projection in zip(actual, expected):
