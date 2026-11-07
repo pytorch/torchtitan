@@ -35,8 +35,7 @@ Each log call is its own W&B row, and every row carries the training step as
 to `wandb.log`: W&B ignores a log to a step below its current one, and validation
 can log at a step that training already logged. W&B's `_step` (`Step` in the UI)
 counts rows:
-- A saved panel with `Step` on its x-axis must switch to `trainer/step`. Runs
-  from before this change have no `trainer/step`.
+- In saved panels, use `trainer/step` as the x-axis.
 - `WANDB_RESUME_FROM` and `WANDB_FORK_FROM` take `<run>?_step=N`. To rewind to
   training step S, find the `_step` of a row whose `trainer/step` is S, e.g. with
   `wandb.Api().run(path).history(keys=["trainer/step"])`. A rewind drops every
