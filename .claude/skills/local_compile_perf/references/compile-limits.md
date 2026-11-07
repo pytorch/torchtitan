@@ -16,5 +16,6 @@ Format: **limit**: symptom -> workaround.
 - **Mesh push/pop inside traced regions**: hard error -> keep mesh context outside regions.
 - **Tensor caches (`functools.cache`, module-level dicts) under FakeTensorMode**: fake tensors cached and reused in real runs -> key caches on real tensors only, or skip under fake mode.
 - **Inductor's FX graph cache ignores a changed custom-op fake**: the old (wrong) fake is still used -> clear the cache dir after changing a fake.
+- **A layer that adds into `weight.grad` in place** (e.g. `HiMidLoLinear` with `inplace_wgrad_accum=True`): tracing it raises -> start the region after the layer.
 
 A new limit hit during a run: add it here (symptom, workaround, a minimal repro command), and report it per pr-template.md. Don't file it outside the repo without asking the user.
