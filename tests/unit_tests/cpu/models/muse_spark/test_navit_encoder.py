@@ -74,6 +74,10 @@ def test_position_sampling_and_permutation_spmd_types(grid_order):
         permutation, _ = encoder._get_sparse_perm_and_slens(4, 6, device)
         spmd.assert_type(positions, activation)
         spmd.assert_type(rope_positions[permutation], activation)
+        spmd.assert_type(
+            rope.prepare_positions(rope_positions[permutation]),
+            {"dp": spmd.V, "cp": spmd.I, "tp": spmd.R},
+        )
         restored = positions[permutation][torch.argsort(permutation)]
         spmd.assert_type(restored, activation)
         # Explicit local gradients avoid implying a distributed scalar reduction.
