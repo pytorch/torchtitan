@@ -44,10 +44,10 @@ y_RD       = s_R[:, None] * (W2(h_RF) + B_RD)
            = W2(s_R[:, None] * h_RF) + s_R[:, None] * B_RD
 ```
 
-[`GptOssGroupedLinear._expand_grouped_bias`](../../gpt_oss/moe.py) constructs
-this row-aligned bias using the same expert offsets as grouped GEMM. Scores
-therefore scale the selected expert's bias for each row, not the expert axis.
-Padding rows receive zero bias.
+[`add_grouped_bias`](../../gpt_oss/moe.py) gathers this row-aligned bias by
+expert id, using the same expert offsets as grouped GEMM. Scores therefore
+scale the selected expert's bias for each row, not the expert axis. Padding
+rows receive zero bias.
 
 ## Output postprocessing
 
@@ -78,6 +78,9 @@ FP32 activation copy that multiplication would otherwise save for backward.
 The algebra above holds in exact arithmetic. Casting the scaled input before
 W2 changes rounding relative to scoring W2's output; FP32 multiplication does
 not guarantee identical BF16 outputs, losses, or gradients.
+
+GPT-OSS's compiled `grouped_expert_bias` region does not convert the scaled
+bias back: it adds it to W2's output in FP32 and rounds once.
 
 ## Checkpoint dependencies
 
