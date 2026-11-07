@@ -112,7 +112,6 @@ def test_position_sampling_and_permutation_spmd_types(grid_order):
     assert rotated_query is query
     assert rotated_key is key
     with spmd.set_current_mesh(mesh, local_axes=("dp",)), typecheck(local=False):
-        rope_positions = disabled_encoder._make_rope_positions(4, 6, device)
         inputs = spmd.mutate_type(
             torch.zeros(24, config.latent_dim), src=spmd.R, dst=activation
         )
