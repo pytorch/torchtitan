@@ -354,7 +354,13 @@ def test_runner_tells_builders_the_selected_graph(mode, uniform, replays_packed_
             SimpleNamespace(backend=object, metadata_builders=[other_builder]),
         ]
     ]
-    selected = (mode, BatchDescriptor(4, uniform=uniform))
+    runner.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            enable_expert_parallel=False, tensor_parallel_size=1
+        )
+    )
+    # vLLM's (cudagraph_mode, batch_descriptor, should_ubatch, num_tokens_across_dp, stats).
+    selected = (mode, BatchDescriptor(4, uniform=uniform), False, None, None)
     with patch.object(
         GPUModelRunner, "_determine_batch_execution_and_padding", return_value=selected
     ):

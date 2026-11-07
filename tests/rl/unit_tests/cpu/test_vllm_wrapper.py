@@ -6,6 +6,7 @@
 
 import dataclasses
 import importlib
+import inspect
 from unittest import mock
 
 import pytest
@@ -523,7 +524,16 @@ def test_vllm_native_mla_decode_weights_follow_weight_sync(tmp_path) -> None:
             attention.register_buffer(name, torch.tensor(0.0), persistent=False)
         block.vllm_mla = attention
 
-        attention.process_weights_after_loading(torch.bfloat16)
+        # Call the hook as the installed vLLM's loader does: vLLM main passes no
+        # argument and reads act_dtype from the layer; the pinned nightly passes it.
+        # TODO: always call with no argument once the nightly includes
+        # vllm-project/vllm#57678.
+        attention.act_dtype = torch.bfloat16
+        base_hook = VLLMNativeMLAAttention.process_weights_after_loading
+        if "act_dtype" in inspect.signature(base_hook).parameters:
+            attention.process_weights_after_loading(torch.bfloat16)
+        else:
+            attention.process_weights_after_loading()
 
         assert not attention.state_dict()
         assert {"W_UK_T", "W_UV"} <= {name for name, _ in attention.named_buffers()}
