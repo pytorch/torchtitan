@@ -40,6 +40,7 @@ _TEST_SUITES = {
     "flux": ("tests.integration_tests.flux", "build_flux_test_list"),
     "h100": ("tests.integration_tests.h100", "build_h100_tests_list"),
     "b200": ("tests.integration_tests.b200", "build_b200_tests_list"),
+    "gb300": ("tests.integration_tests.gb300", "build_gb300_tests_list"),
     "rl": ("tests.integration_tests.rl", "build_rl_test_list"),
     "rl_h100": ("tests.integration_tests.rl", "build_h100_rl_test_list"),
     "rl_b200": ("tests.integration_tests.rl", "build_b200_rl_test_list"),
@@ -52,7 +53,7 @@ def _build_test_list(test_suite: str) -> list[IntegrationTestDefinition]:
 
 
 # Suites that need hardware-specific kernels or a real multi-process runtime.
-_REAL_PG_ONLY_SUITES = frozenset({"h100", "b200", "rl", "rl_h100", "rl_b200"})
+_REAL_PG_ONLY_SUITES = frozenset({"h100", "b200", "gb300", "rl", "rl_h100", "rl_b200"})
 
 # Held while a test writes its captured output so concurrent tests do not
 # interleave their lines.
@@ -538,7 +539,7 @@ def main():
     parser.add_argument(
         "--gpu_arch",
         default=None,
-        choices=["a10g", "h100", "b200", "mi350x"],
+        choices=["a10g", "h100", "b200", "gb300", "mi350x"],
         help=(
             "Specific GPU model, used to select the matching golden numerics "
             "file. Defaults to 'mi350x' for --gpu_arch_type=rocm and 'a10g' "

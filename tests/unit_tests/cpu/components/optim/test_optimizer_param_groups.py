@@ -12,6 +12,11 @@ from unittest.mock import MagicMock, patch
 import torch
 import torch.distributed.checkpoint as dcp
 import torch.nn as nn
+from torch.distributed.device_mesh import init_device_mesh
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 
 from torchtitan.components.optim import (
     Adam,
@@ -144,6 +149,36 @@ def _get_default_groups(model, config):
 
 
 class TestOptimizerConfig(unittest.TestCase):
+    def test_patterns_span_local_model_parts_before_scheduler_build(self):
+        first = nn.ModuleDict({"embedding": nn.Embedding(4, 2)})
+        last = nn.ModuleDict({"output": nn.Linear(2, 4)})
+        config = OptimizersContainer.Config(
+            optimizers=[
+                AdamW.Config(pattern=r"^output\.", fused=False, lr=0.02),
+                AdamW.Config(pattern=r".*", fused=False, lr=0.01),
+            ]
+        )
+        optimizers = config.build(model_parts=[first, last])
+        schedulers = LRSchedulersContainer.Config(warmup_steps=2).build(
+            optimizers=optimizers,
+            training_steps=10,
+        )
+        self.assertEqual(len(optimizers), 2)
+        self.assertEqual(len(schedulers), 2)
+        self.assertEqual(
+            [scheduler.base_lrs for scheduler in schedulers],
+            [[0.01], [0.02]],
+        )
+        self.assertEqual(
+            {
+                id(param)
+                for optimizer in optimizers
+                for group in optimizer.param_groups
+                for param in group["params"]
+            },
+            {id(param) for part in (first, last) for param in part.parameters()},
+        )
+
     def test_external_optimizer_subclass(self):
         class ExternalSGD(torch.optim.SGD, BaseOptimizer):
             @dataclass(kw_only=True, slots=True)
@@ -999,6 +1034,64 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "SGD does not support"):
             config.build(model_parts=[model], enable_accelerator_graph=True)
+
+
+class TestOptimizerPipelinePatterns(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 2
+
+    @property
+    def device_type(self):
+        return "cpu"
+
+    @property
+    def backend(self):
+        return "gloo"
+
+    @with_comms
+    def test_patterns_validate_across_pipeline_ranks(self):
+        mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("pp",))
+        model = nn.ModuleDict(
+            {"table": nn.Embedding(4, 2)}
+            if self.rank == 0
+            else {"block": nn.Linear(2, 2)}
+        )
+        table_config = AdamW.Config(pattern=r"^table\.", fused=False)
+        backbone_config = AdamW.Config(pattern=r".*", fused=False)
+        optimizers = OptimizersContainer.Config(
+            optimizers=[table_config, backbone_config],
+        ).build(model_parts=[model], pp_mesh=mesh)
+        schedulers = LRSchedulersContainer.Config(warmup_steps=0).build(
+            optimizers=optimizers,
+            training_steps=10,
+        )
+        self.assertEqual(len(optimizers), 1)
+        self.assertEqual(len(schedulers), 1)
+        self.assertEqual(
+            {
+                id(param)
+                for group in optimizers.optimizers[0].param_groups
+                for param in group["params"]
+            },
+            {id(param) for param in model.parameters()},
+        )
+        for configs in (
+            [AdamW.Config(pattern=r"missing$", fused=False), backbone_config],
+            [backbone_config, table_config],
+        ):
+            with self.subTest(patterns=[config.pattern for config in configs]):
+                with self.assertRaisesRegex(ValueError, "matched no parameters"):
+                    OptimizersContainer.Config(optimizers=configs).build(
+                        model_parts=[model],
+                        pp_mesh=mesh,
+                    )
+        invalid_mesh = init_device_mesh("cpu", (1, 2), mesh_dim_names=("pp", "tp"))
+        with self.assertRaisesRegex(ValueError, "one axis named 'pp'"):
+            OptimizersContainer.Config(optimizers=[backbone_config]).build(
+                model_parts=[model],
+                pp_mesh=invalid_mesh,
+            )
 
 
 if __name__ == "__main__":

@@ -125,6 +125,7 @@ class Optim(Configurable):
         self.optimizers = config.optimizer.build(
             model_parts=model_parts,
             enable_accelerator_graph=enable_accelerator_graph,
+            pp_mesh=parallelism_context.get_optional_mesh("pp"),
         )
         self.lr_schedulers = config.lr_scheduler.build(
             optimizers=self.optimizers,
