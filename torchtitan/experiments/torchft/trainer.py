@@ -166,6 +166,16 @@ class FaultTolerantTrainer(Configurable):
         checkpointer: TorchFTCheckpointManager.Config | None = None
         fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
 
+        def __post_init__(self) -> None:
+            Trainer.Config.__post_init__(self)
+            if self.parallelism.fsdp_backend is not None:
+                # The gradient all-reduce across replica groups hooks FSDP2's
+                # parameter groups (TorchFTManager.maybe_set_all_reduce_hook).
+                raise ValueError(
+                    "FaultTolerantTrainer does not support "
+                    f"parallelism.fsdp_backend={self.parallelism.fsdp_backend!r}."
+                )
+
     engine: FaultTolerantTrainingEngine
 
     @record

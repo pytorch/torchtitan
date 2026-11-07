@@ -430,6 +430,13 @@ class GraphTrainer(Trainer):
 
         def __post_init__(self) -> None:
             Trainer.Config.__post_init__(self)
+            if self.parallelism.fsdp_backend is not None:
+                # GraphTrainerModel.parallelize shards with SimpleFSDP, not
+                # through _apply_fsdp.
+                raise ValueError(
+                    "GraphTrainer does not support "
+                    f"parallelism.fsdp_backend={self.parallelism.fsdp_backend!r}."
+                )
             if self.training.accelerator_graph_per_microbatch_group:
                 raise ValueError(
                     "Per-group CUDA graphs are not supported with GraphTrainer."

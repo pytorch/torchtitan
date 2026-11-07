@@ -45,6 +45,26 @@ def validate_model_training_config(
         LocalTokenDispatcher,
     )
 
+    if parallelism.fsdp_backend is not None:
+        # Decoder._apply_fsdp has the only FlexShard path, so a model that
+        # overrides it would shard with FSDP2.
+        model_cls = model._owner
+        if getattr(model_cls, "_apply_fsdp", None) is not Decoder._apply_fsdp:
+            name = type(model).__qualname__ if model_cls is None else model_cls.__name__
+            raise ValueError(
+                f"{name} does not support "
+                f"parallelism.fsdp_backend={parallelism.fsdp_backend!r} yet; only "
+                "decoders that use Decoder._apply_fsdp do."
+            )
+        if isinstance(model, Decoder.Config) and model.enable_weight_tying:
+            # TODO(<re-tie PR>): Parallelization unties tok_embeddings and
+            # lm_head, and only init_states ties them again, after FlexShard has
+            # captured both.
+            raise ValueError(
+                f"parallelism.fsdp_backend={parallelism.fsdp_backend!r} does not "
+                "support enable_weight_tying yet."
+            )
+
     if isinstance(model, Decoder.Config):
         if model.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
             raise NotImplementedError(
