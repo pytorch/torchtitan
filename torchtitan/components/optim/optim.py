@@ -163,7 +163,12 @@ class Optim(Configurable):
                 or device_module.is_initialized()
             ):
                 device_module.synchronize()
-            device_module.empty_cache()
+            # Skip on XPU: oneCCL (XCCL) keeps IPC handles to user buffers and is
+            # not told when the caching allocator frees them, so releasing the
+            # cache here makes the next FSDP all-gather fault on unmapped memory.
+            # Before #5450 this was torch.cuda.empty_cache(), a no-op on XPU.
+            if device_type != "xpu":
+                device_module.empty_cache()
             self._is_first_step_call = False
         grad_norm = self._run_update(loss)
         self.lr_schedulers.step()
