@@ -6,7 +6,7 @@
 
 import logging
 from dataclasses import dataclass, fields
-from typing import Any, cast
+from typing import Any, cast, Literal
 
 from torchtitan.models.base.module import Module
 
@@ -17,6 +17,7 @@ from torchtitan.models.common.lora import (
     get_lora_grouped_linear,
     get_lora_linear,
 )
+from torchtitan.models.common.moe import RoutedExperts
 
 from .base import ModelConfigTransform
 
@@ -121,11 +122,38 @@ def _make_linear_lora_config(
     )
 
 
+# The factor on the model-dimension side of each routed-expert projection:
+# A reads the hidden stream in W13, B writes it in W2.
+_SHARED_OUTER_FACTOR = {"w13": "lora_a", "w2": "lora_b"}
+
+
+def _shared_factor(
+    fqn: str,
+    parent: Any,
+    attr: str | int | None,
+    expert_adapter_layout: Literal["per_expert", "shared_outer"],
+) -> Literal["lora_a", "lora_b"] | None:
+    if expert_adapter_layout == "per_expert":
+        return None
+    # The roles come from the routed-experts contract (w13 reads the hidden
+    # stream, w2 writes it), not from a field name alone.
+    shared = _SHARED_OUTER_FACTOR.get(cast(str, attr))
+    if shared is None or not isinstance(
+        parent, (RoutedExperts.Config, DistMoeRoutedExperts.Config)
+    ):
+        raise ValueError(
+            "expert_adapter_layout='shared_outer' applies to the w13 and w2 of "
+            f"routed experts only, got grouped projection {fqn!r}."
+        )
+    return cast(Literal["lora_a", "lora_b"], shared)
+
+
 def _make_grouped_linear_lora_config(
     cfg: GroupedLinear.Config,
     *,
     rank: int,
     alpha: float,
+    shared_factor: Literal["lora_a", "lora_b"] | None,
 ) -> Module.Config:
     if rank % 8:
         raise ValueError(f"Grouped LoRA rank must be divisible by 8, got {rank}")
@@ -136,6 +164,7 @@ def _make_grouped_linear_lora_config(
         **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init},
         rank=rank,
         alpha=alpha,
+        shared_factor=shared_factor,
     )
 
 
@@ -193,6 +222,14 @@ class LoRATransform(ModelConfigTransform):
     Dist-MoE parent is wrapped only to materialize effective weights because its
     fused execution bypasses the child forwards.
 
+    ``expert_adapter_layout`` picks the adapter shape of routed experts. Per
+    expert, every expert has its own A and B. Shared-outer shares the factor on
+    the model-dimension side across the experts of a projection (A of W13, B of
+    W2) and keeps the other per expert: a token's low-rank path then reads and
+    writes the hidden stream through one matrix, the layout SGLang's MoE LoRA
+    plans target and Megatron-Bridge trains, and the adapter volume no longer
+    scales with the model dimension per expert.
+
     This transform conflicts with itself because every application freezes all
     non-target configs. Applying multiple LoRA transforms would make freezing
     and adapter configuration depend on their order.
@@ -203,6 +240,9 @@ class LoRATransform(ModelConfigTransform):
 
     alpha: float = 16.0
     """Scaling factor. Output is scaled by alpha/rank."""
+
+    expert_adapter_layout: Literal["per_expert", "shared_outer"] = "per_expert"
+    """Adapter layout of routed-expert projections (``w13`` and ``w2``)."""
 
     target_modules: list[str] | None = None
     """Module FQNs or dot-delimited FQN suffixes to adapt.
@@ -280,6 +320,9 @@ class LoRATransform(ModelConfigTransform):
                     cfg,
                     rank=self.rank,
                     alpha=self.alpha,
+                    shared_factor=_shared_factor(
+                        fqn, parent, attr, self.expert_adapter_layout
+                    ),
                 )
             elif isinstance(cfg, Linear.Config) and is_target:
                 new_cfg = _make_linear_lora_config(
