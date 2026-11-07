@@ -1175,13 +1175,17 @@ def test_run_logs_ended_passes_then_runs_the_final_pass_if_asked(
         controller._trainer_policy_version = 4
 
     controller._trainer_loop = trainer_loop
-    validation.end(4)
+    # The final pass takes its group ids from step 5, which no other pass uses.
+    validation.end(5)
 
     asyncio.run(asyncio.wait_for(controller.run(), timeout=5))
 
-    final_steps = [4] if validate_after_training else []
-    assert validation.started_steps == [0, 3, *final_steps]
-    assert _logged_steps(controller, is_validation=True) == [4, *final_steps]
+    assert validation.started_steps == [0, 3, *([5] if validate_after_training else [])]
+    # Pass 0 and the final pass log at the last trained step.
+    assert _logged_steps(controller, is_validation=True) == [
+        4,
+        *([4] if validate_after_training else []),
+    ]
     assert list(controller._validation_tasks) == [3]
     assert controller._log_reward_delta.called == validate_after_training
 

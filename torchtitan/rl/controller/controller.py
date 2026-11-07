@@ -852,8 +852,8 @@ class Controller(Configurable):
         """Run greedy validation on held-out prompts.
 
         Args:
-            step: Policy step this pass starts on (the start step for the first pass); it
-                also sets the pass's group ids, which each recorded rollout carries.
+            step: Sets the pass's group ids, so passes that run at the same time need different
+                steps. Each recorded rollout carries its group id.
 
         Returns:
             Validation rollout metrics, generation metrics, and validation
@@ -1013,12 +1013,11 @@ class Controller(Configurable):
         # Log the passes that ended after the last step's check. close() cancels the rest.
         last_step = self._trainer_policy_version
         self._log_finished_validation(step=last_step)
-        # With no step trained (a resume at the last step), the first pass already scores the
-        # final policy, with the same group ids.
-        if async_loop.validation.validate_after_training and last_step > self.start_step:
+        if async_loop.validation.validate_after_training:
             # TODO: cancel the training rollouts still running here. They run until close()
             # (`Rollouter.run_group_rollouts` shields them), and this pass waits behind them.
-            final_metrics = await self.validate(step=num_training_steps)
+            # Group ids come from `step`: no other pass uses step num_training_steps + 1.
+            final_metrics = await self.validate(step=num_training_steps + 1)
             self.metrics_processor.log(
                 step=last_step, metrics=final_metrics, is_validation=True
             )
