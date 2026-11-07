@@ -36,6 +36,39 @@ class AllToAllDispatchMetadata(LocalDispatchMetadata):
     output_splits: list[int]
 
 
+class CombineReadyEvent(Module):
+    """Publishes the stream position at the start of ``combine``.
+
+    The MoE consumes it through ``take_combine_ready_event`` to run the shared
+    experts on a side stream while the routed combine is in flight.  This is a
+    one-shot handoff: each ``combine`` overwrites the event and each consumer
+    takes it once.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        pass
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self._event: torch.Event | None = None
+
+    def record(self, device: torch.device) -> None:
+        if torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing():
+            raise RuntimeError(
+                "shared-expert overlap requires eager execution; "
+                "disable combine_ready_event under torch.compile"
+            )
+        event = torch.Event()
+        event.record(torch.accelerator.current_stream(device))
+        self._event = event
+
+    def take(self) -> torch.Event | None:
+        event = self._event
+        self._event = None
+        return event
+
+
 class LocalTokenDispatcher(Module):
     """Token dispatcher for EP=1. Handles local token reordering only.
 
@@ -188,7 +221,19 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
 
     @dataclass(kw_only=True, slots=True)
     class Config(LocalTokenDispatcher.Config):
-        pass
+        combine_ready_event: CombineReadyEvent.Config | None = None
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.combine_ready_event = (
+            config.combine_ready_event.build()
+            if config.combine_ready_event is not None
+            else None
+        )
+
+    def _record_combine_ready(self, device: torch.device) -> None:
+        if self.combine_ready_event is not None:
+            self.combine_ready_event.record(device)
 
     def init_buffer(self) -> None:
         """Initialize backend communication buffers, if any."""
@@ -590,6 +635,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             out_TD: Combined local output ``(T, D)``.
         """
         # EP=1: fall back to local combine (no all-to-all needed)
+        self._record_combine_ready(routed_output_RD.device)
         if _ep_process_group() is None:
             return LocalTokenDispatcher.combine(
                 self,
@@ -731,6 +777,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
                 x_TD,
             )
 
+        self._record_combine_ready(routed_output_RD.device)
         # EP=1: strip the padding (via _unpermute) to recover expert-sorted
         # order, then apply the local score + scatter_add used by the EP=1
         # path. Mirrors LocalTokenDispatcher.combine, plus the unpad.
@@ -836,6 +883,12 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         # Model hidden dim, threaded by the builder for eager buffer initialization.
         hidden_dim: int | None = None
 
+        def __post_init__(self) -> None:
+            if self.combine_ready_event is not None and self.cuda_graph_compatible:
+                raise ValueError(
+                    "combine_ready_event is incompatible with cuda_graph_compatible"
+                )
+
     def __init__(self, config: Config):
         super().__init__(config)
         if config.num_max_tokens_per_rank is None:
@@ -932,6 +985,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         x_TD: torch.Tensor,
     ) -> torch.Tensor:
         """Combine scored tokens via DeepEP and wait for completion."""
+        self._record_combine_ready(routed_output_RD.device)
         del x_TD
         from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
 
@@ -1068,6 +1122,7 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
         x_TD: torch.Tensor,
     ) -> torch.Tensor:
         """Combine tokens via HybridEP."""
+        self._record_combine_ready(routed_output_RD.device)
         del x_TD
 
         from torchtitan.distributed.deepep import hybridep

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from functools import cache
 from typing import cast, Protocol
 
 import spmd_types as spmd
@@ -16,6 +17,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_remat as remat
+from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
 
 from torchtitan.distributed import ParallelismContext
@@ -42,7 +44,12 @@ from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 
-from .token_dispatcher import DeepEPDispatchMetadata, LocalTokenDispatcher
+from .token_dispatcher import (
+    BaseEPTokenDispatcher,
+    CombineReadyEvent,
+    DeepEPDispatchMetadata,
+    LocalTokenDispatcher,
+)
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
@@ -721,6 +728,12 @@ class BatchWiseLoadBalanceLoss(AuxLoss):
             return self.inject(loss, carrier=carrier, denominator=denominator)
 
 
+@cache
+def _shared_expert_stream(device: torch.device) -> torch.Stream:
+    """Return the side stream shared experts run on during the routed combine."""
+    return torch.get_device_module(device).Stream(device=device)
+
+
 class MoE(FeedForward):
     """Mixture of Experts layer.
 
@@ -764,6 +777,15 @@ class MoE(FeedForward):
                         f"{owner}={count}" for owner, count in expert_counts.items()
                     )
                 )
+            dispatcher = self.routed_experts.token_dispatcher
+            if (
+                isinstance(dispatcher, BaseEPTokenDispatcher.Config)
+                and dispatcher.combine_ready_event is not None
+                and self.shared_experts is None
+            ):
+                raise ValueError(
+                    "combine_ready_event requires shared_experts to consume the event"
+                )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -773,6 +795,12 @@ class MoE(FeedForward):
         self.router = config.router.build()
         self.shared_experts = (
             config.shared_experts.build() if config.shared_experts is not None else None
+        )
+        dispatcher = self.routed_experts.token_dispatcher
+        self._combine_ready_event: CombineReadyEvent | None = (
+            dispatcher.combine_ready_event
+            if isinstance(dispatcher, BaseEPTokenDispatcher)
+            else None
         )
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
@@ -836,6 +864,30 @@ class MoE(FeedForward):
         )
         return self._add_shared_experts_and_reduce_across_tp(out_TD, x_TD)
 
+    def _run_shared_experts(self, x_TD: torch.Tensor) -> torch.Tensor:
+        """Run shared experts on the combine-ready stream when it is published."""
+        assert self.shared_experts is not None
+        if self._combine_ready_event is None:
+            return self.shared_experts(x_TD)
+        combine_ready = self._combine_ready_event.take()
+        if combine_ready is None:
+            return self.shared_experts(x_TD)
+        device = x_TD.device
+        device_module = torch.get_device_module(device)
+        main_stream = device_module.current_stream(device)
+        shared_stream = _shared_expert_stream(device)
+        shared_stream.wait_event(combine_ready)
+        local_x_TD = x_TD.to_local() if isinstance(x_TD, DTensor) else x_TD
+        local_x_TD.record_stream(shared_stream)
+        with device_module.stream(shared_stream):
+            shared_TD = self.shared_experts(x_TD)
+            local_shared_TD = (
+                shared_TD.to_local() if isinstance(shared_TD, DTensor) else shared_TD
+            )
+            local_shared_TD.record_stream(main_stream)
+        main_stream.wait_stream(shared_stream)
+        return shared_TD
+
     def _add_shared_experts_and_reduce_across_tp(
         self, routed_out_TD: torch.Tensor, x_TD: torch.Tensor
     ) -> torch.Tensor:
@@ -857,14 +909,14 @@ class MoE(FeedForward):
                 region_name="tp_routed_reduction",
             )
             shared_TD = self._maybe_all_reduce_moe_output_across_tp(
-                self.shared_experts(x_TD)
+                self._run_shared_experts(x_TD)
             )
             return remat.region(
                 torch.add, self.remat_region_name("shared_add"), recompute=False
             )(routed_out_TD, shared_TD)
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(routed_out_TD)
         if self.shared_experts is not None:
-            shared_TD = self.shared_experts(x_TD)
+            shared_TD = self._run_shared_experts(x_TD)
             # Trailing add, always saved: it saves nothing for backward, so replay skips
             # it and its inputs need no persisting, matching checkpoint early stop.
             out_TD = remat.region(
