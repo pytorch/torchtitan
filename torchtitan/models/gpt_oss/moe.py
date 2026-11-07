@@ -53,10 +53,14 @@ class GptOssGroupedLinear(GroupedLinear):
         return biased_RO.view_as(output_RO)
 
 
-# recompile_limit=16: w13 and w2 widths x (static, dynamic rows) x grad mode is 6 graphs
-# before EP zero-row or eval shapes (default limit 8).
-# TODO: run w13's bias add inside the fused_binary_activation region. No_grad, that is one
-# kernel instead of two; in training SwiGLU would read the unrounded sum (not bitwise).
+# TODO: add w13's bias inside the fused_binary_activation region (RoutedExperts must then
+# pass the bias to the activation). Without grad: one kernel instead of two. With grad it
+# only pays if SwiGLU's backward recomputes the add, so SwiGLU would read the fp32 sum
+# instead of today's bf16-rounded w13 output: not bitwise.
+#
+# recompile_limit=16: w13 and w2 widths x (static, dynamic rows) is 4 graphs in grad mode;
+# no_grad adds 2 (it starts dynamic); EP ranks with 0 or 1 rows add one graph per width
+# and mode: 14 at most (default limit 8).
 @local_compile("grouped_expert_bias", batch_invariant=True, recompile_limit=16)
 def add_grouped_bias(
     output_RO: torch.Tensor,
@@ -74,9 +78,8 @@ def add_grouped_bias(
         offsets_E = [2, 3] (expert 0 owns rows 0-1, expert 1 row 2), 4 rows:
         out[0:2] += bias[0], out[2] += bias[1], out[3] unchanged.
     """
-    if torch.compiler.is_compiling():
-        # w13 and w2 call this with different widths; keep each one static.
-        torch._dynamo.mark_static(output_RO, -1)
+    # w13 and w2 call this with different widths; keep each one static.
+    torch._dynamo.mark_static(output_RO, -1)
     row_ids_R = torch.arange(
         output_RO.shape[0], device=offsets_E.device, dtype=offsets_E.dtype
     )
