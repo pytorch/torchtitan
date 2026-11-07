@@ -13,6 +13,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
+from torch.utils.checkpoint import checkpoint
 
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
@@ -107,6 +108,36 @@ def test_grouped_bias_matches_repeat_interleave(
         results.append((out_RO.detach(), *(t.grad for t in inputs)))
     for reference, actual in zip(*results, strict=True):
         torch.testing.assert_close(actual, reference)
+
+
+def test_grouped_bias_region_in_pipeline_order(reset_local_compile) -> None:
+    """PP runs microbatch B's forward before A's backward, with FSDP2's fp32 bias grad.
+
+    Example: forward A (64 rows), forward B (32 rows), backward A replays the region.
+    """
+    LocalCompileConfig(regions=["grouped_expert_bias"]).apply()
+    layer = GptOssGroupedLinear.Config(
+        group_size=2, in_features=8, out_features=16, num_linears=2
+    ).build()
+    for param in layer.parameters():
+        param.data = torch.randn_like(param, dtype=torch.bfloat16)
+    layer.bias.grad_dtype = torch.float32
+    layer.bias.grad = torch.zeros(layer.bias.shape, dtype=torch.float32)
+
+    def forward(rows):
+        input_RI = torch.randn(rows, 8, dtype=torch.bfloat16, requires_grad=True)
+        offsets_E = torch.tensor([rows // 3, rows - 1], dtype=torch.int32)
+        return checkpoint(
+            lambda x: layer(x, offsets_E),
+            input_RI,
+            use_reentrant=False,
+            preserve_rng_state=False,
+        )
+
+    output_a, output_b = forward(64), forward(32)
+    output_a.sum().backward()
+    output_b.sum().backward()
+    assert layer.bias.grad.dtype == torch.float32
 
 
 class TestGptOssGroupedLinearSPMD(DTensorTestBase):

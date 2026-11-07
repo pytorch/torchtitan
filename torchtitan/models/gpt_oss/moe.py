@@ -40,6 +40,14 @@ class GptOssGroupedLinear(GroupedLinear):
         scores_R: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_RO = super().forward(input_RI, offsets_E, scores_R=scores_R)
+        flat_output_RO = output_RO.flatten(1)
+        # Mark rows dynamic from the first call. Without it, PP fails in backward:
+        # 1. Microbatch A's forward compiles a graph for A's row count.
+        # 2. Microbatch B's forward has other rows and compiles a dynamic-rows graph.
+        # 3. A's backward replays the region on B's graph, which saves other tensors.
+        # Dynamo can't trace this call, so skip it when the caller itself is compiled.
+        if not torch.compiler.is_compiling():
+            torch._dynamo.maybe_mark_dynamic(flat_output_RO, 0)
         # Match the matmul's policy: replaying even this cheap add after a saved
         # matmul would force retention of its full routed output.
         add_bias = remat.region(
@@ -47,8 +55,12 @@ class GptOssGroupedLinear(GroupedLinear):
             self.remat_region_name("bias_add"),
             recompute=self.remat_should_recompute("grouped_mm"),
         )
+        # Pass a copy of the bias. Under PP, FSDP2 keeps an fp32 .grad on the bf16 bias between
+        # microbatches, and Dynamo raises when it compiles a parameter input whose .grad has
+        # another dtype. The copy costs one [E, O] kernel per projection per forward.
+        # TODO: pass self.bias once Dynamo copies a tensor's grad_dtype before its .grad.
         biased_RO = add_bias(
-            output_RO.flatten(1), self.bias.flatten(1), offsets_E, scores_R=scores_R
+            flat_output_RO, self.bias.flatten(1).clone(), offsets_E, scores_R=scores_R
         )
         return biased_RO.view_as(output_RO)
 
@@ -58,9 +70,9 @@ class GptOssGroupedLinear(GroupedLinear):
 # only pays if SwiGLU's backward recomputes the add, so SwiGLU would read the fp32 sum
 # instead of today's bf16-rounded w13 output: not bitwise.
 #
-# recompile_limit=16: w13 and w2 widths x (static, dynamic rows) is 4 graphs in grad mode;
-# no_grad adds 2 (it starts dynamic); 0-row and 1-row calls (EP ranks with few tokens) each
-# add one graph per width and mode (+8): 14 at most (default limit 8).
+# recompile_limit=16 covers the graphs per process: 3 per width (w13, w2), one for 2+ rows
+# and one each for 0 and 1 rows (EP ranks with few tokens), twice if the process runs both
+# grad and no_grad. Up to 12.
 @local_compile("grouped_expert_bias", batch_invariant=True, recompile_limit=16)
 def add_grouped_bias(
     output_RO: torch.Tensor,
