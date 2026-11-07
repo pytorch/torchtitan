@@ -20,7 +20,9 @@ import spmd_types as spmd
 
 import torch
 import torch.nn as nn
+from spmd_types import SpmdType
 
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig
 
@@ -28,6 +30,8 @@ from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
 from torchtitan.models.common.linear import GroupedLinear, Linear
 from torchtitan.models.common.moe.sharding import expert_param_placement_sparse
+
+TP = MeshAxisName.TP
 
 __all__ = [
     "get_lora_dist_moe_routed_experts",
@@ -58,28 +62,9 @@ class _LoRALinearMixin(_LoRAMixin):
 
     def __init__(self, config) -> None:
         super().__init__(config)
-        if config.num_linears > 1:
-            # A stacked base projection shares one A matrix across its logical
-            # linears and stacks their B matrices along the same output axis as
-            # the base weight. The adapters inherit only parameter sharding;
-            # the base projection remains responsible for TP collectives.
-            replicated_weight = ShardingConfig(
-                state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-            )
-            lora_a_sharding = (
-                replicated_weight if config.sharding_config is not None else None
-            )
-            lora_b_sharding = (
-                ShardingConfig(
-                    state_shardings=dict(config.sharding_config.state_shardings),
-                )
-                if config.sharding_config is not None
-                else None
-            )
-        else:
-            lora_a_sharding, lora_b_sharding = self._adapter_sharding(
-                config.sharding_config
-            )
+        lora_a_sharding, lora_b_sharding = self._adapter_sharding(
+            config.sharding_config, num_linears=config.num_linears
+        )
         self.lora_a = Linear.Config(
             in_features=config.in_features,
             out_features=config.rank,
@@ -121,28 +106,45 @@ class _LoRALinearMixin(_LoRAMixin):
     @staticmethod
     def _adapter_sharding(
         base_sharding: ShardingConfig | None,
+        *,
+        num_linears: int,
     ) -> tuple[ShardingConfig | None, ShardingConfig | None]:
-        """Derive adapter sharding from the base linear's TP sharding."""
-        base_weight_sharding = (
+        """Derive adapter weight sharding from the base weight, changing only TP.
+
+        A column-wise base gets a TP-replicated A and a B sharded like the base.
+        A row-wise base gets an A sharded like the base and a TP-replicated B.
+        Any other base TP type is copied to both adapters. The adapters inherit
+        only parameter sharding; the base projection owns the TP collectives.
+        """
+        base_weight = (
             base_sharding.state_shardings.get("weight") if base_sharding else None
         )
-        if base_weight_sharding is None:
+        if base_weight is None:
             return None, None
 
-        replicated_weight = ShardingConfig(
-            state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-        )
-        if base_weight_sharding == dense_param_placement(tp=spmd.S(0)):
-            lora_b_sharding = ShardingConfig(
-                state_shardings={"weight": base_weight_sharding},
-            )
-            return replicated_weight, lora_b_sharding
+        # Parameter shardings use S(i), not a PartitionSpec.
+        assert base_weight.partition_spec is None
+        original_sharding = ShardingConfig(state_shardings={"weight": base_weight})
+        local_type = base_weight.local_type
 
-        assert base_weight_sharding == dense_param_placement(tp=spmd.S(1))
-        lora_a_sharding = ShardingConfig(
-            state_shardings={"weight": dense_param_placement(tp=spmd.S(1))},
-        )
-        return lora_a_sharding, replicated_weight
+        def with_tp(tp: spmd.PerMeshAxisSpmdType) -> ShardingConfig:
+            weight = SpmdType({**local_type, TP: tp})
+            return ShardingConfig(state_shardings={"weight": weight})
+
+        # The base weight is [O, I], or [num_linears, O, I] when stacked. A stacked
+        # base shares one A [L, I] and stacks B [num_linears, O, L].
+        output_dim = 0 if num_linears == 1 else 1
+        base_tp = local_type.get(TP)
+        if base_tp == spmd.S(output_dim):
+            return with_tp(spmd.R), original_sharding
+        if base_tp == spmd.S(output_dim + 1):
+            return with_tp(spmd.S(1)), with_tp(spmd.R)
+        if isinstance(base_tp, spmd.Shard):
+            raise ValueError(
+                f"LoRA does not support base weight TP sharding {base_tp} with "
+                f"num_linears={num_linears}."
+            )
+        return original_sharding, original_sharding
 
 
 def _grouped_lora_adapter_sharding(
