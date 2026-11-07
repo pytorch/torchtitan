@@ -12,7 +12,7 @@ agent and the grading through the [Verifiers bridge](../README.md).
 > Verifiers runtime. Do not use `SubprocessConfig`: it runs the agent on the host.
 >
 > The recipes set `workers_on_controller_host=True`, so a multi-host job still runs every
-> rollout worker, and so every container, on the controller host. Without it the workers
+> rollout worker, and so every container, on the controller host. With it False, the workers
 > spread over the job's hosts, and each of those hosts needs Docker and the task images.
 
 ## How it works

@@ -136,7 +136,7 @@ def _rollouter_without_datasets() -> Rollouter:
         worker="worker_config",
         worker_pool_size=3,
         num_threads_per_worker=2,
-        workers_on_controller_host=True,
+        workers_on_controller_host=False,
     )
     rollouter._workers = []
     rollouter._actor_system = None
@@ -177,7 +177,7 @@ def test_setup_spawns_and_sets_up_every_worker_and_close_stops_them() -> None:
             "config": "worker_config",
             "num_workers": 3,
             "num_threads": 2,
-            "on_controller_host": True,
+            "on_controller_host": False,
         }
         for worker in actor_system.workers:
             assert worker.setup_async.calls == [
