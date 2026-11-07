@@ -58,7 +58,8 @@ class GptOssGroupedLinear(GroupedLinear):
         # Pass a copy of the bias. Under PP, FSDP2 keeps an fp32 .grad on the bf16 bias between
         # microbatches, and Dynamo raises when it compiles a parameter input whose .grad has
         # another dtype. The copy costs one [E, O] kernel per projection per forward.
-        # TODO: pass self.bias once Dynamo copies a tensor's grad_dtype before its .grad.
+        # TODO: pass self.bias once Dynamo copies a tensor's grad_dtype before its .grad
+        # (issue draft: felipemello1/pytorch#23).
         biased_RO = add_bias(
             flat_output_RO, self.bias.flatten(1).clone(), offsets_E, scores_R=scores_R
         )
