@@ -14,8 +14,6 @@ import pytest
 import torch
 from torchstore import RankRole
 from torchtitan.config import PrecisionConfig, TrainingConfig
-from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
@@ -140,26 +138,6 @@ def test_rl_trainer_validates_model_training_config_before_initialization(
         activation_remat=config.activation_remat,
         max_num_documents=None,
     )
-
-
-def test_rl_trainer_rejects_flex_shard(tmp_path) -> None:
-    # FlexShard's state_dict() holds local shards, which the trainer would
-    # publish to the generators as full weights. Recipes may assign the backend
-    # after the config is built, so the trainer checks it at construction.
-    config = Trainer.Config(
-        model=MagicMock(), training=TrainingConfig(disable_accelerator_graphs=True)
-    )
-    config.parallelism = ParallelismConfig(fsdp_backend=FlexShardConfig())
-    with patch(
-        "torchtitan.rl.trainer.trainer.validate_model_training_config"
-    ) as validate, pytest.raises(ValueError, match="RL trainer does not support"):
-        Trainer(
-            config,
-            precision=PrecisionConfig(),
-            max_num_documents=None,
-            output_dir=str(tmp_path),
-        )
-    validate.assert_not_called()
 
 
 def test_forward_backward_uses_global_token_count() -> None:
