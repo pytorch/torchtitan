@@ -27,7 +27,11 @@ from tests.unit_tests.cpu.components.optim.test_optimizer_param_groups import (
 )
 from torch.distributed.device_mesh import init_device_mesh
 
-from torchtitan.components.optim import AdamW, OptimizersContainer
+from torchtitan.components.optim import (
+    AdamW,
+    OptimizersContainer,
+    OptimizerStateOffloader,
+)
 from torchtitan.experiments.torchft.optimizer import (
     TorchFTOptim,
     TorchFTOptimizersContainer,
@@ -191,3 +195,15 @@ class TestTorchFTNonFiniteStep(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "consecutive"):
             optim._update(torch.tensor(float("nan")))
         self.assertEqual(manager.report_error.call_count, 2 * limit)
+
+
+class TestTorchFTOptimizersContainerConfig(unittest.TestCase):
+    def test_rejects_adam_state_offload(self):
+        with self.assertRaisesRegex(ValueError, "state_offload"):
+            TorchFTOptimizersContainer.Config(
+                optimizers=[
+                    AdamW.Config(
+                        pattern=r".*", state_offload=OptimizerStateOffloader.Config()
+                    )
+                ]
+            )

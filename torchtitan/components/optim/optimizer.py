@@ -11,7 +11,7 @@ import logging
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, cast, Literal, overload
+from typing import Any, cast, Literal, overload, TypeGuard
 
 import torch
 import torch.nn as nn
@@ -29,6 +29,7 @@ from torchtitan.distributed.flex_shard import (
 )
 from torchtitan.distributed.utils import build_alternative_fsdp_mesh
 
+from .offload import OptimizerStateOffloader
 from .utils import (
     get_flat_optim_state_dict,
     init_optim_state,
@@ -44,6 +45,7 @@ __all__ = [
     "BaseOptimizer",
     "DistMuon",
     "OptimizersContainer",
+    "offloads_state",
 ]
 
 MomentDType = Literal["parameter", "bfloat16"]
@@ -58,15 +60,18 @@ class BaseOptimizer(Optimizer, Configurable):
         """Regex matched against parameter fully qualified names."""
 
 
-def _validate_moment_dtype(
+def _validate_adam_config(
     *,
     moment_dtype: MomentDType,
     fused: bool | None,
+    state_offload: OptimizerStateOffloader.Config | None,
 ) -> None:
     if moment_dtype not in ("parameter", "bfloat16"):
         raise ValueError(f"Unsupported Adam moment dtype {moment_dtype!r}")
     if moment_dtype == "bfloat16" and fused is not True:
         raise ValueError("bfloat16 Adam moments require fused=True")
+    if state_offload is not None and fused is not True:
+        raise ValueError(f"Adam state_offload requires fused=True, got fused={fused}")
 
 
 def _register_bfloat16_moment_hooks(optimizer: torch.optim.Optimizer) -> None:
@@ -123,11 +128,14 @@ class Adam(torch.optim.Adam, BaseOptimizer):
         weight_decay: float = 0.0
         fused: bool | None = True
         moment_dtype: MomentDType = "parameter"
+        state_offload: OptimizerStateOffloader.Config | None = None
+        """Keep the moments in pinned CPU memory between steps; see `OptimizerStateOffloader`."""
 
         def __post_init__(self) -> None:
-            _validate_moment_dtype(
+            _validate_adam_config(
                 moment_dtype=self.moment_dtype,
                 fused=self.fused,
+                state_offload=self.state_offload,
             )
 
     def __init__(
@@ -160,11 +168,14 @@ class AdamW(torch.optim.AdamW, BaseOptimizer):
         foreach: bool | None = None
         fused: bool | None = True
         moment_dtype: MomentDType = "parameter"
+        state_offload: OptimizerStateOffloader.Config | None = None
+        """Keep the moments in pinned CPU memory between steps; see `OptimizerStateOffloader`."""
 
         def __post_init__(self) -> None:
-            _validate_moment_dtype(
+            _validate_adam_config(
                 moment_dtype=self.moment_dtype,
                 fused=self.fused,
+                state_offload=self.state_offload,
             )
 
     def __init__(
@@ -184,6 +195,16 @@ class AdamW(torch.optim.AdamW, BaseOptimizer):
         )
         if config.moment_dtype == "bfloat16":
             _register_bfloat16_moment_hooks(self)
+
+
+def offloads_state(
+    config: BaseOptimizer.Config,
+) -> TypeGuard[Adam.Config | AdamW.Config]:
+    """Whether ``config`` is an Adam or AdamW config with ``state_offload`` set."""
+    return (
+        isinstance(config, (Adam.Config, AdamW.Config))
+        and config.state_offload is not None
+    )
 
 
 class DistMuon(FlexShardDistMuon, BaseOptimizer):
@@ -413,12 +434,35 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
                         return state_dict
 
                     optimizer.register_state_dict_post_hook(_save_host_lr)
-                self.optimizers.append(optimizer)
                 self._log_optimizer(
                     optimizer,
                     part_idx,
                     optimizer_config.pattern,
                 )
+                if offloads_state(optimizer_config):
+                    # One slab dtype per optimizer, while resident Adam matches each param.
+                    param_dtypes = {param.dtype for param in param_group["params"]}
+                    if (
+                        optimizer_config.moment_dtype == "parameter"
+                        and len(param_dtypes) > 1
+                    ):
+                        raise ValueError(
+                            "state_offload needs one parameter dtype per optimizer, but "
+                            f"{optimizer_config.pattern!r} matched {param_dtypes}"
+                        )
+                    # offloads_state() checked that state_offload is set.
+                    offload_config = cast(
+                        OptimizerStateOffloader.Config, optimizer_config.state_offload
+                    )
+                    optimizer = offload_config.build(
+                        optimizer=optimizer,
+                        state_dtype=(
+                            torch.bfloat16
+                            if optimizer_config.moment_dtype == "bfloat16"
+                            else param_group["params"][0].dtype
+                        ),
+                    )
+                self.optimizers.append(optimizer)
                 all_params.extend(param_group["params"])
 
         self._validate_params(all_params)
