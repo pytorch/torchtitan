@@ -86,6 +86,8 @@ def add_grouped_bias(
     expert_ids_R = torch.searchsorted(offsets_E, row_ids_R, right=True)
     bias_RO = _GatherGroupedBias.apply(bias_EO, expert_ids_R)
     if scores_R is not None:
+        # Eager autograd saves the gathered [R, O] bias for the score grad. The compiled
+        # region (the default) saves only the [E + 1, O] bias and gathers again.
         bias_RO = bias_RO * scores_R.reshape(-1, 1).to(torch.float32)
     return output_RO + bias_RO.to(output_RO.dtype)
 
