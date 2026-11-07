@@ -104,40 +104,6 @@ class TestLocalTokenDispatcherInference(unittest.TestCase):
         self.assertTrue(torch.equal(pairwise_outputs[3], argsort_outputs[3]))
 
 
-class TestDispatchCombineRegion(unittest.TestCase):
-    def test_one_region_name_compiles_every_function(self):
-        # A function registered under another name runs eager and drops out of the calls.
-        torch.manual_seed(0)
-        T, K, D, E = 37, 4, 8, 5
-        ids_TK = torch.stack([torch.randperm(E)[:K] for _ in range(T)])
-        dispatcher = LocalTokenDispatcher(
-            LocalTokenDispatcher.Config(num_experts=E, top_k=K)
-        )
-        routing_map_TE = torch.nn.functional.one_hot(ids_TK, E).any(dim=1)
-        x_TD = torch.randn(T, D, requires_grad=True)
-        scores_TK = torch.rand(T, K, requires_grad=True)
-        with _compiled_regions():
-            with torch.no_grad():
-                routed_ND, _, metadata = dispatcher.dispatch(
-                    x_TD, scores_TK, ids_TK, routing_map_TE
-                )
-                dispatcher.combine(routed_ND, metadata, x_TD)
-            routed_ND, _, metadata = dispatcher.dispatch(
-                x_TD, scores_TK, ids_TK, routing_map_TE
-            )
-            dispatcher.combine(routed_ND, metadata, x_TD).sum().backward()
-            self.assertEqual(
-                set(_compiled_calls),
-                {
-                    "_sort_routes_and_gather",
-                    "_sort_routes_for_training",
-                    "_gather_weighted_sum",
-                    "_sum_routes_per_token",
-                    "_gather_weighted_sum_backward",
-                },
-            )
-
-
 class TestArgsortExpertIds(unittest.TestCase):
     def test_narrow_key_argsort_matches_int64_argsort(self):
         # Each side of the uint8 and int16 thresholds, with the largest id present:
@@ -184,9 +150,21 @@ class TestLocalTokenDispatcherTraining(unittest.TestCase):
         x_TD, scores_TK, weight_D = self._inputs(torch.bfloat16)
         with _compiled_regions():
             training_TD = self._forward(x_TD, scores_TK, weight_D)
+            training_TD.sum().backward()
             with torch.no_grad():
                 inference_TD = self._forward(x_TD, scores_TK, weight_D)
         torch.testing.assert_close(training_TD, inference_TD, rtol=0, atol=0)
+        # A function registered under another region name runs eager and drops out.
+        self.assertEqual(
+            set(_compiled_calls),
+            {
+                "_sort_routes_and_gather",
+                "_sort_routes_for_training",
+                "_gather_weighted_sum",
+                "_sum_routes_per_token",
+                "_gather_weighted_sum_backward",
+            },
+        )
 
     def test_compiled_training_grads_match_float64_reference(self):
         x_TD, scores_TK, weight_D = self._inputs(torch.float32)
