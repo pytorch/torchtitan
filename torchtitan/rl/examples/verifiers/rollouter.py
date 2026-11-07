@@ -147,9 +147,6 @@ class VerifiersRollouter(Rollouter):
                         "taskset": self.training_dataloader.dataset.verifiers_taskset
                     }
                 ),
-                local_taskset_module=_local_taskset_module(
-                    self.training_dataloader.dataset.verifiers_taskset
-                ),
             )
             # One pass, so ValidationConfig(steps=-1) ends and no task is scored twice.
             self.validation_dataset = replace(self.validation_dataset, repeat=False)
@@ -510,13 +507,6 @@ def _trainable_token_spans(mask: list[bool]) -> list[tuple[int, int]]:
             spans.append((start, index))
             start = None
     return spans
-
-
-def _local_taskset_module(taskset: VerifiersTasksetConfig) -> str | None:
-    """Return the module backing a locally registered taskset alias."""
-    module = type(taskset).__module__
-    alias = module.replace(".", "_").lower()
-    return module if taskset.id == alias else None
 
 
 def verifiers_rollout_logs(verifiers_episode: Any, trace: Any) -> dict[str, Any]:

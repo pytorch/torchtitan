@@ -42,7 +42,6 @@ from torchtitan.rl.examples.verifiers.rollouter import (
     RewardFromVerifiers,
     VerifiersRollouter,
 )
-from torchtitan.rl.examples.verifiers.worker_setup import register_local_taskset_alias
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
@@ -64,8 +63,9 @@ from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 def _math_taskset_config(
     dataset: Literal["dapo_math", "aime2025"],
 ) -> VerifiersMathTasksetConfig:
-    taskset_id = register_local_taskset_alias(VerifiersMathTasksetConfig.__module__)
-    return VerifiersMathTasksetConfig(id=taskset_id, dataset=dataset)
+    return VerifiersMathTasksetConfig(
+        id="torchtitan_verifiers_dapo_math", dataset=dataset
+    )
 
 
 def _verifiers_math_rollouter_config(
