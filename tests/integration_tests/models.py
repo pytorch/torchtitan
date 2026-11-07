@@ -50,6 +50,7 @@ from torchtitan_recipes.tests.models.qwen3 import (
     qwen3_debugmodel_moe_param_groups,
 )
 from torchtitan_recipes.tests.models.qwen3_8_flash_next import (
+    qwen38_flash_next_debugmodel_all_parallelism,
     qwen38_flash_next_debugmodel_ep2,
     qwen38_flash_next_debugmodel_mm,
 )
@@ -652,6 +653,14 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             test_descr="Qwen3.8-Flash-Next FSDP+EP, row-owned PLE and sparse attention",
             test_name="qwen3_8_flash_next_fsdp+ep",
             ngpu=2,
+            use_real_pg=True,
+            skip_rocm_test=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[qwen38_flash_next_debugmodel_all_parallelism],
+            test_descr="Qwen3.8-Flash-Next FSDP2+TP2+EP4+PP2, VPP and full remat",
+            test_name="qwen3_8_flash_next_fsdp+tp+ep+pp",
+            ngpu=8,
             use_real_pg=True,
             skip_rocm_test=True,
         ),

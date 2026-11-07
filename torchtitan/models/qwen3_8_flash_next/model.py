@@ -8,9 +8,11 @@
 
 from dataclasses import dataclass
 from typing import Any, cast
+from weakref import ref, ReferenceType
 
 import spmd_types as spmd
 import torch
+import torch.distributed as dist
 import torch_remat as remat
 
 from torchtitan.config import PrecisionConfig
@@ -25,6 +27,7 @@ from torchtitan.distributed.spmd_types import (
     set_current_spmd_mesh,
     spmd_local_context,
 )
+from torchtitan.models.base import BaseModel
 from torchtitan.models.common.attention import AttentionMetadata, AttentionMetadataMap
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import token_id_placement
@@ -33,7 +36,7 @@ from torchtitan.models.common.nn_modules import Identity
 from torchtitan.models.qwen3_5.model import Qwen35Model
 
 from .attention import QSAAttention, QSAIndexMetadata
-from .embedding import NGramTable, PLELayer
+from .embedding import NGramEmbedding, NGramTable, PLELayer
 from .residual import GatedResidual, inject_residual
 from .state_dict_adapter import Qwen38FlashNextStateDictAdapter
 
@@ -118,11 +121,13 @@ class Qwen38FlashNextModel(Qwen35Model):
         norm: Identity.Config  # pyrefly: ignore [bad-override]
 
     state_dict_adapter_cls = Qwen38FlashNextStateDictAdapter
+    pipeline_last_stage_module_fqns = ("hyper_connection_mixer",)
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.num_streams = config.num_streams
         self.hyper_connection_mixer = config.hyper_connection_mixer.build()
+        self._ple_embedding_ref: ReferenceType[NGramEmbedding] | None = None
 
     def _apply_fsdp(
         self,
@@ -152,6 +157,26 @@ class Qwen38FlashNextModel(Qwen35Model):
             parallelism=parallelism,
         )
 
+    def pipeline(self, **kwargs: Any) -> tuple[Any, list[BaseModel], bool, bool]:
+        pp_mesh = kwargs["parallelism_context"].get_mesh("pp")
+        if dist.get_backend(pp_mesh.get_group("pp")) == "fake":
+            raise ValueError(
+                "Flash-Next carries four residual streams between pipeline "
+                "stages; use a real pipeline process group"
+            )
+        result = super().pipeline(**kwargs)
+        model_parts = result[1]
+        for part in model_parts:
+            for module in part.modules():
+                if isinstance(module, NGramEmbedding):
+                    # Preprocessing runs on the first local part; the engine
+                    # keeps the owning part alive. A weak reference registers
+                    # no borrowed parameters or checkpoint keys on this part.
+                    cast(Qwen38FlashNextModel, model_parts[0])._ple_embedding_ref = ref(
+                        module
+                    )
+        return result
+
     def preprocess_inputs(
         self,
         input_dict: dict[str, Any],
@@ -160,8 +185,8 @@ class Qwen38FlashNextModel(Qwen35Model):
         parallelism: ParallelismConfig,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
-        # PLE needs original token history; multimodal rotary coordinates cannot
-        # recover token IDs or one-dimensional document positions.
+        # These full token histories must reach PLE even when it belongs to a
+        # later PP stage. Rotary coordinates alone cannot recover document IDs.
         lexical_inputs = {
             "ple_input_ids": input_dict["input"],
             "document_positions": input_dict["positions"],
@@ -177,11 +202,14 @@ class Qwen38FlashNextModel(Qwen35Model):
             lexical_inputs,
             {name: token_id_placement() for name in lexical_inputs},
         )
-        for module in self.layers.values():
-            layer = cast(Qwen38FlashNextBlock, module)
-            if layer.ple is None:
-                continue
-            embedding = layer.ple.ple_embedding
+        embeddings = (
+            module for module in self.modules() if isinstance(module, NGramEmbedding)
+        )
+        if self._ple_embedding_ref is not None:
+            embedding = self._ple_embedding_ref()
+            assert embedding is not None
+            embeddings = iter((embedding,))
+        for embedding in embeddings:
             table = embedding.ngram_embedding
             if table.row_mesh is not None:
                 with spmd.no_typecheck():
@@ -275,6 +303,8 @@ class Qwen38FlashNextModel(Qwen35Model):
                 padding_mask_T=padding_mask,
                 aux_loss_denominator=denominator,
             )
+        if self.hyper_connection_mixer is None:
+            return x_TC
         x_TD = self.norm(self.hyper_connection_mixer(x_TC))
         if self._skip_lm_head:
             return x_TD

@@ -20,6 +20,9 @@ from torchtitan_recipes.tests.models.llama3 import (
 from torchtitan_recipes.tests.models.qwen3_5 import (
     qwen35_debugmodel_moe_lora as _qwen35_debugmodel_moe_lora,
 )
+from torchtitan_recipes.tests.models.qwen3_8_flash_next import (
+    qwen38_flash_next_debugmodel_all_parallelism,
+)
 
 from tests.integration_tests import IntegrationTestDefinition
 
@@ -179,6 +182,14 @@ def build_h100_tests_list() -> list[IntegrationTestDefinition]:
     Each entry names one configuration per run.
     """
     return [
+        IntegrationTestDefinition(
+            configs=[qwen38_flash_next_debugmodel_all_parallelism],
+            test_descr="Qwen3.8-Flash-Next FSDP2+TP2+EP4+PP2, VPP and full remat",
+            test_name="qwen3_8_flash_next_fsdp+tp+ep+pp",
+            ngpu=8,
+            use_real_pg=True,
+            skip_rocm_test=True,
+        ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_fsdp_symm_mem],
             test_descr="FSDP symmetric memory",

@@ -63,9 +63,9 @@ Zero gradients allow AdamW state/decay updates on entirely empty steps.
 
 ## Build and train
 
-Supported parallelism is FSDP, TP with or without sequence parallelism, and EP.
-PP and CP are rejected at config time. TP degree must divide the two QSA KV
-heads, so degrees 1 and 2 are supported.
+Supported parallelism is FSDP, TP with or without sequence parallelism, EP and
+real pipeline parallelism. CP and fake pipeline process groups are rejected.
+TP degree must divide the two QSA KV heads, so degrees 1 and 2 are supported.
 Flavors are `debugmodel`, `debugmodel_mm`, and `125B-A6B`.
 
 ```python
@@ -128,6 +128,14 @@ when the owner mesh is known. CPU offload, deferred
 FSDP gradient reduction, and a reduction dtype different from the master dtype
 are rejected.
 
+Real PP uses PyTorch's group-level FSDP finalization. Backbone gradients
+accumulate in FP32 on each requester before DP reduction. PLE sums each
+microbatch's BF16 requester gradients in FP32 on row owners, then accumulates
+those owner gradients. Both compute the same globally token-normalized sum with
+different floating-point association. PP coverage qualifies native determinism
+and C4 training; bitwise parity with the former full-table FSDP path is not
+claimed for PP.
+
 The FP32 table parameters, gradients and two AdamW moments total 762.94 GiB
 globally, or 95.37 GiB per owner with DP=8, before the backbone and activations.
 Removing the gather does not make the complete default FP32 AdamW state fit on
@@ -136,12 +144,29 @@ eight GB300s; released-model capacity and throughput remain unqualified.
 ## Tensor parallelism
 
 TP keeps residual/PLE activations replicated, shards QSA heads and lexical
-feature columns in addition to DP row ownership, and reduces detached head probabilities before pooling each block. The
-replicated indexer contributes its KL gradient once across the TP ranks.
+feature columns in addition to DP row ownership, and reduces detached head
+probabilities before pooling each block. The replicated indexer contributes its
+KL gradient once across the TP ranks.
 
 ```bash
 NGPU=2 MODULE=torchtitan_recipes.tests.models.qwen3_8_flash_next \
   CONFIG=qwen38_flash_next_debugmodel_tp2 ./run_train.sh
+```
+
+The eight-GPU recipe combines FSDP2, TP2, EP4 and PP2 with four virtual stages,
+Interleaved1F1B and full activation remat. PLE belongs to virtual stage 2, the
+second local part of PP rank 0. Only that part owns the table. The first local
+part prepares lookup routing through a weak reference to the owning embedding;
+it registers no additional parameters. Optimizer patterns are validated across
+PP ranks, and stages build optimizers only for their matching local parameters.
+Stages exchange `[T, 4 * D]` and receive original token IDs and
+document positions independently of multimodal rotary coordinates. The final
+stage owns the stream mixer and LM head. The shared engine rejects SPMD
+typechecking under PP; the TP/EP recipe checks types separately.
+
+```bash
+NGPU=8 MODULE=torchtitan_recipes.tests.models.qwen3_8_flash_next \
+  CONFIG=qwen38_flash_next_debugmodel_all_parallelism ./run_train.sh
 ```
 
 ## Numerical coverage
@@ -166,61 +191,11 @@ loading a plain-row checkpoint, preserve those results. Both sources use the sam
 committed deterministic GDN policy. The owned lookup also has reduced-model
 parity with the former full-table FSDP embedding.
 
-```bash
-pytest tests/unit_tests/cpu/models/qwen3_8_flash_next -q
-pytest tests/unit_tests/gpu/models/qwen3_8_flash_next -q
-python -m scripts.checkpoint_conversion.numerical_tests_qwen3_8_flash_next \
-  --device cuda --output outputs/flash_next_hf.json
-```
-
-The HF harness runs production CUDA GDN and grouped experts without substituting
-model operations. Its fixed fixtures compare text, standalone vision, and full
-image/video fusion in train/eval, including logits, masked CE, available parameter
-gradients, embeddings and pixels. BF16 gradient bounds are `atol=1e-4`,
-`rtol=0.03125`; standalone FP32 vision uses `atol=3e-6`, `rtol=3e-5`.
-Independent CPU feature equations provide the CPU coverage.
-
-## QSA memory and training limits
-
-Both dense indexer scoring and gathered SDPA use nonreentrant PyTorch checkpoints
-per query chunk. They preserve the original math and nest inside block
-`torch_remat` policies. Visibility masks are rebuilt inside score checkpoints;
-gathered K/V and MATH SDPA intermediates are recomputed during backward. Teacher
-construction and auxiliary logging stay outside the checkpointed functions.
-Ranking still performs quadratic work; chunking removes the quadratic saved
-ReLU graph and per-token saved K/V gathers, rather than eliminating that compute.
-
-Standalone released-geometry QSA completes ten BF16 AdamW steps on one GB300:
-
-| Tokens | Peak allocated memory |
-| --- | --- |
-| 512 | 1.1 GiB |
-| 1,024 | 1.9 GiB |
-| 2,048 | 3.4 GiB |
-| 4,096 | 3.8 GiB |
-
-At 512 tokens, the checkpointed path preserves ten-step loss, gradient norm, KL
-and final weights bitwise relative to the uncheckpointed path, whose peak is
-13.0 GiB. This is a standalone QSA capacity check, not a full released-model
-training claim. Full-model fixtures are the 64-token text and 1,024-token image
-recipes; full released-model training, including the 262,144-token context, is
-unqualified.
-
-QSA uses Python loops and per-chunk checkpoint calls. End-to-end training
-throughput is unqualified.
-
-Attention Gym's [distinct K/V work](https://github.com/meta-pytorch/attention-gym/pull/678)
-and [grouped gathered-attention kernel](https://github.com/meta-pytorch/attention-gym/pull/679)
-track the replacement for the MATH path. The latter lacks the required grouped
-training backward. Its adoption must preserve causal blocks/tails and Qwen's
-teacher KL.
-
-- Dynamic selections require `training.disable_accelerator_graphs=True`.
-- The meta inventory has 177.4B decoder/vision parameters including the lexical
-  table. Full-checkpoint materialization and distributed conversion of that
-  table are unqualified.
-- Sharded HF I/O is verified at debug geometry. This validation runtime's DCP
-  consolidated HF exporter fails on the model's integer buffers in
-  `_consolidate_hf_safetensors._parse_input_metadata`; full consolidated export
-  remains unqualified.
-- Inference KV caching and MTP are outside this training port.
+Eight-GB300 C4 runs compare native DTensor and plain owned-row storage with full
+remat. DP2/TP2/EP4/PP2 uses four virtual stages and Interleaved1F1B; ten-step
+loss/norm and all 763 final checkpoint tensors match bitwise. A repeated native
+run and native resume from a plain-row checkpoint at step 5 reach the identical
+final state. HSDP2x2/TP2/EP4 with SPMD type checking also matches ten-step metrics
+and all 763 tensors. These checks use native asynchronous checkpoints and the
+same committed deterministic GDN policy. The numerical provenance records the
+pinned sources, runtime and local postprocessing of the saved GPU artifacts.

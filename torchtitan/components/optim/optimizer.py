@@ -328,6 +328,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
         config (Config): Ordered optimizer configurations.
         model_parts (List[nn.Module]): List of model parts to be optimized.
         enable_accelerator_graph: Prepare every optimizer for accelerator graph capture.
+        pp_mesh: Validate configured patterns across all pipeline stages.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -360,11 +361,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
                 param_names.append(canonical_fqn(name))
                 claimed.add(name)
 
-        if not params:
-            raise ValueError(
-                f"Optimizer pattern {optimizer_config.pattern!r} matched no parameters"
-            )
-
         return {"params": params, "param_names": param_names}
 
     def __init__(
@@ -373,19 +369,28 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
         *,
         model_parts: list[nn.Module],
         enable_accelerator_graph: bool = False,
+        pp_mesh: DeviceMesh | None = None,
     ) -> None:
+        if pp_mesh is not None and (
+            pp_mesh.ndim != 1 or pp_mesh.mesh_dim_names != ("pp",)
+        ):
+            raise ValueError("pp_mesh must have one axis named 'pp'")
         all_params: list[nn.Parameter] = []
         self.optimizers = []
         self.model_parts = model_parts
+        matched = [False] * len(config.optimizers)
 
         for part_idx, model in enumerate(self.model_parts):
             claimed: set[str] = set()
-            for optimizer_config in config.optimizers:
+            for config_index, optimizer_config in enumerate(config.optimizers):
                 param_group = self._build_param_group(
                     model,
                     optimizer_config,
                     claimed,
                 )
+                if not param_group["params"]:
+                    continue
+                matched[config_index] = True
                 optimizer = optimizer_config.build(params=[param_group])
                 if enable_accelerator_graph:
                     if any(
@@ -421,6 +426,22 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
                 )
                 all_params.extend(param_group["params"])
 
+        if pp_mesh is not None:
+            # A valid pattern can belong exclusively to another pipeline stage.
+            matched_flags = torch.tensor(
+                matched, dtype=torch.int32, device=pp_mesh.device_type
+            )
+            torch.distributed.all_reduce(
+                matched_flags,
+                op=torch.distributed.ReduceOp.MAX,
+                group=pp_mesh.get_group(),
+            )
+            matched = matched_flags.cpu().tolist()
+        for optimizer_config, has_match in zip(config.optimizers, matched, strict=True):
+            if not has_match:
+                raise ValueError(
+                    f"Optimizer pattern {optimizer_config.pattern!r} matched no parameters"
+                )
         self._validate_params(all_params)
         self._post_init(all_params)
 

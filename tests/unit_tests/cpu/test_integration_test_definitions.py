@@ -174,11 +174,12 @@ def test_per_group_accelerator_graph_integration_supports_fake_pg() -> None:
 
 
 def test_parse_multiple_integration_test_suites() -> None:
-    assert _parse_test_suites("features,models,h100,b200") == (
+    assert _parse_test_suites("features,models,h100,b200,gb300") == (
         "features",
         "models",
         "h100",
         "b200",
+        "gb300",
     )
 
 

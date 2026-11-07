@@ -11,6 +11,7 @@ from typing import Any, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.components.optim import Optim, OptimizersContainer
 from torchtitan.components.optim.utils import (
@@ -37,11 +38,13 @@ class TorchFTOptimizersContainer(OptimizersContainer):
         *,
         model_parts: list[nn.Module],
         enable_accelerator_graph: bool = False,
+        pp_mesh: DeviceMesh | None = None,
     ) -> None:
         super().__init__(
             config,
             model_parts=model_parts,
             enable_accelerator_graph=enable_accelerator_graph,
+            pp_mesh=pp_mesh,
         )
 
         # Force to initialize the optimizer state so that `optim.step()`
