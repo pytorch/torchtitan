@@ -170,7 +170,7 @@ def vision_attention_sharding_config(
 
 
 def vision_rope_sharding_config() -> ShardingConfig:
-    """Keep vision position tables invariant across TP and CP."""
+    """Keep vision RoPE buffers invariant across TP and CP."""
     return ShardingConfig(
         state_shardings={"cache": _vision_state_placement(tp=spmd.I, cp=spmd.I)},
     )

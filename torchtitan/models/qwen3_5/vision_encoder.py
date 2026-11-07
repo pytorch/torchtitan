@@ -9,6 +9,7 @@
 Shape suffixes:
 - T = packed patch tokens
 - D = vision hidden dimension
+- Dh = attention head dimension
 - M = packed merged tokens
 - K = merged feature dimension
 - C = two spatial coordinates (row, column)
@@ -212,33 +213,27 @@ class VisionRotaryEmbedding(CosSinRoPE):
         super().__init__(config)
 
     def _precompute_cache(self) -> torch.Tensor:
-        """Compute rotary cos/sin values for positions up to max_context_length.
+        """Compute the per-coordinate inverse frequencies.
 
         Returns:
-            Cache of shape ``(max_context_length, dim / 4, 2)``.
+            Cache of shape ``(dim / 4,)``.
         """
         # Meta construction needs only the table shape and dtype.
         if torch.get_default_device().type == "meta":
             return torch.empty(
-                (self.max_context_length, self.dim // 4, 2),
+                (self.dim // 4,),
                 dtype=torch.float32,
                 device="meta",
             )
         half_dim = self.dim // 2
-        inv_freq_F = 1.0 / (
+        return 1.0 / (
             self.theta ** (torch.arange(0, half_dim, 2, dtype=torch.float32) / half_dim)
         )
-        positions_P = torch.arange(
-            self.max_context_length, device=inv_freq_F.device, dtype=inv_freq_F.dtype
-        )
-        angles_PF = torch.outer(positions_P, inv_freq_F)
-        # Compute cos/sin in float32 for numerical precision
-        return torch.stack((angles_PF.cos(), angles_PF.sin()), dim=-1)
 
     def prepare_positions(self, positions: torch.Tensor) -> torch.Tensor:
         """Compute 2D RoPE cache for vision patches.
 
-        Looks up separate frequency sets for each dimension and concatenates them
+        Builds separate frequency sets for each dimension and concatenates them
         into a rope_cache for VisionAttention.
 
         Args:
@@ -250,9 +245,10 @@ class VisionRotaryEmbedding(CosSinRoPE):
         """
         # 2D RoPE: row and col each get separate frequency sets, concatenated
         # (not interleaved).
-        spatial_TR2 = self.cache[positions].flatten(1, 2)
-        cos_TR, sin_TR = spatial_TR2.unbind(-1)
-        return torch.cat((cos_TR, cos_TR, sin_TR, sin_TR), dim=-1).unsqueeze(1)
+        angles_TR = (positions.unsqueeze(-1) * self.cache).flatten(1, 2)
+        angles_TDh = torch.cat((angles_TR, angles_TR), dim=-1)
+        # Compute cos/sin in float32 for numerical precision
+        return torch.cat((angles_TDh.cos(), angles_TDh.sin()), dim=-1).unsqueeze(1)
 
     def forward(
         self,
