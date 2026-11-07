@@ -18,7 +18,13 @@ from torch.utils.checkpoint import checkpoint
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.activation import ClampedSwiGLU
-from torchtitan.models.gpt_oss.moe import add_grouped_bias, GptOssGroupedLinear
+from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
+from torchtitan.models.gpt_oss.moe import (
+    add_bias_and_activate,
+    add_grouped_bias,
+    GptOssGroupedLinear,
+    GptOssRoutedExperts,
+)
 
 
 @pytest.fixture
@@ -110,34 +116,97 @@ def test_grouped_bias_matches_repeat_interleave(
         torch.testing.assert_close(actual, reference)
 
 
-def test_grouped_bias_region_in_pipeline_order(reset_local_compile) -> None:
-    """PP runs microbatch B's forward before A's backward, with FSDP2's fp32 bias grad.
+def test_w13_bias_activation_matches_unfused(reset_local_compile) -> None:
+    """The compiled w13_bias_activation region matches the bias add then the activation."""
+    torch.manual_seed(0)
+    activation_fn = ClampedSwiGLU.Config().build()
+    # Expert 0 owns rows 0-1, expert 1 none, expert 2 rows 2-4. Rows 5-6 are padding.
+    offsets_E = torch.tensor([2, 2, 5], dtype=torch.int32)
+    gate_up_R2F = torch.randn(7, 2, 6, dtype=torch.float64)
+    bias_E2F = torch.randn(3, 2, 6, dtype=torch.float64)
+    grad_RF = torch.randn(7, 6, dtype=torch.float64)
+    results = []
+    for regions in ([], ["w13_bias_activation"]):
+        LocalCompileConfig(regions=regions).apply()
+        leaf_gate_up_R2F = gate_up_R2F.clone().requires_grad_(True)
+        leaf_bias_E2F = bias_E2F.clone().requires_grad_(True)
+        hidden_RF = add_bias_and_activate(
+            gate_up_R2F=leaf_gate_up_R2F,
+            bias_E2F=leaf_bias_E2F,
+            offsets_E=offsets_E,
+            activation_fn=activation_fn,
+        )
+        hidden_RF.backward(grad_RF)
+        results.append((hidden_RF.detach(), leaf_gate_up_R2F.grad, leaf_bias_E2F.grad))
+    eager, compiled = results
+    for reference, actual in zip(eager, compiled, strict=True):
+        torch.testing.assert_close(actual, reference)
 
-    Example: forward A (64 rows), forward B (32 rows), backward A replays the region.
+
+def test_w13_bias_activation_saves_only_gate_up(reset_local_compile) -> None:
+    """The region recomputes the bias add in backward, so it never saves the biased sum.
+
+    Example: 7 rows, F = 6: saves gate_up [7, 2, 6]. Saving the biased sum would show [7, 6].
     """
-    LocalCompileConfig(regions=["grouped_expert_bias"]).apply()
-    layer = GptOssGroupedLinear.Config(
-        group_size=2, in_features=8, out_features=16, num_linears=2
+    LocalCompileConfig(regions=["w13_bias_activation"]).apply()
+    gate_up_R2F = torch.randn(7, 2, 6, requires_grad=True)
+    saved_shapes = []
+
+    def record_shape(saved: torch.Tensor) -> torch.Tensor:
+        saved_shapes.append(tuple(saved.shape))
+        return saved
+
+    with torch.autograd.graph.saved_tensors_hooks(record_shape, lambda saved: saved):
+        add_bias_and_activate(
+            gate_up_R2F=gate_up_R2F,
+            bias_E2F=torch.randn(3, 2, 6, requires_grad=True),
+            offsets_E=torch.tensor([2, 2, 5], dtype=torch.int32),
+            activation_fn=ClampedSwiGLU.Config().build(),
+        )
+    assert (7, 2, 6) in saved_shapes
+    assert (7, 6) not in saved_shapes
+
+
+@pytest.mark.parametrize(
+    "regions",
+    [["grouped_expert_bias"], ["grouped_expert_bias", "w13_bias_activation"]],
+)
+def test_grouped_bias_region_in_pipeline_order(reset_local_compile, regions) -> None:
+    """PP runs microbatch B's forward before A's backward, with FSDP2's fp32 bias grads.
+
+    Example: forward A (64 rows), forward B (32 rows), backward A replays the regions.
+    """
+    LocalCompileConfig(regions=regions).apply()
+    experts = GptOssRoutedExperts.Config(
+        w13=GptOssGroupedLinear.Config(
+            group_size=2, in_features=8, out_features=16, num_linears=2
+        ),
+        w2=GptOssGroupedLinear.Config(group_size=2, in_features=16, out_features=8),
+        token_dispatcher=AllToAllTokenDispatcher.Config(num_experts=2, top_k=1),
+        activation_fn=ClampedSwiGLU.Config(),
     ).build()
-    for param in layer.parameters():
+    for param in experts.parameters():
         param.data = torch.randn_like(param, dtype=torch.bfloat16)
-    layer.bias.grad_dtype = torch.float32
-    layer.bias.grad = torch.zeros(layer.bias.shape, dtype=torch.float32)
+    for linear in (experts.w13, experts.w2):
+        linear.bias.grad_dtype = torch.float32
+        linear.bias.grad = torch.zeros(linear.bias.shape, dtype=torch.float32)
 
     def forward(rows):
-        input_RI = torch.randn(rows, 8, dtype=torch.bfloat16, requires_grad=True)
+        input_RD = torch.randn(rows, 8, dtype=torch.bfloat16, requires_grad=True)
         offsets_E = torch.tensor([rows // 3, rows - 1], dtype=torch.int32)
+
+        def w13_activation_w2(input_RD):
+            hidden_RF = experts._w13_and_activation(input_RD, offsets_E)
+            return experts.w2(hidden_RF, offsets_E)
+
         return checkpoint(
-            lambda x: layer(x, offsets_E),
-            input_RI,
-            use_reentrant=False,
-            preserve_rng_state=False,
+            w13_activation_w2, input_RD, use_reentrant=False, preserve_rng_state=False
         )
 
     output_a, output_b = forward(64), forward(32)
     output_a.sum().backward()
     output_b.sum().backward()
-    assert layer.bias.grad.dtype == torch.float32
+    assert experts.w13.bias.grad.dtype == torch.float32
 
 
 class TestGptOssGroupedLinearSPMD(DTensorTestBase):
