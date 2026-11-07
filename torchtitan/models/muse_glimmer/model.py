@@ -74,6 +74,23 @@ class RMSGainCenterNorm(RMSNorm):
         return F.rms_norm(input, self.normalized_shape, w, self.eps)
 
 
+# Compiled, the head flatten, sigmoid and gate multiply run as one kernel (eager: 2).
+# emulate_precision_casts rounds the sigmoid to bf16 before the multiply, as eager does.
+@local_compile(
+    "muse_glimmer_attention_output",
+    batch_invariant=True,
+    options={"emulate_precision_casts": True},
+)
+def _flatten_attention_output(
+    output: torch.Tensor, gate: torch.Tensor | None
+) -> torch.Tensor:
+    """Flatten the attention heads to `[T, n_heads * head_dim]`, times `sigmoid(gate)` if configured."""
+    output = output.contiguous().view(output.shape[0], -1)
+    if gate is not None:
+        output = output * torch.sigmoid(gate)
+    return output
+
+
 class Attention(GQAttention):
     """Muse Glimmer GQA attention.
 
@@ -115,7 +132,6 @@ class Attention(GQAttention):
         # common attention boundary.
         x_TD = maybe_gather_tp_input(self, x_TD)
 
-        num_tokens = x_TD.shape[0]
         xq, xk, xv = self.qkv_linear(x_TD)
 
         # QK normalization before RoPE. Query is additionally scaled by a
@@ -143,15 +159,24 @@ class Attention(GQAttention):
         )
         # The copy below reads the inner_attention output with bare ops.
         remat.recompute_needs_tensor(output)
-        output = output.contiguous().view(num_tokens, -1)
-
+        gate = None
         if self.o_gate is not None:
             gate = self.o_gate(x_TD)
             # The gating reads the o_gate projection output with bare ops.
             remat.recompute_needs_tensor(gate)
-            output = output * torch.sigmoid(gate)
+        return self.wo(_flatten_attention_output(output, gate))
 
-        return self.wo(output)
+
+# Compiled, each residual site of the block runs as one kernel: the gain-center weight adds,
+# the norms and the residual add. Eager runs 5 and 3 kernels. emulate_precision_casts
+# rounds the post-norm output to bf16 before the add, as eager does. Outside deterministic
+# mode Inductor may time a few reduction configs at the first call; another pick moves under
+# 1e-4 of the outputs by one bf16 ulp. Like the other norm regions, this does not pin one.
+_compile_residual_norm = local_compile(
+    "muse_glimmer_residual_norm",
+    batch_invariant=False,
+    options={"emulate_precision_casts": True},
+)
 
 
 class MuseGlimmerTransformerBlock(TransformerBlock):
@@ -185,15 +210,26 @@ class MuseGlimmerTransformerBlock(TransformerBlock):
         attn_out = self.attention(self.attention_norm(x), attention_metadata, positions)
         # post_attention_norm reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)
-        h = x + self.post_attention_norm(attn_out)
-        ffn_out = self.feed_forward(self.ffn_norm(h))
-        # post_ffn_norm reads the feed-forward output with bare ops.
-        remat.recompute_needs_tensor(ffn_out)
-        # Trailing add, always saved: it saves nothing for backward, so replay skips
-        # it and its inputs need no persisting, matching checkpoint early stop.
+        h, ffn_input = self._attention_residual(x, attn_out)
+        ffn_out = self.feed_forward(ffn_input)
+        # Trailing norm and add, always saved, so replay skips them, as checkpoint early stop does.
+        # The norm keeps only its [T] rstd; replay rebuilds its input, ffn_out, with the FFN.
         return remat.region(
-            torch.add, self.remat_region_name("ffn_residual"), recompute=False
-        )(h, self.post_ffn_norm(ffn_out))
+            self._ffn_residual, self.remat_region_name("ffn_residual"), recompute=False
+        )(h, ffn_out)
+
+    @_compile_residual_norm
+    def _attention_residual(
+        self, x: torch.Tensor, attn_out: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return `h = x + post_attention_norm(attn_out)` and `ffn_norm(h)`."""
+        h = x + self.post_attention_norm(attn_out)
+        return h, self.ffn_norm(h)
+
+    @_compile_residual_norm
+    def _ffn_residual(self, h: torch.Tensor, ffn_out: torch.Tensor) -> torch.Tensor:
+        """Return `h + post_ffn_norm(ffn_out)`."""
+        return h + self.post_ffn_norm(ffn_out)
 
 
 class SoftCappedLinear(Linear):
@@ -306,6 +342,8 @@ class MuseGlimmerModel(MultimodalModel):
                     "fused_binary_activation",
                     "rope",
                     "muse_glimmer_logit_postprocess",
+                    "muse_glimmer_attention_output",
+                    "muse_glimmer_residual_norm",
                 ]
             )
         )
