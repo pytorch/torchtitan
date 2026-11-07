@@ -19,6 +19,7 @@ from typing import Any
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import PrecisionConfig
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.inference_model import get_attention_dimensions
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
@@ -77,6 +78,7 @@ def register_to_sglang(
     parallelism: InferenceParallelismConfig,
     precision: PrecisionConfig,
     checkpointer_config: CheckpointManager.Config | None,
+    dist_moe_runtime: DistMoeRuntime.Config | None,
     model_state_dict_load_mode: ModelStateDictLoadMode,
 ) -> None:
     """Register the TorchTitan model class, config parser and attention backend with SGLang.
@@ -97,6 +99,8 @@ def register_to_sglang(
         precision: The trainer's dtypes, which the model mirrors.
         checkpointer_config: Initial-weight loader; None when weights arrive through
             model state dict loads.
+        dist_moe_runtime: The runtime of the model's Dist-MoE experts, if any (see
+            ``build_dist_moe_runtime``).
         model_state_dict_load_mode: See ``ModelStateDictLoader``.
     """
     from sglang.srt.configs.model_config_parser_registry import (
@@ -126,6 +130,7 @@ def register_to_sglang(
                 parallelism=parallelism,
                 precision=precision,
                 checkpointer_config=checkpointer_config,
+                dist_moe_runtime=dist_moe_runtime,
                 model_state_dict_load_mode=model_state_dict_load_mode,
             )
 
