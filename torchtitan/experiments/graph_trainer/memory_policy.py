@@ -29,6 +29,7 @@ from torch._functorch.partitioners import (
     force_save_collectives,
     force_save_effectful_ops,
     get_default_op_list,
+    must_recompute,
     NodeInfo,
 )
 from torch.utils._ordered_set import OrderedSet
@@ -51,6 +52,11 @@ from torchtitan.experiments.graph_trainer.fsdp_patterns import (
 )
 from torchtitan.experiments.graph_trainer.log_activation_memory_policy import (
     log_activation_memory_policy,
+)
+from torchtitan.experiments.graph_trainer.mutation_utils import (
+    base_tensor_for_mutation_target,
+    is_mutation_node,
+    mutation_target_nodes,
 )
 from torchtitan.experiments.graph_trainer.registry import (
     MEMORY_POLICY_REGISTRY,
@@ -280,6 +286,57 @@ def _make_eager_memory_policy(save_ops: set | None = None) -> Callable:
     return policy_fn
 
 
+def _is_read_outside_mutation(base: torch.fx.Node, mutation: torch.fx.Node) -> bool:
+    """Return whether ``base``'s storage is read other than through ``mutation``.
+
+    Follows view users of ``base``, since views alias its storage. Reads of
+    ``mutation``'s own output are not counted: those users see the written
+    value and are already saved by ``tag_sac_policy``.
+    """
+    stack = [base]
+    seen: set[torch.fx.Node] = set()
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        for user in node.users:
+            if user is mutation:
+                continue
+            if getattr(user.target, "is_view", False):
+                stack.append(user)
+            else:
+                return True
+    return False
+
+
+def _force_save_forward_mutation_bases(gm: torch.fx.GraphModule) -> None:
+    """Save recomputable tensors that a forward in-place op writes into.
+
+    The remat pass recomputes a node by re-running its op in backward; it does
+    not replay in-place writes made into the node's output afterwards. If a
+    forward mutation writes into the storage of a recomputable node (directly,
+    or through a view of it) and that storage is read elsewhere, a recomputed
+    duplicate holds the pre-write value and backward silently computes wrong
+    gradients. Saving the alias base keeps the written storage; views
+    recomputed from it still alias it.
+
+    Example::
+
+        y = clone(x)              # recomputable
+        increment_(y)             # forward write into y, returns ()
+        loss = (y * y).sum()      # backward reads y
+        # Recomputing clone(x) in backward would drop the increment.
+    """
+    for node in gm.graph.nodes:
+        if _is_backward_node(node) or not is_mutation_node(node):
+            continue
+        for target in mutation_target_nodes(node):
+            base = base_tensor_for_mutation_target(target)
+            if must_recompute(base) and _is_read_outside_mutation(base, node):
+                base.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+
+
 def tag_sac_policy(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
@@ -384,6 +441,9 @@ def tag_sac_policy(
         for user in node.users:
             if not _is_backward_node(user) and "recompute" in user.meta:
                 user.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+    # Pass 1c: Never recompute a tensor that a forward mutation writes into;
+    # the duplicate would miss the write.
+    _force_save_forward_mutation_bases(gm)
 
     # Pass 2: Save recomputable outputs consumed outside their producing
     # layer. Recreating one would require rerunning that producer layer. A
@@ -639,6 +699,7 @@ def _min_cut_memory_policy_pass(
     force_save_bw_mutation_src(gm)
     saved_values = choose_saved_values_set(gm.graph, node_info)
     tag_min_cut_saved_values(gm, backward_side, set(saved_values))
+    _force_save_forward_mutation_bases(gm)
     return gm
 
 

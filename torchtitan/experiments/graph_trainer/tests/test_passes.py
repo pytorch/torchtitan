@@ -154,6 +154,32 @@ def _ordered_identity_fake(x: torch.Tensor) -> torch.Tensor:
 _ordered_identity.register_effect(torch.library.EffectType.ORDERED)
 
 
+@torch.library.custom_op(
+    "torchtitan_graph_trainer_test::increment_", mutates_args=("x",)
+)
+def _increment_(x: torch.Tensor) -> None:
+    x.add_(1)
+
+
+@_increment_.register_fake
+def _increment_fake(x: torch.Tensor) -> None:
+    return None
+
+
+class _AddOneWithInplaceKernel(torch.autograd.Function):
+    """Functional ``x + 1`` implemented as a private clone plus an in-place op."""
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor) -> torch.Tensor:
+        y = x.clone()
+        torch.ops.torchtitan_graph_trainer_test.increment_(y)
+        return y
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor) -> torch.Tensor:
+        return grad
+
+
 class TestDefaultTransformerBlockBuckets(TestCase):
     def test_compile_time_passes_enable_chunked_loss_bucket_only_when_needed(self):
         from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
@@ -2646,6 +2672,94 @@ class TestApplySACPass(TestCase):
             n for n in gm.graph.nodes if n.target is torch.ops.aten.add_.Tensor
         ]
         self.assertEqual(mutations, [update])
+
+    def test_forward_write_into_recomputable_tensor_keeps_gradients(self):
+        """A forward in-place write into a recomputable tensor is not dropped.
+
+        Recompute re-runs the producer (``clone``) in backward without replaying
+        the later write, so the tensor it writes into must be saved instead.
+        Covers a schema-mutable op returning ``()`` and an aten write through a
+        view; in both, backward reads the written tensor, not the op output.
+        """
+
+        def custom_op_write(x):
+            return _AddOneWithInplaceKernel.apply(x)
+
+        def view_write(x):
+            y = x.clone()
+            y.view(-1)[:1].add_(1)
+            return y
+
+        def step_fn(forward_fn):
+            def step(x):
+                y = forward_fn(x)
+                (grad,) = torch.autograd.grad((y * y).sum(), x)
+                return grad
+
+            return step
+
+        for forward_fn in (custom_op_write, view_write):
+            for memory_policy in ("full", "min_cut"):
+                with self.subTest(forward=forward_fn.__name__, policy=memory_policy):
+                    x = torch.tensor([2.0, 5.0], requires_grad=True)
+                    step = step_fn(forward_fn)
+                    expected = step(x)
+                    gm = minimal_fx_tracer(step)(x).gm
+                    if memory_policy == "full":
+                        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+                    else:
+                        config = SimpleNamespace(
+                            compile=GraphTrainerCompileConfig(
+                                memory_policy=memory_policy
+                            )
+                        )
+                        tag_with_memory_policy_pass(gm, config=config)
+                    (clone,) = (
+                        n
+                        for n in gm.graph.find_nodes(
+                            op="call_function", target=torch.ops.aten.clone.default
+                        )
+                        if not n.meta.get("autograd_backward")
+                    )
+                    self.assertEqual(
+                        clone.meta["recompute"], CheckpointPolicy.MUST_SAVE
+                    )
+
+                    selective_activation_remat_pass(gm)
+                    (grad,) = gm(x.detach())
+                    self.assertEqual(grad, expected, atol=0, rtol=0)
+
+    def test_forward_write_base_saved_only_when_read_outside_mutation(self):
+        """Keep the write target recomputable when every read goes through the
+        mutation's output (e.g. ``zeros_like(x).scatter_(...)`` in MoE routing):
+        those reads are saved by the mutation rule, so saving the target too
+        would only cost memory.
+        """
+        for read_target_directly in (False, True):
+            with self.subTest(read_target_directly=read_target_directly):
+                graph = torch.fx.Graph()
+                x = graph.placeholder("x")
+                target = graph.call_function(torch.ops.aten.zeros_like.default, (x,))
+                write = graph.call_function(
+                    torch.ops.aten.add_.Tensor, args=(target, x)
+                )
+                read = graph.call_function(
+                    torch.ops.aten.mul.Tensor,
+                    args=(target if read_target_directly else write, x),
+                )
+                bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(read, x))
+                bwd.meta["autograd_backward"] = True
+                graph.output(bwd)
+                gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+                tag_sac_policy(gm)
+
+                self.assertEqual(
+                    target.meta["recompute"],
+                    CheckpointPolicy.MUST_SAVE
+                    if read_target_directly
+                    else CheckpointPolicy.PREFER_RECOMPUTE,
+                )
 
     def test_non_save_ops_marked_recompute(self):
         """Ops not in the save list should be marked PREFER_RECOMPUTE."""
