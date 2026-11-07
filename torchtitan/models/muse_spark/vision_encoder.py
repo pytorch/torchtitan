@@ -36,7 +36,7 @@ from torchtitan.models.base.module import Module, ModuleDict
 
 from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
-from torchtitan.models.common.rope import ComplexRoPE
+from torchtitan.models.common.rope import ComplexRoPE, IdentityRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     get_packed_vision_grids,
@@ -244,6 +244,7 @@ class NaViTEncoder(Module):
         if config.pos_emb_grid_order not in {"raster", "legacy_spark"}:
             raise ValueError("NaViT positional embedding grid order is invalid")
 
+        self.config = config
         self.patch_size = config.patch_size
         self.patch_temporal = config.patch_temporal
         self.downsample_factor = config.downsample_factor
@@ -388,7 +389,11 @@ class NaViTEncoder(Module):
         pos_emb_GD = self._get_pos_emb(grid_h, grid_w, device)
         x_TD = self.ln_pre(x_TD + pos_emb_GD.to(dtype))
 
-        positions_GC = self._make_rope_positions(grid_h, grid_w, device)
+        positions_GC = (
+            x_TD.new_empty((num_tokens, 0))
+            if type(self.config.block.attn.rope) is IdentityRoPE.Config
+            else self._make_rope_positions(grid_h, grid_w, device)
+        )
 
         sp_perm: torch.Tensor | None = None
         sp_slens = torch.empty(0, dtype=torch.int32, device=device)

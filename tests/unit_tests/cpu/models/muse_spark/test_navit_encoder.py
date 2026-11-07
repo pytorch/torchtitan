@@ -104,7 +104,7 @@ def test_position_sampling_and_permutation_spmd_types(grid_order):
         device,
         torch.float32,
     )
-    assert rope_positions.shape == (24, 2)
+    assert rope_positions.shape == (24, 0)
     query, key = torch.randn(2, 24, 2, 16)
     attention = disabled_encoder.layers["0"].attn
     rope = attention.rope
