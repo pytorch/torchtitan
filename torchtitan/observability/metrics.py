@@ -260,8 +260,8 @@ class WandBLogger(BaseLogger):
             (k if self.tag is None else f"{self.tag}/{k}"): v
             for k, v in metrics.items()
         }
-        # W&B drops a log to a step it already sent, e.g. validation logged after training at
-        # the same step. So the step goes in the `trainer/step` key.
+        # Note: we use `trainer/step` key instead of `step` arg so multiple
+        # log calls can be made to the same step (e.g. trainer and validation)
         self.wandb.log({**wandb_metrics, "trainer/step": step})
 
     def close(self) -> None:
