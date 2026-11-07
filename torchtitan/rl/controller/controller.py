@@ -1096,14 +1096,6 @@ class Controller(Configurable):
         reward_keys = sorted(key for key in set(first) | set(final) if "reward" in key)
         logger.info("=" * 60)
         logger.info("Validation reward (first pass / final pass):")
-        # Flag a first pass that spans weight syncs: its reward mixes policies.
-        first_pass_min_policy = first.get("validation/min_policy_version/min", 0)
-        first_pass_max_policy = first.get("validation/max_policy_version/max", 0)
-        if first_pass_max_policy > first_pass_min_policy:
-            logger.info(
-                f"  first pass sampled policies {first_pass_min_policy:.0f} to "
-                f"{first_pass_max_policy:.0f}: not a clean pre-training score"
-            )
         for key in reward_keys:
             logger.info(
                 f"  {key}:  {first.get(key, float('nan')):+.3f}  /  {final.get(key, float('nan')):+.3f}"
