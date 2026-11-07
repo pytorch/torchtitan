@@ -81,15 +81,15 @@ def resample_waveform(
         1,
         num_input_samples * target_sample_rate // source_sample_rate,
     )
-    output_indices = torch.arange(
-        num_output_samples,
-        dtype=torch.float32,
-        device=waveform.device,
+    # Integer math: float32 positions lose sub-sample precision on long clips.
+    scaled_indices = (
+        torch.arange(num_output_samples, device=waveform.device) * source_sample_rate
     )
-    source_positions = output_indices * source_sample_rate / target_sample_rate
-    lower_indices = source_positions.floor().to(torch.int64)
+    lower_indices = scaled_indices // target_sample_rate
     upper_indices = (lower_indices + 1).clamp(max=num_input_samples - 1)
-    upper_weights = (source_positions - lower_indices).unsqueeze(1)
+    upper_weights = (
+        (scaled_indices % target_sample_rate).to(torch.float32) / target_sample_rate
+    ).unsqueeze(1)
 
     lower_values = waveform[lower_indices]
     upper_values = waveform[upper_indices]
