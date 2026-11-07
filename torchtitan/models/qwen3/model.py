@@ -57,14 +57,13 @@ class Qwen3TransformerBlock(TransformerBlock):
         residual: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominator: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return ``(ffn_out, residual)`` unsummed; their sum is the next block's input.
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Return the next block's hidden state under grad, or its two addends without grad.
 
-        Example (block 0 gets residual=None, so its hidden state is x):
-            ffn_out, residual = block(x, ..., residual=residual)
-            # hidden state in:           h = residual + x
-            # residual out:              h + attn_out
-            # next block's hidden state: residual + ffn_out
+        Example (this block's hidden state is h = residual + x, or x if residual is None):
+            grad:     block(x, ...)                     -> residual_out + ffn_out
+            no_grad:  block(x, ..., residual=residual)  -> (ffn_out, residual_out)
+            where residual_out = h + attn_out. Under grad, residual is always None.
         """
         if residual is None:
             residual = x
@@ -84,11 +83,20 @@ class Qwen3TransformerBlock(TransformerBlock):
             )
         else:
             ffn_out = self.feed_forward(self.ffn_norm(residual))
-        return ffn_out, residual
+        # Without grad (RL generator, validation), the next block adds them inside
+        # its norm kernel. Under grad, remat keeps each block's inputs, so returning
+        # both would keep one more [T, D] tensor per block.
+        if not torch.is_grad_enabled():
+            return ffn_out, residual
+        # Trailing add, always saved: it saves nothing for backward, so replay skips
+        # it and its inputs need no persisting, matching checkpoint early stop.
+        return remat.region(
+            torch.add, self.remat_region_name("ffn_residual"), recompute=False
+        )(residual, ffn_out)
 
     # Compiled, the add runs inside the norm kernel; eager runs two kernels.
     # emulate_precision_casts rounds the sum to bf16 before the norm, as eager
-    # does. Without it, the no_grad graph norms the fp32 sum: up to 22% of
+    # does. Without it, the no_grad graph normalizes the fp32 sum: up to 22% of
     # outputs differ from eager by one bf16 step.
     @local_compile(
         "qwen3_add_rmsnorm",
@@ -153,7 +161,7 @@ class Qwen3Model(Decoder):
         """``Decoder.forward``, but without grad each block hands the next its output
         and residual unsummed (see ``Qwen3TransformerBlock.forward``).
 
-        Example, 2 layers, no_grad (under grad the loop sums them after each block):
+        Example, 2 layers, no_grad (under grad each block returns the sum, as on main):
             h = tok_embeddings(tokens)
             out, residual = layers["0"](h)                       # residual = h + attn_out
             out, residual = layers["1"](out, residual=residual)  # attention_norm adds them
@@ -174,7 +182,7 @@ class Qwen3Model(Decoder):
                 if attention_metadata is None
                 else attention_metadata.get(type(layer.attention.inner_attention))
             )
-            h, residual = layer(
+            out = layer(
                 h,
                 layer_attention_metadata,
                 positions,
@@ -182,12 +190,8 @@ class Qwen3Model(Decoder):
                 padding_mask=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
             )
-            # Under grad, sum here: remat keeps each block's inputs for backward, so
-            # carrying (h, residual) would keep one more [T, D] tensor per block.
-            # Without grad (RL generator, validation), the next block adds them
-            # inside its norm kernel.
-            if torch.is_grad_enabled():
-                h, residual = residual + h, None
+            # Under grad the block returns the sum; see Qwen3TransformerBlock.forward.
+            h, residual = (out, None) if torch.is_grad_enabled() else out
         # The next pipeline stage takes one tensor, so every stage ends with the sum.
         # residual is None here under grad, and in a stage without layers.
         # TODO: fuse this add into the root norm, as _add_attention_norm does for the

@@ -33,16 +33,19 @@ class TestQwen3AddRMSNorm(unittest.TestCase):
         x = torch.randn(64, config.dim, device="cuda", dtype=torch.bfloat16)
         residual = 4 * torch.randn_like(x)
 
-        # The region runs only without grad: Qwen3Model.forward sums in grad mode.
+        # The region runs only without grad: under grad, each block returns the sum.
         with torch.no_grad():
             LocalCompileConfig().apply()
             eager_out, eager_sum = add_attention_norm(block, x, residual)
             LocalCompileConfig(regions=["qwen3_add_rmsnorm"]).apply()
             out, new_residual = add_attention_norm(block, x, residual)
 
-        # bf16 add: the compiled sum rounds exactly as eager's; the norm sums in another order.
+        # bf16 add: the compiled sum rounds exactly as eager's.
         torch.testing.assert_close(new_residual, eager_sum, rtol=0, atol=0)
-        torch.testing.assert_close(out, eager_out)
+        # emulate_precision_casts: the compiled norm reads that bf16 sum, as eager does,
+        # so all but a few outputs match eager bit for bit (0.7% differ without it).
+        fraction_differing = (out != eager_out).float().mean().item()
+        self.assertLess(fraction_differing, 1e-3)
 
 
 if __name__ == "__main__":
