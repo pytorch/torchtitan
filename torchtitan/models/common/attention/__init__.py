@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from . import attention as _attention, mla as _mla
 from .attention import (  # noqa: F401
     Attention,
+    compile_qkv_norm_rope,
     create_attention_mask,
     create_varlen_metadata_for_document,
     FlexAttentionMetadata,
