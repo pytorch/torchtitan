@@ -46,10 +46,10 @@ class GptOssGroupedLinear(GroupedLinear):
         offsets_E: torch.Tensor,
         *,
         scores_R: torch.Tensor | None = None,
-        add_bias: bool = True,
+        with_bias: bool = True,
     ) -> torch.Tensor:
         output_RO = super().forward(input_RI, offsets_E, scores_R=scores_R)
-        if not add_bias:
+        if not with_bias:
             # GptOssRoutedExperts adds w13's bias inside its activation region.
             return output_RO
         flat_output_RO = output_RO.flatten(1)
@@ -110,7 +110,7 @@ def add_grouped_bias(
     bias_RO = _GatherGroupedBias.apply(bias_EO, expert_ids_R)
     if scores_R is not None:
         # Eager autograd saves the gathered [R, O] bias for the score grad. The compiled
-        # region (the default) saves only the [E + 1, O] bias and gathers again.
+        # region (the default) saves only the [E, O] bias and gathers again.
         bias_RO = bias_RO * scores_R.reshape(-1, 1).to(torch.float32)
     return output_RO + bias_RO.to(output_RO.dtype)
 
@@ -155,9 +155,10 @@ class GptOssRoutedExperts(RoutedExperts):
     def _w13_and_activation(
         self, routed_input_RD: torch.Tensor, offsets_E: torch.Tensor
     ) -> torch.Tensor:
-        gate_up_R2F = self.w13(routed_input_RD.bfloat16(), offsets_E, add_bias=False)
+        gate_up_R2F = self.w13(routed_input_RD, offsets_E, with_bias=False)
         remat.recompute_needs_tensor(gate_up_R2F)
-        # Dynamic rows and a copy of the bias, for PP + FSDP2: see GptOssGroupedLinear.forward.
+        # Dynamic rows and a copy of the bias, for PP + FSDP2. See GptOssGroupedLinear.forward,
+        # whose TODO also covers this copy.
         if not torch.compiler.is_compiling():
             torch._dynamo.maybe_mark_dynamic(gate_up_R2F, 0)
         return add_bias_and_activate(
@@ -165,10 +166,13 @@ class GptOssRoutedExperts(RoutedExperts):
         )
 
 
-# Same options as fused_binary_activation, whose __call__ this region inlines.
+# recompile_limit=16 covers the graphs per process: one for 2+ rows and one each for 0 and
+# 1 rows (EP ranks with few tokens), twice if the process runs both grad and no_grad. Up to 6.
+# The options match fused_binary_activation, whose __call__ this region inlines.
 @local_compile(
     "w13_bias_activation",
     batch_invariant=True,
+    recompile_limit=16,
     options={"max_pointwise_cat_inputs": 0, "max_complex_pointwise_cat_inputs": 0},
 )
 def add_bias_and_activate(
@@ -188,17 +192,26 @@ def add_bias_and_activate(
     def biased_activation(
         gate_up_R2F: torch.Tensor, bias_E2F: torch.Tensor
     ) -> torch.Tensor:
-        biased_RO = add_grouped_bias(
-            gate_up_R2F.flatten(1), bias_E2F.flatten(1), offsets_E
-        )
+        gate_up_RO = gate_up_R2F.flatten(1)
+        # Region off: add_grouped_bias compiles on its own. Mark its rows dynamic for PP,
+        # as GptOssGroupedLinear.forward does.
+        if not torch.compiler.is_compiling():
+            torch._dynamo.maybe_mark_dynamic(gate_up_RO, 0)
+        biased_RO = add_grouped_bias(gate_up_RO, bias_E2F.flatten(1), offsets_E)
         return activation_fn(biased_RO.view_as(gate_up_R2F), offsets=offsets_E)
 
+    # Region off: run the bias and activation regions as they are. A checkpoint here would
+    # rerun both in backward and fuse nothing.
     if not torch.compiler.is_compiling():
         return biased_activation(gate_up_R2F, bias_E2F)
     # Compiled as is, the region would save the biased [R, 2F] for the activation's
     # backward, so the forward still writes it. Recomputing the whole function in backward
     # fuses the add into one forward and one backward kernel, and saves gate_up_R2F instead.
+    # MUST_RECOMPUTE forces that recompute. A plain checkpoint leaves it to the partitioner.
     # The activation then reads the add's unrounded fp32 result. Eager reads it rounded to bf16.
+    # TODO: add the bias inside w13's GEMM once torch._grouped_mm accepts one (today it raises
+    # "Bias not supported yet"). That saves this region's recompute in backward, and the
+    # checkpoint goes away.
     return checkpoint(
         biased_activation,
         gate_up_R2F,

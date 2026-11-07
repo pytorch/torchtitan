@@ -50,7 +50,7 @@ from torchtitan.models.common.decoder_sharding import (
     rowwise_sharding_config,
     token_embedding_sharding_config,
 )
-from torchtitan.models.common.moe import MoE, RoutedExperts, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.moe.sharding import (
     moe_sharding_config,
     routed_experts_sharding_config,
@@ -179,8 +179,8 @@ def _make_gptoss_experts_config(
     layer_id: int,
     top_k: int,
     enable_ep: bool,
-) -> RoutedExperts.Config:
-    """Build a fully-specified, sharded RoutedExperts.Config for one layer."""
+) -> GptOssRoutedExperts.Config:
+    """Build a fully-specified, sharded GptOssRoutedExperts.Config for one layer."""
     # TODO: Audit GPT-OSS gate/up depth scaling separately, including its biases.
     std = depth_scaled_std(0.02, layer_id)
     experts_init = {
