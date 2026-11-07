@@ -828,10 +828,10 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
             ((4,), ("tp",), (Shard(1),), (Replicate(),)),
             ((2, 2), ("dp", "tp"), (Shard(0), Shard(1)), (Shard(0), Replicate())),
         )
-        # (vocab size, dtype, ignore some labels, temperature)
+        # (vocab size, dtype, ignore some labels, per-token temperature)
         cases = (
-            (128, torch.float32, False, None),
-            (131, torch.bfloat16, True, 0.7),
+            (128, torch.float32, False, False),
+            (131, torch.bfloat16, True, True),
         )
 
         for mesh_shape, axis_names, logits_placements, label_placements in mesh_configs:
@@ -839,13 +839,13 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                 self.device_type, mesh_shape, mesh_dim_names=axis_names
             )
             tp_group = mesh.get_group("tp")
-            for vocab_size, dtype, ignore, temperature_value in cases:
+            for vocab_size, dtype, ignore, use_temperature in cases:
                 with self.subTest(
                     mesh_shape=mesh_shape,
                     vocab_size=vocab_size,
                     dtype=dtype,
                     ignore=ignore,
-                    temperature=temperature_value,
+                    temperature=use_temperature,
                 ):
                     # Sample on CPU and move to the test device: not every
                     # accelerator registers a device-side torch.Generator.
@@ -871,9 +871,9 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                     )
                     reference_logits_fp32 = reference_logits.float()
                     global_temperature = None
-                    if temperature_value is not None:
-                        global_temperature = torch.full(
-                            (T,), temperature_value, device=self.device_type
+                    if use_temperature:
+                        global_temperature = torch.linspace(
+                            0.5, 1.5, T, device=self.device_type
                         )
                         reference_logits_fp32 = (
                             reference_logits_fp32 / global_temperature.unsqueeze(-1)
