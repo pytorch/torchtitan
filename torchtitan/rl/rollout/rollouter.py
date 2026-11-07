@@ -232,8 +232,9 @@ class Rollouter(Configurable):
                         return_exceptions=True,
                     )
                 errors = [result for result in results if isinstance(result, Exception)]
-            except TimeoutError as timeout:
-                errors = [timeout]
+            except Exception as error:
+                # A timeout, or a call that raised while being sent: stop the workers anyway.
+                errors = [error]
             if errors:
                 logger.warning(
                     "Stopping rollout workers before every generate call was answered; "
