@@ -32,6 +32,39 @@ from torchtitan.models.qwen3_5.rope import MRoPE
 from torchtitan.models.qwen3_5.vision_encoder import VisionRotaryEmbedding
 
 
+def test_vision_rope_matches_prepared_cache():
+    torch.manual_seed(42)
+    positions = torch.tensor([[1, 2], [3, 4], [7, 1]])
+    query = torch.randn(3, 2, 16, requires_grad=True)
+    key = torch.randn_like(query, requires_grad=True)
+    grad_outputs = (torch.randn_like(query), torch.randn_like(key))
+    inv_freq = 1.0 / (10000.0 ** (torch.arange(0, 8, 2).float() / 8))
+    row, col = positions[:, :1] * inv_freq, positions[:, 1:] * inv_freq
+    # MoonViT interleaves column/row pairs; NaViT concatenates them.
+    interleaved = torch.stack((col, row), dim=-1).flatten(-2)
+    contiguous = torch.cat((col, row), dim=-1)
+    # Qwen uses row/column frequencies with the rotate-half convention.
+    rotate_half = torch.cat((row, col, row, col), dim=-1)
+    for rope_cls, cache in (
+        (
+            VisionRotaryEmbedding2D,
+            torch.polar(torch.ones_like(interleaved), interleaved),
+        ),
+        (VisionRopeFreq, torch.complex(contiguous.cos(), contiguous.sin())),
+        (VisionRotaryEmbedding, torch.cat((rotate_half.cos(), rotate_half.sin()), -1)),
+    ):
+        rope = rope_cls.Config(dim=16, max_context_length=8).build()
+        expected = rope.apply_rotary_emb(query, key, cache.unsqueeze(1))
+        actual = rope(query, key, rope.prepare_positions(positions))
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(
+            torch.autograd.grad(actual, (query, key), grad_outputs),
+            torch.autograd.grad(expected, (query, key), grad_outputs),
+            rtol=0,
+            atol=0,
+        )
+
+
 class TestApplyRotaryEmbCosSin(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(42)
@@ -132,40 +165,10 @@ class TestRoPEPositionBoundsComplex(unittest.TestCase):
 
     def test_valid_positions(self):
         num_tokens = 16
-        xq = torch.randn(num_tokens, 4, self.head_dim, requires_grad=True)
-        xk = torch.randn(num_tokens, 4, self.head_dim, requires_grad=True)
+        xq = torch.randn(num_tokens, 4, self.head_dim)
+        xk = torch.randn(num_tokens, 4, self.head_dim)
         positions = torch.arange(num_tokens) % 8
         self.rope(xq, xk, positions)
-        coordinates = torch.tensor([[2, 1], [1, 3], [1, 1], [2, 3]]).repeat(4, 1)
-        inv_freq = 1.0 / (
-            10000.0
-            ** (torch.arange(0, self.head_dim // 2, 2).float() / (self.head_dim // 2))
-        )
-        grad_outputs = (torch.randn_like(xq), torch.randn_like(xk))
-        for rope_cls in (VisionRotaryEmbedding2D, VisionRopeFreq):
-            with self.subTest(rope_cls=rope_cls.__name__):
-                rope = rope_cls.Config(
-                    dim=self.head_dim, max_context_length=self.max_context_length
-                ).build()
-                # MoonViT alternates column/row pairs; NaViT splits the pairs.
-                if rope_cls is VisionRotaryEmbedding2D:
-                    angles = coordinates[:, [1, 0]].repeat(1, self.head_dim // 4)
-                    angles = angles * inv_freq.repeat_interleave(2)
-                    cache = torch.polar(torch.ones_like(angles), angles)
-                else:
-                    angles = coordinates[:, [1, 0]].repeat_interleave(
-                        self.head_dim // 4, dim=1
-                    ) * inv_freq.repeat(2)
-                    cache = torch.complex(angles.cos(), angles.sin())
-                expected = ComplexRoPE.apply_rotary_emb(xq, xk, cache.unsqueeze(1))
-                actual = rope(xq, xk, rope.prepare_positions(coordinates))
-                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-                torch.testing.assert_close(
-                    torch.autograd.grad(actual, (xq, xk), grad_outputs),
-                    torch.autograd.grad(expected, (xq, xk), grad_outputs),
-                    rtol=0,
-                    atol=0,
-                )
 
     def test_out_of_range_positions_raises(self):
         num_tokens = 4
@@ -193,33 +196,10 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
 
     def test_valid_positions(self):
         num_tokens = 16
-        xq = torch.randn(num_tokens, 4, self.head_dim, requires_grad=True)
-        xk = torch.randn(num_tokens, 4, self.head_dim, requires_grad=True)
+        xq = torch.randn(num_tokens, 4, self.head_dim)
+        xk = torch.randn(num_tokens, 4, self.head_dim)
         positions = torch.arange(num_tokens) % 8
         self.rope(xq, xk, positions)
-        coordinates = torch.tensor([[2, 1], [1, 3], [1, 1], [2, 3]]).repeat(4, 1)
-        inv_freq = 1.0 / (
-            10000.0
-            ** (torch.arange(0, self.head_dim // 2, 2).float() / (self.head_dim // 2))
-        )
-        # Rotate-half pairs use row frequencies followed by column frequencies.
-        angles = torch.cat(
-            (coordinates[:, :1] * inv_freq, coordinates[:, 1:] * inv_freq), dim=-1
-        ).repeat(1, 2)
-        cache = torch.cat((angles.cos(), angles.sin()), dim=-1).unsqueeze(1)
-        rope = VisionRotaryEmbedding.Config(
-            dim=self.head_dim, max_context_length=self.max_context_length
-        ).build()
-        expected = CosSinRoPE.apply_rotary_emb(xq, xk, cache)
-        actual = rope(xq, xk, rope.prepare_positions(coordinates))
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-        grad_outputs = (torch.randn_like(xq), torch.randn_like(xk))
-        torch.testing.assert_close(
-            torch.autograd.grad(actual, (xq, xk), grad_outputs),
-            torch.autograd.grad(expected, (xq, xk), grad_outputs),
-            rtol=0,
-            atol=0,
-        )
 
     def test_out_of_range_positions_raises(self):
         num_tokens = 4

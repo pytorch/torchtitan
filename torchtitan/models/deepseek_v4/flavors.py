@@ -777,9 +777,7 @@ def _debugmodel(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=compress_rope_theta,
-        scaling=YaRNScalingConfig(
-            factor=4.0, beta_fast=32.0, beta_slow=1.0, original_seq_len=original_seq_len
-        ),
+        scaling=YaRNScalingConfig(factor=4.0, original_seq_len=original_seq_len),
     )
 
     layers = _build_v4_layers(
@@ -919,12 +917,7 @@ def _deepseek_v4_flash(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=compress_rope_theta,
-        scaling=YaRNScalingConfig(
-            factor=16.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=original_seq_len,
-        ),
+        scaling=YaRNScalingConfig(factor=16.0, original_seq_len=original_seq_len),
     )
 
     layers = _build_v4_layers(
@@ -1065,12 +1058,7 @@ def _deepseek_v4_pro(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=compress_rope_theta,
-        scaling=YaRNScalingConfig(
-            factor=16.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=original_seq_len,
-        ),
+        scaling=YaRNScalingConfig(factor=16.0, original_seq_len=original_seq_len),
     )
 
     layers = _build_v4_layers(

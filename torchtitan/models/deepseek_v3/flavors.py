@@ -510,9 +510,7 @@ def _debugmodel(
             dim=rope_dim,
             max_context_length=seq_len,
             theta=10000.0,
-            scaling=YaRNScalingConfig(
-                factor=40.0, beta_fast=32.0, beta_slow=1.0, original_seq_len=4096
-            ),
+            scaling=YaRNScalingConfig(factor=40.0),
         ),
         enable_sp=enable_sp,
         enable_ep=parallelism.expert_parallel_degree > 1,
@@ -593,9 +591,7 @@ def _16b(
             dim=rope_dim,
             max_context_length=seq_len,
             theta=10000.0,
-            scaling=YaRNScalingConfig(
-                factor=40.0, beta_fast=32.0, beta_slow=1.0, original_seq_len=4096
-            ),
+            scaling=YaRNScalingConfig(factor=40.0),
         ),
         enable_sp=enable_sp,
         enable_ep=parallelism.expert_parallel_degree > 1,
@@ -679,9 +675,7 @@ def _236b(
             dim=rope_dim,
             max_context_length=seq_len,
             theta=10000.0,
-            scaling=YaRNScalingConfig(
-                factor=40.0, beta_fast=32.0, beta_slow=1.0, original_seq_len=4096
-            ),
+            scaling=YaRNScalingConfig(factor=40.0),
         ),
         enable_sp=enable_sp,
         enable_ep=parallelism.expert_parallel_degree > 1,
@@ -766,9 +760,7 @@ def _671b(
             dim=rope_dim,
             max_context_length=seq_len,
             theta=10000.0,
-            scaling=YaRNScalingConfig(
-                factor=40.0, beta_fast=32.0, beta_slow=1.0, original_seq_len=4096
-            ),
+            scaling=YaRNScalingConfig(factor=40.0),
         ),
         enable_sp=enable_sp,
         enable_ep=parallelism.expert_parallel_degree > 1,
