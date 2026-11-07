@@ -20,6 +20,7 @@ from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import RLDataset, RolloutDataLoader
 from torchtitan.rl.rollout.message_env import MessageEnv
@@ -249,6 +250,16 @@ class Rollouter(Configurable):
         await asyncio.gather(
             *(worker.sync_log_step.call_one(step) for worker in self._workers)
         )
+
+    async def process_metrics(self) -> list[m.Metric]:
+        """Every rollout worker's CPU since the previous call and its memory, agent subprocesses
+        included; the metrics processor reduces them over workers."""
+        # TODO: also each host's sum (and its max over hosts), to check a host's CPU and memory
+        #   budget; these sums are job-wide.
+        replies = await asyncio.gather(
+            *(worker.process_metrics.call_one() for worker in self._workers)
+        )
+        return [metric for reply in replies for metric in reply]
 
     async def run_group_rollouts(
         self,
