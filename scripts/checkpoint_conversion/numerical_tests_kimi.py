@@ -8,8 +8,8 @@
 
 Runs the released HF Kimi-VL (``trust_remote_code``) and torchtitan in ONE
 process on the same text+image prompt and compares last-token logits. torchtitan
-does its OWN Kimi image processing (``process_image`` + ``vision_to_patches``,
-raster order), so the full pipeline is exercised (preprocessing + vision +
+does its OWN Kimi image processing (``ImageProcessor`` with
+``KIMI_K2_5_IMAGE_PROCESSOR_KWARGS``, raster order), so the full pipeline is exercised (preprocessing + vision +
 projector + scatter + DeepSeek-V3 text tower), not just the forward.
 
 The released remote code targets transformers ~4.50.x and does NOT import on 5.x,
@@ -33,6 +33,7 @@ selections (diagnostic: removes the MoE routing-flip divergence).
 import argparse
 import os
 from contextlib import nullcontext
+from dataclasses import replace
 
 import torch
 import torch.distributed.checkpoint as dcp
@@ -40,20 +41,18 @@ import torch.nn.functional as F
 from PIL import Image
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torchtitan.components.checkpointer import ModelWrapper
-from torchtitan.components.data.multimodal.utils.image import (
-    process_image,
-    resize_to_navit_patch_grid,
-    vision_to_patches,
-)
+from torchtitan.components.data.multimodal.image_processor import ImageProcessor
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.kimi_k2_7 import build_model_config
+from torchtitan.models.kimi_k2_7 import (
+    build_model_config,
+    KIMI_K2_5_IMAGE_PROCESSOR_KWARGS,
+)
 from transformers import AutoModelForCausalLM, AutoProcessor
 
 _MEDIA_TOKEN_ID = 163605
-_PATCH_SIZE = 14
 _MERGE_SIZE = 2
 _PROMPT = "<|media_pad|>\nWhat is shown in this image? Describe it briefly."
 
@@ -215,26 +214,16 @@ def run_tt(model_flavor, checkpoint_path, ref, dtype, vision_dtype, force_hf_rou
         print(f"forced HF routing on {n} MoE layers")
 
     # titan's OWN Kimi image processing on the raw image (the real data path).
-    img = process_image(
-        Image.fromarray(ref["raw_image"].numpy()),
-        patch_size=_PATCH_SIZE,
-        merge_size=_MERGE_SIZE,
-        resize_fn=resize_to_navit_patch_grid,
-        max_patches=4096,
-        max_patches_per_side=512,
-        image_mean=(0.5, 0.5, 0.5),
-        image_std=(0.5, 0.5, 0.5),
+    image_processor = replace(
+        ImageProcessor.Config(**KIMI_K2_5_IMAGE_PROCESSOR_KWARGS), max_patches=4096
+    ).build()
+    pixels, _ = image_processor.resize_and_normalize(
+        Image.fromarray(ref["raw_image"].numpy())
     )
-    # MoonViT3d consumes raster-order patches (matching the released processor).
-    patches, grid = vision_to_patches(
-        img,  # pyrefly: ignore [bad-argument-type]
-        patch_size=_PATCH_SIZE,
-        temporal_patch_size=1,
-        merge_size=_MERGE_SIZE,
-        patch_order="raster",
-    )
+    patches, grid_thw = image_processor.patchify(pixels)
+    grid_thw = grid_thw.unsqueeze(0)
     pixel_values = patches.unsqueeze(0).to(device=device, dtype=vision_dtype)
-    grid_thw = grid.unsqueeze(0).to(device)
+    grid_thw = grid_thw.to(device)
     tokens = ref["input_ids"].to(device)
 
     # Sanity: titan's grid must yield the same vision-token count as HF produced

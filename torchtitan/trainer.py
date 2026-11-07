@@ -20,6 +20,9 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpointer import DATALOADER
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
+
+from torchtitan.components.data.multimodal.image_processor import ImageProcessor
+from torchtitan.components.data.multimodal.video_processor import VideoProcessor
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.loss import combine_loss_metrics
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
@@ -73,6 +76,15 @@ class Trainer(Configurable):
         tokenizer: BaseTokenizer.Config = field(
             default_factory=HuggingFaceTokenizer.Config
         )
+        image_processor: ImageProcessor.Config | None = None
+        """The model's image preprocessing, e.g.
+        ``ImageProcessor.Config(**QWEN3_5_IMAGE_PROCESSOR_KWARGS)`` with the settings
+        next to the model's special tokens. Built once and handed to the
+        dataloader, like the tokenizer. None: no image inputs."""
+        video_processor: VideoProcessor.Config | None = None
+        """The model's video preprocessing, e.g.
+        ``VideoProcessor.Config(**QWEN3_5_VIDEO_PROCESSOR_KWARGS)``. None: no video
+        inputs."""
         dataloader: BaseDataLoader.Config = field(default_factory=BaseDataLoader.Config)
         validator: Validator.Config | None = None
         dump_folder: str = "./outputs"
@@ -151,6 +163,8 @@ class Trainer(Configurable):
     engine_cls: type[TrainingEngine] = TrainingEngine
 
     tokenizer: BaseTokenizer
+    image_processor: ImageProcessor | None
+    video_processor: VideoProcessor | None
     dataloader: BaseDataLoader
     validator: BaseValidator
     metrics_processor: MetricsProcessor
@@ -221,6 +235,16 @@ class Trainer(Configurable):
         )
 
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
+        self.image_processor = (
+            config.image_processor.build()
+            if config.image_processor is not None
+            else None
+        )
+        self.video_processor = (
+            config.video_processor.build()
+            if config.video_processor is not None
+            else None
+        )
         num_tokens_per_microbatch = (
             config.training.num_tokens_per_microbatch_per_dp_rank
         )
@@ -230,6 +254,8 @@ class Trainer(Configurable):
             tokenizer=self.tokenizer,
             max_context_length=config.model.max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
+            image_processor=self.image_processor,
+            video_processor=self.video_processor,
         )
 
         try:
@@ -282,6 +308,8 @@ class Trainer(Configurable):
                 dp_world_size=dp_degree,
                 dp_rank=dp_rank,
                 tokenizer=self.tokenizer,
+                image_processor=self.image_processor,
+                video_processor=self.video_processor,
                 parallelism_context=parallelism_context,
                 loss_fn=engine.loss_fn,
                 metrics_processor=self.metrics_processor,

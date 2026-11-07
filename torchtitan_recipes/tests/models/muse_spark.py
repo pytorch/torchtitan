@@ -51,7 +51,9 @@ from torchtitan_recipes.models.muse_spark import (
     _ultradata_lora_sft_transform,
     _ultradata_sft_dataloader,
     _with_dist_moe,
+    MUSE_SPARK_IMAGE_PROCESSOR_KWARGS,
     MUSE_SPARK_SPECIAL_TOKENS,
+    MUSE_SPARK_VIDEO_PROCESSOR_KWARGS,
 )
 
 
@@ -194,11 +196,13 @@ def muse_spark_debugmodel_mm(
     context_parallel_transform: ContextParallelTransform | None = None,
 ) -> Trainer.Config:
     """Pack mixed CC12M test images and synthetic audio/video at equal weights."""
+    from torchtitan.components.data.multimodal.image_processor import ImageProcessor
     from torchtitan.components.data.multimodal.mm_datasets import (
         AudioProcessor,
         MM_DATASETS,
         MMSamplePackingConfig,
     )
+    from torchtitan.components.data.multimodal.video_processor import VideoProcessor
 
     from torchtitan_recipes.tests.datasets.synthetic_multimodal import (
         _audio_token_count,
@@ -216,6 +220,8 @@ def muse_spark_debugmodel_mm(
     )
     config.model = model_config
     config.tokenizer = MuseSparkTokenizer.Config(**MUSE_SPARK_DEBUG_SPECIAL_TOKENS)
+    config.image_processor = ImageProcessor.Config(**MUSE_SPARK_IMAGE_PROCESSOR_KWARGS)
+    config.video_processor = VideoProcessor.Config(**MUSE_SPARK_VIDEO_PROCESSOR_KWARGS)
     image_dataset = _muse_spark_mm_dataloader(
         model_config, MM_DATASETS["cc12m-test"]
     ).dataset

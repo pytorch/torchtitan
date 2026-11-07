@@ -382,6 +382,8 @@ pretraining_mix_ds = DatasetMixConfig(
 
 Images use the same source, dataset, loader, sharding, and checkpoint contracts. Their processors preserve modality-specific sample dictionaries, and their collators create model-specific batches.
 
+Image preprocessing is fixed by the model, like the tokenizer: set `Trainer.Config.image_processor` (and `video_processor` for video) from the model's settings next to its special tokens, e.g. `ImageProcessor.Config(**QWEN3_5_IMAGE_PROCESSOR_KWARGS)`. The trainer builds it once and hands it to the dataloader. The dataset's sample processor decodes, resizes and normalizes each image with it (`resize_and_normalize`); the collator cuts the microbatch's images into patches with it (`patchify`).
+
 Example for Qwen multimodal:
 
 ```python
@@ -390,12 +392,14 @@ from torchtitan.components.data import (
     HuggingFaceStreamingSource,
     SingleDatasetConfig,
 )
+from torchtitan.components.data.multimodal.image_processor import ImageProcessor
 from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
 from torchtitan.components.data.multimodal.mm_datasets import (
     MMSamplePackingConfig,
     VisionProcessor,
     _process_cc12_wd_sample,
 )
+from torchtitan.models.qwen3_5 import QWEN3_5_IMAGE_PROCESSOR_KWARGS
 
 mm_processor = VisionProcessor.Config(
     sample_processor=_process_cc12_wd_sample,
@@ -415,14 +419,10 @@ packed_mm_ds = MMSamplePackingConfig(
     num_packing_bins=8,
 )
 
+config.image_processor = ImageProcessor.Config(**QWEN3_5_IMAGE_PROCESSOR_KWARGS)
 config.dataloader = GrainDataLoader.Config(
     dataset=packed_mm_ds,
-    collator=MultiModalCollator.Config(
-        build_mrope_positions=True,
-        patch_size=mm_processor.patch_size,
-        temporal_patch_size=mm_processor.temporal_patch_size,
-        spatial_merge_size=mm_processor.spatial_merge_size,
-    ),
+    collator=MultiModalCollator.Config(build_mrope_positions=True),
     streaming_shuffle_buffer_size=128,
 )
 ```
