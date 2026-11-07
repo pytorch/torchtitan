@@ -62,6 +62,8 @@ from torchtitan.models.common.moe.sharding import (
 )
 from torchtitan.models.common.param_init import depth_scaled_std
 
+from torchtitan.models.common.rope import YaRNScalingConfig
+
 from .attention import DeepSeekMLAAttention
 from .model import DeepSeekV3Model, DeepSeekV3TransformerBlock
 from .moe import DeepSeekV3Router
@@ -507,11 +509,7 @@ def _debugmodel(
             dim=rope_dim,
             max_context_length=seq_len,
             theta=10000.0,
-            scaling="yarn",
-            rope_factor=40.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=4096,
+            scaling=YaRNScalingConfig(factor=40.0),
         ),
         enable_sp=enable_sp,
         enable_ep=parallelism.expert_parallel_degree > 1,
@@ -591,11 +589,7 @@ def _16b(
             dim=rope_dim,
             max_context_length=seq_len,
             theta=10000.0,
-            scaling="yarn",
-            rope_factor=40.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=4096,
+            scaling=YaRNScalingConfig(factor=40.0),
         ),
         enable_sp=enable_sp,
         enable_ep=parallelism.expert_parallel_degree > 1,
@@ -678,11 +672,7 @@ def _236b(
             dim=rope_dim,
             max_context_length=seq_len,
             theta=10000.0,
-            scaling="yarn",
-            rope_factor=40.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=4096,
+            scaling=YaRNScalingConfig(factor=40.0),
         ),
         enable_sp=enable_sp,
         enable_ep=parallelism.expert_parallel_degree > 1,
@@ -766,11 +756,7 @@ def _671b(
             dim=rope_dim,
             max_context_length=seq_len,
             theta=10000.0,
-            scaling="yarn",
-            rope_factor=40.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=4096,
+            scaling=YaRNScalingConfig(factor=40.0),
         ),
         enable_sp=enable_sp,
         enable_ep=parallelism.expert_parallel_degree > 1,

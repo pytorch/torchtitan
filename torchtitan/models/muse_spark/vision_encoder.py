@@ -16,12 +16,15 @@ Shape suffixes:
 - G = spatial grid tokens
 - M = merged visual tokens
 - O = adapter output dim
+- C = spatial coordinates (row, column)
+- F = frequencies per coordinate
+- R = combined spatial frequencies
+- L = position table length
 
 """
 
 import math
 from dataclasses import dataclass, field
-from typing import cast
 
 import spmd_types as spmd
 import torch
@@ -31,23 +34,14 @@ import torch.nn.functional as F
 from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 
-from torchtitan.models.common import ComplexRoPE, Linear
+from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
+from torchtitan.models.common.rope import ComplexRoPE, IdentityRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     get_packed_vision_grids,
-    RopeApply,
     VisionTransformerBlock,
 )
-
-
-def _identity_rope(
-    query_TNH: torch.Tensor,
-    key_TNH: torch.Tensor,
-    rope_cache: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    _ = rope_cache
-    return query_TNH, key_TNH
 
 
 def _annotate_vision_activation_type(tensor: torch.Tensor) -> torch.Tensor:
@@ -102,34 +96,59 @@ class MuseSparkNaViTAdapter(Module):
         return self.act_fn(self.c_proj(self.act_fn(self.c_fc(value_MO))))
 
 
-class VisionRopeFreq(Module):
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        head_dim: int
-        rope_theta: float
+class VisionRopeFreq(ComplexRoPE):
+    """One-based spatial coordinates with contiguous column/row complex pairs."""
 
+    @dataclass(kw_only=True, slots=True)
+    class Config(ComplexRoPE.Config):
         def __post_init__(self) -> None:
-            if self.head_dim % 4:
+            if self.dim % 4:
                 raise ValueError("NaViT attention head size must be divisible by four")
 
     def __init__(self, config: Config) -> None:
-        super().__init__()
-        self.head_dim = config.head_dim
-        self.rope_theta = config.rope_theta
-        self.register_buffer("inv_freq", self._compute(), persistent=False)
+        if config.scaling is not None:
+            raise ValueError("VisionRopeFreq does not support frequency scaling")
+        super().__init__(config)
 
-    def _compute(self, *, device: torch.device | None = None) -> torch.Tensor:
-        half_dim = self.head_dim // 2
-        return 1.0 / (
-            self.rope_theta
-            ** (
-                torch.arange(0, half_dim, 2, dtype=torch.float32, device=device)
-                / half_dim
+    def _precompute_cache(self) -> torch.Tensor:
+        """Store angles; evaluate cos/sin once per batch, as in the encoder."""
+        # Meta construction needs only the table shape and dtype.
+        if torch.get_default_device().type == "meta":
+            return torch.empty(
+                (self.max_context_length, self.dim // 4),
+                dtype=torch.float32,
+                device="meta",
             )
+        half_dim = self.dim // 2
+        inv_freq_F = 1.0 / (
+            self.theta ** (torch.arange(0, half_dim, 2, dtype=torch.float32) / half_dim)
         )
+        positions_L = torch.arange(
+            self.max_context_length,
+            device=inv_freq_F.device,
+            dtype=inv_freq_F.dtype,
+        )
+        return torch.outer(positions_L, inv_freq_F)
 
-    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
-        self.inv_freq = self._compute(device=buffer_device or self.inv_freq.device)
+    def prepare_positions(self, positions: torch.Tensor) -> torch.Tensor:
+        positions_TC = positions
+        row_TF, col_TF = self.cache[positions_TC].unbind(1)
+        angles_TR = torch.cat((col_TF, row_TF), dim=-1)
+        coefficients_TR2 = torch.stack((angles_TR.cos(), angles_TR.sin()), dim=-1)
+        if torch.compiler.is_compiling():
+            return coefficients_TR2.flatten(-2).unsqueeze(1)
+        return torch.view_as_complex(coefficients_TR2).unsqueeze(1)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        positions: torch.Tensor,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Rotate with positions prepared once outside the vision block."""
+        return self.apply_rotary_emb(query, key, positions, inverse=inverse)
 
 
 class NaViTEncoder(Module):
@@ -146,12 +165,10 @@ class NaViTEncoder(Module):
         sparse_attention_factor: int
         pos_emb_grid_h: int
         pos_emb_grid_w: int
-        rope_freq: VisionRopeFreq.Config
         conv1_linear: Linear.Config
         ln_pre: LayerNorm.Config
         block: VisionTransformerBlock.Config
         ln_post: LayerNorm.Config
-        use_rope: bool = True
         grid_sample_mode: str = "bilinear"
         pos_emb_grid_order: str = "raster"
 
@@ -227,17 +244,21 @@ class NaViTEncoder(Module):
         if config.pos_emb_grid_order not in {"raster", "legacy_spark"}:
             raise ValueError("NaViT positional embedding grid order is invalid")
 
+        self.config = config
         self.patch_size = config.patch_size
         self.patch_temporal = config.patch_temporal
         self.downsample_factor = config.downsample_factor
         self.sparse_attention_factor = config.sparse_attention_factor
         self.pos_emb_grid_h = config.pos_emb_grid_h
         self.pos_emb_grid_w = config.pos_emb_grid_w
-        self.use_rope = config.use_rope
+        self.max_rope_positions = (
+            config.block.attn.rope.max_context_length
+            if isinstance(config.block.attn.rope, ComplexRoPE.Config)
+            else None
+        )
         self.grid_sample_mode = config.grid_sample_mode
         self.pos_emb_grid_order = config.pos_emb_grid_order
 
-        self.rope_freq = config.rope_freq.build()
         self.conv1_linear = config.conv1_linear.build()
         self.positional_embedding_vlm = nn.Parameter(
             torch.empty(
@@ -251,26 +272,20 @@ class NaViTEncoder(Module):
         )
         self.ln_post = config.ln_post.build()
 
-    def _make_2d_rope(
+    def _make_rope_positions(
         self,
         grid_h: int,
         grid_w: int,
         device: torch.device,
     ) -> torch.Tensor:
-        inv_freq_D = self.rope_freq.inv_freq
-        pos_h_H = torch.arange(1, grid_h + 1, dtype=torch.float32, device=device)
-        pos_w_W = torch.arange(1, grid_w + 1, dtype=torch.float32, device=device)
+        pos_h_H = torch.arange(1, grid_h + 1, device=device)
+        pos_w_W = torch.arange(1, grid_w + 1, device=device)
         pos_h_H = _annotate_vision_activation_type(pos_h_H)
         pos_w_W = _annotate_vision_activation_type(pos_w_W)
         idx_h_G = pos_h_H.unsqueeze(1).expand(-1, grid_w).reshape(-1)
         idx_w_G = pos_w_W.unsqueeze(0).expand(grid_h, -1).reshape(-1)
 
-        freq_h_GD = torch.outer(idx_h_G, inv_freq_D)
-        freq_w_GD = torch.outer(idx_w_G, inv_freq_D)
-        angles_GD = torch.cat([freq_w_GD, freq_h_GD], dim=-1)
-        return torch.view_as_complex(
-            torch.stack([torch.cos(angles_GD), torch.sin(angles_GD)], dim=-1)
-        )
+        return torch.stack((idx_h_G, idx_w_G), dim=-1)
 
     def _get_pos_emb(
         self,
@@ -374,10 +389,10 @@ class NaViTEncoder(Module):
         pos_emb_GD = self._get_pos_emb(grid_h, grid_w, device)
         x_TD = self.ln_pre(x_TD + pos_emb_GD.to(dtype))
 
-        freqs_cis_GD = (
-            self._make_2d_rope(grid_h, grid_w, device)
-            if self.use_rope
-            else x_TD.new_empty((num_tokens, 0))
+        positions_GC = (
+            x_TD.new_empty((num_tokens, 0))
+            if type(self.config.block.attn.rope) is IdentityRoPE.Config
+            else self._make_rope_positions(grid_h, grid_w, device)
         )
 
         sp_perm: torch.Tensor | None = None
@@ -385,9 +400,9 @@ class NaViTEncoder(Module):
         if self.sparse_attention_factor > 1:
             sp_perm, sp_slens = self._get_sparse_perm_and_slens(grid_h, grid_w, device)
             x_TD = x_TD[sp_perm]
-            freqs_cis_GD = freqs_cis_GD[sp_perm]
+            positions_GC = positions_GC[sp_perm]
 
-        return x_TD, freqs_cis_GD, num_tokens, grid_h, grid_w, sp_perm, sp_slens
+        return x_TD, positions_GC, num_tokens, grid_h, grid_w, sp_perm, sp_slens
 
     def _finalize_image(
         self,
@@ -409,13 +424,21 @@ class NaViTEncoder(Module):
         grid_thw: torch.Tensor,
     ) -> torch.Tensor:
         grids = grid_thw.tolist()
+        if self.max_rope_positions is not None and any(
+            max(grid_h, grid_w) >= self.max_rope_positions
+            for _, grid_h, grid_w in grids
+        ):
+            raise ValueError(
+                "NaViT grid coordinates exceed the configured RoPE table; "
+                "increase block.attn.rope.max_context_length"
+            )
 
         device = self.conv1_linear.weight.device
         dtype = self.conv1_linear.weight.dtype
         sf = self.sparse_attention_factor
 
         all_x: list[torch.Tensor] = []
-        all_freqs: list[torch.Tensor] = []
+        all_positions: list[torch.Tensor] = []
         all_sp_slens: list[torch.Tensor] = []
         all_global_slens: list[int] = []
         per_frame_meta: list[tuple[int, int, int, torch.Tensor | None]] = []
@@ -430,7 +453,7 @@ class NaViTEncoder(Module):
                 offset += num_spatial_patches
                 (
                     x_TD,
-                    freqs_cis_TD,
+                    positions_TC,
                     num_tokens,
                     grid_h,
                     grid_w,
@@ -438,20 +461,14 @@ class NaViTEncoder(Module):
                     sp_slens,
                 ) = self._embed_image(frame_patches_NP, grid_h, grid_w, device, dtype)
                 all_x.append(x_TD)
-                all_freqs.append(freqs_cis_TD)
+                all_positions.append(positions_TC)
                 if sp_slens.numel() > 0:
                     all_sp_slens.append(sp_slens)
                 all_global_slens.append(num_tokens)
                 per_frame_meta.append((grid_h, grid_w, num_tokens, sp_perm))
 
         x_TD = torch.cat(all_x, dim=0)
-        freqs_cis_TD = torch.cat(all_freqs, dim=0)
-        rope_cache = freqs_cis_TD.unsqueeze(1)
-        rope_apply = (
-            cast(RopeApply, ComplexRoPE.apply_rotary_emb)
-            if self.use_rope
-            else _identity_rope
-        )
+        positions_TC = torch.cat(all_positions, dim=0)
         total_tokens = x_TD.shape[0]
 
         sp_slens_cat = torch.cat(all_sp_slens) if all_sp_slens else None
@@ -477,6 +494,12 @@ class NaViTEncoder(Module):
                 else None
             )
 
+        # Every layer is built from the same block config.
+        rope_positions = (
+            self.layers["0"].attn.rope.prepare_positions(positions_TC)
+            if len(self.layers) > 0
+            else positions_TC
+        )
         num_layers = len(self.layers)
         for layer_id, layer in enumerate(self.layers.values()):
             use_full_attention = layer_id == num_layers - 1 or (layer_id + 1) % sf == 0
@@ -487,8 +510,7 @@ class NaViTEncoder(Module):
                 attention_mask = sparse_attention_mask
             x_TD = layer(
                 x_TD,
-                rope_cache=rope_cache,
-                rope_apply=rope_apply,
+                positions=rope_positions,
                 attention_mask=attention_mask,
             )
 

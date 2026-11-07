@@ -15,6 +15,8 @@ early ValueError while validating the complete trainer config.
 import unittest
 from unittest.mock import patch
 
+from torchtitan.models.common.rope import Llama3ScalingConfig
+
 try:
     import sys
     from unittest.mock import MagicMock
@@ -86,7 +88,7 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
                         dim=_DIM // n_heads,
                         max_context_length=4096,
                         theta=500000,
-                        scaling="llama",
+                        scaling=Llama3ScalingConfig(),
                     ),
                     enable_sp=True,
                 ),

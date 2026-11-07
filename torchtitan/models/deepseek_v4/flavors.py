@@ -58,6 +58,8 @@ from torchtitan.models.common.moe.sharding import (
 )
 from torchtitan.models.common.param_init import depth_scaled_std
 
+from torchtitan.models.common.rope import YaRNScalingConfig
+
 from .attention import (
     CompressedSparseAttention,
     DeepSeekV4Attention,
@@ -769,20 +771,13 @@ def _debugmodel(
     original_seq_len = 65536
 
     rope = ComplexRoPE.Config(
-        dim=rope_head_dim,
-        max_context_length=seq_len,
-        theta=10000.0,
-        scaling="none",
+        dim=rope_head_dim, max_context_length=seq_len, theta=10000.0
     )
     rope_compress = ComplexRoPE.Config(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=compress_rope_theta,
-        scaling="yarn",
-        rope_factor=4.0,
-        beta_fast=32.0,
-        beta_slow=1.0,
-        original_seq_len=original_seq_len,
+        scaling=YaRNScalingConfig(factor=4.0, original_seq_len=original_seq_len),
     )
 
     layers = _build_v4_layers(
@@ -916,20 +911,13 @@ def _deepseek_v4_flash(
     original_seq_len = 65536
 
     rope = ComplexRoPE.Config(
-        dim=rope_head_dim,
-        max_context_length=seq_len,
-        theta=10000.0,
-        scaling="none",
+        dim=rope_head_dim, max_context_length=seq_len, theta=10000.0
     )
     rope_compress = ComplexRoPE.Config(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=compress_rope_theta,
-        scaling="yarn",
-        rope_factor=16.0,
-        beta_fast=32.0,
-        beta_slow=1.0,
-        original_seq_len=original_seq_len,
+        scaling=YaRNScalingConfig(factor=16.0, original_seq_len=original_seq_len),
     )
 
     layers = _build_v4_layers(
@@ -1064,20 +1052,13 @@ def _deepseek_v4_pro(
     original_seq_len = 65536
 
     rope = ComplexRoPE.Config(
-        dim=rope_head_dim,
-        max_context_length=seq_len,
-        theta=10000.0,
-        scaling="none",
+        dim=rope_head_dim, max_context_length=seq_len, theta=10000.0
     )
     rope_compress = ComplexRoPE.Config(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=compress_rope_theta,
-        scaling="yarn",
-        rope_factor=16.0,
-        beta_fast=32.0,
-        beta_slow=1.0,
-        original_seq_len=original_seq_len,
+        scaling=YaRNScalingConfig(factor=16.0, original_seq_len=original_seq_len),
     )
 
     layers = _build_v4_layers(
