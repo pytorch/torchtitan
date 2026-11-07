@@ -432,6 +432,13 @@ class Controller(Configurable):
 
             if self.trainer.debug.batch_invariant:
                 if torch.version.hip is not None:
+                    rocm_version = str(torch.__version__).partition("+rocm")[2]
+                    if not rocm_version or int(rocm_version.partition(".")[0]) < 10:
+                        raise ValueError(
+                            "batch_invariant mode requires PyTorch built for "
+                            f"ROCm 10.0 or newer, got torch {torch.__version__}"
+                        )
+
                     from torchtitan.models.common.attention import (
                         Attention,
                         FlexInnerAttention,
