@@ -11,12 +11,16 @@ import asyncio
 import json
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock
 
 import numpy as np
 import pytest
 import torch
-from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.controller.controller import (
+    AsyncLoopConfig,
+    Controller,
+    ValidationConfig,
+)
 from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
@@ -26,15 +30,23 @@ from torchtitan.rl.controller.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
 )
+from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
-from torchtitan.rl.rollout.types import RolloutTurnID
+from torchtitan.rl.rollout.types import (
+    Rollout,
+    RolloutStatus,
+    RolloutTurn,
+    RolloutTurnID,
+)
 
 from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.training_sample_builder import (
     TrainingSample,
     TrainingSampleGroup,
 )
+
+from tests.rl.unit_tests.cpu.test_trainer_loop import fake_controller
 
 
 def test_controller_config_maybe_log(tmp_path, caplog) -> None:
@@ -793,61 +805,457 @@ async def _block_forever(*args, **kwargs) -> None:
     await asyncio.Event().wait()
 
 
-def _run_with_generator_watcher(watcher) -> None:
-    """Run Controller.run with every stage but the engine-loop watcher stubbed to block."""
+def _validation_rollout(versions: list[tuple[int, int]]) -> Rollout:
+    """One completed rollout with a turn per `(min_policy_version, max_policy_version)` pair."""
+    return Rollout(
+        group_id=-1,
+        rollout_id=0,
+        status=RolloutStatus.COMPLETED,
+        reward=1.0,
+        turns=[
+            RolloutTurn(
+                rollout_id=RolloutTurnID(group_id=-1, rollout_id=0, turn_id=turn_id),
+                prompt_prefix_len=0,
+                prompt_delta_token_ids=np.array([1], dtype=np.int32),
+                completion_token_ids=np.array([2], dtype=np.int32),
+                completion_logprobs=np.array([-0.1], dtype=np.float32),
+                min_policy_version=min_version,
+                max_policy_version=max_version,
+            )
+            for turn_id, (min_version, max_version) in enumerate(versions)
+        ],
+    )
+
+
+@pytest.mark.parametrize("step, group_ids", [(0, [-1, -2]), (25, [-51, -52])])
+def test_validation_group_ids_and_sampled_policies(step, group_ids) -> None:
+    """Group ids depend on the pass's step, so passes that run at the same time use distinct ids.
+
+    Example, 2 prompts: pass 0 uses -1, -2; pass 25 uses -51, -52. Each pass releases only its ids.
+    Prompt 0's rollout spans policies `step` to `step + 2`.
+    """
+    controller = object.__new__(Controller)
+    controller._validation_samples = ["prompt", "prompt"]
+    controller.generator_router = SimpleNamespace(
+        release_groups=SimpleNamespace(call_one=AsyncMock())
+    )
+    controller._rollouter = SimpleNamespace(
+        run_group_rollouts=AsyncMock(
+            side_effect=[
+                # Mixed-policy rollout: its second turn starts on policy `step` and ends on `step + 2`.
+                RolloutGroup(
+                    group_id=group_ids[0],
+                    rollouts=[_validation_rollout([(step, step), (step, step + 2)])],
+                ),
+                RolloutGroup(
+                    group_id=group_ids[1],
+                    rollouts=[_validation_rollout([(step, step)])],
+                ),
+            ]
+        ),
+    )
+
+    _, metrics = asyncio.run(
+        controller._collect_validation_rollouts(sampling=SamplingConfig(), step=step)
+    )
+
+    run_group_ids = [
+        call.kwargs["group_id"]
+        for call in controller._rollouter.run_group_rollouts.call_args_list
+    ]
+    assert run_group_ids == group_ids
+    controller.generator_router.release_groups.call_one.assert_awaited_once_with(
+        group_ids
+    )
+    reduced = m.MetricsProcessor._aggregate_metrics(metrics)
+    assert reduced["validation/min_policy_version/min"] == step
+    assert reduced["validation/max_policy_version/max"] == step + 2
+
+
+def test_validation_turn_metrics_get_the_validation_prefix() -> None:
+    """A rubric's turn metric gets `validation/`; keys that already start with `validation` stay."""
+    turn = RolloutTurn(
+        rollout_id=RolloutTurnID(group_id=-1, rollout_id=0, turn_id=0),
+        prompt_prefix_len=0,
+        prompt_delta_token_ids=np.array([1], dtype=np.int32),
+        completion_token_ids=np.array([2], dtype=np.int32),
+        completion_logprobs=np.array([-0.1], dtype=np.float32),
+        min_policy_version=0,
+        max_policy_version=0,
+        metrics=[
+            m.Metric("math_verify/timeouts", m.Sum(1.0)),
+            m.Metric("validation_generator/queue_time_ms", m.Mean(2.0)),
+        ],
+    )
+    rollout = Rollout(
+        group_id=-1,
+        rollout_id=0,
+        status=RolloutStatus.COMPLETED,
+        reward=0.0,
+        turns=[turn],
+    )
+    controller = object.__new__(Controller)
+    controller._validation_samples = ["prompt"]
+    controller.generator_router = SimpleNamespace(
+        release_groups=SimpleNamespace(call_one=AsyncMock())
+    )
+    controller._rollouter = SimpleNamespace(
+        run_group_rollouts=AsyncMock(
+            return_value=RolloutGroup(group_id=-1, rollouts=[rollout])
+        )
+    )
+
+    _, validation_metrics = asyncio.run(
+        controller._collect_validation_rollouts(sampling=SamplingConfig(), step=0)
+    )
+
+    validation = m.MetricsProcessor._aggregate_metrics(validation_metrics)
+    assert validation["validation/math_verify/timeouts/sum"] == 1.0
+    assert validation["validation_generator/queue_time_ms/mean"] == 2.0
+    assert "math_verify/timeouts/sum" not in validation
+
+
+class _FakeValidation:
+    """Fake `Controller.validate`: the pass for step N runs until the test calls `end(N)`."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, int]] = []
+        self._end_events: dict[int, asyncio.Event] = {}
+        self._errors: dict[int, Exception] = {}
+
+    @property
+    def started_steps(self) -> list[int]:
+        return [step for event, step in self.events if event == "start"]
+
+    async def __call__(self, *, step: int) -> list[m.Metric]:
+        self.events.append(("start", step))
+        await self._end_event(step).wait()
+        self.events.append(("end", step))
+        if step in self._errors:
+            raise self._errors[step]
+        return [m.Metric("validation_reward", m.Mean(float(step)))]
+
+    def end(self, step: int, error: Exception | None = None) -> None:
+        if error is not None:
+            self._errors[step] = error
+        self._end_event(step).set()
+
+    def _end_event(self, step: int) -> asyncio.Event:
+        return self._end_events.setdefault(step, asyncio.Event())
+
+
+def _controller_for_validation(
+    validation: ValidationConfig, *, events: list[str] | None = None, on_pull=None
+) -> tuple[Controller, _FakeValidation]:
+    controller = fake_controller([] if events is None else events, on_pull=on_pull)
+    controller.config.async_loop.validation = validation
+    controller.metrics_processor = Mock()
+    fake_validation = _FakeValidation()
+    controller.validate = fake_validation
+    return controller, fake_validation
+
+
+def _training_batch(step: int) -> SimpleNamespace:
+    """Fake `TrainerStepBatch` for `step`, with only the fields `_trainer_loop` reads."""
+    return SimpleNamespace(
+        metrics=[],
+        min_policy_versions=[step - 1],
+        microbatch_groups=[],
+        global_loss_token_counts=[1],
+        global_routing_token_counts=None,
+        group_ids=[step],
+    )
+
+
+def _logged_steps(controller: Controller, *, is_validation: bool) -> list[int]:
+    return [
+        call.kwargs["step"]
+        for call in controller.metrics_processor.log.call_args_list
+        if call.kwargs["is_validation"] == is_validation
+    ]
+
+
+async def _run_until(condition) -> None:
+    """Let other tasks run until `condition()` holds; fail after 100 event-loop turns."""
+    for _ in range(100):
+        if condition():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition never held")
+
+
+async def _train(controller: Controller, queue: asyncio.Queue, step: int) -> None:
+    """Queue the batch for `step` and wait until `_trainer_loop` logs it.
+
+    By then the step's validation check has also run: it follows the log with no `await` between.
+    """
+    await queue.put(_training_batch(step))
+    await _run_until(lambda: step in _logged_steps(controller, is_validation=False))
+
+
+def test_passes_start_at_every_due_step() -> None:
+    """With `defer_new_if_not_finished=False`, every due step starts its own pass.
+
+    step 2: pass 2 waits for pull 2; step 3 trains meanwhile
+    step 4: pass 4 starts while pass 2 runs
+    step 5: logs pass 4, which ended first
+    step 6: logs pass 2; the last step starts no pass
+    """
+    events: list[str] = []
+    pulls_may_end = asyncio.Event()
+    controller, validation = _controller_for_validation(
+        ValidationConfig(freq=2, defer_new_if_not_finished=False),
+        events=events,
+        on_pull=pulls_may_end.wait,
+    )
+
+    async def run() -> None:
+        queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        trainer = asyncio.create_task(
+            controller._trainer_loop(queue, num_training_steps=6)
+        )
+
+        pulls_may_end.set()
+        await _train(controller, queue, 1)
+        # Wait until step 1's pull is done ("release 5 trained" follows the pull).
+        # Otherwise clearing `pulls_may_end` below would hold step 1's pull too.
+        await _run_until(lambda: "release 5 trained" in events)
+        # Hold step 2's pull. Pass 2 must wait for it; step 3's forward/backward runs meanwhile.
+        pulls_may_end.clear()
+        await _train(controller, queue, 2)
+        await _run_until(lambda: "pull 2" in events)
+        await queue.put(_training_batch(3))
+        await _run_until(lambda: "fwd_bwd 3" in events)
+        assert validation.started_steps == []
+        pulls_may_end.set()
+        await _run_until(lambda: validation.started_steps == [2])
+        await _run_until(lambda: 3 in _logged_steps(controller, is_validation=False))
+
+        # Step 4 starts its own pass while pass 2 runs.
+        await _train(controller, queue, 4)
+        await _run_until(lambda: validation.started_steps == [2, 4])
+
+        # Pass 4 ends before pass 2. Step 5 logs pass 4; pass 2 keeps running.
+        validation.end(4)
+        await _run_until(lambda: controller._validation_tasks[4].done())
+        await _train(controller, queue, 5)
+        assert _logged_steps(controller, is_validation=True) == [5]
+
+        validation.end(2)
+        await _run_until(lambda: controller._validation_tasks[2].done())
+        await _train(controller, queue, 6)
+        await asyncio.wait_for(trainer, timeout=5)
+        # Step 6 is due but is the last step, so it starts no pass. It logs pass 2.
+        assert validation.started_steps == [2, 4]
+        assert _logged_steps(controller, is_validation=True) == [5, 6]
+        assert _logged_steps(controller, is_validation=False) == [1, 2, 3, 4, 5, 6]
+
+    asyncio.run(run())
+
+
+def test_defer_new_if_not_finished() -> None:
+    """With `defer_new_if_not_finished=True`, one pass runs at a time (freq=2, 9 steps):
+
+        step     1  2  3  4  5  6  7  8  9
+        due         *     *     *     *
+        starts      2              7
+        logs                       2     7
+
+    Pass 7 covers due steps 4 and 6. Step 9 is the last step, so step 8 gets no pass.
+    """
+    controller, validation = _controller_for_validation(
+        ValidationConfig(freq=2, defer_new_if_not_finished=True)
+    )
+
+    async def run() -> None:
+        queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        trainer = asyncio.create_task(
+            controller._trainer_loop(queue, num_training_steps=9)
+        )
+        await _train(controller, queue, 1)
+        await _train(controller, queue, 2)
+        await _run_until(lambda: validation.started_steps == [2])
+        # Steps 4 and 6 are due. Pass 2 still runs, so neither starts a pass.
+        for step in (3, 4, 5, 6):
+            await _train(controller, queue, step)
+        assert list(controller._validation_tasks) == [2]
+
+        # Pass 2 ends. Step 7 logs it and starts pass 7, which covers due steps 4 and 6.
+        validation.end(2)
+        await _run_until(lambda: controller._validation_tasks[2].done())
+        await _train(controller, queue, 7)
+        await _run_until(lambda: validation.started_steps == [2, 7])
+
+        # Step 8 is due while pass 7 runs, so its pass waits.
+        # Step 9 logs pass 7 and starts nothing: it is the last step.
+        await _train(controller, queue, 8)
+        validation.end(7)
+        await _run_until(lambda: controller._validation_tasks[7].done())
+        await _train(controller, queue, 9)
+        await asyncio.wait_for(trainer, timeout=5)
+        assert validation.started_steps == [2, 7]
+        assert _logged_steps(controller, is_validation=True) == [7, 9]
+
+    asyncio.run(run())
+
+
+def test_validation_failure_fails_training() -> None:
+    """A pass that raises stops training in the step that would log it.
+
+    step 1: pass 1 starts, then raises
+    step 2: trains and logs, then raises pass 1's error; step 3 never runs
+    """
+    controller, validation = _controller_for_validation(ValidationConfig(freq=1))
+
+    async def run() -> None:
+        queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        trainer = asyncio.create_task(
+            controller._trainer_loop(queue, num_training_steps=3)
+        )
+        await _train(controller, queue, 1)
+        await _run_until(lambda: validation.started_steps == [1])
+        validation.end(1, error=RuntimeError("release_groups failed"))
+        await _run_until(lambda: controller._validation_tasks[1].done())
+        await queue.put(_training_batch(2))
+        await asyncio.wait_for(trainer, timeout=5)
+
+    with pytest.raises(RuntimeError, match="release_groups failed"):
+        asyncio.run(run())
+    assert _logged_steps(controller, is_validation=False) == [1, 2]
+    assert _logged_steps(controller, is_validation=True) == []
+
+
+def _controller_for_run(
+    *, watcher=_block_forever
+) -> tuple[Controller, _FakeValidation]:
+    """Fake `Controller` whose `run()` ends only when the test's `_trainer_loop` or `watcher` ends."""
     controller = object.__new__(Controller)
     controller.config = SimpleNamespace(
-        async_loop=SimpleNamespace(
-            num_training_steps=1,
-            max_active_rollout_groups=1,
-            window_size=None,
-            target_offpolicy_steps=0,
-            windowed_fifo_batches=None,
-            max_offpolicy_steps=None,
-            num_prompts_per_train_step=1,
-            group_buffer=SimpleNamespace(
-                build=lambda **kwargs: SimpleNamespace(close=AsyncMock())
-            ),
-        ),
+        async_loop=AsyncLoopConfig(num_training_steps=4),
         trainer=SimpleNamespace(
-            training=SimpleNamespace(num_tokens_per_microbatch_per_dp_rank=8)
+            training=SimpleNamespace(
+                num_tokens_per_microbatch_per_dp_rank=64, max_context_length=64
+            )
         ),
     )
     controller.start_step = 0
-    controller.trainer = None
-    controller.trainer_dp_degree = 1
-    controller.tokenizer = SimpleNamespace(eos_id=0)
-    controller._sampling = SimpleNamespace(temperature=1.0)
+    controller.trainer = Mock()
     controller.generator_router = SimpleNamespace(
         wait_engine_loop=SimpleNamespace(call_one=watcher)
     )
-    with (
-        patch.multiple(
-            Controller,
-            _validate_and_log=AsyncMock(return_value={}),
-            _make_generate_fn=lambda self, metrics_prefix: None,
-            _data_input_loop=_block_forever,
-            _rollout_loop=_block_forever,
-            _batcher_loop=_block_forever,
-            _trainer_loop=_block_forever,
-        ),
-    ):
-        asyncio.run(asyncio.wait_for(controller.run(), timeout=10))
+    controller.trainer_dp_degree = 1
+    controller.tokenizer = SimpleNamespace(eos_id=0)
+    controller._sampling = SamplingConfig()
+    controller.metrics_processor = Mock()
+    controller._log_reward_delta = Mock()
+    controller._validation_tasks = {}
+    validation = _FakeValidation()
+    controller.validate = validation
+    controller._data_input_loop = _block_forever
+    controller._rollout_loop = _block_forever
+    controller._batcher_loop = _block_forever
+    controller._trainer_loop = _block_forever
+    return controller, validation
 
 
 def test_run_fails_when_an_engine_loop_crashes() -> None:
     async def crashed() -> None:
         raise RuntimeError("engine loop crashed")
 
+    controller, _ = _controller_for_run(watcher=crashed)
     with pytest.raises(RuntimeError, match="engine loop crashed"):
-        _run_with_generator_watcher(crashed)
+        asyncio.run(asyncio.wait_for(controller.run(), timeout=10))
 
 
 def test_run_fails_when_the_engine_loops_exit_mid_run() -> None:
     async def exited() -> None:
         return None
 
+    controller, _ = _controller_for_run(watcher=exited)
     with pytest.raises(
         RuntimeError, match="generator_wait_engine_loop exited unexpectedly"
     ):
-        _run_with_generator_watcher(exited)
+        asyncio.run(asyncio.wait_for(controller.run(), timeout=10))
+
+
+@pytest.mark.parametrize("validate_after_training", [False, True])
+def test_run_logs_ended_passes_then_runs_the_final_pass_if_asked(
+    validate_after_training,
+) -> None:
+    """What run() does when training ends. Resumed at step 1, it stopped at policy 3 of 4:
+
+    pass 1:      ended          -> logged at step 3, the last trained step
+    pass 2:      still running  -> dropped: left in `_validation_tasks` for close() to cancel
+    final pass:  only with `validate_after_training`. Pass 2 ends during it, so pass 2 and
+                 then the final pass are logged at step 3.
+    """
+    controller, validation = _controller_for_run()
+    controller.start_step = 1
+    controller.config.async_loop.validation = ValidationConfig(
+        validate_after_training=validate_after_training
+    )
+
+    async def trainer_loop(queue, *, num_training_steps: int) -> None:
+        controller._start_validation(step=2)
+        await _run_until(lambda: validation.started_steps == [1, 2])
+        validation.end(1)
+        await _run_until(lambda: controller._validation_tasks[1].done())
+        controller._trainer_policy_version = 3
+
+    async def validate(*, step: int) -> list[m.Metric]:
+        # The final pass takes its group ids from step 5 (num_training_steps + 1).
+        if step == 5:
+            validation.end(2)
+            await _run_until(lambda: controller._validation_tasks[2].done())
+            validation.end(5)
+        return await validation(step=step)
+
+    controller._trainer_loop = trainer_loop
+    controller.validate = validate
+
+    asyncio.run(asyncio.wait_for(controller.run(), timeout=5))
+
+    logged_passes = [1, 2, 5] if validate_after_training else [1]
+    assert validation.started_steps == [1, 2, 5][: 2 + validate_after_training]
+    assert _logged_steps(controller, is_validation=True) == [3] * len(logged_passes)
+    assert [
+        m.MetricsProcessor._aggregate_metrics(call.kwargs["metrics"])[
+            "validation_reward/mean"
+        ]
+        for call in controller.metrics_processor.log.call_args_list
+        if call.kwargs["is_validation"]
+    ] == logged_passes
+    assert list(controller._validation_tasks) == (
+        [] if validate_after_training else [2]
+    )
+    assert controller._log_reward_delta.called == validate_after_training
+
+
+def test_close_cancels_running_passes_before_closing_the_rollouter() -> None:
+    """close() cancels running passes and waits for them, then closes the rollouter they use."""
+    controller = object.__new__(Controller)
+    controller.trainer = None
+    controller.generator_router = None
+    controller.metrics_processor = Mock()
+    controller.actor_system = None
+    controller._validation_tasks = {}
+    validation = _FakeValidation()
+    controller.validate = validation
+    passes_done_at_rollouter_close: list[bool] = []
+    passes: list[asyncio.Task] = []
+
+    async def close_rollouter() -> None:
+        passes_done_at_rollouter_close.append(all(task.done() for task in passes))
+
+    controller._rollouter = SimpleNamespace(close=close_rollouter)
+
+    async def run() -> None:
+        controller._start_validation(step=0)
+        controller._start_validation(step=2)
+        await _run_until(lambda: validation.started_steps == [0, 2])
+        passes.extend(controller._validation_tasks.values())
+        await asyncio.wait_for(controller.close(), timeout=5)
+
+    asyncio.run(run())
+    assert all(task.cancelled() for task in passes)
+    assert passes_done_at_rollouter_close == [True]

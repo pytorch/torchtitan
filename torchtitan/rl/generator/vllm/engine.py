@@ -275,7 +275,6 @@ class VLLMEngine(GenerationEngine):
             engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
         # Smaller `priority` runs first and is preempted last; we pass `EngineRequest.group_id`
         # (-1 for all validation), so older groups have higher priority (see its docstring).
-        # TODO: validation (priority -1) runs before training. Revisit once validation overlaps training.
         engine_kwargs["scheduling_policy"] = "priority"
         # Which sliding-window / Mamba (GDN) state blocks are hashed into the prefix
         # cache; full-attention groups hash every block regardless.
