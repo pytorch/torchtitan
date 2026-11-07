@@ -203,7 +203,12 @@ class TensorBoardLogger(BaseLogger):
 
 
 class WandBLogger(BaseLogger):
-    """Logger implementation for Weights & Biases."""
+    """Logger implementation for Weights & Biases: each `log` call is one row, with `trainer/step`.
+
+    Example:
+        log({"loss": 2.1}, step=10)                       -> row _step=0, trainer/step=10
+        log({"validation_metrics/loss": 2.3}, step=10)    -> row _step=1, trainer/step=10
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseLogger.Config):
@@ -245,6 +250,9 @@ class WandBLogger(BaseLogger):
             dir=log_dir,
             config=config_dict,
         )
+        # Generated charts plot `trainer/step` on the x-axis.
+        self.wandb.define_metric("trainer/step")
+        self.wandb.define_metric("*", step_metric="trainer/step")
         logger.info("WandB logging enabled")
 
     def log(self, metrics: dict[str, Any], step: int) -> None:
@@ -252,7 +260,9 @@ class WandBLogger(BaseLogger):
             (k if self.tag is None else f"{self.tag}/{k}"): v
             for k, v in metrics.items()
         }
-        self.wandb.log(wandb_metrics, step=step, commit=True)
+        # Note: we use `trainer/step` key instead of `step` arg so multiple
+        # log calls can be made to the same step (e.g. trainer and validation)
+        self.wandb.log({**wandb_metrics, "trainer/step": step})
 
     def close(self) -> None:
         if self.wandb.run is not None:
