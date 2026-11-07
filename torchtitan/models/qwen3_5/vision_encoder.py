@@ -179,12 +179,6 @@ class QwenVisionRoPE(CosSinRoPE):
         pass
 
     def __init__(self, config: Config):
-        if config.dim <= 0 or config.dim % 4:
-            raise ValueError(
-                "Qwen vision RoPE dim must be positive and divisible by four."
-            )
-        if config.max_context_length <= 0:
-            raise ValueError("Qwen vision RoPE requires a positive coordinate bound.")
         if config.scaling is not None:
             raise ValueError("Qwen vision RoPE does not support frequency scaling.")
         super().__init__(config)
@@ -208,10 +202,6 @@ class QwenVisionRoPE(CosSinRoPE):
         return torch.stack((angles_PF.cos(), angles_PF.sin()), dim=-1)
 
     def prepare_positions(self, positions: torch.Tensor) -> torch.Tensor:
-        if positions.ndim != 2 or positions.shape[1] != 2:
-            raise ValueError(
-                "Qwen vision RoPE requires positions of shape (num_tokens, 2)."
-            )
         spatial_TR2 = self.cache[positions].flatten(1, 2)
         cos_TR, sin_TR = spatial_TR2.unbind(-1)
         return torch.cat((cos_TR, cos_TR, sin_TR, sin_TR), dim=-1).unsqueeze(1)

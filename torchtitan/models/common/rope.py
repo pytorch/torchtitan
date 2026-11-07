@@ -188,17 +188,6 @@ class RoPE(Module):
         """
         return positions
 
-    def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor | None = None,
-        positions: torch.Tensor | None = None,
-        *,
-        inverse: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Transform query and optional key using prepared position data."""
-        raise NotImplementedError
-
 
 class IdentityRoPE(RoPE):
     """Leave query and optional key unchanged without allocating a cache."""

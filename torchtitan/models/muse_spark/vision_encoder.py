@@ -101,15 +101,11 @@ class NaViTRoPE(ComplexRoPE):
 
     @dataclass(kw_only=True, slots=True)
     class Config(ComplexRoPE.Config):
-        pass
+        def __post_init__(self) -> None:
+            if self.dim % 4:
+                raise ValueError("NaViT attention head size must be divisible by four")
 
     def __init__(self, config: Config) -> None:
-        if config.dim <= 0 or config.dim % 4:
-            raise ValueError("NaViT RoPE dim must be positive and divisible by four")
-        if config.max_context_length <= 1:
-            raise ValueError("NaViT RoPE requires max_context_length greater than one")
-        if config.theta <= 0:
-            raise ValueError("NaViT RoPE theta must be positive")
         if config.scaling is not None:
             raise ValueError("NaViT RoPE does not support frequency scaling")
         super().__init__(config)
@@ -135,8 +131,6 @@ class NaViTRoPE(ComplexRoPE):
         return torch.outer(positions_L, inv_freq_F)
 
     def prepare_positions(self, positions: torch.Tensor) -> torch.Tensor:
-        if positions.ndim != 2 or positions.shape[1] != 2:
-            raise ValueError("NaViT RoPE positions must have shape (num_tokens, 2)")
         positions_TC = positions
         row_TF, col_TF = self.cache[positions_TC].unbind(1)
         angles_TR = torch.cat((col_TF, row_TF), dim=-1)

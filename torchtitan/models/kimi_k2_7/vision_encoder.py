@@ -208,10 +208,10 @@ class VisionRotaryEmbedding2D(ComplexRoPE):
         pass
 
     def __init__(self, config: Config):
-        if config.dim <= 0 or config.dim % 4:
-            raise ValueError("MoonViT RoPE dim must be positive and divisible by four.")
-        if config.max_context_length <= 0:
-            raise ValueError("MoonViT RoPE requires a positive coordinate bound.")
+        if config.dim % 4 != 0:
+            raise ValueError(
+                f"2D RoPE requires head_dim divisible by 4, got {config.dim}."
+            )
         if config.scaling is not None:
             raise ValueError("MoonViT RoPE does not support frequency scaling.")
         super().__init__(config)
@@ -234,10 +234,6 @@ class VisionRotaryEmbedding2D(ComplexRoPE):
         return torch.polar(torch.ones_like(angles_PF), angles_PF)
 
     def prepare_positions(self, positions: torch.Tensor) -> torch.Tensor:
-        if positions.ndim != 2 or positions.shape[1] != 2:
-            raise ValueError(
-                "MoonViT RoPE requires positions of shape (num_tokens, 2)."
-            )
         if torch.compiler.is_compiling():
             cache_PF2 = torch.view_as_real(self.cache)
             row_TF2, col_TF2 = cache_PF2[positions].unbind(1)
