@@ -15,14 +15,17 @@ Selection (no size threshold):
   * XM-max components                                      (cross-module, barrier-free)
   * XM pairs whose link touches a barrier op               (cross-module through T2 ops)
   * XL pairs, RB pairs                                     (cross-layer, recompute-backward)
-  * T3 epilogue / prologue candidates                      (GEMM + adjacent glue)
+  * T3 epilogue / prologue candidates                      (GEMM + adjacent glue; report only)
 Candidates whose kernel set equals one of their parts' and exact duplicates are dropped.
 Signature variants that differ only in minor details (first/last layer) are merged
-when their kernel members have the same ops and shapes.
+when their kernel members have the same ops and shapes. Regions containing a GEMM,
+attention or fused MoE op (tier T3) get no lift pass: a bitwise kernel cannot replace
+that op, so it would only wrap the unchanged call; their glue-only region is lifted.
 
 Writes:
   regions.json              inventory (schema in references/regions_schema.md)
-  regions_table.md          ranked table for the report
+  regions_table.md          ranked tables for the report: glue regions with their lift
+                            pass, and GEMM-adjacent (T3) regions with their glue-only region
   fusion_regions/           one folder per region, e.g. g003_rope/:
                               region.json    the region's regions.json entry plus its lift status
                               lift_pass.py   generated topology matchers and the registered
@@ -931,6 +934,32 @@ def main():
     dn = {n.name: n for n in dump_nodes}
     not_liftable = {}
     for r in regions:
+        # A kernel must reproduce the region bit for bit, and cuBLAS GEMMs, attention and
+        # fused MoE ops (T3) cannot be reproduced; such a kernel would only wrap the
+        # unchanged call. The glue-only region next to it gives the same kernel.
+        if r["bitwise_tier"] == "T3":
+            hard = sorted(
+                m
+                for m in r["_kset"]
+                if cat.get(m) in ("gemm", "attention", "fused_moe")
+            )
+            glue_k = r["_kset"] - set(hard)
+            glue_only = [
+                x["id"]
+                for x in regions
+                if x["_kset"] == glue_k and x["bitwise_tier"] != "T3"
+            ]
+            not_liftable[r["id"]] = (
+                f"contains {short_op(by[hard[0]]['target'])}: a bitwise kernel would only wrap the "
+                "unchanged call; "
+                + (
+                    f"lift the glue-only region {glue_only[0]} instead"
+                    if glue_only
+                    else "no glue-only region matches its glue part, so there is nothing to fuse "
+                    "without the GEMM"
+                )
+            )
+            continue
         # A getitem of a tuple produced outside the instance is an input, so the
         # submodule receives the tensor it reads rather than the whole tuple. An
         # in-place write into outside storage that nothing in the instance reads
@@ -1135,21 +1164,48 @@ def main():
     ]
     json.dump(side, open(os.path.join(A, "regions_side.json"), "w"), indent=1)
 
-    hdr = "| id | title | phases | scope | kind | inst | measured ms | ideal ms | gap ms | % step | tier | lift pass |"
-    lines = [hdr, "|" + "---|" * 12]
-    for r in regions:
-        if r["id"] in pass_names:
-            pn = pass_names[r["id"]]
-            lift = f"`{pn}`, {num_sites[r['id']]} sites" + (
-                " (default)" if pn in default_sel else ""
-            )
-        else:
-            lift = "no: " + not_liftable[r["id"]].split(" (")[0].split(":")[0]
-        lines.append(
+    def table(rows, last_col, last):
+        hdr = (
+            "| id | title | phases | scope | kind | inst | measured ms | ideal ms | gap ms | % step | tier "
+            f"| {last_col} |"
+        )
+        return [hdr, "|" + "---|" * 12] + [
             f"| {r['id']} | {r['title']} | {', '.join(r['phases'])} | {', '.join(r['scope'])} | {r['fusion_kind']} | "
             f"{r['instances_per_step']} | {r['measured_ms_total']:.1f} | {r['ideal_ms_total']:.1f} | "
-            f"{r['gap_ms_total']:.1f} | {r['gap_pct_of_step']:.2f} | {r['bitwise_tier']} | {lift} |"
+            f"{r['gap_ms_total']:.1f} | {r['gap_pct_of_step']:.2f} | {r['bitwise_tier']} | {last(r)} |"
+            for r in rows
+        ]
+
+    def lift_cell(r):
+        if r["id"] in pass_names:
+            pn = pass_names[r["id"]]
+            return f"`{pn}`, {num_sites[r['id']]} sites" + (
+                " (default)" if pn in default_sel else ""
+            )
+        return "no: " + not_liftable[r["id"]].split(" (")[0].split(":")[0]
+
+    def glue_only_cell(r):
+        m = re.search(r"glue-only region (G-\d+)", not_liftable[r["id"]])
+        return m.group(1) if m else "-"
+
+    t3 = [r for r in regions if r["bitwise_tier"] == "T3"]
+    lines = (
+        ["## Glue regions", ""]
+        + table(
+            [r for r in regions if r["bitwise_tier"] != "T3"], "lift pass", lift_cell
         )
+        + [
+            "",
+            "## GEMM-adjacent regions (no lift pass)",
+            "",
+            "A GEMM, attention or fused MoE op with its adjacent glue. Fusing them needs a kernel that "
+            "replaces the GEMM, which bitwise parity with cuBLAS rules out; the glue-only region gives "
+            "the same kernel. The gap includes the GEMM's own gap to its flops roofline (see the "
+            "region's notes).",
+            "",
+        ]
+        + table(t3, "glue-only region", glue_only_cell)
+    )
     open(os.path.join(R, "regions_table.md"), "w").write("\n".join(lines) + "\n")
 
     cov = glue.groupby("covered")["kernel_us"].sum() / 1e3

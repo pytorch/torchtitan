@@ -101,8 +101,8 @@ def lift_fusion_region_g003(gm, example_inputs=None):
     return lift_matches(gm, REGION_ID, MATCHERS)
 ```
 
-- A matcher returns the instance's member nodes (views and allocations included; T3
-  regions include their GEMM) and its external inputs, or `None`.
+- A matcher returns the instance's member nodes (views and allocations included) and its
+  external inputs, or `None`. T3 regions have no lift pass.
 - `is_op(node, target, args, kwargs)`: `N` marks a node slot, `S` a size (any int),
   `V` a scalar operand (any number), `D('cuda')` a device of that type (any index);
   other entries are literals compared exactly (dtypes and layouts as strings, e.g.

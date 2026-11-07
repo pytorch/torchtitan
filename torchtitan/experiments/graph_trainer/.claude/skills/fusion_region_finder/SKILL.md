@@ -16,8 +16,9 @@ substitute_kernels when a lifted region has no kernel yet (section 5). Everythin
 Terms:
 - **Glue:** any node that is not a GEMM, attention or collective: norms, RoPE, casts,
   routing, permutes, scatters, residual adds.
-- **Region:** a set of glue nodes (plus, for T3, one GEMM) that one kernel could run.
-  A region repeats per layer; each repetition is an **instance**.
+- **Region:** a set of glue nodes that one kernel could run. T3 regions add the adjacent
+  GEMM; they are reported, not lifted (section 3). A region repeats per layer; each
+  repetition is an **instance**.
 - **Phase:** `forward`, `recompute` (forward ops copied before their backward
   consumers by `selective_activation_remat_pass`) or `backward`.
 - **Fusion stage:** number of GEMM/attention/collective nodes on the longest path to
@@ -152,6 +153,12 @@ What the scripts do:
   overlaps, and lists uncovered memory-bound node classes under `no_opportunity`.
 - **Lift checks**, per instance. A region gets a lift pass only if all hold; otherwise
   `regions_table.md` and its `region.json` give the reason:
+  - the region contains no GEMM, attention or fused MoE op (tier T3). A kernel has to
+    reproduce the region bit for bit, and those ops (cuBLAS, FA4, Dist-MoE) cannot be
+    reproduced, so a kernel for a T3 region would only wrap the unchanged call. The
+    glue-only region next to it gives the same kernel, and the reason names it. T3
+    regions get their own table in `regions_table.md`: they are the fusions that need a
+    GEMM kernel we own;
   - every node exists in the `pre_inductor` graph, which is the graph extra passes see;
   - no path leaves the region and re-enters it. If one does, `blockers` starts with
     `NOT FUSABLE AS FOUND` and says either "not one kernel" (a GEMM, attention or
@@ -364,7 +371,7 @@ next largest gaps lead the next plan.
 | file | content |
 |---|---|
 | `regions.json` | inventory: setup, step budget, regions, no_opportunity ([schema](references/regions_schema.md)) |
-| `regions_table.md` | ranked table with tier and the lift pass (or why there is none) |
+| `regions_table.md` | ranked tables: glue regions with tier and lift pass (or why there is none); T3 (GEMM-adjacent) regions with their glue-only region |
 | `fusion_regions/<folder>/region.json` | the region's `regions.json` entry plus `lift`: pass name, sites, default selection, or why it is not liftable |
 | `fusion_regions/<folder>/lift_pass.py` | liftable regions: generated topology matchers (`MATCHERS`) and the registered pass `lift_fusion_region_g<id>` |
 | `fusion_regions/__init__.py` | imports every lift pass; `PASSES` (region -> folder, pass) and `DEFAULT_SELECTION` |
