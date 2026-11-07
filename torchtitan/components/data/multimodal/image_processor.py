@@ -370,6 +370,33 @@ class ImageProcessor(Configurable):
         grid_thw = torch.tensor([T_patches, H_patches, W_patches])
         return patches, grid_thw
 
+    def grid_thw(self, height: int, width: int) -> tuple[int, int, int]:
+        """The patch grid ``(1, H, W)`` that ``resize_and_normalize`` gives a
+        ``height x width`` image, without decoding it.
+
+        For callers that know an image's size but not its pixels, e.g. a renderer that
+        reads the size from the file header to count the image's placeholder tokens
+        with ``num_placeholder_tokens(processor.grid_thw(height, width))``.
+        """
+        resize_h, resize_w, pad_h, pad_w = self._resize_rule(height, width)
+        patch_size = self.config.patch_size
+        return 1, (resize_h + pad_h) // patch_size, (resize_w + pad_w) // patch_size
+
+    def _resize_rule(self, height: int, width: int) -> tuple[int, int, int, int]:
+        """``config.resize_fn``'s ``(resize_h, resize_w, pad_h, pad_w)`` for a
+        ``height x width`` image."""
+        config = self.config
+        return config.resize_fn(
+            height,
+            width,
+            patch_size=config.patch_size,
+            merge_size=config.spatial_merge_size,
+            min_pixels=config.min_pixels,
+            max_pixels=config.max_pixels,
+            max_patches=config.max_patches,
+            max_patches_per_side=config.max_patches_per_side,
+        )
+
     def _resize(self, image: torch.Tensor) -> torch.Tensor:
         """Resize uint8 ``(..., C, H, W)`` pixels to ``config.resize_fn``'s
         ``(resize_h, resize_w, pad_h, pad_w)``, then zero-pad right/bottom.
@@ -382,16 +409,7 @@ class ImageProcessor(Configurable):
 
         config = self.config
         height, width = image.shape[-2:]
-        resize_h, resize_w, pad_h, pad_w = config.resize_fn(
-            height,
-            width,
-            patch_size=config.patch_size,
-            merge_size=config.spatial_merge_size,
-            min_pixels=config.min_pixels,
-            max_pixels=config.max_pixels,
-            max_patches=config.max_patches,
-            max_patches_per_side=config.max_patches_per_side,
-        )
+        resize_h, resize_w, pad_h, pad_w = self._resize_rule(height, width)
         if (resize_h, resize_w) != (height, width):
             image = TVF.resize(
                 image,
