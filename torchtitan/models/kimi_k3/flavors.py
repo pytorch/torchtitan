@@ -79,7 +79,7 @@ from torchtitan.models.kimi_k2_7.sharding import (
     moonvit_encoder_sharding_config,
     moonvit_projector_sharding_config,
 )
-from torchtitan.models.kimi_k2_7.vision_encoder import MoonViTRoPE
+from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
 from .attention import KimiMLAAttention
 from .model import AttentionResidual, KimiK3Model, KimiK3TransformerBlock
 from .moe import KimiLatentMoE
@@ -463,7 +463,7 @@ def _vision_encoder_config(
         attn=VisionAttention.Config(
             dim=qkv_dim,
             num_heads=num_heads,
-            rope=MoonViTRoPE.Config(
+            rope=VisionRotaryEmbedding2D.Config(
                 dim=head_dim,
                 max_context_length=max_rope_positions,
                 sharding_config=vision_rope_sharding_config(),

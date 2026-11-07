@@ -196,7 +196,7 @@ def _tpool_patch_merger(
     return packed_merged
 
 
-class MoonViTRoPE(ComplexRoPE):
+class VisionRotaryEmbedding2D(ComplexRoPE):
     """Two-dimensional RoPE with interleaved column/row complex pairs.
 
     Coordinates are zero-based ``(row, column)`` pairs in token order.
@@ -215,25 +215,6 @@ class MoonViTRoPE(ComplexRoPE):
         if config.scaling is not None:
             raise ValueError("MoonViT RoPE does not support frequency scaling.")
         super().__init__(config)
-
-    def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor | None = None,
-        positions: torch.Tensor | None = None,
-        *,
-        inverse: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Rotate with positions prepared once outside the vision block."""
-        if (
-            positions is None
-            or positions.ndim != 3
-            or positions.shape[:2] != (query.shape[0], 1)
-        ):
-            raise ValueError(
-                "MoonViT RoPE requires prepared positions of shape (num_tokens, 1, cache_width)"
-            )
-        return self.apply_rotary_emb(query, key, positions, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
         # Meta construction needs only the table shape and dtype.
@@ -263,6 +244,25 @@ class MoonViTRoPE(ComplexRoPE):
             return torch.stack((col_TF2, row_TF2), dim=-2).flatten(-3).unsqueeze(1)
         row_TF, col_TF = self.cache[positions].unbind(1)
         return torch.stack((col_TF, row_TF), dim=-1).flatten(-2).unsqueeze(1)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Rotate with positions prepared once outside the vision block."""
+        if (
+            positions is None
+            or positions.ndim != 3
+            or positions.shape[:2] != (query.shape[0], 1)
+        ):
+            raise ValueError(
+                "MoonViT RoPE requires prepared positions of shape (num_tokens, 1, cache_width)"
+            )
+        return self.apply_rotary_emb(query, key, positions, inverse=inverse)
 
 
 class VisionProjector(Module):

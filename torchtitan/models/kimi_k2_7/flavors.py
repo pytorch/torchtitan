@@ -62,13 +62,17 @@ from .sharding import (
     sequence_parallel_first_layer_sharding_config,
 )
 
-from .vision_encoder import KimiK25VisionEncoder, MoonViTRoPE, VisionProjector
+from .vision_encoder import (
+    KimiK25VisionEncoder,
+    VisionProjector,
+    VisionRotaryEmbedding2D,
+)
 
 __all__ = [
     "KimiK25Model",
     "KimiK25VisionEncoder",
     "VisionProjector",
-    "MoonViTRoPE",
+    "VisionRotaryEmbedding2D",
     "build_model_config",
     "MODEL_FLAVORS",
     "KIMI_K2_5_SPECIAL_TOKENS",
@@ -190,7 +194,7 @@ def _vision_encoder_config(
         attn=VisionAttention.Config(
             dim=dim,
             num_heads=num_heads,
-            rope=MoonViTRoPE.Config(
+            rope=VisionRotaryEmbedding2D.Config(
                 dim=head_dim,
                 max_context_length=max_rope_positions,
                 theta=rope_theta,

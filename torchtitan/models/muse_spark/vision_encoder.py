@@ -114,25 +114,6 @@ class NaViTRoPE(ComplexRoPE):
             raise ValueError("NaViT RoPE does not support frequency scaling")
         super().__init__(config)
 
-    def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor | None = None,
-        positions: torch.Tensor | None = None,
-        *,
-        inverse: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Rotate with positions prepared once outside the vision block."""
-        if (
-            positions is None
-            or positions.ndim != 3
-            or positions.shape[:2] != (query.shape[0], 1)
-        ):
-            raise ValueError(
-                "NaViT RoPE requires prepared positions of shape (num_tokens, 1, cache_width)"
-            )
-        return self.apply_rotary_emb(query, key, positions, inverse=inverse)
-
     def _precompute_cache(self) -> torch.Tensor:
         """Store angles; evaluate cos/sin once per batch, as in the encoder."""
         # Meta construction needs only the table shape and dtype.
@@ -163,6 +144,25 @@ class NaViTRoPE(ComplexRoPE):
         if torch.compiler.is_compiling():
             return coefficients_TR2.flatten(-2).unsqueeze(1)
         return torch.view_as_complex(coefficients_TR2).unsqueeze(1)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Rotate with positions prepared once outside the vision block."""
+        if (
+            positions is None
+            or positions.ndim != 3
+            or positions.shape[:2] != (query.shape[0], 1)
+        ):
+            raise ValueError(
+                "NaViT RoPE requires prepared positions of shape (num_tokens, 1, cache_width)"
+            )
+        return self.apply_rotary_emb(query, key, positions, inverse=inverse)
 
 
 class NaViTEncoder(Module):

@@ -26,7 +26,7 @@ from torchtitan.models.common.rope import (
     RoPE,
     YaRNScalingConfig,
 )
-from torchtitan.models.kimi_k2_7.vision_encoder import MoonViTRoPE
+from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
 from torchtitan.models.muse_spark.vision_encoder import NaViTRoPE
 from torchtitan.models.qwen3_5.rope import MRoPE
 from torchtitan.models.qwen3_5.vision_encoder import QwenVisionRoPE
@@ -142,13 +142,13 @@ class TestRoPEPositionBoundsComplex(unittest.TestCase):
             ** (torch.arange(0, self.head_dim // 2, 2).float() / (self.head_dim // 2))
         )
         grad_outputs = (torch.randn_like(xq), torch.randn_like(xk))
-        for rope_cls in (MoonViTRoPE, NaViTRoPE):
+        for rope_cls in (VisionRotaryEmbedding2D, NaViTRoPE):
             with self.subTest(rope_cls=rope_cls.__name__):
                 rope = rope_cls.Config(
                     dim=self.head_dim, max_context_length=self.max_context_length
                 ).build()
                 # MoonViT alternates column/row pairs; NaViT splits the pairs.
-                if rope_cls is MoonViTRoPE:
+                if rope_cls is VisionRotaryEmbedding2D:
                     angles = coordinates[:, [1, 0]].repeat(1, self.head_dim // 4)
                     angles = angles * inv_freq.repeat_interleave(2)
                     cache = torch.polar(torch.ones_like(angles), angles)
