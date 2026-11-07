@@ -124,8 +124,6 @@ class EngineLoop:
         broadcast_group: All-ranks gloo group that `LoopDecision`s are broadcast over.
         max_engine_steps_between_decisions: ``Generator.Config``'s field.
         reset_kv_cache_on_model_state_dict_load: ``Generator.Config``'s field.
-        holds_session_kv: Whether the engine config needs session/group releases
-            (``GenerationEngine.Config.holds_session_kv``).
         fetch_model_state_dict: Fills the given model state dict tensors in place with the new
             weights and returns the keys it filled.
     """
@@ -140,7 +138,6 @@ class EngineLoop:
         broadcast_group: dist.ProcessGroup,
         max_engine_steps_between_decisions: int,
         reset_kv_cache_on_model_state_dict_load: bool,
-        holds_session_kv: bool,
         fetch_model_state_dict: Callable[[dict[str, torch.Tensor]], Iterable[str]],
     ):
         self._engine: GenerationEngine | None = engine
@@ -153,7 +150,8 @@ class EngineLoop:
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load
         )
-        self._holds_session_kv = holds_session_kv
+        # Read once: the engine is released on exit, and only the engine loop thread uses it.
+        self._holds_session_kv = engine.holds_session_kv
 
         self.policy_version = 0
         # RANK 0: group id -> min policy version the group is pinned to, set at the
@@ -225,7 +223,8 @@ class EngineLoop:
             self._queue.put(SessionReleaseMessage(group_ids=group_ids))
 
     def release_sessions(self, session_ids: list[str]) -> None:
-        """RANK 0: queue GPU retention release and CPU eviction for finished sessions."""
+        """RANK 0: release the held KV of sessions whose rollout ended (a no-op unless the
+        engine holds session KV)."""
         if self._holds_session_kv and self._rank == 0:
             self._queue.put(SessionReleaseMessage(session_ids=session_ids))
 
@@ -602,7 +601,7 @@ class CloseMessage:
 
 @dataclass(kw_only=True, slots=True)
 class SessionReleaseMessage:
-    """Finished sessions/groups whose retained or offloaded KV may be reclaimed."""
+    """Sessions (and every session of groups) whose held KV the engine loop releases; no reply."""
 
     session_ids: list[str] = field(default_factory=list)
     group_ids: list[int] = field(default_factory=list)

@@ -119,6 +119,7 @@ def _generator_worker(
             generator_name=f"generator-{device_id}",
             output_dir="/tmp",
         )
+        assert engine.holds_session_kv == hold_sessions
         # Use real model weights in the normal pinned receive buffers.
         torch.manual_seed(42)
         for tensor in engine.prefetched_model_state_dict.values():

@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Manage session KV lifetime with GPU holds and optional CPU cache release hints."""
+"""Hold each multi-turn session's reusable KV between its turns."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from torchtitan.config import Configurable
 
 
 class VLLMSessionKVHolder(Configurable):
-    """Keep a session's cached prefix on GPU between turns.
+    """Keeps each multi-turn session's cached prefix on GPU between its turns.
 
     With a CPU offload connector, session/group release also sends eviction hints
     after outstanding saves finish, protecting hashes used by other local sessions.
@@ -82,22 +82,6 @@ class VLLMSessionKVHolder(Configurable):
         offload_connector: Any | None = None,
     ) -> None:
         del config
-        self._scheduler = scheduler
-        self._offload_connector = offload_connector
-        # Retain request objects through scheduler cleanup to capture decode hashes.
-        self._live: dict[str, tuple[Request, str, int, bool]] = {}
-        self._cpu_sessions: dict[str, tuple[int, set[BlockHash]]] = {}
-        self._released_sessions: set[str] = set()
-        self._released_hashes: set[BlockHash] = set()
-        self._eviction_hashes: set[BlockHash] = set()
-        self._pending_saves: set[int] = set()
-        # Held blocks per session, idle longest first.
-        self._held: OrderedDict[str, list[Any]] = OrderedDict()
-        self._session_groups: dict[str, int] = {}
-        self._group_sessions: dict[int, set[str]] = {}
-        # Plain ints, so other threads (e.g. a logging endpoint) can read them safely.
-        self.num_sessions = 0
-        self.num_evicted = 0
         # Partial-block prefix hits or speculative decoding move the replay point away from the
         # prompt-end block this holds.
         if scheduler.kv_cache_manager.coordinator.enable_partial_hash_hits:
@@ -106,6 +90,7 @@ class VLLMSessionKVHolder(Configurable):
             )
         if scheduler.vllm_config.speculative_config is not None:
             raise ValueError("session_kv_holder does not support speculative decoding")
+        self._scheduler = scheduler
         kv_cache_manager = scheduler.kv_cache_manager
         self._coordinator = kv_cache_manager.coordinator
         self._block_pool = kv_cache_manager.block_pool
@@ -114,9 +99,27 @@ class VLLMSessionKVHolder(Configurable):
             cdiv(scheduler.max_num_scheduled_tokens, group.kv_cache_spec.block_size)
             for group in kv_cache_manager.kv_cache_config.kv_cache_groups
         )
+        # Requests in vLLM: internal request id -> (request, session, group, prefill seen).
+        # The request object outlives scheduler cleanup, so CPU release can read its final
+        # block hashes, decode blocks included.
+        self._live: dict[str, tuple[Request, str, int, bool]] = {}
+        # Held blocks per session, idle longest first.
+        self._held: OrderedDict[str, list[Any]] = OrderedDict()
+        self._session_groups: dict[str, int] = {}
+        self._group_sessions: dict[int, set[str]] = {}
+        # Plain ints, so other threads (e.g. a logging endpoint) can read them safely.
+        self.num_sessions = 0
+        self.num_evicted = 0
+        # CPU release hints (with an offload connector only).
+        self._offload_connector = offload_connector
+        self._cpu_sessions: dict[str, tuple[int, set[BlockHash]]] = {}
+        self._released_sessions: set[str] = set()
+        self._released_hashes: set[BlockHash] = set()
+        self._eviction_hashes: set[BlockHash] = set()
+        self._pending_saves: set[int] = set()
 
     def track(self, internal_request_id: str, session_id: str, group_id: int) -> None:
-        """Track a request's session to hold its prefix after prefill."""
+        """Hold this request's prefix once its prefill finishes."""
         request = self._scheduler.requests[internal_request_id]
         self._live[internal_request_id] = (request, session_id, group_id, False)
         if self._offload_connector is not None:

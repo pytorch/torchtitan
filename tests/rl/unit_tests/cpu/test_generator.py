@@ -95,7 +95,6 @@ class _FakeLLMEngine:
         self.add_requests = []
         self.reset_prefix_cache_calls = []
         self.renderer = _FakeRenderer()
-        self.output_processor = SimpleNamespace(has_unfinished_requests=lambda: False)
 
     def add_request(self, *args, **kwargs):
         self.add_requests.append((args, kwargs))
@@ -370,6 +369,7 @@ def test_session_kv_holder_tracks_admitted_requests_and_releases_sessions():
     engine._engine.add_request = Mock(return_value="r0-internal")
     engine._engine.step = lambda: []
 
+    assert engine.holds_session_kv
     engine.add_requests([_engine_request("r0", min_policy_version=6)])
     engine.step()
     engine.release_sessions(["group=3/rollout=0"], [3])
@@ -655,13 +655,7 @@ def test_qwen36_27b_perf_config():
 # --- vLLM engine kwargs (what VLLMEngine passes to EngineArgs) ---
 
 
-def _build_engine_kwargs(
-    monkeypatch,
-    tmp_path,
-    config: Generator.Config,
-    *,
-    generator_name="generator",
-) -> dict:
+def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dict:
     """Build ``config.engine`` as the generator does, with vLLM's ``EngineArgs``,
     ``LLMEngine`` and model registration mocked; return the ``EngineArgs`` kwargs."""
     engine_args = Mock()
@@ -683,7 +677,7 @@ def _build_engine_kwargs(
         reset_kv_cache_on_model_state_dict_load=False,
         model_state_dict_load_mode="cpu_prefetch",
         rank=0,
-        generator_name=generator_name,
+        generator_name="generator",
         output_dir=str(tmp_path),
     )
     return engine_args.call_args.kwargs

@@ -164,7 +164,6 @@ class MonarchActorSystem(ActorSystem):
             InterGeneratorRouterActor,
             config,
             generators=self._generators,
-            holds_session_kv=generator_config.engine.holds_session_kv,
         )
 
     async def spawn_batcher(self, config: Batcher.Config, **kwargs: Any) -> Any:

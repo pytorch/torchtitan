@@ -101,10 +101,8 @@ class InterGeneratorRouter(Configurable):
         config: Config,
         *,
         generators: Sequence[ServiceHandle],
-        holds_session_kv: bool,
     ):
         self._config = config
-        self._holds_session_kv = holds_session_kv
         self._generators = [
             _GeneratorHandle(actor=generator.all_ranks, rank0_actor=generator.rank0)
             for generator in generators
@@ -307,17 +305,15 @@ class InterGeneratorRouter(Configurable):
         await self._fanout("sync_log_step", step)
 
     async def release_session(self, routing_session_id: str) -> None:
-        """Release a finished session's cached KV on every generator it may have used."""
+        """Forget a routing session after its rollout's last generation call, and tell its
+        generator to release the session's held KV."""
+        pinned = self._strategy.pinned_candidate(
+            RoutingContext(session_id=routing_session_id)
+        )
         self._strategy.release_session(routing_session_id)
-        if self._holds_session_kv:
-            # Repinning can leave KV on several generators. Each rank 0 queues
-            # the release for its engine loop to broadcast to the other ranks.
-            await asyncio.gather(
-                *(
-                    h.rank0_actor.release_sessions.call_one([routing_session_id])
-                    for h in self._generators
-                )
-            )
+        # Without a pin (non-sticky routing), `release_groups` frees the held KV at group end.
+        if pinned is not None:
+            await pinned.rank0_actor.release_sessions.call_one([routing_session_id])
 
     async def release_groups(self, group_ids: list[int]) -> None:
         """Tell every generator that these rollout groups are finished."""

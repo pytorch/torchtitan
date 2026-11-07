@@ -72,8 +72,11 @@ Session/group ends -> notify generators -> wait for requests and saves
                   -> prioritize unused CPU blocks for eviction
 ```
 
-Session releases notify each generator's rank 0, which broadcasts the release
-to its workers. With the holder disabled, session release only removes the routing pin.
+A session release reaches the rank 0 of the generator the session is pinned to
+(sticky routing); a group release reaches every generator. Rank 0 broadcasts
+the release to its workers. A generator the session left after a repin
+releases its KV when the group ends. Without the holder, generators ignore
+releases.
 
 Released blocks remain reusable until reclaimed. Hashes and aliases used by
 active sessions on the local DP replica are protected. This is a one-shot hint;

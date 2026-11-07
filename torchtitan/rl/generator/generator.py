@@ -314,7 +314,6 @@ class Generator(Configurable):
             broadcast_group=broadcast_group,
             max_engine_steps_between_decisions=config.max_engine_steps_between_decisions,
             reset_kv_cache_on_model_state_dict_load=config.reset_kv_cache_on_model_state_dict_load,
-            holds_session_kv=config.engine.holds_session_kv,
             fetch_model_state_dict=(
                 self._copy_prefetched_model_state_dict
                 if config.model_state_dict_load_mode == "cpu_prefetch"
@@ -434,7 +433,8 @@ class Generator(Configurable):
         self._engine_loop.release_groups(group_ids)
 
     async def release_sessions(self, session_ids: list[str]) -> None:
-        """Release retained GPU KV and hint CPU eviction for finished sessions.
+        """Release the held KV of sessions whose rollout ended (rank 0; a no-op unless the
+        engine holds session KV).
 
         Args:
             session_ids: Routing session ids with no more generation calls.

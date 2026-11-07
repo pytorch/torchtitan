@@ -102,7 +102,6 @@ def _bare_loop(
     dp_size: int = 1,
     dp_routing_strategy: RoutingStrategy.Config | None = None,
     reset_kv_cache_on_model_state_dict_load: bool = False,
-    holds_session_kv: bool = False,
     fetch_model_state_dict: Callable[[dict], Any] = lambda weights: weights.keys(),
 ) -> EngineLoop:
     # _decide_next_action delegates the in-flight check and routing to the
@@ -116,7 +115,6 @@ def _bare_loop(
         broadcast_group=None,
         max_engine_steps_between_decisions=16,
         reset_kv_cache_on_model_state_dict_load=reset_kv_cache_on_model_state_dict_load,
-        holds_session_kv=holds_session_kv,
         fetch_model_state_dict=fetch_model_state_dict,
     )
     # An outstanding generation models in-flight work (possibly in a peer DP rank).
@@ -320,9 +318,9 @@ def test_session_releases_are_queued_only_when_the_engine_holds_session_kv(
     runner,
 ) -> None:
     for holds_session_kv in (False, True):
-        engine_loop = _bare_loop(
-            event_loop=runner.get_loop(), holds_session_kv=holds_session_kv
-        )
+        engine = _FakeEngine()
+        engine.holds_session_kv = holds_session_kv
+        engine_loop = _bare_loop(event_loop=runner.get_loop(), engine=engine)
         engine_loop.release_sessions(["s0"])
         engine_loop.release_groups([3])
         runner.run(asyncio.sleep(0))  # `put` lands on the next loop iteration
@@ -581,6 +579,8 @@ def _finished(request_id: str) -> FinishedRequest:
 class _FakeEngine:
     """Every step finishes all admitted requests. `step_hook` runs inside each step;
     `threads` records which threads admitted and stepped, and `shutdowns` which shut it down."""
+
+    holds_session_kv = False
 
     def __init__(self, step_hook: Callable[[], None] = lambda: None):
         self.step_hook = step_hook

@@ -63,8 +63,8 @@ def add_extra_vllm_engine_args(
     Raises ``ValueError`` for keys TorchTitan already set in ``engine_kwargs`` or
     derives from a config field, so they cannot silently diverge from it.
     """
-    # EngineArgs backed by dedicated config fields, including optional arguments
-    # that may be absent from engine_kwargs.
+    # EngineArgs that TorchTitan sets only when the mapped config field is set (or
+    # derives from it), so they may be absent from engine_kwargs.
     config_field_by_engine_arg = {
         "max_num_batched_tokens": "Generator.Config.max_num_batched_tokens",
         "compilation_config": "VLLMEngine.Config.cuda_graph",
@@ -120,10 +120,6 @@ class VLLMEngine(GenerationEngine):
         """Keep each multi-turn session's cached prefix on GPU between its turns (see
         `VLLMSessionKVHolder`). With KV offload configured, also send CPU cache
         release hints when sessions end. None disables both session behaviors."""
-
-        @property
-        def holds_session_kv(self) -> bool:
-            return self.session_kv_holder is not None
 
         def __post_init__(self):
             if self.kv_transfer_config is None:
@@ -228,9 +224,8 @@ class VLLMEngine(GenerationEngine):
         self._engine = LLMEngine.from_engine_args(
             engine_args, stat_loggers=stat_loggers
         )
-        # With GPU holding enabled, each TP rank holds the same blocks in its own
-        # scheduler. Only the engine loop thread mutates session state; TP ranks
-        # apply updates in the same order.
+        # Every rank holds the same blocks in its own scheduler; only the engine loop thread
+        # touches them.
         self._session_kv_holder: VLLMSessionKVHolder | None = None
         if config.session_kv_holder is not None:
             scheduler = self._engine.engine_core.engine_core.scheduler
@@ -399,6 +394,10 @@ class VLLMEngine(GenerationEngine):
         return self._engine.vllm_config.parallel_config.data_parallel_rank
 
     @property
+    def holds_session_kv(self) -> bool:
+        return self._session_kv_holder is not None
+
+    @property
     def prefetched_model_state_dict(self) -> dict[str, torch.Tensor] | None:
         """The pinned CPU buffers a model state dict is prefetched into, and loaded from by
         a model state dict load. Safe to fill from any thread while no load runs. None with
@@ -438,7 +437,7 @@ class VLLMEngine(GenerationEngine):
                     sampling_params.extra_args = {
                         "kv_transfer_params": {"shared_request_id": request.request_id}
                     }
-                # Track vLLM's internal ID, which may include its random suffix.
+                # vLLM appends a random suffix to the id; the scheduler knows only that one.
                 internal_request_id = self._engine.add_request(
                     request_id=request.request_id,
                     prompt=engine_input,
