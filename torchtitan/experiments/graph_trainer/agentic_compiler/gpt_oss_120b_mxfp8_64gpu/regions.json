@@ -2,7 +2,7 @@
  "substrate": "graph",
  "setup": {
   "git_commit": "765bc29a46b2308be4c6e2ec66f8f9bb45ad0ffa",
-  "command": "PYTHONPATH=torchtitan/experiments/graph_trainer/.claude/skills/fusion_region_finder/scripts:outputs/agentic_compiler/gpt_oss_120b_mxfp8_64gpu:. NGPU=64 LOCAL_RANK=0 CUDA_VISIBLE_DEVICES=0 PYTORCH_ALLOC_CONF=expandable_segments:True python -m torchtitan.train --module recipes --config capture --comm-backend fake",
+  "command": "PYTHONPATH=torchtitan/experiments/graph_trainer/.claude/skills/fusion_finder/scripts:outputs/agentic_compiler/gpt_oss_120b_mxfp8_64gpu:. NGPU=64 LOCAL_RANK=0 CUDA_VISIBLE_DEVICES=0 PYTORCH_ALLOC_CONF=expandable_segments:True python -m torchtitan.train --module recipes --config capture --comm-backend fake",
   "config_deltas": {
    "pass_pipeline": "fusion_finder",
    "memory_policy": "none",

@@ -77,9 +77,17 @@ The region's `regions.json` entry plus:
 
 ### lift_pass.py
 
-Liftable regions only:
+Liftable regions only. After the docstring, a comment shows each structural variant in the
+format of the kernel cache's `reference.py` (inputs `in<k>`, values `v<k>`; at most 100
+lines each):
 
 ```python
+# match_v0, from the instance at unsqueeze_2:
+#
+#     def forward(self, in0, in1):
+#         v2 = torch.ops.aten.cat.default([in0, in1], -1);  in0 = in1 = None
+#         ...
+
 REGION_ID = "G-003"
 
 

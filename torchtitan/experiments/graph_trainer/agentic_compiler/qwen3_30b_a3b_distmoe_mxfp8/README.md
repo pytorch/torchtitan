@@ -1,7 +1,7 @@
 # Agentic compiler loop: Qwen3 30B-A3B DistMoE MXFP8
 
 The same loop as `../dsv3_671b_distmoe_mxfp8/`, applied to Qwen3 30B-A3B:
-- fusion_region_finder proposes a fusion plan;
+- fusion_finder proposes a fusion plan;
 - `substitute_with_kernels_pass` (`graph_trainer/substitute_kernels.py`) turns each lifted region into a
   kernel-cache problem;
 - the autokernel swarm writes CuTe DSL kernels;
@@ -38,7 +38,7 @@ the repo's pre-commit hooks, since reformatting a kernel would change the file t
 ## Run
 
 ```
-S=torchtitan/experiments/graph_trainer/.claude/skills/fusion_region_finder/scripts
+S=torchtitan/experiments/graph_trainer/.claude/skills/fusion_finder/scripts
 D=torchtitan/experiments/graph_trainer/agentic_compiler/qwen3_30b_a3b_distmoe_mxfp8
 ENV="PYTHONPATH=$S:$D:. NGPU=8 LOCAL_RANK=0 CUDA_VISIBLE_DEVICES=0 PYTORCH_ALLOC_CONF=expandable_segments:True"
 
@@ -88,7 +88,7 @@ dependencies) and FA4 (`flash_attn.cute`).
 
 ## 3. Setup
 
-- **Branch:** `agentic_compiler` at `d89f7f53e`, plus the two fusion_region_finder skill fixes in sec. 9.
+- **Branch:** `agentic_compiler` at `d89f7f53e`, plus the two fusion_finder skill fixes in sec. 9.
 - **Software:** torch 2.16.0.dev20261105+cu132, CUDA 13.2, nvidia-cutlass-dsl 4.8.1, torchao
   0.19.0.dev20261105; one GB300 (sm_103, 152 SMs).
 - **Recipe** (`loop_recipe.py`, `qwen3_30b_base`):
@@ -119,7 +119,7 @@ dependencies) and FA4 (`flash_attn.cute`).
 ## 4. The loop
 
 ```
- fusion_region_finder (profile + graph dump of the baseline capture, cuDNN; 84 regions, 64 with a lift pass)
+ fusion_finder (profile + graph dump of the baseline capture, cuDNN; 84 regions, 64 with a lift pass)
    -> regions.json, one folder per region with a generated topology-matching lift pass
    -> plan_passes.py: a plan of lift passes that replays consistently (no overlapping sites)
  training run with the plan (loop_recipe capture): each region becomes call_module fusion_G<id>
@@ -282,7 +282,7 @@ then be re-verified.
 
 ## 9. Code changes
 
-- **Skill: fusion_region_finder** (`torchtitan/experiments/graph_trainer/.claude/skills/fusion_region_finder/`),
+- **Skill: fusion_finder** (`torchtitan/experiments/graph_trainer/.claude/skills/fusion_finder/`),
   two small fixes, needed to re-analyze profiles of runs that already substitute kernels (a separate change from
   this directory):
   - **`lift_regions.py`, `op_schema`:** targets that are Python callables (substitute_kernels'
@@ -343,7 +343,7 @@ then be re-verified.
 - **Beyond glue fusion, needs your decision:** what is left is DistMoE grouped GEMMs, attention, GEMMs and the
   optimizer (sec. 8). The remaining glue headroom (~12 ms) is mostly G19, which a verified-exact rewrite has not
   beaten.
-- **Worth reporting to the substitute_kernels / fusion_region_finder authors (not posted anywhere):**
+- **Worth reporting to the substitute_kernels / fusion_finder authors (not posted anywhere):**
   - the two skill patches (sec. 9);
   - the cache contract has no way to say a kernel is only valid for one GPU model or SM count. G01 t30 asserts 152
     SMs, and the quack-order kernels assume it.

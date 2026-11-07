@@ -42,6 +42,7 @@ import argparse
 import hashlib
 import json
 import math
+import operator
 import os
 import re
 import shutil
@@ -62,11 +63,14 @@ from lift_regions import (
     load_dump_graph,
     N,
     op_schema,
+    region_io,
     S,
     user_of,
     V,
     writes_outside,
 )
+
+from torchtitan.experiments.graph_trainer.substitute_kernels import normalize_names
 
 T2_OPS = {
     "aten.sort.stable",
@@ -425,25 +429,102 @@ def _lift_imports(matchers):
 
 
 def _region_matchers(instances, dn, dump_nodes):
-    """Matchers that find every finder instance: ([(anchor op, source, fn)], sites) or (None, reason)."""
+    """Matchers that find every finder instance: ([(anchor op, source, fn)], sites, one
+    example site per matcher) or (None, reason, None)."""
     matchers = []
+    examples = []
     wanted = [frozenset(i) for i in instances]
     uncovered = list(wanted)
     while uncovered:
         fname = f"match_v{len(matchers)}"
         src, anchor = _gen_matcher(sorted(uncovered[0]), dn, fname)
         if src is None:
-            return None, anchor
+            return None, anchor, None
         ns = {"D": D, "N": N, "S": S, "V": V, "is_op": is_op, "user_of": user_of}
         exec(src, ns)  # noqa: S102  (generated matcher source)
         matchers.append((anchor, src, ns[fname]))
         sites = find_matches(dump_nodes, [(a, fn) for a, _, fn in matchers])
-        claimed = {n.name for site in sites for n in site}
         # An equivalent overlapping site can claim an instance's nodes first; that counts.
-        if not uncovered[0] & claimed:
-            return None, "a matcher does not find the instance it was generated from"
+        mine = [s for s in sites if uncovered[0] & {n.name for n in s}]
+        if not mine:
+            return (
+                None,
+                "a matcher does not find the instance it was generated from",
+                None,
+            )
+        examples.append(mine[0])
+        claimed = {n.name for site in sites for n in site}
         uncovered = [i for i in wanted if not i & claimed]
-    return matchers, sites
+    return matchers, sites, examples
+
+
+def _reference_comment(site, max_lines=100):
+    """``site`` as substitute_kernels writes the lifted region's reference.py, as ``#`` lines.
+
+    The submodule signature comes from ``region_io`` (as ``lift_matches`` outlines it) and
+    the names from ``normalize_names`` (``in<k>`` inputs, ``v<k>`` values).
+    """
+    members, inputs, outputs = region_io(site)
+    graph = torch.fx.Graph()
+    env, shown = {}, {}
+
+    def literal(v, typ):
+        # The dump writes dtypes, layouts, memory formats and devices as strings.
+        t = str(typ)
+        if isinstance(v, str) and any(
+            k in t for k in ("ScalarType", "Layout", "MemoryFormat")
+        ):
+            return getattr(torch, v.removeprefix("torch."))
+        if isinstance(v, str) and "Device" in t:
+            return torch.device(v)
+        return v
+
+    def arg(a, typ=None):
+        if isinstance(a, DumpNode):
+            return env[a]
+        if isinstance(a, list):
+            return [arg(x) for x in a]
+        return literal(a, typ)
+
+    for i in inputs:
+        env[i] = graph.placeholder(i.name)
+    for n in members:
+        schema = op_schema(n)
+        # real_type: ``type`` reports ScalarType, Layout and MemoryFormat as int.
+        types = [a.real_type for a in schema.arguments] if schema else []
+        kw_types = {a.name: a.real_type for a in schema.arguments} if schema else {}
+        args = tuple(
+            arg(a, types[k] if k < len(types) else None) for k, a in enumerate(n.args)
+        )
+        kwargs = {k: arg(v, kw_types.get(k)) for k, v in n.kwargs.items()}
+        if n.target == "_operator.getitem":
+            target = operator.getitem
+        else:
+            # Codegen only needs a callable; its name is replaced by the op name below.
+            def target(*args, **kwargs):
+                raise NotImplementedError
+
+            target.__name__ = f"fusion_finder_op_{len(shown)}"
+            shown[target] = (
+                f"torch.ops.{n.target}" if n.target.count(".") == 2 else n.target
+            )
+        env[n] = graph.create_node("call_function", target, args, kwargs, name=n.name)
+    graph.output(
+        env[outputs[0]] if len(outputs) == 1 else tuple(env[o] for o in outputs)
+    )
+    gm = normalize_names(torch.fx.GraphModule(torch.nn.Module(), graph))
+    code = gm.recompile()
+    src = code.src.strip()
+    for name, obj in code.globals.items():
+        if obj in shown:
+            src = re.sub(rf"\b{re.escape(name)}\b", shown[obj], src)
+    lines = src.splitlines()
+    if len(lines) > max_lines:
+        lines = lines[: max_lines - 1] + [
+            f"    ... ({len(lines) - max_lines + 1} more lines)",
+            lines[-1],
+        ]
+    return "\n".join("#     " + line if line else "#" for line in lines)
 
 
 def main():
@@ -1046,7 +1127,9 @@ def main():
         os.makedirs(os.path.join(pkg, folders[r["id"]]))
         if not_liftable[r["id"]]:
             continue
-        matchers, sites = _region_matchers(r["_lift_instances"], dn, dump_nodes)
+        matchers, sites, examples = _region_matchers(
+            r["_lift_instances"], dn, dump_nodes
+        )
         if matchers is None:
             not_liftable[r["id"]] = f"no topology matcher: {sites}"
             continue
@@ -1069,6 +1152,11 @@ def main():
                     num_found=len(r["_instances"]),
                     pass_name=pass_names[r["id"]],
                     attr=f"fusion_{r['id'].replace('-', '')}",
+                    reference="\n#\n".join(
+                        f"# match_v{k}, from the instance at {site[0].name}:\n#\n"
+                        + _reference_comment(site)
+                        for k, site in enumerate(examples)
+                    ),
                     lift_imports=_lift_imports(matchers),
                     matchers="\n\n".join(src for _, src, _ in matchers),
                     matcher_list="["
@@ -1230,7 +1318,7 @@ def main():
 REGION_PASS_TEMPLATE = """\"\"\"Fusion region {id}: {title}
 
 {num_instances} instances per step; gap {gap} ms ({pct}% of step); bitwise tier {tier}; {fusion_kind}.
-Generated by fusion_region_finder/scripts/curate_regions.py from {root}. In that capture
+Generated by fusion_finder/scripts/curate_regions.py from {root}. In that capture
 the matchers below find {num_sites} site(s); the finder reported {num_found} instance(s).
 
 Each matcher walks the region's topology from an anchor node and checks every op and
@@ -1245,6 +1333,11 @@ instance becomes ``call_module {attr}`` (``{attr}_v<k>`` for structural variants
 body runs the region's original aten ops. To replace it with a kernel, assign a module
 with the same signature to ``gm.{attr}`` in a pass listed after this one.
 \"\"\"
+
+# The region in the format of the kernel cache's reference.py (substitute_kernels): the
+# submodule each instance becomes, with inputs in<k> and values v<k>, as captured.
+#
+{reference}
 
 from lift_regions import {lift_imports}
 
@@ -1266,7 +1359,7 @@ def {pass_name}(gm, example_inputs=None):
 
 PACKAGE_TEMPLATE = """\"\"\"Fusion regions found in {root}, one folder per region.
 
-Generated by fusion_region_finder/scripts/curate_regions.py. Importing this package
+Generated by fusion_finder/scripts/curate_regions.py. Importing this package
 registers every region's lift pass (<folder>/lift_pass.py); enable regions by listing
 their passes in config.compile.extra_passes. A region's pass lifts every safe match of
 its pattern; after one region is lifted, an overlapping region's pass finds fewer

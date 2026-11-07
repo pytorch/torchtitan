@@ -487,6 +487,17 @@ def _structural_key(gm: fx.GraphModule) -> tuple:
     )
 
 
+def region_io(nodes: list[Any]) -> tuple[dict[Any, None], list[Any], list[Any]]:
+    """The submodule signature of an instance: members in graph order, external inputs
+    in order of first use, and the members used outside (its outputs)."""
+    members = dict.fromkeys(sorted(nodes))
+    inputs = list(
+        dict.fromkeys(i for n in members for i in n.all_input_nodes if i not in members)
+    )
+    outputs = [n for n in members if any(u not in members for u in n.users)]
+    return members, inputs, outputs
+
+
 def _outline(gm: fx.GraphModule, nodes: list[fx.Node], name: str) -> fx.Node:
     """Replace ``nodes`` by one ``call_module name`` placed inside their own span.
 
@@ -498,11 +509,7 @@ def _outline(gm: fx.GraphModule, nodes: list[fx.Node], name: str) -> fx.Node:
     # for thousands of instances) and insert_subgm relies on a later topological re-sort,
     # which reorders mutations; upstream a bounded, order-preserving variant.
     graph = gm.graph
-    members = dict.fromkeys(sorted(nodes))
-    inputs = list(
-        dict.fromkeys(i for n in members for i in n.all_input_nodes if i not in members)
-    )
-    outputs = [n for n in members if any(u not in members for u in n.users)]
+    members, inputs, outputs = region_io(nodes)
 
     sub = fx.Graph()
     env: dict[fx.Node, fx.Node] = {}

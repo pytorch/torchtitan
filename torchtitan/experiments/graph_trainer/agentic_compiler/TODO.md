@@ -113,7 +113,7 @@ change therefore regenerates and re-verifies everything.
 ## 3. Polish the end-to-end workflow into a production skill
 
 **Today the loop is three parts glued together by per-run code:**
-- the fusion_region_finder skill;
+- the fusion_finder skill;
 - `substitute_kernels` (#5838);
 - the autokernel skill (#5839);
 - a hand-written `loop_recipe.py` per model;

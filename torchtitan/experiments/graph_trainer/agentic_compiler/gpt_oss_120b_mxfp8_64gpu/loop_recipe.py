@@ -6,9 +6,9 @@
 
 """Agentic compiler loop for graph_trainer_gpt_oss_120b_mxfp8_64gpu on one fake-PG GPU.
 
-Run from the repo root with the fusion_region_finder scripts and this directory on PYTHONPATH:
+Run from the repo root with the fusion_finder scripts and this directory on PYTHONPATH:
 
-    S=torchtitan/experiments/graph_trainer/.claude/skills/fusion_region_finder/scripts
+    S=torchtitan/experiments/graph_trainer/.claude/skills/fusion_finder/scripts
     D=torchtitan/experiments/graph_trainer/agentic_compiler/gpt_oss_120b_mxfp8_64gpu
     env FUSION_PLAN=$(cat $D/plans/plan_iter3.txt) LIFT_OPTIONAL=1 RUN=full_final \\
         PYTHONPATH=$S:$D:. NGPU=64 LOCAL_RANK=0 CUDA_VISIBLE_DEVICES=0 \\

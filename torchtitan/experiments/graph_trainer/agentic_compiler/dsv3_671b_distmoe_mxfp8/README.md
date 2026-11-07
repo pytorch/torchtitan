@@ -1,6 +1,6 @@
 # Agentic compiler loop: DSv3 671B DistMoE MXFP8
 
-fusion_region_finder proposes a fusion plan; `substitute_with_kernels_pass` (#5838) turns each lifted region
+fusion_finder proposes a fusion plan; `substitute_with_kernels_pass` (#5838) turns each lifted region
 into a kernel-cache problem; the autokernel swarm (#5839) writes CuTe DSL kernels; an independent verifier
 checks each one; verified kernels replace the regions in training. Model numerics must stay bitwise
 identical.
@@ -28,7 +28,7 @@ the repo's pre-commit hooks, since reformatting a kernel would change the file t
 ## Run
 
 ```
-S=torchtitan/experiments/graph_trainer/.claude/skills/fusion_region_finder/scripts
+S=torchtitan/experiments/graph_trainer/.claude/skills/fusion_finder/scripts
 D=torchtitan/experiments/graph_trainer/agentic_compiler/dsv3_671b_distmoe_mxfp8
 env FUSION_PLAN=$(cat $D/plans/plan_iter9.txt) LOOP_ITER=iter9 PYTHONPATH=$S:$D:. NGPU=256 LOCAL_RANK=0 \
     CUDA_VISIBLE_DEVICES=0 PYTORCH_ALLOC_CONF=expandable_segments:True \
@@ -54,7 +54,7 @@ either way.
 
 ## 2. Goal and constraints
 
-- **Goal (user, 2026-11-04):** improve DSv3 DistMoE MXFP8 performance in a loop. fusion_region_finder proposes a
+- **Goal (user, 2026-11-04):** improve DSv3 DistMoE MXFP8 performance in a loop. fusion_finder proposes a
   fusion plan; #5838 (`substitute_with_kernels_pass`) turns the lifted regions into kernel-cache problems; #5839
   (autokernel skill) generates kernels.
 - **Hard constraint (user):** model numerics must not change. A training run counts as passing only if loss and
@@ -77,7 +77,7 @@ either way.
   - `fsdp_defer_gradient_reduction=False`, because GraphTrainer rejects True;
   - `scratch_capacity_factor=64`;
   - seed 42, deterministic. torchtitan's `set_determinism` also sets `fill_uninitialized_memory=False`.
-  - Files: `torchtitan/experiments/graph_trainer/.claude/skills/fusion_region_finder/scripts/example_recipe.py`,
+  - Files: `torchtitan/experiments/graph_trainer/.claude/skills/fusion_finder/scripts/example_recipe.py`,
     `loop_recipe.py` (configs `lifted`, `capture`).
 - **Run one iteration:**
   ```
@@ -97,7 +97,7 @@ either way.
 ## 4. The loop
 
 ```
- fusion_region_finder (profile + graph dump of the baseline capture)
+ fusion_finder (profile + graph dump of the baseline capture)
    -> regions.json, one folder per region with a generated topology-matching lift pass
    -> plan_passes.py: a plan of lift passes that replays consistently (no overlapping sites)
  training run with the plan (loop_recipe capture): each region becomes call_module fusion_G<id>
@@ -241,7 +241,7 @@ override is disabled, the reference's own numerics change, and these kernels wou
 
   The patch resolves an op's module from `torch._library.simple_registry` fake-impl source files. All 18 tests in
   `tests/test_substitute_kernels.py` pass.
-- **Skill: fusion_region_finder** (`torchtitan/experiments/graph_trainer/.claude/skills/fusion_region_finder/`,
+- **Skill: fusion_finder** (`torchtitan/experiments/graph_trainer/.claude/skills/fusion_finder/`,
   untracked):
   - **`lift_regions.py`:** `_plain_outputs` in `find_matches`. Per matched site, a tuple-valued member takes its
     `getitem` users, and a view of external inputs that is also used outside stays outside, so lifted submodules

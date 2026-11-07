@@ -10,7 +10,7 @@ Copy and adapt for another model: build the GraphTrainer config the way the
 model's verified recipe does, then call ``enable_fusion_finder``. Run from the repo
 root with this directory (and, for the lifted run, the capture directory) on PYTHONPATH:
 
-    SKILL=torchtitan/experiments/graph_trainer/.claude/skills/fusion_region_finder/scripts
+    SKILL=torchtitan/experiments/graph_trainer/.claude/skills/fusion_finder/scripts
     PYTHONPATH=$SKILL:. NGPU=256 LOCAL_RANK=0 CUDA_VISIBLE_DEVICES=0 \\
         PYTORCH_ALLOC_CONF=expandable_segments:True \\
         python -m torchtitan.train --module example_recipe --config dsv3_671b_fake --comm-backend fake

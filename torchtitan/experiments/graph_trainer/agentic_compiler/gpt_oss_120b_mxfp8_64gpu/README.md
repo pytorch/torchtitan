@@ -2,7 +2,7 @@
 
 This loop has four stages:
 
-1. fusion_region_finder proposes a fusion plan.
+1. fusion_finder proposes a fusion plan.
 2. `substitute_with_kernels_pass` (#5838) turns each lifted region into a kernel-cache problem.
 3. The autokernel swarm (#5839) writes CuTe DSL kernels, and an independent verifier checks each one.
 4. Verified kernels replace the regions in training.
@@ -40,7 +40,7 @@ since reformatting a kernel would change the file the verifier checked.
 Benchmark recipe (5 microbatches per step, 10 steps) with the plan and the kernels:
 
 ```
-S=torchtitan/experiments/graph_trainer/.claude/skills/fusion_region_finder/scripts
+S=torchtitan/experiments/graph_trainer/.claude/skills/fusion_finder/scripts
 D=torchtitan/experiments/graph_trainer/agentic_compiler/gpt_oss_120b_mxfp8_64gpu
 env FUSION_PLAN=$(cat $D/plans/plan_iter3.txt) LIFT_OPTIONAL=1 RUN=full_final PYTHONPATH=$S:$D:. \
     NGPU=64 LOCAL_RANK=0 CUDA_VISIBLE_DEVICES=0 PYTORCH_ALLOC_CONF=expandable_segments:True \
@@ -109,7 +109,7 @@ the gap this path explains is not measured.
 ## 4. The loop
 
 ```
- fusion_region_finder (profile + graph dump of the 1-microbatch capture)
+ fusion_finder (profile + graph dump of the 1-microbatch capture)
    -> regions.json, one folder per region with a generated topology-matching lift pass
    -> a plan of lift passes that replays without overlapping sites
  training run with the plan (loop_recipe lifted / lifted_inputs): each region becomes call_module fusion_G<id>

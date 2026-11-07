@@ -2,7 +2,7 @@
  "substrate": "graph",
  "setup": {
   "git_commit": "d89f7f53e1dc18e407d445f60787a8a2a48edad9",
-  "command": "PYTHONPATH=torchtitan/experiments/graph_trainer/.claude/skills/fusion_region_finder/scripts:torchtitan/experiments/graph_trainer/agentic_compiler/qwen3_30b_a3b_distmoe_mxfp8:. NGPU=8 LOCAL_RANK=0 CUDA_VISIBLE_DEVICES=0 FUSION_FINDER_OUT=/home/bahuang/local/torchtitan/outputs/fusion_finder/qwen3_30b_a3b_distmoe_mxfp8 PYTORCH_ALLOC_CONF=expandable_segments:True python -m torchtitan.train --module loop_recipe --config baseline --comm-backend fake",
+  "command": "PYTHONPATH=torchtitan/experiments/graph_trainer/.claude/skills/fusion_finder/scripts:torchtitan/experiments/graph_trainer/agentic_compiler/qwen3_30b_a3b_distmoe_mxfp8:. NGPU=8 LOCAL_RANK=0 CUDA_VISIBLE_DEVICES=0 FUSION_FINDER_OUT=/home/bahuang/local/torchtitan/outputs/fusion_finder/qwen3_30b_a3b_distmoe_mxfp8 PYTORCH_ALLOC_CONF=expandable_segments:True python -m torchtitan.train --module loop_recipe --config baseline --comm-backend fake",
   "config_deltas": {
    "pass_pipeline": "fusion_finder",
    "memory_policy": "none",

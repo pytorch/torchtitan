@@ -1,5 +1,5 @@
 ---
-name: fusion_region_finder
+name: fusion_finder
 description: Find kernel-fusion regions in a GraphTrainer training step (forward, recompute and backward) from the traced joint graph, a profiler trace and a measured roofline; rank them by gap to roofline, and write one folder per region with a compile.extra_passes graph pass that lifts the region into a call_module, whose body is the fusion target. Use when asked to find fusion opportunities, rank glue ops by distance from roofline, or prepare targets for handwritten kernels in graph_trainer.
 ---
 
@@ -77,7 +77,7 @@ distort timing). Save the command to `<out>/command.txt` so it lands in
 `regions.json`:
 
 ```bash
-SKILL=torchtitan/experiments/graph_trainer/.claude/skills/fusion_region_finder/scripts
+SKILL=torchtitan/experiments/graph_trainer/.claude/skills/fusion_finder/scripts
 OUT=outputs/fusion_finder/dsv3_671b
 PYTHONPATH=$SKILL:. NGPU=256 LOCAL_RANK=0 CUDA_VISIBLE_DEVICES=0 FUSION_FINDER_OUT=$PWD/$OUT \
     PYTORCH_ALLOC_CONF=expandable_segments:True \
@@ -240,6 +240,22 @@ import fusion_regions  # the capture dir must be on PYTHONPATH
 config.compile.extra_passes = ["lift_fusion_region_g003", "lift_fusion_region_g005"]
 # or a set that does not step on each other, largest gap first:
 config.compile.extra_passes = list(fusion_regions.DEFAULT_SELECTION)
+```
+
+Each `lift_pass.py` starts with a comment that shows the region as the kernel cache will
+write its `reference.py` (section 5, substitute_kernels): the submodule an instance becomes,
+with inputs `in<k>` and values `v<k>`, one per structural variant:
+
+```python
+# match_v0, from the instance at alias_391:
+#
+#     def forward(self, in0, in1, in2, in3, in4):
+#         v5 = torch.ops.aten.alias.default(in0);  in0 = None
+#         v6 = torch.ops.aten._fused_rms_norm_backward.default(in1, in2, [2048], v5, in3, [True, True]);  ...
+#         v7 = v6[0]
+#         v8 = v6[1];  v6 = None
+#         v9 = torch.ops.aten.add.Tensor(in4, v7);  in4 = v7 = None
+#         return (v8, v9)
 ```
 
 **Matching is by topology, not node names.** Each `lift_pass.py` holds generated
