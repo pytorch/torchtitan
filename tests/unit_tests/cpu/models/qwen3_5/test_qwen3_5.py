@@ -260,3 +260,26 @@ def test_qwen35_always_calls_vision_encoder_twice(
             encoder.patch_embed.weight.grad,
             torch.zeros_like(encoder.patch_embed.weight),
         )
+
+
+def test_vision_scatter_gather_follows_build_config() -> None:
+    """The embedding gather matches layer 0's build-time layout.
+
+    The RL generator drops ``vision_encoder`` after build, but layer 0 still
+    expects the TP-replicated stream, so the gather must not depend on it.
+    Qwen3.8 2.4T-A95B reuses ``Qwen35Model`` without a vision encoder and never
+    gathers.
+    """
+    parallelism = ParallelismConfig()
+    qwen35_config = build_model_config("debugmodel", parallelism=parallelism)
+    qwen38_config = build_qwen3_8_model_config("2.4T-A95B", parallelism=parallelism)
+    assert qwen35_config.vision_encoder is not None
+    assert qwen38_config.vision_encoder is None
+    with torch.device("meta"):
+        qwen35 = replace(qwen35_config, layers=[]).build()
+        qwen38 = replace(qwen38_config, layers=[]).build()
+
+    assert qwen35._replicates_embeddings_for_vision()
+    qwen35.vision_encoder = None
+    assert qwen35._replicates_embeddings_for_vision()
+    assert not qwen38._replicates_embeddings_for_vision()

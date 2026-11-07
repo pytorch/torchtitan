@@ -294,7 +294,7 @@ class DeepSeekV4Model(Decoder):
 
         prev_hc_hidden = h
         main_hidden = self.hc_head(h)
-        main_hidden = self.norm(main_hidden) if self.norm is not None else main_hidden
+        main_hidden = self._pre_lm_head_norm_and_gather(main_hidden)
 
         if len(self.mtp_layers) == 0:
             if self._skip_lm_head or self.lm_head is None:

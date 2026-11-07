@@ -8,19 +8,29 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torchtitan.distributed.spmd_types import spmd_mesh_group
+from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.base.module import Module
+from torchtitan.models.common.decoder_sharding import (
+    dense_activation_placement,
+    token_id_placement,
+)
 
 
-class Embedding(nn.Embedding, Module):
-    """
-    Configurable embedding with optional local vocab-parallel execution.
-    TODO(pianpwk): rename to VocabParallelEmbedding
+class VocabParallelEmbedding(nn.Embedding, Module):
+    """Token embedding whose weight is vocab-sharded across TP.
+
+    With a TP group, each rank looks up only the token ids in its vocab shard,
+    giving a TP-``Partial`` output, then reduces it to the decoder residual
+    layout: ``Partial -> Shard(0)`` is a reduce-scatter under sequence
+    parallelism, and ``Partial -> Invariant`` is an all-reduce without it.
+    Without TP it is a plain embedding lookup.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -35,8 +45,7 @@ class Embedding(nn.Embedding, Module):
         )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        """Run vocab-parallel embedding when the active mesh has a TP group."""
-        tp_group = spmd_mesh_group("tp")
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
             return F.embedding(
                 input,
@@ -47,7 +56,28 @@ class Embedding(nn.Embedding, Module):
                 self.scale_grad_by_freq,
                 self.sparse,
             )
+        # The masked lookup indexes the vocab shard with bare tensor arithmetic,
+        # so it runs as a local region: TP-replicated token ids in, TP-partial
+        # embeddings out.
+        tokens = token_id_placement()
+        partial_output = dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
+        output = spmd.local_map(
+            in_types=((tokens.local_type, tokens.partition_spec),),
+            out_types=(partial_output.local_type, partial_output.partition_spec),
+        )(self.lookup_vocab_shard)(input)
+        return spmd.redistribute(
+            output,
+            tp_group,
+            src=spmd.P,
+            dst=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+            backward_options={"op_dtype": output.dtype},
+        )
 
+    def lookup_vocab_shard(self, input: torch.Tensor) -> torch.Tensor:
+        """Return this rank's TP-partial lookup: the embeddings of the tokens in
+        its vocab shard, and zeros for every other token."""
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        assert tp_group is not None
         tp_size = dist.get_world_size(tp_group)
         chunk_size = (self.num_embeddings + tp_size - 1) // tp_size
         offset = dist.get_rank(tp_group) * chunk_size
@@ -72,4 +102,4 @@ class Embedding(nn.Embedding, Module):
         return out * mask.unsqueeze(-1).to(out.dtype)
 
 
-__all__ = ["Embedding"]
+__all__ = ["VocabParallelEmbedding"]

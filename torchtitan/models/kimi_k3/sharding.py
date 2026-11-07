@@ -120,7 +120,7 @@ def _block_residual_placement(*, tp: spmd.PerMeshAxisSpmdType) -> SpmdType:
 
 
 def multimodal_first_layer_sharding_config(*, enable_sp: bool) -> ShardingConfig:
-    """Layer 0 boundary after a TP-replicated multimodal token embedding.
+    """Layer 0 boundary after the TP-replicated multimodal scatter.
 
     Restores the decoder's layout for the stream and the block-residual stack.
     """

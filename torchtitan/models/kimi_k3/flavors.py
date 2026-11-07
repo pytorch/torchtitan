@@ -23,13 +23,13 @@ from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     Conv1d,
     DenseFeedForward,
-    Embedding,
     GatedRMSNorm,
     HiMidLoLinear,
     Linear,
     RowParallelLinear,
     Sigmoid,
     SiTUGLU,
+    VocabParallelEmbedding,
 )
 from torchtitan.models.common.attention import FlexInnerAttention, InnerAttention
 from torchtitan.models.common.attention.kda import InnerKDA, KDA, KDAKernel
@@ -45,7 +45,6 @@ from torchtitan.models.common.decoder_sharding import (
     mla_attention_local_spmd_sharding_config,
     mla_kv_projection_sharding_config,
     norm_sharding_config,
-    pre_lm_head_norm_sharding_config,
     replicated_input_colwise_sharding_config,
     replicated_state_sharding_config,
     residual_activation_placement,
@@ -67,7 +66,6 @@ from torchtitan.models.common.vision_encoder import (
 )
 from torchtitan.models.common.vision_encoder_sharding import (
     invariant_norm_sharding_config,
-    multimodal_token_embedding_sharding_config,
     vision_attention_sharding_config,
     vision_colwise_sharding_config,
     vision_inner_attention_sharding_config,
@@ -571,9 +569,9 @@ def _kimi_k3_config(
     is KDA. Layer 0 is the single dense FFN layer (released
     ``first_k_dense_replace=1``); the rest are LatentMoE.
 
-    With a vision encoder, ``tok_embeddings`` keeps a TP-replicated output for
-    the vision scatter and layer 0's input boundary restores the decoder's
-    layout.
+    With a vision encoder, the model gathers the token embeddings to
+    TP-``Replicate`` before the vision scatter, and layer 0's input boundary
+    restores the decoder's layout.
     """
     enable_sp = parallelism.enable_sequence_parallel
     enable_ep = parallelism.expert_parallel_degree > 1
@@ -662,20 +660,14 @@ def _kimi_k3_config(
         max_context_length=max_context_length,
         dim=dim,
         vocab_size=vocab_size,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=(
-                multimodal_token_embedding_sharding_config()
-                if multimodal
-                else token_embedding_sharding_config(enable_sp=enable_sp)
-            ),
+            sharding_config=token_embedding_sharding_config(enable_sp=enable_sp),
         ),
         layers=layers,
-        norm=_norm(
-            dim, sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp)
-        ),
+        norm=_norm(dim, sharding_config=norm_sharding_config(enable_sp=enable_sp)),
         lm_head=_linear(
             dim,
             vocab_size,

@@ -23,11 +23,13 @@ from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
+    spmd_dense_sp_enabled,
     spmd_local_context,
     spmd_mesh_size,
 )
 from torchtitan.models.common.attention import AttentionMetadataMap
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
     build_dummy_vision_inputs,
@@ -91,6 +93,9 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         self.vision_encoder = (
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
+        # Fixed at build time, like layer 0's input layout. The RL generator drops
+        # ``vision_encoder`` after build but keeps the decoder's sharding.
+        self._built_with_vision_encoder = config.vision_encoder is not None
 
     def parallelize(
         self,
@@ -162,6 +167,22 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         input_dict["aux_loss_denominators"] = global_routing_token_counts
         return inputs, labels, input_dict, loss_kwargs
 
+    def _replicates_embeddings_for_vision(self) -> bool:
+        """Whether the token embeddings are gathered to TP-``Replicate`` for the
+        vision scatter.
+
+        Decided by the config, not by the runtime ``vision_encoder``, so it
+        always matches the input layout layer 0 was built with.
+
+        Without SP the stream already holds the full sequence on every TP rank,
+        so only the SP shards need gathering.
+        """
+        return (
+            self.tok_embeddings is not None
+            and self._built_with_vision_encoder
+            and spmd_dense_sp_enabled()
+        )
+
     def _prepare_multimodal_embeds(
         self,
         tokens: torch.Tensor,
@@ -178,9 +199,14 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         to visual items in order. Mixing images and videos in one batch is not
         yet supported (see the TODO below).
         """
-        inputs_embeds = (
-            self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
-        )
+        if self.tok_embeddings is None:
+            inputs_embeds = tokens
+        else:
+            inputs_embeds = self.tok_embeddings(tokens)
+            if self._replicates_embeddings_for_vision():
+                inputs_embeds = maybe_gather_tp_input(
+                    self.tok_embeddings, inputs_embeds
+                )
 
         modalities = []
         if pixel_values is not None and grid_thw is not None:
@@ -304,7 +330,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
                 aux_loss_denominator=aux_loss_denominator,
             )
 
-        x = self.norm(x) if self.norm is not None else x
+        x = self._pre_lm_head_norm_and_gather(x)
         if self._skip_lm_head:
             return x
         return self.lm_head(x) if self.lm_head is not None else x

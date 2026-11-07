@@ -23,12 +23,12 @@ from torchtitan.models.base.sharding import ShardingConfig
 
 from torchtitan.models.common import (  # noqa: F401
     Conv1d,
-    Embedding,
     GatedRMSNorm,
     Linear,
     RowParallelLinear,
     SiLU,
     Softmax,
+    VocabParallelEmbedding,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.attention.gdn import GDN, GDNKernel, InnerGDN
@@ -46,11 +46,11 @@ from torchtitan.models.common.decoder_sharding import (
     inner_attention_local_spmd_sharding_config,
     lm_head_sharding_config,
     norm_sharding_config,
-    pre_lm_head_norm_sharding_config,
     replicated_input_colwise_sharding_config,
     residual_activation_placement,
     rope_cache_sharding_config,
     rowwise_sharding_config,
+    token_embedding_sharding_config,
 )
 from torchtitan.models.common.moe.sharding import shared_experts_sharding_config
 from torchtitan.models.common.nn_modules import LayerNorm
@@ -63,7 +63,6 @@ from torchtitan.models.common.vision_encoder import (
 )
 from torchtitan.models.common.vision_encoder_sharding import (
     invariant_norm_sharding_config,
-    multimodal_token_embedding_sharding_config,
     vision_attention_sharding_config,
     vision_colwise_sharding_config,
     vision_inner_attention_sharding_config,
@@ -643,15 +642,17 @@ def _debugmodel(
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -715,15 +716,17 @@ def _debugmodel_moe(
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -791,16 +794,18 @@ def _0_8b(
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -864,16 +869,18 @@ def _2b(
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -937,16 +944,18 @@ def _4b(
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -1006,15 +1015,17 @@ def _9b(
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -1074,15 +1085,17 @@ def _27b(
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -1145,15 +1158,17 @@ def _35b_a3b(
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -1220,15 +1235,17 @@ def _122b_a10b(
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -1295,15 +1312,17 @@ def _397b_a17b(
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
