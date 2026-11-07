@@ -30,6 +30,15 @@ Weights and Biases will automatically send metrics to a remote server if you log
 Add `WandBLogger.Config()` to `metrics.loggers` in your recipe. Set
 `WANDB_PROJECT` to select the W&B project; the default is `torchtitan`.
 
+Plot metrics against `trainer/step`, the training step. Generated charts already
+do; in a saved panel, pick it as the x-axis. W&B's own `Step` (`_step`) counts
+log calls instead. Example: training and validation both log at step 10. That
+makes two rows, both with `trainer/step` 10, and with two different `Step` values.
+
+`WANDB_RESUME_FROM` and `WANDB_FORK_FROM` take `<run>?_step=N`, so N is a `Step`
+value. To start from training step S, use the `Step` of the row whose
+`trainer/step` is S.
+
 For an example you can inspect the Llama 3 [recipe](../../torchtitan_recipes/models/llama3.py)
 
 ## MLflow
