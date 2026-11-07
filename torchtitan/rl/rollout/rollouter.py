@@ -228,18 +228,23 @@ class Rollouter(Configurable):
         if workers:
             try:
                 async with asyncio.timeout_at(deadline):
-                    await asyncio.gather(
+                    # return_exceptions: a dead worker must not cut short the wait for the
+                    # live ones, which may still owe the router replies.
+                    results = await asyncio.gather(
                         *(
                             worker.wait_for_generate_calls.call_one()
                             for worker in workers
-                        )
+                        ),
+                        return_exceptions=True,
                     )
-            except Exception:
-                # A timeout, or a worker that already died: stop the workers anyway.
+                errors = [result for result in results if isinstance(result, Exception)]
+            except TimeoutError as timeout:
+                errors = [timeout]
+            if errors:
                 logger.warning(
                     "Stopping rollout workers before every generate call was answered; "
-                    "the job may exit 130",
-                    exc_info=True,
+                    "the job may exit 130: %r",
+                    errors,
                 )
         if actor_system is not None:
             await actor_system.stop_rollout_workers()
