@@ -250,8 +250,8 @@ Instead, the end-of-block residual add (`ffn_residual`) and the shared-expert
 add (`moe.shared_add`) are fixed `recompute=False` regions, so replay skips
 them. A bare add saves nothing for backward, so its inputs need no marker and
 stay resident only as long as the forward needs them. Muse Glimmer's
-`ffn_residual` also holds its post-FFN norm, which saves only its input and a
-`[T]` rstd for backward, the same tensors the norm would save anywhere else.
+`ffn_residual` also holds its post-FFN norm: it keeps only its `[T]` rstd, and
+replay rebuilds its input (`ffn_out`) while rerunning the FFN.
 
 ## Random state
 

@@ -74,6 +74,23 @@ class RMSGainCenterNorm(RMSNorm):
         return F.rms_norm(input, self.normalized_shape, w, self.eps)
 
 
+# Compiled, the head flatten, sigmoid and gate multiply run as one kernel (eager: 2).
+# emulate_precision_casts rounds the sigmoid to bf16 before the multiply, as eager does.
+@local_compile(
+    "muse_glimmer_attention_output",
+    batch_invariant=True,
+    options={"emulate_precision_casts": True},
+)
+def _flatten_attention_output(
+    output: torch.Tensor, gate: torch.Tensor | None
+) -> torch.Tensor:
+    """Flatten the attention heads to `[T, n_heads * head_dim]`, times `sigmoid(gate)` if configured."""
+    output = output.contiguous().view(output.shape[0], -1)
+    if gate is not None:
+        output = output * torch.sigmoid(gate)
+    return output
+
+
 class Attention(GQAttention):
     """Muse Glimmer GQA attention.
 
@@ -147,27 +164,7 @@ class Attention(GQAttention):
             gate = self.o_gate(x_TD)
             # The gating reads the o_gate projection output with bare ops.
             remat.recompute_needs_tensor(gate)
-        return self.wo(self._flatten_attention_output(output, gate))
-
-    # Compiled, the head flatten, sigmoid and gate multiply run as one kernel (eager: 2).
-    # emulate_precision_casts rounds the sigmoid to bf16 before the multiply, as eager does.
-    # No pointwise autotuning: kernel configs picked by timing can round differently from run to run.
-    @local_compile(
-        "muse_glimmer_attention_output",
-        batch_invariant=True,
-        options={
-            "emulate_precision_casts": True,
-            "triton.autotune_pointwise": False,
-        },
-    )
-    def _flatten_attention_output(
-        self, output: torch.Tensor, gate: torch.Tensor | None
-    ) -> torch.Tensor:
-        """Flatten the attention heads to `[T, n_heads * head_dim]`, times `sigmoid(gate)` if configured."""
-        output = output.contiguous().view(output.shape[0], -1)
-        if gate is not None:
-            output = output * torch.sigmoid(gate)
-        return output
+        return self.wo(_flatten_attention_output(output, gate))
 
 
 # Compiled, each residual site of the block runs as one kernel: the gain-center weight adds,
@@ -215,8 +212,8 @@ class MuseGlimmerTransformerBlock(TransformerBlock):
         remat.recompute_needs_tensor(attn_out)
         h, ffn_input = self._attention_residual(x, attn_out)
         ffn_out = self.feed_forward(ffn_input)
-        # Trailing norm and add, always saved: backward keeps only the norm's input (ffn_out)
-        # and its [T] rstd, so replay skips both, matching checkpoint early stop.
+        # Trailing norm and add, always saved, so replay skips them, as checkpoint early stop does.
+        # The norm keeps only its [T] rstd; replay rebuilds its input, ffn_out, with the FFN.
         return remat.region(
             self._ffn_residual, self.remat_region_name("ffn_residual"), recompute=False
         )(h, ffn_out)

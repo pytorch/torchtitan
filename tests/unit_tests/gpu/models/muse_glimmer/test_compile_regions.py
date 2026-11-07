@@ -14,6 +14,7 @@ import torch
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.muse_glimmer import build_model_config
+from torchtitan.models.muse_glimmer.model import _flatten_attention_output
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
@@ -80,8 +81,12 @@ def _compare_region_to_eager(region, fn, module, inputs, grads, token_counts):
     ):
         no_grad_outputs, actual_tensors = actual_case
         expected_tensors, reference_tensors = expected_case[1], reference_case[1]
+        num_outputs = len(no_grad_outputs)
         for no_grad_output, grad_output, expected_output in zip(
-            no_grad_outputs, actual_tensors, expected_tensors, strict=False
+            no_grad_outputs,
+            actual_tensors[:num_outputs],
+            expected_tensors[:num_outputs],
+            strict=True,
         ):
             # A norm over a wide row is a looped reduction whose kernel config Inductor picks
             # per kernel, so the summation order can differ in a few rows.
@@ -106,12 +111,11 @@ def _compare_region_to_eager(region, fn, module, inputs, grads, token_counts):
 # Token counts: 2048 compiles a static graph, as a generator's first call does; 37 a symbolic
 # one; 1 its own. Without emulate_precision_casts, 34-47% of the outputs at width 6656 differ
 # from eager and up to 21% between no_grad and grad mode.
-@pytest.mark.parametrize("width", [None, 6656])
+@pytest.mark.parametrize("width", [256, 6656], ids=["debug_width", "glimmer_30b_width"])
 def test_residual_norm_region_matches_eager(width):
     torch.manual_seed(0)
     config = build_model_config("debugmodel", parallelism=ParallelismConfig())
     layer_config = config.layers[0]
-    width = width or config.dim
     block = layer_config.build().cuda()
     norm_names = ("post_attention_norm", "ffn_norm", "post_ffn_norm")
     for name in norm_names:
@@ -139,8 +143,7 @@ def test_residual_norm_region_matches_eager(width):
 def test_attention_output_region_matches_eager():
     torch.manual_seed(0)
     config = build_model_config("debugmodel", parallelism=ParallelismConfig())
-    attention = config.layers[0].attention.build().cuda()
-    attention.requires_grad_(False)
+    attention = config.layers[0].attention.build()
     heads, head_dim = attention.n_heads, attention.head_dim
     inputs = [
         torch.randn(64, heads, head_dim, device="cuda"),
@@ -150,10 +153,8 @@ def test_attention_output_region_matches_eager():
     token_counts = (64, 37, 1)
     no_grad_outputs = _compare_region_to_eager(
         "muse_glimmer_attention_output",
-        lambda attention, output, gate: (
-            attention._flatten_attention_output(output, gate),
-        ),
-        attention,
+        lambda _, output, gate: (_flatten_attention_output(output, gate),),
+        torch.nn.Module(),  # no parameters
         inputs,
         grads,
         token_counts,
