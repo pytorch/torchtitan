@@ -22,15 +22,17 @@ class ProcessStats:
         children=False   this process only
         children=True    plus every live descendant (e.g. a rollout worker's agent subprocesses)
                          and, for CPU, every descendant already reaped inside the tree
-        never counted    a descendant that left the tree (its parent exited first, or it
-                         double-forked), and a container's processes (children of dockerd)
+        left the tree    a descendant whose parent exited first, or that double-forked: counted
+                         while in the tree; once it leaves, its CPU so far comes out of the next
+                         reads (e.g. 50 s counted, then 0 s reported until the tree does 50 s more)
+        never counted    a container's processes (children of dockerd)
 
     Example: ProcessStats("rollout_worker", children=True).metrics() on two workers, reduced
     to the sum (the job), the max (the largest worker) and the min (the fullest host):
-        perf/rollout_worker/cpu_seconds/sum                      79.2  CPU-s since the last read
-        perf/rollout_worker/rss_anon_gib/sum                     52.8
-        perf/rollout_worker/rss_anon_gib/max                     27.1
-        host_memory/rollout_worker_host_mem_available_gib/min    512.0
+        process/rollout_worker/cpu_seconds/sum              79.2   CPU-s since the last read
+        process/rollout_worker/rss_anon_gib/sum             52.8
+        process/rollout_worker/rss_anon_gib/max             27.1
+        process/rollout_worker/host_mem_available_gib/min   512.0
     """
 
     def __init__(self, role: str, *, children: bool) -> None:
@@ -45,14 +47,13 @@ class ProcessStats:
         cpu_since_last_read = cpu_seconds - self._cpu_seconds
         self._cpu_seconds = cpu_seconds
         anon_gib = sum(map(_anonymous_kib, (os.getpid(), *live_descendants))) / 2**20
-        prefix = f"perf/{self._role}"
+        prefix = f"process/{self._role}"
         return [
             Metric(f"{prefix}/cpu_seconds", Sum(cpu_since_last_read)),
             Metric(f"{prefix}/rss_anon_gib", Sum(anon_gib)),
             Metric(f"{prefix}/rss_anon_gib", Max(anon_gib)),
             Metric(
-                f"host_memory/{self._role}_host_mem_available_gib",
-                Min(_mem_available_kib() / 2**20),
+                f"{prefix}/host_mem_available_gib", Min(_mem_available_kib() / 2**20)
             ),
         ]
 
@@ -86,6 +87,8 @@ class ProcessStats:
                 seconds += (
                     sum(int(field) for field in stat[_CPU_TIMES]) / _TICKS_PER_SECOND
                 )
+        # TODO: per-process deltas, or the cgroup's cpu.stat, would keep the CPU of a descendant
+        #   that left the tree; this max takes it back out of the next reads.
         return max(self._cpu_seconds, seconds), live_descendants
 
 

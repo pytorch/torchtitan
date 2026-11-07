@@ -1126,7 +1126,8 @@ class Controller(Configurable):
                 self.batcher.sync_log_step.broadcast(step)
                 await self._rollouter.sync_log_step(step)
             # Read the workers', the router's and the controller's CPU and memory while the trainer
-            # steps. A read covers the time since the previous one (about the previous step).
+            # steps. A read covers the time since the previous one (about the previous step); step
+            # 1's covers setup too (env and checkpoint loading).
             process_metrics_task = asyncio.create_task(self._read_process_metrics())
             step_timer = MetricsTimer()
 

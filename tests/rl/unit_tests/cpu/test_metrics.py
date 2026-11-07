@@ -832,8 +832,8 @@ def test_process_stats_counts_each_child_cpu_second_once() -> None:
     """A rollout worker's agents are subprocesses. Example: a child burns 1 s and exits. The read
     while it runs counts its 1 s; the read after it exits does not count it again."""
     read = _read
-    cpu, memory = ("perf/rollout_worker/cpu_seconds", m.Sum), (
-        "perf/rollout_worker/rss_anon_gib",
+    cpu, memory = ("process/rollout_worker/cpu_seconds", m.Sum), (
+        "process/rollout_worker/rss_anon_gib",
         m.Sum,
     )
     tree = ProcessStats("rollout_worker", children=True)
@@ -857,13 +857,17 @@ def test_process_stats_counts_each_child_cpu_second_once() -> None:
         live.stdin.close()
         live.wait()
     assert while_live[cpu] >= 1.0
-    assert while_live[cpu] - own_while_live[("perf/router/cpu_seconds", m.Sum)] >= 0.8
     assert (
-        while_live[memory] - own_while_live[("perf/router/rss_anon_gib", m.Sum)]
+        while_live[cpu] - own_while_live[("process/router/cpu_seconds", m.Sum)] >= 0.8
+    )
+    assert (
+        while_live[memory] - own_while_live[("process/router/rss_anon_gib", m.Sum)]
         >= 60 / 1024
     )
-    assert while_live[("perf/rollout_worker/rss_anon_gib", m.Max)] == while_live[memory]
-    assert while_live[("host_memory/rollout_worker_host_mem_available_gib", m.Min)] > 0
+    assert (
+        while_live[("process/rollout_worker/rss_anon_gib", m.Max)] == while_live[memory]
+    )
+    assert while_live[("process/rollout_worker/host_mem_available_gib", m.Min)] > 0
 
     # 3. The same child after it exited: only this process's own work since read 2
     # (one /proc scan, ~0.2 s with 2,700 processes), not the child's 1 s again.
@@ -927,7 +931,7 @@ def test_process_stats_counts_a_descendant_once_when_it_is_reaped_mid_read(
     )
     monkeypatch.setattr(process, "_read_stat", read_stat_then_reap)
     try:
-        cpu = _read(tree)[("perf/rollout_worker/cpu_seconds", m.Sum)]
+        cpu = _read(tree)[("process/rollout_worker/cpu_seconds", m.Sum)]
     finally:
         monkeypatch.undo()
         if proc.stdin is not None:
@@ -961,7 +965,7 @@ def test_process_stats_skips_a_pid_that_now_names_another_process(monkeypatch) -
     try:
         assert live.stdout.readline() == b"ready\n"
         monkeypatch.setattr(process, "_read_stat", read_stat_of_a_newer_process)
-        cpu = _read(tree)[("perf/rollout_worker/cpu_seconds", m.Sum)]
+        cpu = _read(tree)[("process/rollout_worker/cpu_seconds", m.Sum)]
     finally:
         monkeypatch.undo()
         live.stdin.close()
@@ -985,7 +989,7 @@ def test_process_stats_reads_a_child_that_hides_its_memory() -> None:
     )
     try:
         assert child.stdout.readline() == b"ready\n"
-        assert _read(tree)[("perf/rollout_worker/rss_anon_gib", m.Sum)] > 0
+        assert _read(tree)[("process/rollout_worker/rss_anon_gib", m.Sum)] > 0
     finally:
         child.stdin.close()
         child.wait()

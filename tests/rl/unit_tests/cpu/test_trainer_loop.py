@@ -119,7 +119,7 @@ def _controller(
     )
 
     async def router_process_metrics():
-        return [m.Metric("perf/router/cpu_seconds", m.NoReduce(1.0))]
+        return [m.Metric("process/router/cpu_seconds", m.NoReduce(1.0))]
 
     controller.generator_router = SimpleNamespace(
         sync_log_step=_Endpoint(),
@@ -135,7 +135,7 @@ def _controller(
         pass
 
     async def worker_process_metrics():
-        return [m.Metric("perf/rollout_worker/cpu_seconds", m.Sum(2.0))]
+        return [m.Metric("process/rollout_worker/cpu_seconds", m.Sum(2.0))]
 
     controller._rollouter = SimpleNamespace(
         sync_log_step=sync_log_step,
@@ -144,7 +144,7 @@ def _controller(
         state_dict=lambda: {},
     )
     controller._process_stats = SimpleNamespace(
-        metrics=lambda: [m.Metric("perf/controller/cpu_seconds", m.Sum(0.5))]
+        metrics=lambda: [m.Metric("process/controller/cpu_seconds", m.Sum(0.5))]
     )
     controller._group_buffer = SimpleNamespace(
         metrics=lambda: [], release_active_groups=release_active_groups
@@ -266,9 +266,9 @@ def test_each_step_logs_the_workers_router_and_controller_process_metrics() -> N
 
     assert len(controller.logged_metrics) == 2
     for logged in controller.logged_metrics:
-        assert logged["perf/rollout_worker/cpu_seconds"].value.value == 2.0
-        assert logged["perf/router/cpu_seconds"].value.value == 1.0
-        assert logged["perf/controller/cpu_seconds"].value.value == 0.5
+        assert logged["process/rollout_worker/cpu_seconds"].value.value == 2.0
+        assert logged["process/router/cpu_seconds"].value.value == 1.0
+        assert logged["process/controller/cpu_seconds"].value.value == 0.5
         assert "timing/step/blocking_read_process_metrics" in logged
 
 
