@@ -10,9 +10,8 @@ Declarations only: ``flavors.py`` sets these on each sub-config as it builds
 it, and ``model.parallelize()`` applies TP/EP/SP through the Module protocol.
 
 - Decoder (MLA + MoE): built with DeepSeek V3's sharded layer builder.
-  Multimodal models gather the token embeddings to ``Replicate`` before the
-  vision scatter and resume SP at layer 0 (see
-  ``sequence_parallel_first_layer_sharding_config``).
+  Under SP, multimodal models gather the token embeddings to ``Replicate``
+  before the vision scatter and restore the residual layout after it.
 - Vision encoder: activations flow ``Invariant`` (no SP -- the patch sequence is
   short, so sequence-sharding would add gather/scatter around the block-diagonal
   attention for little memory gain). Only the linear layers are Colwise/Rowwise
@@ -24,28 +23,10 @@ from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.sharding import ShardingConfig
-from torchtitan.models.common.decoder_sharding import (
-    dense_sequence_parallel_placement,
-    replicated_activation_placement,
-)
 
 DP = MeshAxisName.DP
 CP = MeshAxisName.CP
 TP = MeshAxisName.TP
-
-
-def sequence_parallel_first_layer_sharding_config() -> ShardingConfig:
-    """Layer 0 boundary that resumes SP after the ``Replicate`` vision scatter.
-
-    Layer 0 takes a ``Replicate`` input and its rowwise ``wo`` reduce-scatters
-    back to ``Shard(0)``, so the residual is sequence-parallel from layer 0's
-    output and layers ``1..N-1`` are unchanged full SP.
-    """
-    return ShardingConfig(
-        in_src_shardings={"x": replicated_activation_placement()},
-        in_dst_shardings={"x": dense_sequence_parallel_placement()},
-        out_src_shardings=dense_sequence_parallel_placement(),
-    )
 
 
 def _moonvit_state_placement() -> SpmdType:

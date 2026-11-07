@@ -19,7 +19,6 @@ from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
-from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     ComplexRoPE,
     FeedForward,
@@ -297,7 +296,6 @@ def build_mla_moe_layers(
     router_config_factory: Callable[
         ..., TokenChoiceTopKRouter.Config
     ] = make_router_config,
-    first_layer_sharding_config: ShardingConfig | None = None,
     norm_eps: float = 1e-6,
     enable_sp: bool,
     enable_ep: bool,
@@ -310,9 +308,7 @@ def build_mla_moe_layers(
     Router and expert inits are constructed per-layer so depth-scaled
     initializers are correct for each layer's position. The router factory lets
     architecture variants select their routing policy without changing this
-    shared layer builder; it must return a sharded router config.
-    ``first_layer_sharding_config`` sets layer 0's own boundary, for decoders
-    whose embedding output is not in the residual layout. ``norm_eps`` is the
+    shared layer builder; it must return a sharded router config. ``norm_eps`` is the
     epsilon of each block's ``attention_norm`` and ``ffn_norm`` (HF
     ``rms_norm_eps``); the MLA q/kv norms keep 1e-6.
     """
@@ -395,7 +391,6 @@ def build_mla_moe_layers(
                     sharding_config=norm_sharding,
                 ),
                 feed_forward=ffn_cfg,
-                sharding_config=first_layer_sharding_config if layer_id == 0 else None,
             )
         )
     return layers
