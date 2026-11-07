@@ -7,15 +7,23 @@
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch import nn
+from torch.utils.checkpoint import (
+    checkpoint,
+    CheckpointPolicy,
+    create_selective_checkpoint_contexts,
+)
 
 from torchtitan.distributed.local_compile import local_compile
+from torchtitan.models.common.activation import BinaryActivationFn
 from torchtitan.models.common.linear import GroupedLinear
+from torchtitan.models.common.moe import RoutedExperts
 
 # Shape suffix legend: R = routed rows, E = experts, I = input features,
 # O = flattened output features, including stacked projections.
@@ -38,8 +46,12 @@ class GptOssGroupedLinear(GroupedLinear):
         offsets_E: torch.Tensor,
         *,
         scores_R: torch.Tensor | None = None,
+        add_bias: bool = True,
     ) -> torch.Tensor:
         output_RO = super().forward(input_RI, offsets_E, scores_R=scores_R)
+        if not add_bias:
+            # GptOssRoutedExperts adds w13's bias inside its activation region.
+            return output_RO
         flat_output_RO = output_RO.flatten(1)
         # Mark rows dynamic from the first call (scores_R has the same rows). Without it,
         # PP fails in backward:
@@ -69,11 +81,6 @@ class GptOssGroupedLinear(GroupedLinear):
         return biased_RO.view_as(output_RO)
 
 
-# TODO: add w13's bias inside the fused_binary_activation region (RoutedExperts must then
-# pass the bias to the activation). Without grad: one kernel instead of two. With grad it
-# only pays if SwiGLU's backward recomputes the add, so SwiGLU would read the fp32 sum
-# instead of today's bf16-rounded w13 output: not bitwise.
-#
 # recompile_limit=16 covers the graphs per process: 3 per width (w13, w2), one for 2+ rows
 # and one each for 0 and 1 rows (EP ranks with few tokens), twice if the process runs both
 # grad and no_grad. Up to 12.
@@ -123,9 +130,12 @@ class _GatherGroupedBias(torch.autograd.Function):
     ) -> torch.Tensor:
         ctx.save_for_backward(expert_ids_R)
         ctx.num_experts = bias_EO.shape[0]
-        # Padding rows (expert id E) index the appended zero row.
-        padded_bias_EO = torch.cat((bias_EO, bias_EO.new_zeros(1, bias_EO.shape[-1])))
-        return padded_bias_EO[expert_ids_R]
+        # Padding rows (expert id E) get zero. torch.where keeps this gather inside its
+        # consumer's kernel. A padded copy of the bias (cat with a zero row) adds 2 kernels
+        # per call in the w13_bias_activation region.
+        in_range_R1 = (expert_ids_R < bias_EO.shape[0]).unsqueeze(-1)
+        gathered_RO = bias_EO[expert_ids_R.clamp(max=bias_EO.shape[0] - 1)]
+        return torch.where(in_range_R1, gathered_RO, 0)
 
     @staticmethod
     def backward(ctx, grad_RO: torch.Tensor):  # pyrefly: ignore[bad-override]
@@ -133,3 +143,69 @@ class _GatherGroupedBias(torch.autograd.Function):
         one_hot_ER = grad_RO.new_zeros(ctx.num_experts + 1, grad_RO.shape[0])
         one_hot_ER.scatter_(0, expert_ids_R.long().unsqueeze(0), 1)
         return torch.mm(one_hot_ER, grad_RO)[: ctx.num_experts], None
+
+
+class GptOssRoutedExperts(RoutedExperts):
+    """Routed experts that add w13's bias inside the activation region."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(RoutedExperts.Config):
+        pass
+
+    def _w13_and_activation(
+        self, routed_input_RD: torch.Tensor, offsets_E: torch.Tensor
+    ) -> torch.Tensor:
+        gate_up_R2F = self.w13(routed_input_RD.bfloat16(), offsets_E, add_bias=False)
+        remat.recompute_needs_tensor(gate_up_R2F)
+        # Dynamic rows and a copy of the bias, for PP + FSDP2: see GptOssGroupedLinear.forward.
+        if not torch.compiler.is_compiling():
+            torch._dynamo.maybe_mark_dynamic(gate_up_R2F, 0)
+        return add_bias_and_activate(
+            gate_up_R2F, self.w13.bias.clone(), offsets_E, self.activation_fn
+        )
+
+
+# Same options as fused_binary_activation, whose __call__ this region inlines.
+@local_compile(
+    "w13_bias_activation",
+    batch_invariant=True,
+    options={"max_pointwise_cat_inputs": 0, "max_complex_pointwise_cat_inputs": 0},
+)
+def add_bias_and_activate(
+    gate_up_R2F: torch.Tensor,
+    bias_E2F: torch.Tensor,
+    offsets_E: torch.Tensor,
+    activation_fn: BinaryActivationFn,
+) -> torch.Tensor:
+    """Return ``activation_fn(gate_up_R2F + bias_E2F[expert of row])``, both in one region.
+
+    Example:
+        offsets_E = [2, 3] (expert 0 owns rows 0-1, expert 1 row 2), 4 rows:
+        rows 0-1 add bias_E2F[0], row 2 adds bias_E2F[1], row 3 (padding) adds nothing,
+        then activation_fn maps each row's [2, F] gate and up to [F].
+    """
+
+    def biased_activation(
+        gate_up_R2F: torch.Tensor, bias_E2F: torch.Tensor
+    ) -> torch.Tensor:
+        biased_RO = add_grouped_bias(
+            gate_up_R2F.flatten(1), bias_E2F.flatten(1), offsets_E
+        )
+        return activation_fn(biased_RO.view_as(gate_up_R2F), offsets=offsets_E)
+
+    if not torch.compiler.is_compiling():
+        return biased_activation(gate_up_R2F, bias_E2F)
+    # Compiled as is, the region would save the biased [R, 2F] for the activation's
+    # backward, so the forward still writes it. Recomputing the whole function in backward
+    # fuses the add into one forward and one backward kernel, and saves gate_up_R2F instead.
+    # The activation then reads the add's unrounded fp32 result. Eager reads it rounded to bf16.
+    return checkpoint(
+        biased_activation,
+        gate_up_R2F,
+        bias_E2F,
+        use_reentrant=False,
+        context_fn=functools.partial(
+            create_selective_checkpoint_contexts,
+            lambda ctx, op, *args, **kwargs: CheckpointPolicy.MUST_RECOMPUTE,
+        ),
+    )

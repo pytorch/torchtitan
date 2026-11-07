@@ -243,6 +243,7 @@ class GptOssModel(Decoder):
                     "fp32_to_bf16_split",
                     "grouped_expert_bias",
                     "attention_sinks",
+                    "w13_bias_activation",
                 ]
             )
         )

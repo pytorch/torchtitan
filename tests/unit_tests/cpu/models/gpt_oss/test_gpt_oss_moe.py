@@ -18,7 +18,11 @@ from torch.utils.checkpoint import checkpoint
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.activation import ClampedSwiGLU
-from torchtitan.models.gpt_oss.moe import add_grouped_bias, GptOssGroupedLinear
+from torchtitan.models.gpt_oss.moe import (
+    add_bias_and_activate,
+    add_grouped_bias,
+    GptOssGroupedLinear,
+)
 
 
 @pytest.fixture
@@ -106,6 +110,25 @@ def test_grouped_bias_matches_repeat_interleave(
         out_RO = fn(*inputs[:2], offsets_E, scores_R=inputs[2] if with_scores else None)
         out_RO.backward(grad_RO)
         results.append((out_RO.detach(), *(t.grad for t in inputs)))
+    for reference, actual in zip(*results, strict=True):
+        torch.testing.assert_close(actual, reference)
+
+
+def test_w13_bias_activation_matches_unfused(reset_local_compile) -> None:
+    """The compiled w13_bias_activation region matches the bias add then the activation."""
+    torch.manual_seed(0)
+    activation_fn = ClampedSwiGLU.Config().build()
+    # 3 experts own rows 0-1, (none), 2-4; rows 5-6 are padding.
+    offsets_E = torch.tensor([2, 2, 5], dtype=torch.int32)
+    tensors = [torch.randn(7, 2, 6), torch.randn(3, 2, 6), torch.randn(7, 6)]
+    gate_up_R2F, bias_E2F, grad_RF = (t.double() for t in tensors)
+    results = []
+    for regions in ([], ["w13_bias_activation"]):
+        LocalCompileConfig(regions=regions).apply()
+        inputs = [t.clone().requires_grad_(True) for t in (gate_up_R2F, bias_E2F)]
+        hidden_RF = add_bias_and_activate(*inputs, offsets_E, activation_fn)
+        hidden_RF.backward(grad_RF)
+        results.append((hidden_RF.detach(), *(t.grad for t in inputs)))
     for reference, actual in zip(*results, strict=True):
         torch.testing.assert_close(actual, reference)
 

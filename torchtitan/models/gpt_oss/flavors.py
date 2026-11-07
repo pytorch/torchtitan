@@ -60,7 +60,7 @@ from torchtitan.models.common.moe.sharding import (
 from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.common.param_init import depth_scaled_std
 from .model import GptOssAttention, GptOssModel, GptOssTransformerBlock
-from .moe import GptOssGroupedLinear
+from .moe import GptOssGroupedLinear, GptOssRoutedExperts
 from .sharding import attention_sharding_config, routed_expert_linear_sharding_config
 
 __all__ = [
@@ -187,7 +187,7 @@ def _make_gptoss_experts_config(
         "weight": partial(nn.init.trunc_normal_, std=std),
         "bias": partial(nn.init.trunc_normal_, std=std),
     }
-    return RoutedExperts.Config(
+    return GptOssRoutedExperts.Config(
         w13=GptOssGroupedLinear.Config(
             group_size=num_experts,
             in_features=dim,
