@@ -92,6 +92,7 @@ def test_qkv_norm_rope_region_matches_eager(model):
             )
 
 
+@pytest.mark.multi_gpu
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
 class TestQKVNormRopeTensorParallel(DTensorTestBase):
     @property
