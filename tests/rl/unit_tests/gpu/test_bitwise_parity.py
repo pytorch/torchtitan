@@ -1094,9 +1094,9 @@ class TestBitwiseParityKimiK3DebugVarlen(KimiK3BitwiseParityTestBase):
         """vLLM prefill and decode must not depend on batch composition."""
         self._check_vllm_prefill_and_decode_batch_invariance()
 
-    # TODO: trainer and vLLM prefill differ on prompt + generated tokens, greedy too (seq 0 on H100:
-    # the first 5 generated tokens match, 33 of 128 match, max_delta 3.2e-2). The prompt-only test
-    # passes. The generator's chunked KDA prefill (paged_chunk_kda) is a candidate.
+    # TODO: trainer and vLLM prefill differ on prompt + generated tokens, greedy too (seq 0, H100:
+    # 33 of 128 match). The 64-token prompt (one KDA chunk) matches, and vLLM decode matches its
+    # prefill. So compare how the trainer and paged_chunk_kda carry KDA state across chunks.
     @unittest.skip(
         "Kimi K3 trainer and vLLM differ past the prompt; see the TODO above"
     )
