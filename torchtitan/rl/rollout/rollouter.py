@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import logging
+import random
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any, TYPE_CHECKING
@@ -135,8 +136,8 @@ class Rollouter(Configurable):
             raise ValueError("training_dataloader must build a RolloutDataLoader")
         self._training_dataloader = iter(training_dataloader)
 
-        # The worker pool's actor handle and the actor system that spawned it.
-        self._worker_actors: Any | None = None
+        # One single-actor handle per worker process, and the actor system that spawned them.
+        self._workers: list[Any] = []
         self._actor_system: ActorSystem | None = None
         # `run_group` calls still running on a worker, including those whose caller was cancelled.
         self._inflight_run_group_calls: set[asyncio.Future[RolloutGroup]] = set()
@@ -169,19 +170,24 @@ class Rollouter(Configurable):
         hf_assets_path: str,
     ) -> None:
         """Spawn the rollout worker pool through ``actor_system`` and initialize it."""
-        if self._worker_actors is not None:
+        if self._workers:
             raise RuntimeError("rollout worker pool is already initialized")
 
         self._actor_system = actor_system
-        self._worker_actors = await actor_system.spawn_rollout_workers(
+        self._workers = await actor_system.spawn_rollout_workers(
             self._config.worker,
             num_workers=self._config.worker_pool_size,
             num_threads=self._config.num_threads_per_worker,
         )
-        await self._worker_actors.setup_async.call(
-            tokenizer_config=tokenizer_config,
-            renderer_config=renderer_config,
-            hf_assets_path=hf_assets_path,
+        await asyncio.gather(
+            *(
+                worker.setup_async.call_one(
+                    tokenizer_config=tokenizer_config,
+                    renderer_config=renderer_config,
+                    hf_assets_path=hf_assets_path,
+                )
+                for worker in self._workers
+            )
         )
 
     async def close(self) -> None:
@@ -196,9 +202,9 @@ class Rollouter(Configurable):
         Why wait: if a worker stops while the generator router still owes it a reply, Monarch fails the
         router and the finished job exits 130.
         """
-        worker_actors = self._worker_actors
+        workers = self._workers
         actor_system = self._actor_system
-        self._worker_actors = None
+        self._workers = []
         self._actor_system = None
         deadline = asyncio.get_running_loop().time() + _SHUTDOWN_DRAIN_TIMEOUT_S
         calls = tuple(self._inflight_run_group_calls)
@@ -213,10 +219,15 @@ class Rollouter(Configurable):
                 for call in pending:
                     call.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
-        if worker_actors is not None:
+        if workers:
             try:
                 async with asyncio.timeout_at(deadline):
-                    await worker_actors.wait_for_generate_calls.call()
+                    await asyncio.gather(
+                        *(
+                            worker.wait_for_generate_calls.call_one()
+                            for worker in workers
+                        )
+                    )
             except Exception:
                 # A timeout, or a worker that already died: stop the workers anyway.
                 logger.warning(
@@ -229,8 +240,9 @@ class Rollouter(Configurable):
 
     async def sync_log_step(self, step: int) -> None:
         """Propagate the controller log step to every rollout worker."""
-        if self._worker_actors is not None:
-            await self._worker_actors.sync_log_step.call(step)
+        await asyncio.gather(
+            *(worker.sync_log_step.call_one(step) for worker in self._workers)
+        )
 
     async def run_group_rollouts(
         self,
@@ -260,13 +272,17 @@ class Rollouter(Configurable):
         Returns:
             One scored `RolloutGroup`.
         """
-        if self._worker_actors is None:
+        if not self._workers:
             raise RuntimeError("rollout worker pool is not initialized")
 
-        # `choose` (see ActorSystem's call convention) sends the call to the `run_group`
-        # endpoint of one worker in the pool.
+        # Random, so a worker whose groups fail at once gets 1/N of the groups. Picking the least
+        # busy worker would send it every slot that frees up.
+        # TODO: random puts 5-7 groups on the busiest worker when the mean is 1 (250 groups on 250
+        #   workers). Before groups of tens of GB (1M-token rollouts, 128 per group), reserve
+        #   their bytes per worker host at admission, or pick by bytes with a fail-fast guard.
+        worker = random.choice(self._workers)
         call = asyncio.ensure_future(
-            self._worker_actors.run_group.choose(
+            worker.run_group.call_one(
                 generate_fn=generate_fn,
                 release_session_fn=release_session_fn,
                 sample=sample,
@@ -287,7 +303,7 @@ class Rollouter(Configurable):
             # TODO(monarch): drop cancel_group once Monarch forwards a caller's cancel to the callee.
             try:
                 async with asyncio.timeout(_SHUTDOWN_DRAIN_TIMEOUT_S):
-                    await self._worker_actors.cancel_group.call(group_id)
+                    await worker.cancel_group.call_one(group_id)
             except Exception:
                 logger.exception(
                     "cancel_group(%d) failed; the group may keep running", group_id

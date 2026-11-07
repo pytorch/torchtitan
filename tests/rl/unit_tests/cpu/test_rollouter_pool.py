@@ -17,19 +17,14 @@ import cloudpickle
 import pytest
 from monarch.actor import ActorError, this_host
 
-from torchtitan.observability import structured_logger as sl
-from torchtitan.rl.actors.monarch import (
-    provisioning,
-    rollout_worker as rollout_worker_module,
-)
+from torchtitan.rl.actors.monarch import rollout_worker as rollout_worker_module
 from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
-from torchtitan.rl.actors.monarch.system import MonarchActorSystem
 
 from torchtitan.rl.rollout import rollouter as rollouter_module, RolloutGroup
-from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
+from torchtitan.rl.rollout.rollouter import Rollouter
 
 
-class _ChooseRunGroupEndpoint:
+class _RunGroupEndpoint:
     def __init__(self) -> None:
         self.calls: list[dict] = []
         self.started = asyncio.Event()
@@ -37,7 +32,7 @@ class _ChooseRunGroupEndpoint:
         self.cancelled = asyncio.Event()
         self.error: Exception | None = None
 
-    def choose(self, **kwargs) -> asyncio.Future[RolloutGroup]:
+    def call_one(self, **kwargs) -> asyncio.Future[RolloutGroup]:
         self.calls.append(kwargs)
         self.started.set()
         return asyncio.create_task(self._execute(kwargs))
@@ -81,12 +76,15 @@ def test_rollout_worker_actor_builds_its_worker_and_inits_its_logger(
     asyncio.run(run())
 
 
-class _SetupEndpoint:
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
+class _CallOneEndpoint:
+    """Like a Monarch endpoint, `call_one` returns a Future, not a coroutine."""
 
-    async def call(self, **kwargs) -> None:
-        self.calls.append(kwargs)
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def call_one(self, *args, **kwargs) -> asyncio.Future:
+        self.calls.append(kwargs or args)
+        return asyncio.ensure_future(asyncio.sleep(0))
 
 
 class _CancelGroupEndpoint:
@@ -94,211 +92,150 @@ class _CancelGroupEndpoint:
         self.calls: list[int] = []
         self.called, self.release = asyncio.Event(), asyncio.Event()
 
-    async def call(self, group_id: int) -> None:
+    def call_one(self, group_id: int) -> asyncio.Future:
         self.calls.append(group_id)
         self.called.set()
-        await self.release.wait()
+        return asyncio.ensure_future(self.release.wait())
 
 
-class _WaitForGenerateCallsEndpoint:
-    async def call(self) -> None:
-        pass
+class _Worker:
+    """A single-actor handle to one rollout worker."""
 
-
-class _WorkerActorMesh:
     def __init__(self) -> None:
-        self.setup_async = _SetupEndpoint()
-        self.run_group = _ChooseRunGroupEndpoint()
+        self.setup_async = _CallOneEndpoint()
+        self.run_group = _RunGroupEndpoint()
         self.cancel_group = _CancelGroupEndpoint()
-        self.wait_for_generate_calls = _WaitForGenerateCallsEndpoint()
-        self.stopped = False
-
-    async def stop(self) -> None:
-        self.stopped = True
+        self.wait_for_generate_calls = _CallOneEndpoint()
+        self.sync_log_step = _CallOneEndpoint()
 
 
-class _WorkerMesh:
-    def __init__(self, actor_mesh: _WorkerActorMesh) -> None:
-        self.actor_mesh = actor_mesh
-        self.spawn_args = None
-        self.stopped = False
-
-    def spawn(self, *args, **kwargs) -> _WorkerActorMesh:
-        self.spawn_args = (args, kwargs)
-        return self.actor_mesh
-
-    async def stop(self) -> None:
-        await self.actor_mesh.stop()
-        self.stopped = True
-
-
-class _ControllerHost:
-    def __init__(self, worker_mesh: _WorkerMesh) -> None:
-        self.worker_mesh = worker_mesh
+class _ActorSystem:
+    def __init__(self, workers: list[_Worker]) -> None:
+        self.workers = workers
         self.spawn_kwargs = None
+        self.stopped = False
 
-    def spawn_procs(self, **kwargs) -> _WorkerMesh:
-        self.spawn_kwargs = kwargs
-        return self.worker_mesh
+    async def spawn_rollout_workers(self, config, **kwargs) -> list[_Worker]:
+        self.spawn_kwargs = {"config": config, **kwargs}
+        return self.workers
+
+    async def stop_rollout_workers(self) -> None:
+        self.stopped = True
 
 
 def _rollouter_without_datasets() -> Rollouter:
-    class WorkerConfig:
-        _owner = RolloutWorker
-
-    worker_config = WorkerConfig()
     rollouter = object.__new__(Rollouter)
     rollouter._config = SimpleNamespace(
-        worker=worker_config,
+        worker="worker_config",
         worker_pool_size=3,
         num_threads_per_worker=2,
     )
-    rollouter._worker_actors = None
+    rollouter._workers = []
     rollouter._actor_system = None
     rollouter._inflight_run_group_calls = set()
     return rollouter
 
 
-async def _setup(
-    rollouter: Rollouter,
-    actor_mesh: _WorkerActorMesh,
-    monkeypatch,
-) -> _WorkerMesh:
-    worker_mesh = _WorkerMesh(actor_mesh)
-    host = _ControllerHost(worker_mesh)
-    monkeypatch.setattr(provisioning, "this_host", lambda: host)
+async def _setup(rollouter: Rollouter, num_workers: int = 1) -> _ActorSystem:
+    actor_system = _ActorSystem([_Worker() for _ in range(num_workers)])
     await rollouter.setup_async(
-        actor_system=MonarchActorSystem(MonarchActorSystem.Config()),
+        actor_system=actor_system,
         tokenizer_config="tokenizer_config",
         renderer_config="renderer_config",
         hf_assets_path="hf_assets_path",
     )
-    return worker_mesh
+    return actor_system
 
 
-def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
-    async def run() -> None:
-        worker_mesh = _WorkerMesh(_WorkerActorMesh())
-        host = _ControllerHost(worker_mesh)
-        monkeypatch.setattr(provisioning, "this_host", lambda: host)
-        structured_logger_init_fn = object()
-        monkeypatch.setattr(
-            sl,
-            "get_structured_logger_subprocess_init_fn",
-            lambda: structured_logger_init_fn,
-        )
-        rollouter = _rollouter_without_datasets()
-
-        await rollouter.setup_async(
-            actor_system=MonarchActorSystem(MonarchActorSystem.Config()),
-            tokenizer_config="tokenizer_config",
-            renderer_config="renderer_config",
-            hf_assets_path="hf_assets_path",
-        )
-
-        assert host.spawn_kwargs == {"per_host": {"cpus": 3}}
-        args, kwargs = worker_mesh.spawn_args
-        assert args[0] == "rollout_worker"
-        assert args[1] is RolloutWorkerActor
-        # The actor gets the worker's own config, not the whole Rollouter config.
-        assert kwargs == {
-            "worker_config": rollouter._config.worker,
-            "num_threads": 2,
-            "structured_logger_init_fn": structured_logger_init_fn,
-        }
-        assert worker_mesh.actor_mesh.setup_async.calls == [
-            {
-                "tokenizer_config": "tokenizer_config",
-                "renderer_config": "renderer_config",
-                "hf_assets_path": "hf_assets_path",
-            }
-        ]
-        await rollouter.close()
-        assert worker_mesh.actor_mesh.stopped
-        assert worker_mesh.stopped
-
-    asyncio.run(run())
-
-
-def test_rollout_group_dispatch_uses_choose(monkeypatch) -> None:
-    async def run() -> None:
-        actor_mesh = _WorkerActorMesh()
-        rollouter = _rollouter_without_datasets()
-        await _setup(rollouter, actor_mesh, monkeypatch)
-
-        dispatch = asyncio.create_task(
-            rollouter.run_group_rollouts(
-                generate_fn="generate_fn",
-                release_session_fn="release_session_fn",
-                sample="sample",
-                group_id=1,
-                group_size=2,
-                sampling="sampling",
-            )
-        )
-        await actor_mesh.run_group.started.wait()
-        assert actor_mesh.run_group.calls == [
-            {
-                "generate_fn": "generate_fn",
-                "release_session_fn": "release_session_fn",
-                "sample": "sample",
-                "group_id": 1,
-                "group_size": 2,
-                "sampling": "sampling",
-            }
-        ]
-
-        actor_mesh.run_group.release.set()
-        assert (await dispatch).group_id == 1
-        await rollouter.close()
-        assert actor_mesh.stopped
-
-    asyncio.run(run())
-
-
-async def _dispatch_then_cancel_caller(
-    rollouter: Rollouter, actor_mesh: _WorkerActorMesh
-) -> None:
-    """Start one `run_group` call, then cancel its caller as `Controller.run` does at the end."""
-    dispatch = asyncio.create_task(
+def _dispatch(rollouter: Rollouter, group_id: int) -> asyncio.Task:
+    return asyncio.create_task(
         rollouter.run_group_rollouts(
             generate_fn="generate_fn",
             release_session_fn="release_session_fn",
             sample="sample",
-            group_id=1,
+            group_id=group_id,
             group_size=2,
             sampling="sampling",
         )
     )
-    await actor_mesh.run_group.started.wait()
+
+
+def test_setup_spawns_and_sets_up_every_worker_and_close_stops_them() -> None:
+    async def run() -> None:
+        rollouter = _rollouter_without_datasets()
+        actor_system = await _setup(rollouter, num_workers=2)
+
+        assert actor_system.spawn_kwargs == {
+            "config": "worker_config",
+            "num_workers": 3,
+            "num_threads": 2,
+        }
+        for worker in actor_system.workers:
+            assert worker.setup_async.calls == [
+                {
+                    "tokenizer_config": "tokenizer_config",
+                    "renderer_config": "renderer_config",
+                    "hf_assets_path": "hf_assets_path",
+                }
+            ]
+        await rollouter.close()
+        assert actor_system.stopped
+
+    asyncio.run(run())
+
+
+def test_dispatch_sends_each_group_to_one_worker_and_uses_every_worker() -> None:
+    async def run() -> None:
+        rollouter = _rollouter_without_datasets()
+        workers = (await _setup(rollouter, num_workers=4)).workers
+
+        dispatches = [_dispatch(rollouter, group_id) for group_id in range(200)]
+        await asyncio.sleep(0)
+        group_ids = [[c["group_id"] for c in w.run_group.calls] for w in workers]
+        assert sorted(sum(group_ids, [])) == list(range(200))
+        # Random picks: a worker left idle by 200 groups has odds 4 * (3/4) ** 200.
+        assert all(group_ids)
+
+        for worker in workers:
+            worker.run_group.release.set()
+        await asyncio.gather(*dispatches)
+        await rollouter.close()
+
+    asyncio.run(run())
+
+
+async def _dispatch_then_cancel_caller(rollouter: Rollouter, worker: _Worker) -> None:
+    """Start one `run_group` call, then cancel its caller as `Controller.run` does at the end."""
+    dispatch = _dispatch(rollouter, group_id=1)
+    await worker.run_group.started.wait()
     # Let the worker's cancel_group return at once.
-    actor_mesh.cancel_group.release.set()
+    worker.cancel_group.release.set()
     dispatch.cancel()
     await asyncio.gather(dispatch, return_exceptions=True)
 
 
-def test_close_waits_for_run_group_of_cancelled_caller(monkeypatch) -> None:
+def test_close_waits_for_run_group_of_cancelled_caller() -> None:
     async def run() -> None:
         loop_errors: list[str] = []
         asyncio.get_running_loop().set_exception_handler(
             lambda loop, context: loop_errors.append(context["message"])
         )
-        actor_mesh = _WorkerActorMesh()
         rollouter = _rollouter_without_datasets()
-        worker_mesh = await _setup(rollouter, actor_mesh, monkeypatch)
-        await _dispatch_then_cancel_caller(rollouter, actor_mesh)
+        actor_system = await _setup(rollouter)
+        worker = actor_system.workers[0]
+        await _dispatch_then_cancel_caller(rollouter, worker)
 
         close = asyncio.create_task(rollouter.close())
         await asyncio.sleep(0)
-        # The worker still runs the group, so the mesh stays up.
-        assert not worker_mesh.stopped
+        # The worker still runs the group, so the pool stays up.
+        assert not actor_system.stopped
 
         # Each rollout catches its own errors, but scoring can still make run_group raise.
-        actor_mesh.run_group.error = RuntimeError("scoring failed")
-        actor_mesh.run_group.release.set()
+        worker.run_group.error = RuntimeError("scoring failed")
+        worker.run_group.release.set()
         await close
-        assert worker_mesh.stopped
-        assert not actor_mesh.run_group.cancelled.is_set()
+        assert actor_system.stopped
+        assert not worker.run_group.cancelled.is_set()
         # The cancelled caller never reads the error; the done callback must, or asyncio logs it here.
         gc.collect()
         assert loop_errors == []
@@ -309,48 +246,40 @@ def test_close_waits_for_run_group_of_cancelled_caller(monkeypatch) -> None:
 def test_close_stops_waiting_after_drain_timeout(monkeypatch) -> None:
     async def run() -> None:
         monkeypatch.setattr(rollouter_module, "_SHUTDOWN_DRAIN_TIMEOUT_S", 0.0)
-        actor_mesh = _WorkerActorMesh()
         rollouter = _rollouter_without_datasets()
-        worker_mesh = await _setup(rollouter, actor_mesh, monkeypatch)
-        await _dispatch_then_cancel_caller(rollouter, actor_mesh)
+        actor_system = await _setup(rollouter)
+        await _dispatch_then_cancel_caller(rollouter, actor_system.workers[0])
 
         await rollouter.close()
 
-        assert worker_mesh.stopped
+        assert actor_system.stopped
         assert not rollouter._inflight_run_group_calls
 
     asyncio.run(run())
 
 
-def test_cancelled_dispatch_cancels_the_group_on_its_worker(monkeypatch) -> None:
-    """A cancelled caller stops the group on its worker before the cancel propagates."""
+def test_cancelled_dispatch_cancels_the_group_on_its_worker() -> None:
+    """A cancelled caller stops the group on the worker that runs it, and only there, before the
+    cancel propagates."""
 
     async def run() -> None:
-        actor_mesh = _WorkerActorMesh()
         rollouter = _rollouter_without_datasets()
-        await _setup(rollouter, actor_mesh, monkeypatch)
-
-        dispatch = asyncio.create_task(
-            rollouter.run_group_rollouts(
-                generate_fn="generate_fn",
-                release_session_fn="release_session_fn",
-                sample="sample",
-                group_id=5,
-                group_size=2,
-                sampling="sampling",
-            )
-        )
-        await actor_mesh.run_group.started.wait()
+        workers = (await _setup(rollouter, num_workers=2)).workers
+        dispatch = _dispatch(rollouter, group_id=5)
+        await asyncio.sleep(0)
+        (running,) = [w for w in workers if w.run_group.calls]
+        (other,) = [w for w in workers if w is not running]
         dispatch.cancel()
-        await actor_mesh.cancel_group.called.wait()
+        await running.cancel_group.called.wait()
         # The cancel waits until the worker stopped the group.
         assert not dispatch.done()
-        actor_mesh.cancel_group.release.set()
+        running.cancel_group.release.set()
         with pytest.raises(asyncio.CancelledError):
             await dispatch
-        assert actor_mesh.cancel_group.calls == [5]
+        assert running.cancel_group.calls == [5]
+        assert other.cancel_group.calls == []
         # The shielded run_group call still runs; finish it so close() doesn't wait for it.
-        actor_mesh.run_group.release.set()
+        running.run_group.release.set()
         await rollouter.close()
 
     asyncio.run(run())
@@ -361,26 +290,16 @@ def test_cancelled_dispatch_stops_waiting_for_a_cancel_group_that_hangs(
 ) -> None:
     async def run() -> None:
         monkeypatch.setattr(rollouter_module, "_SHUTDOWN_DRAIN_TIMEOUT_S", 0.05)
-        actor_mesh = _WorkerActorMesh()  # its cancel_group never returns
         rollouter = _rollouter_without_datasets()
-        await _setup(rollouter, actor_mesh, monkeypatch)
+        worker = (await _setup(rollouter)).workers[0]  # its cancel_group never returns
 
-        dispatch = asyncio.create_task(
-            rollouter.run_group_rollouts(
-                generate_fn="generate_fn",
-                release_session_fn="release_session_fn",
-                sample="sample",
-                group_id=5,
-                group_size=2,
-                sampling="sampling",
-            )
-        )
-        await actor_mesh.run_group.started.wait()
+        dispatch = _dispatch(rollouter, group_id=5)
+        await worker.run_group.started.wait()
         dispatch.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(dispatch, timeout=5)
         assert "cancel_group(5) failed" in caplog.text
-        actor_mesh.run_group.release.set()
+        worker.run_group.release.set()
         await rollouter.close()
 
     asyncio.run(run())
