@@ -31,6 +31,8 @@ from torchtitan.models.common.attention import (
     SlidingWindowVarlenInnerAttention,
     VarlenInnerAttention,
 )
+from torchtitan.models.common.attention.gdn import GDN
+from torchtitan.models.common.attention.linear_attention import LinearAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
@@ -45,14 +47,16 @@ from torchtitan.rl.generator.inference_model import (
 )
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.sglang.attention import SGLangInnerAttention
+from torchtitan.rl.generator.sglang.gdn import SGLangInnerGDN
 
 logger = logging.getLogger(__name__)
 
 
 def replace_sglang_layer_configs(model_config: Decoder.Config) -> Decoder.Config:
-    """Replace each layer's inner attention with ``SGLangInnerAttention``.
+    """Replace each layer's inner attention with ``SGLangInnerAttention``, or, for GDN
+    layers, ``SGLangInnerGDN``.
 
-    Only softmax attention with the varlen backend, full or sliding-window, is
+    Only GDN and softmax attention with the varlen backend, full or sliding-window, are
     supported; other layers raise ``ValueError``. The inner attention keeps the trainer
     attention's sharding config.
     """
@@ -61,10 +65,31 @@ def replace_sglang_layer_configs(model_config: Decoder.Config) -> Decoder.Config
     new_layers = []
     for layer_id, layer_cfg in enumerate(model_config.layers):
         attention_cfg = layer_cfg.attention
-        if not isinstance(attention_cfg, Attention.Config):
+        if isinstance(attention_cfg, GDN.Config):
+            sglang_inner_gdn_cfg = SGLangInnerGDN.Config(
+                layer_id=layer_id,
+                num_k_heads=attention_cfg.n_key_heads,
+                num_v_heads=attention_cfg.n_heads,
+                head_k_dim=attention_cfg.key_head_dim,
+                head_v_dim=attention_cfg.value_head_dim,
+                conv_kernel_size=attention_cfg.conv_kernel_size,
+                sharding_config=attention_cfg.inner_attention.sharding_config,
+            )
+            new_layers.append(
+                dataclasses.replace(
+                    layer_cfg,
+                    attention=dataclasses.replace(
+                        attention_cfg, inner_attention=sglang_inner_gdn_cfg
+                    ),
+                )
+            )
+            continue
+        if isinstance(attention_cfg, LinearAttention.Config) or not isinstance(
+            attention_cfg, Attention.Config
+        ):
             raise ValueError(
                 f"layers[{layer_id}]: the SGLang engine supports softmax attention "
-                f"only, got {type(attention_cfg).__qualname__}"
+                f"and GDN only, got {type(attention_cfg).__qualname__}"
             )
         if isinstance(attention_cfg, GptOssAttention.Config):
             # TODO: rescale the attention output by the sinks, from the log-sum-exp
@@ -168,11 +193,19 @@ class _DecoderBody(Module):
         self._token_multiple = token_multiple
         self._dist_moe_runtime = dist_moe_runtime
         # TODO(https://github.com/sgl-project/sglang/issues/48475): SGLang finds each
-        # layer's RadixAttention by attribute path (``layers[i].attention.attn`` among
-        # others); alias it there, unregistered so the state dict is unchanged.
+        # layer's RadixAttention or RadixLinearAttention by attribute path
+        # (``layers[i].attention.attn`` among others); alias it there, unregistered so
+        # the state dict is unchanged.
         for layer in decoder.layers.values():
+            inner = layer.attention.inner_attention
             object.__setattr__(
-                layer.attention, "attn", layer.attention.inner_attention.radix_attention
+                layer.attention,
+                "attn",
+                (
+                    inner.linear_attention
+                    if isinstance(inner, SGLangInnerGDN)
+                    else inner.radix_attention
+                ),
             )
 
     @property
@@ -214,8 +247,9 @@ class _DecoderBody(Module):
                 input_ids.shape[0] // tp
             )
         with self._parallelism_context.activate_spmd():
+            # Keywords: some models' forward (e.g. Qwen3.5's) takes them only so.
             hidden_states = self.decoder(
-                input_ids, positions, padding_mask=padding_mask
+                input_ids, positions=positions, padding_mask=padding_mask
             )
         return hidden_states[:num_tokens]
 
