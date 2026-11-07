@@ -18,7 +18,7 @@ from typing import Any
 
 from torchtitan.config import Configurable
 from torchtitan.observability import structured_logger as sl
-from torchtitan.rl.rollout import Rollout, RolloutGroup, RolloutTurn
+from torchtitan.rl.rollout import Rollout, RolloutGroup, RolloutStatus, RolloutTurn
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ def _log_write_error(write_future: Future) -> None:
 
 class KeepExtremeRewardsFilter(Configurable):
     """Keep the k highest- and k lowest-reward rollouts of each group (unscored skipped),
-    plus every errored rollout with `keep_errors`.
+    plus every `ERROR_SYSTEM` rollout, and every errored rollout with `keep_errors`.
 
     Example:
 
@@ -81,13 +81,17 @@ class KeepExtremeRewardsFilter(Configurable):
             top = ranked[len(ranked) - k :]
             kept = ranked if len(ranked) <= 2 * k else ranked[:k] + top
             picked.extend(kept)
-            if self._keep_errors:
-                kept_ids = {id(rollout) for rollout in kept}
-                picked.extend(
-                    rollout
-                    for rollout in group.rollouts
-                    if rollout.status.is_error() and id(rollout) not in kept_ids
+            # An ERROR_SYSTEM rollout is unscored, so the ranking above never picks it: always record it.
+            kept_ids = {id(rollout) for rollout in kept}
+            picked.extend(
+                rollout
+                for rollout in group.rollouts
+                if id(rollout) not in kept_ids
+                and (
+                    rollout.status is RolloutStatus.ERROR_SYSTEM
+                    or (self._keep_errors and rollout.status.is_error())
                 )
+            )
         return picked
 
 
