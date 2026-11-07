@@ -149,16 +149,19 @@ class Attention(GQAttention):
     def _prepare_query_key_value(
         self, qkv: torch.Tensor, positions: torch.Tensor | None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Split the ``QKVLinear`` output and return q, k, v as attention reads them. Norms and RoPE run only if configured.
+        """Split the packed ``QKVLinear`` output and return q, k, v as attention reads them. Norms and RoPE run only if configured.
 
         query: split -> q_norm -> * scale_query_by -> RoPE (RoPE layers only)
         key:   split -> k_norm -> RoPE (RoPE layers only)
         value: split
         """
         xq, xk, xv = split_qkv(
-            qkv, self.qkv_linear.heads_per_kv, self.qkv_linear.head_dim
+            qkv,
+            heads_per_kv=self.qkv_linear.heads_per_kv,
+            head_dim=self.qkv_linear.head_dim,
         )
-        if self.q_norm is not None and self.k_norm is not None:
+        if self.q_norm is not None or self.k_norm is not None:
+            assert self.q_norm is not None and self.k_norm is not None
             xq = self.q_norm(xq)
             if torch.compiler.is_compiling():
                 # emulate_precision_casts rounds a Python float to bf16 before a bf16 multiply,

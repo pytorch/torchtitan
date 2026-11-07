@@ -210,8 +210,8 @@ def split_qkv(
 # rounds the normed q/k to bf16 before RoPE, as the eager modules do; without it ~31%
 # of q elements differ from eager. No pointwise autotuning: kernel configs
 # picked by timing can round differently from run to run.
-# recompile_limit counts graphs per process; one more raises. A generator compiles 3 per
-# code path: its first token count (static), a symbolic count, and T=1. Muse Glimmer's
+# recompile_limit counts graphs per compiled method; one more raises. A generator compiles
+# 3 per code path: its first token count (static), a symbolic count, and T=1. Muse Glimmer's
 # RoPE and NoPE layers are 2 paths, so 6 graphs, near the default limit of 8. Hence 16.
 compile_qkv_norm_rope = local_compile(
     "qkv_norm_rope",
