@@ -6,7 +6,6 @@
 
 import asyncio
 import functools
-import os
 import pathlib
 import sys
 from types import SimpleNamespace
@@ -477,11 +476,9 @@ def test_spawn_proc_mesh_checks_gpus_per_host_before_spawning(
 
 
 def _record_worker(marker_dir: str, *, source: str, rank: int) -> None:
-    """Stands in for the structured logger's init: one file per rollout worker, naming its log
-    rank, its (simulated) host and its CUDA_VISIBLE_DEVICES."""
-    host = os.environ["HYPERACTOR_PROCESS_NAME"].split("@")[-1].strip()
-    cuda = os.environ.get("CUDA_VISIBLE_DEVICES")
-    pathlib.Path(marker_dir, f"{rank}-{host}-{cuda!r}").touch()
+    """Stands in for the structured logger's init: one file per rollout worker, named by its log
+    rank."""
+    pathlib.Path(marker_dir, str(rank)).touch()
 
 
 class _Worker:
@@ -522,7 +519,7 @@ def test_spawn_rollout_workers_returns_one_handle_per_worker(tmp_path, monkeypat
 
     asyncio.run(run())
     markers = sorted(path.name for path in tmp_path.iterdir())
-    assert [m.split("-")[0] for m in markers] == ["0", "1", "2", "3", "4"]
+    assert markers == ["0", "1", "2", "3", "4"]
 
 
 def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch):

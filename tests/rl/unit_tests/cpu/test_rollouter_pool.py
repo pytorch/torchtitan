@@ -243,6 +243,36 @@ def test_close_waits_for_run_group_of_cancelled_caller() -> None:
     asyncio.run(run())
 
 
+def test_close_waits_for_the_live_workers_when_one_worker_is_dead() -> None:
+    """A dead worker's failed drain doesn't stop close from waiting for the others, which may
+    still owe the router replies."""
+
+    async def failed_drain() -> None:
+        raise RuntimeError("worker process died")
+
+    async def run() -> None:
+        rollouter = _rollouter_without_datasets()
+        actor_system = await _setup(rollouter, num_workers=2)
+        dead, live = actor_system.workers
+        live_drained = asyncio.Event()
+        dead.wait_for_generate_calls = SimpleNamespace(
+            call_one=lambda: asyncio.ensure_future(failed_drain())
+        )
+        live.wait_for_generate_calls = SimpleNamespace(
+            call_one=lambda: asyncio.ensure_future(live_drained.wait())
+        )
+
+        close = asyncio.create_task(rollouter.close())
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert not actor_system.stopped
+        live_drained.set()
+        await close
+        assert actor_system.stopped
+
+    asyncio.run(run())
+
+
 def test_close_stops_waiting_after_drain_timeout(monkeypatch) -> None:
     async def run() -> None:
         monkeypatch.setattr(rollouter_module, "_SHUTDOWN_DRAIN_TIMEOUT_S", 0.0)

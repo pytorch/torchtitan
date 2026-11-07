@@ -67,7 +67,6 @@ class ActorSystem(Configurable, abc.ABC):
     - ``.call(...)``: on every actor of the handle; the result holds each rank's
       value, read with ``.get(rank)``;
     - ``.call_one(...)``: on a single-actor handle; returns its value;
-    - ``.choose(...)``: on any one actor of the handle;
     - ``.stream(...)``: on every actor, yielding each rank's value as it arrives;
     - ``.broadcast(...)``: on every actor, without waiting for or returning a result.
 
