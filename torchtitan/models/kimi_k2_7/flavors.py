@@ -181,7 +181,7 @@ def _vision_encoder_config(
     merge_kernel_size: list[int] | None = None,
     text_hidden_size: int = 7168,
 ) -> KimiK25VisionEncoder.Config:
-    """Build MoonViT3d; the coordinate bound matches 512 patches per side."""
+    """Build a fully-specified KimiK25VisionEncoder.Config (MoonViT3d)."""
     if merge_kernel_size is None:
         merge_kernel_size = [2, 2]
     patch_dim = in_channels * patch_size * patch_size

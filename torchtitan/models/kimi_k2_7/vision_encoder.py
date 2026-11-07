@@ -132,13 +132,26 @@ def _compute_learned_pos_embeds(
 
 
 def _compute_2d_positions(grids: list[list[int]], device: torch.device) -> torch.Tensor:
-    """Pack zero-based (row, column) coordinates in raster and frame order."""
+    """Compute packed 2D RoPE coordinates in raster order.
+
+    Frames repeat the spatial pattern.
+
+    Args:
+        grids: per-item ``[t, h, w]`` patch counts as host ints (``grid_thw``
+            read to CPU once by the caller, so the per-item loop adds no syncs).
+        device: Device for the position indices.
+
+    Returns:
+        ``(total_num_patches, 2)`` row/column coordinates.
+    """
     positions: dict[int, torch.Tensor] = {}
+    # Group by (h, w) so the per-resolution coordinate grid is built once.
     hw_to_indices: dict[tuple[int, int], list[int]] = {}
     for i, (_, h, w) in enumerate(grids):
         hw_to_indices.setdefault((h, w), []).append(i)
 
     for (h, w), indices in hw_to_indices.items():
+        # Raster order: position p -> (row = p // w, col = p % w).
         flat_T = torch.arange(h * w, device=device)
         if spmd.is_type_checking():
             flat_T = spmd.mutate_type(flat_T, "tp", src=spmd.R, dst=spmd.I)
@@ -197,7 +210,13 @@ def _tpool_patch_merger(
 
 
 class VisionRotaryEmbedding2D(ComplexRoPE):
-    """Two-dimensional RoPE with interleaved column/row complex pairs.
+    """2D rotary position embedding for the vision tower.
+
+    Holds the per-axis rotation table (``head_dim/4`` complex values per
+    position, shared by the row and column axes). ``prepare_positions``
+    gathers per-patch row/col coefficients, and ``forward`` applies them
+    through ``ComplexRoPE.apply_rotary_emb``.
+    ``head_dim`` must be divisible by 4.
 
     Coordinates are zero-based ``(row, column)`` pairs in token order.
     ``max_context_length`` is the exclusive bound on either coordinate.
@@ -219,6 +238,9 @@ class VisionRotaryEmbedding2D(ComplexRoPE):
         super().__init__(config)
 
     def _precompute_cache(self) -> torch.Tensor:
+        """Complex rotation table ``(max_context_length, head_dim/4)`` for
+        positions ``[0, max_context_length)``.
+        """
         # Meta construction needs only the table shape and dtype.
         if torch.get_default_device().type == "meta":
             return torch.empty(
@@ -226,6 +248,8 @@ class VisionRotaryEmbedding2D(ComplexRoPE):
                 dtype=torch.complex64,
                 device="meta",
             )
+        # inv_freq[k] = theta**(-4k/head_dim) for k in [0, head_dim/4); the
+        # step of 4 leaves room for the row/col split of the 2D rotation.
         inv_freq_F = 1.0 / (
             self.theta ** (torch.arange(0, self.dim, 4, dtype=torch.float32) / self.dim)
         )
@@ -236,11 +260,28 @@ class VisionRotaryEmbedding2D(ComplexRoPE):
         return torch.polar(torch.ones_like(angles_PF), angles_PF)
 
     def prepare_positions(self, positions: torch.Tensor) -> torch.Tensor:
+        """Prepare packed 2D RoPE rotation coefficients in token order.
+
+        For head-dim pair index ``k`` (``k`` in ``[0, head_dim/4)``), even output
+        pairs are rotated by the *column* (x) position and odd pairs by the *row*
+        (y) position. The per-axis angle for a position ``p`` is ``p * inv_freq[k]``;
+        its complex rotation coefficient is gathered from this module's table.
+
+        Args:
+            positions: ``(total_num_patches, 2)`` row/column coordinates.
+
+        Returns:
+            ``(total_num_patches, 1, head_dim/2)`` complex64. The singleton head
+            axis broadcasts over attention heads. Under compile, the real view
+            has shape ``(total_num_patches, 1, head_dim)``.
+        """
+        # Interleave x/y so pair 2k uses x-position, pair 2k+1 uses y-position.
         if torch.compiler.is_compiling():
             cache_PF2 = torch.view_as_real(self.cache)
             row_TF2, col_TF2 = cache_PF2[positions].unbind(1)
             return torch.stack((col_TF2, row_TF2), dim=-2).flatten(-3).unsqueeze(1)
         row_TF, col_TF = self.cache[positions].unbind(1)
+        # Complex unit-modulus cache; unsqueeze the head axis for broadcast.
         return torch.stack((col_TF, row_TF), dim=-1).flatten(-2).unsqueeze(1)
 
     def forward(
@@ -338,7 +379,20 @@ class MoonViTEncoder(Module):
     def compute_position_embeddings(
         self, grids: list[list[int]]
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return learned embeddings and packed (row, column) coordinates."""
+        """Compute both position inputs for packed visual patches.
+
+        Delegates to two standalone helpers:
+        - ``_compute_learned_pos_embeds``: interpolated learnable spatial table
+          (plus a runtime sinusoidal temporal term for videos).
+        - ``_compute_2d_positions``: packed row/column coordinates for RoPE.
+
+        Args:
+            grids: per-item ``[t, h, w]`` patch counts as host ints (``grid_thw``
+                read to CPU once by ``forward``).
+        Returns:
+            learned_pos: ``(total_num_patches, dim)`` additive positions.
+            positions: ``(total_num_patches, 2)`` row/column coordinates.
+        """
         rope_config = self.config.block.attn.rope
         max_hw = max(max(h, w) for _, h, w in grids)
         if (

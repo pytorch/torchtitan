@@ -128,20 +128,43 @@ def _compute_learned_pos_embeds(
 def _compute_2d_positions(
     grids: list[list[int]], spatial_merge_size: int, device: torch.device
 ) -> torch.Tensor:
-    """Pack zero-based (row, column) coordinates in patch merge block order."""
+    """Compute 2D RoPE coordinates for vision patches.
+
+    Builds row and col indices in block order (matching the patch layout from
+    the collator).
+
+    Args:
+        grids: per-item ``[t, h, w]`` patch counts as host ints.
+        spatial_merge_size: Number of patches to merge per spatial dimension
+        device: Device for the position indices.
+
+    Returns:
+        ``(total_num_patches, 2)`` row/column coordinates.
+    """
     positions: dict[int, torch.Tensor] = {}
+    # Group images by (h, w) to batch compute RoPE positions
     hw_to_indices: dict[tuple[int, int], list[int]] = {}
     for i, (_, h, w) in enumerate(grids):
         hw_to_indices.setdefault((h, w), []).append(i)
 
     merge_size = spatial_merge_size
     for (h, w), indices in hw_to_indices.items():
+        # Compute RoPE position ids in block order (once per unique h, w)
+        # A "block" is a merge_size x merge_size group of patches that will
+        # be merged into one LLM visual token. RoPE indices must follow
+        # block order to match the patch layout from image_to_patches
         merged_h, merged_w = h // merge_size, w // merge_size
+        # starting row of each block
         row_base_H = torch.arange(merged_h, device=device) * merge_size
+        # starting col of each block
         col_base_W = torch.arange(merged_w, device=device) * merge_size
         intra_row_S = torch.arange(merge_size, device=device)
         intra_col_S = torch.arange(merge_size, device=device)
-        # Match the collator's [block_row, block_col, intra_row, intra_col] order.
+        # Build row and col indices in block order
+        # The 4 dimensions represent: [block_row, block_col, intra_row, intra_col]
+        # e.g., for merge_size=2 on a 4x4 patch grid (2x2 blocks):
+        #   row_idx = [0,0,1,1, 0,0,1,1, 2,2,3,3, 2,2,3,3]
+        #   col_idx = [0,1,0,1, 2,3,2,3, 0,1,0,1, 2,3,2,3]
         row_T = (
             (row_base_H[:, None, None, None] + intra_row_S[None, None, :, None])
             .expand(merged_h, merged_w, merge_size, merge_size)
@@ -158,6 +181,9 @@ def _compute_2d_positions(
             col_T = spmd.mutate_type(col_T, "tp", src=spmd.R, dst=spmd.I)
             col_T = spmd.mutate_type(col_T, "cp", src=spmd.R, dst=spmd.I)
         spatial_TC = torch.stack((row_T, col_T), dim=-1)
+        # Apply to all visual items with this (h, w).
+        # For videos (t > 1), repeat spatial positions per frame;
+        # temporal position encoding is handled by MRoPE in the LLM
         for i in indices:
             positions[i] = spatial_TC.repeat(grids[i][0], 1)
 
@@ -168,7 +194,7 @@ def _compute_2d_positions(
 
 
 class VisionRotaryEmbedding(CosSinRoPE):
-    """Two-dimensional RoPE with row/column frequencies and rotate-half.
+    """2D Rotary Position Embedding for Vision Transformer.
 
     Coordinates are zero-based ``(row, column)`` pairs in token order.
     ``max_context_length`` is the exclusive bound on either coordinate.
@@ -186,6 +212,11 @@ class VisionRotaryEmbedding(CosSinRoPE):
         super().__init__(config)
 
     def _precompute_cache(self) -> torch.Tensor:
+        """Compute rotary cos/sin values for positions up to max_context_length.
+
+        Returns:
+            Cache of shape ``(max_context_length, dim / 4, 2)``.
+        """
         # Meta construction needs only the table shape and dtype.
         if torch.get_default_device().type == "meta":
             return torch.empty(
@@ -201,9 +232,24 @@ class VisionRotaryEmbedding(CosSinRoPE):
             self.max_context_length, device=inv_freq_F.device, dtype=inv_freq_F.dtype
         )
         angles_PF = torch.outer(positions_P, inv_freq_F)
+        # Compute cos/sin in float32 for numerical precision
         return torch.stack((angles_PF.cos(), angles_PF.sin()), dim=-1)
 
     def prepare_positions(self, positions: torch.Tensor) -> torch.Tensor:
+        """Compute 2D RoPE cache for vision patches.
+
+        Looks up separate frequency sets for each dimension and concatenates them
+        into a rope_cache for VisionAttention.
+
+        Args:
+            positions: ``(total_num_patches, 2)`` row/column coordinates.
+
+        Returns:
+            rope_cache: (total_num_patches, 1, head_dim*2) float32 for
+                VisionAttention.
+        """
+        # 2D RoPE: row and col each get separate frequency sets, concatenated
+        # (not interleaved).
         spatial_TR2 = self.cache[positions].flatten(1, 2)
         cos_TR, sin_TR = spatial_TR2.unbind(-1)
         return torch.cat((cos_TR, cos_TR, sin_TR, sin_TR), dim=-1).unsqueeze(1)
@@ -355,7 +401,19 @@ class Qwen35VisionEncoder(Module):
     def compute_position_embeddings(
         self, grids: list[list[int]]
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return learned embeddings and packed (row, column) coordinates."""
+        """Compute packed learned position embeddings and RoPE positions.
+
+        Delegates to two standalone helpers:
+        - ``_compute_learned_pos_embeds``: bilinear-interpolated learned embeddings
+        - ``_compute_2d_positions``: 2D RoPE coordinates
+
+        Args:
+            grids: per-item ``[t, h, w]`` patch counts as host ints.
+
+        Returns:
+            learned_pos: ``(total_num_patches, dim)`` learned positions.
+            positions: ``(total_num_patches, 2)`` row/column coordinates.
+        """
         rope_config = self.config.block.attn.rope
         max_hw = max(max(h, w) for _, h, w in grids)
         if (

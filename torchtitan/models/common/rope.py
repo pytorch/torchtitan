@@ -111,6 +111,7 @@ def _yarn_inv_freq(
 def _compute_inv_freq(dim: int, theta: float, scaling: _ScalingConfig) -> torch.Tensor:
     """Compute FP32 inverse frequencies; F denotes rotary frequency pairs."""
     if isinstance(scaling, YaRNScalingConfig) and scaling.factor > 1.0:
+        # YaRN (DeepSeek V3 style)
         return _yarn_inv_freq(
             dim,
             theta,
@@ -160,11 +161,11 @@ def _qk_amplitude(scaling: _ScalingConfig, *, mscale: float = 1.0) -> float:
 
 
 class RoPE(Module):
-    """Configurable query/key positional transform, including the identity.
+    """Shared Rotary Position Embedding module.
 
-    Dependencies and overrides can target ``RoPE.Config`` without requiring a
-    position table. Implementations that use rotary dimensions or scaling
-    inherit the corresponding ``ComplexRoPE.Config`` or ``CosSinRoPE.Config``.
+    Common base for concrete RoPE formats. Use ``ComplexRoPE.Config`` for
+    complex exponential caches and ``CosSinRoPE.Config`` for concatenated
+    cosine/sine caches.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -227,7 +228,10 @@ class ComplexRoPE(RoPE):
         self.register_buffer("cache", self._precompute_cache(), persistent=False)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        # TODO: In long-term we need to have buffer abstraction in `Module`` class to infer the buffer_device
         if buffer_device is None:
+            # After ``to_empty()``, the existing cache records the target device.
+            # Recompute there when the caller does not pass an explicit buffer device.
             buffer_device = self.cache.device
         with torch.device(buffer_device):
             self.cache = self._precompute_cache()
@@ -259,15 +263,20 @@ class ComplexRoPE(RoPE):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Apply rotary embeddings to query and optional key tensors."""
         reshaped_cache = self._reshape_cache(query, positions)
         return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
-        """Precompute complex cis values of shape (max_context_length, dim / 2)."""
+        """Precompute complex cis values.
+
+        Returns:
+            Cache of shape ``(max_context_length, dim / 2)``.
+        """
         inv_freq_F = _compute_inv_freq(self.dim, self.theta, self.scaling)
         positions_P = torch.arange(self.max_context_length, device=inv_freq_F.device)
         angles_PF = torch.outer(positions_P, inv_freq_F).float()
-        return torch.polar(torch.ones_like(angles_PF), angles_PF)
+        return torch.polar(torch.ones_like(angles_PF), angles_PF)  # complex64
 
     def _reshape_cache(
         self,
@@ -406,7 +415,10 @@ class CosSinRoPE(RoPE):
         self.register_buffer("cache", self._precompute_cache(), persistent=False)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        # TODO: In long-term we need to have buffer abstraction in `Module`` class to infer the buffer_device
         if buffer_device is None:
+            # After ``to_empty()``, the existing cache records the target device.
+            # Recompute there when the caller does not pass an explicit buffer device.
             buffer_device = self.cache.device
         with torch.device(buffer_device):
             self.cache = self._precompute_cache()
@@ -420,11 +432,16 @@ class CosSinRoPE(RoPE):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Apply rotary embeddings to query and optional key tensors."""
         reshaped_cache = self._reshape_cache(query, positions)
         return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
-        """Precompute cos/sin values of shape (max_context_length, dim * 2)."""
+        """Precompute cos/sin values.
+
+        Returns:
+            Cache of shape ``(max_context_length, dim * 2)``.
+        """
         if isinstance(self.scaling, Llama3ScalingConfig):
             raise NotImplementedError("Cos/sin RoPE does not support Llama scaling.")
         inv_freq_F = _compute_inv_freq(self.dim, self.theta, self.scaling)

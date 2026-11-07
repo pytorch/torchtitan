@@ -226,10 +226,11 @@ def _qwen35_vision_encoder_config(
     max_rope_positions: int = 4096,
     in_channels: int = 3,
 ) -> Qwen35VisionEncoder.Config:
-    """Build the ViT with a configurable per-coordinate RoPE bound.
+    """Build a fully-specified Qwen35VisionEncoder.Config.
 
-    4096 covers the default 16M-pixel, aspect-ratio-200 preprocessing budget
-    with 16-pixel patches. Increase it for larger preprocessing budgets.
+    The default RoPE bound of 4096 covers the default 16M-pixel,
+    aspect-ratio-200 preprocessing budget with 16-pixel patches.
+    Increase it for larger preprocessing budgets.
     """
     patch_dim = in_channels * temporal_patch_size * patch_size * patch_size
     merged_hidden_size = dim * (spatial_merge_size**2)
