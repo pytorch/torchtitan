@@ -51,12 +51,10 @@ class DispatchState:
 
     Attributes:
         handle_id: CPU tensor identifying the opaque dispatch handle.
-        permuted_scores: Routing scores applied to expert outputs in combine.
         num_tokens: Original input token count (for combine fake shape inference).
     """
 
     handle_id: torch.Tensor
-    permuted_scores: torch.Tensor | None = None
     num_tokens: int = 0
 
 
@@ -460,11 +458,11 @@ def dispatch_tokens(
     recompute: bool,
     non_blocking_expert_capacity_factor: float | None = None,
     pad_multiple: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
-    """Dispatch tokens to experts via HybridEP all-to-all.
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, DispatchState]:
+    """Dispatch tokens and FP32 router scores in expert-major order.
 
-    Routing scores are applied to the expert outputs in ``combine_tokens``,
-    after expert computation.
+    Scores are returned separately for the caller to apply before W2, or after
+    output postprocessing when it is configured. Combine expects weighted rows.
 
     Args:
         hidden_states: [num_tokens, hidden_dim]
@@ -474,8 +472,7 @@ def dispatch_tokens(
         num_experts: Total experts across all ranks
         group: EP ProcessGroup
         remat_region_name: Name for the dispatch communication region.
-        recompute: Whether to replay communication during backward. Must match
-            the value passed to combine_tokens.
+        recompute: Whether to replay dispatch communication during backward.
         non_blocking_expert_capacity_factor: None = blocking mode (default).
             float in (0, 1] = non-blocking mode; pre-sizes the permute output
             tensor as num_tokens * ep_size *
@@ -485,7 +482,7 @@ def dispatch_tokens(
             MXFP8). None means no padding.
 
     Returns:
-        (permuted_hidden, tokens_per_expert, state)
+        (permuted_hidden, tokens_per_expert, routed_scores, state)
     """
     non_blocking = non_blocking_expert_capacity_factor is not None
 
@@ -511,19 +508,15 @@ def dispatch_tokens(
         pad_multiple,
     )
 
-    # The score cast and the expert-count cumsum run outside remat regions.
-    remat.recompute_needs_tensor(permuted_scores, tokens_per_expert)
-
-    # Routing scores are applied to expert outputs in combine_tokens.
-    if permuted_scores is not None and permuted_scores.dtype != hidden.dtype:
-        permuted_scores = permuted_scores.to(hidden.dtype)
+    # The expert-count cumsum runs outside remat regions. Score multiplication
+    # marks its score dependency in GroupedLinear or the postprocess path.
+    remat.recompute_needs_tensor(tokens_per_expert)
 
     state = DispatchState(
         handle_id=handle_id,
-        permuted_scores=permuted_scores,
         num_tokens=hidden_states.shape[0],
     )
-    return hidden, tokens_per_expert, state
+    return hidden, tokens_per_expert, permuted_scores, state
 
 
 def combine_tokens(
@@ -531,31 +524,27 @@ def combine_tokens(
     state: DispatchState,
     *,
     remat_region_name: str,
-    recompute: bool,
     pad_multiple: int | None = None,
 ) -> torch.Tensor:
     """Combine expert outputs back to original token order.
 
-    Applies deferred scores (if any), then unpermutes via the opaque dispatch handle.
+    Unpermutes and reduces rows already weighted by their router scores.
+    Combine backward uses only the dispatch handle, not the expert outputs, so
+    saving this region avoids a dependency on W2's output during replay.
 
     Args:
-        hidden_states: Unweighted expert outputs.
+        hidden_states: Weighted expert outputs.
         state: Dispatch state for these outputs.
         remat_region_name: Name for the combine communication region.
-        recompute: Whether to replay communication during backward. Must match
-            the value passed to dispatch_tokens.
         pad_multiple: Per-expert token alignment used during dispatch.
 
     Returns:
         Combined tokens in the original order.
     """
-    if state.permuted_scores is not None:
-        hidden_states = hidden_states * state.permuted_scores.reshape(-1, 1)
-
     combined = remat.region(
         torch.ops.hybridep.combine,
         remat_region_name,
-        recompute=recompute,
+        recompute=False,
     )(hidden_states, state.handle_id, state.num_tokens, pad_multiple)
     return combined
 

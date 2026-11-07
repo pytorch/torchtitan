@@ -50,6 +50,17 @@ _MODEL_DIM = 256
 _NUM_TOKENS = 64
 _TOP_K = 2
 
+_EXPERT_CONFIGS = (
+    (GroupedLinear, SwiGLU.Config(), None),
+    (GptOssGroupedLinear, ClampedSwiGLU.Config(), None),
+    (GroupedLinear, SwiGLU.Config(), RMSNorm.Config(normalized_shape=_MODEL_DIM)),
+    (
+        GptOssGroupedLinear,
+        ClampedSwiGLU.Config(),
+        RMSNorm.Config(normalized_shape=_MODEL_DIM),
+    ),
+)
+
 
 class _EPBlock(Module):
     def __init__(
@@ -113,7 +124,7 @@ class _EPBlock(Module):
 
 
 class _PostW2(_EPBlock):
-    """Reference DeepEP experts with router scores applied after W2."""
+    """Reference EP experts with router scores applied after W2."""
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
         num_tokens = x_TD.shape[0]
@@ -237,26 +248,23 @@ class _EPActivationCheckpointing(DTensorTestBase):
                     )
                 ).to(self.device_type, torch.bfloat16)
                 ac_model.load_state_dict(baseline.state_dict())
-                reference = None
-                if isinstance(dispatcher_config, DeepEPTokenDispatcher.Config):
-                    reference = _Model(
-                        _PostW2(
-                            num_experts,
-                            dispatcher_config,
-                            grouped_linear_cls=grouped_linear_cls,
-                            activation_fn=activation_fn,
-                            output_postprocess=output_postprocess,
-                        )
-                    ).to(self.device_type, torch.bfloat16)
-                    reference.load_state_dict(baseline.state_dict())
+                reference = _Model(
+                    _PostW2(
+                        num_experts,
+                        dispatcher_config,
+                        grouped_linear_cls=grouped_linear_cls,
+                        activation_fn=activation_fn,
+                        output_postprocess=output_postprocess,
+                    )
+                ).to(self.device_type, torch.bfloat16)
+                reference.load_state_dict(baseline.state_dict())
                 activation_remat.apply(ac_model)
                 # As in training, the buffer is created after AC is applied. All
                 # models share it, so the baseline also runs deterministic when
                 # the AC model replays.
                 baseline.layers["0"].routed_experts.token_dispatcher.init_buffer()
                 ac_model.layers["0"].routed_experts.token_dispatcher.init_buffer()
-                if reference is not None:
-                    reference.layers["0"].routed_experts.token_dispatcher.init_buffer()
+                reference.layers["0"].routed_experts.token_dispatcher.init_buffer()
 
                 num_calls = {"dispatch": 0, "combine": 0}
                 original = {
@@ -310,25 +318,22 @@ class _EPActivationCheckpointing(DTensorTestBase):
                     else:
                         actual = _run_forward_backward(ac_model, x_TD)
 
-                if reference is not None:
-                    reference_values = _run_forward_backward(reference, x_TD)
-                    # Compare pre-W2 absorption with the previous post-W2 scoring.
-                    bf16_rtol = 2 * torch.finfo(torch.bfloat16).eps
-                    for value, reference_value in zip(expected, reference_values):
-                        if output_postprocess is not None and exact:
-                            torch.testing.assert_close(
-                                value, reference_value, rtol=0, atol=0
-                            )
-                            continue
-                        error_norm = torch.linalg.vector_norm(
-                            value.float() - reference_value.float()
+                reference_values = _run_forward_backward(reference, x_TD)
+                # Compare pre-W2 absorption with the previous post-W2 scoring.
+                bf16_rtol = 2 * torch.finfo(torch.bfloat16).eps
+                for value, reference_value in zip(expected, reference_values):
+                    if output_postprocess is not None and exact:
+                        torch.testing.assert_close(
+                            value, reference_value, rtol=0, atol=0
                         )
-                        reference_norm = torch.linalg.vector_norm(
-                            reference_value.float()
-                        )
-                        self.assertLessEqual(
-                            error_norm.item(), bf16_rtol * reference_norm.item()
-                        )
+                        continue
+                    error_norm = torch.linalg.vector_norm(
+                        value.float() - reference_value.float()
+                    )
+                    reference_norm = torch.linalg.vector_norm(reference_value.float())
+                    self.assertLessEqual(
+                        error_norm.item(), bf16_rtol * reference_norm.item()
+                    )
 
                 # Forward dispatch and combine, plus their backward passes.
                 self.assertEqual(baseline_calls, {"dispatch": 2, "combine": 2})
@@ -369,20 +374,7 @@ class TestDeepEPActivationCheckpointing(_EPActivationCheckpointing):
                 hidden_dim=_MODEL_DIM,
                 num_max_tokens_per_rank=_NUM_TOKENS,
             ),
-            expert_configs=(
-                (GroupedLinear, SwiGLU.Config(), None),
-                (GptOssGroupedLinear, ClampedSwiGLU.Config(), None),
-                (
-                    GroupedLinear,
-                    SwiGLU.Config(),
-                    RMSNorm.Config(normalized_shape=_MODEL_DIM),
-                ),
-                (
-                    GptOssGroupedLinear,
-                    ClampedSwiGLU.Config(),
-                    RMSNorm.Config(normalized_shape=_MODEL_DIM),
-                ),
-            ),
+            expert_configs=_EXPERT_CONFIGS,
             buffer_type=deep_ep.ElasticBuffer,
             dispatch_method="dispatch",
             combine_method="combine",
@@ -439,15 +431,17 @@ class TestHybridEPActivationCheckpointing(_EPActivationCheckpointing):
                 self._check_ep_activation_checkpointing(
                     ac_configs,
                     num_dispatch_replays=num_replays,
-                    num_combine_replays=num_replays,
+                    num_combine_replays=0,
                     dispatcher_config=HybridEPTokenDispatcher.Config(
                         num_experts=4 * self.world_size,
                         top_k=_TOP_K,
                         hidden_dim=_MODEL_DIM,
                         num_max_tokens_per_rank=_NUM_TOKENS,
                         non_blocking_capacity_factor=capacity_factor,
+                        # Each expert receives 32 real rows; exercise padding too.
+                        pad_multiple=64,
                     ),
-                    expert_configs=((GroupedLinear, SwiGLU.Config(), None),),
+                    expert_configs=_EXPERT_CONFIGS,
                     buffer_type=deep_ep.HybridEPBuffer,
                     dispatch_method="dispatch_with_permute",
                     combine_method="combine_with_unpermute",

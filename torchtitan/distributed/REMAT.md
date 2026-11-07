@@ -294,11 +294,15 @@ communication regions:
   and the expert-major permute; `combine` covers the unpermute, the combine
   all-to-all and the score-weighted scatter-add. The DeepEP and HybridEP
   dispatchers instead declare `ep_communication.dispatch` and
-  `ep_communication.combine` around their kernels. Both save or replay
-  dispatch and combine together, following `ep_communication`. A replay must
-  receive tokens in the forward's order, so DeepEP uses a deterministic buffer, which
-  adds a sort to every dispatch. HybridEP derives token positions from prefix
-  scans. `FullActivationRematConfig` replays both backends' communication.
+  `ep_communication.combine`. Dispatch follows `ep_communication`; combine is
+  always saved, including local unpermutation, and receives weighted expert
+  outputs. A replay must receive tokens in the forward's order, so DeepEP uses
+  a deterministic buffer, adding a sort per dispatch. HybridEP derives row
+  positions from integer prefix scans, preserving alignment with the forward
+  dispatch handle used by saved combine. `FullActivationRematConfig` replays
+  dispatch for both backends, but never their combine regions. With router-score
+  absorption, saving `w2.grouped_mm` can skip its forward replay without keeping
+  the routed output for the score gradient; full remat still replays W2.
 - Shared-expert linear regions. The shared `w2.tp_reduce` region is the
   `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled;
   save it together with `w2.linear`.

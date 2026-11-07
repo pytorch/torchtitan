@@ -36,7 +36,7 @@ Dispatch/combine microbenchmarks alone do not measure overlap with expert GEMMs
 or the cost of activation rematerialization. Run at least 10 training steps so
 startup does not dominate the comparison.
 
-See [router-score absorption](ROUTER_SCORE_ABSORPTION.md) for diagrams of DeepEP
+See [router-score absorption](ROUTER_SCORE_ABSORPTION.md) for diagrams of DeepEP and HybridEP
 score placement, biased experts, postprocessing, and checkpoint dependencies.
 
 ## Configure a dispatcher
@@ -105,12 +105,12 @@ config.activation_remat = ActivationRematConfig(
 )
 ```
 
-DeepEP uses `ep_communication` to control dispatch replay and always saves the
-complete combine region, including unpermute. Full remat replays dispatch with
-deterministic receive ordering, adding a sort. HybridEP saves or replays
-dispatch and combine together under `ep_communication`; selecting just its
-`.dispatch` or `.combine` suffix does not control the pair. It derives token
-positions from prefix scans. The all-to-all dispatcher instead has independent
+DeepEP and HybridEP use `ep_communication` to control dispatch replay and always
+save combine, including local unpermutation. Selecting a `.dispatch` or `.combine`
+suffix does not override this policy. Full remat replays DeepEP dispatch with
+deterministic receive ordering, adding a sort; HybridEP derives the same row
+positions from integer prefix scans. Both return FP32 row scores for absorption
+before W2, or scoring after an output postprocess. The all-to-all dispatcher has independent
 `dispatch` and `combine` regions that include local reordering and collectives.
 
 Dist-MoE always retains its outer region and owns its internal activation
