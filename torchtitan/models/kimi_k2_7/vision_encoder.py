@@ -213,7 +213,9 @@ class VisionRotaryEmbedding2D(ComplexRoPE):
                 f"2D RoPE requires head_dim divisible by 4, got {config.dim}."
             )
         if config.scaling is not None:
-            raise ValueError("MoonViT RoPE does not support frequency scaling.")
+            raise ValueError(
+                "VisionRotaryEmbedding2D does not support frequency scaling."
+            )
         super().__init__(config)
 
     def _precompute_cache(self) -> torch.Tensor:
