@@ -175,6 +175,7 @@ def _decide(
     pending_engine_requests: list[EngineRequest],
     *messages: EngineLoopMessage | EngineRequest,
     pending_load_messages: list[ModelStateDictLoadMessage] | None = None,
+    has_unfinished_requests: bool = False,
 ) -> LoopDecision:
     """Puts `messages` on the queue, then runs one decision."""
 
@@ -184,6 +185,7 @@ def _decide(
             engine_loop._decide_next_action(
                 pending_engine_requests,
                 [] if pending_load_messages is None else pending_load_messages,
+                has_unfinished_requests=has_unfinished_requests,
             ),
             _TIMEOUT_S,
         )
@@ -409,11 +411,21 @@ def test_step_drains_the_queue(runner) -> None:
     assert engine_loop._request_dispatcher._rank0_dp_router is None
 
 
-def test_step_with_empty_queue_when_only_in_flight_work_remains(runner) -> None:
-    # No message, but an outstanding generation means a request is still in flight
-    # (possibly in a peer DP rank), so rank 0 must keep issuing STEP.
-    engine_loop = _bare_loop(event_loop=runner.get_loop(), inflight=True)
-    decision = _decide(runner, engine_loop, [])
+@pytest.mark.parametrize("has_unfinished_requests", [False, True])
+def test_step_with_empty_queue_when_only_in_flight_work_remains(
+    runner, has_unfinished_requests
+) -> None:
+    # Either an outstanding response or the preceding all-rank work check keeps
+    # rank 0 awake. This rank-0-only path must not query the collective again.
+    engine_loop = _bare_loop(
+        event_loop=runner.get_loop(), inflight=not has_unfinished_requests
+    )
+    engine_loop._engine.has_unfinished_requests = lambda: pytest.fail(
+        "rank 0 must use the previous all-rank result"
+    )
+    decision = _decide(
+        runner, engine_loop, [], has_unfinished_requests=has_unfinished_requests
+    )
     assert decision.action is LoopAction.STEP and decision.requests_per_dp_rank == [[]]
 
 
@@ -422,7 +434,9 @@ def test_idle_decision_waits_for_the_next_message(runner) -> None:
     request = _request()
 
     async def run() -> LoopDecision:
-        decision = asyncio.create_task(engine_loop._decide_next_action([], []))
+        decision = asyncio.create_task(
+            engine_loop._decide_next_action([], [], has_unfinished_requests=False)
+        )
         await asyncio.sleep(0.1)
         assert not decision.done()
         await _put(engine_loop, request)
@@ -768,6 +782,44 @@ def test_close_releases_the_engine() -> None:
         assert shutdowns == [engine_thread.thread]
     finally:
         _stop_engine_thread(engine_thread)
+
+
+@pytest.mark.parametrize("burst_size", [1, 16])
+def test_background_cache_work_progresses_after_last_output(
+    engine_thread, burst_size
+) -> None:
+    drained = threading.Event()
+
+    class SavingEngine(_FakeEngine):
+        remaining_steps = 0
+
+        def has_unfinished_requests(self):
+            return super().has_unfinished_requests() or self.remaining_steps > 0
+
+        def step(self):
+            if self.running:
+                # More than one step burst: exercise both the inner step gate
+                # and the rank-0 decision not to sleep on the empty queue.
+                self.remaining_steps = 20
+            else:
+                self.remaining_steps -= 1
+            outputs = super().step()
+            if self.remaining_steps == 0:
+                drained.set()
+            return outputs
+
+    async def run():
+        engine = SavingEngine()
+        loop = engine_thread(engine)
+        loop._max_engine_steps_between_decisions = burst_size
+        loop.start()
+        result = await asyncio.wait_for(_generate(loop, "r0"), _TIMEOUT_S)
+        assert result.request_id == "r0"
+        assert await asyncio.to_thread(drained.wait, _TIMEOUT_S)
+        assert engine.remaining_steps == 0
+        await asyncio.wait_for(loop.close(), _TIMEOUT_S)
+
+    asyncio.run(run())
 
 
 def test_actor_loop_takes_calls_while_the_engine_steps(engine_thread) -> None:

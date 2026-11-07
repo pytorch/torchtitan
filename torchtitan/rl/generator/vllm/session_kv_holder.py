@@ -13,12 +13,18 @@ from dataclasses import dataclass
 from typing import Any
 
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.request import Request, RequestStatus
 
 from torchtitan.config import Configurable
 
 
 class VLLMSessionKVHolder(Configurable):
     """Keeps each multi-turn session's cached prefix on GPU between its turns.
+
+    With a CPU offload connector, session/group release also sends eviction hints
+    after outstanding saves finish, protecting hashes used by other local sessions.
+    Hints are not tombstones: later requests may cache the prefix again.
 
     Between turns (a tool call, an env step) a session has no request in vLLM, so its blocks sit in
     vLLM's free queue, where any new request can take them; the next turn then recomputes its
@@ -35,7 +41,7 @@ class VLLMSessionKVHolder(Configurable):
     When memory runs short, it releases whole idle sessions, idle longest first:
     - after each step, while fewer than ``floor`` blocks are free: the next step needs room, and the
       holder can't act inside a step;
-    - after a step where nothing runs and requests wait: vLLM refused the head for lack of blocks.
+    - after a step where nothing runs and requests wait for blocks, excluding pending KV loads.
 
     The floor is vLLM's watermark plus the most blocks the next step can add to running requests
     (vLLM schedules them before it admits new ones):
@@ -60,13 +66,21 @@ class VLLMSessionKVHolder(Configurable):
 
     Args:
         scheduler: The vLLM v1 scheduler of this rank's in-process engine.
+        offload_connector: Optional connector with ``get_pending_save_ids()`` and
+            ``release_session_cache(released_hashes, active_hashes)``.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         pass
 
-    def __init__(self, config: Config, *, scheduler: Any) -> None:
+    def __init__(
+        self,
+        config: Config,
+        *,
+        scheduler: Any,
+        offload_connector: Any | None = None,
+    ) -> None:
         del config
         # Partial-block prefix hits or speculative decoding move the replay point away from the
         # prompt-end block this holds.
@@ -85,8 +99,10 @@ class VLLMSessionKVHolder(Configurable):
             cdiv(scheduler.max_num_scheduled_tokens, group.kv_cache_spec.block_size)
             for group in kv_cache_manager.kv_cache_config.kv_cache_groups
         )
-        # Requests in vLLM: internal request id -> (session, group, prefill seen).
-        self._live: dict[str, tuple[str, int, bool]] = {}
+        # Requests in vLLM: internal request id -> (request, session, group, prefill seen).
+        # The request object outlives scheduler cleanup, so CPU release can read its final
+        # block hashes, decode blocks included.
+        self._live: dict[str, tuple[Request, str, int, bool]] = {}
         # Held blocks per session, idle longest first.
         self._held: OrderedDict[str, list[Any]] = OrderedDict()
         self._session_groups: dict[str, int] = {}
@@ -94,28 +110,48 @@ class VLLMSessionKVHolder(Configurable):
         # Plain ints, so other threads (e.g. a logging endpoint) can read them safely.
         self.num_sessions = 0
         self.num_evicted = 0
+        # CPU release hints (with an offload connector only).
+        self._offload_connector = offload_connector
+        self._cpu_sessions: dict[str, tuple[int, set[BlockHash]]] = {}
+        self._released_sessions: set[str] = set()
+        self._released_hashes: set[BlockHash] = set()
+        self._eviction_hashes: set[BlockHash] = set()
+        self._pending_saves: set[int] = set()
 
     def track(self, internal_request_id: str, session_id: str, group_id: int) -> None:
         """Hold this request's prefix once its prefill finishes."""
-        self._live[internal_request_id] = (session_id, group_id, False)
+        request = self._scheduler.requests[internal_request_id]
+        self._live[internal_request_id] = (request, session_id, group_id, False)
+        if self._offload_connector is not None:
+            group, _ = self._cpu_sessions.setdefault(session_id, (group_id, set()))
+            assert group == group_id
 
     def after_step(self) -> None:
         """After each engine step: hold the prefix of requests whose prefill finished, mark sessions
-        whose request left, and release idle sessions so the next step has room."""
-        for internal_id, (session_id, group_id, held) in list(self._live.items()):
-            request = self._scheduler.requests.get(internal_id)
-            if request is None:  # finished or aborted: the session is idle from now on
+        whose request left, and process GPU pressure and CPU release hints."""
+        for internal_id, (request, session_id, group_id, held) in list(
+            self._live.items()
+        ):
+            if internal_id not in self._scheduler.requests:
+                if self._offload_connector is not None:
+                    self._cpu_sessions[session_id][1].update(request.block_hashes)
                 del self._live[internal_id]
                 if session_id in self._held:
                     self._held.move_to_end(session_id)
             elif not held and request.num_computed_tokens >= request.num_prompt_tokens:
-                self._live[internal_id] = (session_id, group_id, True)
+                self._live[internal_id] = (request, session_id, group_id, True)
                 self._hold(request, session_id, group_id)
 
+        if self._offload_connector is not None:
+            self._release_cpu_cache()
         # Nothing runs and requests wait: with an empty batch vLLM skips the watermark, so it refused
         # the head for lack of blocks (or the batch just drained: one cheap extra release).
+        # A pending KV load already has destination blocks; it waits for data.
         scheduler = self._scheduler
-        if not scheduler.running and (scheduler.waiting or scheduler.skipped_waiting):
+        if not scheduler.running and any(
+            request.status != RequestStatus.WAITING_FOR_REMOTE_KVS
+            for request in (*scheduler.skipped_waiting, *scheduler.waiting)
+        ):
             free_before = self._block_pool.get_num_free_blocks()
             for session_id in list(self._held):
                 self._release(session_id)
@@ -139,7 +175,7 @@ class VLLMSessionKVHolder(Configurable):
         if self._block_pool.get_num_free_blocks() >= floor:
             return
         running_sessions = {
-            self._live[request.request_id][0]
+            self._live[request.request_id][1]
             for request in running
             if request.request_id in self._live
         }
@@ -161,9 +197,58 @@ class VLLMSessionKVHolder(Configurable):
             self._release(session_id)
         # A request still before its prefill must not re-hold a released session.
         dropped_groups = set(group_ids)
-        for internal_id, (session_id, group_id, held) in list(self._live.items()):
+        for internal_id, (request, session_id, group_id, held) in list(
+            self._live.items()
+        ):
             if session_id in released or group_id in dropped_groups:
-                self._live[internal_id] = (session_id, group_id, True)
+                self._live[internal_id] = (request, session_id, group_id, True)
+        if self._offload_connector is not None:
+            self._released_sessions.update(set(session_ids) & self._cpu_sessions.keys())
+            self._released_sessions.update(
+                session
+                for session, (group, _) in self._cpu_sessions.items()
+                if group in dropped_groups
+            )
+            self._release_cpu_cache()
+
+    @property
+    def has_pending_work(self) -> bool:
+        """Whether CPU release still needs engine steps to finish requests or saves."""
+        return bool(
+            self._released_sessions or self._released_hashes or self._eviction_hashes
+        )
+
+    def _release_cpu_cache(self) -> None:
+        """Send eviction hints after released requests and their save batch finish."""
+        if not self.has_pending_work:
+            return
+        live_sessions = {session for _, session, _, _ in self._live.values()}
+        for session in sorted(self._released_sessions - live_sessions):
+            _, hashes = self._cpu_sessions.pop(session)
+            self._released_hashes.update(hashes)
+            self._released_sessions.remove(session)
+
+        connector = self._offload_connector
+        if not self._eviction_hashes:
+            if not self._released_hashes:
+                return
+            self._eviction_hashes, self._released_hashes = self._released_hashes, set()
+            # Include finish-time saves queued for the next step. Freeze this
+            # batch so unrelated later saves cannot postpone its release forever.
+            self._pending_saves = connector.get_pending_save_ids()
+        if self._pending_saves & connector.get_pending_save_ids():
+            return
+
+        active_hashes = set().union(
+            *(hashes for _, hashes in self._cpu_sessions.values())
+        )
+        for request, _, _, _ in self._live.values():
+            active_hashes.update(request.block_hashes)
+        released = self._eviction_hashes - active_hashes
+        self._eviction_hashes.clear()
+        self._pending_saves.clear()
+        if released:
+            connector.release_session_cache(released, active_hashes)
 
     def _hold(self, request: Any, session_id: str, group_id: int) -> None:
         # The prompt's last token is recomputed for its logits, so a continuation hits at most

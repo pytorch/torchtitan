@@ -14,6 +14,7 @@ metrics that ride with it), the SamplingParams contract, and the vLLM metric tim
 
 import asyncio
 import concurrent.futures
+import copy
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import cast
@@ -47,6 +48,7 @@ from torchtitan.rl.generator.vllm.engine import (
     VLLMEngine,
 )
 from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
+from torchtitan.rl.generator.vllm.simple_cpu_offload import SimpleCPUOffloadConnector
 from torchtitan.rl.generator.vllm.worker import (
     TorchTitanCudagraphDispatcher,
     TorchTitanGPUModelRunner,
@@ -60,9 +62,11 @@ from vllm.config import (
     CompilationMode,
     CUDAGraphMode,
     DeviceConfig,
+    KVTransferConfig,
     SchedulerConfig,
     VllmConfig,
 )
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
@@ -137,6 +141,8 @@ def _vllm_engine(*, reset_kv_cache_on_model_state_dict_load=False, model=None):
     """A `VLLMEngine` around a fake `LLMEngine` (no engine build)."""
     engine = VLLMEngine.__new__(VLLMEngine)
     engine._engine = _FakeLLMEngine()
+    engine._uses_kv_offload = False
+    engine._coordinate_kv_offload = False
     engine._reset_kv_cache_on_model_state_dict_load = (
         reset_kv_cache_on_model_state_dict_load
     )
@@ -329,9 +335,11 @@ def _engine_request(request_id: str, *, min_policy_version: int, group_id: int =
     return request
 
 
-def test_admission_passes_group_id_as_priority_and_arrival_time():
+@pytest.mark.parametrize("coordinate_kv_offload", [False, True])
+def test_admission_preserves_priority_arrival_time_and_shared_id(coordinate_kv_offload):
     # Priority is the group id (3), not the pinned version (6); every validation id shares -1.
     engine = _vllm_engine()
+    engine._coordinate_kv_offload = coordinate_kv_offload
     engine.add_requests(
         [
             _engine_request("train", min_policy_version=6, group_id=3),
@@ -344,6 +352,14 @@ def test_admission_passes_group_id_as_priority_and_arrival_time():
     added_kwargs = [kwargs for _, kwargs in llm_engine.add_requests]
     assert [kwargs["priority"] for kwargs in added_kwargs] == [3, -1, -1]
     assert [kwargs["arrival_time"] for kwargs in added_kwargs] == [1.5] * 3
+    for kwargs in added_kwargs:
+        extra = kwargs["params"].extra_args
+        if coordinate_kv_offload:
+            assert (
+                extra["kv_transfer_params"]["shared_request_id"] == kwargs["request_id"]
+            )
+        else:
+            assert extra is None
 
 
 def test_session_kv_holder_tracks_admitted_requests_and_releases_sessions():
@@ -680,6 +696,71 @@ def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
     assert engine_kwargs["scheduling_policy"] == "priority"
 
 
+@pytest.mark.parametrize("hold_sessions", [False, True])
+def test_simple_cpu_offload_uses_shared_coordination_without_store_settings(
+    monkeypatch, tmp_path, hold_sessions
+):
+    transfer = KVTransferConfig(
+        kv_connector="SimpleCPUOffloadConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"cpu_bytes_to_use_per_rank": 1 << 30},
+    )
+    original = copy.deepcopy(transfer)
+    holder_build = Mock()
+    monkeypatch.setattr(VLLMSessionKVHolder.Config, "build", holder_build)
+    kwargs = _build_engine_kwargs(
+        monkeypatch,
+        tmp_path,
+        Generator.Config(
+            model=_MODEL_CONFIG,
+            parallelism=InferenceParallelismConfig(tensor_parallel_degree=2),
+            engine=VLLMEngine.Config(
+                kv_transfer_config=transfer,
+                session_kv_holder=(
+                    VLLMSessionKVHolder.Config() if hold_sessions else None
+                ),
+            ),
+        ),
+    )
+    resolved = kwargs["kv_transfer_config"]
+    assert KVConnectorFactory.get_connector_class(resolved) is SimpleCPUOffloadConnector
+    assert kwargs["scheduler_cls"].endswith(
+        "cpu_kv_offload.create_kv_offload_scheduler"
+    )
+    assert resolved.kv_connector_extra_config == original.kv_connector_extra_config
+    assert transfer == original
+    if hold_sessions:
+        scheduler = (
+            vllm_engine_module.LLMEngine.from_engine_args.return_value.engine_core.engine_core.scheduler
+        )
+        holder_build.assert_called_once_with(
+            scheduler=scheduler, offload_connector=scheduler.connector
+        )
+    else:
+        holder_build.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "kv_role, module_path, match",
+    [
+        ("kv_both", "custom.cpu_offload_connector", "custom kv_connector_module_path"),
+        ("kv_producer", None, "requires kv_role='kv_both'"),
+        ("kv_consumer", None, "requires kv_role='kv_both'"),
+    ],
+)
+def test_unsupported_kv_transfer_config_rejected_before_engine_creation(
+    kv_role, module_path, match
+):
+    with pytest.raises(ValueError, match=match):
+        VLLMEngine.Config(
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="SimpleCPUOffloadConnector",
+                kv_role=kv_role,
+                kv_connector_module_path=module_path,
+            )
+        )
+
+
 @pytest.mark.parametrize(
     "key, match",
     [
@@ -691,6 +772,7 @@ def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
             r"use Generator\.Config\.max_num_batched_tokens",
         ),
         ("seed", r"use Generator\.Config\.debug\.seed"),
+        ("kv_transfer_config", r"use VLLMEngine\.Config\.kv_transfer_config"),
     ],
 )
 def test_extra_engine_args_rejects_torchtitan_owned_keys(key, match):

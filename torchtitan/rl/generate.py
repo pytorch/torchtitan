@@ -107,6 +107,12 @@ def generate() -> None:
             "generate.py runs vLLM; set generator.engine to VLLMEngine.Config, "
             f"got {type(engine_config).__qualname__}"
         )
+    if engine_config.kv_transfer_config is not None:
+        raise ValueError(
+            "generate.py does not yet support KV offload: it steps LLMEngine "
+            "directly, without the RL engine's TP KV-completion coordination and "
+            "asynchronous KV-save draining. Use the RL generator for now."
+        )
     model_config = gen_config.model
     model_path = config.hf_assets_path
     # Recipes name local assets relative to the repo root, while

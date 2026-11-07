@@ -590,6 +590,21 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
     )
 
 
+def rl_grpo_qwen3_5_debug_varlen_cpu_offload() -> Controller.Config:
+    """Eight GPUs: four trainer GPUs and two TP=2 generators with local CPU KV caches."""
+    from vllm.config import KVTransferConfig
+
+    config = rl_grpo_qwen3_5_debug_varlen()
+    config.num_generators = 2
+    config.generator.engine.cuda_graph = VLLMCudaGraphConfig(mode="NONE")
+    config.generator.engine.kv_transfer_config = KVTransferConfig(
+        kv_connector="SimpleCPUOffloadConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"cpu_bytes_to_use_per_rank": 1 << 30},
+    )
+    return config
+
+
 def rl_grpo_qwen3_5_debug_varlen_batch_invariant(
     *, seq_len: int = 2048
 ) -> Controller.Config:

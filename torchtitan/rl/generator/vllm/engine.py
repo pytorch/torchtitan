@@ -11,12 +11,14 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import torch
+import torch.distributed as dist
 from vllm import EngineArgs, LLMEngine, SamplingParams
-from vllm.config import AttentionConfig
+from vllm.config import AttentionConfig, KVTransferConfig
+from vllm.distributed import get_world_group
 from vllm.exceptions import VLLMClientError
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
@@ -66,6 +68,7 @@ def add_extra_vllm_engine_args(
     config_field_by_engine_arg = {
         "max_num_batched_tokens": "Generator.Config.max_num_batched_tokens",
         "compilation_config": "VLLMEngine.Config.cuda_graph",
+        "kv_transfer_config": "VLLMEngine.Config.kv_transfer_config",
         "seed": "Generator.Config.debug.seed",
     }
     owned_keys = sorted(
@@ -99,6 +102,10 @@ class VLLMEngine(GenerationEngine):
         cuda_graph: VLLMCudaGraphConfig = field(default_factory=VLLMCudaGraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
 
+        kv_transfer_config: KVTransferConfig | None = None
+        """Native vLLM KV offload configuration. None: no connector. See
+        ``SIMPLE_CPU_OFFLOAD.md``."""
+
         extra_engine_args: dict[str, Any] = field(default_factory=dict)
         """Additional keyword arguments passed to vLLM's ``EngineArgs``, for engine
         options without a dedicated field (e.g. ``{"watermark": 0.03}``). vLLM
@@ -111,7 +118,34 @@ class VLLMEngine(GenerationEngine):
 
         session_kv_holder: VLLMSessionKVHolder.Config | None = None
         """Keep each multi-turn session's cached prefix on GPU between its turns (see
-        `VLLMSessionKVHolder`). None: off."""
+        `VLLMSessionKVHolder`). With KV offload configured, also send CPU cache
+        release hints when sessions end. None disables both session behaviors."""
+
+        def __post_init__(self):
+            if self.kv_transfer_config is None:
+                return
+            # TODO(acisseJZhong): support prefill/decode disaggregation connectors
+            # if needed, and MultiConnector to combine them with KV offload.
+            if self.kv_transfer_config.kv_connector != "SimpleCPUOffloadConnector":
+                raise ValueError(
+                    "Titan RL supports SimpleCPUOffloadConnector; "
+                    "MultiConnector and other KV connectors are not supported."
+                )
+            if self.kv_transfer_config.kv_role != "kv_both":
+                raise ValueError(
+                    "SimpleCPUOffloadConnector requires kv_role='kv_both': "
+                    "it both saves and loads KV, so vLLM must enable "
+                    "producer finalization and consumer block-lifetime protection."
+                )
+            if self.kv_transfer_config.kv_connector_module_path not in (
+                None,
+                "vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector",
+            ):
+                raise ValueError(
+                    "KV offload requires vLLM's built-in connector in "
+                    "user config. Titan installs its lifecycle adapter automatically; "
+                    "user-provided custom kv_connector_module_path values are not supported."
+                )
 
     def __init__(
         self,
@@ -133,6 +167,16 @@ class VLLMEngine(GenerationEngine):
         generator_name: str,
         output_dir: str,
     ):
+        self._uses_kv_offload = config.kv_transfer_config is not None
+        self._coordinate_kv_offload = self._uses_kv_offload and (
+            parallelism.tensor_parallel_degree * parallelism.data_parallel_degree > 1
+        )
+        if config.kv_transfer_config is not None:
+            if reset_kv_cache_on_model_state_dict_load:
+                raise ValueError(
+                    "KV offload requires reset_kv_cache_on_model_state_dict_load=False: "
+                    "asynchronous saves can still hold GPU blocks after requests finish."
+                )
         if (
             config.session_kv_holder is not None
             and reset_kv_cache_on_model_state_dict_load
@@ -184,8 +228,12 @@ class VLLMEngine(GenerationEngine):
         # touches them.
         self._session_kv_holder: VLLMSessionKVHolder | None = None
         if config.session_kv_holder is not None:
+            scheduler = self._engine.engine_core.engine_core.scheduler
             self._session_kv_holder = config.session_kv_holder.build(
-                scheduler=self._engine.engine_core.engine_core.scheduler
+                scheduler=scheduler,
+                offload_connector=scheduler.connector
+                if self._uses_kv_offload
+                else None,
             )
 
     @staticmethod
@@ -256,6 +304,7 @@ class VLLMEngine(GenerationEngine):
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=gpu_memory_limit,
             enforce_eager=self.config.cuda_graph.mode == "NONE",
+            kv_transfer_config=self.config.kv_transfer_config,
             attention_config=AttentionConfig(backend=vllm_attention_backend(model)),
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
@@ -287,6 +336,17 @@ class VLLMEngine(GenerationEngine):
         # - None: every full block boundary, as before v0.29. Blocks are still freed
         #   when the request moves past them; hashed ones stay reusable until evicted.
         engine_kwargs["prefix_cache_retention_interval"] = None
+        if self.config.kv_transfer_config is not None:
+            engine_kwargs["kv_transfer_config"] = replace(
+                self.config.kv_transfer_config,
+                kv_connector_module_path=(
+                    "torchtitan.rl.generator.vllm.simple_cpu_offload"
+                ),
+            )
+            if self._coordinate_kv_offload:
+                engine_kwargs[
+                    "scheduler_cls"
+                ] = "torchtitan.rl.generator.vllm.cpu_kv_offload.create_kv_offload_scheduler"
         # FA2 requires block_size to be a multiple of 256
         if not has_cuda_capability(9, 0):
             engine_kwargs["block_size"] = 256
@@ -369,11 +429,20 @@ class VLLMEngine(GenerationEngine):
                 # prompts); the high-level entry stays resilient to vLLM internals vs
                 # vllm.inputs.tokens_input.
                 [engine_input] = self._engine.renderer.render_cmpl([prompt])
+                sampling_params = _build_sampling_params(request.sampling)
+                if self._coordinate_kv_offload:
+                    # shared_request_id is a copy of Titan's request.request_id,
+                    # shared by all TP ranks. vLLM may randomize its internal ID;
+                    # this metadata preserves the original ID so the scheduler
+                    # can match KV completions across ranks.
+                    sampling_params.extra_args = {
+                        "kv_transfer_params": {"shared_request_id": request.request_id}
+                    }
                 # vLLM appends a random suffix to the id; the scheduler knows only that one.
                 internal_request_id = self._engine.add_request(
                     request_id=request.request_id,
                     prompt=engine_input,
-                    params=_build_sampling_params(request.sampling),
+                    params=sampling_params,
                     arrival_time=request.arrival_time,
                     priority=max(request.group_id, -1),
                 )
@@ -388,11 +457,48 @@ class VLLMEngine(GenerationEngine):
         return rejected_requests
 
     def has_unfinished_requests(self) -> bool:
-        """Whether any admitted request is still running."""
-        return self._engine.has_unfinished_requests()
+        """Whether requests or their remaining KV work need more engine steps."""
+        if not self._uses_kv_offload:
+            return self._engine.has_unfinished_requests()
+
+        # All ranks enter this check before stepping and use the result directly.
+        has_work = self._has_unfinished_local_requests()
+        if self._coordinate_kv_offload:
+            work = torch.tensor(has_work, dtype=torch.int32)
+            dist.all_reduce(
+                work, op=dist.ReduceOp.MAX, group=get_world_group().cpu_group
+            )
+            has_work = bool(work.item())
+        return has_work
+
+    def _has_unfinished_local_requests(self) -> bool:
+        # LLMEngine tracks user outputs only; the in-process scheduler also tracks
+        # finish-time saves and the completion steps that release their GPU blocks.
+        # TODO(acisseJZhong): expose scheduler work through the public LLMEngine interface:
+        # https://github.com/vllm-project/vllm/blob/main/vllm/v1/engine/llm_engine.py
+        core = self._engine.engine_core.engine_core
+        return (
+            self._engine.output_processor.has_unfinished_requests()
+            or core.scheduler.has_requests()
+            or bool(core.batch_queue)
+            or (
+                self._session_kv_holder is not None
+                and self._session_kv_holder.has_pending_work
+            )
+        )
 
     def step(self) -> list[FinishedRequest]:
         """Run one engine step, a TP collective, and return the requests it finished."""
+        if self._coordinate_kv_offload and self._engine.dp_group is not None:
+            core = self._engine.engine_core.engine_core
+            # Idle DP replicas must still join the EP forward. Include KV-only
+            # steps, which upstream executes as dummy forwards under DP.
+            self._engine.has_unfinished_requests_dp(core.scheduler.has_requests())
+            if self._engine.should_execute_dummy_batch:
+                self._engine.should_execute_dummy_batch = False
+                self._engine.engine_core.execute_dummy_batch()
+            # Continue into step even after a dummy forward: this DP replica may
+            # still have queued async outputs and KV completions to drain.
         with torch.no_grad():
             request_outputs = self._engine.step()
         if self._session_kv_holder is not None:
@@ -400,6 +506,8 @@ class VLLMEngine(GenerationEngine):
         return [_finished_request(request_output) for request_output in request_outputs]
 
     def release_sessions(self, session_ids: list[str], group_ids: list[int]) -> None:
+        if not session_ids and not group_ids:
+            return
         if self._session_kv_holder is not None:
             self._session_kv_holder.release(session_ids, group_ids)
 
