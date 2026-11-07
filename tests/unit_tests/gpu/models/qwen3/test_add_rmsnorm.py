@@ -21,12 +21,13 @@ class TestQwen3AddRMSNorm(unittest.TestCase):
         torch._dynamo.reset()
 
     def test_compiled_add_and_norm_matches_eager(self):
-        config = build_model_config("8B", parallelism=ParallelismConfig())
+        # Qwen3-0.6B width (D=1024): without emulate_precision_casts, 23% of outputs differ.
+        config = build_model_config("0.6B", parallelism=ParallelismConfig())
         torch.manual_seed(0)
         norm = config.layers[0].attention_norm.build().cuda().to(torch.bfloat16)
         with torch.no_grad():
             norm.weight.normal_(1.0, 0.1)
-        # The method reads only attention_norm; a full 8B block would build ~200M params.
+        # The method reads only attention_norm.
         block = torch.nn.Module()
         block.attention_norm = norm
         add_attention_norm = Qwen3TransformerBlock._add_attention_norm
@@ -43,7 +44,7 @@ class TestQwen3AddRMSNorm(unittest.TestCase):
         # bf16 add: the compiled sum rounds exactly as eager's.
         torch.testing.assert_close(new_residual, eager_sum, rtol=0, atol=0)
         # emulate_precision_casts: the compiled norm reads that bf16 sum, as eager does,
-        # so all but a few outputs match eager bit for bit (0.7% differ without it).
+        # so all but a few outputs match eager bit for bit.
         fraction_differing = (out != eager_out).float().mean().item()
         self.assertLess(fraction_differing, 1e-3)
 
