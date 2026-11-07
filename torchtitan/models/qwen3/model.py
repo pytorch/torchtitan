@@ -184,7 +184,8 @@ class Qwen3Model(Decoder):
             )
             # Under grad, sum here: remat keeps each block's inputs for backward, so
             # carrying (h, residual) would keep one more [T, D] tensor per block.
-            # Without grad, the next block adds them inside its norm kernel.
+            # Without grad (RL generator, validation), the next block adds them
+            # inside its norm kernel.
             if torch.is_grad_enabled():
                 h, residual = residual + h, None
         # The next pipeline stage takes one tensor, so every stage ends with the sum.
