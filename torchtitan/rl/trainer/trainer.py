@@ -28,6 +28,7 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.rl.controller.metrics import combine_microbatch_metrics
+from torchtitan.rl.model_state_dict_delta import ModelStateDictDeltaPublisher
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import (
     RDMAMicrobatch,
@@ -97,6 +98,7 @@ class Trainer(Configurable):
         max_num_documents: int | None,
         hf_assets_path: str = "",
         output_dir: str,
+        model_state_dict_delta_max_fraction: float | None,
     ):
         init_logger()
         # Quiet torchstore's per-op transport-resolve INFO spam (very noisy in CI).
@@ -154,6 +156,16 @@ class Trainer(Configurable):
         )
 
         engine.load_checkpoint()
+        self._model_state_dict_delta_publisher = None
+        if model_state_dict_delta_max_fraction is not None:
+            model_state_dict = self._model_state_dict()
+            self._model_state_dict_delta_publisher = ModelStateDictDeltaPublisher(
+                model_state_dict,
+                key="model_state_dict",
+                max_fraction=model_state_dict_delta_max_fraction,
+                transfer_dtype=self._transfer_dtype,
+                preserve_dtype_keys=self._preserve_dtype_keys(model_state_dict),
+            )
         if engine.device.type == "cpu":
             self._push_model_state_dict_stream = None
         else:
@@ -440,8 +452,8 @@ class Trainer(Configurable):
     async def push_model_state_dict(self) -> None:
         """Publish model weights for generators to pull.
 
-        The live GPU tensors are put directly, so the trainer keeps no CPU
-        snapshot of its own. With the colocated SharedMemory transport,
+        The live GPU tensors are put directly; only model state dict deltas, when
+        enabled, keep a CPU copy of the previous version to diff against. With the colocated SharedMemory transport,
         TorchStore copies (and casts) each tensor straight into StorageVolume
         memory; other transports make a GPU cast copy of each batch first.
 
@@ -478,6 +490,10 @@ class Trainer(Configurable):
         with stream if stream is not None else nullcontext():
             if stream is not None:
                 stream.synchronize()
+            publisher = self._model_state_dict_delta_publisher
+            if publisher is not None:
+                asyncio.run(publisher.put(model_state_dict))
+                return
             asyncio.run(
                 ts.put_state_dict(
                     model_state_dict,

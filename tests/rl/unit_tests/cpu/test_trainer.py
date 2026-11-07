@@ -50,7 +50,8 @@ def test_initialize_torchstore_client_uses_publisher_role() -> None:
     asyncio.run(run())
 
 
-def test_push_model_state_dict_puts_on_push_stream_in_worker() -> None:
+@pytest.mark.parametrize("use_delta", [False, True])
+def test_push_model_state_dict_puts_on_push_stream_in_worker(use_delta: bool) -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
         # Model parts are torchtitan Modules (BaseModel in the engine).
@@ -65,6 +66,8 @@ def test_push_model_state_dict_puts_on_push_stream_in_worker() -> None:
         # Under PP, a rank publishes the merged state dicts of its model parts.
         trainer.engine = SimpleNamespace(model_parts=[weight_part, buffer_part])
         trainer._transfer_dtype = torch.bfloat16
+        publisher = MagicMock() if use_delta else None
+        trainer._model_state_dict_delta_publisher = publisher
         stream = MagicMock()
         trainer._push_model_state_dict_stream = stream
         main_thread_id = threading.get_ident()
@@ -73,29 +76,36 @@ def test_push_model_state_dict_puts_on_push_stream_in_worker() -> None:
         def enter_stream() -> None:
             worker_thread_ids.append(threading.get_ident())
 
-        async def put_state_dict(*args, **kwargs) -> None:
+        async def put_after_synchronize(*args, **kwargs) -> None:
             # The put must run while the push stream is current and idle.
             stream.__exit__.assert_not_called()
             stream.synchronize.assert_called_once()
             worker_thread_ids.append(threading.get_ident())
 
         stream.__enter__.side_effect = enter_stream
+        if use_delta:
+            publisher.put = AsyncMock(side_effect=put_after_synchronize)
         with patch(
             "torchtitan.rl.trainer.trainer.ts.put_state_dict",
             new_callable=AsyncMock,
-            side_effect=put_state_dict,
+            side_effect=put_after_synchronize,
         ) as put:
             await trainer.push_model_state_dict()
 
-        put.assert_awaited_once_with(
-            ANY,
-            "model_state_dict",
-            direct_rdma=False,
-            transfer_dtype=torch.bfloat16,
-            preserve_dtype_keys=frozenset({"norm.weight", "norm.scale"}),
-        )
+        if use_delta:
+            put.assert_not_awaited()
+            publisher.put.assert_awaited_once()
+            state_dict = publisher.put.await_args.args[0]
+        else:
+            put.assert_awaited_once_with(
+                ANY,
+                "model_state_dict",
+                direct_rdma=False,
+                transfer_dtype=torch.bfloat16,
+                preserve_dtype_keys=frozenset({"norm.weight", "norm.scale"}),
+            )
+            state_dict = put.await_args.args[0]
         # The live model tensors are put; TorchStore owns the CPU copy.
-        state_dict = put.await_args.args[0]
         assert set(state_dict) == {"weight", "norm.weight", "norm.scale"}
         assert state_dict["weight"].data_ptr() == weight_part.weight.data_ptr()
         assert state_dict["norm.scale"].data_ptr() == buffer_part.norm.scale.data_ptr()
@@ -128,6 +138,7 @@ def test_rl_trainer_validates_model_training_config_before_initialization(
                 precision=PrecisionConfig(),
                 max_num_documents=None,
                 output_dir=str(tmp_path),
+                model_state_dict_delta_max_fraction=None,
             )
 
     validate.assert_called_once_with(

@@ -33,6 +33,7 @@ from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadM
 from torchtitan.rl.generator.engine_loop import EngineLoop, EngineLoopThread
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
+from torchtitan.rl.model_state_dict_delta import ModelStateDictDeltaReader
 from torchtitan.rl.rollout.types import Completion
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 
@@ -208,6 +209,7 @@ class Generator(Configurable):
         model_path: str,
         max_num_seqs: int,
         output_dir: str,
+        pull_model_state_dict_delta: bool,
         rank: int | None = None,
         generator_name: str = "generator",
         open_result_channel: Callable[[], tuple[Any, Any]] | None = None,
@@ -292,6 +294,11 @@ class Generator(Configurable):
             )
 
         self._prefetched_model_state_dict = engine.prefetched_model_state_dict
+        self._model_state_dict_delta_reader = (
+            ModelStateDictDeltaReader("model_state_dict")
+            if pull_model_state_dict_delta
+            else None
+        )
         # Set by `initialize_torchstore_client`: the event loop TorchStore reads run on.
         self._torchstore_loop: asyncio.AbstractEventLoop | None = None
 
@@ -474,6 +481,12 @@ class Generator(Configurable):
         A no-op with ``model_state_dict_load_mode="gpu_fetch"``: the load reads the weights.
         """
         if self.config.model_state_dict_load_mode == "gpu_fetch":
+            return
+        reader = self._model_state_dict_delta_reader
+        if reader is not None:
+            # The prefetch buffers keep the previous version between pulls. The
+            # controller finishes each push before pulling.
+            await reader.pull(self._prefetched_model_state_dict)
             return
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
