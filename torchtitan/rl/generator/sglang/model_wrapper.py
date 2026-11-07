@@ -28,6 +28,7 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
     Attention,
     FlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder
@@ -51,10 +52,12 @@ logger = logging.getLogger(__name__)
 def replace_sglang_layer_configs(model_config: Decoder.Config) -> Decoder.Config:
     """Replace each layer's inner attention with ``SGLangInnerAttention``.
 
-    Only full softmax attention with the varlen backend is supported; other layers
-    raise ``ValueError``. The inner attention keeps the trainer attention's sharding
-    config.
+    Only softmax attention with the varlen backend, full or sliding-window, is
+    supported; other layers raise ``ValueError``. The inner attention keeps the trainer
+    attention's sharding config.
     """
+    from torchtitan.models.gpt_oss.model import GptOssAttention
+
     new_layers = []
     for layer_id, layer_cfg in enumerate(model_config.layers):
         attention_cfg = layer_cfg.attention
@@ -62,6 +65,13 @@ def replace_sglang_layer_configs(model_config: Decoder.Config) -> Decoder.Config
             raise ValueError(
                 f"layers[{layer_id}]: the SGLang engine supports softmax attention "
                 f"only, got {type(attention_cfg).__qualname__}"
+            )
+        if isinstance(attention_cfg, GptOssAttention.Config):
+            # TODO: rescale the attention output by the sinks, from the log-sum-exp
+            # SGLang's FlashAttention backend returns.
+            raise ValueError(
+                f"layers[{layer_id}]: the SGLang engine does not support attention "
+                "sinks (GPT-OSS)"
             )
         inner_cfg = attention_cfg.inner_attention
         if isinstance(inner_cfg, FlexInnerAttention.Config):
@@ -71,9 +81,12 @@ def replace_sglang_layer_configs(model_config: Decoder.Config) -> Decoder.Config
                 f"layers[{layer_id}]: the SGLang engine does not support the flex "
                 "attention backend yet; use varlen."
             )
-        if type(inner_cfg) is not VarlenInnerAttention.Config:
+        if type(inner_cfg) not in (
+            VarlenInnerAttention.Config,
+            SlidingWindowVarlenInnerAttention.Config,
+        ):
             raise ValueError(
-                f"layers[{layer_id}]: the SGLang engine supports full varlen attention "
+                f"layers[{layer_id}]: the SGLang engine supports varlen attention "
                 f"only, got {type(inner_cfg).__qualname__}"
             )
         num_heads, num_kv_heads, head_dim, value_head_dim = get_attention_dimensions(
@@ -90,6 +103,11 @@ def replace_sglang_layer_configs(model_config: Decoder.Config) -> Decoder.Config
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
             scale=attention_cfg.softmax_scale,
+            sliding_window_size=(
+                inner_cfg.sliding_window_size
+                if isinstance(inner_cfg, SlidingWindowVarlenInnerAttention.Config)
+                else None
+            ),
             sharding_config=inner_cfg.sharding_config,
         )
         new_layers.append(

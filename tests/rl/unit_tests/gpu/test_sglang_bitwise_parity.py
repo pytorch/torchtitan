@@ -34,6 +34,7 @@ package):
 """
 
 import dataclasses
+import functools
 import importlib.util
 import os
 import shutil
@@ -52,6 +53,9 @@ from torchtitan.config.transform import apply_transforms
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.models.common.dist_moe import DistMoeRuntime
+from torchtitan.models.muse_glimmer import (
+    build_model_config as build_muse_glimmer_model_config,
+)
 from torchtitan.rl.controller.controller import Controller
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
@@ -59,6 +63,7 @@ from torchtitan.tools.utils import activate_cuda_flash_attention_impl
 from torchtitan_recipes.rl.alphabet_sort import (
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
 )
+from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 from torchtitan_recipes.tests.rl.alphabet_sort import (
     rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
 )
@@ -333,6 +338,54 @@ class TestSGLangBitwiseParityMoEEP(SGLangBitwiseParityTestBase):
     sync_weights_from_trainer = True
     # The all-to-all token dispatcher syncs the host for its split sizes.
     cuda_graph = "none"
+
+
+def _debug_model_config(build_model_config, **kwargs) -> Controller.Config:
+    """A model's debug flavor at TP 2 on both sides, in the batch-invariant Qwen3 MoE
+    debug recipe."""
+    config = rl_grpo_qwen3_moe_debug_varlen_batch_invariant()
+    trainer_parallelism = dataclasses.replace(
+        config.trainer.parallelism,
+        data_parallel_shard_degree=1,
+        expert_parallel_degree=1,
+    )
+    generator_parallelism = InferenceParallelismConfig(tensor_parallel_degree=2)
+    trainer_model, generator_model = build_rl_model_configs(
+        build_model_config,
+        "debugmodel",
+        seq_len=2048,
+        attn_backend="varlen",
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
+        **kwargs,
+    )
+    # Local compile regions do not support batch-invariant mode.
+    for model_config in (trainer_model, generator_model):
+        model_config.local_compile.regions = []
+    config.trainer = dataclasses.replace(
+        config.trainer, model=trainer_model, parallelism=trainer_parallelism
+    )
+    config.generator = dataclasses.replace(
+        config.generator, model=generator_model, parallelism=generator_parallelism
+    )
+    return config
+
+
+class TestSGLangBitwiseParitySlidingWindow(SGLangBitwiseParityTestBase):
+    """Muse Glimmer debug model with random weights, 128-token windows: of the 60- to
+    150-token prompts with 50 generated tokens, one exceeds a window in prefill and
+    three during decode."""
+
+    __test__ = True
+    config_fn = staticmethod(
+        functools.partial(
+            _debug_model_config,
+            build_muse_glimmer_model_config,
+            # Its lm_head soft-caps the logits, which the fp32 lm_head does not.
+            fp32_lm_head=False,
+        )
+    )
+    sync_weights_from_trainer = True
 
 
 def _qwen3_moe_debug_dist_moe_tp2_ep2_config() -> Controller.Config:
