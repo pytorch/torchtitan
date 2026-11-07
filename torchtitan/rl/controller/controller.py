@@ -544,8 +544,9 @@ class Controller(Configurable):
         # handle serializes cheaply and the whole controller does not.
         generator_router = self.generator_router
 
-        # TODO: a caller that stops waiting (a cancelled group) leaves its request running to the end
-        # on its generator: Monarch doesn't forward the cancel. Abort it there to free its KV sooner.
+        # TODO: a caller that stops waiting (a cancelled group, or a rollout past `rollout_timeout_s`)
+        # leaves its request running to the end on its generator: Monarch doesn't forward the cancel.
+        # Abort it there to free its KV sooner.
         @sl.log_trace_span("generate")
         async def generate(
             prompt_token_ids: list[int],

@@ -145,8 +145,8 @@ class RolloutStatus(StrEnum):
     ERROR_ABORT = "error_abort"
     ERROR = "error"
     # The rollout failed outside the policy: its code raised, or Verifiers recorded an infra error
-    # (a generator 5xx, a sandbox or env failure). It stays in its group for logs, but gets no
-    # reward or advantage and isn't trained.
+    # (a generator 5xx, a sandbox or env failure), or it passed `rollout_timeout_s` before its first
+    # turn. It stays in its group for logs, but gets no reward or advantage and isn't trained.
     ERROR_SYSTEM = "error_system"
 
     def is_truncated(self) -> bool:

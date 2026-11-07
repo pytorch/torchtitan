@@ -129,6 +129,7 @@ def test_worker_executes_group_without_actor_mesh() -> None:
             message_env=_MessageEnvConfig(),
             token_env=token_env_config,
             advantage=_Config(_AdvantageEstimator()),
+            rollout_timeout_s=None,
         )
         worker = _CustomWorker(worker_config)
         released = []
@@ -258,6 +259,7 @@ def test_a_rollout_that_raises_is_kept_but_left_out_of_the_advantage() -> None:
                 message_env=_MessageEnvConfig(),
                 token_env=_TokenEnvConfig(),
                 advantage=AdvantageEstimator.Config(),
+                rollout_timeout_s=None,
             )
         )
         await worker.setup_async(
@@ -308,6 +310,7 @@ def test_cancelled_group_waits_for_every_sibling_release() -> None:
                 message_env=_MessageEnvConfig(),
                 token_env=_TokenEnvConfig(),
                 advantage=_Config(_AdvantageEstimator()),
+                rollout_timeout_s=None,
             )
         )
         await worker.setup_async(
@@ -345,6 +348,7 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
             message_env=None,
             token_env=None,
             advantage=_Config(None),
+            rollout_timeout_s=None,
         )
     )
     builder = TrainingSampleBuilder.Config().build()
@@ -399,3 +403,80 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
 
     asyncio.run(run())
 
+
+def _bare_worker(rollout_timeout_s: float | None = None) -> RolloutWorker:
+    return RolloutWorker(
+        SimpleNamespace(
+            rubric=_Config(None),
+            message_env=None,
+            token_env=None,
+            advantage=_Config(None),
+            rollout_timeout_s=rollout_timeout_s,
+        )
+    )
+
+
+class _TwoTurnTokenEnv(_TokenEnv):
+    async def step(self, completion: Completion) -> TokenEnvOutput:
+        if completion.request_id.endswith("turn=1"):
+            return await super().step(completion)
+        return TokenEnvOutput(
+            next_prompt_token_ids=[1, 2, 4, 5],
+            status=RolloutStatus.ONGOING,
+            completion_message={"role": "assistant", "content": "call a tool"},
+        )
+
+
+async def _hang() -> Completion:
+    await asyncio.Event().wait()
+
+
+async def _raise_timeout() -> Completion:
+    raise TimeoutError("connect timed out")
+
+
+@pytest.mark.parametrize(
+    "turn_that_stalls, stall, expected_status, expected_num_turns",
+    [
+        # Past rollout_timeout_s before the first turn: no tokens to train, so ERROR_SYSTEM.
+        (0, _hang, RolloutStatus.ERROR_SYSTEM, 0),
+        # Past rollout_timeout_s after a turn: ERROR_TIMEOUT, which trains.
+        (1, _hang, RolloutStatus.ERROR_TIMEOUT, 1),
+        # A TimeoutError from the generate call before the deadline is an error of the code.
+        (1, _raise_timeout, RolloutStatus.ERROR_SYSTEM, 1),
+    ],
+)
+def test_rollout_timeout(
+    turn_that_stalls, stall, expected_status, expected_num_turns
+) -> None:
+    generate_fn, released = _GenerateFn(), []
+
+    async def generate_then_stall(prompt_token_ids, **kwargs) -> Completion:
+        if kwargs["request_id"].endswith(f"turn={turn_that_stalls}"):
+            return await stall()
+        return await generate_fn(prompt_token_ids, **kwargs)
+
+    async def release_session_fn(**kwargs) -> None:
+        released.append(kwargs)
+
+    rollout = asyncio.run(
+        asyncio.wait_for(
+            _bare_worker(rollout_timeout_s=0.1)._run_single_rollout(
+                generate_fn=generate_then_stall,
+                release_session_fn=release_session_fn,
+                env=_TwoTurnTokenEnv(),
+                sampling=SamplingConfig(),
+                group_id=7,
+                rollout_id=0,
+            ),
+            timeout=10,
+        )
+    )
+
+    assert (rollout.status, len(rollout.turns)) == (
+        expected_status,
+        expected_num_turns,
+    )
+    # Every ERROR_SYSTEM rollout records why.
+    assert (rollout.status is RolloutStatus.ERROR_SYSTEM) == ("error" in rollout.logs)
+    assert released == [{"routing_session_id": "group=7/rollout=0"}]
