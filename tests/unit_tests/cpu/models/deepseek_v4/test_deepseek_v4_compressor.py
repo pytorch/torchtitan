@@ -40,3 +40,16 @@ def test_default_positions_match_explicit_positions(ratio):
     implicit = compressor(x, positions=None)
     explicit = compressor(x, positions=torch.arange(seqlen))
     torch.testing.assert_close(implicit, explicit)
+
+
+def test_rotate_activation_after_fake_tensor_trace():
+    """Regression: a cached Hadamard matrix built under a fake-tensor trace
+    (make_fx, GraphTrainer) leaked a FakeTensor into later eager calls."""
+    from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
+
+    from torchtitan.models.deepseek_v4.compressor import Indexer
+
+    with FakeTensorMode():
+        Indexer._rotate_activation(torch.randn(4, 128))
+    out = Indexer._rotate_activation(torch.randn(4, 128))
+    assert not isinstance(out, FakeTensor)
