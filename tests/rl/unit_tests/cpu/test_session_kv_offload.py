@@ -65,7 +65,10 @@ def test_cpu_eviction_preserves_active_hashes_and_rank_independent_order(
     assert pinned.ref_cnt == 1
 
 
-def test_cpu_offload_rejects_disabled_prefix_cache():
+def test_cpu_offload_rejects_disabled_prefix_cache(monkeypatch):
+    # RL jobs default to expandable segments, which vLLM rejects for any KV
+    # connector before this connector's own prefix-cache check can run.
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:False")
     config = VllmConfig(
         device_config=DeviceConfig("cpu"),
         cache_config=CacheConfig(enable_prefix_caching=False),

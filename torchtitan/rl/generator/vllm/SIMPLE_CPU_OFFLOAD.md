@@ -47,6 +47,11 @@ Eight-GPU recipe:
 - CPU blocks share the GPU prefix cache's salt, the request's
   `min_policy_version`: a group reuses its offloaded KV across weight updates
   exactly as it reuses GPU KV, and new groups start under the current version.
+  The salt is the group's starting version, not the weights that computed a
+  block: with hot swap, or across turns of a group pinned to an older version,
+  cached GPU and CPU blocks may hold KV computed under different weights. For
+  strict recompute, use `reset_kv_cache_on_model_state_dict_load=True`, which
+  KV offload does not support.
 - Weight updates may hot swap (`generator_router.hot_swap=True`). Saves and
   loads only copy KV blocks, which a weight load does not touch; the engine
   keeps stepping pending transfers after responses return.
