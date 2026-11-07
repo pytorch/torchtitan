@@ -18,14 +18,17 @@ MoE layers are already Titan Module instances with ShardingConfig and
 are handled by ``model._parallelize()`` directly.
 """
 
+import functools
 import inspect
 import logging
 
 import spmd_types as spmd
+import torch
 import torch.nn as nn
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
@@ -69,7 +72,10 @@ def _hf_colwise_sharding_config() -> ShardingConfig:
 
 
 def _hf_rowwise_sharding_config(*, output_sp: bool = False) -> ShardingConfig:
-    """Row-shard a linear whose output retains HF's batch dimension."""
+    """Row-shard a linear whose output retains HF's batch dimension.
+
+    The output layout is after the reduction that ``_set_row_parallel`` adds.
+    """
     out_dst = (
         _hf_sequence_parallel_placement()
         if output_sp
@@ -80,8 +86,7 @@ def _hf_rowwise_sharding_config(*, output_sp: bool = False) -> ShardingConfig:
             "weight": dense_param_placement(tp=spmd.S(1)),
             "bias": dense_param_placement(tp=spmd.R),
         },
-        out_src_shardings=_hf_activation_placement(tp=spmd.P),
-        out_dst_shardings=out_dst,
+        out_src_shardings=out_dst,
     )
 
 
@@ -98,6 +103,114 @@ def _sp_activation(*, enable_sp: bool) -> SpmdType:
         if enable_sp
         else _hf_activation_placement(tp=spmd.R)
     )
+
+
+def _maybe_redistribute_tp(
+    x: torch.Tensor,
+    *,
+    src: spmd.PerMeshAxisSpmdType,
+    dst: spmd.PerMeshAxisSpmdType,
+) -> torch.Tensor:
+    """Redistribute ``x`` along the TP axis; a no-op without TP."""
+    tp_group = spmd_mesh_group(TP)
+    if tp_group is None:
+        return x
+    return spmd.redistribute(
+        x, tp_group, src=src, dst=dst, backward_options={"op_dtype": x.dtype}
+    )
+
+
+class _GatherTPInput:
+    """Mixin gathering one sequence-parallel forward input to TP-``Replicate``.
+
+    HF modules keep their own ``forward``, so the TP collective is added by
+    swapping in a subclass. ``_tp_input_name`` is the gathered argument, which
+    HF decoder layers pass either positionally or by keyword.
+    """
+
+    _tp_input_name: str
+    _tp_input_src: spmd.PerMeshAxisSpmdType
+
+    def forward(self, *args, **kwargs):
+        name, src = self._tp_input_name, self._tp_input_src
+        if name in kwargs:
+            kwargs[name] = _maybe_redistribute_tp(kwargs[name], src=src, dst=spmd.R)
+        else:
+            args = (_maybe_redistribute_tp(args[0], src=src, dst=spmd.R), *args[1:])
+        return super().forward(*args, **kwargs)  # pyrefly: ignore [missing-attribute]
+
+
+class _ReduceTPOutput:
+    """Mixin reducing a TP-``Partial`` row-parallel output to ``_tp_output_dst``."""
+
+    _tp_output_dst: spmd.PerMeshAxisSpmdType
+
+    def forward(self, *args, **kwargs):
+        output = super().forward(*args, **kwargs)  # pyrefly: ignore [missing-attribute]
+        return _maybe_redistribute_tp(output, src=spmd.P, dst=self._tp_output_dst)
+
+
+class _VocabParallelEmbedding:
+    """Mixin reducing the TP-``Partial`` vocab-sharded lookup to ``_tp_output_dst``.
+
+    The masked lookup runs in a local-SPMD region (TP-replicated token ids in,
+    TP-partial embeddings out); the reduction runs outside it.
+    """
+
+    _tp_output_dst: spmd.PerMeshAxisSpmdType
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        tokens = _hf_activation_placement(tp=spmd.R)
+        partial = _hf_activation_placement(tp=spmd.P)
+        output = spmd.local_map(
+            in_types=((tokens.local_type, tokens.partition_spec),),
+            out_types=(partial.local_type, partial.partition_spec),
+        )(
+            super().forward  # pyrefly: ignore [missing-attribute]
+        )(
+            input
+        )
+        return _maybe_redistribute_tp(output, src=spmd.P, dst=self._tp_output_dst)
+
+
+_tp_boundary_class_cache: dict[tuple[type, type], type] = {}
+
+
+def _add_tp_boundary(module: nn.Module, mixin: type, **attrs: object) -> None:
+    """Swap ``module`` to a cached subclass of its class with ``mixin`` first.
+
+    Like ``convert_hf_to_module``, this keeps module state and state_dict keys.
+    The subclass ``forward`` reports the HF signature: ``Module`` maps
+    positional inputs to its sharding config by parameter name.
+    """
+    cls = type(module)
+    key = (mixin, cls)
+    if key not in _tp_boundary_class_cache:
+        mixin_forward = mixin.forward
+
+        @functools.wraps(cls.forward)
+        def forward(self, *args, **kwargs):
+            return mixin_forward(self, *args, **kwargs)
+
+        _tp_boundary_class_cache[key] = type(
+            cls.__name__, (mixin, cls), {"forward": forward}
+        )
+    module.__class__ = _tp_boundary_class_cache[key]
+    for name, value in attrs.items():
+        setattr(module, name, value)
+
+
+def _set_row_parallel(module: nn.Module, *, output_sp: bool) -> None:
+    """Row-shard a linear and reduce its output: reduce-scatter under SP."""
+    module._sharding_config = _hf_rowwise_sharding_config(output_sp=output_sp)
+    _add_tp_boundary(
+        module, _ReduceTPOutput, _tp_output_dst=spmd.S(1) if output_sp else spmd.I
+    )
+
+
+def _set_gather_input(module: nn.Module, name: str, *, src: spmd.Shard) -> None:
+    """Gather a sequence-parallel input to TP-``Replicate`` before ``module``."""
+    _add_tp_boundary(module, _GatherTPInput, _tp_input_name=name, _tp_input_src=src)
 
 
 def set_hf_sharding_configs(
@@ -125,10 +238,12 @@ def set_hf_sharding_configs(
         model.tok_embeddings._sharding_config = ShardingConfig(
             state_shardings=emb_state,
             in_src_shardings={"input": _hf_activation_placement(tp=spmd.R)},
-            in_dst_shardings={"input": _hf_activation_placement(tp=spmd.R)},
-            out_src_shardings=_hf_activation_placement(tp=spmd.P),
-            out_dst_shardings=_sp_activation(enable_sp=enable_sp),
-            local_spmd=True,
+            out_src_shardings=_sp_activation(enable_sp=enable_sp),
+        )
+        _add_tp_boundary(
+            model.tok_embeddings,
+            _VocabParallelEmbedding,
+            _tp_output_dst=spmd.S(1) if enable_sp else spmd.R,
         )
 
     if model.norm is not None and not isinstance(model.norm, nn.Identity):
@@ -148,17 +263,15 @@ def set_hf_sharding_configs(
             in_src_shardings={
                 "input": lm_head_input,
             },
-            in_dst_shardings={
-                "input": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
-            },
             # Vocab-shard the lm_head output S(-1) unconditionally, mirroring
             # core's set_decoder_sharding_config. The S(-1) TP placement is a
             # no-op when TP is absent from the runtime mesh, so no flag is
             # needed: core cross_entropy_loss detects the vocab-sharded pred
             # (spmd_types: tp mesh size > 1) and runs vocab-parallel CE.
             out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
-            out_dst_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
         )
+        if enable_sp:
+            _set_gather_input(model.lm_head, "input", src=spmd.S(0))
 
     # Rotary embedding: annotate buffers and inputs so their local SPMD layouts
     # compose through apply_rotary_pos_emb.
@@ -268,10 +381,9 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
         in_src_shardings={
             "hidden_states": _sp_activation(enable_sp=enable_sp),
         },
-        in_dst_shardings={
-            "hidden_states": _hf_activation_placement(tp=spmd.R),
-        },
     )
+    if enable_sp:
+        _set_gather_input(attn, "hidden_states", src=spmd.S(1))
 
     # Flex attention: attach the kernel Module that carries the attention
     # local SPMD region so q/k/v are computed on local head-sharded tensors.
@@ -319,9 +431,7 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
 
     # O projection
     o_proj_name = "o_proj" if hasattr(attn, "o_proj") else "dense"
-    getattr(attn, o_proj_name)._sharding_config = _hf_rowwise_sharding_config(
-        output_sp=enable_sp
-    )
+    _set_row_parallel(getattr(attn, o_proj_name), output_sp=enable_sp)
 
     # Q/K norms (Qwen3) — weight replicated, activations stay heads-sharded.
     for norm_name in ("q_norm", "k_norm"):
@@ -342,8 +452,9 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
         mlp_arg = _first_forward_arg(mlp)
         mlp._sharding_config = ShardingConfig(
             in_src_shardings={mlp_arg: _sp_activation(enable_sp=enable_sp)},
-            in_dst_shardings={mlp_arg: _hf_activation_placement(tp=spmd.R)},
         )
+        if enable_sp:
+            _set_gather_input(mlp, mlp_arg, src=spmd.S(1))
 
         gate_name = "gate_proj" if hasattr(mlp, "gate_proj") else "fc1"
         getattr(mlp, gate_name)._sharding_config = _hf_colwise_sharding_config()
@@ -352,9 +463,7 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
             mlp.up_proj._sharding_config = _hf_colwise_sharding_config()
 
         down_name = "down_proj" if hasattr(mlp, "down_proj") else "fc2"
-        getattr(mlp, down_name)._sharding_config = _hf_rowwise_sharding_config(
-            output_sp=enable_sp
-        )
+        _set_row_parallel(getattr(mlp, down_name), output_sp=enable_sp)
 
     # --- Direct-on-layer state ---
     # Some models keep parameters/buffers directly on the decoder layer rather
