@@ -192,7 +192,8 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         self, prompt_ids: list[list[int]], *, load_at_step: int = -1
     ) -> list[FinishedRequest]:
         """Sample a completion of each prompt at temperature 1, each with its own seed
-        and session, and return the results in prompt order.
+        and session, and return the results in prompt order. Equal prompts form one
+        rollout group.
 
         With ``load_at_step`` >= 0, load the trainer's weights before that step.
         """
@@ -207,7 +208,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
                     seed=1000 + i,
                     stop_token_ids=[],
                 ),
-                group_id=i,
+                group_id=prompt_ids.index(ids),
                 routing_session_id=str(i),
                 arrival_time=time.time(),
             )

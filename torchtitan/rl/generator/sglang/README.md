@@ -69,7 +69,7 @@ scripts/install_rl_env.sh --sglang
 | Tensor parallelism | Supported; outside batch-invariant mode, the model's TP all-reduces run on SGLang's TP all-reduce (custom all-reduce) instead of NCCL |
 | CUDA graphs (decode and prefill), overlap scheduling, chunked prefill | Supported |
 | Priority scheduling by rollout group | Supported |
-| Prompt KV reuse within a rollout group | Supported; see below |
+| Prompt KV reuse within a rollout group | Supported for softmax attention, not linear attention (GDN, KDA); see below |
 | Model state dict loads (`cpu_prefetch`, `gpu_fetch`) | Supported |
 | Policy-version prefix cache isolation | Supported (`cache_salt`) |
 | `reset_kv_cache_on_model_state_dict_load` | Supported: running requests are retracted and recompute their KV |

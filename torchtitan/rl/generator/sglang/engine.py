@@ -313,14 +313,15 @@ class SGLangEngine(GenerationEngine):
         # The sessions of each rollout group with a request admitted, for
         # `release_sessions`.
         self._group_sessions: dict[int, set[str]] = {}
-        # Per (cache salt, prompt) whose first admitted request awaits its prefill:
-        # that request, and the later requests with that prompt, held out of
-        # SGLang's waiting queue until then (see add_requests).
+        # Per (priority, cache salt, prompt) whose first admitted request awaits its
+        # prefill: that request, and the later requests with that key, held out of
+        # SGLang's waiting queue until then (see add_requests). The priority keeps a
+        # request from waiting on a newer group's request that SGLang runs later.
         # TODO(https://github.com/sgl-project/sglang/issues/48963): SGLang could share
         # a prompt's KV among requests in one prefill batch, as vLLM's prefix cache
         # does; then drop the holding.
         self._awaiting_prefill: dict[
-            tuple[str | None, tuple[int, ...]], tuple[Req, list[Req]]
+            tuple[int, str | None, tuple[int, ...]], tuple[Req, list[Req]]
         ] = {}
         # Without the extra_buffer strategy, SGLang snapshots a linear attention
         # state only at the end of the cached prefix: a request that shares a whole
@@ -460,9 +461,9 @@ class SGLangEngine(GenerationEngine):
         instead of raising, so that rejection is the abort, before SGLang schedules it.
         The checks are deterministic, so every TP rank rejects the same requests.
 
-        A request whose prompt (and cache salt) matches an admitted request still
-        awaiting its prefill waits outside SGLang's waiting queue until that prefill
-        is done, then reuses its KV. SGLang caches a request's KV only after its
+        A request whose prompt, priority and cache salt match an admitted request
+        still awaiting its prefill waits outside SGLang's waiting queue until that
+        prefill is done, then reuses its KV. SGLang caches a request's KV only after its
         prefill, so the samples of a rollout group admitted in one prefill batch
         would each compute the prompt. SGLang's own parallel sampling (n > 1)
         prefills the prompt first for the same reason. Linear attention models do
@@ -543,7 +544,7 @@ class SGLangEngine(GenerationEngine):
             held = set()
             # In admission order, so every TP rank picks the same leaders.
             for req in queued.values():
-                key = (req.cache_salt, tuple(req.origin_input_ids))
+                key = (req.priority, req.cache_salt, tuple(req.origin_input_ids))
                 if key in self._awaiting_prefill:
                     self._awaiting_prefill[key][1].append(req)
                     held.add(req.rid)
