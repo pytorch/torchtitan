@@ -107,7 +107,7 @@ class NaViTRoPE(ComplexRoPE):
 
     def __init__(self, config: Config) -> None:
         if config.scaling is not None:
-            raise ValueError("NaViT RoPE does not support frequency scaling")
+            raise ValueError("NaViTRoPE does not support frequency scaling")
         super().__init__(config)
 
     def _precompute_cache(self) -> torch.Tensor:
