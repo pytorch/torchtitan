@@ -97,6 +97,15 @@ class LocalTokenDispatcher(Module):
         super().__init__()
         self.num_experts = config.num_experts
         self.top_k = config.top_k
+        # Expert ids are sorted as keys on the narrowest integer type that holds
+        # [0, num_experts): the CUDA radix sort makes one pass per key byte, so int64
+        # ids take 8 passes and uint8 ids 1. Same order.
+        if config.num_experts <= 256:
+            self.expert_ids_sort_dtype = torch.uint8
+        elif config.num_experts <= 2**15:
+            self.expert_ids_sort_dtype = torch.int16
+        else:
+            self.expert_ids_sort_dtype = torch.int64
 
     def init_buffer(self) -> None:
         """Initialize backend communication buffers, if any."""
@@ -124,8 +133,8 @@ class LocalTokenDispatcher(Module):
             topk_scores_experts_sorted_N: ``(N,)`` scores in expert-sorted order
         """
         # Reorder the token indices to match the order of the experts where N = T*K
-        token_indices_experts_sorted_N = _argsort_expert_ids(
-            topk_expert_ids_TK.view(-1), self.num_experts
+        token_indices_experts_sorted_N = torch.argsort(
+            topk_expert_ids_TK.view(-1).to(self.expert_ids_sort_dtype), stable=True
         )
         topk_scores_experts_sorted_N = topk_scores_TK.view(-1)[
             token_indices_experts_sorted_N
@@ -221,22 +230,6 @@ class LocalTokenDispatcher(Module):
 def _ep_process_group() -> torch.distributed.ProcessGroup | None:
     with maybe_set_sparse_mesh():
         return spmd_mesh_group(MeshAxisName.EP)
-
-
-def _argsort_expert_ids(expert_ids_N: torch.Tensor, num_experts: int) -> torch.Tensor:
-    """``torch.argsort(expert_ids_N, stable=True)``, sorted on the narrowest integer type
-    that holds the expert ids.
-
-    The CUDA radix sort makes one pass per key byte, so int64 ids take 8 passes and
-    uint8 ids 1. Same order.
-    """
-    # num_experts is a Python int fixed by the model config, so compile resolves this
-    # branch once: no graph break, and the same dtype in training and inference.
-    if num_experts <= 256:
-        expert_ids_N = expert_ids_N.to(torch.uint8)
-    elif num_experts <= 2**15:
-        expert_ids_N = expert_ids_N.to(torch.int16)
-    return torch.argsort(expert_ids_N, stable=True)
 
 
 class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):

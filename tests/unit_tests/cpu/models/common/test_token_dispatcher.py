@@ -8,7 +8,7 @@ import unittest
 
 import torch
 
-import torchtitan.models.common.moe.token_dispatcher as token_dispatcher
+from torchtitan.models.common.moe.token_dispatcher import LocalTokenDispatcher
 
 
 class TestArgsortExpertIds(unittest.TestCase):
@@ -17,12 +17,18 @@ class TestArgsortExpertIds(unittest.TestCase):
         # an off-by-one in a threshold would wrap that id and change the order.
         torch.manual_seed(0)
         for num_experts in (256, 257, 2**15, 2**15 + 1):
-            ids_N = torch.randint(0, num_experts, (4096,))
-            ids_N[0] = num_experts - 1
+            dispatcher = LocalTokenDispatcher.Config(
+                num_experts=num_experts, top_k=1
+            ).build()
+            ids_TK = torch.randint(0, num_experts, (4096, 1))
+            ids_TK[0] = num_experts - 1
+            _, token_indices_experts_sorted_N, _ = dispatcher._local_reorder(
+                torch.randn(4096, 2), torch.rand(4096, 1), ids_TK
+            )
             self.assertTrue(
                 torch.equal(
-                    token_dispatcher._argsort_expert_ids(ids_N, num_experts),
-                    torch.argsort(ids_N, stable=True),
+                    token_indices_experts_sorted_N,
+                    torch.argsort(ids_TK.view(-1), stable=True),
                 )
             )
 
