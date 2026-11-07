@@ -248,20 +248,12 @@ class VisionRotaryEmbedding2D(ComplexRoPE):
     def forward(
         self,
         query: torch.Tensor,
-        key: torch.Tensor | None = None,
-        positions: torch.Tensor | None = None,
+        key: torch.Tensor | None,
+        positions: torch.Tensor,
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Rotate with positions prepared once outside the vision block."""
-        if (
-            positions is None
-            or positions.ndim != 3
-            or positions.shape[:2] != (query.shape[0], 1)
-        ):
-            raise ValueError(
-                "MoonViT RoPE requires prepared positions of shape (num_tokens, 1, cache_width)"
-            )
         return self.apply_rotary_emb(query, key, positions, inverse=inverse)
 
 
