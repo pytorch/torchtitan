@@ -98,8 +98,8 @@ class LocalTokenDispatcher(Module):
         self.num_experts = config.num_experts
         self.top_k = config.top_k
         # Expert ids are sorted as keys on the narrowest integer type that holds
-        # [0, num_experts): the CUDA radix sort makes one pass per key byte, so int64
-        # ids take 8 passes and uint8 ids 1. Same order.
+        # [0, num_experts): the CUDA radix sort's passes scale with key width, so int64
+        # ids take 8x the passes of uint8 ids. Same order.
         if config.num_experts <= 256:
             self.expert_ids_sort_dtype = torch.uint8
         elif config.num_experts <= 2**15:
