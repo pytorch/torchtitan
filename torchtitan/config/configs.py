@@ -145,6 +145,13 @@ class CommConfig:
     save_traces_file_prefix: str = "rank_"
     """Flight recorder trace files prefix"""
 
+    nccl_ctas: dict[str, int] = field(default_factory=dict)
+    """Fixed NCCL CTA count per mesh axis, e.g. ``{"dp_shard": 16}``; other axes
+    keep NCCL's choice."""
+
+    sm_carveout: int = 0
+    """SMs that GEMMs leave free for communication kernels (0: off)."""
+
     backend: CommBackend = "default"
     """Communication topology used for training or distributed debugging.
 
@@ -162,6 +169,19 @@ class CommConfig:
     to ``"fake"``; ``"real_pp_fake_spmd"`` uses physical ``RANK`` as its PP
     coordinate. See ``docs/debugging.md`` for launch examples and limitations.
     """
+
+    def __post_init__(self) -> None:
+        axes = {"pp", "dp_replicate", "dp_shard", "cp", "tp", "dp", "ep", "edp_shard"}
+        unknown = set(self.nccl_ctas) - axes
+        if unknown:
+            raise ValueError(
+                f"comm.nccl_ctas: unknown mesh axes {sorted(unknown)}; "
+                f"known: {sorted(axes)}"
+            )
+        if any(n < 1 for n in self.nccl_ctas.values()):
+            raise ValueError(f"comm.nccl_ctas values must be >= 1: {self.nccl_ctas}")
+        if self.sm_carveout < 0:
+            raise ValueError(f"comm.sm_carveout must be >= 0, got {self.sm_carveout}")
 
 
 @dataclass(kw_only=True, slots=True)

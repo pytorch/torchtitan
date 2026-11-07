@@ -96,6 +96,14 @@ def unfold_dp_axes(axes: Iterable[MeshAxisName | str]) -> list[str]:
     ]
 
 
+def _nccl_with_ctas(ctas: int) -> tuple[str, dist.ProcessGroupNCCL.Options]:
+    """An NCCL backend override whose communicator always runs ``ctas`` CTAs."""
+    options = dist.ProcessGroupNCCL.Options()
+    options.config.min_ctas = ctas
+    options.config.max_ctas = ctas
+    return ("nccl", options)
+
+
 @dataclass
 class ParallelismContext:
     """Parallelism degrees and the device meshes derived from them."""
@@ -108,6 +116,8 @@ class ParallelismContext:
     ep: int
     world_size: int
     enable_sequence_parallel: bool
+    nccl_ctas: dict[str, int] = field(default_factory=dict)
+    """Fixed NCCL CTA count per mesh axis (``CommConfig.nccl_ctas``)."""
     _real_pp_group_for_fake_spmd: dist.ProcessGroup | None = None
     # Cache by axis name(s); DeviceMesh equality is by identity, so reuse the
     # same object instead of re-slicing a submesh on every lookup.
@@ -129,6 +139,7 @@ class ParallelismContext:
         topology: DistributedTopology,
         *,
         dump_folder: str,
+        nccl_ctas: dict[str, int] | None = None,
     ) -> ParallelismContext:
         """Construct the parallelism context from config and topology."""
         parallelism_context = cls(
@@ -140,6 +151,7 @@ class ParallelismContext:
             ep=parallelism_config.expert_parallel_degree,
             world_size=topology.world_size,
             enable_sequence_parallel=parallelism_config.enable_sequence_parallel,
+            nccl_ctas=dict(nccl_ctas or {}),
             _real_pp_group_for_fake_spmd=topology.real_pp_group_for_fake_spmd,
         )
         if parallelism_config.save_parallelism_folder is not None:
@@ -290,6 +302,8 @@ class ParallelismContext:
             for axis, degree in zip(axis_names, axis_degrees, strict=True):
                 if degree == 1 or not self._axis_is_active(axis, degree):
                     backend_override[axis] = "fake"
+                elif axis in self.nccl_ctas:
+                    backend_override[axis] = _nccl_with_ctas(self.nccl_ctas[axis])
 
             return world_mesh._unflatten(
                 0,
