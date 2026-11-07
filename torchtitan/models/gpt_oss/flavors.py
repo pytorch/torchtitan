@@ -50,7 +50,7 @@ from torchtitan.models.common.decoder_sharding import (
     rowwise_sharding_config,
     token_embedding_sharding_config,
 )
-from torchtitan.models.common.moe import MoE, RoutedExperts, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.moe.sharding import (
     moe_sharding_config,
     routed_experts_sharding_config,
@@ -60,7 +60,7 @@ from torchtitan.models.common.moe.sharding import (
 from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.common.param_init import depth_scaled_std
 from .model import GptOssAttention, GptOssModel, GptOssTransformerBlock
-from .moe import GptOssGroupedLinear
+from .moe import GptOssGroupedLinear, GptOssRoutedExperts
 from .sharding import attention_sharding_config, routed_expert_linear_sharding_config
 
 __all__ = [
@@ -179,15 +179,15 @@ def _make_gptoss_experts_config(
     layer_id: int,
     top_k: int,
     enable_ep: bool,
-) -> RoutedExperts.Config:
-    """Build a fully-specified, sharded RoutedExperts.Config for one layer."""
+) -> GptOssRoutedExperts.Config:
+    """Build a fully-specified, sharded GptOssRoutedExperts.Config for one layer."""
     # TODO: Audit GPT-OSS gate/up depth scaling separately, including its biases.
     std = depth_scaled_std(0.02, layer_id)
     experts_init = {
         "weight": partial(nn.init.trunc_normal_, std=std),
         "bias": partial(nn.init.trunc_normal_, std=std),
     }
-    return RoutedExperts.Config(
+    return GptOssRoutedExperts.Config(
         w13=GptOssGroupedLinear.Config(
             group_size=num_experts,
             in_features=dim,

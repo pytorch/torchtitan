@@ -53,7 +53,7 @@ from torchtitan.models.common.vision_encoder import (
     VisionMLP,
     VisionTransformerBlock,
 )
-from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
+from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear, GptOssRoutedExperts
 from torchtitan_recipes.overrides.fused_swiglu import fused_swiglu, FusedSwiGLU
 
 
@@ -277,10 +277,11 @@ class _CountingGroupedLinear(GroupedLinear):
 
 def _routed_experts_config(
     *,
+    routed_experts_cls: type[RoutedExperts] = RoutedExperts,
     grouped_linear_cls: type[GroupedLinear] = GroupedLinear,
     activation_fn: BinaryActivationFn.Config | None = None,
 ) -> RoutedExperts.Config:
-    return RoutedExperts.Config(
+    return routed_experts_cls.Config(
         w13=grouped_linear_cls.Config(
             group_size=1,
             in_features=4,
@@ -1000,6 +1001,7 @@ class TestRematRegions(unittest.TestCase):
         configs = (
             _routed_experts_config(),
             _routed_experts_config(
+                routed_experts_cls=GptOssRoutedExperts,
                 grouped_linear_cls=GptOssGroupedLinear,
                 activation_fn=ClampedSwiGLU.Config(),
             ),
@@ -1049,18 +1051,16 @@ class TestRematRegions(unittest.TestCase):
                         output = model(x_TD)
                     output.backward()
 
-                region_names = (
-                    ("grouped_mm", "bias_add")
-                    if isinstance(config.w13, GptOssGroupedLinear.Config)
-                    else ("grouped_mm",)
-                )
+                expected_names = [
+                    "routed_experts.w13.grouped_mm",
+                    "routed_experts.w2.grouped_mm",
+                ]
+                # GptOssRoutedExperts adds w13's bias inside the activation, so only w2
+                # declares a bias_add region.
+                if isinstance(routed_experts, GptOssRoutedExperts):
+                    expected_names.append("routed_experts.w2.bias_add")
                 self.assertEqual(
-                    [entry.name for entry in trace.entries],
-                    [
-                        f"routed_experts.{projection}.{name}"
-                        for projection in ("w13", "w2")
-                        for name in region_names
-                    ],
+                    [entry.name for entry in trace.entries], expected_names
                 )
                 self.assertIsNotNone(x_TD.grad)
 

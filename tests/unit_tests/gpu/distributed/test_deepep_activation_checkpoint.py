@@ -39,7 +39,7 @@ from torchtitan.models.common.moe.token_dispatcher import (
     HybridEPTokenDispatcher,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
+from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear, GptOssRoutedExperts
 
 deep_ep = pytest.importorskip("deep_ep")
 
@@ -66,7 +66,9 @@ class _EPBlock(Module):
         # expert-weight shard. This test bypasses parallelization, so construct
         # that local view directly while the dispatcher retains the global E.
         num_local_experts = num_experts // torch.distributed.get_world_size()
-        routed_experts = RoutedExperts.__new__(RoutedExperts)
+        is_gpt_oss = grouped_linear_cls is GptOssGroupedLinear
+        routed_experts_cls = GptOssRoutedExperts if is_gpt_oss else RoutedExperts
+        routed_experts = routed_experts_cls.__new__(routed_experts_cls)
         Module.__init__(routed_experts)
         routed_experts.w13 = grouped_linear_cls.Config(
             group_size=num_local_experts,
