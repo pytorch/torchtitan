@@ -277,6 +277,24 @@ def test_close_waits_for_the_live_workers_when_one_worker_is_dead() -> None:
     asyncio.run(run())
 
 
+def test_close_stops_the_workers_when_a_drain_call_raises_while_sent() -> None:
+    def failed_send() -> None:
+        raise RuntimeError("actor mesh already stopped")
+
+    async def run() -> None:
+        rollouter = _rollouter_without_datasets()
+        actor_system = await _setup(rollouter)
+        actor_system.workers[0].wait_for_generate_calls = SimpleNamespace(
+            call_one=failed_send
+        )
+
+        await rollouter.close()
+
+        assert actor_system.stopped
+
+    asyncio.run(run())
+
+
 def test_close_stops_waiting_after_drain_timeout(monkeypatch) -> None:
     async def run() -> None:
         monkeypatch.setattr(rollouter_module, "_SHUTDOWN_DRAIN_TIMEOUT_S", 0.0)
@@ -376,8 +394,9 @@ async def _slow_generate(marker_dir: str, prompt_token_ids, **kwargs) -> None:
 def test_cancel_group_and_wait_for_generate_calls_on_real_worker_processes(
     tmp_path,
 ) -> None:
-    """Sent right after `run_group`, `cancel_group` finds the group (Monarch starts one sender's
-    concurrent calls in order) and returns once it stopped, while its generate call still runs.
+    """Sent right after `run_group` to the same worker handle, `cancel_group` finds the group (Monarch
+    starts one sender's concurrent calls in order) and returns once it stopped, while its generate
+    call still runs.
     `wait_for_generate_calls` returns only after that call's reply, so `Rollouter.close` never stops
     a worker the router still owes. Stopping the process closes the worker."""
 
@@ -394,7 +413,9 @@ def test_cancel_group_and_wait_for_generate_calls_on_real_worker_processes(
                 structured_logger_init_fn=None,
                 first_worker_index=0,
             )
-            group = workers.run_group.choose(
+            # The handle the Rollouter keeps per worker (`spawn_rollout_workers`).
+            worker = workers.flatten("rank").slice(rank=0)
+            group = worker.run_group.call_one(
                 generate_fn=functools.partial(_slow_generate, str(tmp_path)),
                 release_session_fn=None,
                 sample=None,
@@ -402,15 +423,15 @@ def test_cancel_group_and_wait_for_generate_calls_on_real_worker_processes(
                 group_size=1,
                 sampling=None,
             )
-            await workers.cancel_group.call(7)
+            await worker.cancel_group.call_one(7)
             assert (tmp_path / "7.cancelled").exists()
             with pytest.raises(ActorError):
                 await group
             assert not (tmp_path / "replied").exists()
-            await workers.wait_for_generate_calls.call()
+            await worker.wait_for_generate_calls.call_one()
             assert (tmp_path / "replied").exists()
             # The worker keeps serving after a cancel.
-            await workers.sync_log_step.call(1)
+            await worker.sync_log_step.call_one(1)
         finally:
             cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
             await mesh.stop()
