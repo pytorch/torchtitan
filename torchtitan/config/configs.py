@@ -202,11 +202,12 @@ class DebugConfig:
     are no-ops. Disable to fully eliminate trace overhead."""
 
     def __post_init__(self):
-        # dp_replicate ranks hold replicated params, so distinct seeds there
+        # Replicate-axis ranks hold replicated params, so distinct seeds there
         # would initialize each replica differently.
-        if "dp_replicate" in self.distinct_seed_mesh_axes:
-            raise ValueError(
-                "debug.distinct_seed_mesh_axes must not contain 'dp_replicate': "
-                "its ranks hold replicated parameters and would be initialized "
-                "differently."
-            )
+        for axis in ("dp_replicate", "edp_replicate"):
+            if axis in self.distinct_seed_mesh_axes:
+                raise ValueError(
+                    f"debug.distinct_seed_mesh_axes must not contain '{axis}': "
+                    "its ranks hold replicated parameters and would be initialized "
+                    "differently."
+                )

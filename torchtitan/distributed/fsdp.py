@@ -84,7 +84,7 @@ if TYPE_CHECKING:
 
 
 _DENSE_STORAGE_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
-_SPARSE_STORAGE_AXES = ["dp_replicate", "edp_shard", "ep"]
+_SPARSE_STORAGE_AXES = ["edp_replicate", "edp_shard", "ep"]
 
 
 def linear_param_shard_placements(
@@ -161,14 +161,15 @@ def resolve_sparse_fsdp_mesh(
     """Sparse counterpart of ``resolve_fsdp_mesh`` for routed experts.
 
     Returns ``(None, None)`` when EP is disabled; otherwise the sparse
-    storage mesh + sparse DP axes. The FSDP axis is ``edp_shard`` and
-    ``dp_replicate`` is shared with the dense path.
+    storage mesh + sparse DP axes. The FSDP axis is ``edp_shard`` and the
+    HSDP replicate axis is ``edp_replicate``, which equals ``dp_replicate``
+    unless ``expert_data_parallel_replicate_degree`` is set.
     """
     if not parallelism_context.ep_enabled:
         return None, None
     sparse_mesh = parallelism_context.get_activated_mesh(_SPARSE_STORAGE_AXES)
     assert sparse_mesh is not None
-    replicate = "dp_replicate" if parallelism_context.dp_replicate_enabled else None
+    replicate = "edp_replicate" if parallelism_context.edp_replicate_enabled else None
     return sparse_mesh, DataParallelMeshDims(shard="edp_shard", replicate=replicate)
 
 

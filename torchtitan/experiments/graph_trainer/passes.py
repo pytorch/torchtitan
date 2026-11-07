@@ -229,8 +229,17 @@ def compile_time_passes(
         cp_degree = getattr(config.parallelism, "context_parallel_degree", 1)
         tp_degree = getattr(config.parallelism, "tensor_parallel_degree", 1)
         ep_degree = max(1, getattr(config.parallelism, "expert_parallel_degree", 1))
+        edp_replicate_degree = (
+            getattr(config.parallelism, "expert_data_parallel_replicate_degree", None)
+            or dp_replicate_degree
+        )
         edp_shard_degree = max(
-            1, (max(1, dp_shard_degree) * cp_degree * tp_degree) // ep_degree
+            1,
+            (dp_replicate_degree // edp_replicate_degree)
+            * max(1, dp_shard_degree)
+            * cp_degree
+            * tp_degree
+            // ep_degree,
         )
     module_bucket_plans = get_default_transformer_block_buckets(
         n_layers,
@@ -305,10 +314,10 @@ def compile_time_passes(
                 )
 
             sparse_hsdp_mesh = parallelism_context.get_optional_mesh(
-                ["dp_replicate", "edp_shard"]
+                ["edp_replicate", "edp_shard"]
             )
             if sparse_hsdp_mesh is not None:
-                sparse_replicate_mesh = sparse_hsdp_mesh["dp_replicate"]
+                sparse_replicate_mesh = sparse_hsdp_mesh["edp_replicate"]
                 sparse_shard_mesh = sparse_hsdp_mesh["edp_shard"]
                 hsdp_process_group_pairs.append(
                     (

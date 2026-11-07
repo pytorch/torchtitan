@@ -225,6 +225,13 @@ def deepseek_v3_debugmodel_hsdp2x2_ep2() -> Trainer.Config:
     return config
 
 
+def deepseek_v3_debugmodel_hsdp2x2_ep2_edp_replicate1() -> Trainer.Config:
+    """Both dense replicas share one copy of the routed experts (eFSDP=2)."""
+    config = deepseek_v3_debugmodel_hsdp2x2_ep2()
+    config.parallelism.expert_data_parallel_replicate_degree = 1
+    return config
+
+
 def deepseek_v4_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
     from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_debugmodel
 
@@ -706,7 +713,10 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             use_real_pg=True,
         ),
         IntegrationTestDefinition(
-            configs=[deepseek_v3_debugmodel_hsdp2x2_ep2],
+            configs=[
+                deepseek_v3_debugmodel_hsdp2x2_ep2,
+                deepseek_v3_debugmodel_hsdp2x2_ep2_edp_replicate1,
+            ],
             test_descr="DeepSeek V3 HSDP+EP",
             test_name="deepseek_v3_hsdp+ep",
             ngpu=4,

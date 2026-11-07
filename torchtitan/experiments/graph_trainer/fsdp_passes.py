@@ -397,16 +397,16 @@ def reorder_hsdp_grad_collectives_pass(
     DTensor lowers the HSDP backward redistribution from ``(Partial, Partial)``
     to ``(Replicate, Shard)`` in mesh-axis order. For both the dense
     ``(dp_replicate, dp_shard)`` mesh and the routed-expert
-    ``(dp_replicate, edp_shard)`` mesh this produces the following chain::
+    ``(edp_replicate, edp_shard)`` mesh this produces the following chain::
 
-        all_reduce(dp_replicate) -> wait -> reduce_scatter(shard_axis) -> wait
+        all_reduce(replicate_axis) -> wait -> reduce_scatter(shard_axis) -> wait
 
     The two sum reductions commute because they operate on distinct mesh axes.
     Reversing them makes the all-reduce operate on the already-sharded gradient,
     reducing its payload by the shard-axis degree. Each process-group pair is
     ``(replicate_group_name, shard_degree, shard_group_name)``. The dense and
-    routed-expert meshes can have distinct process groups for their respective
-    ``dp_replicate`` axes.
+    routed-expert meshes have distinct process groups for their
+    ``dp_replicate`` and ``edp_replicate`` axes.
 
     For strided parameter shards, DTensor inserts a provenance-annotated
     split/getitem/cat layout conversion between the all-reduce wait and the
