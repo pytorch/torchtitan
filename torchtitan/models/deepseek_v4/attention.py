@@ -138,7 +138,7 @@ class DSV4InnerAttention(InnerAttention):
                     )
                 out_THD = aux_loss(
                     q_THD.detach(),
-                    cmp_k_SD.detach(),
+                    cmp_k_SD.detach().unsqueeze(1),
                     cmp_topk_TK,
                     topk_scores_TK,
                     aux.lse.squeeze(0).transpose(0, 1).detach(),
