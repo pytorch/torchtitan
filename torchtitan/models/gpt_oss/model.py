@@ -17,7 +17,7 @@ from torch import nn
 from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
-from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.attention import (
     Attention,
@@ -36,6 +36,7 @@ from torchtitan.models.common.rope import RoPE
 from .state_dict_adapter import GptOssStateDictAdapter
 
 
+@local_compile("attention_sinks", batch_invariant=True)
 def apply_attention_sink_rescale(
     out: torch.Tensor, lse: torch.Tensor, sinks: torch.Tensor
 ) -> torch.Tensor:
@@ -236,6 +237,7 @@ class GptOssModel(Decoder):
                     "rope",
                     "fp32_to_bf16_split",
                     "grouped_expert_bias",
+                    "attention_sinks",
                 ]
             )
         )
