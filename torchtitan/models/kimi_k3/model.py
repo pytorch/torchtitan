@@ -227,6 +227,7 @@ class KimiK3Model(MultimodalModel):
                     "fused_binary_activation",
                     "fp32_to_bf16_split",
                     "attention_residual",
+                    "moe_dispatch_combine",
                 ]
             )
         )
