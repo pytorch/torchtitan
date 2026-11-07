@@ -1,0 +1,47 @@
+{
+  "repository": "Qwen/Qwen3.8-Flash-Next",
+  "revision": "de4b8e4d43b917e7706784d8bb445c9af86a3540",
+  "index_sha256": "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de",
+  "method": "Safetensors header shapes only; bounded HTTP Range requests; no tensor payload materialized",
+  "num_tensors": 1627,
+  "num_ngram_shards": 128,
+  "names_sha256": "56b8050fd51b5e8258b278d8de1db63840655ca1662f01487f5d910455572a11",
+  "names_and_shapes_sha256": "c453af89687fed9659910ed9b990ab4544f7e7d796bbfb7b43dcb6d4ba96c8c4",
+  "representative_shapes": {
+    "model.language_model.embed_tokens.weight": [
+      248320,
+      2560
+    ],
+    "lm_head.weight": [
+      248320,
+      2560
+    ],
+    "model.language_model.layers.0.linear_attn.in_proj_qkv.weight": [
+      10240,
+      2560
+    ],
+    "model.language_model.layers.3.self_attn.q_proj.weight": [
+      12288,
+      2560
+    ],
+    "model.language_model.layers.3.self_attn.k_proj.weight": [
+      512,
+      2560
+    ],
+    "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight": [
+      2500012,
+      160
+    ],
+    "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_127.weight": [
+      2500012,
+      160
+    ],
+    "model.visual.patch_embed.proj.weight": [
+      1152,
+      3,
+      2,
+      16,
+      16
+    ]
+  }
+}
