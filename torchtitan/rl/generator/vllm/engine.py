@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -30,6 +32,7 @@ from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import (
     EngineRequest,
     FinishedRequest,
+    KVCacheReading,
     RequestMetricsInputs,
     SamplingConfig,
 )
@@ -43,7 +46,7 @@ from torchtitan.rl.generator.vllm.registry import (
     TORCHTITAN_WORKER_CLS,
     vllm_attention_backend,
 )
-from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
+from torchtitan.rl.generator.vllm.session_kv_evictor import VLLMSessionKVEvictor
 from torchtitan.rl.generator.vllm.stat_logger import (
     StatLoggerContext,
     VllmOtelStatLogger,
@@ -51,6 +54,10 @@ from torchtitan.rl.generator.vllm.stat_logger import (
 from torchtitan.tools.utils import has_cuda_capability
 
 logger = logging.getLogger(__name__)
+
+# Finished requests carry a KV cache reading taken at most this long ago: the read walks vLLM's
+# free queue (about 4 ms over 60k free blocks), too slow for every engine step on a large cache.
+_KV_CACHE_READ_MAX_AGE_S = 1.0
 
 
 def add_extra_vllm_engine_args(
@@ -109,10 +116,6 @@ class VLLMEngine(GenerationEngine):
         stat_logger: VllmOtelStatLogger.Config | None = None
         """Optional logger instantiated on TP rank 0 to export vLLM metrics."""
 
-        session_kv_holder: VLLMSessionKVHolder.Config | None = None
-        """Keep each multi-turn session's cached prefix on GPU between its turns (see
-        `VLLMSessionKVHolder`). None: off."""
-
     def __init__(
         self,
         config: Config,
@@ -133,14 +136,6 @@ class VLLMEngine(GenerationEngine):
         generator_name: str,
         output_dir: str,
     ):
-        if (
-            config.session_kv_holder is not None
-            and reset_kv_cache_on_model_state_dict_load
-        ):
-            raise ValueError(
-                "session_kv_holder needs reset_kv_cache_on_model_state_dict_load=False: vLLM "
-                "cannot reset the prefix cache while blocks are held"
-            )
         self.config = config
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load
@@ -165,8 +160,11 @@ class VLLMEngine(GenerationEngine):
             seed=debug.seed,
         )
         tp_degree = parallelism.tensor_parallel_degree
+        # Only TP rank 0's finished requests reach the dispatcher, so only it logs vLLM's stats
+        # and reads the KV cache.
+        self._is_tp_rank_0 = rank % tp_degree == 0
         stat_loggers = None
-        if rank % tp_degree == 0:
+        if self._is_tp_rank_0:
             stat_loggers = self._build_stat_loggers(
                 StatLoggerContext(
                     rank=rank,
@@ -180,13 +178,13 @@ class VLLMEngine(GenerationEngine):
         self._engine = LLMEngine.from_engine_args(
             engine_args, stat_loggers=stat_loggers
         )
-        # Every rank holds the same blocks in its own scheduler; only the engine loop thread
+        # Every rank evicts the same blocks from its own scheduler; only the engine loop thread
         # touches them.
-        self._session_kv_holder: VLLMSessionKVHolder | None = None
-        if config.session_kv_holder is not None:
-            self._session_kv_holder = config.session_kv_holder.build(
-                scheduler=self._engine.engine_core.engine_core.scheduler
-            )
+        self._session_kv_evictor = VLLMSessionKVEvictor(
+            scheduler=self._engine.engine_core.engine_core.scheduler
+        )
+        self._kv_cache_reading: KVCacheReading | None = None
+        self._kv_cache_read_time = -math.inf
 
     @staticmethod
     def _setup(
@@ -335,10 +333,6 @@ class VLLMEngine(GenerationEngine):
         return self._engine.vllm_config.parallel_config.data_parallel_rank
 
     @property
-    def holds_session_kv(self) -> bool:
-        return self._session_kv_holder is not None
-
-    @property
     def prefetched_model_state_dict(self) -> dict[str, torch.Tensor] | None:
         """The pinned CPU buffers a model state dict is prefetched into, and loaded from by
         a model state dict load. Safe to fill from any thread while no load runs. None with
@@ -377,14 +371,15 @@ class VLLMEngine(GenerationEngine):
                     arrival_time=request.arrival_time,
                     priority=max(request.group_id, -1),
                 )
-                if self._session_kv_holder is not None:
-                    self._session_kv_holder.track(
-                        internal_request_id,
-                        request.routing_session_id,
-                        request.group_id,
-                    )
             except (ValueError, VLLMClientError) as exc:
                 rejected_requests.append((request.request_id, exc))
+            else:
+                self._session_kv_evictor.track(
+                    internal_request_id,
+                    request_id=request.request_id,
+                    session_id=request.routing_session_id,
+                    group_id=request.group_id,
+                )
         return rejected_requests
 
     def has_unfinished_requests(self) -> bool:
@@ -395,22 +390,34 @@ class VLLMEngine(GenerationEngine):
         """Run one engine step, a TP collective, and return the requests it finished."""
         with torch.no_grad():
             request_outputs = self._engine.step()
-        if self._session_kv_holder is not None:
-            self._session_kv_holder.after_step()
-        return [_finished_request(request_output) for request_output in request_outputs]
+        finished_requests = [
+            _finished_request(request_output) for request_output in request_outputs
+        ]
+        self._session_kv_evictor.finish(
+            [finished_request.request_id for finished_request in finished_requests]
+        )
+        if finished_requests and self._is_tp_rank_0:
+            now = time.monotonic()
+            if now - self._kv_cache_read_time >= _KV_CACHE_READ_MAX_AGE_S:
+                self._kv_cache_reading = self._session_kv_evictor.kv_cache_reading()
+                self._kv_cache_read_time = now
+            for finished_request in finished_requests:
+                finished_request.metrics_inputs.kv_cache_reading = (
+                    self._kv_cache_reading
+                )
+        return finished_requests
 
     def release_sessions(self, session_ids: list[str], group_ids: list[int]) -> None:
-        if self._session_kv_holder is not None:
-            self._session_kv_holder.release(session_ids, group_ids)
+        """Evict the cached KV of ended rollouts and groups (see `VLLMSessionKVEvictor`)."""
+        self._session_kv_evictor.release(session_ids, group_ids)
 
     def log_stats(self, step: int) -> None:
-        if self._session_kv_holder is not None:
-            logger.info(
-                "Session KV at step %d: %d sessions held, %d evicted so far",
-                step,
-                self._session_kv_holder.num_sessions,
-                self._session_kv_holder.num_evicted,
-            )
+        logger.info(
+            "Session KV at step %d: %d live sessions, %d blocks evicted so far",
+            step,
+            self._session_kv_evictor.num_sessions,
+            self._session_kv_evictor.num_evicted_blocks,
+        )
 
     def load_model_state_dict(
         self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
@@ -438,7 +445,6 @@ class VLLMEngine(GenerationEngine):
         if renderer is not None:
             logger.info("Shutting down vLLM renderer")
             renderer.shutdown()
-        self._session_kv_holder = None
 
     def _get_model(self):
         """The ``VLLMModelWrapper`` the engine runs."""

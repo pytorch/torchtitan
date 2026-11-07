@@ -14,6 +14,7 @@ metrics that ride with it), the SamplingParams contract, and the vLLM metric tim
 
 import asyncio
 import concurrent.futures
+import math
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import cast
@@ -37,7 +38,7 @@ from torchtitan.rl.generator.dispatcher import (
 )
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
-from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
+from torchtitan.rl.generator.types import EngineRequest, KVCacheReading, SamplingConfig
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import (
     _build_sampling_params,
@@ -46,7 +47,7 @@ from torchtitan.rl.generator.vllm.engine import (
     add_extra_vllm_engine_args,
     VLLMEngine,
 )
-from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
+from torchtitan.rl.generator.vllm.session_kv_evictor import VLLMSessionKVEvictor
 from torchtitan.rl.generator.vllm.worker import (
     TorchTitanCudagraphDispatcher,
     TorchTitanGPUModelRunner,
@@ -141,7 +142,12 @@ def _vllm_engine(*, reset_kv_cache_on_model_state_dict_load=False, model=None):
         reset_kv_cache_on_model_state_dict_load
     )
     engine._get_model = lambda: model
-    engine._session_kv_holder = None
+    engine._session_kv_evictor = Mock(
+        **{"kv_cache_reading.return_value": KVCacheReading(occupancy=0.0, usage=0.0)}
+    )
+    engine._is_tp_rank_0 = True
+    engine._kv_cache_reading = None
+    engine._kv_cache_read_time = -math.inf
     return engine
 
 
@@ -217,16 +223,15 @@ def test_process_finished_requests_resolves_reply_with_completion():
         generation.min_policy_version = 7
         dispatcher._rank0_outstanding_generations = {"r0": generation}
 
-        dispatcher.process_finished_requests(
-            [
-                _finished_request(
-                    _request_output(
-                        outputs=[_sample(token_ids=(10, 11), finish_reason="length")]
-                    )
-                )
-            ],
-            policy_version=8,
+        finished = _finished_request(
+            _request_output(
+                outputs=[_sample(token_ids=(10, 11), finish_reason="length")]
+            )
         )
+        finished.metrics_inputs.kv_cache_reading = KVCacheReading(
+            occupancy=0.7, usage=0.25
+        )
+        dispatcher.process_finished_requests([finished], policy_version=8)
 
         completion = await asyncio.wrap_future(reply)
         assert completion.request_id == "r0"
@@ -238,12 +243,10 @@ def test_process_finished_requests_resolves_reply_with_completion():
         # The request is popped from the in-flight map.
         assert dispatcher._rank0_outstanding_generations == {}
         # The per-generation metrics ride on the completion (built on rank 0).
-        assert (
-            m.MetricsProcessor._aggregate_metrics(completion.metrics)[
-                "generator/inflight_requests_at_completion/max"
-            ]
-            == 1
-        )
+        metrics = m.MetricsProcessor._aggregate_metrics(completion.metrics)
+        assert metrics["generator/inflight_requests_at_completion/max"] == 1
+        assert metrics["generator/kv_cache_occupancy/max"] == 0.7
+        assert metrics["generator/kv_cache_usage/max"] == 0.25
 
     asyncio.run(main())
 
@@ -346,22 +349,61 @@ def test_admission_passes_group_id_as_priority_and_arrival_time():
     assert [kwargs["arrival_time"] for kwargs in added_kwargs] == [1.5] * 3
 
 
-def test_session_kv_holder_tracks_admitted_requests_and_releases_sessions():
+def test_session_kv_evictor_follows_a_request_from_admission_to_release():
+    # vLLM's scheduler knows only the internal id (ours plus a random suffix); outputs carry ours.
+    block_pool = SimpleNamespace(
+        free_block_queue=SimpleNamespace(iter_blocks_after=lambda block: iter(())),
+        num_gpu_blocks=2,
+        get_usage=lambda: 0.0,
+        hash_block_size=16,
+    )
+    scheduler = SimpleNamespace(
+        requests={"r0-internal": SimpleNamespace(block_hashes=[])},
+        kv_cache_manager=SimpleNamespace(
+            block_pool=block_pool,
+            coordinator=SimpleNamespace(single_type_managers=()),
+        ),
+    )
     engine = _vllm_engine()
-    holder = Mock()
-    engine._session_kv_holder = holder
+    engine._session_kv_evictor = VLLMSessionKVEvictor(scheduler=scheduler)
     engine._engine.add_request = Mock(return_value="r0-internal")
-    engine._engine.step = lambda: []
+    engine._engine.step = lambda: [_request_output(request_id="r0")]
 
-    assert engine.holds_session_kv
     engine.add_requests([_engine_request("r0", min_policy_version=6)])
     engine.step()
-    engine.release_sessions(["group=3/rollout=0"], [3])
+    assert engine._session_kv_evictor._requests == {}  # the step reported r0 finished
+    assert engine._session_kv_evictor.num_sessions == 1
+    engine.release_sessions(["group=3/rollout=0"], [])
+    assert engine._session_kv_evictor.num_sessions == 0
 
-    # The holder tracks vLLM's internal request id, which carries a random suffix.
-    holder.track.assert_called_once_with("r0-internal", "group=3/rollout=0", 3)
-    holder.after_step.assert_called_once_with()
-    holder.release.assert_called_once_with(["group=3/rollout=0"], [3])
+
+def test_step_stamps_finished_requests_with_a_kv_cache_reading_at_most_a_second_old(
+    monkeypatch,
+):
+    # TP rank 0 reads the KV cache when its last reading is 1 s old; other ranks never read.
+    first = KVCacheReading(occupancy=0.1, usage=0.0)
+    second = KVCacheReading(occupancy=0.2, usage=0.0)
+    readings = iter([first, second])
+    now = [100.0]
+    monkeypatch.setattr(vllm_engine_module.time, "monotonic", lambda: now[0])
+    engine = _vllm_engine()
+    engine._session_kv_evictor.kv_cache_reading.side_effect = lambda: next(readings)
+
+    def step(*request_ids: str, at: float) -> list[KVCacheReading | None]:
+        now[0] = at
+        engine._engine.step = lambda: [
+            _request_output(request_id=request_id) for request_id in request_ids
+        ]
+        return [
+            finished_request.metrics_inputs.kv_cache_reading
+            for finished_request in engine.step()
+        ]
+
+    assert step("r0", "r1", at=100.0) == [first, first]
+    assert step("r2", at=100.5) == [first]
+    assert step("r3", at=101.1) == [second]
+    engine._is_tp_rank_0 = False
+    assert step("r4", at=103.0) == [None]
 
 
 def test_admission_salts_prompt_with_min_policy_version():
@@ -595,29 +637,6 @@ def test_batch_invariant_requires_kv_cache_reset():
         )
 
 
-def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_path):
-    with pytest.raises(
-        ValueError, match="needs reset_kv_cache_on_model_state_dict_load=False"
-    ):
-        VLLMEngine.Config(session_kv_holder=VLLMSessionKVHolder.Config()).build(
-            model=_MODEL_CONFIG,
-            parallelism=_PARALLELISM,
-            model_path="unused",
-            max_num_seqs=8,
-            precision=PrecisionConfig(),
-            gpu_memory_limit=0.9,
-            max_num_batched_tokens=None,
-            checkpointer=None,
-            dist_moe_runtime=None,
-            debug=DebugConfig(),
-            reset_kv_cache_on_model_state_dict_load=True,
-            model_state_dict_load_mode="cpu_prefetch",
-            rank=0,
-            generator_name="generator",
-            output_dir=str(tmp_path),
-        )
-
-
 def test_qwen36_27b_perf_config():
     from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_6_27b_varlen_perf
 
@@ -641,10 +660,12 @@ def test_qwen36_27b_perf_config():
 
 def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dict:
     """Build ``config.engine`` as the generator does, with vLLM's ``EngineArgs``,
-    ``LLMEngine`` and model registration mocked; return the ``EngineArgs`` kwargs."""
+    ``LLMEngine``, model registration and the session KV evictor mocked; return the
+    ``EngineArgs`` kwargs."""
     engine_args = Mock()
     monkeypatch.setattr(vllm_engine_module, "EngineArgs", engine_args)
     monkeypatch.setattr(vllm_engine_module, "LLMEngine", Mock())
+    monkeypatch.setattr(vllm_engine_module, "VLLMSessionKVEvictor", Mock())
     monkeypatch.setattr(vllm_engine_module, "register_to_vllm", Mock())
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     config.engine.build(

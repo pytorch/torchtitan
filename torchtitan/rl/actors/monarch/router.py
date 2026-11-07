@@ -38,7 +38,7 @@ class _InterGeneratorRouterActorEndpoints:
         *,
         request_id: str,
         group_id: int,
-        routing_session_id: str | None,
+        routing_session_id: str,
         sampling_config: Any | None,
         metrics_prefix: str,
     ) -> Any:

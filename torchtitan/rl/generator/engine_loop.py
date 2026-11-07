@@ -101,11 +101,11 @@ class EngineLoop:
     For DP>1, the requests will be routed among DPs first. See RequestDispatcher's docstring for more details.
 
     Threading: the engine and everything the loop touches (queue, replies, dispatcher) live on
-    the engine loop thread, whose event loop is `event_loop`. `generate` and `load_model_state_dict`
-    run on the caller's event loop and reach the loop only through the thread-safe queue and the
-    `concurrent.futures.Future`s it resolves. `release_groups` is an exception: it pops cache-salt
-    pins directly; each pop, like the loop's `setdefault`, is a single dict operation, atomic
-    under the GIL.
+    the engine loop thread, whose event loop is `event_loop`. `generate`, `load_model_state_dict`,
+    `release_sessions` and `release_groups` run on the caller's event loop and reach the loop only
+    through the thread-safe queue and the `concurrent.futures.Future`s it resolves.
+    `release_groups` also pops cache-salt pins directly; each pop, like the loop's `setdefault`, is
+    a single dict operation, atomic under the GIL.
 
     A model state dict load rides the same loop: `load_model_state_dict` puts a
     `ModelStateDictLoadMessage` on the queue, which rank 0 turns into a
@@ -150,9 +150,6 @@ class EngineLoop:
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load
         )
-        # Read once: the engine is released on exit, and only the engine loop thread uses it.
-        self._holds_session_kv = engine.holds_session_kv
-
         self.policy_version = 0
         # RANK 0: group id -> min policy version the group is pinned to, set at the
         # group's first admission and used as its prefix cache salt. Unused with
@@ -163,7 +160,8 @@ class EngineLoop:
         # `release_groups`.
         self._group_min_policy_versions: dict[int, int] = {}
 
-        # Rank 0: messages `generate` and `load_model_state_dict` put; the loop takes them off to decide.
+        # Rank 0: messages `generate`, `load_model_state_dict`, `release_sessions` and `release_groups`
+        # put; the loop takes them off to decide.
         self._queue = EngineLoopQueue(event_loop)
 
         # `_run` running on the engine loop thread's event loop, as a future any thread can await;
@@ -213,20 +211,26 @@ class EngineLoop:
         await asyncio.wrap_future(reply)
 
     def release_groups(self, group_ids: list[int]) -> None:
-        """RANK 0: drop the pinned cache salts of finished rollout groups."""
+        """RANK 0: drop the pinned cache salts and evict the cached KV of finished rollout
+        groups."""
         # A pop can land partway through `_decide_next_action`'s stamping loop, so requests of a
         # released group in one batch can get different versions. If every batch must see one
         # consistent snapshot of the pins, send releases through the queue instead.
         for group_id in group_ids:
             self._group_min_policy_versions.pop(group_id, None)
-        if self._holds_session_kv and self._rank == 0:
-            self._queue.put(SessionReleaseMessage(group_ids=group_ids))
+        # Every rank gets this call; only rank 0 decides, and its decision carries the release.
+        # Once the queue closes (shutdown or a crash), nothing is left to evict: drop late releases.
+        if self._rank == 0:
+            self._queue.put(
+                SessionReleaseMessage(group_ids=group_ids), drop_if_closed=True
+            )
 
     def release_sessions(self, session_ids: list[str]) -> None:
-        """RANK 0: release the held KV of sessions whose rollout ended (a no-op unless the
-        engine holds session KV)."""
-        if self._holds_session_kv and self._rank == 0:
-            self._queue.put(SessionReleaseMessage(session_ids=session_ids))
+        """RANK 0: evict the cached KV of rollouts that ended."""
+        if self._rank == 0:
+            self._queue.put(
+                SessionReleaseMessage(session_ids=session_ids), drop_if_closed=True
+            )
 
     def log_engine_stats(self, step: int) -> None:
         """Log the engine's per-step stats, if it has any (rank 0)."""
@@ -293,6 +297,9 @@ class EngineLoop:
         pending_engine_requests: list[EngineRequest] = []
         # Loop state (rank 0): model state dict loads taken off the queue but not yet applied.
         pending_load_messages: list[ModelStateDictLoadMessage] = []
+        # Loop state (rank 0): rollout releases taken off the queue but not yet put in a `LoopAction.STEP`.
+        # A load admits nothing, so its releases wait for the STEP that admits its carried requests.
+        pending_release_messages: list[SessionReleaseMessage] = []
         try:
             # One-time dispatcher setup before the loop starts.
             self._request_dispatcher.setup(self._rank0_result_drain_failed)
@@ -300,7 +307,9 @@ class EngineLoop:
                 # Rank 0 decides next decision; followers pass None and learn from the broadcast.
                 decision = (
                     await self._decide_next_action(
-                        pending_engine_requests, pending_load_messages
+                        pending_engine_requests,
+                        pending_load_messages,
+                        pending_release_messages,
                     )
                     if self._rank == 0
                     else None
@@ -337,10 +346,6 @@ class EngineLoop:
                         )
                     return
 
-                self._engine.release_sessions(
-                    decision.released_session_ids, decision.released_group_ids
-                )
-
                 if decision.action is LoopAction.LOAD_MODEL_STATE_DICT:
                     await self._load_model_state_dict(decision.load_version)
                     # One load serves every load this decision coalesced (only rank 0 holds any).
@@ -368,6 +373,16 @@ class EngineLoop:
                         self._request_dispatcher.process_rejected_requests(
                             rejected_requests
                         )
+                    # After the admissions: a request queued before its rollout's release (an
+                    # abandoned attempt still in transit) is marked released too, and its blocks
+                    # are evicted when it finishes.
+                    # TODO: a request that reaches the queue after its group's release re-creates
+                    # the rollout's session, and nothing releases it again. The router leaks the
+                    # same way: `generate` re-creates the group's `_group_session_ids` set and
+                    # `_route` the session's `_session_generators` list.
+                    self._engine.release_sessions(
+                        decision.released_session_ids, decision.released_group_ids
+                    )
 
                 # Barrier (NCCL): engine.step() runs SPMD in lockstep.
                 # The step burst `max_engine_steps_between_decisions` gives the generator time to buffer
@@ -419,6 +434,7 @@ class EngineLoop:
         self,
         pending_engine_requests: list[EngineRequest],
         pending_load_messages: list[ModelStateDictLoadMessage],
+        pending_release_messages: list[SessionReleaseMessage],
     ) -> LoopDecision:
         """RANK 0: takes everything off the queue and picks the next action. Sleeps until there is
         something to do.
@@ -429,10 +445,14 @@ class EngineLoop:
             )
 
         # * If there are outstanding generations, we drain the queue and make the next decision right away,
-        #   so outstanding generations can keep stepping.
+        #   so outstanding generations can keep stepping. Releases a load took off the queue also
+        #   decide right away: the next STEP applies them, even with nothing to admit.
         # * If there are none, there is nothing to step, so we wait on the queue for the next decision.
         messages: list[EngineLoopMessage]
-        if self._request_dispatcher.rank0_has_outstanding_generations():
+        if (
+            self._request_dispatcher.rank0_has_outstanding_generations()
+            or pending_release_messages
+        ):
             messages = []
         else:
             if pending_engine_requests:
@@ -446,8 +466,6 @@ class EngineLoop:
         while not self._queue.empty():
             messages.append(self._queue.get_nowait())
 
-        released_session_ids: list[str] = []
-        released_group_ids: list[int] = []
         for message in messages:
             if isinstance(message, ResultDrainFailureMessage):
                 # Peers are already waiting in the decision broadcast. Send them
@@ -458,8 +476,7 @@ class EngineLoop:
                 # Drops nothing: the queue rejects puts once closed, so the `CloseMessage` is the last message.
                 return LoopDecision(action=LoopAction.CLOSE, requests_per_dp_rank=[])
             if isinstance(message, SessionReleaseMessage):
-                released_session_ids.extend(message.session_ids)
-                released_group_ids.extend(message.group_ids)
+                pending_release_messages.append(message)
                 continue
             # Skip a call its caller already cancelled; once running, the reply ignores cancellation, so only
             # the loop resolves it.
@@ -503,9 +520,18 @@ class EngineLoop:
             decision = LoopDecision(
                 action=LoopAction.STEP,
                 requests_per_dp_rank=requests_per_dp_rank,
+                released_session_ids=[
+                    session_id
+                    for release in pending_release_messages
+                    for session_id in release.session_ids
+                ],
+                released_group_ids=[
+                    group_id
+                    for release in pending_release_messages
+                    for group_id in release.group_ids
+                ],
             )
-        decision.released_session_ids = released_session_ids
-        decision.released_group_ids = released_group_ids
+            pending_release_messages.clear()
         return decision
 
     @sl.log_trace_span("load_model_state_dict_copy")
@@ -591,7 +617,7 @@ class CloseMessage:
 
 @dataclass(kw_only=True, slots=True)
 class SessionReleaseMessage:
-    """Sessions (and every session of groups) whose held KV the engine loop releases; no reply."""
+    """Rollouts (and every rollout of groups) whose cached KV the engine loop evicts; no reply."""
 
     session_ids: list[str] = field(default_factory=list)
     group_ids: list[int] = field(default_factory=list)
@@ -635,10 +661,13 @@ class EngineLoopQueue:
         """Whether `close` has been called."""
         return self._closed_reason is not None
 
-    def put(self, message: EngineLoopMessage) -> None:
-        """Enqueue `message`; it lands on the next iteration of `event_loop`. Raises once closed."""
+    def put(self, message: EngineLoopMessage, *, drop_if_closed: bool = False) -> None:
+        """Enqueue `message`; it lands on the next iteration of `event_loop`. Once closed, raises,
+        or drops `message` if `drop_if_closed`."""
         with self._lock:
             if self._closed_reason is not None:
+                if drop_if_closed:
+                    return
                 raise RuntimeError(self._closed_reason)
             # asyncio.Queue is not thread-safe, so hand the put to the loop that owns it.
             self._event_loop.call_soon_threadsafe(self._queue.put_nowait, message)
@@ -695,4 +724,4 @@ class LoopDecision:
 
     released_session_ids: list[str] = field(default_factory=list)
     released_group_ids: list[int] = field(default_factory=list)
-    # sessions (and groups) whose held KV every rank releases before acting (session_kv_holder)
+    # STEP only: rollouts (and groups) whose cached KV every rank evicts after admitting the requests

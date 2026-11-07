@@ -56,6 +56,7 @@ class _Actor:
         self.prefetch_model_state_dict = _Endpoint(wait=wait_prefetch)
         self.load_model_state_dict = _Endpoint(None, wait=wait_pull, raises=raises_pull)
         self.release_sessions = _Endpoint()
+        self.release_groups = _Endpoint()
 
     def __len__(self):
         return 1
@@ -385,18 +386,34 @@ def test_sticky_session_release_drops_its_assignment():
     asyncio.run(_run())
 
 
-def test_session_release_reaches_only_its_pinned_generator():
-    """The generator a session is pinned to releases its held KV."""
-
+def test_session_release_reaches_only_the_generators_its_calls_went_to():
     async def _run():
-        actors = [_Actor("gen0"), _Actor("gen1")]
-        router = _router(actors, strategy=StickySessionRoutingStrategy.Config())
+        actors = [_Actor("gen0"), _Actor("gen1"), _Actor("gen2")]
+        router = _router(actors, strategy=RoundRobinRoutingStrategy.Config())
+        # Round robin sends s0's two turns to gen0 and gen1 (like a re-pinned session), s1's to gen2.
         assert await _generate(router, group_id=0, session_id="s0") == "gen0"
+        assert await _generate(router, group_id=0, session_id="s0") == "gen1"
+        assert await _generate(router, group_id=0, session_id="s1") == "gen2"
 
         await router.release_session("s0")
 
+        assert [len(actor.release_sessions.calls) for actor in actors] == [1, 1, 0]
         assert actors[0].release_sessions.calls == [((["s0"],), {})]
-        assert actors[1].release_sessions.calls == []
+
+        # s2 never gets its own release (a retried attempt): its group's end forgets it.
+        completion = await router.generate(
+            [1],
+            request_id="s2/t0",
+            group_id=1,
+            routing_session_id="s2",
+            sampling_config=None,
+            metrics_prefix="generator",
+        )
+        assert completion == "gen0"
+        await router.release_groups([1])
+        assert router._group_session_ids == {}
+        await router.release_session("s2")
+        assert len(actors[0].release_sessions.calls) == 1
 
     asyncio.run(_run())
 

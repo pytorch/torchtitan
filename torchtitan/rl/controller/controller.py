@@ -550,7 +550,7 @@ class Controller(Configurable):
             *,
             request_id: str,
             group_id: int,
-            routing_session_id: str | None = None,
+            routing_session_id: str,
             sampling_config: SamplingConfig | None = None,
         ) -> Completion | None:
             return await generator_router.generate.call_one(
@@ -1033,7 +1033,7 @@ class Controller(Configurable):
                     rollouts=[],
                     metrics=[m.Metric("rollout/group_failures", m.Sum(1.0))],
                 )
-            # The group makes no more generation calls, so its cache salts can go.
+            # The group makes no more generation calls: drop its cache salts and evict its KV.
             await self.generator_router.release_groups.call_one([work.group_id])
             await group_buffer.finalize_work(group)
 
