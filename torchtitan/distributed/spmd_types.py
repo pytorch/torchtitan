@@ -286,7 +286,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
                     f"Cannot compare SPMD layout with shard dim {axis_type.dim} "
                     f"against PartitionSpec of rank {ndim}."
                 )
-            entries[dim] = (MeshAxisName(axis_name),)
+            entries[dim] = entries[dim] + (MeshAxisName(axis_name),)
         return tuple(entries)
 
     def _validate_redistribute_spmd_pair(
