@@ -58,15 +58,13 @@ class Qwen3TransformerBlock(TransformerBlock):
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominator: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return ``(ffn_out, residual)`` unsummed; the next block adds them.
+        """Return ``(ffn_out, residual)`` unsummed; their sum is the next block's input.
 
-        The next block adds them in ``_add_attention_norm``, in the norm's kernel
-        when the ``qwen3_add_rmsnorm`` region is on. The first block gets
-        ``residual=None``: its ``x`` is the residual stream.
-
-        Example (the stream entering this block is h = residual + x):
+        Example (block 0 gets residual=None, so its hidden state is x):
             ffn_out, residual = block(x, ..., residual=residual)
-            # residual: h + attn_out; the stream entering the next block: residual + ffn_out
+            # hidden state in:           h = residual + x
+            # residual out:              h + attn_out
+            # next block's hidden state: residual + ffn_out
         """
         if residual is None:
             residual = x
@@ -76,22 +74,22 @@ class Qwen3TransformerBlock(TransformerBlock):
         attn_out = self.attention(attention_input, attention_metadata, positions)
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)
-        x = residual + attn_out
+        residual = residual + attn_out
 
         if isinstance(self.feed_forward, MoE):
             ffn_out = self.feed_forward(
-                self.ffn_norm(x),
+                self.ffn_norm(residual),
                 padding_mask_T=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
             )
         else:
-            ffn_out = self.feed_forward(self.ffn_norm(x))
-        return ffn_out, x
+            ffn_out = self.feed_forward(self.ffn_norm(residual))
+        return ffn_out, residual
 
     # Compiled, the add runs inside the norm kernel; eager runs two kernels.
     # emulate_precision_casts rounds the sum to bf16 before the norm, as eager
-    # does. Without it, the trainer's (grad) and generator's (no_grad) kernels
-    # round differently: up to 22% of outputs differ by one bf16 step.
+    # does. Without it, the no_grad graph norms the fp32 sum: up to 22% of
+    # outputs differ from eager by one bf16 step.
     @local_compile(
         "qwen3_add_rmsnorm",
         batch_invariant=False,
@@ -152,10 +150,10 @@ class Qwen3Model(Decoder):
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominators: torch.Tensor | None = None,
     ):
-        """``Decoder.forward``, but each block hands the next its output and the
-        residual stream unsummed (see ``Qwen3TransformerBlock.forward``).
+        """``Decoder.forward``, but without grad each block hands the next its output
+        and residual unsummed (see ``Qwen3TransformerBlock.forward``).
 
-        Example, 2 layers:
+        Example, 2 layers, no_grad (under grad the loop sums them after each block):
             h = tok_embeddings(tokens)
             out, residual = layers["0"](h)                       # residual = h + attn_out
             out, residual = layers["1"](out, residual=residual)  # attention_norm adds them
@@ -184,12 +182,17 @@ class Qwen3Model(Decoder):
                 padding_mask=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
             )
+            # Under grad, sum here: remat keeps each block's inputs for backward, so
+            # carrying (h, residual) would keep one more [T, D] tensor per block.
+            # Without grad, the next block adds them inside its norm kernel.
+            if torch.is_grad_enabled():
+                h, residual = residual + h, None
         # The next pipeline stage takes one tensor, so every stage ends with the sum.
-        # A stage without layers passes its input through (residual stays None).
+        # residual is None here under grad, and in a stage without layers.
         # TODO: fuse this add into the root norm, as _add_attention_norm does for the
         # attention norm: one kernel fewer per forward. Under sequence parallelism the
-        # root norm all-gathers its output (pre_lm_head_norm_sharding_config), so that
-        # region would wrap a collective and needs its own TP test.
+        # root norm's output is all-gathered, so that region would wrap a collective
+        # and needs its own TP test.
         if residual is not None:
             h = residual + h
         h = self.norm(h) if self.norm is not None else h

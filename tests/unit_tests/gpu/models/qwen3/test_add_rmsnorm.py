@@ -20,7 +20,7 @@ class TestQwen3AddRMSNorm(unittest.TestCase):
         LocalCompileConfig().apply()
         torch._dynamo.reset()
 
-    def test_compiled_add_and_norm(self):
+    def test_compiled_add_and_norm_matches_eager(self):
         config = build_model_config("8B", parallelism=ParallelismConfig())
         torch.manual_seed(0)
         norm = config.layers[0].attention_norm.build().cuda().to(torch.bfloat16)
@@ -32,29 +32,17 @@ class TestQwen3AddRMSNorm(unittest.TestCase):
         add_attention_norm = Qwen3TransformerBlock._add_attention_norm
         x = torch.randn(64, config.dim, device="cuda", dtype=torch.bfloat16)
         residual = 4 * torch.randn_like(x)
-        grad_outputs = (torch.randn_like(x), torch.randn_like(x))
 
-        def forward_backward():
-            inputs = (x.clone().requires_grad_(), residual.clone().requires_grad_())
-            outputs = add_attention_norm(block, *inputs)
-            grads = torch.autograd.grad(outputs, (*inputs, norm.weight), grad_outputs)
-            return outputs, grads
-
-        LocalCompileConfig().apply()
-        (eager_out, eager_sum), eager_grads = forward_backward()
-        LocalCompileConfig(regions=["qwen3_add_rmsnorm"]).apply()
-        (out, new_residual), grads = forward_backward()
+        # The region runs only without grad: Qwen3Model.forward sums in grad mode.
         with torch.no_grad():
-            no_grad_out, no_grad_sum = add_attention_norm(block, x, residual)
+            LocalCompileConfig().apply()
+            eager_out, eager_sum = add_attention_norm(block, x, residual)
+            LocalCompileConfig(regions=["qwen3_add_rmsnorm"]).apply()
+            out, new_residual = add_attention_norm(block, x, residual)
 
-        # The trainer (grad) and the generator (no_grad) get the same bits.
-        torch.testing.assert_close(no_grad_out, out, rtol=0, atol=0)
-        torch.testing.assert_close(no_grad_sum, new_residual, rtol=0, atol=0)
         # bf16 add: the compiled sum rounds exactly as eager's; the norm sums in another order.
         torch.testing.assert_close(new_residual, eager_sum, rtol=0, atol=0)
         torch.testing.assert_close(out, eager_out)
-        for grad, eager_grad in zip(grads, eager_grads, strict=True):
-            torch.testing.assert_close(grad, eager_grad, atol=2e-2, rtol=2e-2)
 
 
 if __name__ == "__main__":
