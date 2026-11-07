@@ -609,7 +609,8 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
     def _unpermute(self, routed_output_RD, input_shape, permuted_indices):
         """Reverse expert-major reordering."""
         # permuted_indices is a permutation of all input rows, so scattering by it
-        # is gathering by its inverse.
+        # is gathering by its inverse. input_shape is unused here: the gather keeps
+        # every row (TorchAO's padded override needs it).
         return _PermuteRows.apply(
             routed_output_RD, _inverse_permutation(permuted_indices)
         )
