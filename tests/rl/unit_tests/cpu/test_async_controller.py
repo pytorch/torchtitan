@@ -1063,11 +1063,11 @@ def test_passes_start_at_every_due_step() -> None:
     asyncio.run(run())
 
 
-def test_skip_new_if_prev_not_finished() -> None:
-    """With `skip_new_if_prev_not_finished`, a due step starts no pass while an earlier pass runs.
-    A skipped step never starts its pass later, even after the running pass ends."""
+def test_defer_new_if_not_finished() -> None:
+    """With `defer_new_if_not_finished`, due steps that come while a pass runs share one pass.
+    It starts in the step where the running pass is logged. The last step starts no pass."""
     controller, validation = _controller_for_validation(
-        ValidationConfig(freq=2, skip_new_if_prev_not_finished=True)
+        ValidationConfig(freq=2, defer_new_if_not_finished=True)
     )
 
     async def run() -> None:
@@ -1078,30 +1078,25 @@ def test_skip_new_if_prev_not_finished() -> None:
         await _train(controller, queue, 1)
         await _train(controller, queue, 2)
         await _run_until(lambda: validation.started_steps == [2])
-        # Step 4 is due while pass 2 runs: skipped.
-        await _train(controller, queue, 3)
-        await _train(controller, queue, 4)
+        # Steps 4 and 6 are due while pass 2 runs.
+        for step in (3, 4, 5, 6):
+            await _train(controller, queue, step)
         assert list(controller._validation_tasks) == [2]
 
-        # Pass 2 is logged in step 5, which is not due.
+        # Step 7 logs pass 2 first, then starts one pass for steps 4 and 6.
         validation.end(2)
         await _run_until(lambda: controller._validation_tasks[2].done())
-        await _train(controller, queue, 5)
-        assert controller._validation_tasks == {}
-
-        # Pass 6 ends just before due step 8: step 8 logs it first, then starts its own pass.
-        await _train(controller, queue, 6)
         await _train(controller, queue, 7)
-        validation.end(6)
-        await _run_until(lambda: controller._validation_tasks[6].done())
-        await _train(controller, queue, 8)
-        await _run_until(lambda: validation.started_steps == [2, 6, 8])
+        await _run_until(lambda: validation.started_steps == [2, 7])
 
-        validation.end(8)
-        await _run_until(lambda: controller._validation_tasks[8].done())
+        # Step 8 is due while pass 7 runs; step 9 is the last step.
+        await _train(controller, queue, 8)
+        validation.end(7)
+        await _run_until(lambda: controller._validation_tasks[7].done())
         await _train(controller, queue, 9)
         await asyncio.wait_for(trainer, timeout=5)
-        assert _logged_steps(controller, is_validation=True) == [2, 6, 8]
+        assert validation.started_steps == [2, 7]
+        assert _logged_steps(controller, is_validation=True) == [2, 7]
 
     asyncio.run(run())
 

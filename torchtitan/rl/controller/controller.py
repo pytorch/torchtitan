@@ -149,16 +149,16 @@ class ValidationConfig:
 
         step     0    25   50   75   100  125  150  175
         train    ====================|  training ends at 100
-        skip_new_if_prev_not_finished=False: every due pass starts
+        defer_new_if_not_finished=False: every due pass starts
         pass 0   ============                  logged at 0
         pass 25       ============             logged at 25
         pass 50            ============        logged at 50
         pass 75                 ============   logged at 75
         final                               ============ starts when the open passes end, logged at 100
-        skip_new_if_prev_not_finished=True: pass 0 still runs at steps 25 and 50, so they start no pass
+        defer_new_if_not_finished=True: due steps 25 and 50 start one pass when pass 0 ends
         pass 0   ============                  logged at 0
-        pass 75                 ============   logged at 75
-        final                               ============ logged at 100
+        pass 60              ============      logged at 60
+        final                            ============ logged at 100
     """
 
     steps: int = 20
@@ -167,9 +167,10 @@ class ValidationConfig:
     freq: int | None = None
     """Also validate every `freq` train steps. None: only at the start and after the last step."""
 
-    skip_new_if_prev_not_finished: bool = False
-    """False: every due pass starts, beside the running ones. True: a due step starts no pass while an
-    earlier pass still runs. Use it when the env server can't host several passes beside training."""
+    defer_new_if_not_finished: bool = False
+    """False: every due pass starts, beside the running ones. True: a due pass waits until the running
+    pass ends, then starts at once. Due steps that come meanwhile share that one pass. Use it when
+    the env server can't host several passes beside training."""
 
     def __post_init__(self) -> None:
         if self.steps < -1:
@@ -182,9 +183,9 @@ class ValidationConfig:
             raise ValueError(
                 f"validation freq={self.freq} needs steps != 0; steps=0 disables validation"
             )
-        if self.skip_new_if_prev_not_finished and self.freq is None:
+        if self.defer_new_if_not_finished and self.freq is None:
             raise ValueError(
-                "validation skip_new_if_prev_not_finished=True needs freq, got freq=None"
+                "validation defer_new_if_not_finished=True needs freq, got freq=None"
             )
 
 
@@ -1258,6 +1259,8 @@ class Controller(Configurable):
         push_task: asyncio.Task[float] | None = None
         pull_task: asyncio.Task[float] | None = None
         validation = self.config.async_loop.validation
+        # With `validation.defer_new_if_not_finished`, a due pass can wait for later steps.
+        is_validation_due = False
         for step in range(self.start_step + 1, num_training_steps + 1):
             sl.set_step(step)  # propagate the step counter to the actors
             with sl.log_trace_span("sync_log_step"):
@@ -1420,18 +1423,16 @@ class Controller(Configurable):
 
             # Never awaits a pass: validation must not stall training.
             self._log_finished_validation()
-            is_validation_due = (
-                validation.freq is not None and step % validation.freq == 0
+            if validation.freq is not None and step % validation.freq == 0:
+                is_validation_due = True
+            is_deferred = validation.defer_new_if_not_finished and bool(
+                self._validation_tasks
             )
             # The last step starts no pass: the final pass after training covers it.
-            if is_validation_due and step < num_training_steps:
-                if validation.skip_new_if_prev_not_finished and self._validation_tasks:
-                    logger.info(
-                        f"Validation pass {step} skipped: pass {min(self._validation_tasks)} still runs"
-                    )
-                else:
-                    # The pass waits for this step's weight pull; training goes on.
-                    self._start_validation(step=step, after=pull_task)
+            if is_validation_due and not is_deferred and step < num_training_steps:
+                # The pass waits for this step's weight pull; training goes on.
+                self._start_validation(step=step, after=pull_task)
+                is_validation_due = False
 
         # Finish the last push and pull so generators hold the final weights for the final pass.
         if push_task is not None:
