@@ -8,9 +8,6 @@
 # D = rotary width; query/key use the existing public argument names.
 
 import math
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass
 
 import spmd_types as spmd
@@ -221,54 +218,7 @@ class IdentityRoPE(RoPE):
         return query if key is None else (query, key)
 
 
-_initializing_rope_caches: ContextVar[list[RoPE] | None] = ContextVar(
-    "initializing_rope_caches", default=None
-)
-
-
-@contextmanager
-def _share_rope_cache_initialization() -> Iterator[None]:
-    """Reuse static caches within one decoder initialization, then release the memo."""
-    token = _initializing_rope_caches.set([])
-    try:
-        yield
-    finally:
-        _initializing_rope_caches.reset(token)
-
-
-def _init_rope_cache(
-    rope: RoPE,
-    initialize: Callable[[], torch.Tensor],
-    buffer_device: torch.device | None,
-) -> None:
-    # A subclass overriding initialization must opt in itself; do not inherit
-    # this optimization across an arbitrary override's RNG or state effects.
-    representatives = (
-        _initializing_rope_caches.get()
-        if type(rope).__dict__.get("_cache_init_is_pure", False)
-        else None
-    )
-    device = rope.get_buffer("cache").device if buffer_device is None else buffer_device
-    with torch.device(device):
-        if representatives is not None:
-            target_device = torch.get_default_device()
-            for other in representatives:
-                if (
-                    type(other) is type(rope)
-                    and other.config == rope.config
-                    and other.get_buffer("cache").device == target_device
-                ):
-                    rope.cache = other.get_buffer("cache")
-                    return
-        rope.cache = initialize()
-    if representatives is not None:
-        representatives.append(rope)
-
-
 class ComplexRoPE(RoPE):
-    _cache_init_is_pure = True
-    cache: torch.Tensor
-
     @dataclass(kw_only=True, slots=True)
     class Config(RoPE.Config):
         dim: int
@@ -288,7 +238,10 @@ class ComplexRoPE(RoPE):
         self.register_buffer("cache", self._precompute_cache(), persistent=False)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
-        _init_rope_cache(self, self._precompute_cache, buffer_device)
+        if buffer_device is None:
+            buffer_device = self.cache.device
+        with torch.device(buffer_device):
+            self.cache = self._precompute_cache()
 
     # Cat options: only fp32/fp16 inputs reach the stack (bf16 writes int32 pairs); they write
     # each half with one store, instead of one masked kernel over both.
@@ -445,9 +398,6 @@ class _RotatePairs(torch.autograd.Function):
 
 
 class CosSinRoPE(RoPE):
-    _cache_init_is_pure = True
-    cache: torch.Tensor
-
     @dataclass(kw_only=True, slots=True)
     class Config(RoPE.Config):
         dim: int
@@ -467,7 +417,10 @@ class CosSinRoPE(RoPE):
         self.register_buffer("cache", self._precompute_cache(), persistent=False)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
-        _init_rope_cache(self, self._precompute_cache, buffer_device)
+        if buffer_device is None:
+            buffer_device = self.cache.device
+        with torch.device(buffer_device):
+            self.cache = self._precompute_cache()
 
     @local_compile("rope", batch_invariant=True)
     def forward(

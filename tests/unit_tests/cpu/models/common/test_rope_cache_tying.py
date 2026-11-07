@@ -9,12 +9,11 @@
 import dataclasses
 import importlib
 import unittest
-from unittest.mock import patch
 
 import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.rope import ComplexRoPE, IdentityRoPE, RoPE
+from torchtitan.models.common.rope import IdentityRoPE, RoPE
 from torchtitan.models.deepseek_v4 import build_model_config as build_dsv4_config
 from torchtitan.models.llama3 import MODEL_FLAVORS
 from torchtitan.models.llama3.model import Llama3Model
@@ -53,22 +52,6 @@ class TestRoPECacheTying(unittest.TestCase):
                 super().__init__(config)
                 self.register_buffer("cache", torch.ones(4), persistent=False)
 
-            def _init_self_buffers(self, *, buffer_device=None):
-                self.cache.uniform_()
-                self.initial_contents = self.cache.clone()
-
-        class RandomComplexRoPE(ComplexRoPE):
-            @dataclasses.dataclass(kw_only=True, slots=True)
-            class Config(ComplexRoPE.Config):
-                pass
-
-            initializations = 0
-
-            def _precompute_cache(self):
-                type(self).initializations += 1
-                angles = torch.rand(self.max_context_length, self.dim // 2)
-                return torch.polar(torch.ones_like(angles), angles)
-
         model = Llama3Model(_make_config())
         ropes = _ropes(model)
         self.assertGreater(len(ropes), 1)
@@ -76,21 +59,8 @@ class TestRoPECacheTying(unittest.TestCase):
             self.assertIs(rope.cache, ropes[0].cache)
         model.add_module("custom_rope_0", CustomRoPE.Config().build())
         model.add_module("custom_rope_1", CustomRoPE.Config().build())
-        for index in range(2):
-            model.add_module(
-                f"random_rope_{index}",
-                RandomComplexRoPE.Config(dim=4, max_context_length=4).build(),
-            )
-        RandomComplexRoPE.initializations = 0
         model.init_states()
         self.assertIs(model.custom_rope_0.cache, model.custom_rope_1.cache)
-        torch.testing.assert_close(
-            model.custom_rope_0.cache,
-            model.custom_rope_0.initial_contents,
-            rtol=0,
-            atol=0,
-        )
-        self.assertEqual(RandomComplexRoPE.initializations, 2)
 
     def test_caches_are_shared_after_to_empty_and_init_states(self):
         """Mirror the trainer: build on meta, ``to_empty()``, then ``init_states()``."""
@@ -113,15 +83,7 @@ class TestRoPECacheTying(unittest.TestCase):
                         model.add_module("vision_encoder", encoder)
                         groups.append(encoder)
                 model.to_empty(device="cpu")
-                initialize = ComplexRoPE._precompute_cache
-                with patch.object(
-                    ComplexRoPE,
-                    "_precompute_cache",
-                    autospec=True,
-                    side_effect=initialize,
-                ) as precompute:
-                    model.init_states()
-                    self.assertEqual(precompute.call_count, 1)
+                model.init_states()
                 self.assertIsInstance(model.identity_rope, RoPE)
                 self.assertEqual(list(model.identity_rope.named_buffers()), [])
 

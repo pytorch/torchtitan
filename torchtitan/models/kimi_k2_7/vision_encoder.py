@@ -203,8 +203,6 @@ class MoonViTRoPE(ComplexRoPE):
     ``max_context_length`` is the exclusive bound on either coordinate.
     """
 
-    _cache_init_is_pure = True
-
     @dataclass(kw_only=True, slots=True)
     class Config(ComplexRoPE.Config):
         pass

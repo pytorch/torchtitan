@@ -37,7 +37,7 @@ from torchtitan.models.common.flops import (
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.common.rope import _share_rope_cache_initialization, RoPE
+from torchtitan.models.common.rope import RoPE
 from torchtitan.observability.logging import warn_once
 
 __all__ = ["Decoder", "TransformerBlock"]
@@ -276,13 +276,12 @@ class Decoder(BaseModel):
             # weight.
             assert self.tok_embeddings is not None and self.lm_head is not None
             self.tok_embeddings.weight = self.lm_head.weight
-        self._tie_rope_caches(static_only=True)
-        with _share_rope_cache_initialization():
-            super().init_states(buffer_device=buffer_device)
-        # Custom RoPE initializers can still create separate buffers.
+        super().init_states(buffer_device=buffer_device)
+        # ``to_empty()`` and RoPE buffer initialization give every layer its
+        # own cache again; point identical RoPEs back at one tensor.
         self._tie_rope_caches()
 
-    def _tie_rope_caches(self, *, static_only: bool = False) -> None:
+    def _tie_rope_caches(self) -> None:
         """Share one cache tensor across RoPE modules with equal configs.
 
         Cache-backed RoPE modules build their own position tables, identical
@@ -294,15 +293,9 @@ class Decoder(BaseModel):
         ``model.to(...)``) gives every RoPE its own copy again. That costs
         memory but not correctness.
         """
-        # ``init_states`` also ties freshly allocated buffers before initializing
-        # them, and built-in RoPEs compute each distinct static cache only once.
         representatives: list[RoPE] = []
         for module in self.modules():
             if not isinstance(module, RoPE):
-                continue
-            if static_only and not type(module).__dict__.get(
-                "_cache_init_is_pure", False
-            ):
                 continue
             # Identity and buffer-free overrides have no cache to share.
             if "cache" not in dict(module.named_buffers(recurse=False)):
@@ -311,11 +304,7 @@ class Decoder(BaseModel):
                 (
                     r
                     for r in representatives
-                    if type(r) is type(module)
-                    and r.config == module.config
-                    and r.get_buffer("cache").device
-                    == module.get_buffer("cache").device
-                    and r.get_buffer("cache").dtype == module.get_buffer("cache").dtype
+                    if type(r) is type(module) and r.config == module.config
                 ),
                 None,
             )

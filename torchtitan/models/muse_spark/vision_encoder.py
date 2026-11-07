@@ -99,8 +99,6 @@ class MuseSparkNaViTAdapter(Module):
 class NaViTRoPE(ComplexRoPE):
     """One-based spatial coordinates with contiguous column/row complex pairs."""
 
-    _cache_init_is_pure = True
-
     @dataclass(kw_only=True, slots=True)
     class Config(ComplexRoPE.Config):
         pass
