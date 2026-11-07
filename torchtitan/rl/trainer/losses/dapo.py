@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import torch
 
 from torchtitan.components.loss import compute_logprobs, Loss
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
 # Clamp |log(pi_theta/pi_old)| before exp() so a large generator/trainer
@@ -70,6 +71,7 @@ class DAPOLoss(Loss[torch.Tensor]):
         self.ratio_clip_high = config.ratio_clip_high
         self.global_vocab_size = config.global_vocab_size
 
+    @local_compile("loss", batch_invariant=False)
     def __call__(
         self,
         logits: torch.Tensor,
