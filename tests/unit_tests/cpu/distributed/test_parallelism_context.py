@@ -1176,5 +1176,59 @@ class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
             self.assertEqual(loss, ref_loss)
 
 
+class TestNcclCtasPerAxis(unittest.TestCase):
+    """comm.nccl_ctas reaches the mesh axes' communicators as fixed CTA counts."""
+
+    @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
+    def test_storage_mesh_axes_get_the_options(self):
+        from unittest import mock
+
+        context = ParallelismContext(
+            dp_replicate=2,
+            dp_shard=4,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            world_size=8,
+            enable_sequence_parallel=False,
+            nccl_ctas={"dp_shard": 16, "dp_replicate": 2, "tp": 8},
+        )
+        world = mock.MagicMock()
+        with patch(
+            "torchtitan.distributed.parallelism_context.init_device_mesh",
+            return_value=world,
+        ):
+            try:
+                context.build_mesh()
+            except AssertionError:
+                pass  # mocked meshes have no sizes; the calls are recorded
+        overrides = {
+            call.args[2]: call.kwargs["backend_override"]
+            for call in world._unflatten.call_args_list
+        }
+        storage = overrides[("pp", "dp_replicate", "dp_shard", "cp", "tp")]
+        for axis, ctas in (("dp_shard", 16), ("dp_replicate", 2)):
+            backend, options = storage[axis]
+            self.assertEqual(backend, "nccl")
+            self.assertEqual(
+                (options.config.min_ctas, options.config.max_ctas), (ctas, ctas)
+            )
+        # a size-1 axis stays fake
+        self.assertEqual(storage["tp"], "fake")
+        self.assertEqual(storage["pp"], "fake")
+
+    def test_config_refuses_unknown_axes_and_bad_values(self):
+        from torchtitan.config import CommConfig
+
+        CommConfig(nccl_ctas={"dp_shard": 16}, sm_carveout=16)
+        with self.assertRaisesRegex(ValueError, "unknown mesh axes"):
+            CommConfig(nccl_ctas={"shard": 16})
+        with self.assertRaisesRegex(ValueError, ">= 1"):
+            CommConfig(nccl_ctas={"dp_shard": 0})
+        with self.assertRaisesRegex(ValueError, "sm_carveout"):
+            CommConfig(sm_carveout=-1)
+
+
 if __name__ == "__main__":
     unittest.main()
