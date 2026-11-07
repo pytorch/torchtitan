@@ -1,0 +1,4 @@
+== python nla_remat_checkpoint_wrapped_regions.py
+T=1024: OK, max |grad - no-checkpoint grad| = 0
+T=2048: OK, max |grad - no-checkpoint grad| = 0
+T=512: OK, max |grad - no-checkpoint grad| = 0

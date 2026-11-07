@@ -1,0 +1,5 @@
+== PYTHONPATH=$CUTLASS_DSL_SITE:$PYTHONPATH python ask07_cutedsl_template.py
+torch 2.16.0.dev20261009+cu132 (146a5a2f73), NVIDIA GB300
+w13 T=34: GEMM kernel 142.6 us, all device work per call 2807.1 us, kernels per call 1539, D2H syncs per call 1
+CUDA graph capture fails: AcceleratorError CUDA error: operation failed due to a previous error during capture
+Search for `cudaErrorStreamCaptureInvalidated' in ht

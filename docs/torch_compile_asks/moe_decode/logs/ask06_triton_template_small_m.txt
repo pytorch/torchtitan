@@ -1,0 +1,5 @@
+== python ask06_triton_template_small_m.py
+torch 2.16.0.dev20261009+cu132 (146a5a2f73), NVIDIA GB300
+w13 T=   1: ATen   24.1 us   Inductor Triton template   33.1 us
+w13 T=  34: ATen  151.3 us   Inductor Triton template  135.8 us
+w13 T= 128: ATen  209.5 us   Inductor Triton template  186.7 us

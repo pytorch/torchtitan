@@ -1,0 +1,9 @@
+== python ask08_dynamic_autotune_first_size.py
+torch 2.16.0.dev20261009+cu132 (146a5a2f73), NVIDIA GB300
+us per call at R = [131072, 524288] rows (CUDA graph), one fresh process per line:
+  decode first (272, 512 rows)     110.6   422.3
+  decode first (272, 512 rows)     109.8   422.1
+  decode first (272, 512 rows)     110.4   422.0
+  large first (131072, 114688)      65.4   237.6
+  large first (131072, 114688)      63.7   236.5
+  static compile at each size       63.6   235.1

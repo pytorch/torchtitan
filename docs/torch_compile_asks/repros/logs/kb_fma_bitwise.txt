@@ -1,0 +1,20 @@
+== EMULATE_PRECISION_CASTS=0 TORCHINDUCTOR_FORCE_DISABLE_CACHES=1 python kb_fma_bitwise.py
+  warn_once(
+emulate_precision_casts = False
+(a) complex eager vs real compiled mismatched     44 / 4194304  max abs diff 7.81e-03
+(a') real eager vs real compiled mismatched     92 / 4194304  max abs diff 1.56e-02
+(b) rotate-half eager vs compiled mismatched     81 / 4194304  max abs diff 7.81e-03
+== EMULATE_PRECISION_CASTS=1 TORCHINDUCTOR_FORCE_DISABLE_CACHES=1 python kb_fma_bitwise.py
+  warn_once(
+  _set_triton_libdevice_path()
+  _set_triton_libdevice_path()
+emulate_precision_casts = True
+(a) complex eager vs real compiled mismatched     90 / 4194304  max abs diff 1.56e-02
+(a') real eager vs real compiled mismatched      0 / 4194304  max abs diff 0.00e+00
+(b) rotate-half eager vs compiled mismatched      0 / 4194304  max abs diff 0.00e+00
+== TORCHINDUCTOR_FORCE_DISABLE_CACHES=1 TRITON_DEFAULT_FP_FUSION=0 python kb_fma_bitwise.py
+  warn_once(
+emulate_precision_casts = False
+(a) complex eager vs real compiled mismatched     44 / 4194304  max abs diff 7.81e-03
+(a') real eager vs real compiled mismatched     92 / 4194304  max abs diff 1.56e-02
+(b) rotate-half eager vs compiled mismatched     81 / 4194304  max abs diff 7.81e-03

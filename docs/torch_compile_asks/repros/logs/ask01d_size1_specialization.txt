@@ -1,0 +1,4 @@
+== python ask01d_size1_specialization.py
+default, widths 1,2,3,5,8,1: 2 graphs
+maybe_mark_dynamic on the size-1 dim, widths 1 then 4: 2 graphs
+mark_unbacked on the width, widths 1 then 4: 1 graphs

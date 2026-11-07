@@ -1,0 +1,5 @@
+== CUDA_VISIBLE_DEVICES= python kb_make_fx_tensor_constant.py
+graph constants: ['_tensor_constant0']
+traced, denominator 2:           2.0
+after in-place fill_(4):          1.0  eager 1.0
+after rebinding to tensor(8):     1.0  eager 0.5
