@@ -21,7 +21,7 @@ class TestQwen3AddRMSNorm(unittest.TestCase):
         torch._dynamo.reset()
 
     def test_compiled_add_and_norm_matches_eager(self):
-        # Qwen3-0.6B width (D=1024): without emulate_precision_casts, 23% of outputs differ.
+        # Qwen3-0.6B width (D=1024): without emulate_precision_casts, 22% of outputs differ.
         config = build_model_config("0.6B", parallelism=ParallelismConfig())
         torch.manual_seed(0)
         norm = config.layers[0].attention_norm.build().cuda().to(torch.bfloat16)
