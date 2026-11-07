@@ -503,7 +503,7 @@ def compute_logprobs(
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Per-token logprobs from ``logits[T, V]`` and ``labels[T]``.
 
-    With ``temperature[T]``, logprobs and entropy are of ``softmax(logits / temperature)``.
+    With ``temperature[T]``, logprobs and entropy use ``softmax(logits / temperature)``.
 
     When ``return_entropy`` is set, also returns per-token Shannon entropy
     ``H(p) = logsumexp(logits) - sum(softmax(logits) * logits)``, with shape
@@ -520,11 +520,13 @@ def compute_logprobs(
     ``(logprobs, entropy)``.
     """
     if temperature is not None:
-        # Divide, never multiply by the reciprocal: vLLM divides; batch-invariant runs compare bits.
-        # expand_as skips Inductor's scaled-softmax rewrite. For a [T, 1] divisor, the rewrite's
-        # isfinite guard writes two fp32 [T, V] buffers: 1529 vs 806 us per [1280, 151936] chunk,
-        # fwd+bwd, GB300.
-        # TODO: drop expand_as once that guard is fixed: https://github.com/pytorch/pytorch/pull/184046
+        # Divide, never multiply by the reciprocal: batch-invariant runs need logprobs bitwise
+        # equal to vLLM's, which divides.
+        # expand_as skips Inductor's div-softmax rewrite, whose isfinite guard writes two fp32
+        # [T, V] buffers for a [T, 1] divisor: 1529 us with a [T, 1] divisor vs 806 us expanded,
+        # per [1280, 151936] chunk, fwd+bwd, GB300.
+        # TODO: drop expand_as once Inductor's div-softmax rewrite stops writing its isfinite
+        # buffers for a broadcast tensor divisor (guard added in pytorch/pytorch#184046).
         logits = logits / temperature.unsqueeze(-1).expand_as(logits)
     if vocab_parallel_group is not None:
         if global_vocab_size is None:
