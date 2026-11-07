@@ -47,11 +47,9 @@ def cp_replicated_vision_sharding_config(config: ShardingConfig) -> ShardingConf
 
 def navit_encoder_sharding_config() -> ShardingConfig:
     parameter_invariant = SpmdType({DP: spmd.R, CP: spmd.I, TP: spmd.I})
-    activation_invariant = SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I})
     return ShardingConfig(
         state_shardings={"positional_embedding_vlm": parameter_invariant},
-        out_src_shardings=activation_invariant,
-        out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I}),
+        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I}),
     )
 
 
