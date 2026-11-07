@@ -32,7 +32,7 @@ Add `WandBLogger.Config()` to `metrics.loggers` in your recipe. Set
 
 Each log call is its own W&B row, and every row carries the training step as
 `trainer/step`, the x-axis of the generated charts. The logger passes no `step=`
-to `wandb.log`: W&B ignores a log to a step below its current one, and validation
+to `wandb.log`: W&B ignores a log to a step it already sent, and validation
 can log at a step that training already logged. W&B's `_step` (`Step` in the UI)
 counts rows:
 - In saved panels, use `trainer/step` as the x-axis.
