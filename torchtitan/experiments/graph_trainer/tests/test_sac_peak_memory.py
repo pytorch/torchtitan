@@ -46,10 +46,10 @@ def _build_model(model_flavor: str, attn_backend: str = "flex") -> nn.Module:
     )
     with torch.device("meta"):
         model = model_config.build()
+    model.to(dtype=DTYPE)
     model.to_empty(device="cuda")
     with torch.no_grad():
         model.init_states(buffer_device=None)
-    model.to(dtype=DTYPE)
     model.train()
     return model
 

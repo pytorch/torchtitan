@@ -761,8 +761,8 @@ def rl_grpo_kimi_k3_debug_varlen_batch_invariant(
 def rl_grpo_deepseek_v3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
     """Random-init DeepSeek V3 GRPO whose generator caches compressed MLA latents.
 
-    Without batch invariance, the generator uses vLLM's native MLA and captures
-    decode CUDA graphs.
+    Without batch invariance, the generator decodes the compressed cache with
+    Attention Gym's latent MLA kernel and captures decode CUDA graphs.
     """
     trainer_parallelism = ParallelismConfig(data_parallel_shard_degree=2)
     generator_parallelism = InferenceParallelismConfig(

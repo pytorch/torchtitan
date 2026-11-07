@@ -149,6 +149,48 @@ class TestLinear(unittest.TestCase):
 
 
 class TestGroupedLinear(unittest.TestCase):
+    def test_scores_use_fp32_without_saving_fp32_input(self):
+        """Keep score precision without doubling the saved activation storage."""
+        torch.manual_seed(42)
+        grouped = GroupedLinear.Config(
+            group_size=1, in_features=4, out_features=4
+        ).build()
+        input_RI = torch.randn(8, 4, dtype=torch.bfloat16, requires_grad=True)
+        scores_R = torch.linspace(0.01, 0.99, 8, requires_grad=True)
+        reference_RI = input_RI.detach().clone().requires_grad_(True)
+        reference_scores_R = scores_R.detach().clone().requires_grad_(True)
+        expected_RI = (reference_RI.float() * reference_scores_R.reshape(-1, 1)).to(
+            input_RI.dtype
+        )
+        saved = []
+
+        def pack(tensor):
+            saved.append((tensor.dtype, tuple(tensor.shape)))
+            return tensor
+
+        def identity_projection(*, input_RI, weight_EOI, offsets_E):
+            return input_RI
+
+        # Isolate score multiplication from the accelerator-only grouped GEMM.
+        with (
+            patch.object(grouped, "_grouped_mm", side_effect=identity_projection),
+            torch.autograd.graph.saved_tensors_hooks(pack, lambda tensor: tensor),
+        ):
+            actual_RI = grouped(
+                input_RI, torch.tensor([8], dtype=torch.int32), scores_R=scores_R
+            )
+        grad_RI = torch.randn_like(actual_RI)
+        actual_RI.backward(grad_RI)
+        expected_RI.backward(grad_RI)
+
+        torch.testing.assert_close(actual_RI, expected_RI, rtol=0, atol=0)
+        torch.testing.assert_close(input_RI.grad, reference_RI.grad, rtol=0, atol=0)
+        torch.testing.assert_close(
+            scores_R.grad, reference_scores_R.grad, rtol=0, atol=0
+        )
+        self.assertIn((torch.bfloat16, (8, 4)), saved)
+        self.assertNotIn((torch.float32, (8, 4)), saved)
+
     def test_num_linears_preserves_projection_axis_without_copy(self):
         """Multiple projections retain a zero-copy logical output axis."""
         grouped = GroupedLinear.Config(
