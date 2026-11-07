@@ -36,13 +36,11 @@ trap 'rm -f "$overrides"' EXIT
 # Keep the RL environment's PyTorch, Monarch and openai (vLLM needs a newer one
 # than SGLang pins).
 uv pip freeze | grep -E "^(torch|torchvision|torchmonarch|openai)==" > "$overrides"
-# SGLang depends on torchaudio, which the engine never imports: any nightly
-# built for the same CUDA as torch.
-echo "torchaudio==2.11.0.dev20261007+cu132" >> "$overrides"
+# SGLang depends on torchaudio, which the engine never imports: drop it (a uv
+# override whose marker is never true removes the dependency).
+echo "torchaudio ; sys_platform == 'never'" >> "$overrides"
 
 # The engine does not use SGLang's Rust extensions: the radix tree falls back to
 # its Python implementation.
 SGLANG_BUILD_RUST_EXTS=none uv pip install -e "$src/python" \
-  --override "$overrides" \
-  --extra-index-url https://download.pytorch.org/whl/nightly/cu132 \
-  --index-strategy unsafe-best-match --prerelease allow
+  --override "$overrides" --prerelease allow
