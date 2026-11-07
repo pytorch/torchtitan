@@ -153,8 +153,6 @@ class Generator(Configurable):
         cache salt pinned when this generator first admitted it, so its rollouts and
         later turns reuse its KV across model state dict loads, while new groups use the current
         version.
-        CPU KV offload instead salts by the loaded weights: after an update,
-        requests cannot reuse the group's older KV.
         Enable this to clear prefix-cache entries and preempt running requests; the engine
         then recomputes their KV under the new weights when they resume."""
 

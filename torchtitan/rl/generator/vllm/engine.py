@@ -122,10 +122,6 @@ class VLLMEngine(GenerationEngine):
         release hints when sessions end. None disables both session behaviors."""
 
         @property
-        def supports_hot_swap(self) -> bool:
-            return self.kv_transfer_config is None
-
-        @property
         def holds_session_kv(self) -> bool:
             return self.session_kv_holder is not None
 
@@ -183,8 +179,7 @@ class VLLMEngine(GenerationEngine):
             if reset_kv_cache_on_model_state_dict_load:
                 raise ValueError(
                     "KV offload requires reset_kv_cache_on_model_state_dict_load=False: "
-                    "asynchronous saves can still hold GPU blocks after requests finish. "
-                    "Policy-version salts isolate KV without resetting the cache."
+                    "asynchronous saves can still hold GPU blocks after requests finish."
                 )
         if (
             config.session_kv_holder is not None
@@ -195,8 +190,6 @@ class VLLMEngine(GenerationEngine):
                 "cannot reset the prefix cache while blocks are held"
             )
         self.config = config
-        # Initial random weights must never cache KV as trainer version 0.
-        self._loaded_policy_version: int | None = None
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load
         )
@@ -424,20 +417,9 @@ class VLLMEngine(GenerationEngine):
         rejected_requests: list[tuple[str, Exception]] = []
         for request in requests:
             prompt = {"prompt_token_ids": request.prompt_token_ids}
-            if self._uses_kv_offload:
-                if self._loaded_policy_version is None:
-                    rejected_requests.append(
-                        (
-                            request.request_id,
-                            ValueError("Load trainer weights before using KV offload"),
-                        )
-                    )
-                    continue
-                # Offload isolates exact weights, including across replicas.
-                # A group can outlive a weight update, so its minimum is not enough.
-                prompt["cache_salt"] = str(self._loaded_policy_version)
-            elif not self._reset_kv_cache_on_model_state_dict_load:
-                # Preserve the existing stale-KV semantics within a group.
+            if not self._reset_kv_cache_on_model_state_dict_load:
+                # Salt by the pinned version so a request only reuses KV
+                # computed under that version.
                 prompt["cache_salt"] = str(request.min_policy_version)
             # vLLM validates a request (prompt length, sampling params, token ids) as it
             # admits it: render_cmpl and InputProcessor.process_inputs raise
@@ -543,15 +525,11 @@ class VLLMEngine(GenerationEngine):
             )
 
     def load_model_state_dict(
-        self,
-        fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]],
-        *,
-        policy_version: int,
+        self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
     ) -> None:
         """Fetch the model state dict into the model's weights one FSDP group at a time, and
         reset the KV cache when configured."""
         self._get_model().load_model_state_dict(fetch)
-        self._loaded_policy_version = policy_version
         if self._reset_kv_cache_on_model_state_dict_load:
             # Always reset running requests too: the only reason to reset is a strict
             # recompute under the new weights. Keeping running requests' KV while hiding

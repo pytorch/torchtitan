@@ -529,9 +529,7 @@ class EngineLoop:
         """
         error: Exception | None = None
         try:
-            self._engine.load_model_state_dict(
-                self._fetch_model_state_dict, policy_version=version
-            )
+            self._engine.load_model_state_dict(self._fetch_model_state_dict)
         except Exception as e:
             # Log now: peers may be stuck in a collective until it times out.
             logger.exception("Model state dict load failed")

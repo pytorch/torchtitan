@@ -218,49 +218,33 @@ class KVOffloadScheduler(Scheduler):
         """Override vLLM KV completion handling with shared-ID ordering.
 
         update_from_output() has already aggregated TP reports and restored local
-        request IDs. Completed loads let waiting requests resume on a later step;
-        requests that ended during loading can release their GPU blocks. The
-        connector handles save-job completion and its held block references.
-
-        Unlike upstream's unordered traversal, process receive callbacks and
-        request cleanup in shared-ID order so CPU cache LRU updates and GPU block
-        reuse stay consistent across TP ranks.
+        request IDs. Upstream traverses the completed request-ID sets in
+        per-process hash order; receive callbacks free CPU cache references and
+        request cleanup frees GPU blocks, so the order must match across TP ranks.
+        Delegate to upstream one request at a time, in shared-ID order, to keep
+        its per-request bookkeeping.
         """
-        # The connector tracks save jobs by job ID and releases their pinned blocks once
-        # all required workers finish, independently of request cleanup below.
-        if self.connector is not None:
-            self.connector.update_connector_output(
-                replace(output, finished_recving=None)
-            )
-        for request_id in sorted(
-            output.finished_recving or (),
-            key=lambda local_id: self.requests[local_id].kv_transfer_params[
-                "shared_request_id"
-            ],
-        ):
-            # CPU offload also frees cache references in this callback. Apply
-            # receives in shared request-ID order so every rank keeps the same LRU order.
-            if self.connector is not None:
-                self.connector.update_connector_output(
-                    KVConnectorOutput(finished_recving={request_id})
-                )
-            request = self.requests[request_id]
-            if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                # schedule() checks this flag before resuming the request.
-                self.finished_recving_kv_req_ids.add(request_id)
-            else:
-                # The request ended during the load; its blocks can now be freed.
-                assert RequestStatus.is_finished(request.status)
-                self._free_blocks(request)
 
-        # Offload saves use job metadata above; retain generic send-completion handling.
-        for request_id in sorted(
-            output.finished_sending or (),
-            key=lambda local_id: self.requests[local_id].kv_transfer_params[
-                "shared_request_id"
-            ],
-        ):
-            self._free_blocks(self.requests[request_id])
+        def shared_order(request_ids: set[str] | None) -> list[str]:
+            return sorted(
+                request_ids or (),
+                key=lambda local_id: self.requests[local_id].kv_transfer_params[
+                    "shared_request_id"
+                ],
+            )
+
+        # Save-job completions and other non-request fields are applied once.
+        super()._update_from_kv_xfer_finished(
+            replace(output, finished_recving=None, finished_sending=None)
+        )
+        for request_id in shared_order(output.finished_recving):
+            super()._update_from_kv_xfer_finished(
+                KVConnectorOutput(finished_recving={request_id})
+            )
+        for request_id in shared_order(output.finished_sending):
+            super()._update_from_kv_xfer_finished(
+                KVConnectorOutput(finished_sending={request_id})
+            )
 
 
 def _remap_request_ids(

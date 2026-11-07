@@ -592,12 +592,10 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
 
 def rl_grpo_qwen3_5_debug_varlen_cpu_offload() -> Controller.Config:
     """Eight GPUs: four trainer GPUs and two TP=2 generators with local CPU KV caches."""
-    from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
     from vllm.config import KVTransferConfig
 
     config = rl_grpo_qwen3_5_debug_varlen()
     config.num_generators = 2
-    config.generator_router = InterGeneratorRouter.Config(hot_swap=False)
     config.generator.engine.cuda_graph = VLLMCudaGraphConfig(mode="NONE")
     config.generator.engine.kv_transfer_config = KVTransferConfig(
         kv_connector="SimpleCPUOffloadConnector",

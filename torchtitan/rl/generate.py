@@ -109,9 +109,9 @@ def generate() -> None:
         )
     if engine_config.kv_transfer_config is not None:
         raise ValueError(
-            "generate.py does not yet support KV offload: it needs "
-            "checkpoint-specific cache isolation and asynchronous KV-save draining. "
-            "Use the RL generator for now."
+            "generate.py does not yet support KV offload: it steps LLMEngine "
+            "directly, without the RL engine's TP KV-completion coordination and "
+            "asynchronous KV-save draining. Use the RL generator for now."
         )
     model_config = gen_config.model
     model_path = config.hf_assets_path

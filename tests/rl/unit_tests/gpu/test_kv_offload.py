@@ -134,7 +134,17 @@ def _generator_worker(
                     tensor.copy_(engine.prefetched_model_state_dict[name])
             return state_dict.keys()
 
-        engine.load_model_state_dict(fetch, policy_version=0)
+        engine.load_model_state_dict(fetch)
+        loaded_version = 0
+
+        def load_new_weights(version):
+            nonlocal loaded_version
+            # Change real weights, not just the version label.
+            for tensor in engine.prefetched_model_state_dict.values():
+                tensor.mul_(0.75)
+            engine.load_model_state_dict(fetch)
+            loaded_version = version
+
         scheduler = engine._engine.engine_core.engine_core.scheduler
         block_size = scheduler.block_size
         if prefix_match_unit is not None:
@@ -164,12 +174,17 @@ def _generator_worker(
                 after = len(first_blocks)
                 results.put(("released", (before, after)))
                 continue
-            version, prompt, clear_local, request_id, max_tokens, force_cold = command
-            if version != engine._loaded_policy_version:
-                # Change real weights, not just the version label.
-                for tensor in engine.prefetched_model_state_dict.values():
-                    tensor.mul_(0.75)
-                engine.load_model_state_dict(fetch, policy_version=version)
+            (
+                version,
+                prompt,
+                clear_local,
+                request_id,
+                max_tokens,
+                force_cold,
+                hot_swap_version,
+            ) = command
+            if version != loaded_version:
+                load_new_weights(version)
             # A cold reference bypasses both cache tiers without changing weights.
             if clear_local or force_cold:
                 # Simulate GPU eviction between turns, not session completion.
@@ -188,8 +203,8 @@ def _generator_worker(
                 routing_session_id="session-0",
                 arrival_time=time.time(),
             )
-            # Keep the group pinned to 0 even after updating weights.
-            request.min_policy_version = 0
+            # The group starts under the loaded weights; a hot swap keeps its pin.
+            request.min_policy_version = version
             # Idle DP replicas still participate in EP forwards and global progress.
             assert engine.add_requests([request] if prompt is not None else []) == []
             scheduler = engine._engine.engine_core.engine_core.scheduler
@@ -223,6 +238,11 @@ def _generator_worker(
                 while engine.has_unfinished_requests():
                     assert time.monotonic() < deadline, "KV transfer failed to drain"
                     finished.extend(engine.step())
+                    if hot_swap_version is not None:
+                        # Every rank loads after the same step, while the request
+                        # is still running and its saves may be in flight.
+                        load_new_weights(hot_swap_version)
+                        hot_swap_version = None
             if prefix_match_unit is not None:
                 assert not scheduler.connector.has_pending_push_work()
                 assert all(
@@ -403,6 +423,7 @@ def test_cpu_kv_and_weight_version_isolation(
             target_dp=0,
             background_prompt=None,
             force_cold=False,
+            hot_swap_version=None,
         ):
             request_id = uuid.uuid4().hex
             prompts = {target_dp: prompt}
@@ -423,6 +444,7 @@ def test_cpu_kv_and_weight_version_isolation(
                         )
                         + (64 if dp_rank != target_dp else 0),
                         force_cold,
+                        hot_swap_version,
                     )
                 )
             outputs = {}
@@ -488,6 +510,15 @@ def test_cpu_kv_and_weight_version_isolation(
         old = generate(1, 0, prompt, clear_local=True)
         assert old[2] >= cached_prompt_tokens
         assert old[0] == first[0]
+        # Hot swap: load weights while a request runs and its saves may be in
+        # flight. Its group keeps the pinned salt, so after GPU eviction the
+        # group's next request still reloads the prefix from CPU.
+        swap_prompt = [token + 1 for token in prompt]
+        generate(consumer, 1, swap_prompt, target_dp=consumer_dp, hot_swap_version=2)
+        reused = generate(
+            consumer, 1, swap_prompt, clear_local=True, target_dp=consumer_dp
+        )
+        assert reused[2] >= cached_prompt_tokens
         print(
             f"{connector} cached tokens: cold={first[2]}, shared={shared[2]}, "
             f"next_turn={continued[2]}, new_policy={updated[2]}, old_policy={old[2]}"

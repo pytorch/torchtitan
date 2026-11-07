@@ -616,7 +616,7 @@ class _FakeEngine:
         finished, self.running = self.running, []
         return [_finished(request_id) for request_id in finished]
 
-    def load_model_state_dict(self, fetch, *, policy_version: int) -> None:
+    def load_model_state_dict(self, fetch) -> None:
         fetch({})
 
     def shutdown(self) -> None:
@@ -989,7 +989,7 @@ def test_gpu_fetch_reads_torchstore_on_the_actor_loop_during_the_load(
     weights = {"weight": object()}
 
     class _GPUFetchEngine(_FakeEngine):
-        def load_model_state_dict(self, fetch, *, policy_version: int) -> None:
+        def load_model_state_dict(self, fetch) -> None:
             fetch(weights)
 
     async def run() -> None:

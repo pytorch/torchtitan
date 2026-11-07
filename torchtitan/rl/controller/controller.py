@@ -375,14 +375,6 @@ class Controller(Configurable):
                     "Set generator.checkpointer=None."
                 )
             if (
-                self.generator_router.hot_swap
-                and not self.generator.engine.supports_hot_swap
-            ):
-                raise ValueError(
-                    "The configured generation engine requires drained weight updates: "
-                    "set generator_router.hot_swap=False."
-                )
-            if (
                 self.trainer.dist_moe_runtime is not None
                 and self.precision.param_dtype != "bfloat16"
             ):

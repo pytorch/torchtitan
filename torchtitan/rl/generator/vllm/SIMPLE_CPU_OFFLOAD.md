@@ -25,7 +25,6 @@ headroom for DeepEP buffers and CUDA graph pools.
 from vllm.config import KVTransferConfig
 
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
-from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 
 engine = VLLMEngine.Config(
     kv_transfer_config=KVTransferConfig(
@@ -34,7 +33,6 @@ engine = VLLMEngine.Config(
         kv_connector_extra_config={"cpu_bytes_to_use_per_rank": 1 << 30},
     ),
 )
-generator_router = InterGeneratorRouter.Config(hot_swap=False)
 ```
 
 Capacity is **per GPU worker**: TP=2 uses 2 GiB here. Leave room for weight
@@ -46,13 +44,14 @@ Eight-GPU recipe:
 
 ## Weight and cache lifecycle
 
-- Load trainer weights before the first request. Titan salts cache keys with
-  the loaded policy version to prevent stale KV reuse after weight updates.
-  This applies to both GPU and CPU cache: after an update, requests cannot reuse
-  the group's older KV. Without offload, Titan permits stale GPU KV within a rollout group.
-- Keep `generator_router.hot_swap=False` and
-  `generator.reset_kv_cache_on_model_state_dict_load=False`. Weight updates drain
-  requests; the engine also finishes pending transfers after responses return.
+- CPU blocks share the GPU prefix cache's salt, the request's
+  `min_policy_version`: a group reuses its offloaded KV across weight updates
+  exactly as it reuses GPU KV, and new groups start under the current version.
+- Weight updates may hot swap (`generator_router.hot_swap=True`). Saves and
+  loads only copy KV blocks, which a weight load does not touch; the engine
+  keeps stepping pending transfers after responses return.
+- Keep `generator.reset_kv_cache_on_model_state_dict_load=False`: a reset cannot
+  free GPU blocks that in-flight saves still hold.
 
 ## Session release
 

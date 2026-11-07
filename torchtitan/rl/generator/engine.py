@@ -50,8 +50,8 @@ class GenerationEngine(Configurable, abc.ABC):
         dist_moe_runtime: Dist-MoE runtime policy, when the model has Dist-MoE experts.
         debug: Debug and determinism settings.
         reset_kv_cache_on_model_state_dict_load: Whether each model state dict load resets
-            all KV. When False, the engine may preserve stale KV within a rollout
-            group. Engines with CPU offload instead namespace KV by loaded weights.
+            all KV. When False, a request may reuse only KV computed under its
+            ``min_policy_version``.
         model_state_dict_load_mode: ``"cpu_prefetch"`` allocates the pinned CPU buffers of
             ``prefetched_model_state_dict``; ``"gpu_fetch"`` does not.
         rank: Global rank of this process.
@@ -61,11 +61,6 @@ class GenerationEngine(Configurable, abc.ABC):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        @property
-        def supports_hot_swap(self) -> bool:
-            """Whether model state dict loads may interrupt active requests."""
-            return True
-
         @property
         def holds_session_kv(self) -> bool:
             """Whether session completion needs generator-side cache cleanup."""
@@ -109,21 +104,14 @@ class GenerationEngine(Configurable, abc.ABC):
 
     @abc.abstractmethod
     def load_model_state_dict(
-        self,
-        fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]],
-        *,
-        policy_version: int,
+        self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
     ) -> None:
         """Load a model state dict by having ``fetch`` fill the model's weights in place, and
         reset the KV cache when configured.
 
-        Callers must drain requests first when ``Config.supports_hot_swap`` is False.
-
         Args:
             fetch: Fills each tensor of the given subset of the model state dict in place
                 with the new weights and returns the keys it filled.
-            policy_version: Identifies the same loaded weights across replicas;
-                engines may use it to namespace cached KV.
         """
 
     @property

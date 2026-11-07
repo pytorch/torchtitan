@@ -138,19 +138,12 @@ def _request_output(
     )
 
 
-def _vllm_engine(
-    *,
-    reset_kv_cache_on_model_state_dict_load=False,
-    model=None,
-    kv_transfer_config=None,
-):
+def _vllm_engine(*, reset_kv_cache_on_model_state_dict_load=False, model=None):
     """A `VLLMEngine` around a fake `LLMEngine` (no engine build)."""
     engine = VLLMEngine.__new__(VLLMEngine)
     engine._engine = _FakeLLMEngine()
-    engine.config = VLLMEngine.Config(kv_transfer_config=kv_transfer_config)
-    engine._uses_kv_offload = kv_transfer_config is not None
+    engine._uses_kv_offload = False
     engine._coordinate_kv_offload = False
-    engine._loaded_policy_version = None
     engine._reset_kv_cache_on_model_state_dict_load = (
         reset_kv_cache_on_model_state_dict_load
     )
@@ -534,7 +527,7 @@ def test_reset_kv_cache_on_model_state_dict_load_controls_cache_reset(
         reset_kv_cache_on_model_state_dict_load=reset_kv_cache, model=model
     )
 
-    engine.load_model_state_dict(lambda state_dict: state_dict.keys(), policy_version=1)
+    engine.load_model_state_dict(lambda state_dict: state_dict.keys())
 
     expected = [((), {"reset_running_requests": True})] if reset_kv_cache else []
     assert cast(_FakeLLMEngine, engine._engine).reset_prefix_cache_calls == expected
@@ -543,46 +536,6 @@ def test_reset_kv_cache_on_model_state_dict_load_controls_cache_reset(
 def test_sampling_config_rejects_top_p_below_one():
     with pytest.raises(ValueError, match="top_p must be 1.0, got 0.95"):
         SamplingConfig(top_p=0.95)
-
-
-def test_kv_offload_uses_loaded_weights_not_group_version():
-    model = SimpleNamespace(load_model_state_dict=Mock())
-    engine = _vllm_engine(
-        model=model,
-        kv_transfer_config=KVTransferConfig(
-            kv_connector="SimpleCPUOffloadConnector", kv_role="kv_both"
-        ),
-    )
-    request = _engine_request("r0", min_policy_version=3)
-
-    # Random initial weights must not populate the shared trainer namespace.
-    assert len(engine.add_requests([request])) == 1
-    assert engine._engine.add_requests == []
-    engine.load_model_state_dict(lambda state_dict: state_dict.keys(), policy_version=5)
-    assert engine.add_requests([request]) == []
-    assert engine._engine.add_requests[-1][1]["prompt"]["cache_salt"] == "5"
-
-    engine.load_model_state_dict(lambda state_dict: state_dict.keys(), policy_version=6)
-    assert engine.add_requests([request]) == []
-    assert engine._engine.add_requests[-1][1]["prompt"]["cache_salt"] == "6"
-    assert engine._engine.reset_prefix_cache_calls == []
-
-
-def test_kv_offload_failed_load_does_not_advance_cache_version():
-    model = SimpleNamespace(
-        load_model_state_dict=Mock(side_effect=RuntimeError("load failed")),
-    )
-    engine = _vllm_engine(
-        model=model,
-        kv_transfer_config=KVTransferConfig(
-            kv_connector="SimpleCPUOffloadConnector", kv_role="kv_both"
-        ),
-    )
-    with pytest.raises(RuntimeError, match="load failed"):
-        engine.load_model_state_dict(
-            lambda state_dict: state_dict.keys(), policy_version=2
-        )
-    assert engine._loaded_policy_version is None
 
 
 # --- vLLM metric timing math (the `_prepare_generation_request_metrics` helper) ---
