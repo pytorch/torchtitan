@@ -273,8 +273,8 @@ class VLLMEngine(GenerationEngine):
         engine_kwargs["max_num_seqs"] = max_num_seqs
         if max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
-        # Admit requests by `priority`, smaller first: older training groups first, validation
-        # last. See `EngineRequest.group_id`.
+        # Smaller `priority` runs first and is preempted last; we pass `EngineRequest.group_id`
+        # (-1 for all validation), so older groups have higher priority (see its docstring).
         engine_kwargs["scheduling_policy"] = "priority"
         # Which sliding-window / Mamba (GDN) state blocks are hashed into the prefix
         # cache; full-attention groups hash every block regardless.
@@ -374,8 +374,7 @@ class VLLMEngine(GenerationEngine):
                     prompt=engine_input,
                     params=_build_sampling_params(request.sampling),
                     arrival_time=request.arrival_time,
-                    # 2**31 - 1 (int32 max) sorts after every training group id.
-                    priority=request.group_id if request.group_id >= 0 else 2**31 - 1,
+                    priority=max(request.group_id, -1),
                 )
                 if self._session_kv_holder is not None:
                     self._session_kv_holder.track(

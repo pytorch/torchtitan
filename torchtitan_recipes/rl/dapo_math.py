@@ -301,7 +301,7 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
             num_prompts_per_train_step=8,
             num_samples_per_prompt=8,
             target_offpolicy_steps=0,
-            # Skip the pre- and post-training validation passes.
+            # No validation passes.
             validation=ValidationConfig(steps=0),
             # Keep all-pass / all-fail groups so every step trains exactly
             # num_prompts_per_train_step groups.

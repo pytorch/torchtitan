@@ -330,24 +330,19 @@ def _engine_request(request_id: str, *, min_policy_version: int, group_id: int =
 
 
 def test_admission_passes_group_id_as_priority_and_arrival_time():
-    # Every request pins policy 6, so only the group id can set the priority.
-    # Validation ids are negative and all map to 2**31 - 1, after every training group.
+    # Priority is the group id (3), not the pinned version (6); every validation id shares -1.
     engine = _vllm_engine()
     engine.add_requests(
         [
             _engine_request("train", min_policy_version=6, group_id=3),
             _engine_request("val_1", min_policy_version=6, group_id=-1),
-            _engine_request("val_52", min_policy_version=6, group_id=-52),
+            _engine_request("val_5", min_policy_version=6, group_id=-5),
         ]
     )
 
     llm_engine = cast(_FakeLLMEngine, engine._engine)
     added_kwargs = [kwargs for _, kwargs in llm_engine.add_requests]
-    assert [kwargs["priority"] for kwargs in added_kwargs] == [
-        3,
-        2**31 - 1,
-        2**31 - 1,
-    ]
+    assert [kwargs["priority"] for kwargs in added_kwargs] == [3, -1, -1]
     assert [kwargs["arrival_time"] for kwargs in added_kwargs] == [1.5] * 3
 
 

@@ -236,11 +236,8 @@ def compute_policy_age_metrics(
 
 
 def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metric]:
-    """Build metrics from `rollouts`:
-
-    - `{prefix}/...`: lengths, number of turns, truncation rate, error rate
-    - `{prefix}_reward` and `{prefix}_reward/component/<name>`: rewards
-    - each turn's own metrics, keys unchanged (e.g. `generator/queue_time_ms`)
+    """Build rollout-derived metrics: lengths, truncation, reward breakdown, and each turn's
+    per-generation metrics (the latter keep their own generator-side keys, unprefixed).
 
     Args:
         prefix: Metric namespace (e.g. `"rollout"` or `"validation"`).
@@ -263,9 +260,6 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
     ]
 
     truncated = [float(rollout.status.is_truncated()) for rollout in rollouts]
-    # Errored or timed-out rollouts can get the same reward as a wrong answer; this rate tells
-    # them apart.
-    errored = [float(rollout.status.is_error()) for rollout in rollouts]
     rewards = [rollout.reward for rollout in rollouts if rollout.reward is not None]
     num_turns = [float(len(rollout.turns)) for rollout in rollouts]
 
@@ -282,7 +276,6 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
         m.Metric(f"{prefix}/num_turns", m.Mean.from_list(num_turns)),
         m.Metric(f"{prefix}/num_turns", m.Max.from_list(num_turns)),
         m.Metric(f"{prefix}/truncation_rate", m.Mean.from_list(truncated)),
-        m.Metric(f"{prefix}/error_rate", m.Mean.from_list(errored)),
         m.Metric(f"{prefix}_reward", m.SummaryStats.from_list(rewards)),
     ]
 
@@ -296,8 +289,8 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
         for name, values in sorted(values_by_name.items())
     )
 
-    # Turn metrics skip `prefix`: the generator already named them ("generator/..." or
-    # "validation_generator/..."), and a rubric names its own ("math_verify/...").
+    # Per-generation turn metrics (latencies, output tokens) measured by the generator.
+    # They carry their own keys (e.g. "generator/..."), so they ride through unprefixed.
     # Fold across turns: group metrics outlive the rollouts (until the step is logged),
     # and every full GC walks them.
     out.extend(

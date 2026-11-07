@@ -90,8 +90,8 @@ def _max_concurrent_rollouts(async_loop: AsyncLoopConfig) -> int:
     """
     if async_loop.validation.steps < 0:
         raise ValueError(
-            "The env server has room for one validation pass of `validation.steps` tasks; "
-            f"set it to the task count, got {async_loop.validation.steps}"
+            f"validation.steps={async_loop.validation.steps}: set it to the number of validation "
+            "tasks, which sizes the env server"
         )
     return (
         async_loop.max_active_rollout_groups * async_loop.num_samples_per_prompt
@@ -233,7 +233,6 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             console_log_keys_validation=[
                 "validation_reward/_mean",
                 "validation_reward/_max",
-                "validation/error_rate",
                 "timing/validate",
             ],
         ),
@@ -376,7 +375,6 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             console_log_keys_validation=[
                 "validation_reward/_mean",
                 "validation_reward/_max",
-                "validation/error_rate",
                 "timing/validate",
             ],
         ),
@@ -496,7 +494,6 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
             console_log_keys_validation=[
                 "validation_reward/_mean",
                 "validation_reward/_max",
-                "validation/error_rate",
                 "timing/validate",
             ],
         ),

@@ -832,7 +832,7 @@ def test_validation_group_ids_and_sampled_policies(step, group_ids) -> None:
     """Group ids depend on the pass's step, so passes that run at the same time use distinct ids.
 
     Example, 2 prompts: pass 0 uses -1, -2; pass 25 uses -51, -52. Each pass releases only its ids.
-    Prompt 0's rollout spans policies `step` to `step + 2`, so 1 of 2 rollouts is mixed-policy.
+    Prompt 0's rollout spans policies `step` to `step + 2`.
     """
     controller = object.__new__(Controller)
     controller._validation_samples = ["prompt", "prompt"]
@@ -870,10 +870,11 @@ def test_validation_group_ids_and_sampled_policies(step, group_ids) -> None:
     reduced = m.MetricsProcessor._aggregate_metrics(metrics)
     assert reduced["validation/min_policy_version/min"] == step
     assert reduced["validation/max_policy_version/max"] == step + 2
-    assert reduced["validation/mixed_policy_rollouts/mean"] == 0.5
 
 
-def test_validation_counts_errored_rollouts() -> None:
+def test_validation_turn_metrics_get_the_validation_prefix() -> None:
+    """A rubric's turn metric gets `validation/`; keys that already start with `validation` stay."""
+
     def rollout(*, group_id: int, status: RolloutStatus) -> Rollout:
         turn = RolloutTurn(
             rollout_id=RolloutTurnID(group_id=group_id, rollout_id=0, turn_id=0),
@@ -883,6 +884,10 @@ def test_validation_counts_errored_rollouts() -> None:
             completion_logprobs=np.array([-0.1], dtype=np.float32),
             min_policy_version=0,
             max_policy_version=0,
+            metrics=[
+                m.Metric("math_verify/timeouts", m.Sum(1.0)),
+                m.Metric("validation_generator/queue_time_ms", m.Mean(2.0)),
+            ],
         )
         return Rollout(
             group_id=group_id, rollout_id=0, status=status, reward=0.0, turns=[turn]
@@ -897,7 +902,7 @@ def test_validation_counts_errored_rollouts() -> None:
         run_group_rollouts=AsyncMock(
             return_value=RolloutGroup(
                 group_id=-1,
-                rollouts=[rollout(group_id=-1, status=RolloutStatus.ERROR_TIMEOUT)],
+                rollouts=[rollout(group_id=-1, status=RolloutStatus.COMPLETED)],
             )
         )
     )
@@ -907,7 +912,9 @@ def test_validation_counts_errored_rollouts() -> None:
     )
 
     validation = m.MetricsProcessor._aggregate_metrics(validation_metrics)
-    assert validation["validation/error_rate/mean"] == 1.0
+    assert validation["validation/math_verify/timeouts/sum"] == 1.0
+    assert validation["validation_generator/queue_time_ms/mean"] == 2.0
+    assert "math_verify/timeouts/sum" not in validation
 
 
 class _FakeValidation:
@@ -999,7 +1006,9 @@ def test_passes_start_at_every_due_step() -> None:
     events: list[str] = []
     pulls_may_end = asyncio.Event()
     controller, validation = _controller_for_validation(
-        ValidationConfig(freq=2), events=events, on_pull=pulls_may_end.wait
+        ValidationConfig(freq=2, defer_new_if_not_finished=False),
+        events=events,
+        on_pull=pulls_may_end.wait,
     )
 
     async def run() -> None:
@@ -1175,38 +1184,35 @@ def test_run_fails_when_the_engine_loops_exit_mid_run() -> None:
 def test_run_logs_ended_passes_then_runs_the_final_pass_if_asked(
     validate_after_training,
 ) -> None:
-    """What run() does after the last training step (step 4):
+    """What run() does when training ends. Resumed at step 1, it stopped at policy 3 of 4:
 
-    pass 0:      ended          -> logged at step 4
-    pass 3:      still running  -> left in `_validation_tasks` for close() to cancel
-    final pass:  only with `validate_after_training` -> runs, logged at step 4
+    pass 1:      ended          -> logged at step 3, the last trained step
+    pass 2:      still running  -> left in `_validation_tasks` for close() to cancel
+    final pass:  only with `validate_after_training` -> runs, logged at step 3
     """
     controller, validation = _controller_for_run()
+    controller.start_step = 1
     controller.config.async_loop.validation = ValidationConfig(
         validate_after_training=validate_after_training
     )
 
-    # The state run() sees when training ends: pass 0 ended, pass 3 running, trainer at policy 4.
     async def trainer_loop(queue, *, num_training_steps: int) -> None:
-        controller._start_validation(step=3)
-        await _run_until(lambda: validation.started_steps == [0, 3])
-        validation.end(0)
-        await _run_until(lambda: controller._validation_tasks[0].done())
-        controller._trainer_policy_version = 4
+        controller._start_validation(step=2)
+        await _run_until(lambda: validation.started_steps == [1, 2])
+        validation.end(1)
+        await _run_until(lambda: controller._validation_tasks[1].done())
+        controller._trainer_policy_version = 3
 
     controller._trainer_loop = trainer_loop
-    # The final pass takes its group ids from step 5, which no other pass uses.
+    # The final pass takes its group ids from step 5 (num_training_steps + 1).
     validation.end(5)
 
     asyncio.run(asyncio.wait_for(controller.run(), timeout=5))
 
-    assert validation.started_steps == [0, 3, *([5] if validate_after_training else [])]
-    # Pass 0 and the final pass log at the last trained step.
-    assert _logged_steps(controller, is_validation=True) == [
-        4,
-        *([4] if validate_after_training else []),
-    ]
-    assert list(controller._validation_tasks) == [3]
+    final_steps = [5] if validate_after_training else []
+    assert validation.started_steps == [1, 2, *final_steps]
+    assert _logged_steps(controller, is_validation=True) == [3] * (1 + len(final_steps))
+    assert list(controller._validation_tasks) == [2]
     assert controller._log_reward_delta.called == validate_after_training
 
 
