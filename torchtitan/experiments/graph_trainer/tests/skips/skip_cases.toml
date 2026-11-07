@@ -1,0 +1,20 @@
+[rocm]
+graph_trainer = [
+  "sdc_replay",
+  "aot_fx_trace_llama3_fsdp_tp_cp",                          # aot_fx_trace applies CUDA graphs; disabled via _FLEX_CP_INDUCTOR_DISABLED
+  "aot_fx_trace_llama3_spmd_gradient_accumulation",          # ditto
+  "aot_fx_trace_llama3_ga_per_microbatch_fsdp_collectives",   # ditto
+  "aot_fx_trace_llama3_ga_first_unshard_last_reduce_fsdp",    # ditto
+  "aot_fx_trace_llama3_fsdp_tp_sac_and_offload",              # ditto; disabled=True
+]
+graph_trainer_default = [
+  "sdc_replay",
+  "aot_fx_trace_llama3_fsdp_tp_cp",                          # aot_fx_trace applies CUDA graphs; disabled via _FLEX_CP_INDUCTOR_DISABLED
+  "aot_fx_trace_llama3_spmd_gradient_accumulation",          # ditto
+  "aot_fx_trace_llama3_ga_per_microbatch_fsdp_collectives",   # ditto
+  "aot_fx_trace_llama3_ga_first_unshard_last_reduce_fsdp",    # ditto
+  "aot_fx_trace_llama3_fsdp_tp_sac_and_offload",              # ditto; disabled=True
+]
+graph_trainer_h100 = [
+  "aot_fx_trace_llama3_fsdp_tp_asynctp",                      # aot_fx_trace applies CUDA graphs; disabled=True (async_tp stride mismatch)
+]
