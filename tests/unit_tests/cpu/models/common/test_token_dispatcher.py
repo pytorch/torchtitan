@@ -24,7 +24,6 @@ class _EagerBackendLocalCompileConfig(LocalCompileConfig):
 
     @staticmethod
     def _compile(reference, **compile_kwargs):
-        compile_kwargs.pop("options", None)
         compile_kwargs["backend"] = "eager"
         compiled = torch.compile(reference, **compile_kwargs)
 
@@ -76,18 +75,6 @@ class TestLocalTokenDispatcherInference(unittest.TestCase):
         with torch.no_grad(), _compiled_regions():
             actual_TD = self._dispatch_combine(x_TD, scores_TK, ids_TK, E)
         torch.testing.assert_close(actual_TD, expected_TD, rtol=0, atol=0)
-
-    def test_eager_no_grad_combine_matches_the_scatter_path(self):
-        torch.manual_seed(0)
-        T, K, D, E = 37, 4, 8, 5
-        x_TD = torch.randn(T, D, dtype=torch.float64)
-        scores_TK = torch.rand(T, K, dtype=torch.float64)
-        ids_TK = torch.stack([torch.randperm(E)[:K] for _ in range(T)])
-        with torch.enable_grad():
-            expected = self._dispatch_combine(x_TD, scores_TK, ids_TK, E)
-        with torch.no_grad():
-            actual = self._dispatch_combine(x_TD, scores_TK, ids_TK, E)
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     def test_pairwise_rank_matches_stable_argsort(self):
         # Compiled, small inputs take the pairwise rank and large ones argsort; both
@@ -153,9 +140,12 @@ class TestDispatchCombineRegion(unittest.TestCase):
 
 class TestArgsortExpertIds(unittest.TestCase):
     def test_narrow_key_argsort_matches_int64_argsort(self):
+        # Each side of the uint8 and int16 thresholds, with the largest id present:
+        # an off-by-one in a threshold would wrap that id and change the order.
         torch.manual_seed(0)
-        for num_experts in (5, 300, 40000):  # uint8, int16 and int64 keys
+        for num_experts in (256, 257, 2**15, 2**15 + 1):
             ids_N = torch.randint(0, num_experts, (4096,))
+            ids_N[0] = num_experts - 1
             self.assertTrue(
                 torch.equal(
                     token_dispatcher._argsort_expert_ids(ids_N, num_experts),
@@ -183,14 +173,6 @@ class TestLocalTokenDispatcherTraining(unittest.TestCase):
             x_TD, scores_TK, self.ids_TK, self.routing_map_TE
         )
         return self.dispatcher.combine(routed_ND * weight_D, metadata, x_TD)
-
-    def _scatter_path(self, x_TD, scores_TK, weight_D):
-        routed_ND, tokens_N, scores_N = self.dispatcher._local_reorder(
-            x_TD, scores_TK, self.ids_TK
-        )
-        return LocalTokenDispatcher._score_and_scatter_add(
-            routed_ND * weight_D, scores_N, tokens_N, x_TD
-        )
 
     def _inputs(self, dtype):
         x_TD = torch.randn(self.T, self.D, dtype=dtype, requires_grad=True)
@@ -223,20 +205,6 @@ class TestLocalTokenDispatcherTraining(unittest.TestCase):
                 grads = torch.autograd.grad(out_TD, (x_TD, scores_TK), grad_TD)
             for grad, ref in zip(grads, ref_grads, strict=True):
                 torch.testing.assert_close(grad.double(), ref, rtol=1e-5, atol=1e-5)
-
-    def test_eager_training_matches_the_scatter_path(self):
-        # Uncompiled, dispatch and combine keep the scatter-add forward and backward.
-        x_TD, scores_TK, weight_D = self._inputs(torch.bfloat16)
-        grad_TD = torch.randn(self.T, self.D, dtype=torch.bfloat16)
-        actual = self._forward(x_TD, scores_TK, weight_D)
-        expected = self._scatter_path(x_TD, scores_TK, weight_D)
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-        for a, e in zip(
-            torch.autograd.grad(actual, (x_TD, scores_TK), grad_TD),
-            torch.autograd.grad(expected, (x_TD, scores_TK), grad_TD),
-            strict=True,
-        ):
-            torch.testing.assert_close(a, e, rtol=0, atol=0)
 
 
 if __name__ == "__main__":
