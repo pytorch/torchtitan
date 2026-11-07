@@ -52,6 +52,9 @@ python <search-r1>/local_dense_retriever/retrieval_server.py \
 ```
 
 Override `message_env.search_url` / `message_env.topk` in the config if needed.
+The recipes set `workers_on_controller_host=True`, so in a multi-host job the rollout workers
+stay on the controller host, where `127.0.0.1:8000` is the retriever. To spread them, serve the
+retriever on an address every host can reach and point `search_url` at it.
 
 ### 3. Checkpoint
 Download the base checkpoint the config expects. `download_hf_assets.py` writes to a

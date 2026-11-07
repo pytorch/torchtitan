@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import socket
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -30,14 +31,20 @@ class RolloutWorkerActor(Actor):
         worker_config: RolloutWorker.Config,
         num_threads: int,
         structured_logger_init_fn: functools.partial[None] | None,
+        first_worker_index: int,
     ) -> None:
         if structured_logger_init_fn is not None:
+            # Each host's workers form their own proc mesh, so `current_rank()` restarts at 0 on
+            # every host. The offset keeps the log rank unique across hosts.
             structured_logger_init_fn(
-                source="rl_rollout_worker", rank=current_rank().rank
+                source="rl_rollout_worker",
+                rank=first_worker_index + current_rank().rank,
             )
         asyncio.get_running_loop().set_default_executor(
             ThreadPoolExecutor(max_workers=num_threads)
         )
+        # TODO: os.nice(10), inherited by agent subprocesses, so ranks on a shared host win CPU
+        #   fights; decide from a multi-node run.
         self._worker = worker_config.build()
         # group id -> the `run_group` call running it here, for `cancel_group`.
         self._group_tasks: dict[int, asyncio.Task] = {}
@@ -123,6 +130,10 @@ class RolloutWorkerActor(Actor):
     @concurrent_endpoint
     async def sync_log_step(self, step: int) -> None:
         sl.set_step(step)
+
+    @concurrent_endpoint
+    async def hostname(self) -> str:
+        return socket.gethostname()
 
     async def __cleanup__(self, exc: Exception | None) -> None:
         """Monarch runs this on a graceful stop (`mesh.stop()`), after cancelling the endpoint

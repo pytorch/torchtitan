@@ -10,6 +10,10 @@ agent and the grading through the [Verifiers bridge](../README.md).
 > for real training. Containers run untrusted task code on the controller host and, by
 > default, share its network. For real training, plug in a mature sandbox as the
 > Verifiers runtime. Do not use `SubprocessConfig`: it runs the agent on the host.
+>
+> The recipes set `workers_on_controller_host=True`, so a multi-host job still runs every
+> rollout worker, and so every container, on the controller host. Without it the workers
+> spread over the job's hosts, and each of those hosts needs Docker and the task images.
 
 ## How it works
 

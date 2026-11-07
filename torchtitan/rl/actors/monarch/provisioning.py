@@ -293,6 +293,41 @@ def spawn_cpu_procs(num_procs: int) -> ProcMesh:
     return this_host().spawn_procs(per_host={"cpus": num_procs})
 
 
+# Rollout workers need no GPU, and on a trainer or generator host every GPU belongs to a rank.
+# An empty CUDA_VISIBLE_DEVICES keeps any CUDA context a worker's libraries open off those GPUs.
+# TODO: cap glibc's memory pools (MALLOC_ARENA_MAX=2) here if a worker's memory grows step
+#   over step: each pool keeps its peak after frees. Not measured on a long run yet.
+ROLLOUT_WORKER_ENV = {"CUDA_VISIBLE_DEVICES": ""}
+
+
+def rollout_worker_hosts(host_meshes: HostMeshes | None) -> list[HostMesh]:
+    """The hosts that run rollout workers, one single-host mesh each: every host of the job but
+    trainer host 0, where the controller runs (the Slurm launcher runs it on the job's first node).
+
+        host_meshes None (one node)                        [this_host()]
+        trainer [t0], generators [g0, g1]                  [g0, g1]
+        trainer [t0, t1], generators [g0, g0, g1]          [t1, g0, g1]   (a shared mesh counts once)
+        every role on trainer host t0                      [this_host()]
+    """
+    # TODO: let a launcher name the controller's host; this rule assumes trainer host 0, so a
+    #   launcher that runs the controller on its own host leaves one job host without workers.
+    # TODO: when workers are fewer than hosts, consider generator hosts first: trainer hosts are
+    #   the CPU-sensitive ones (a busy host 0 slowed its trainer ranks' input preprocessing).
+    if host_meshes is None:
+        return [this_host()]
+    # Keyed by id(mesh) because a HostMesh can't be a dict key.
+    meshes = {
+        id(mesh): mesh for mesh in (host_meshes.trainer, *host_meshes.generators)
+    }.values()
+    # flatten: a launcher's mesh has a "hosts" dimension, but `this_host()` has none.
+    hosts = [
+        mesh.flatten("hosts").slice(hosts=i)
+        for mesh in meshes
+        for i in range(len(mesh))
+    ]
+    return hosts[1:] or [this_host()]
+
+
 def shutdown() -> None:
     """Shut down the Monarch client (normally an atexit hook) and wait for it."""
     shutdown_context().get()
