@@ -124,6 +124,8 @@ class EngineLoop:
         broadcast_group: All-ranks gloo group that `LoopDecision`s are broadcast over.
         max_engine_steps_between_decisions: ``Generator.Config``'s field.
         reset_kv_cache_on_model_state_dict_load: ``Generator.Config``'s field.
+        holds_session_kv: Whether the engine config needs session/group releases
+            (``GenerationEngine.Config.holds_session_kv``).
         fetch_model_state_dict: Fills the given model state dict tensors in place with the new
             weights and returns the keys it filled.
     """
@@ -138,6 +140,7 @@ class EngineLoop:
         broadcast_group: dist.ProcessGroup,
         max_engine_steps_between_decisions: int,
         reset_kv_cache_on_model_state_dict_load: bool,
+        holds_session_kv: bool,
         fetch_model_state_dict: Callable[[dict[str, torch.Tensor]], Iterable[str]],
     ):
         self._engine: GenerationEngine | None = engine
@@ -150,8 +153,7 @@ class EngineLoop:
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load
         )
-        # Read once: the engine is released on exit, and only the engine loop thread uses it.
-        self._holds_session_kv = engine.holds_session_kv
+        self._holds_session_kv = holds_session_kv
 
         self.policy_version = 0
         # RANK 0: group id -> min policy version the group is pinned to, set at the

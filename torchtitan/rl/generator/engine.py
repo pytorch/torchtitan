@@ -114,11 +114,6 @@ class GenerationEngine(Configurable, abc.ABC):
                 with the new weights and returns the keys it filled.
         """
 
-    @property
-    def holds_session_kv(self) -> bool:
-        """Whether session/group releases manage retained GPU or offloaded CPU KV."""
-        return False
-
     def release_sessions(self, session_ids: list[str], group_ids: list[int]) -> None:
         """Release retained KV and hint CPU eviction for finished sessions/groups."""
 

@@ -314,6 +314,7 @@ class Generator(Configurable):
             broadcast_group=broadcast_group,
             max_engine_steps_between_decisions=config.max_engine_steps_between_decisions,
             reset_kv_cache_on_model_state_dict_load=config.reset_kv_cache_on_model_state_dict_load,
+            holds_session_kv=config.engine.holds_session_kv,
             fetch_model_state_dict=(
                 self._copy_prefetched_model_state_dict
                 if config.model_state_dict_load_mode == "cpu_prefetch"

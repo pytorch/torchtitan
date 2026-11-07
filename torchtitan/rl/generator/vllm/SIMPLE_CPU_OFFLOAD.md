@@ -103,7 +103,10 @@ The full matrix requires eight available GPUs. Run from the repo root:
 pytest -q tests/rl/unit_tests/gpu/test_kv_offload.py
 ```
 
-Tests cover CPU restoration, session release, policy isolation, TP/DP/EP, and
-hybrid tails. The RL multi-GPU CI job runs TP=2/DP=2/EP=4 and hybrid TP=2 cases.
-`MultiConnector`, custom connectors, and standalone `generate.py`
-are unsupported. Disk offload and CUDA graphs remain unvalidated.
+Tests cover CPU restoration, session release, policy isolation, hot swap,
+TP/DP/EP, and hybrid tails, all without CUDA graphs. The RL multi-GPU CI job
+runs TP=2/DP=2/EP=4 and hybrid TP=2 cases. FULL CUDA graphs were benchmarked
+on Qwen3-8B at TP=2 and TP=4 (identical tokens and logprobs between CPU reload
+and GPU prefix reuse) but are not covered by CI. `MultiConnector`, custom
+connectors, and standalone `generate.py` are unsupported. Disk offload remains
+unvalidated.

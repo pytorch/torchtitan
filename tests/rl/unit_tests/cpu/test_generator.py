@@ -370,7 +370,6 @@ def test_session_kv_holder_tracks_admitted_requests_and_releases_sessions():
     engine._engine.add_request = Mock(return_value="r0-internal")
     engine._engine.step = lambda: []
 
-    assert engine.holds_session_kv
     engine.add_requests([_engine_request("r0", min_policy_version=6)])
     engine.step()
     engine.release_sessions(["group=3/rollout=0"], [3])

@@ -399,10 +399,6 @@ class VLLMEngine(GenerationEngine):
         return self._engine.vllm_config.parallel_config.data_parallel_rank
 
     @property
-    def holds_session_kv(self) -> bool:
-        return self._session_kv_holder is not None
-
-    @property
     def prefetched_model_state_dict(self) -> dict[str, torch.Tensor] | None:
         """The pinned CPU buffers a model state dict is prefetched into, and loaded from by
         a model state dict load. Safe to fill from any thread while no load runs. None with
