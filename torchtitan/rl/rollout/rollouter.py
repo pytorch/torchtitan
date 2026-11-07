@@ -111,7 +111,15 @@ class Rollouter(Configurable):
         `RolloutWorker` subclass by config type; one worker is built per pool process."""
 
         worker_pool_size: int = 4
-        """CPU rollout worker processes to spawn on the controller host."""
+        """CPU rollout worker processes, on the controller's host unless
+        `workers_on_controller_host` is False."""
+
+        # TODO: default to False once a matched multi-node run (workers home vs spread) passes.
+        workers_on_controller_host: bool = True
+        """True: every rollout worker runs on the controller's host. False: the actor system
+        spreads them over the job's other hosts (a one-node run keeps them on this host). Keep
+        True when an env needs something only that host has, e.g. a retriever on its 127.0.0.1
+        or its Docker daemon."""
 
         num_threads_per_worker: int = 4
         """Size of each worker process's default thread pool executor, i.e. the pool
@@ -178,6 +186,7 @@ class Rollouter(Configurable):
             self._config.worker,
             num_workers=self._config.worker_pool_size,
             num_threads=self._config.num_threads_per_worker,
+            on_controller_host=self._config.workers_on_controller_host,
         )
         await asyncio.gather(
             *(

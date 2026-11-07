@@ -6,12 +6,15 @@
 
 import asyncio
 import functools
+import os
 import pathlib
 import sys
 from types import SimpleNamespace
 
 import cloudpickle
 import pytest
+from monarch.actor import this_host
+from monarch.job import ProcessJob
 
 from torchtitan.config import OverrideConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -403,14 +406,22 @@ def test_shutdown_continues_after_generator_close_failure(tmp_path):
 
 
 class _FakeHostMesh:
-    """Records the CUDA_VISIBLE_DEVICES of each proc mesh spawned on it."""
+    """Records the CUDA_VISIBLE_DEVICES of each proc mesh spawned on it. Host i of a mesh named
+    "g" is "g{i}"."""
 
-    def __init__(self, num_hosts=1):
+    def __init__(self, num_hosts=1, name="host"):
         self.num_hosts = num_hosts
+        self.name = name
         self.visible_devices = []
 
     def __len__(self):
         return self.num_hosts
+
+    def flatten(self, dim):
+        return self
+
+    def slice(self, *, hosts):
+        return f"{self.name}{hosts}"
 
     def spawn_procs(self, *, per_host, bootstrap, bootstrap_command):
         self.visible_devices.append(bootstrap_command["CUDA_VISIBLE_DEVICES"])
@@ -475,10 +486,58 @@ def test_spawn_proc_mesh_checks_gpus_per_host_before_spawning(
     assert all(mesh.visible_devices == [] for mesh in meshes.values())
 
 
+@pytest.mark.parametrize(
+    "trainer, generators, expected",
+    [
+        (None, [], ["this_host"]),  # one node, no launcher
+        ("t1", ["a1", "b2"], ["a0", "b0", "b1"]),
+        (
+            "t2",
+            ["b2", "b2"],
+            ["t1", "b0", "b1"],
+        ),  # generators sharing a mesh count it once
+        ("t1", ["t1", "t1"], ["this_host"]),  # every role on trainer host 0
+    ],
+)
+def test_rollout_worker_hosts_are_every_host_but_trainer_host_0(
+    monkeypatch, trainer, generators, expected
+):
+    """Mesh "b2" is 2 hosts named b0, b1. Trainer host 0 runs the controller."""
+    monkeypatch.setattr(provisioning, "this_host", lambda: "this_host")
+    meshes = {
+        spec: _FakeHostMesh(int(spec[1:]), spec[0])
+        for spec in [trainer, *generators]
+        if spec
+    }
+    host_meshes = (
+        None
+        if trainer is None
+        else provisioning.HostMeshes(
+            meshes[trainer], [meshes[g] for g in generators], 4
+        )
+    )
+    assert provisioning.rollout_worker_hosts(host_meshes) == expected
+
+
+def test_rollout_worker_hosts_takes_this_host_meshes():
+    """A Controller subclass may pass `this_host()` meshes, which have no "hosts" dimension."""
+
+    async def run() -> list:
+        # Inside a task, so Monarch's client context ends with the test. Outside one, it stays
+        # set and Monarch prefixes "[actor=<root>]" to every later test's log messages.
+        return provisioning.rollout_worker_hosts(
+            provisioning.HostMeshes(this_host(), [this_host()], gpus_per_node=4)
+        )
+
+    assert [len(host) for host in asyncio.run(run())] == [1]
+
+
 def _record_worker(marker_dir: str, *, source: str, rank: int) -> None:
-    """Stands in for the structured logger's init: one file per rollout worker, named by its log
-    rank."""
-    pathlib.Path(marker_dir, str(rank)).touch()
+    """Stands in for the structured logger's init: one file per rollout worker, naming its log
+    rank, its (simulated) host and its CUDA_VISIBLE_DEVICES."""
+    host = os.environ["HYPERACTOR_PROCESS_NAME"].split("@")[-1].strip()
+    cuda = os.environ.get("CUDA_VISIBLE_DEVICES")
+    pathlib.Path(marker_dir, f"{rank}-{host}-{cuda!r}").touch()
 
 
 class _Worker:
@@ -494,12 +553,26 @@ class _WorkerConfig:
         return _Worker()
 
 
-def test_spawn_rollout_workers_returns_one_handle_per_worker(tmp_path, monkeypatch):
-    """5 workers on this host come back as 5 single-actor handles (`call_one` raises on a
-    handle to several actors), with log ranks 0-4."""
+@pytest.mark.parametrize("on_controller_host", [False, True])
+def test_rollout_workers_spread_over_the_hosts_of_a_job(
+    tmp_path, monkeypatch, on_controller_host
+):
+    """On a 4-host job (simulated on this machine), 5 workers go 2-2-1 to the 3 hosts that are
+    not trainer host 0, with log ranks 0-4 and no GPU visible. With `on_controller_host`, all 5
+    stay on the controller's host."""
+    # The job's hosts see a GPU, so a worker sees one too unless its bootstrap hides it.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "99")
 
     async def run():
-        system = MonarchActorSystem(MonarchActorSystem.Config())
+        # One mesh per role, as `Layout.host_meshes` builds them.
+        job = ProcessJob({"trainer": 2, "generator_0": 1, "generator_1": 1})
+        state = job.state(cached_path=None)
+        system = MonarchActorSystem(
+            MonarchActorSystem.Config(),
+            host_meshes=provisioning.HostMeshes(
+                state.trainer, [state.generator_0, state.generator_1], gpus_per_node=4
+            ),
+        )
         monkeypatch.setattr(
             monarch_system.sl,
             "get_structured_logger_subprocess_init_fn",
@@ -509,17 +582,32 @@ def test_spawn_rollout_workers_returns_one_handle_per_worker(tmp_path, monkeypat
         cloudpickle.register_pickle_by_value(sys.modules[__name__])
         try:
             workers = await system.spawn_rollout_workers(
-                _WorkerConfig(), num_workers=5, num_threads=1
+                _WorkerConfig(),
+                num_workers=5,
+                num_threads=1,
+                on_controller_host=on_controller_host,
             )
             assert len(workers) == 5
             await asyncio.gather(*(w.sync_log_step.call_one(1) for w in workers))
             await system.stop_rollout_workers()
         finally:
             cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
+            job.kill()
 
     asyncio.run(run())
     markers = sorted(path.name for path in tmp_path.iterdir())
-    assert markers == ["0", "1", "2", "3", "4"]
+    if on_controller_host:
+        assert [m.split("-")[0] for m in markers] == ["0", "1", "2", "3", "4"]
+        assert not any("trainer" in m or "generator" in m for m in markers)
+        assert all(m.endswith("-''") for m in markers)
+    else:
+        assert markers == [
+            "0-trainer_1-''",
+            "1-trainer_1-''",
+            "2-generator_0_0-''",
+            "3-generator_0_0-''",
+            "4-generator_1_0-''",
+        ]
 
 
 def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch):

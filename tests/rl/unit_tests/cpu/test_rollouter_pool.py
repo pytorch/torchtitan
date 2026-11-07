@@ -68,10 +68,12 @@ def test_rollout_worker_actor_builds_its_worker_and_inits_its_logger(
             structured_logger_init_fn=functools.partial(
                 lambda **kwargs: init_calls.append(kwargs), source="rl", rank=0
             ),
+            first_worker_index=4,
         )
 
         assert actor._worker is worker
-        assert init_calls == [{"source": "rl_rollout_worker", "rank": 2}]
+        # Rank 2 in the proc mesh of a host whose first worker is the pool's worker 4.
+        assert init_calls == [{"source": "rl_rollout_worker", "rank": 6}]
 
     asyncio.run(run())
 
@@ -129,6 +131,7 @@ def _rollouter_without_datasets() -> Rollouter:
         worker="worker_config",
         worker_pool_size=3,
         num_threads_per_worker=2,
+        workers_on_controller_host=False,
     )
     rollouter._workers = []
     rollouter._actor_system = None
@@ -169,6 +172,7 @@ def test_setup_spawns_and_sets_up_every_worker_and_close_stops_them() -> None:
             "config": "worker_config",
             "num_workers": 3,
             "num_threads": 2,
+            "on_controller_host": False,
         }
         for worker in actor_system.workers:
             assert worker.setup_async.calls == [
@@ -407,6 +411,7 @@ def test_cancel_group_and_wait_for_generate_calls_on_real_worker_processes(
                 worker_config=_GeneratingWorkerConfig(str(tmp_path)),
                 num_threads=1,
                 structured_logger_init_fn=None,
+                first_worker_index=0,
             )
             # The handle the Rollouter keeps per worker (`spawn_rollout_workers`).
             worker = workers.flatten("rank").slice(rank=0)

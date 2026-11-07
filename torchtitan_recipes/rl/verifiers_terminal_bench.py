@@ -148,6 +148,11 @@ def terminal_bench_rollouter_config(
         ),
         # TODO: tune after a TB run with Docker; 16 is the env server's old pool size.
         worker_pool_size=16,
+        # The README's toy sandbox: task containers run on the controller's host, the one host
+        # whose Docker the example expects. On another host without Docker, every rollout would
+        # fail at once.
+        # TODO: spread the workers once every worker host runs Docker (or a real sandbox).
+        workers_on_controller_host=True,
         # Verifiers renders each turn on the worker's default executor; 32 threads, as each
         # old pool worker had (Python's default on a large host), so renders don't queue.
         num_threads_per_worker=32,

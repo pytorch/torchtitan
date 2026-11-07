@@ -9,12 +9,13 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
 from dataclasses import dataclass
 from typing import Any
 
 import torchstore as ts
-from monarch.actor import ProcMesh
+from monarch.actor import default_bootstrap_cmd, ProcMesh
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability import structured_logger as sl
@@ -25,6 +26,8 @@ from torchtitan.rl.actors.monarch.provisioning import (
     compute_trainer_world_size,
     generator_role_names,
     HostMeshes,
+    ROLLOUT_WORKER_ENV,
+    rollout_worker_hosts,
     shutdown,
     spawn_cpu_procs,
     spawn_proc_mesh,
@@ -50,8 +53,10 @@ class MonarchActorSystem(ActorSystem):
     The trainer and each generator get their own GPU proc mesh: on this host,
     partitioned with ``CUDA_VISIBLE_DEVICES``, or on the ``host_meshes`` a
     launcher passes in (e.g. ``MonarchControllerWithLauncher`` in
-    ``launcher/base.py``, with the hosts of a submitted job). The router, the
-    batcher and the rollout worker pool get CPU procs on this host.
+    ``launcher/base.py``, with the hosts of a submitted job). The router and the
+    batcher get CPU procs on this host. The rollout workers spread over the job's
+    other hosts (``rollout_worker_hosts``), or stay on this host with
+    ``on_controller_host``.
 
     Example: a ``Controller`` subclass that allocated its hosts as
     ``self.host_meshes``::
@@ -76,7 +81,8 @@ class MonarchActorSystem(ActorSystem):
         self._generator_meshes: list[ProcMesh] = []
         self._router_mesh: ProcMesh | None = None
         self._batcher_mesh: ProcMesh | None = None
-        self._rollout_worker_mesh: ProcMesh | None = None
+        # One proc mesh per host that runs rollout workers.
+        self._rollout_worker_meshes: list[ProcMesh] = []
         self._trainer: Any | None = None
         self._generators: list[ServiceHandle] = []
 
@@ -171,23 +177,51 @@ class MonarchActorSystem(ActorSystem):
         return self._batcher_mesh.spawn("batcher", BatcherActor, config, **kwargs)
 
     async def spawn_rollout_workers(
-        self, config: RolloutWorker.Config, *, num_workers: int, num_threads: int
+        self,
+        config: RolloutWorker.Config,
+        *,
+        num_workers: int,
+        num_threads: int,
+        on_controller_host: bool,
     ) -> list[Any]:
-        self._rollout_worker_mesh = spawn_cpu_procs(num_workers)
-        actors = self._rollout_worker_mesh.spawn(
-            "rollout_worker",
-            RolloutWorkerActor,
-            worker_config=config,
-            num_threads=num_threads,
-            structured_logger_init_fn=sl.get_structured_logger_subprocess_init_fn(),
+        hosts = rollout_worker_hosts(None if on_controller_host else self._host_meshes)
+        workers: list[Any] = []
+        for host_index, host in enumerate(hosts):
+            # Split as evenly as possible, first hosts first: 5 workers on 3 hosts -> 2, 2, 1.
+            num_host_workers = num_workers // len(hosts) + (
+                host_index < num_workers % len(hosts)
+            )
+            if num_host_workers == 0:
+                continue
+            procs = host.spawn_procs(
+                per_host={"cpus": num_host_workers},
+                bootstrap_command=default_bootstrap_cmd().with_env(ROLLOUT_WORKER_ENV),
+            )
+            self._rollout_worker_meshes.append(procs)
+            actors = procs.spawn(
+                "rollout_worker",
+                RolloutWorkerActor,
+                worker_config=config,
+                num_threads=num_threads,
+                structured_logger_init_fn=sl.get_structured_logger_subprocess_init_fn(),
+                first_worker_index=len(workers),
+            )
+            workers += [
+                actors.flatten("rank").slice(rank=rank)
+                for rank in range(num_host_workers)
+            ]
+        # Worker procs on a launcher's hosts don't stream their logs here, so log where they run.
+        hostnames = await asyncio.gather(*(w.hostname.call_one() for w in workers))
+        logger.info(
+            "Rollout workers per host: %s", dict(collections.Counter(hostnames))
         )
-        return [actors.flatten("rank").slice(rank=rank) for rank in range(num_workers)]
+        # TODO(monarch): one dead worker process ends the job: the root's default fault hook exits.
+        # To drop only its groups, spawn the workers under an actor that implements `__supervise__`.
+        return workers
 
     async def stop_rollout_workers(self) -> None:
-        worker_mesh = self._rollout_worker_mesh
-        self._rollout_worker_mesh = None
-        if worker_mesh is not None:
-            await worker_mesh.stop()
+        meshes, self._rollout_worker_meshes = self._rollout_worker_meshes, []
+        await asyncio.gather(*(mesh.stop() for mesh in meshes))
 
     async def initialize_torchstore(self) -> None:
         # StorageVolumes are spawned on the trainer mesh so they are colocated
