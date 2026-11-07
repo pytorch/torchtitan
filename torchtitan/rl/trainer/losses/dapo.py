@@ -99,13 +99,13 @@ class DAPOLoss(Loss[torch.Tensor]):
         """
         # Score tokens under the distribution vLLM sampled from. Dividing by a per-token fp32
         # tensor matches vLLM's op, so batch-invariant runs stay bitwise equal to the generator.
-        logits = pred / temperature.unsqueeze(-1)
         trainer_logprobs, token_entropy = compute_logprobs(
-            logits,
+            pred,
             labels,
             vocab_parallel_group=spmd_mesh_group("tp"),
             return_entropy=True,
             global_vocab_size=self.global_vocab_size,
+            temperature=temperature,
         )
         # A non-finite generator logprob (notably under CUDA graph) has no valid
         # old-policy reference, so DROP that token from the loss + denominator (cleaner

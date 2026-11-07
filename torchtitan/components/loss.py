@@ -499,8 +499,13 @@ def compute_logprobs(
     vocab_parallel_group: dist.ProcessGroup | None,
     return_entropy: bool = False,
     global_vocab_size: int | None = None,
+    temperature: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Per-token logprobs from ``logits[T, V]`` and ``labels[T]``.
+
+    With ``temperature[T]``, scores ``logits / temperature`` (both statistics).
+    Dividing here, inside the ``loss`` region, fuses the divide into the
+    log-softmax reads instead of an eager fp32 pass over ``[T, V]``.
 
     When ``return_entropy`` is set, also returns per-token Shannon entropy
     ``H(p) = logsumexp(logits) - sum(softmax(logits) * logits)``, with shape
@@ -516,6 +521,11 @@ def compute_logprobs(
     Returns ``logprobs`` when ``return_entropy`` is False, else
     ``(logprobs, entropy)``.
     """
+    if temperature is not None:
+        # Dividing by a [T, 1] tensor makes Inductor rewrite softmax(x / t). The rewrite's isfinite
+        # guard (https://github.com/pytorch/pytorch/pull/184046) writes two fp32 [T, V] buffers, and
+        # the loss runs 1.9x slower. expand_as skips the rewrite; eager divides the same values.
+        logits = logits / temperature.unsqueeze(-1).expand_as(logits)
     if vocab_parallel_group is not None:
         if global_vocab_size is None:
             raise ValueError(
