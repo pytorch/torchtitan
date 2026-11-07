@@ -149,7 +149,12 @@ class GptOssAttention(Attention):
 
     def _apply_sinks(self, out: torch.Tensor, lse: torch.Tensor) -> torch.Tensor:
         """out_transform hook: rescale attention output by this layer's sinks."""
-        return apply_attention_sink_rescale(out, lse, self.sinks)
+        # Pass a copy of sinks. Under PP, FSDP2 keeps an fp32 .grad on the bf16 sinks between
+        # microbatches, and Dynamo raises when it compiles a parameter input whose .grad has
+        # another dtype. The copy costs one [n_heads] kernel per attention call.
+        # TODO: pass self.sinks once Dynamo copies a tensor's grad_dtype before its .grad
+        # (issue draft: felipemello1/pytorch#23).
+        return apply_attention_sink_rescale(out, lse, self.sinks.clone())
 
 
 class GptOssTransformerBlock(TransformerBlock):
