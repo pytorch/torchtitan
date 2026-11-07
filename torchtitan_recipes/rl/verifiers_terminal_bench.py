@@ -83,6 +83,22 @@ from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 _ENV_SERVER_WORKERS = 16
 
 
+def _max_concurrent_rollouts(async_loop: AsyncLoopConfig) -> int:
+    """Env server size: the training rollouts in flight plus one validation pass.
+
+    Example: 48 groups x 32 samples + validation steps=89 -> 1625.
+    """
+    if async_loop.validation.steps < 0:
+        raise ValueError(
+            "The env server has room for one validation pass of `validation.steps` tasks; "
+            f"set it to the task count, got {async_loop.validation.steps}"
+        )
+    return (
+        async_loop.max_active_rollout_groups * async_loop.num_samples_per_prompt
+        + async_loop.validation.steps
+    )
+
+
 def _terminal_bench_rollouter_config(
     train_dataset: str,
     validation_dataset: str,
@@ -199,11 +215,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
             max_turns=120,
-            # Room for one validation pass beside training. The sum needs `validation.steps` to be
-            # the task count: -1 (the whole source) would break it.
-            max_concurrent_rollouts=async_loop.max_active_rollout_groups
-            * async_loop.num_samples_per_prompt
-            + async_loop.validation.steps,
+            max_concurrent_rollouts=_max_concurrent_rollouts(async_loop),
         ),
         renderer=from_renderers(
             Qwen35RendererConfig(
@@ -346,11 +358,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
             max_turns=120,
-            # Room for one validation pass beside training. The sum needs `validation.steps` to be
-            # the task count: -1 (the whole source) would break it.
-            max_concurrent_rollouts=async_loop.max_active_rollout_groups
-            * async_loop.num_samples_per_prompt
-            + async_loop.validation.steps,
+            max_concurrent_rollouts=_max_concurrent_rollouts(async_loop),
         ),
         renderer=from_renderers(
             Qwen35RendererConfig(
@@ -470,11 +478,7 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
             max_turns=8,
-            # Room for one validation pass beside training. The sum needs `validation.steps` to be
-            # the task count: -1 (the whole source) would break it.
-            max_concurrent_rollouts=async_loop.max_active_rollout_groups
-            * async_loop.num_samples_per_prompt
-            + async_loop.validation.steps,
+            max_concurrent_rollouts=_max_concurrent_rollouts(async_loop),
         ),
         renderer=from_renderers(
             CustomRendererConfig(
