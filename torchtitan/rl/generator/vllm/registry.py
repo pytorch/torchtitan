@@ -44,6 +44,7 @@ from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
+from torchtitan.rl.generator.inference_model import get_attention_dimensions
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 
 if TYPE_CHECKING:
@@ -133,10 +134,6 @@ def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
         )
     ffn = cfg.first_feed_forward
     moe = cfg.first_moe
-
-    from torchtitan.rl.generator.vllm.attention.attention import (
-        get_attention_dimensions,
-    )
 
     n_heads, n_kv_heads, head_dim, _ = get_attention_dimensions(attn, cfg.dim)
     rope = getattr(attn, "rope", None)
