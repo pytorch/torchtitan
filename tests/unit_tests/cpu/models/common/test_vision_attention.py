@@ -80,13 +80,22 @@ def test_encoder_rope_and_attention_overrides_are_independent() -> None:
         def __init__(self, config):
             super().__init__(config)
             self.calls = 0
+            self.prepare_calls = 0
+            self.prepared_positions = None
+            self.received_positions = None
             self.positions_shape = None
+
+        def prepare_positions(self, positions):
+            self.prepare_calls += 1
+            self.prepared_positions = positions + 1
+            return self.prepared_positions
 
         def forward(self, query, key=None, positions=None, *, inverse=False):
             self.calls += 1
             assert positions is not None
             assert positions.dtype == torch.long
             self.positions_shape = positions.shape
+            self.received_positions = positions
             return torch.full_like(query, 42), key
 
     class MarkerAttention(FlexInnerAttention):
@@ -158,16 +167,21 @@ def test_encoder_rope_and_attention_overrides_are_independent() -> None:
                     if family.startswith("muse_")
                     else encoder.patch_embed
                 )
-                encoder(
-                    torch.randn(16, projection.in_features),
-                    grid_thw=torch.tensor([[1, 4, 4]]),
-                )
-            for layer in encoder.layers.values():
-                assert isinstance(layer.attn.rope, RoPE)
-                assert not list(layer.attn.rope.named_buffers())
-                assert layer.attn.rope.calls == 1
-                assert layer.attn.rope.positions_shape == (16, 2)
-                assert layer.attn.flex_attention.calls == 1
+                for calls, grid in enumerate(([1, 4, 4], [1, 2, 8]), start=1):
+                    encoder(
+                        torch.randn(16, projection.in_features),
+                        grid_thw=torch.tensor([grid]),
+                    )
+                    ropes = [layer.attn.rope for layer in encoder.layers.values()]
+                    assert sum(rope.prepare_calls for rope in ropes) == calls
+                    prepared_positions = ropes[0].prepared_positions
+                    for layer in encoder.layers.values():
+                        assert isinstance(layer.attn.rope, RoPE)
+                        assert not list(layer.attn.rope.named_buffers())
+                        assert layer.attn.rope.calls == calls
+                        assert layer.attn.rope.positions_shape == (16, 2)
+                        assert layer.attn.rope.received_positions is prepared_positions
+                        assert layer.attn.flex_attention.calls == calls
 
 
 if __name__ == "__main__":

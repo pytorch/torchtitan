@@ -158,7 +158,7 @@ class TestRoPEPositionBoundsComplex(unittest.TestCase):
                     ) * inv_freq.repeat(2)
                     cache = torch.complex(angles.cos(), angles.sin())
                 expected = ComplexRoPE.apply_rotary_emb(xq, xk, cache.unsqueeze(1))
-                actual = rope(xq, xk, coordinates)
+                actual = rope(xq, xk, rope.prepare_positions(coordinates))
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
                 torch.testing.assert_close(
                     torch.autograd.grad(actual, (xq, xk), grad_outputs),
@@ -211,7 +211,7 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
             dim=self.head_dim, max_context_length=self.max_context_length
         ).build()
         expected = CosSinRoPE.apply_rotary_emb(xq, xk, cache)
-        actual = rope(xq, xk, coordinates)
+        actual = rope(xq, xk, rope.prepare_positions(coordinates))
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         grad_outputs = (torch.randn_like(xq), torch.randn_like(xk))
         torch.testing.assert_close(

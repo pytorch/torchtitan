@@ -180,6 +180,17 @@ class RoPE(Module):
         super().__init__()
         self.config = config
 
+    def prepare_positions(self, positions: torch.Tensor) -> torch.Tensor:
+        """Prepare query-independent position data for ``forward``.
+
+        Encoders with a shared block config call this once per batch and pass
+        the result to every layer. The representation belongs to the RoPE
+        implementation; the default keeps raw positions unchanged. Only data
+        determined by the shared config and positions belongs here;
+        layer-specific state must be applied in ``forward``.
+        """
+        return positions
+
     def forward(
         self,
         query: torch.Tensor,
@@ -188,7 +199,7 @@ class RoPE(Module):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Transform query and optional key using the supplied positions."""
+        """Transform query and optional key using prepared position data."""
         raise NotImplementedError
 
 

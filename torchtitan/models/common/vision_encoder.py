@@ -8,9 +8,9 @@
 block-diagonal FlexInnerAttention mask helper and the pre-norm transformer block
 (attention + MLP) over token-major visual patches.
 
-Each encoder passes spatial coordinates in patch order through the block to
-attention. ``VisionAttention.Config.rope`` selects the module that owns the
-position table and rotates the head-sharded query and key tensors.
+Each encoder prepares spatial positions once through its configured RoPE, then
+passes the result to every block. ``VisionAttention.Config.rope`` selects the
+module that owns the position table and rotates the head-sharded query and key.
 
 Shape suffixes:
 - T = packed visual tokens
@@ -155,7 +155,7 @@ class VisionAttention(Module):
     """Multi-head self-attention with FlexInnerAttention over visual patches.
 
     Separate q/k/v projections (clean per-head ColwiseParallel under TP). The
-    configured RoPE module applies the encoder-provided spatial positions.
+    configured RoPE module consumes positions prepared once by the encoder.
     """
 
     @dataclass(kw_only=True, slots=True)

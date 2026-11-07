@@ -18,6 +18,7 @@ Shape suffixes:
 - O = adapter output dim
 - C = spatial coordinates (row, column)
 - F = frequencies per coordinate
+- R = combined spatial frequencies
 - L = position table length
 
 """
@@ -123,17 +124,24 @@ class NaViTRoPE(ComplexRoPE):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Keep spatial rotation in the enclosing vision block's compile region."""
-        return self.apply_rotary_emb(
-            query, key, self._reshape_cache(query, positions), inverse=inverse
-        )
+        """Rotate with positions prepared once outside the vision block."""
+        if (
+            positions is None
+            or positions.ndim != 3
+            or positions.shape[:2] != (query.shape[0], 1)
+        ):
+            raise ValueError(
+                "NaViT RoPE requires prepared positions of shape (num_tokens, 1, cache_width)"
+            )
+        return self.apply_rotary_emb(query, key, positions, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
+        """Store angles; evaluate cos/sin once per batch, as in the encoder."""
         # Meta construction needs only the table shape and dtype.
         if torch.get_default_device().type == "meta":
             return torch.empty(
                 (self.max_context_length, self.dim // 4),
-                dtype=torch.complex64,
+                dtype=torch.float32,
                 device="meta",
             )
         half_dim = self.dim // 2
@@ -145,25 +153,18 @@ class NaViTRoPE(ComplexRoPE):
             device=inv_freq_F.device,
             dtype=inv_freq_F.dtype,
         )
-        angles_LF = torch.outer(positions_L, inv_freq_F)
-        return torch.view_as_complex(
-            torch.stack((angles_LF.cos(), angles_LF.sin()), dim=-1)
-        )
+        return torch.outer(positions_L, inv_freq_F)
 
-    def _reshape_cache(
-        self,
-        query: torch.Tensor,
-        positions: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if positions is None or positions.shape != (query.shape[0], 2):
+    def prepare_positions(self, positions: torch.Tensor) -> torch.Tensor:
+        if positions.ndim != 2 or positions.shape[1] != 2:
             raise ValueError("NaViT RoPE positions must have shape (num_tokens, 2)")
         positions_TC = positions
-        if torch.compiler.is_compiling():
-            cache_LF2 = torch.view_as_real(self.cache)
-            row_TF2, col_TF2 = cache_LF2[positions_TC].unbind(1)
-            return torch.cat((col_TF2, row_TF2), dim=-2).flatten(-2).unsqueeze(1)
         row_TF, col_TF = self.cache[positions_TC].unbind(1)
-        return torch.cat((col_TF, row_TF), dim=-1).unsqueeze(1)
+        angles_TR = torch.cat((col_TF, row_TF), dim=-1)
+        coefficients_TR2 = torch.stack((angles_TR.cos(), angles_TR.sin()), dim=-1)
+        if torch.compiler.is_compiling():
+            return coefficients_TR2.flatten(-2).unsqueeze(1)
+        return torch.view_as_complex(coefficients_TR2).unsqueeze(1)
 
 
 class NaViTEncoder(Module):
@@ -504,6 +505,12 @@ class NaViTEncoder(Module):
                 else None
             )
 
+        # Every layer is built from the same block config.
+        rope_positions = (
+            self.layers["0"].attn.rope.prepare_positions(positions_TC)
+            if len(self.layers) > 0
+            else positions_TC
+        )
         num_layers = len(self.layers)
         for layer_id, layer in enumerate(self.layers.values()):
             use_full_attention = layer_id == num_layers - 1 or (layer_id + 1) % sf == 0
@@ -514,7 +521,7 @@ class NaViTEncoder(Module):
                 attention_mask = sparse_attention_mask
             x_TD = layer(
                 x_TD,
-                positions=positions_TC,
+                positions=rope_positions,
                 attention_mask=attention_mask,
             )
 

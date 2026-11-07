@@ -226,10 +226,16 @@ class MoonViTRoPE(ComplexRoPE):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Keep spatial rotation in the enclosing vision block's compile region."""
-        return self.apply_rotary_emb(
-            query, key, self._reshape_cache(query, positions), inverse=inverse
-        )
+        """Rotate with positions prepared once outside the vision block."""
+        if (
+            positions is None
+            or positions.ndim != 3
+            or positions.shape[:2] != (query.shape[0], 1)
+        ):
+            raise ValueError(
+                "MoonViT RoPE requires prepared positions of shape (num_tokens, 1, cache_width)"
+            )
+        return self.apply_rotary_emb(query, key, positions, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
         # Meta construction needs only the table shape and dtype.
@@ -248,10 +254,8 @@ class MoonViTRoPE(ComplexRoPE):
         angles_PF = torch.outer(positions_P, inv_freq_F)
         return torch.polar(torch.ones_like(angles_PF), angles_PF)
 
-    def _reshape_cache(
-        self, query: torch.Tensor, positions: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        if positions is None or positions.shape != (query.shape[0], 2):
+    def prepare_positions(self, positions: torch.Tensor) -> torch.Tensor:
+        if positions.ndim != 2 or positions.shape[1] != 2:
             raise ValueError(
                 "MoonViT RoPE requires positions of shape (num_tokens, 2)."
             )
@@ -415,10 +419,16 @@ class MoonViTEncoder(Module):
                 x.device,
             )
 
+        # Every layer is built from the same block config.
+        rope_positions = (
+            self.layers["0"].attn.rope.prepare_positions(positions_TC)
+            if len(self.layers) > 0
+            else positions_TC
+        )
         for block in self.layers.values():
             x = block(
                 x,
-                positions=positions_TC,
+                positions=rope_positions,
                 attention_mask=attention_mask,
             )
 

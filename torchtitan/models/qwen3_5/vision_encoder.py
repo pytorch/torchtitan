@@ -199,10 +199,16 @@ class QwenVisionRoPE(CosSinRoPE):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Keep spatial rotation in the enclosing vision block's compile region."""
-        return self.apply_rotary_emb(
-            query, key, self._reshape_cache(query, positions), inverse=inverse
-        )
+        """Rotate with positions prepared once outside the vision block."""
+        if (
+            positions is None
+            or positions.ndim != 3
+            or positions.shape[:2] != (query.shape[0], 1)
+        ):
+            raise ValueError(
+                "Qwen vision RoPE requires prepared positions of shape (num_tokens, 1, cache_width)"
+            )
+        return self.apply_rotary_emb(query, key, positions, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
         # Meta construction needs only the table shape and dtype.
@@ -222,10 +228,8 @@ class QwenVisionRoPE(CosSinRoPE):
         angles_PF = torch.outer(positions_P, inv_freq_F)
         return torch.stack((angles_PF.cos(), angles_PF.sin()), dim=-1)
 
-    def _reshape_cache(
-        self, query: torch.Tensor, positions: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        if positions is None or positions.shape != (query.shape[0], 2):
+    def prepare_positions(self, positions: torch.Tensor) -> torch.Tensor:
+        if positions.ndim != 2 or positions.shape[1] != 2:
             raise ValueError(
                 "Qwen vision RoPE requires positions of shape (num_tokens, 2)."
             )
@@ -439,10 +443,16 @@ class Qwen35VisionEncoder(Module):
                 x.device,
             )
 
+        # Every layer is built from the same block config.
+        rope_positions = (
+            self.layers["0"].attn.rope.prepare_positions(positions_TC)
+            if len(self.layers) > 0
+            else positions_TC
+        )
         for layer in self.layers.values():
             x = layer(
                 x,
-                positions=positions_TC,
+                positions=rope_positions,
                 attention_mask=attention_mask,
             )
 

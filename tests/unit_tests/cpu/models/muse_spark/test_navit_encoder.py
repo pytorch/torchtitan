@@ -22,8 +22,14 @@ def test_rope_frequency_meta_initialization_matches_hf():
     exponent = torch.arange(0, 48, 2, dtype=torch.float32) / 48
     inv_freq = 1.0 / (10000.0**exponent)
     angles = torch.outer(torch.arange(9, dtype=torch.float32), inv_freq)
-    expected = torch.complex(angles.cos(), angles.sin())
-    torch.testing.assert_close(rope.cache, expected, rtol=0, atol=0)
+    torch.testing.assert_close(rope.cache, angles, rtol=0, atol=0)
+    coordinates = torch.tensor([[1, 2], [3, 4], [8, 8]])
+    row_angles, col_angles = angles[coordinates].unbind(1)
+    packed_angles = torch.cat((col_angles, row_angles), dim=-1)
+    expected = torch.complex(packed_angles.cos(), packed_angles.sin()).unsqueeze(1)
+    torch.testing.assert_close(
+        rope.prepare_positions(coordinates), expected, rtol=0, atol=0
+    )
     assert not rope.state_dict()
 
 
