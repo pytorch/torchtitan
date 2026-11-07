@@ -789,6 +789,40 @@ def test_no_window_takes_oldest_ready_group_past_a_stuck_head() -> None:
     asyncio.run(run())
 
 
+def test_buffer_gauges_count_every_active_slot() -> None:
+    async def run() -> None:
+        # 4 slots: g0 taken by the batcher, g1 finalized, g2 inflight, g3 waiting.
+        buffer = _buffer(capacity=4, window_size=None)
+        for group_id in range(4):
+            await _admit(buffer, group_id)
+        for _ in range(3):
+            await buffer.claim_next()  # g0, g1, g2 -> INFLIGHT
+        await _finalize(buffer, 0)
+        await _finalize(buffer, 1)
+        await buffer.take_finalized()  # g0 leaves the buffer but keeps its slot
+
+        def gauges() -> dict[str, float]:
+            return {
+                metric.key: metric.value.value
+                for metric in buffer.metrics()
+                if metric.key != "rollout_buffer/active_slots_in_use_peak"
+            }
+
+        assert gauges() == {
+            "rollout_buffer/num_groups_waiting": 1.0,
+            "rollout_buffer/num_groups_inflight": 1.0,
+            "rollout_buffer/num_groups_finalized": 1.0,
+            "rollout_buffer/num_groups_taken": 1.0,
+            "rollout_buffer/available_active_slots": 0.0,
+        }
+        # The weight pull after g0's optimizer step frees its slot.
+        await buffer.release_active_groups(1, reason="trained")
+        assert gauges()["rollout_buffer/num_groups_taken"] == 0.0
+        assert gauges()["rollout_buffer/available_active_slots"] == 1.0
+
+    asyncio.run(run())
+
+
 async def _block_forever(*args, **kwargs) -> None:
     await asyncio.Event().wait()
 
