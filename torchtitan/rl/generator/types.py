@@ -54,19 +54,18 @@ class EngineRequest:
     prompt_token_ids: list[int]  # [prompt_tokens]
     sampling: SamplingConfig
     group_id: int
-    """Rollout group id; also sets the vLLM priority (smaller is admitted first and preempted last):
+    """Rollout group id. It also sets the vLLM priority; a smaller priority is admitted first and
+    preempted last:
 
-        requests     group ids                                        vLLM priority
-        training     0, 1, 2, ...: one per group                      the group id: older groups first
-        validation   negative, unique per pass                        2**31 - 1: after all training
-                     (`Controller._collect_validation_rollouts`)
+        requests     group ids        vLLM priority
+        training     0, 1, 2, ...     the group id: older groups first
+        validation   negative         2**31 - 1: after all training
 
-    Validation shares one priority, so it runs in arrival order, after every training request:
+    Example, five requests waiting:
 
-        waiting, in arrival order:  g7 turn 1   val -1      g9 turn 1   g4 turn 2   val -2
-        priority:                   7           2**31 - 1   9           4           2**31 - 1
-        vLLM admits:                g4 turn 2   g7 turn 1   g9 turn 1   val -1      val -2
-                                    ^ g4 started before g7
+        arrival order:  g7 turn 1   val -1      g9 turn 1   g4 turn 2   val -2
+        priority:       7           2**31 - 1   9           4           2**31 - 1
+        admit order:    g4 turn 2   g7 turn 1   g9 turn 1   val -1      val -2
     """
     routing_session_id: str
     arrival_time: float

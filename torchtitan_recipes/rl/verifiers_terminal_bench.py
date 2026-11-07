@@ -84,9 +84,9 @@ _ENV_SERVER_WORKERS = 16
 
 
 def _max_concurrent_rollouts(async_loop: AsyncLoopConfig) -> int:
-    """Env server size: the training rollouts in flight plus one validation pass.
+    """Rollouts the env server must run at once: the training rollouts in flight plus one validation pass.
 
-    Example: 48 groups x 32 samples + validation steps=89 -> 1625.
+    Example: 48 groups x 32 samples + validation.steps=89 -> 1625.
     """
     if async_loop.validation.steps < 0:
         raise ValueError(

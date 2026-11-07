@@ -330,8 +330,8 @@ def _engine_request(request_id: str, *, min_policy_version: int, group_id: int =
 
 
 def test_admission_passes_group_id_as_priority_and_arrival_time():
-    # Priority is the group id (3), not the pinned version (6); every validation id (negative) runs
-    # after all training.
+    # Every request pins policy 6, so only the group id can set the priority.
+    # Validation ids are negative and all map to 2**31 - 1, after every training group.
     engine = _vllm_engine()
     engine.add_requests(
         [

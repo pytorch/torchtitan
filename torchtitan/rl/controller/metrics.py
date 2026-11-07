@@ -236,8 +236,11 @@ def compute_policy_age_metrics(
 
 
 def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metric]:
-    """Build rollout-derived metrics: lengths, truncation, errors, reward breakdown, and each turn's
-    metrics (the latter keep their own keys, unprefixed).
+    """Build metrics from `rollouts`:
+
+    - `{prefix}/...`: lengths, number of turns, truncation rate, error rate
+    - `{prefix}_reward` and `{prefix}_reward/component/<name>`: rewards
+    - each turn's own metrics, keys unchanged (e.g. `generator/queue_time_ms`)
 
     Args:
         prefix: Metric namespace (e.g. `"rollout"` or `"validation"`).
@@ -260,8 +263,8 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
     ]
 
     truncated = [float(rollout.status.is_truncated()) for rollout in rollouts]
-    # Errors and timeouts (e.g. an agent task past its deadline): their reward alone can look
-    # like a wrong answer's.
+    # Errored or timed-out rollouts can get the same reward as a wrong answer; this rate tells
+    # them apart.
     errored = [float(rollout.status.is_error()) for rollout in rollouts]
     rewards = [rollout.reward for rollout in rollouts if rollout.reward is not None]
     num_turns = [float(len(rollout.turns)) for rollout in rollouts]
@@ -293,8 +296,8 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
         for name, values in sorted(values_by_name.items())
     )
 
-    # Turn metrics: the generator's (latencies, output tokens; e.g. "generator/...") and any a
-    # rubric adds (e.g. "math_verify/..."). They carry their own keys, so they ride through unprefixed.
+    # Turn metrics skip `prefix`: the generator already named them ("generator/..." or
+    # "validation_generator/..."), and a rubric names its own ("math_verify/...").
     # Fold across turns: group metrics outlive the rollouts (until the step is logged),
     # and every full GC walks them.
     out.extend(

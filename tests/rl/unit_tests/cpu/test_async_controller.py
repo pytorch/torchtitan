@@ -24,7 +24,6 @@ from torchtitan.rl.controller.controller import (
 from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
-    compute_rollout_metrics,
     MetricsTimer,
 )
 from torchtitan.rl.controller.work_buffer import (
@@ -807,7 +806,7 @@ async def _block_forever(*args, **kwargs) -> None:
 
 
 def _validation_rollout(versions: list[tuple[int, int]]) -> Rollout:
-    """One rollout with a turn per `(min_policy_version, max_policy_version)`."""
+    """One completed rollout with a turn per `(min_policy_version, max_policy_version)` pair."""
     return Rollout(
         group_id=-1,
         rollout_id=0,
@@ -830,9 +829,11 @@ def _validation_rollout(versions: list[tuple[int, int]]) -> Rollout:
 
 @pytest.mark.parametrize("step, group_ids", [(0, [-1, -2]), (25, [-51, -52])])
 def test_validation_group_ids_and_sampled_policies(step, group_ids) -> None:
-    """A pass's group ids come from its step and the prompt index, so passes running side by side
-    never share one, and each pass releases only its own. A pass logs the policies it sampled: a
-    weight sync during a rollout shows as a newer max version and a mixed-policy rollout."""
+    """Group ids depend on the pass's step, so passes that run at the same time use distinct ids.
+
+    Example, 2 prompts: pass 0 uses -1, -2; pass 25 uses -51, -52. Each pass releases only its ids.
+    Prompt 0's rollout spans policies `step` to `step + 2`, so 1 of 2 rollouts is mixed-policy.
+    """
     controller = object.__new__(Controller)
     controller._validation_samples = ["prompt", "prompt"]
     controller.generator_router = SimpleNamespace(
@@ -841,7 +842,7 @@ def test_validation_group_ids_and_sampled_policies(step, group_ids) -> None:
     controller._rollouter = SimpleNamespace(
         run_group_rollouts=AsyncMock(
             side_effect=[
-                # A sync to the next policy landed during the second turn.
+                # Mixed-policy rollout: its second turn starts on policy `step` and ends on `step + 2`.
                 RolloutGroup(
                     group_id=group_ids[0],
                     rollouts=[_validation_rollout([(step, step), (step, step + 2)])],
@@ -873,8 +874,6 @@ def test_validation_group_ids_and_sampled_policies(step, group_ids) -> None:
 
 
 def test_validation_counts_errored_rollouts() -> None:
-    """A rollout that ends in an error or a timeout counts in `validation/error_rate`."""
-
     def rollout(*, group_id: int, status: RolloutStatus) -> Rollout:
         turn = RolloutTurn(
             rollout_id=RolloutTurnID(group_id=group_id, rollout_id=0, turn_id=0),
@@ -912,7 +911,7 @@ def test_validation_counts_errored_rollouts() -> None:
 
 
 class _FakeValidation:
-    """Stands in for `Controller.validate`: each pass runs until the test ends it."""
+    """Fake `Controller.validate`: the pass for step N runs until the test calls `end(N)`."""
 
     def __init__(self) -> None:
         self.events: list[tuple[str, int]] = []
@@ -943,8 +942,6 @@ class _FakeValidation:
 def _controller_for_validation(
     validation: ValidationConfig, *, events: list[str] | None = None, on_pull=None
 ) -> tuple[Controller, _FakeValidation]:
-    """`test_trainer_loop`'s fake controller, plus `validation`, a fake `validate` and a `Mock`
-    metrics processor that records each `log`."""
     controller = fake_controller([] if events is None else events, on_pull=on_pull)
     controller.config.async_loop.validation = validation
     controller.metrics_processor = Mock()
@@ -954,7 +951,7 @@ def _controller_for_validation(
 
 
 def _training_batch(step: int) -> SimpleNamespace:
-    """Stands in for the `TrainerStepBatch` that `step` trains on."""
+    """Fake `TrainerStepBatch` for `step`, with only the fields `_trainer_loop` reads."""
     return SimpleNamespace(
         metrics=[],
         min_policy_versions=[step - 1],
@@ -974,7 +971,7 @@ def _logged_steps(controller: Controller, *, is_validation: bool) -> list[int]:
 
 
 async def _run_until(condition) -> None:
-    """Let other tasks run until `condition()` holds."""
+    """Let other tasks run until `condition()` holds; fail after 100 event-loop turns."""
     for _ in range(100):
         if condition():
             return
@@ -983,14 +980,22 @@ async def _run_until(condition) -> None:
 
 
 async def _train(controller: Controller, queue: asyncio.Queue, step: int) -> None:
-    """Hand `_trainer_loop` the batch for `step` and wait until it logs that step."""
+    """Queue the batch for `step` and wait until `_trainer_loop` logs it.
+
+    By then the step's validation check has also run: it follows the log with no `await` between.
+    """
     await queue.put(_training_batch(step))
     await _run_until(lambda: step in _logged_steps(controller, is_validation=False))
 
 
 def test_passes_start_at_every_due_step() -> None:
-    """Training keeps stepping while passes run, and every due step starts its own pass once that
-    step's weight pull ends. Each pass is logged at the step it ends."""
+    """With `defer_new_if_not_finished=False`, every due step starts its own pass.
+
+    step 2: pass 2 waits for pull 2; step 3 trains meanwhile
+    step 4: pass 4 starts while pass 2 runs
+    step 5: logs pass 4, which ended first
+    step 6: logs pass 2; the last step starts no pass
+    """
     events: list[str] = []
     pulls_may_end = asyncio.Event()
     controller, validation = _controller_for_validation(
@@ -1005,9 +1010,10 @@ def test_passes_start_at_every_due_step() -> None:
 
         pulls_may_end.set()
         await _train(controller, queue, 1)
-        # Step 1's pull has ended.
+        # Wait until step 1's pull is done ("release 5 trained" follows the pull).
+        # Otherwise clearing `pulls_may_end` below would hold step 1's pull too.
         await _run_until(lambda: "release 5 trained" in events)
-        # Hold step 2's pull: pass 2 must not start before it ends, but step 3 trains meanwhile.
+        # Hold step 2's pull. Pass 2 must wait for it; step 3's forward/backward runs meanwhile.
         pulls_may_end.clear()
         await _train(controller, queue, 2)
         await _run_until(lambda: "pull 2" in events)
@@ -1022,7 +1028,7 @@ def test_passes_start_at_every_due_step() -> None:
         await _train(controller, queue, 4)
         await _run_until(lambda: validation.started_steps == [2, 4])
 
-        # Pass 4 ends first: step 5 logs it, while pass 2 still runs.
+        # Pass 4 ends before pass 2. Step 5 logs pass 4; pass 2 keeps running.
         validation.end(4)
         await _run_until(lambda: controller._validation_tasks[4].done())
         await _train(controller, queue, 5)
@@ -1032,7 +1038,7 @@ def test_passes_start_at_every_due_step() -> None:
         await _run_until(lambda: controller._validation_tasks[2].done())
         await _train(controller, queue, 6)
         await asyncio.wait_for(trainer, timeout=5)
-        # The last step starts no pass; it logs pass 2.
+        # Step 6 is due but is the last step, so it starts no pass. It logs pass 2.
         assert validation.started_steps == [2, 4]
         assert _logged_steps(controller, is_validation=True) == [5, 6]
         assert _logged_steps(controller, is_validation=False) == [1, 2, 3, 4, 5, 6]
@@ -1041,8 +1047,15 @@ def test_passes_start_at_every_due_step() -> None:
 
 
 def test_defer_new_if_not_finished() -> None:
-    """With `defer_new_if_not_finished`, due steps that come while a pass runs share one pass.
-    It starts in the step where the running pass is logged. The last step starts no pass."""
+    """With `defer_new_if_not_finished=True`, one pass runs at a time (freq=2, 9 steps):
+
+        step     1  2  3  4  5  6  7  8  9
+        due         *     *     *     *
+        starts      2              7
+        logs                       2     7
+
+    Pass 7 covers due steps 4 and 6. Step 9 is the last step, so step 8 gets no pass.
+    """
     controller, validation = _controller_for_validation(
         ValidationConfig(freq=2, defer_new_if_not_finished=True)
     )
@@ -1055,18 +1068,19 @@ def test_defer_new_if_not_finished() -> None:
         await _train(controller, queue, 1)
         await _train(controller, queue, 2)
         await _run_until(lambda: validation.started_steps == [2])
-        # Steps 4 and 6 are due while pass 2 runs.
+        # Steps 4 and 6 are due. Pass 2 still runs, so neither starts a pass.
         for step in (3, 4, 5, 6):
             await _train(controller, queue, step)
         assert list(controller._validation_tasks) == [2]
 
-        # Step 7 logs pass 2, then starts one pass for steps 4 and 6.
+        # Pass 2 ends. Step 7 logs it and starts pass 7, which covers due steps 4 and 6.
         validation.end(2)
         await _run_until(lambda: controller._validation_tasks[2].done())
         await _train(controller, queue, 7)
         await _run_until(lambda: validation.started_steps == [2, 7])
 
-        # Step 8 is due while pass 7 runs; step 9 is the last step.
+        # Step 8 is due while pass 7 runs, so its pass waits.
+        # Step 9 logs pass 7 and starts nothing: it is the last step.
         await _train(controller, queue, 8)
         validation.end(7)
         await _run_until(lambda: controller._validation_tasks[7].done())
@@ -1079,8 +1093,11 @@ def test_defer_new_if_not_finished() -> None:
 
 
 def test_validation_failure_fails_training() -> None:
-    """A pass that raises fails training at the step it is logged: only pass-level errors (e.g.
-    `release_groups`) reach it."""
+    """A pass that raises stops training in the step that would log it.
+
+    step 1: pass 1 starts, then raises
+    step 2: trains and logs, then raises pass 1's error; step 3 never runs
+    """
     controller, validation = _controller_for_validation(ValidationConfig(freq=1))
 
     async def run() -> None:
@@ -1104,8 +1121,7 @@ def test_validation_failure_fails_training() -> None:
 def _controller_for_run(
     *, watcher=_block_forever
 ) -> tuple[Controller, _FakeValidation]:
-    """A `Controller` whose `run()` runs 4 steps on fakes. Every loop blocks; each test sets
-    `_trainer_loop` or the engine-loop `watcher`."""
+    """Fake `Controller` whose `run()` ends only when the test's `_trainer_loop` or `watcher` ends."""
     controller = object.__new__(Controller)
     controller.config = SimpleNamespace(
         async_loop=AsyncLoopConfig(num_training_steps=4),
@@ -1159,14 +1175,18 @@ def test_run_fails_when_the_engine_loops_exit_mid_run() -> None:
 def test_run_logs_ended_passes_then_runs_the_final_pass_if_asked(
     validate_after_training,
 ) -> None:
-    """When training ends, run() logs the passes that ended, leaves the running ones to close(),
-    and runs the final pass only with `validate_after_training`."""
+    """What run() does after the last training step (step 4):
+
+    pass 0:      ended          -> logged at step 4
+    pass 3:      still running  -> left in `_validation_tasks` for close() to cancel
+    final pass:  only with `validate_after_training` -> runs, logged at step 4
+    """
     controller, validation = _controller_for_run()
     controller.config.async_loop.validation = ValidationConfig(
         validate_after_training=validate_after_training
     )
 
-    # Stands in for `_trainer_loop`, which the tests above cover: 4 steps, pass 3 still runs.
+    # The state run() sees when training ends: pass 0 ended, pass 3 running, trainer at policy 4.
     async def trainer_loop(queue, *, num_training_steps: int) -> None:
         controller._start_validation(step=3)
         await _run_until(lambda: validation.started_steps == [0, 3])
@@ -1191,8 +1211,7 @@ def test_run_logs_ended_passes_then_runs_the_final_pass_if_asked(
 
 
 def test_close_cancels_running_passes_before_closing_the_rollouter() -> None:
-    """After a training crash, `close()` cancels the open passes and waits for them, then closes
-    the rollouter they were using."""
+    """close() cancels running passes and waits for them, then closes the rollouter they use."""
     controller = object.__new__(Controller)
     controller.trainer = None
     controller.generator_router = None
