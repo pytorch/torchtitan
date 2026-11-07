@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""``parallelism.fsdp_backend='flex_shard'`` against FSDP2, bit for bit."""
+"""``parallelism.fsdp_backend=FlexShardConfig()`` against FSDP2, bit for bit."""
 
 from itertools import product
 
@@ -22,10 +22,12 @@ from torchtitan.config import PrecisionConfig
 from torchtitan.config.configs import DebugConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
 from torchtitan.distributed.fsdp import set_is_last_accumulation_step
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.models.llama3 import build_model_config
+from torchtitan.models.llama3 import build_model_config as build_llama3_config
+from torchtitan.models.qwen3 import build_model_config as build_qwen3_config
 
 flex_shard = pytest.importorskip("flex_shard")
 
@@ -46,7 +48,9 @@ class TestFlexShardDecoder(DTensorTestBase):
 
     def _build(
         self,
-        fsdp_backend: str,
+        build_config,
+        flavor: str,
+        fsdp_backend: FlexShardConfig | None,
         reshard_after_forward: str,
         parallelism_context: ParallelismContext,
     ):
@@ -55,8 +59,8 @@ class TestFlexShardDecoder(DTensorTestBase):
             fsdp_backend=fsdp_backend,
             fsdp_reshard_after_forward=reshard_after_forward,
         )
-        model_config = build_model_config(
-            "debugmodel",
+        model_config = build_config(
+            flavor,
             parallelism=parallelism,
             seq_len=_SEQ_LEN,
             attn_backend="flex",
@@ -112,6 +116,11 @@ class TestFlexShardDecoder(DTensorTestBase):
                     {"input": tokens, "labels": labels, "positions": positions},
                     parallelism_context=parallelism_context,
                     parallelism=parallelism,
+                    # The trainer's count for MoE load balancing, without padding.
+                    global_routing_token_counts=torch.tensor(
+                        [_SEQ_LEN * self.world_size * microbatches],
+                        device=self.device_type,
+                    ),
                 )
                 with parallelism_context.activate_spmd():
                     logits = model(inputs, **model_kwargs)
@@ -158,18 +167,32 @@ class TestFlexShardDecoder(DTensorTestBase):
             world_size=self.world_size,
             enable_sequence_parallel=False,
         )
-        for reshard_after_forward, microbatches in product(
-            ("default", "always"), (1, 2)
+        for (build_config, flavor), reshard_after_forward, microbatches in product(
+            (
+                (build_llama3_config, "debugmodel"),
+                (build_qwen3_config, "debugmodel_moe"),
+            ),
+            ("default", "always"),
+            (1, 2),
         ):
             context = (
+                f"{flavor} "
                 f"reshard_after_forward={reshard_after_forward} "
                 f"microbatches={microbatches}"
             )
             fsdp2, *fsdp2_setup = self._build(
-                "fsdp2", reshard_after_forward, parallelism_context
+                build_config,
+                flavor,
+                None,
+                reshard_after_forward,
+                parallelism_context,
             )
             flex, *flex_setup = self._build(
-                "flex_shard", reshard_after_forward, parallelism_context
+                build_config,
+                flavor,
+                FlexShardConfig(),
+                reshard_after_forward,
+                parallelism_context,
             )
             for fqn, param in flex.named_parameters():
                 self.assertTrue(flex_shard.is_flex_shard_param(param), msg=fqn)

@@ -16,10 +16,11 @@ import torch
 import torchtitan.experiments.torchft.trainer as ft
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.validator import Validator
-from torchtitan.config import override
+from torchtitan.config import override, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import LoRATransform
 from torchtitan.distributed import DistributedTopology, ParallelismContext
+from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.llama3 import build_model_config
@@ -151,6 +152,21 @@ def test_ft_accepts_validation_with_training_accelerator_graphs():
     config.validator = Validator.Config(steps=1)
     config.training.disable_accelerator_graphs = False
     config.__post_init__()
+
+
+def test_ft_rejects_flex_shard():
+    # The gradient all-reduce across replica groups hooks FSDP2's parameter groups.
+    parallelism = ParallelismConfig(fsdp_backend=FlexShardConfig())
+    with pytest.raises(ValueError, match="FaultTolerantTrainer does not support"):
+        ft.FaultTolerantTrainer.Config(
+            model=build_model_config(
+                "debugmodel", attn_backend="flex", parallelism=parallelism
+            ),
+            tokenizer=None,
+            loss=CrossEntropyLoss.Config(),
+            training=TrainingConfig(disable_accelerator_graphs=True),
+            parallelism=parallelism,
+        )
 
 
 def test_ft_accepts_eager_validation():

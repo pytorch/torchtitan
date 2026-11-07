@@ -102,28 +102,3 @@ def test_parallelism_config_rejects_unknown_fsdp_symm_mem_scope() -> None:
         ParallelismConfig(
             fsdp_symm_mem_scope="sparse"  # pyrefly: ignore [bad-argument-type]
         )
-
-
-def test_parallelism_config_rejects_unknown_fsdp_backend() -> None:
-    with pytest.raises(
-        ValueError, match=r"fsdp_backend must be one of .* \(got 'fsdp1'\)"
-    ):
-        ParallelismConfig(fsdp_backend="fsdp1")  # pyrefly: ignore[bad-argument-type]
-
-
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"data_parallel_replicate_degree": 2},
-        {"tensor_parallel_degree": 2},
-        {"context_parallel_degree": 2},
-        {"expert_parallel_degree": 2},
-        {"pipeline_parallel_degree": 2},
-        {"fsdp_symm_mem_scope": "all"},
-        {"fsdp_enable_cpu_offloading": True},
-    ],
-)
-def test_flex_shard_rejects_unsupported_parallelism(kwargs: dict) -> None:
-    (name,) = kwargs
-    with pytest.raises(ValueError, match=rf"does not support parallelism\.{name}="):
-        ParallelismConfig(fsdp_backend="flex_shard", **kwargs)

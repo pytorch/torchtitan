@@ -175,12 +175,13 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 raise ValueError(
                     "parallelism.num_pp_microbatches must be greater than 0."
                 )
-            if self.parallelism.fsdp_backend == "flex_shard":
+            if self.parallelism.fsdp_backend is not None:
                 from torchtitan.distributed.flex_shard_fsdp import (
                     validate_flex_shard_training,
                 )
 
                 validate_flex_shard_training(
+                    parallelism=self.parallelism,
                     training=self.training,
                     loss=self.loss,
                     checkpointer=self.checkpointer,

@@ -13,33 +13,44 @@ policy. The buckets' collectives then match FSDP2's byte for byte, so training
 is bitwise identical. The one difference is that FSDP2 skips the embedding's
 backward all-gather (``set_unshard_in_backward``), which FlexShard can't yet; it
 gathers the embedding again in backward, with the same values. FlexShard is
-imported only when ``parallelism.fsdp_backend='flex_shard'``.
+imported only when ``parallelism.fsdp_backend`` is a ``FlexShardConfig``.
 """
 
 import logging
 import sys
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Shard
 
-from torchtitan.distributed.fsdp import decoder_fsdp_groups
-
 if TYPE_CHECKING:
     from torchtitan.components.checkpointer import CheckpointManager
     from torchtitan.components.loss import Loss
     from torchtitan.components.optim import Optim
     from torchtitan.config.configs import DebugConfig, TrainingConfig
+    from torchtitan.config.parallelism import ParallelismConfig
     from torchtitan.models.common.decoder import Decoder
 
 __all__ = [
+    "FlexShardConfig",
     "apply_flex_shard_to_decoder",
     "as_fsdp2_dtensor",
     "validate_flex_shard_training",
 ]
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(kw_only=True, slots=True)
+class FlexShardConfig:
+    """Shard parameters with FlexShard (meta-pytorch/flex_shard) in place of
+    FSDP2's ``fully_shard``.
+
+    Each FSDP2 group becomes an ``fsdp2_compatible`` bucket with the FSDP
+    settings in ``parallelism``, so training is bitwise identical to FSDP2.
+    """
 
 
 def apply_flex_shard_to_decoder(
@@ -68,6 +79,29 @@ def apply_flex_shard_to_decoder(
         reshard_after_forward_policy: "default", "always" or "never", as for
             ``apply_fsdp_to_decoder``.
     """
+    from torchtitan.distributed.fsdp import decoder_fsdp_groups
+    from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
+
+    # FlexShard's Shard placement all-gathers a bucket in one dtype.
+    if any(model.named_preserve_dtype_params()):
+        raise ValueError(
+            "parallelism.fsdp_backend=FlexShardConfig() does not support "
+            "preserve_dtype_params yet."
+        )
+    # FlexShard stores parameters as plain tensors, which would drop the
+    # quantized all-gather that MXFP8 and NVFP4 weights implement for FSDP2.
+    quantized = [
+        fqn
+        for fqn, param in model.named_parameters()
+        if isinstance(param, _ShardedFSDPTensor)
+    ]
+    if quantized:
+        raise ValueError(
+            "parallelism.fsdp_backend=FlexShardConfig() does not support quantized "
+            f"weights (MXFP8, NVFP4) yet; got {quantized[0]} and "
+            f"{len(quantized) - 1} more."
+        )
+
     # flex_shard is an optional dependency, needed only for this backend.
     # pyrefly: ignore [missing-import]
     from flex_shard import BucketSpec, flex_shard, MixedPrecisionPolicy
@@ -75,20 +109,9 @@ def apply_flex_shard_to_decoder(
     # pyrefly: ignore [missing-import]
     from flex_shard.custom_placements.shard import Shard as FlexShardShard
 
-    # ParallelismConfig allows only dp_shard with flex_shard.
+    # validate_flex_shard_training allows only dp_shard.
     assert dp_mesh.mesh_dim_names == ("dp_shard",), dp_mesh.mesh_dim_names
-    # As mixed_precision_policy does for FSDP2, preserved parameters compute in
-    # the wider of their own dtype and param_dtype.
-    param_dtype_overrides = {
-        fqn: dtype
-        for fqn, param in model.named_preserve_dtype_params()
-        if (dtype := torch.promote_types(param.dtype, param_dtype)) != param_dtype
-    }
-    mp_policy = MixedPrecisionPolicy(
-        param_dtype=param_dtype,
-        reduce_dtype=reduce_dtype,
-        param_dtype_overrides=param_dtype_overrides or None,
-    )
+    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     embedding, head, blocks = decoder_fsdp_groups(
         model,
         dp_mesh,
@@ -176,19 +199,44 @@ def as_fsdp2_dtensor(tensor: torch.Tensor, param: torch.Tensor) -> torch.Tensor:
 
 def validate_flex_shard_training(
     *,
+    parallelism: "ParallelismConfig",
     training: "TrainingConfig",
     loss: "Loss.Config",
     checkpointer: "CheckpointManager.Config | None",
     optim: "Optim.Config",
     debug: "DebugConfig",
 ) -> None:
-    """Reject training features that ``parallelism.fsdp_backend='flex_shard'``
-    does not support yet."""
+    """Reject parallelisms and training features that
+    FlexShard does not support yet.
+
+    These checks run from ``TrainingEngine.Config.__post_init__``, which the
+    config loader runs again after recipes assign fields, rather than from
+    ``ParallelismConfig.__post_init__``, which runs only at construction.
+    """
     from torchtitan.components.loss import ChunkedLossWrapper
     from torchtitan.components.optim.optimizer import DistMuon
     from torchtitan.distributed.accelerator_graph import accelerator_graphs_supported
 
-    unsupported = []
+    unsupported = [
+        f"parallelism.{name}={degree}"
+        for name, degree in (
+            (
+                "data_parallel_replicate_degree",
+                parallelism.data_parallel_replicate_degree,
+            ),
+            ("tensor_parallel_degree", parallelism.tensor_parallel_degree),
+            ("context_parallel_degree", parallelism.context_parallel_degree),
+            ("expert_parallel_degree", parallelism.expert_parallel_degree),
+            ("pipeline_parallel_degree", parallelism.pipeline_parallel_degree),
+        )
+        if degree != 1
+    ]
+    if parallelism.fsdp_symm_mem_scope is not None:
+        unsupported.append(
+            f"parallelism.fsdp_symm_mem_scope={parallelism.fsdp_symm_mem_scope!r}"
+        )
+    if parallelism.fsdp_enable_cpu_offloading:
+        unsupported.append("parallelism.fsdp_enable_cpu_offloading=True")
     if not training.disable_accelerator_graphs and accelerator_graphs_supported():
         unsupported.append(
             "accelerator graphs (set training.disable_accelerator_graphs=True)"
@@ -206,6 +254,6 @@ def validate_flex_shard_training(
         unsupported.append("debug.spmd_typechecking")
     if unsupported:
         raise ValueError(
-            "parallelism.fsdp_backend='flex_shard' does not support "
+            "parallelism.fsdp_backend=FlexShardConfig() does not support "
             f"{', '.join(unsupported)} yet."
         )

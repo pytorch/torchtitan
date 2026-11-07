@@ -1471,7 +1471,7 @@ def _run_forward_backward_recording_all_reduce(
                 pp_enabled=False,
                 dp_replicate_enabled=dp_replicate_enabled,
             ),
-            config=SimpleNamespace(parallelism=SimpleNamespace(fsdp_backend="fsdp2")),
+            config=SimpleNamespace(parallelism=SimpleNamespace(fsdp_backend=None)),
             model_parts=[part],
             _non_pp_forward_backward_microbatch=MagicMock(
                 return_value=torch.tensor(1.0)
@@ -1557,7 +1557,7 @@ def test_fsdp_gradient_accumulation_reduction_policy(
                 pp_enabled=False,
                 dp_replicate_enabled=False,
             ),
-            config=SimpleNamespace(parallelism=SimpleNamespace(fsdp_backend="fsdp2")),
+            config=SimpleNamespace(parallelism=SimpleNamespace(fsdp_backend=None)),
             model_parts=[fsdp_root],
             _non_pp_forward_backward_microbatch=MagicMock(
                 side_effect=(torch.tensor(1.0), torch.tensor(2.0))

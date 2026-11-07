@@ -11,10 +11,13 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from torch.distributed.tensor import Shard
 
+import torchtitan.config.transform.quantization as quantization_transform
+from torch.distributed.tensor import Shard
 from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
+from torchtitan.config.transform import MXFP8LinearConverter
+from torchtitan.distributed.flex_shard_fsdp import apply_flex_shard_to_decoder
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     enable_fsdp_symm_mem,
@@ -27,6 +30,7 @@ from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.llama3.flavors import build_model_config
+from torchtitan.quantization import MXFP8Linear
 
 
 class _FSDPModule(nn.Module):
@@ -113,6 +117,46 @@ def test_apply_fsdp_to_decoder_shards_an_moe_held_as_mlp() -> None:
     block_call = next(c for c in fully_shard.call_args_list if c.args[0] == [block])
     shard_placement_fn = block_call.kwargs["shard_placement_fn"]
     assert shard_placement_fn(moe.routed_experts.weight) == Shard(0)
+
+
+@pytest.mark.parametrize("unsupported", ["preserve_dtype_params", "quantized weights"])
+def test_flex_shard_rejects_parameters_it_would_change(
+    unsupported: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # FlexShard all-gathers a bucket in one dtype, and stores parameters as plain
+    # tensors, dropping the quantized all-gather of MXFP8 and NVFP4 weights.
+    parallelism = ParallelismConfig()
+    if unsupported == "quantized weights":
+        if MXFP8Linear is None:
+            pytest.skip("torchao MXFP8Linear is unavailable")
+        monkeypatch.setattr(
+            quantization_transform, "has_cuda_capability", lambda *_: True
+        )
+        config = build_model_config(
+            "debugmodel",
+            parallelism=parallelism,
+            attn_backend="flex",
+            converters=[MXFP8LinearConverter.Config(fqns=["feed_forward"])],
+        )
+    else:
+        config = build_model_config(
+            "debugmodel", parallelism=parallelism, attn_backend="flex"
+        )
+        config.norm = dataclasses.replace(
+            config.norm, preserve_dtype_params=("weight",)
+        )
+    with torch.device("meta"):
+        model = config.build()
+
+    with pytest.raises(ValueError, match=f"does not support {unsupported}"):
+        apply_flex_shard_to_decoder(
+            model,
+            mock.Mock(),
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            pp_enabled=False,
+            reshard_after_forward_policy="default",
+        )
 
 
 def test_stacked_linear_shard_placements_use_num_linears() -> None:

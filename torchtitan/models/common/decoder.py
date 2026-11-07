@@ -194,7 +194,7 @@ class Decoder(BaseModel):
         )
 
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
-        if parallelism.fsdp_backend == "flex_shard":
+        if parallelism.fsdp_backend is not None:
             from torchtitan.distributed.flex_shard_fsdp import (
                 apply_flex_shard_to_decoder,
             )

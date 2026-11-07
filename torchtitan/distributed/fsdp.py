@@ -19,7 +19,7 @@ from torch.distributed.fsdp import (
 )
 from torch.distributed.tensor import Shard
 
-from torchtitan.config.parallelism import FSDPBackend, FSDPSymmMemScope
+from torchtitan.config.parallelism import FSDPSymmMemScope
 from torchtitan.distributed.fsdp_lifecycle import complete_fsdp_grouped_forward
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.base.module import Module
@@ -39,7 +39,6 @@ __all__ = [
     "mixed_precision_policy",
     "resolve_fsdp_mesh",
     "resolve_sparse_fsdp_mesh",
-    "routed_expert_param_placements",
     "set_is_last_accumulation_step",
 ]
 
@@ -84,6 +83,7 @@ def _fsdp_unit_holds_only_embedding_weights(
 
 
 if TYPE_CHECKING:
+    from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
     from torchtitan.models.common.decoder import Decoder
 
 
@@ -120,27 +120,6 @@ def linear_param_shard_placements(
         placements[weight] = Shard(weight.ndim - 2)
         if (bias := getattr(child, "bias", None)) is not None:
             placements[bias] = Shard(bias.ndim - 1)
-    return placements
-
-
-def routed_expert_param_placements(
-    routed_experts: nn.Module,
-    *,
-    num_experts: int,
-    expert_sharding_size: int,
-) -> dict[nn.Parameter, Shard]:
-    """Shard routed-expert parameters along the expert dimension, or along their
-    matrix rows when there are more expert shards than experts."""
-    placements: dict[nn.Parameter, Shard] = {
-        param: Shard(0) for param in routed_experts.parameters()
-    }
-    if expert_sharding_size > num_experts:
-        placements.update(
-            linear_param_shard_placements(
-                routed_experts,
-                include_unstacked_grouped=True,
-            )
-        )
     return placements
 
 
@@ -230,15 +209,18 @@ def decoder_fsdp_groups(
                 expert_sharding_size = dp_mesh["dp_shard"].size()
                 if "cp" in (dp_mesh.mesh_dim_names or ()):
                     expert_sharding_size *= dp_mesh["cp"].size()
+            placements.update(
+                {param: Shard(0) for param in moe.routed_experts.parameters()}
+            )
             # Experts may shard their output features when there are more
             # expert shards than experts.
-            placements.update(
-                routed_expert_param_placements(
-                    moe.routed_experts,
-                    num_experts=moe.num_experts,
-                    expert_sharding_size=expert_sharding_size,
+            if expert_sharding_size > moe.num_experts:
+                placements.update(
+                    linear_param_shard_placements(
+                        moe.routed_experts,
+                        include_unstacked_grouped=True,
+                    )
                 )
-            )
         blocks.append(
             FSDPGroup(
                 [transformer_block],
@@ -254,7 +236,7 @@ def set_is_last_accumulation_step(
     model_part: nn.Module,
     is_last_accumulation_step: bool,
     *,
-    fsdp_backend: FSDPBackend,
+    fsdp_backend: "FlexShardConfig | None",
 ) -> None:
     """Set whether the next backward is the last of gradient accumulation.
 
@@ -262,7 +244,7 @@ def set_is_last_accumulation_step(
     backward. Earlier ones keep the parameters unsharded, and the next backward
     accumulates into their grads.
     """
-    if fsdp_backend == "fsdp2":
+    if fsdp_backend is None:
         # FlexShard has no equivalent: every backward waits for its gradient
         # reductions and releases its prefetch.
         cast(FSDPModule, model_part).set_is_last_backward(is_last_accumulation_step)

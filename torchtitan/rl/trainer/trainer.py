@@ -110,6 +110,15 @@ class Trainer(Configurable):
         sl.log_trace_instant("structured_logger_started")
 
         self.config = config
+        # Checked here rather than in Config.__post_init__, which the controller
+        # config doesn't run again after recipes assign fields. FlexShard's
+        # state_dict() holds each rank's local shards, which
+        # push_model_state_dict would publish as full weights.
+        if config.parallelism.fsdp_backend is not None:
+            raise ValueError(
+                "The RL trainer does not support "
+                f"parallelism.fsdp_backend={config.parallelism.fsdp_backend!r} yet."
+            )
         validate_model_training_config(
             config.model,
             parallelism=config.parallelism,

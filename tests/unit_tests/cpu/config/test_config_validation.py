@@ -14,6 +14,7 @@ from torchtitan.components.validator import Validator
 from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.validation import validate_model_training_config
+from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.observability.sdc_replayer import SDCReplayer
@@ -27,6 +28,7 @@ from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel,
     llama3_debugmodel_varlen_attn,
 )
+from torchtitan_recipes.tests.models.qwen3 import qwen3_debugmodel
 
 
 @contextlib.contextmanager
@@ -219,7 +221,7 @@ def test_microbatch_tokens_match_activation_sharding() -> None:
 
 def test_flex_shard_rejects_features_it_lacks() -> None:
     config = llama3_debugmodel()
-    config.parallelism = ParallelismConfig(fsdp_backend="flex_shard")
+    config.parallelism = ParallelismConfig(fsdp_backend=FlexShardConfig())
 
     with _accelerator_graphs_supported(True), pytest.raises(
         ValueError,
@@ -233,13 +235,38 @@ def test_flex_shard_rejects_features_it_lacks() -> None:
         TrainingEngine.Config.__post_init__(config)
 
 
-def test_flex_shard_rejects_models_with_their_own_fsdp() -> None:
+@pytest.mark.parametrize(
+    "name, value",
+    [
+        ("data_parallel_replicate_degree", 2),
+        ("tensor_parallel_degree", 2),
+        ("context_parallel_degree", 2),
+        ("expert_parallel_degree", 2),
+        ("pipeline_parallel_degree", 2),
+        ("fsdp_symm_mem_scope", "all"),
+        ("fsdp_enable_cpu_offloading", True),
+    ],
+)
+def test_flex_shard_rejects_unsupported_parallelism(name: str, value) -> None:
+    # Recipes assign fields after ParallelismConfig is built, so the check must
+    # run again in the trainer config's __post_init__.
+    config = llama3_debugmodel()
+    config.training.disable_accelerator_graphs = True
+    config.loss = config.loss.loss_fn  # the chunked wrapper's cross-entropy
+    config.debug.distinct_seed_mesh_axes = ["pp", "dp_shard"]  # for CPU offloading
+    config.parallelism.fsdp_backend = FlexShardConfig()
+    setattr(config.parallelism, name, value)
+    with pytest.raises(ValueError, match=rf"does not support parallelism\.{name}="):
+        TrainingEngine.Config.__post_init__(config)
+
+
+def test_flex_shard_rejects_unsupported_models() -> None:
     # Overriding _apply_fsdp bypasses the FlexShard path, so it must raise rather
-    # than silently shard with FSDP2.
+    # than silently shard with FSDP2. Tied weights would silently train wrong.
     def validate(config):
         validate_model_training_config(
             config.model,
-            parallelism=ParallelismConfig(fsdp_backend="flex_shard"),
+            parallelism=ParallelismConfig(fsdp_backend=FlexShardConfig()),
             training=config.training,
             debug=config.debug,
             activation_remat=config.activation_remat,
@@ -251,6 +278,21 @@ def test_flex_shard_rejects_models_with_their_own_fsdp() -> None:
         ValueError, match="DeepSeekV4Model does not support parallelism.fsdp_backend"
     ):
         validate(deepseek_v4_debugmodel())
+    with pytest.raises(ValueError, match="does not support enable_weight_tying"):
+        validate(qwen3_debugmodel())
+
+
+def test_graph_trainer_rejects_flex_shard() -> None:
+    # GraphTrainer models inherit Decoder._apply_fsdp but shard with SimpleFSDP.
+    with pytest.raises(
+        ValueError,
+        match=r"GraphTrainer does not support parallelism.fsdp_backend=FlexShardConfig\(\)",
+    ):
+        GraphTrainer.Config(
+            model=llama3_debugmodel(attn_backend="flex").model,
+            training=TrainingConfig(disable_accelerator_graphs=True),
+            parallelism=ParallelismConfig(fsdp_backend=FlexShardConfig()),
+        )
 
 
 def test_spmd_typechecking_rejects_pipeline_parallelism() -> None:
