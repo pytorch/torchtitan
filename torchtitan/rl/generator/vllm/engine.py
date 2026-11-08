@@ -61,9 +61,10 @@ def add_extra_vllm_engine_args(
     Raises ``ValueError`` for keys TorchTitan already set in ``engine_kwargs`` or
     derives from a config field, so they cannot silently diverge from it.
     """
-    # EngineArgs that TorchTitan sets only when the mapped config field is set (or
-    # derives from it), so they may be absent from engine_kwargs.
+    # EngineArgs owned by a config field. Some are set only when that field is set (or
+    # derived from it), so they may be absent from engine_kwargs.
     config_field_by_engine_arg = {
+        "max_num_seqs": "Generator.Config.max_num_seqs",
         "max_num_batched_tokens": "Generator.Config.max_num_batched_tokens",
         "compilation_config": "VLLMEngine.Config.cuda_graph",
         "seed": "Generator.Config.debug.seed",

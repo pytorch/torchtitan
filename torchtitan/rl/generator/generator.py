@@ -130,9 +130,10 @@ class Generator(Configurable):
 
         max_num_seqs: int = 512
         """The most requests each engine DP rank runs at once; the rest wait in its queue. It
-        also sizes per-request buffers and the decode CUDA graphs, so a cap above what a run sends
-        costs some KV cache. Lower it if the engine refuses to start (hybrid GDN models need one
-        state block per request) or to free memory."""
+        also sizes per-request buffers and the decode CUDA graphs. 512 is above what small runs
+        send and costs them ~1 GiB of KV cache per GPU. It must be <= ``max_num_batched_tokens``.
+        Lower it if vLLM refuses to start a linear-attention model (GDN, KDA) with FULL CUDA
+        graphs: each running request needs one state block."""
 
         checkpointer: CheckpointManager.Config | None = None
         """Optional initial-weight loader for the engine's model.
