@@ -97,6 +97,15 @@ class LocalTokenDispatcher(Module):
         super().__init__()
         self.num_experts = config.num_experts
         self.top_k = config.top_k
+        # Expert ids are sorted as keys on the narrowest integer type that holds
+        # [0, num_experts): the CUDA radix sort's passes scale with key width, so int64
+        # ids take 8x the passes of uint8 ids. Same order.
+        if config.num_experts <= 256:
+            self._expert_ids_sort_dtype = torch.uint8
+        elif config.num_experts <= 2**15:
+            self._expert_ids_sort_dtype = torch.int16
+        else:
+            self._expert_ids_sort_dtype = torch.int64
 
     def init_buffer(self) -> None:
         """Initialize backend communication buffers, if any."""
@@ -125,7 +134,7 @@ class LocalTokenDispatcher(Module):
         """
         # Reorder the token indices to match the order of the experts where N = T*K
         token_indices_experts_sorted_N = torch.argsort(
-            topk_expert_ids_TK.view(-1), stable=True
+            topk_expert_ids_TK.view(-1).to(self._expert_ids_sort_dtype), stable=True
         )
         topk_scores_experts_sorted_N = topk_scores_TK.view(-1)[
             token_indices_experts_sorted_N
