@@ -76,9 +76,7 @@ class Generator(Configurable):
         precision: The trainer's dtypes, which the generator's model mirrors.
         model_path: Path to the HF model checkpoint.
         max_num_seqs: The engine's upper bound on concurrently scheduled sequences (it may admit
-            fewer if KV is tight). The RL loop passes
-            ``Controller.Config.max_num_seqs_per_generator_dp_rank``, which reads
-            ``Config.max_num_seqs``.
+            fewer if KV is tight).
         output_dir: Structured-logger output directory.
         open_result_channel: Opens the asynchronous channel used to fan in
             completions from nonzero data-parallel replicas to rank 0. It must
@@ -131,14 +129,6 @@ class Generator(Configurable):
         """The engine's chunked-prefill chunk size: max tokens scheduled per engine step
         (prefill + decode, summed over the batch). ``None`` (default) leaves the
         engine's own default in place."""
-
-        max_num_seqs: int | None = None
-        """The most requests each engine DP rank runs at once; the rest wait in its queue.
-        ``None`` (default) derives it from the rollouts in flight; see
-        ``Controller.Config.max_num_seqs_per_generator_dp_rank``. A set value is used as is;
-        on FlashAttention-2 GPUs, use a power of two >= the token budget / 64. Lower it if
-        vLLM says "max_num_seqs exceeds available Mamba cache blocks": GDN and KDA models with
-        FULL or FULL_DECODE_ONLY CUDA graphs need one Mamba cache block per running request."""
 
         checkpointer: CheckpointManager.Config | None = None
         """Optional initial-weight loader for the engine's model.
