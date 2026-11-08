@@ -9,26 +9,30 @@
 #
 # Pinned PyPI and git dependencies live in requirements.txt and
 # torchtitan/rl/requirements.txt. This script adds what those files cannot
-# express: matching torch/torchvision/vLLM CUDA nightlies, git-main packages
-# installed without dependencies (so they cannot replace the nightly torch),
-# and the Flash Attention build for the local GPU.
+# express: torch/torchvision CUDA nightlies, a vLLM release on top of them,
+# git-main packages installed without dependencies (so they cannot replace the
+# nightly torch), and the Flash Attention build for the local GPU.
 #
 # Usage (from anywhere; requires uv):
 #   scripts/install_rl_env.sh [--cuda cu132] [--skip-base]
 #       [--flash-attn auto|none|3|4|3,4] [--nvcc] [--constraint FILE]...
 #
-#   --cuda         PyTorch nightly CUDA tag (default: cu132).
+#   --cuda         PyTorch nightly CUDA 13 tag (default: cu132). The vLLM
+#                  release wheel links libcudart.so.13.
 #   --skip-base    Skip requirements.txt and the RL requirements, e.g. in the
 #                  CI image that already contains them.
 #   --flash-attn   Comma-separated versions to install, or auto (default):
 #                  FA4 on SM100+, FA3 on SM90, none elsewhere or without a GPU.
 #   --nvcc         Install nvidia-cuda-nvcc so FlashInfer can JIT-compile its
 #                  kernels when no CUDA toolkit is installed.
-#   --constraint   Extra constraint file for the nightly resolve (repeatable).
+#   --constraint   Extra constraint file for the torch and vLLM installs
+#                  (repeatable).
 
 set -euo pipefail
 
 cuda="cu132"
+# Also set VLLM_VERSION in .github/workflows/validate_release_gpu.yml (2 places).
+vllm_version="0.33.0"
 skip_base=0
 flash_attn="auto"
 install_nvcc=0
@@ -44,6 +48,10 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
+if [[ "$cuda" != cu13* ]]; then
+  echo "--cuda must be a CUDA 13 tag (the vLLM wheel links libcudart.so.13), got $cuda" >&2
+  exit 1
+fi
 
 cd "$(dirname "$0")/.."
 set -x
@@ -52,14 +60,23 @@ if [[ "$skip_base" == "0" ]]; then
   uv pip install -r requirements.txt -r torchtitan/rl/requirements.txt
 fi
 
-# torchvision must come from the same nightly as torch so its C++ extensions
-# match the torch ABI. xformers has no aarch64 wheel; nothing in TorchTitan
-# imports it, but vLLM uses it when present.
-nightly=(torch torchvision vllm)
-if [[ "$(uname -m)" == "x86_64" ]]; then
-  nightly+=(xformers)
-fi
-uv pip install --upgrade "${nightly[@]}" --pre \
+# torchvision nightlies use torch's stable ABI and need only torch>=2.14, so
+# their date can differ from torch's.
+uv pip install --upgrade torch torchvision --pre \
+  --extra-index-url "https://download.pytorch.org/whl/nightly/${cuda}" \
+  --index-strategy unsafe-best-match \
+  "${constraints[@]}"
+
+# The vLLM release pins an older torch, but its compiled kernels use only
+# torch's stable ABI, so they load on the torch nightly; RL CI checks the rest.
+# The override keeps the installed torch and torchvision over vLLM's pins.
+# An override whose marker is never true removes the package: vLLM uses
+# torchaudio and torchcodec only for audio and video inputs.
+overrides="$(mktemp)"
+uv pip freeze | grep -E '^(torch|torchvision)==' > "$overrides"
+printf '%s\n' 'torchaudio; sys_platform == "never"' \
+  'torchcodec; sys_platform == "never"' >> "$overrides"
+uv pip install "vllm==${vllm_version}" --override "$overrides" \
   --extra-index-url "https://download.pytorch.org/whl/nightly/${cuda}" \
   --index-strategy unsafe-best-match \
   "${constraints[@]}"
@@ -70,7 +87,8 @@ from importlib.metadata import version
 wheels = {name: version(name) for name in ("torch", "torchvision", "vllm")}
 print(wheels)
 assert all(
-    ".dev" in wheel and f"+{sys.argv[1]}" in wheel for wheel in wheels.values()
+    ".dev" in wheels[name] and f"+{sys.argv[1]}" in wheels[name]
+    for name in ("torch", "torchvision")
 ), wheels
 PY
 

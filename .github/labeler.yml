@@ -20,12 +20,14 @@
     - .github/workflows/*b200*.yaml
     - tests/integration_tests/b200.py
     - torchtitan_recipes/tests/**/b200.py
+    - scripts/install_rl_env.sh
   draft: false
 
 "ciflow/rl":
   - torchtitan/rl/**
   - tests/rl/**
   - scripts/rl/**
+  - scripts/install_rl_env.sh
   - torchtitan/trainer.py
   - torchtitan/components/checkpointer/**
   - torchtitan/components/data/**
