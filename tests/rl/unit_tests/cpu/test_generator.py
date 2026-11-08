@@ -23,6 +23,7 @@ import pytest
 import torch
 
 import torchtitan.rl.generator.generator as generator_module
+import torchtitan.rl.generator.vllm.config as vllm_config_module
 import torchtitan.rl.generator.vllm.engine as vllm_engine_module
 from torchstore import RankRole
 from torchtitan.components.optim import AdamW
@@ -66,6 +67,7 @@ from vllm.config import (
 from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
+from vllm.usage.usage_lib import UsageContext
 
 
 class _FakeRenderer:
@@ -680,12 +682,31 @@ def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
     assert engine_kwargs["scheduling_policy"] == "priority"
 
 
+# max_num_seqs=8 x max_context_length=1024 caps the budget at 8192.
+@pytest.mark.parametrize("table_value, expected", [(4096, 4096), (16384, 8192)])
+def test_unset_max_num_batched_tokens_uses_vllm_serve_default(
+    monkeypatch, tmp_path, table_value, expected
+):
+    # Injected table values: 4096 is in no real tier, and 16384 is above the 8192 cap.
+    monkeypatch.setattr(
+        vllm_config_module.EngineArgs,
+        "get_batch_defaults",
+        lambda world_size: ({UsageContext.OPENAI_API_SERVER: table_value}, {}),
+    )
+    engine_kwargs = _build_engine_kwargs(
+        monkeypatch, tmp_path, Generator.Config(model=_MODEL_CONFIG)
+    )
+    assert engine_kwargs["max_num_batched_tokens"] == expected
+    # FULL graphs (the default) capture mixed steps up to the same budget.
+    assert engine_kwargs["compilation_config"].cudagraph_capture_sizes[-1] == expected
+
+
 @pytest.mark.parametrize(
     "key, match",
     [
         # Always set by TorchTitan.
         ("scheduling_policy", r"controls: scheduling_policy$"),
-        # Set only when the config field is set, so absent from engine_kwargs here.
+        # Derived from a config field: the error names the field.
         (
             "max_num_batched_tokens",
             r"use Generator\.Config\.max_num_batched_tokens",
@@ -709,6 +730,7 @@ def test_cuda_graph_none_mode_preserves_sequence_parallel_config():
         max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=True,
+        max_num_batched_tokens=2048,
     )
 
     assert compilation_config.cudagraph_mode.name == "NONE"
@@ -728,6 +750,7 @@ def test_expert_sequence_parallel_padding_filters_cuda_graph_sizes():
         max_model_len=4096,
         expert_sequence_parallel_size=parallelism.expert_sequence_parallel_size,
         enable_sequence_parallel=False,
+        max_num_batched_tokens=2048,
     )
 
     assert cfg.cudagraph_capture_sizes == [4, 8]
@@ -739,6 +762,7 @@ def test_expert_sequence_parallel_padding_keeps_small_cuda_graph_batches():
         max_model_len=4096,
         expert_sequence_parallel_size=8,
         enable_sequence_parallel=False,
+        max_num_batched_tokens=2048,
     )
 
     assert cfg.cudagraph_capture_sizes[0] == 8
@@ -754,6 +778,7 @@ def test_expert_sequence_parallel_padding_rejects_no_valid_cuda_graph_sizes():
             max_model_len=4096,
             expert_sequence_parallel_size=4,
             enable_sequence_parallel=False,
+            max_num_batched_tokens=2048,
         )
 
 
@@ -862,6 +887,7 @@ def test_cuda_graph_default_mode_is_full():
         max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
+        max_num_batched_tokens=2048,
     )
     assert cfg.cudagraph_mode.name == "FULL"
     assert int(cfg.mode) == 0
@@ -874,6 +900,7 @@ def test_cuda_graph_full_mode_no_compile():
         max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
+        max_num_batched_tokens=2048,
     )
     assert cfg.cudagraph_mode.name == "FULL"
     assert int(cfg.mode) == 0
@@ -886,6 +913,7 @@ def test_cuda_graph_decode_only_capture_sizes_cover_max_num_seqs():
         max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
+        max_num_batched_tokens=2048,
     )
     sizes = cfg.cudagraph_capture_sizes
     assert 40 in sizes  # 34 sequences pad to 40, not 64
@@ -915,6 +943,7 @@ def test_cuda_graph_full_mode_caps_sizes_at_the_largest_step():
         max_model_len=1000,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
+        max_num_batched_tokens=2048,
     )
     # Packed prefills reach the 2048-token budget, so it is graphed.
     cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(**kwargs)
@@ -939,6 +968,7 @@ def test_cuda_graph_rejects_nonpositive_max_num_seqs():
             max_model_len=4096,
             expert_sequence_parallel_size=1,
             enable_sequence_parallel=False,
+            max_num_batched_tokens=2048,
         )
 
 
@@ -957,6 +987,7 @@ def test_inference_parallelism_propagates_dense_sequence_parallelism():
         max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=parallelism.enable_sequence_parallel,
+        max_num_batched_tokens=2048,
     )
     assert compilation_config.cudagraph_capture_sizes == [1, 4, 5, 8]
     assert compilation_config.pass_config.enable_sp

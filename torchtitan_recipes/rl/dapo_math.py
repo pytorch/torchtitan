@@ -370,6 +370,10 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
             dist_moe_runtime=DistMoeRuntime.Config(
                 inference=True, scratch_capacity_factor=16.0
             ),
+            # Dist-MoE scratch grows with the step budget: 2 GiB per GPU at 2,048 tokens,
+            # 16 GiB at 16,384 (the GB300 default), taken from the KV cache.
+            # TODO: measure 16,384 against the KV cache it costs.
+            max_num_batched_tokens=2048,
             checkpointer=None,
             gpu_memory_limit=0.9,
             sampling=SamplingConfig(

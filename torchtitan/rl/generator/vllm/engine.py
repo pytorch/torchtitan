@@ -36,7 +36,10 @@ from torchtitan.rl.generator.types import (
 from torchtitan.rl.generator.vllm.batch_invariance import (
     force_logprobs_fn_for_batch_invariance,
 )
-from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
+from torchtitan.rl.generator.vllm.config import (
+    resolve_max_num_batched_tokens,
+    VLLMCudaGraphConfig,
+)
 from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
@@ -61,8 +64,8 @@ def add_extra_vllm_engine_args(
     Raises ``ValueError`` for keys TorchTitan already set in ``engine_kwargs`` or
     derives from a config field, so they cannot silently diverge from it.
     """
-    # EngineArgs that TorchTitan sets only when the mapped config field is set (or
-    # derives from it), so they may be absent from engine_kwargs.
+    # EngineArgs owned by a config field. Some are set only when that field is set (or
+    # derived from it), so they may be absent from engine_kwargs.
     config_field_by_engine_arg = {
         "max_num_batched_tokens": "Generator.Config.max_num_batched_tokens",
         "compilation_config": "VLLMEngine.Config.cuda_graph",
@@ -271,8 +274,13 @@ class VLLMEngine(GenerationEngine):
         # returns the raw model's logprobs, before temperature.
         engine_kwargs["logprobs_mode"] = "processed_logprobs"
         engine_kwargs["max_num_seqs"] = max_num_seqs
-        if max_num_batched_tokens is not None:
-            engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
+        max_num_batched_tokens = resolve_max_num_batched_tokens(
+            max_num_batched_tokens,
+            max_num_seqs=max_num_seqs,
+            max_model_len=model.max_context_length,
+            tensor_parallel_size=parallelism.tensor_parallel_degree,
+        )
+        engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
         # Smaller `priority` runs first and is preempted last; we pass `EngineRequest.group_id`
         # (-1 for all validation), so older groups have higher priority (see its docstring).
         # TODO: validation (priority -1) runs before training. Revisit once validation overlaps training.

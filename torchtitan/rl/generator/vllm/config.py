@@ -12,19 +12,43 @@ import logging
 from dataclasses import dataclass
 from typing import Literal
 
+from vllm import EngineArgs
 from vllm.config import CompilationConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
+from vllm.usage.usage_lib import UsageContext
 
 logger = logging.getLogger(__name__)
 
 
-# vLLM's default max_num_batched_tokens (vllm's per-step budget:
-# prefill + decode tokens summed over the batch). Used as the CUDA graph capture
-# cap for "FULL" (which graphs prefill / mixed batches, so capture sizes must
-# reach the per-step budget or those batches fall back to eager) when
-# ``Config.max_num_batched_tokens`` is unset; when that field is set, its value
-# is used instead (and also drives the vLLM engine).
-_DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
+def resolve_max_num_batched_tokens(
+    max_num_batched_tokens: int | None,
+    *,
+    max_num_seqs: int,
+    max_model_len: int,
+    tensor_parallel_size: int,
+) -> int:
+    """Return ``max_num_batched_tokens``, or what ``vllm serve`` picks for this GPU when it is None.
+
+    ``vllm serve`` reads vLLM's per-GPU table (``EngineArgs.get_batch_defaults``) and caps the
+    value at ``max_num_seqs * max_model_len``. The table today:
+        >= 160 GB (B200, GB300)     -> 16384
+        >= 70 GB, not A100 (H100)   -> 8192
+        other GPUs (A100, A10G)     -> 2048
+
+    ``LLMEngine.from_engine_args`` uses ``UsageContext.ENGINE_CONTEXT``, which has no entry in
+    that table, so vLLM itself would pick 2048 on every GPU. The engine and the FULL CUDA graph
+    cap both take the value returned here. ``tensor_parallel_size`` matters only on vLLM's CPU
+    backend.
+    """
+    if max_num_batched_tokens is not None:
+        return max_num_batched_tokens
+    default_max_num_batched_tokens, _ = EngineArgs.get_batch_defaults(
+        tensor_parallel_size
+    )
+    return min(
+        default_max_num_batched_tokens[UsageContext.OPENAI_API_SERVER],
+        max_num_seqs * max_model_len,
+    )
 
 
 @dataclass(kw_only=True, slots=True)
@@ -70,9 +94,9 @@ class VLLMCudaGraphConfig:
         *,
         max_num_seqs: int,
         max_model_len: int,
+        max_num_batched_tokens: int,
         expert_sequence_parallel_size: int,
         enable_sequence_parallel: bool,
-        max_num_batched_tokens: int | None = None,
     ) -> CompilationConfig:
         """Build a vLLM ``CompilationConfig`` for the generator.
 
@@ -80,12 +104,13 @@ class VLLMCudaGraphConfig:
         sizes come from ``_default_capture_sizes``, whose largest size is the cap.
         The cap is ``max_num_seqs`` for ``FULL_DECODE_ONLY`` (decode batch ==
         num_seqs). ``FULL`` also graphs prefill, whose per-step token count is
-        bounded by ``max_num_batched_tokens`` (the configured value, else
-        ``_DEFAULT_MAX_NUM_BATCHED_TOKENS``), so the cap extends to it -- otherwise
+        bounded by ``max_num_batched_tokens``, so the cap extends to it -- otherwise
         prefill chunks larger than the cap fall back to eager. A step holds at most
         ``max_num_seqs`` requests of at most ``max_model_len`` tokens, so ``FULL`` also
         stops at ``max_num_seqs * max_model_len``. ``TorchTitanGPUModelRunner._dummy_run``
         keeps each capture request within ``max_model_len``.
+
+        With ``max_num_batched_tokens=2048``:
 
             FULL, max_num_seqs=8, max_model_len=1000, auto sizes          -> [1, 2, ..., 1536, 2048]
             FULL, max_num_seqs=1, max_model_len=1000, auto sizes          -> [1, 2, ..., 992, 1000]
@@ -119,14 +144,10 @@ class VLLMCudaGraphConfig:
                 "expert_sequence_parallel_size must be positive, got "
                 f"{expert_sequence_parallel_size}"
             )
-        if max_num_batched_tokens is not None:
-            _max_cuda_graph_capture_size = max_num_batched_tokens
-        else:
-            _max_cuda_graph_capture_size = _DEFAULT_MAX_NUM_BATCHED_TOKENS
         cap = max_num_seqs
         max_step_tokens = max_num_seqs * max_model_len
         if self.mode == "FULL":
-            cap = min(max(cap, _max_cuda_graph_capture_size), max_step_tokens)
+            cap = min(max(cap, max_num_batched_tokens), max_step_tokens)
         if self.capture_sizes is not None:
             if not self.capture_sizes or any(s <= 0 for s in self.capture_sizes):
                 raise ValueError(
