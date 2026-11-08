@@ -379,8 +379,7 @@ class DistMuon(Optimizer):
                 raise NotImplementedError(
                     f"{fqn!r} would exchange in {compute_dtype}: DistMuon's "
                     "exchange buffers must be torch.bfloat16, set compute_dtype="
-                    "torch.bfloat16 on its ComputeLayout (ns_dtype selects the "
-                    "Newton-Schulz iteration's dtype)"
+                    "torch.bfloat16 on its ComputeLayout"
                 )
             compute_layouts.append(
                 _ParameterComputeLayout(
@@ -1982,9 +1981,9 @@ def _zeropower_via_newtonschulz(
     coefficients_by_step = _ns_coefficients_by_step(ns_coefficients, ns_steps)
     transposed = update.shape[-2] > update.shape[-1]
     if ns_dtype is torch.bfloat16:
-        # BF16 keeps torch.optim.Muon's ops, so it matches that optimizer bitwise.
-        # The float32-norm path below would make a float32 copy on the host, and
-        # after a BF16 iteration it helps mostly float32 inputs.
+        # BF16 keeps torch.optim.Muon's ops: 2D matrices match it bitwise. The
+        # float32-norm path below would make a float32 copy on the host, and after
+        # a BF16 iteration it helps mostly float32 inputs.
         result = update.to(dtype=torch.bfloat16, copy=True)
         if transposed:
             result = result.transpose(-2, -1)

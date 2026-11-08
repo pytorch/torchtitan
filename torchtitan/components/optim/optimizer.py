@@ -223,8 +223,8 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         changes anything when the parameters live on the host."""
         ns_dtype: Literal["bfloat16", "float16"] = "float16"
         """Dtype of the Newton-Schulz iteration only; the exchange between ranks stays
-        bfloat16. Set ``"bfloat16"`` when Newton-Schulz runs on the host. See
-        FlexShard's ``DistMuon`` docstring."""
+        bfloat16. Set ``"bfloat16"`` when Newton-Schulz runs on the host (CPU offload
+        without ``ns_device="accelerator"``). See FlexShard's ``DistMuon`` docstring."""
         max_nccl_ctas_for_comms: int = -1  # Cap NCCL CTAs to save memory; <=0 disables.
         """Limit NCCL CTAs for DistMuon redistribution only; ``<= 0`` disables.
 
