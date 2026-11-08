@@ -16,7 +16,7 @@ import logging
 import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -30,6 +30,8 @@ from torchtitan.rl.rollout.types import Completion
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+
+ReprefillMode = Literal["new_groups", "next_turn"]
 
 
 class EngineLoopThread:
@@ -131,6 +133,7 @@ class EngineLoop:
         rank: Global rank of this process.
         broadcast_group: All-ranks gloo group that `LoopDecision`s are broadcast over.
         max_engine_steps_between_decisions: ``Generator.Config``'s field.
+        reprefill_after_model_state_dict_load: ``Generator.Config``'s field.
         fetch_model_state_dict: Fills the given model state dict tensors in place with the new
             weights and returns the keys it filled.
     """
@@ -144,6 +147,7 @@ class EngineLoop:
         rank: int,
         broadcast_group: dist.ProcessGroup,
         max_engine_steps_between_decisions: int,
+        reprefill_after_model_state_dict_load: ReprefillMode,
         fetch_model_state_dict: Callable[[dict[str, torch.Tensor]], Iterable[str]],
     ):
         self._engine: GenerationEngine | None = engine
@@ -153,15 +157,19 @@ class EngineLoop:
         self._rank = rank
         self._broadcast_group = broadcast_group
         self._max_engine_steps_between_decisions = max_engine_steps_between_decisions
+        self._reprefill_after_model_state_dict_load = (
+            reprefill_after_model_state_dict_load
+        )
         # Read once: the engine is released on exit, and only the engine loop thread uses it.
         self._holds_session_kv = engine.holds_session_kv
 
         self.policy_version = 0
         # RANK 0: group id -> min policy version the group is pinned to, set at the
-        # group's first admission and used as its prefix cache salt. All rollouts of a
-        # group share the pin, so a rollout first admitted after a load still reuses its
-        # group's prompt KV, at the cost of depending on the group's older version. Only
-        # the controller knows when a group makes no more generation calls, so entries live
+        # group's first admission and used as its prefix cache salt. Used only with
+        # reprefill_after_model_state_dict_load="new_groups". All rollouts of a group
+        # share the pin, so a rollout first admitted after a load still reuses its group's
+        # prompt KV, at the cost of depending on the group's older version. Only the
+        # controller knows when a group makes no more generation calls, so entries live
         # until it calls `release_groups`.
         self._group_min_policy_versions: dict[int, int] = {}
 
@@ -511,9 +519,21 @@ class EngineLoop:
         else:
             # `LoopAction.STEP`: admit whatever is pending (may be empty -> just keep stepping in-flight work).
             for request in pending_engine_requests:
-                request.min_policy_version = self._group_min_policy_versions.setdefault(
-                    request.group_id, self.policy_version
-                )
+                if self._reprefill_after_model_state_dict_load == "next_turn":
+                    # The installed version salts the request, so after a load it can't reuse KV
+                    # cached under older weights.
+                    # TODO: a request still queued in vLLM when a later load lands keeps this salt and
+                    # can reuse pre-load KV (min_policy_version stays honest). The re-prefill burst
+                    # after each load makes such queues. Fix in VLLMEngine at a "next_turn" load: abort
+                    # the requests still waiting with no computed tokens, re-add them with the new
+                    # stamp (same priority and arrival_time) on every rank, and restamp them on rank 0.
+                    request.min_policy_version = self.policy_version
+                else:
+                    request.min_policy_version = (
+                        self._group_min_policy_versions.setdefault(
+                            request.group_id, self.policy_version
+                        )
+                    )
             requests_per_dp_rank = self._request_dispatcher.rank0_route(
                 pending_engine_requests
             )

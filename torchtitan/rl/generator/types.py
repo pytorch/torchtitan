@@ -70,7 +70,7 @@ class EngineRequest:
     min_policy_version: int = field(init=False)
     """Oldest policy version this request's KV can come from. It is also the prefix cache salt,
     so the request reuses only KV cached by requests with the same value. Rank 0 sets it at
-    admission to the version its group was pinned to."""
+    admission; see ``Generator.Config.reprefill_after_model_state_dict_load``."""
 
 
 @dataclass(kw_only=True, slots=True)
