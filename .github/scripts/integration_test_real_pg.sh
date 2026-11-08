@@ -35,7 +35,7 @@ if [ -n "${TORCH_VERSION}" ]; then
 fi
 python -m pip install --force-reinstall --pre \
   "${TORCH_SPEC}" torchvision --index-url "${INDEX_URL}"
-USE_CPP=0 python -m pip install --pre torchao --index-url "${INDEX_URL}"
+USE_CPP=0 python -m pip install --pre -r .github/requirements-torchao.txt --index-url "${INDEX_URL}"
 
 GPU_ARCH="a10g"
 if [[ "${GPU_ARCH_TYPE}" == "rocm" ]]; then
