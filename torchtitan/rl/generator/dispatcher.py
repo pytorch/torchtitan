@@ -391,7 +391,8 @@ def _prepare_generation_request_metrics(
     # in SchedulerStats / IterationStats, which only reach a registered
     # vllm.v1.metrics.loggers.StatLoggerBase (VllmOtelStatLogger, when
     # VLLMEngine.Config.stat_logger is set). To log one to W&B, carry it on a
-    # finished request like the CUDA graph padding counts (VLLMEngine.step).
+    # finished request like the CUDA graph padding counts (VLLMEngine.step). A second
+    # such stat should switch to one list of engine metrics built in VLLMEngine.step.
 
     metric_values: dict[str, float] = {}
     if inputs.num_cached_tokens is not None:
@@ -427,8 +428,8 @@ def _prepare_generation_request_metrics(
         for metric in (m.Metric(key, m.Mean(value)), m.Metric(key, m.Max(value)))
     ]
     if inputs.num_engine_padded_tokens > 0:
-        # Covers every request in the engine since its last report, training and validation
-        # alike, so the key has no prefix. Weighted by forward tokens. Eager steps count only
+        # Covers every request in the engine since the last `pop_forward_token_counts`, training
+        # and validation alike, so the key has no prefix. Weighted by forward tokens. Eager steps count only
         # sequence-parallel rounding.
         num_paddings = (
             inputs.num_engine_padded_tokens - inputs.num_engine_unpadded_tokens

@@ -88,8 +88,8 @@ class RequestMetricsInputs:
     first_token_latency: float = 0.0
     num_generation_tokens: int = 0
     num_preemptions: int = 0
-    # The whole engine's forward tokens since its last report, before and after padding (not
-    # this request's own); set on one finished request per engine step, else 0.
+    # The whole engine's forward tokens since the last `pop_forward_token_counts`, before and
+    # after padding (not this request's own); set on one finished request per step, else 0.
     num_engine_unpadded_tokens: int = 0
     num_engine_padded_tokens: int = 0
 

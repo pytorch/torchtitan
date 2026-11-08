@@ -393,9 +393,10 @@ class Generator(Configurable):
             routing_session_id: Stable session key for in-mesh DP routing.
             sampling_config: Optional per-call override for the generator's
                 default SamplingConfig.
-            metrics_prefix: Namespace prepended to every metric key on the returned
-                `Completion` (default ``"generator"``). Callers that need to keep streams
-                separate, e.g. ``"validation/generator"``, can override it.
+            metrics_prefix: Namespace prepended to every per-request metric key on the
+                returned `Completion` (default ``"generator"``). Callers that need to keep
+                streams separate, e.g. ``"validation/generator"``, can override it. The
+                engine-wide ``generator/cudagraph_padding_frac`` keeps its fixed key.
 
         Example:
 
