@@ -257,9 +257,6 @@ def _dist_muon_optimizer(
                 adjust_lr_fn="match_rms_adamw",
                 ns_steps=muon_ns_steps,
                 ns_coefficients=muon_ns_coefficients,
-                # Parameters stay on the GPU here, so Newton-Schulz runs there, where
-                # float16 has less rounding error than BF16 (see FlexShard's DistMuon).
-                ns_dtype="float16",
             ),
             AdamW.Config(
                 pattern=r".*",

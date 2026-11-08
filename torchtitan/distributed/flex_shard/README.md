@@ -18,7 +18,7 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   compute ranks and directions are sent back in this dtype. DistMuon's
   exchange buffers accept only `torch.bfloat16`, so every FP32 parameter sets
   it. DistMuon's `ns_dtype` selects the Newton-Schulz iteration's dtype
-  (`torch.bfloat16` or `torch.float16`).
+  (`torch.float16` by default, or `torch.bfloat16`).
 - `BlockShard` shards complete contiguous blocks along one tensor dimension. It
   preserves the tensor's rank and global shape and never creates a tensor view.
 - `Owned` assigns a complete subgroup-local logical tensor to one dynamically

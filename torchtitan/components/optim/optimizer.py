@@ -221,10 +221,10 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         Newton-Schulz there and copies the result back. Momentum, parameters,
         gradients and the exchange between ranks stay where they are, so this only
         changes anything when the parameters live on the host."""
-        ns_dtype: Literal["bfloat16", "float16"] = "bfloat16"
+        ns_dtype: Literal["bfloat16", "float16"] = "float16"
         """Dtype of the Newton-Schulz iteration only; the exchange between ranks stays
-        bfloat16. Consider ``"float16"`` when Newton-Schulz runs on the accelerator;
-        keep ``"bfloat16"`` on the host. See FlexShard's ``DistMuon`` docstring."""
+        bfloat16. Set ``"bfloat16"`` when Newton-Schulz runs on the host. See
+        FlexShard's ``DistMuon`` docstring."""
         max_nccl_ctas_for_comms: int = -1  # Cap NCCL CTAs to save memory; <=0 disables.
         """Limit NCCL CTAs for DistMuon redistribution only; ``<= 0`` disables.
 

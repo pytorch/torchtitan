@@ -203,10 +203,10 @@ class DistMuon(Optimizer):
     ``ns_dtype`` is the dtype of the Newton-Schulz iteration only. Redistributed
     inputs and directions stay in ``ComputeLayout.compute_dtype`` (BF16).
 
-    - ``torch.float16``: consider it when Newton-Schulz runs on the accelerator.
-      Its 3 extra mantissa bits cut the iteration's rounding error (Step 3.5
-      Flash, arXiv 2602.10604, Section 4.1.1).
-    - ``torch.bfloat16``: keep it when Newton-Schulz runs on the host. float16
+    - ``torch.float16`` (default): for Newton-Schulz on the accelerator. Its 3
+      extra mantissa bits cut the iteration's rounding error (Step 3.5 Flash,
+      arXiv 2602.10604, Section 4.1.1).
+    - ``torch.bfloat16``: set it when Newton-Schulz runs on the host. float16
       matmuls are slower there, and the float16 path normalizes through a
       float32 copy.
 
@@ -240,7 +240,7 @@ class DistMuon(Optimizer):
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
         ns_device: Literal["accelerator"] | None = None,
-        ns_dtype: torch.dtype = torch.bfloat16,
+        ns_dtype: torch.dtype = torch.float16,
     ) -> None:
         self._ns_device = self._resolve_ns_device(ns_device)
         if ns_dtype not in (torch.bfloat16, torch.float16):
@@ -1982,10 +1982,9 @@ def _zeropower_via_newtonschulz(
     coefficients_by_step = _ns_coefficients_by_step(ns_coefficients, ns_steps)
     transposed = update.shape[-2] > update.shape[-1]
     if ns_dtype is torch.bfloat16:
-        # BF16 keeps BF16 normalization: the float32-norm path below would change
-        # every BF16 recipe's numerics and loss goldens, and make a float32 copy on
-        # the host. After a BF16 iteration, it helps mostly float32 inputs
-        # (parameters that skip the BF16 exchange).
+        # BF16 keeps torch.optim.Muon's ops, so it matches that optimizer bitwise.
+        # The float32-norm path below would make a float32 copy on the host, and
+        # after a BF16 iteration it helps mostly float32 inputs.
         result = update.to(dtype=torch.bfloat16, copy=True)
         if transposed:
             result = result.transpose(-2, -1)
