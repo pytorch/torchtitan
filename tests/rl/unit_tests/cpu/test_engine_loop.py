@@ -1504,9 +1504,13 @@ def test_drain_task_handles_peer_results_on_the_engine_thread(
                 3,
                 5,
             )
-        # A valid peer result frees its DP rank: only the "busy" reservation is left.
+        # A valid peer result frees its DP rank: only the "busy" reservation is left. Read it on
+        # the engine loop: the reply resolves before the release, in the same loop callback.
         if peer_result != "unknown":
-            assert dispatcher._rank0_dp_router._reservations == {"busy": 0}
+            reservations = await _on_engine_loop(
+                engine_loop, lambda: dict(dispatcher._rank0_dp_router._reservations)
+            )
+            assert reservations == {"busy": 0}
         assert engine.threads == set()  # rank 0's own DP replica served nothing
         assert set(recv_threads) == {engine_loop.engine_thread.thread}
 
