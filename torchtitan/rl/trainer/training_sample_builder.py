@@ -268,8 +268,8 @@ class TrainingSampleBuilder(Configurable):
             TITO is our default;
 
         Each packed training_sample records the min/max policy version across its turns: `min_policy_version`
-        = the oldest (opening) turn's version (the off-policy filter reads it), `max_policy_version` = the
-        newest version any of its turns reached.
+        = the oldest version any of its turns depends on (the policy-age metrics and the max_offpolicy_steps
+        check read it), `max_policy_version` = the newest version any of its turns reached.
 
         Example (5 turns; the env compacts history before turn 3, so the prefix breaks -> 2 training_samples).
         P = prompt; C = completion; E = env reply
@@ -392,7 +392,11 @@ class TrainingSampleBuilder(Configurable):
                 np.zeros(num_delta, dtype=np.float32),
                 np.full(num_completion, rollout_advantage, dtype=np.float32),
             ]
-            # Widen the segment's version span to include this turn (the min stays the opening turn's).
+            # Widen the segment's version span to include this turn. A later turn can be older than
+            # the opening one: its session moved to a generator that has not loaded the new weights.
+            sample_in_progress.min_policy_version = min(
+                sample_in_progress.min_policy_version, rollout_turn.min_policy_version
+            )
             sample_in_progress.max_policy_version = max(
                 sample_in_progress.max_policy_version, rollout_turn.max_policy_version
             )
