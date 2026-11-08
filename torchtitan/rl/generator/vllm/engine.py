@@ -42,13 +42,13 @@ from torchtitan.rl.generator.vllm.registry import (
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
     vllm_attention_backend,
+    vllm_block_size,
 )
 from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.generator.vllm.stat_logger import (
     StatLoggerContext,
     VllmOtelStatLogger,
 )
-from torchtitan.tools.utils import has_cuda_capability
 
 logger = logging.getLogger(__name__)
 
@@ -306,9 +306,9 @@ class VLLMEngine(GenerationEngine):
         # - None: every full block boundary, as before v0.29. Blocks are still freed
         #   when the request moves past them; hashed ones stay reusable until evicted.
         engine_kwargs["prefix_cache_retention_interval"] = None
-        # FA2 requires block_size to be a multiple of 256
-        if not has_cuda_capability(9, 0):
-            engine_kwargs["block_size"] = 256
+        block_size = vllm_block_size(model)
+        if block_size is not None:
+            engine_kwargs["block_size"] = block_size
         vllm_compilation_config = self.config.cuda_graph.get_vllm_compilation_config(
             max_num_seqs=max_num_seqs,
             max_model_len=model.max_context_length,
