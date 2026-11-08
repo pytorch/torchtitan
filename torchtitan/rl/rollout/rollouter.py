@@ -102,8 +102,8 @@ class Rollouter(Configurable):
         training_dataloader: RolloutDataLoader.Config
         """Builds a checkpointable iterator of identified training inputs."""
 
-        validation_dataloader: ValidationDataLoader.Config | None
-        """Yields the prompts of one validation pass. None: no validation."""
+        validation_dataloader: ValidationDataLoader.Config
+        """Yields the prompts of one validation pass. `Controller.Config.evaluator = None` turns validation off."""
         # TODO: support several validation datasets, each logged under its own metric keys.
 
         worker: RolloutWorker.Config

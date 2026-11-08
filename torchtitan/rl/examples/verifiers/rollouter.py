@@ -127,7 +127,7 @@ class VerifiersRollouter(Rollouter):
 
         def __post_init__(self) -> None:
             Rollouter.Config.__post_init__(self)
-            if self.validation_dataloader is not None and not isinstance(
+            if not isinstance(
                 self.validation_dataloader.dataset, VerifiersTaskDataset.Config
             ):
                 raise ValueError(
