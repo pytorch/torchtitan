@@ -253,26 +253,30 @@ class VerifiersRollouter(Rollouter):
         sampling: SamplingConfig,
     ) -> RolloutGroup:
         """Run sibling rollouts through Verifiers, then compute advantages."""
-        if self._generation_server is None:
+        generation_server = self._generation_server
+        if generation_server is None:
             raise RuntimeError("Verifiers rollouter is not initialized")
-        self._generation_server.set_generate_fn(generate_fn)
-        results = await asyncio.gather(
-            *(
-                self._run_single_rollout(
-                    release_session_fn=release_session_fn,
-                    sample=sample,
-                    sampling=(
-                        sampling
-                        if sampling.seed is None
-                        else replace(sampling, seed=sampling.seed + rollout_id)
-                    ),
-                    group_id=group_id,
-                    rollout_id=rollout_id,
-                )
-                for rollout_id in range(group_size)
-            ),
-            return_exceptions=True,
-        )
+        generation_server.generate_fns[group_id] = generate_fn
+        try:
+            results = await asyncio.gather(
+                *(
+                    self._run_single_rollout(
+                        release_session_fn=release_session_fn,
+                        sample=sample,
+                        sampling=(
+                            sampling
+                            if sampling.seed is None
+                            else replace(sampling, seed=sampling.seed + rollout_id)
+                        ),
+                        group_id=group_id,
+                        rollout_id=rollout_id,
+                    )
+                    for rollout_id in range(group_size)
+                ),
+                return_exceptions=True,
+            )
+        finally:
+            del generation_server.generate_fns[group_id]
         # Raise only after every sibling finished: the caller releases the group next, and a
         # sibling still generating would pin the group again, with nothing left to release it.
         for result in results:
