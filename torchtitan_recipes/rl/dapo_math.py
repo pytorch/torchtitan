@@ -63,8 +63,6 @@ from torchtitan.rl.examples.dapo_math.rubric import RewardMathVerify
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
-from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
-from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
@@ -204,7 +202,6 @@ def _qwen3_4b_dapo_math_config(
         generator=Generator.Config(
             model=generator_model,
             parallelism=generator_parallelism,
-            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,
@@ -365,7 +362,6 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
         generator=Generator.Config(
             model=generator_model,
             parallelism=generator_parallelism,
-            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             # vLLM's profiling dummy batch can route every token to one expert.
             dist_moe_runtime=DistMoeRuntime.Config(
                 inference=True, scratch_capacity_factor=16.0
@@ -504,7 +500,6 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
         generator=Generator.Config(
             model=generator_model,
             parallelism=generator_parallelism,
-            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             dist_moe_runtime=DistMoeRuntime.Config(
                 scratch_capacity_factor=4.0, inference=True
             ),

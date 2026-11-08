@@ -641,6 +641,8 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
+            # TODO: use FULL CUDA graphs once the EP > 1 MoE token dispatcher can be
+            # captured; its all-to-all copies split sizes to the host.
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             parallelism=generator_parallelism,
             checkpointer=None,
@@ -848,7 +850,6 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
