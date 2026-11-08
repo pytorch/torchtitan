@@ -93,7 +93,9 @@ class GenerationServer(Configurable):
         self.host = config.host
         self.requested_port = config.port
         self.max_rollout_tokens = config.max_rollout_tokens
-        self.generate_fn: GenerateFn | None = None
+        # The GenerateFn of each running rollout group, by group id. Groups can pass different
+        # ones: validation logs its generation metrics under its own prefix.
+        self.generate_fns: dict[int, GenerateFn] = {}
         self.runner: web.AppRunner | None = None
         self.bound_port: int | None = None
         self.request_counts: dict[str, int] = {}
@@ -109,9 +111,6 @@ class GenerationServer(Configurable):
     def base_url(self) -> str:
         """OpenAI-compatible base URL used by the local Verifiers client."""
         return f"http://{self.host}:{self.port}/v1"
-
-    def set_generate_fn(self, generate_fn: GenerateFn) -> None:
-        self.generate_fn = generate_fn
 
     async def start(self) -> None:
         if self.runner is not None:
@@ -169,10 +168,6 @@ class GenerationServer(Configurable):
         return web.json_response({"object": "list", "data": [model]})
 
     async def _handle_generate_request(self, request: web.Request) -> web.Response:
-        if self.generate_fn is None:
-            return web.json_response(
-                {"error": "TorchTitan GenerateFn is not ready"}, status=503
-            )
         session_id = request.headers.get(_SESSION_ID_HEADER)
         if not session_id:
             return web.json_response(
@@ -206,12 +201,18 @@ class GenerationServer(Configurable):
                 raise ValueError("multimodal features are not supported")
         except (TypeError, ValueError) as error:
             return web.json_response({"error": str(error)}, status=400)
+        # A group that ended has no entry, e.g. a cancelled group whose Verifiers rollout still sends calls.
+        generate_fn = self.generate_fns.get(group_id)
+        if generate_fn is None:
+            return web.json_response(
+                {"error": f"rollout group {group_id} is not running"}, status=400
+            )
 
         request_index = self.request_counts.get(session_id, 0)
         self.request_counts[session_id] = request_index + 1
         request_id = f"{session_id}/request={request_index}"
         try:
-            completion = await self.generate_fn(
+            completion = await generate_fn(
                 prompt_token_ids,
                 request_id=request_id,
                 group_id=group_id,
