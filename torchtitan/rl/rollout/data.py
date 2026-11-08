@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import itertools
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Iterable, Iterator
@@ -25,6 +26,42 @@ class RLDataset(Configurable, ABC):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         pass
+
+
+class ValidationDataLoader(Configurable):
+    """Builds the validation dataset and yields one pass of it, one prompt at a time.
+
+    Example: 30 AIME problems, the dataset repeats forever.
+        num_prompts=30    -> problems 0..29
+        num_prompts=60    -> problems 0..29, twice
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        dataset: RLDataset.Config
+        """Built again for every pass, so each pass reads the same prompts in the same order."""
+
+        num_prompts: int
+        """Prompts per pass (>= 1). Every validation dataset in the repo repeats forever, so this ends the pass."""
+
+        def __post_init__(self) -> None:
+            if self.num_prompts < 1:
+                raise ValueError(f"num_prompts must be >= 1, got {self.num_prompts}")
+
+    def __init__(self, config: Config) -> None:
+        self._dataset = config.dataset.build()
+        self._num_prompts = config.num_prompts
+
+    def __iter__(self) -> Iterator[object]:
+        num_yielded = 0
+        for sample in itertools.islice(self._dataset, self._num_prompts):
+            yield sample
+            num_yielded += 1
+        if num_yielded < self._num_prompts:
+            raise RuntimeError(
+                f"validation dataset ended after {num_yielded} prompts, "
+                f"but num_prompts is {self._num_prompts}"
+            )
 
 
 class RolloutDataLoader(Stateful, ABC, Configurable):

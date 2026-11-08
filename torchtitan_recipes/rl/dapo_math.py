@@ -52,11 +52,7 @@ from torchtitan.models.muse_spark.tokenizer import MuseSparkTokenizer
 from torchtitan.models.qwen3 import build_model_config
 
 from torchtitan.observability.metrics import WandBLogger
-from torchtitan.rl.controller.controller import (
-    AsyncLoopConfig,
-    Controller,
-    ValidationConfig,
-)
+from torchtitan.rl.controller.controller import AsyncLoopConfig, Controller
 from torchtitan.rl.examples.dapo_math.data import AIME2025Dataset, DapoMathDataset
 from torchtitan.rl.examples.dapo_math.env import DapoMathEnv
 from torchtitan.rl.examples.dapo_math.rubric import RewardMathVerify
@@ -67,7 +63,7 @@ from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
-from torchtitan.rl.rollout.data import IterableRolloutDataLoader
+from torchtitan.rl.rollout.data import IterableRolloutDataLoader, ValidationDataLoader
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.rollout.token_env import TokenEnv
@@ -86,14 +82,14 @@ from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
 def _dapo_math_rollouter_config(
     *,
-    validation_dataset: AIME2025Dataset.Config,
+    validation_dataloader: ValidationDataLoader.Config | None,
     token_env: TokenEnv.Config,
 ) -> Rollouter.Config:
     return Rollouter.Config(
         training_dataloader=IterableRolloutDataLoader.Config(
             dataset=DapoMathDataset.Config()
         ),
-        validation_dataset=validation_dataset,
+        validation_dataloader=validation_dataloader,
         worker=RolloutWorker.Config(
             rubric=Rubric.Config(
                 reward_fns=[RewardMathVerify.Config(weight=1.0)],
@@ -113,8 +109,6 @@ def _qwen3_4b_dapo_math_config(
     dump_folder: str,
 ) -> Controller.Config:
     """Build the shared Qwen3-4B DAPO-Math configuration."""
-    num_validation_samples = 30
-    validation_dataset = AIME2025Dataset.Config()
     trainer_parallelism = ParallelismConfig(
         data_parallel_replicate_degree=1,
         data_parallel_shard_degree=1,
@@ -140,12 +134,11 @@ def _qwen3_4b_dapo_math_config(
             num_prompts_per_train_step=8,
             num_samples_per_prompt=16,
             target_offpolicy_steps=4,
-            validation=ValidationConfig(
-                steps=num_validation_samples,
-            ),
         ),
         rollouter=_dapo_math_rollouter_config(
-            validation_dataset=validation_dataset,
+            validation_dataloader=ValidationDataLoader.Config(
+                dataset=AIME2025Dataset.Config(), num_prompts=30
+            ),
             token_env=TokenEnv.Config(
                 max_rollout_tokens=max_total_tokens,
                 max_num_turns=1,
@@ -280,10 +273,8 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
         attn_backend="varlen",
     )
     rollouter = _dapo_math_rollouter_config(
-        validation_dataset=AIME2025Dataset.Config(
-            repo_id=aime2025_repo_id,
-            num_samples=8,
-        ),
+        # Skip the pre- and post-training validation passes.
+        validation_dataloader=None,
         token_env=TokenEnv.Config(
             max_rollout_tokens=max_total_tokens,
             max_num_turns=1,
@@ -301,8 +292,6 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
             num_prompts_per_train_step=8,
             num_samples_per_prompt=8,
             target_offpolicy_steps=0,
-            # Skip the pre- and post-training validation passes.
-            validation=ValidationConfig(steps=0),
             # Keep all-pass / all-fail groups so every step trains exactly
             # num_prompts_per_train_step groups.
             batcher=Batcher.Config(
@@ -438,10 +427,11 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
             num_prompts_per_train_step=32,
             num_samples_per_prompt=16,
             target_offpolicy_steps=4,
-            validation=ValidationConfig(steps=30),
         ),
         rollouter=_dapo_math_rollouter_config(
-            validation_dataset=AIME2025Dataset.Config(),
+            validation_dataloader=ValidationDataLoader.Config(
+                dataset=AIME2025Dataset.Config(), num_prompts=30
+            ),
             token_env=TokenEnv.Config(
                 max_rollout_tokens=max_total_tokens,
                 max_num_turns=1,

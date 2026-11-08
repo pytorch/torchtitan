@@ -7,9 +7,8 @@
 from __future__ import annotations
 
 import asyncio
-import itertools
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from typing import Any, TYPE_CHECKING
 
@@ -20,7 +19,7 @@ from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
-from torchtitan.rl.rollout.data import RLDataset, RolloutDataLoader
+from torchtitan.rl.rollout.data import RolloutDataLoader, ValidationDataLoader
 from torchtitan.rl.rollout.message_env import MessageEnv
 from torchtitan.rl.rollout.rubric import Rubric, RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv
@@ -76,7 +75,9 @@ class Rollouter(Configurable):
             training_dataloader=IterableRolloutDataLoader.Config(
                 dataset=MyDataset.Config()
             ),
-            validation_dataset=MyDataset.Config(),
+            validation_dataloader=ValidationDataLoader.Config(
+                dataset=MyDataset.Config(), num_prompts=30
+            ),
             worker=RolloutWorker.Config(
                 rubric=Rubric.Config(
                     reward_fns=[RewardCorrect.Config(), RewardFormat.Config(weight=0.3)]
@@ -101,8 +102,9 @@ class Rollouter(Configurable):
         training_dataloader: RolloutDataLoader.Config
         """Builds a checkpointable iterator of identified training inputs."""
 
-        validation_dataset: RLDataset.Config
-        """Builds an iterable validation dataset."""
+        validation_dataloader: ValidationDataLoader.Config | None = None
+        """Yields the prompts of one validation pass. None: no validation."""
+        # TODO: support several validation datasets, each logged under its own metric keys.
 
         worker: RolloutWorker.Config
         """How a rollout group is built, driven, scored and advantaged. Selects the
@@ -148,16 +150,15 @@ class Rollouter(Configurable):
         """Mark training samples as safe to omit from the next checkpoint."""
         self._training_dataloader.commit(sample_ids)
 
-    def get_validation_samples(self, steps: int) -> list[object]:
-        """Materialize one fresh validation pass, optionally bounded by steps."""
-        validation_data = self._config.validation_dataset.build()
-        try:
-            iterator = iter(validation_data)
-        except TypeError as error:
-            raise ValueError("validation_dataset must build an iterable") from error
-        if steps == -1:
-            return list(iterator)
-        return list(itertools.islice(iterator, steps))
+    def iter_validation_samples(self) -> Iterator[object]:
+        """Return one validation pass from a fresh dataset: same prompts, same order on every call."""
+        validation_dataloader = self._config.validation_dataloader
+        if validation_dataloader is None:
+            raise RuntimeError(
+                "iter_validation_samples needs Rollouter.Config.validation_dataloader, "
+                "but it is None"
+            )
+        return iter(validation_dataloader.build())
 
     async def setup_async(
         self,

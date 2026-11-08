@@ -36,11 +36,7 @@ from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
 from torchtitan.models.qwen3_5 import build_model_config
-from torchtitan.rl.controller.controller import (
-    AsyncLoopConfig,
-    Controller,
-    ValidationConfig,
-)
+from torchtitan.rl.controller.controller import AsyncLoopConfig, Controller
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
 from torchtitan.rl.examples.verifiers.env_server import VerifiersEnvServer
 from torchtitan.rl.examples.verifiers.generation_server import GenerationServer
@@ -62,7 +58,7 @@ from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
-from torchtitan.rl.rollout.data import IterableRolloutDataLoader
+from torchtitan.rl.rollout.data import IterableRolloutDataLoader, ValidationDataLoader
 from torchtitan.rl.rollout.recorder import (
     KeepExtremeRewardsFilter,
     RolloutSampleRecorder,
@@ -115,12 +111,16 @@ def _terminal_bench_rollouter_config(
                 shuffle=True,
             ),
         ),
-        validation_dataset=VerifiersTaskDataset.Config(
-            verifiers_taskset=TerminalTasksetConfig(
-                id=taskset_id, dataset=validation_dataset
+        validation_dataloader=ValidationDataLoader.Config(
+            dataset=VerifiersTaskDataset.Config(
+                verifiers_taskset=TerminalTasksetConfig(
+                    id=taskset_id, dataset=validation_dataset
+                ),
+                seed=99,
+                shuffle=False,
             ),
-            seed=99,
-            shuffle=False,
+            # terminal-bench-2-1 has 89 tasks: one pass runs each task once.
+            num_prompts=89,
         ),
         verifiers_env_server=VerifiersEnvServer.Config(
             environment=HarborEnvConfig(
@@ -168,7 +168,6 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
         num_prompts_per_train_step=12,
         num_samples_per_prompt=32,
         target_offpolicy_steps=3,
-        validation=ValidationConfig(steps=89),
     )
     trainer_parallelism = ParallelismConfig(
         data_parallel_replicate_degree=1,
@@ -308,7 +307,6 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
         num_prompts_per_train_step=8,
         num_samples_per_prompt=32,
         target_offpolicy_steps=4,
-        validation=ValidationConfig(steps=89),
     )
     # TODO: update to distMoE model config
     trainer_parallelism = ParallelismConfig(
@@ -430,7 +428,6 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
         num_training_steps=100,
         num_prompts_per_train_step=8,
         num_samples_per_prompt=8,
-        validation=ValidationConfig(steps=89),
     )
     trainer_parallelism = ParallelismConfig(
         data_parallel_shard_degree=4,

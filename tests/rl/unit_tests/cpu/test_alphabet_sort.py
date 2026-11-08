@@ -434,7 +434,7 @@ def test_rollouter_config_wires_alphabet_sort() -> None:
     config = _alphabet_sort_rollouter_config()
     assert isinstance(config.training_dataloader, IterableRolloutDataLoader.Config)
     assert isinstance(config.training_dataloader.dataset, AlphabetSortDataset.Config)
-    assert isinstance(config.validation_dataset, AlphabetSortDataset.Config)
+    assert isinstance(config.validation_dataloader.dataset, AlphabetSortDataset.Config)
     assert isinstance(config.worker.message_env, AlphabetSortEnv.Config)
     assert len(config.worker.rubric.reward_fns) == 1
     assert isinstance(config.worker.rubric.reward_fns[0], RewardAlphabetSort.Config)
