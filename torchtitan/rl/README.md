@@ -212,7 +212,7 @@ scripts/install_rl_env.sh
 ```
 
 The script installs the core and RL requirements (Monarch, OpenTelemetry, ...),
-matching PyTorch, torchvision and vLLM CUDA nightlies, TorchStore and
+PyTorch and torchvision CUDA nightlies, a vLLM release, TorchStore and
 batch-invariant ops (git main, without dependencies so they cannot replace the
 nightly torch), and the Flash Attention build for the local GPU: FA4 on
 Blackwell (SM100+), FA3 on Hopper (SM90). TorchTitan uses the FA2
@@ -225,9 +225,9 @@ Gated DeltaNet (Qwen3.5) runs Attention Gym's cuDNN chunk kernels on Blackwell
 (SM100/SM103) and its fused kernels elsewhere. The `cudnn` extra in the
 `attn-gym[linear,cudnn]` dependency installs them.
 
-**NOTE:** The pre-built vLLM wheels are built for CUDA 13.2, though they should
-work with most older CUDA versions. A vLLM nightly must match the PyTorch
-nightly build date, which installing both from the same index ensures.
+**NOTE:** The pinned vLLM release (`vllm_version` in `scripts/install_rl_env.sh`)
+is a CUDA 13 wheel. Its compiled kernels use only torch's stable ABI, so they
+load on the PyTorch nightly; RL CI checks the rest.
 
 2. From the TorchTitan repository root, add the checkout to `PYTHONPATH`. Monarch-spawned RL worker processes inherit this environment variable, so they can import the local `torchtitan` package:
 ```bash

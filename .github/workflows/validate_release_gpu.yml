@@ -194,7 +194,7 @@ jobs:
       timeout: 180
       script: |
         VALIDATION_SUITE="${{ matrix.validation-suite }}" \
-        VLLM_VERSION="1.0.0.dev20261005+cu132" \
+        VLLM_VERSION="0.33.0" \
         TORCH_VERSION="2.15.0" \
         TORCHVISION_VERSION="0.29.2" \
         PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu132" \
@@ -222,7 +222,7 @@ jobs:
 
       - name: Validate B200 RL release candidate
         env:
-          VLLM_VERSION: '1.0.0.dev20261005+cu132'
+          VLLM_VERSION: '0.33.0'
         run: |
           bash .ci/docker/common/install_base.sh
 
