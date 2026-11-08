@@ -36,6 +36,8 @@ from torchtitan.rl.trainer.training_sample_builder import (
     TrainingSampleGroup,
 )
 
+from tests.rl.unit_tests.cpu.test_evaluator import RecordingEvaluator
+
 
 def test_controller_config_maybe_log(tmp_path, caplog) -> None:
     from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_5_debug_varlen
@@ -793,7 +795,7 @@ async def _block_forever(*args, **kwargs) -> None:
     await asyncio.Event().wait()
 
 
-def _run_with_generator_watcher(watcher) -> None:
+def _run_with_generator_watcher(watcher, evaluator: RecordingEvaluator) -> None:
     """Run Controller.run with every stage but the engine-loop watcher stubbed to block."""
     controller = object.__new__(Controller)
     controller.config = SimpleNamespace(
@@ -821,10 +823,10 @@ def _run_with_generator_watcher(watcher) -> None:
     controller.generator_router = SimpleNamespace(
         wait_engine_loop=SimpleNamespace(call_one=watcher)
     )
+    controller.evaluator = evaluator
     with (
         patch.multiple(
             Controller,
-            _validate_and_log=AsyncMock(return_value={}),
             _make_generate_fn=lambda self, metrics_prefix: None,
             _data_input_loop=_block_forever,
             _rollout_loop=_block_forever,
@@ -839,15 +841,19 @@ def test_run_fails_when_an_engine_loop_crashes() -> None:
     async def crashed() -> None:
         raise RuntimeError("engine loop crashed")
 
+    evaluator = RecordingEvaluator()
     with pytest.raises(RuntimeError, match="engine loop crashed"):
-        _run_with_generator_watcher(crashed)
+        _run_with_generator_watcher(crashed, evaluator)
+    assert evaluator.calls == [("on_step", 0), ("close", False)]
 
 
 def test_run_fails_when_the_engine_loops_exit_mid_run() -> None:
     async def exited() -> None:
         return None
 
+    evaluator = RecordingEvaluator()
     with pytest.raises(
         RuntimeError, match="generator_wait_engine_loop exited unexpectedly"
     ):
-        _run_with_generator_watcher(exited)
+        _run_with_generator_watcher(exited, evaluator)
+    assert evaluator.calls == [("on_step", 0), ("close", False)]

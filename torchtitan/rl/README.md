@@ -88,6 +88,9 @@ The package is organized by responsibility and dependency boundary:
   data types including the generation contract (`types.py`: `GenerateFn`,
   `Completion`). Renderers are shared with SFT and live in core
   `torchtitan/components/renderer.py`.
+- `evaluator.py` contains the `Evaluator` interface, selected by
+  `Controller.Config.evaluator`, and `RolloutEvaluator`, which rolls out the
+  rollouter's validation prompts beside training.
 - `routing/` contains request routing across and within generators.
 - `actors/` contains the `ActorSystem` interface (`system.py`), which places
   the services on processes and is selected by `Controller.Config.actor_system`,
@@ -128,6 +131,10 @@ rollouter = Rollouter.Config(
     ),
 )
 ```
+
+`Controller.Config.evaluator` schedules the validation passes: by default one at the start, beside
+training, and one after it. `RolloutEvaluator.Config(freq=10)` adds one every 10 steps; `None` turns
+them off.
 
 Subclass `RolloutWorker` or `Rollouter` only when an experiment changes their
 behavior. For example, the Verifiers integration keeps a custom

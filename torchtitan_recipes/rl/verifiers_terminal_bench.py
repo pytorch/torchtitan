@@ -139,6 +139,8 @@ def _terminal_bench_rollouter_config(
             ),
             serve=vf.ServeConfig(
                 pool=vf.StaticPoolConfig(num_workers=_ENV_SERVER_WORKERS),
+                # TODO: validation passes run beside training and share this cap, so their
+                # tasks queue behind training rollouts; count them in max_concurrent_rollouts.
                 max_concurrent=math.ceil(max_concurrent_rollouts / _ENV_SERVER_WORKERS),
                 address="tcp://127.0.0.1:0",
             ),

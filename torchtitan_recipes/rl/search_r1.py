@@ -268,6 +268,8 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             num_samples_per_prompt=8,  # TODO: TBD
         ),
         rollouter=_search_r1_rollouter_config(),
+        # No validation: a pass beside training would change this recipe's step times.
+        evaluator=None,
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(

@@ -53,6 +53,7 @@ from torchtitan.models.qwen3 import build_model_config
 
 from torchtitan.observability.metrics import WandBLogger
 from torchtitan.rl.controller.controller import AsyncLoopConfig, Controller
+from torchtitan.rl.evaluator import RolloutEvaluator
 from torchtitan.rl.examples.dapo_math.data import AIME2025Dataset, DapoMathDataset
 from torchtitan.rl.examples.dapo_math.env import DapoMathEnv
 from torchtitan.rl.examples.dapo_math.rubric import RewardMathVerify
@@ -82,7 +83,7 @@ from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
 def _dapo_math_rollouter_config(
     *,
-    validation_dataloader: ValidationDataLoader.Config | None,
+    validation_dataloader: ValidationDataLoader.Config,
     token_env: TokenEnv.Config,
 ) -> Rollouter.Config:
     return Rollouter.Config(
@@ -144,6 +145,7 @@ def _qwen3_4b_dapo_math_config(
                 max_num_turns=1,
             ),
         ),
+        evaluator=RolloutEvaluator.Config(freq=10),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=True)),
         num_generators=6,
         metrics=MetricsProcessor.Config(
@@ -273,8 +275,13 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
         attn_backend="varlen",
     )
     rollouter = _dapo_math_rollouter_config(
-        # Skip the pre- and post-training validation passes.
-        validation_dataloader=None,
+        validation_dataloader=ValidationDataLoader.Config(
+            dataset=AIME2025Dataset.Config(
+                repo_id=aime2025_repo_id,
+                num_samples=8,
+            ),
+            num_prompts=8,
+        ),
         token_env=TokenEnv.Config(
             max_rollout_tokens=max_total_tokens,
             max_num_turns=1,
@@ -301,6 +308,8 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
             ),
         ),
         rollouter=rollouter,
+        # Skip the validation passes.
+        evaluator=None,
         renderer=MuseSparkRendererConfig(reasoning_effort="low"),
         num_generators=1,
         precision=PrecisionConfig(dtype="float32", param_dtype="bfloat16"),

@@ -55,8 +55,9 @@ class EngineRequest:
     sampling: SamplingConfig
     group_id: int
     """Rollout group id. Sets the vLLM priority: lower is admitted first and preempted last.
-    Training ids grow as groups start. Validation ids count down (-1, -2, ...) and restart every run,
+    Training ids grow as groups start. Validation ids count down (-1, -2, ...) for the whole run,
     so all validation gets priority -1: it runs in arrival order (not newest first), before training.
+    `RolloutEvaluator.Config.max_prompts_in_flight` caps how many validation groups run at once.
 
         waiting, in arrival order:  g7 turn 1   g9 turn 1   g4 turn 2   val -1      val -2
         priority:                   7           9           4           -1          -1
