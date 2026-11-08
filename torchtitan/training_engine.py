@@ -40,6 +40,7 @@ from torchtitan.distributed.accelerator_graph import (
     wrap_fwd_bwd_with_accelerator_graph,
     wrap_with_accelerator_graph,
 )
+from torchtitan.distributed.activation_offload import ActivationOffloadConfig
 from torchtitan.distributed.activation_remat import (
     ActivationRematConfig,
     DefaultActivationRematConfig,
@@ -144,6 +145,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         activation_remat: ActivationRematConfig | None = field(
             default_factory=DefaultActivationRematConfig
         )
+        activation_offload: ActivationOffloadConfig | None = None
+        """Optional CPU offloading of activations retained for backward."""
         profiler: Profiler.Config = field(default_factory=Profiler.Config)
         sdc_replayer: SDCReplayer.Config | None = None
         comm: CommConfig = field(default_factory=CommConfig)
@@ -448,6 +451,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self.model_parts = [model]
             self.pp_has_first_stage = True
             self.pp_has_last_stage = True
+
+        if config.activation_offload is not None and not create_seed_checkpoint:
+            # After remat and parallelization: groups wrap the final modules,
+            # and each pipeline stage gets its own offloader.
+            for model_part in self.model_parts:
+                config.activation_offload.apply(model_part)
 
         with self.parallelism_context.activate_spmd():
             for model_part in self.model_parts:
