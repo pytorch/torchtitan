@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import grain.python as grain
+import numpy as np
 import pytest
 import torch
 from tokenizers import AddedToken, Tokenizer
@@ -20,7 +21,11 @@ from torchtitan.components.data.dataset import SingleDatasetConfig
 from torchtitan.components.data.multimodal import mm_datasets
 from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
 from torchtitan.components.data.multimodal.utils.audio import load_pcm_waveform
-from torchtitan.components.data.multimodal.utils.video import load_npy_video_frames
+from torchtitan.components.data.multimodal.vision_processor import (
+    PixelBudgetResize,
+    ResizeRule,
+    VisionProcessor,
+)
 from torchtitan.components.data.sources import IndexedJsonlSource
 from torchtitan.components.data.types import DatasetBuildContext
 from torchtitan.components.loss import IGNORE_INDEX
@@ -122,26 +127,58 @@ def test_audio_sample_processor_resamples_truncates_and_masks(audio_tokenizer):
     )
 
 
+def test_load_npy_video_frames_returns_c_contiguous_uint8_thwc(tmp_path):
+    frames_THWC = np.arange(2 * 3 * 4 * 3, dtype=np.uint8).reshape(2, 3, 4, 3)
+    path = tmp_path / "frames.npy"
+    np.save(path, frames_THWC)
+
+    actual_THWC = synthetic_multimodal.load_npy_video_frames(path)
+
+    assert actual_THWC.is_contiguous()
+    assert torch.equal(actual_THWC, torch.from_numpy(frames_THWC))
+
+
+class _PadWidthResize(ResizeRule):
+    """Keeps each frame's size and pads its width by 6 pixels."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ResizeRule.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        pass
+
+    def __call__(
+        self, height: int, width: int, *, patch_size: int, merge_size: int
+    ) -> tuple[int, int, int, int]:
+        return height, width, 0, 6
+
+
 def test_video_sample_processor_resizes_and_masks(audio_tokenizer):
     row = _first_manifest_row("video")
-    frames = load_npy_video_frames(_ASSET_ROOT / "video_text" / row["video_path"])
+    frames = synthetic_multimodal.load_npy_video_frames(
+        _ASSET_ROOT / "video_text" / row["video_path"]
+    )
+
+    vision_processor = VisionProcessor.Config(
+        patch_size=14,
+        temporal_patch_size=2,
+        spatial_merge_size=1,
+        image_mean=(0.5, 0.5, 0.5),
+        image_std=(0.5, 0.5, 0.5),
+        resize=_PadWidthResize.Config(),
+        patch_order="block",
+        video_resize=_PadWidthResize.Config(),
+    ).build()
 
     result = mm_datasets._process_video_text_sample(
         text=row["text"],
         frames=frames,
         tokenizer=audio_tokenizer,
-        patch_size=14,
-        temporal_patch_size=2,
-        spatial_merge_size=1,
-        min_pixels=1,
-        max_pixels=1_000_000,
-        image_mean=(0.5, 0.5, 0.5),
-        image_std=(0.5, 0.5, 0.5),
-        resize_fn=lambda height, width, **kwargs: (height, width, 0, 6),
-        max_patches=128,
-        max_patches_per_side=32,
+        vision_processor=vision_processor,
     )
 
+    # Two 28 x 36 frames padded to 28 x 42.
     assert result["pixel_values_videos"][0].shape == (2, 28, 42, 3)
     assert torch.any(result["input_ids"] == audio_tokenizer.video_id)
     _assert_media_targets_masked(
@@ -154,7 +191,10 @@ def test_video_sample_processor_resizes_and_masks(audio_tokenizer):
 def test_synthetic_datasets_register_absolute_sources_and_processors():
     expected = {
         "synthetic-audio-text": ("audio_text", mm_datasets.AudioProcessor.Config),
-        "synthetic-video-text": ("video_text", mm_datasets.VisionProcessor.Config),
+        "synthetic-video-text": (
+            "video_text",
+            mm_datasets.VisionSampleProcessor.Config,
+        ),
     }
     for name, (directory, processor_type) in expected.items():
         dataset = synthetic_multimodal.SYNTHETIC_MM_DATASETS[name]
@@ -168,16 +208,19 @@ def test_synthetic_datasets_register_absolute_sources_and_processors():
 
 def _synthetic_loader(audio_tokenizer, dataset_name: str):
     dataset = synthetic_multimodal.SYNTHETIC_MM_DATASETS[dataset_name]
-    assert dataset.processor is not None
+    vision_processor = None
     if dataset_name == "synthetic-video-text":
-        dataset = replace(
-            dataset,
-            processor=replace(
-                dataset.processor,
-                min_pixels=784,
-                max_pixels=200_000,
-            ),
-        )
+        resize = PixelBudgetResize.Config(min_pixels=784, max_pixels=200_000)
+        vision_processor = VisionProcessor.Config(
+            patch_size=16,
+            temporal_patch_size=2,
+            spatial_merge_size=2,
+            image_mean=(0.5, 0.5, 0.5),
+            image_std=(0.5, 0.5, 0.5),
+            resize=resize,
+            patch_order="block",
+            video_resize=resize,
+        ).build()
     collator = MultiModalCollator.Config()
     if dataset_name == "synthetic-audio-text":
         collator = replace(
@@ -198,6 +241,7 @@ def _synthetic_loader(audio_tokenizer, dataset_name: str):
         tokenizer=audio_tokenizer,
         max_context_length=512,
         num_tokens_per_microbatch=512,
+        vision_processor=vision_processor,
     )
 
 
