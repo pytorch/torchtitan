@@ -102,7 +102,7 @@ class Rollouter(Configurable):
         training_dataloader: RolloutDataLoader.Config
         """Builds a checkpointable iterator of identified training inputs."""
 
-        validation_dataloader: ValidationDataLoader.Config | None = None
+        validation_dataloader: ValidationDataLoader.Config | None
         """Yields the prompts of one validation pass. None: no validation."""
         # TODO: support several validation datasets, each logged under its own metric keys.
 
@@ -152,13 +152,7 @@ class Rollouter(Configurable):
 
     def iter_validation_samples(self) -> Iterator[object]:
         """Return one validation pass from a fresh dataset: same prompts, same order on every call."""
-        validation_dataloader = self._config.validation_dataloader
-        if validation_dataloader is None:
-            raise RuntimeError(
-                "iter_validation_samples needs Rollouter.Config.validation_dataloader, "
-                "but it is None"
-            )
-        return iter(validation_dataloader.build())
+        return iter(self._config.validation_dataloader.build())
 
     async def setup_async(
         self,

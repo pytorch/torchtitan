@@ -23,7 +23,10 @@ from verifiers.v1.types import SamplingConfig as VerifiersSamplingConfig
 from torchtitan.components.renderer import RendererConfig, RenderersConfigAdapter
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.rl.examples.verifiers.data import VerifiersTaskSample
+from torchtitan.rl.examples.verifiers.data import (
+    VerifiersTaskDataset,
+    VerifiersTaskSample,
+)
 from torchtitan.rl.examples.verifiers.env_server import VerifiersEnvServer
 from torchtitan.rl.examples.verifiers.generation_server import (
     GenerationServer,
@@ -31,7 +34,7 @@ from torchtitan.rl.examples.verifiers.generation_server import (
     VerifiersGenerationMetadata,
 )
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
-from torchtitan.rl.rollout.data import IterableRolloutDataLoader, ValidationDataLoader
+from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
 from torchtitan.rl.rollout.rubric import RewardFn, Rubric
 from torchtitan.rl.rollout.types import (
@@ -89,9 +92,6 @@ class VerifiersRollouter(Rollouter):
         training_dataloader: IterableRolloutDataLoader.Config
         """Verifiers taskset used for training samples and environment scoring."""
 
-        validation_dataloader: ValidationDataLoader.Config | None = None
-        """Validation prompts; its dataset is a `VerifiersTaskDataset`. None: no validation."""
-
         worker: RolloutWorker.Config | None = None
         """Inherited schema field; hidden because Verifiers replaces that path."""
 
@@ -127,6 +127,13 @@ class VerifiersRollouter(Rollouter):
 
         def __post_init__(self) -> None:
             Rollouter.Config.__post_init__(self)
+            if self.validation_dataloader is not None and not isinstance(
+                self.validation_dataloader.dataset, VerifiersTaskDataset.Config
+            ):
+                raise ValueError(
+                    "validation_dataloader.dataset must be a VerifiersTaskDataset.Config, got "
+                    f"{type(self.validation_dataloader.dataset).__qualname__}"
+                )
             configured_taskset = self.verifiers_env_server.environment.taskset
             if configured_taskset not in (
                 VerifiersTasksetConfig(),
