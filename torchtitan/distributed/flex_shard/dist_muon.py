@@ -202,10 +202,13 @@ class DistMuon(Optimizer):
 
     ``ns_dtype`` is the dtype of the Newton-Schulz iteration only. Redistributed
     inputs and directions stay in ``ComputeLayout.compute_dtype`` (BF16).
-    Consider ``torch.float16`` when Newton-Schulz runs on the accelerator: its 3
-    extra mantissa bits cut the iteration's rounding error (Step 3.5 Flash,
-    arXiv 2602.10604, Section 4.1.1). Keep BF16 when Newton-Schulz runs on the
-    host, where float16 matmuls are slower and need more temporary memory.
+
+    - ``torch.float16``: consider it when Newton-Schulz runs on the accelerator.
+      Its 3 extra mantissa bits cut the iteration's rounding error (Step 3.5
+      Flash, arXiv 2602.10604, Section 4.1.1).
+    - ``torch.bfloat16``: keep it when Newton-Schulz runs on the host. float16
+      matmuls are slower there, and float16's float32 normalization makes a
+      float32 copy.
 
     ``ns_device`` selects where Newton-Schulz runs. ``None`` keeps the storage
     device, where each parameter's local shard lives (the host under FSDP2 CPU
@@ -374,10 +377,10 @@ class DistMuon(Optimizer):
                 compute_dtype = param.dtype
             if compute_dtype is not torch.bfloat16:
                 raise NotImplementedError(
-                    f"{fqn!r} would exchange in {compute_dtype}: compute_dtype "
-                    "sets DistMuon's exchange buffers and must be torch.bfloat16. "
-                    "For a float16 Newton-Schulz iteration, set "
-                    "ns_dtype=torch.float16."
+                    f"{fqn!r} would exchange in {compute_dtype}: DistMuon's "
+                    "exchange buffers must be torch.bfloat16, set compute_dtype="
+                    "torch.bfloat16 on its ComputeLayout (ns_dtype selects the "
+                    "Newton-Schulz iteration's dtype)"
                 )
             compute_layouts.append(
                 _ParameterComputeLayout(
@@ -1979,9 +1982,9 @@ def _zeropower_via_newtonschulz(
     coefficients_by_step = _ns_coefficients_by_step(ns_coefficients, ns_steps)
     transposed = update.shape[-2] > update.shape[-1]
     if ns_dtype is torch.bfloat16:
-        # TODO: also take the float32-norm path below for BF16. It rounds the
-        # normalized entries once instead of twice, but changes the numerics
-        # (and loss goldens) of every BF16 recipe.
+        # BF16 keeps BF16 normalization: the float32-norm path below makes a
+        # float32 copy on the host, and after a BF16 iteration it is more accurate
+        # only for float32 inputs (parameters that skip the BF16 exchange).
         result = update.to(dtype=torch.bfloat16, copy=True)
         if transposed:
             result = result.transpose(-2, -1)

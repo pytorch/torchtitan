@@ -50,8 +50,9 @@ def test_dist_muon_applies_shared_or_per_step_ns_coefficients() -> None:
 
 
 def test_float16_newton_schulz_tracks_float32_reference() -> None:
-    # Low-rank momentum at a tiny scale. A float16 cast before the normalization
-    # flushes it to zero; a BF16 division rounds the normalized entries again.
+    # Low-rank momentum at 1e-9 scale: float16 must normalize in float32 before
+    # the cast, since a cast first flushes these entries to zero. Here float16 is
+    # ~8x closer to the float32 reference than BF16; the 3x bound leaves margin.
     generator = torch.Generator().manual_seed(0)
     left = torch.randn(256, 8, generator=generator)
     right = torch.randn(8, 512, generator=generator)

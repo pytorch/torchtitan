@@ -13,8 +13,8 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   `DeviceMesh` axes using PyTorch DTensor placements plus `BlockShard` or
   `Owned`, and optionally the order in which several axes shard one tensor
   dimension.
-- `ComputeLayout.compute_dtype` is the dtype the optimizer computes in for
-  that parameter; `None` keeps the storage dtype. Inputs are sent to the
+- `ComputeLayout.compute_dtype` is the dtype of that parameter's compute
+  view; `None` keeps the storage dtype. Inputs are sent to the
   compute ranks and directions are sent back in this dtype. DistMuon's
   exchange buffers accept only `torch.bfloat16`, so every FP32 parameter sets
   it. DistMuon's `ns_dtype` selects the Newton-Schulz iteration's dtype
