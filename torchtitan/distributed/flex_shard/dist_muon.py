@@ -207,7 +207,7 @@ class DistMuon(Optimizer):
       Its 3 extra mantissa bits cut the iteration's rounding error (Step 3.5
       Flash, arXiv 2602.10604, Section 4.1.1).
     - ``torch.bfloat16``: keep it when Newton-Schulz runs on the host. float16
-      matmuls are slower there, and float16's float32 normalization makes a
+      matmuls are slower there, and the float16 path normalizes through a
       float32 copy.
 
     ``ns_device`` selects where Newton-Schulz runs. ``None`` keeps the storage
