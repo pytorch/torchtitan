@@ -1155,6 +1155,8 @@ class Controller(Configurable):
                     ],
                 )
             if self.evaluator is not None:
+                # TODO: when a step raises (here or above), cancel its push and pull tasks;
+                # today they keep running during shutdown.
                 self.evaluator.on_step(step)
 
         # Finish the last push and pull so generators hold the final weights for the final validation pass.

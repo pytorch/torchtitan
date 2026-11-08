@@ -54,14 +54,15 @@ class Evaluator(Configurable, ABC):
         """Policy `step` is trained: called with the start step, then after every optimizer step. Never waits.
 
         Its push and pull run in the background, so generators and TorchStore may still hold `step - 1`.
+        Raise to fail the run, e.g. with the error of a failed pass.
         """
 
     @abstractmethod
     async def close(self, *, training_completed: bool) -> None:
         """Called once, at the end of `Controller.run`.
 
-        training_completed=False (a crash): cancel running work only.
-        training_completed=True: may run final work, e.g. a pass on the final policy.
+        training_completed=False (a crash): cancel running work only. Don't raise: the crash keeps its error.
+        training_completed=True: may run final work, e.g. a pass on the final policy, and may raise.
         """
 
 
@@ -181,15 +182,13 @@ class RolloutEvaluator(Evaluator):
     async def close(self, *, training_completed: bool) -> None:
         if self._waiting_due_step is not None:
             logger.warning(
-                "Dropping the validation pass due at step %d: training ended first",
+                "Dropping the validation pass due at step %d",
                 self._waiting_due_step,
             )
             self._waiting_due_step = None
         if self._pass_task is not None:
             if self._pass_task.cancel():
-                logger.warning(
-                    "Cancelled the %s: training ended", self._pass_task.get_name()
-                )
+                logger.warning("Cancelled the %s", self._pass_task.get_name())
             # A bare `await` re-raises the cancelled pass's CancelledError: it would replace
             # the training error being raised, or end a healthy run before the final pass.
             await asyncio.gather(self._pass_task, return_exceptions=True)
