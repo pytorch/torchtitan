@@ -78,7 +78,6 @@ def _parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--max-tokens", type=int, default=None)
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--top-p", type=float, default=None)
-    parser.add_argument("--max-num-seqs", type=int, default=1)
     return parser.parse_known_args()
 
 
@@ -113,7 +112,7 @@ def generate() -> None:
     # initial_load_path must be absolute or remote.
     if not filesystem.is_remote(model_path):
         model_path = os.path.abspath(model_path)
-    max_num_seqs = args.max_num_seqs
+    max_num_seqs = gen_config.max_num_seqs
     is_rank0 = os.environ.get("RANK", "0") == "0"
 
     # Register TorchTitan model with vLLM before engine creation
