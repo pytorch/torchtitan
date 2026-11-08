@@ -125,10 +125,13 @@ class TorchTitanVarlenInnerAttentionDiffKVBackend(
 
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
-        # For a hybrid model, vLLM sizes the attention page from the model's head size
-        # alone, so V gets K's head size and the shared page outgrows the layer's real
+        # vLLM sizes a hybrid model's attention page from a spec without head_size_v,
+        # so V gets K's head size and the page comes out larger than this layer's real
         # page. vLLM then cannot split a block into smaller kernel blocks (FA4 on SM100).
-        return replace(super().customize_spec(spec), head_size_v=cls.head_size_v)
+        # vLLM's DiffKV backends keep V's head size on the class (set_head_size_v), so
+        # one V head size per process; Kimi K3 has one.
+        # TODO: drop once vLLM's DiffKV backends set head_size_v in customize_spec.
+        return super().customize_spec(replace(spec, head_size_v=cls.head_size_v))
 
     @staticmethod
     def get_impl_cls():
