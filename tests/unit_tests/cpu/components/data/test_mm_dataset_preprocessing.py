@@ -16,6 +16,7 @@ import math
 import unittest
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 import torchvision.transforms.v2.functional as TVF
 from PIL import Image
@@ -237,6 +238,30 @@ class TestVisionProcessorPreprocess(unittest.TestCase):
         processor = _vision_processor_config().build()
         # A (1, 4, 6) patch grid merges 2x2 patches into 2 * 3 tokens.
         self.assertEqual(processor.num_placeholder_tokens((1, 4, 6)), 6)
+
+    def test_grid_thw_matches_resize_and_normalize(self):
+        # A renderer counts placeholder tokens from the size in the file header with
+        # grid_thw; it must be the grid resize_and_normalize produces, for a
+        # pixel-budget resize and for a NaViT resize that pads.
+        kimi_style = dict(
+            patch_size=14,
+            temporal_patch_size=1,
+            resize=NaViTPatchGridResize.Config(
+                max_patches=256, max_patches_per_side=16
+            ),
+            patch_order="raster",
+        )
+        qwen_style = dict(
+            resize=PixelBudgetResize.Config(min_pixels=32 * 32, max_pixels=256 * 256)
+        )
+        for overrides in (qwen_style, kimi_style):
+            processor = _vision_processor_config(**overrides).build()
+            for height, width in ((200, 300), (48, 64), (900, 40)):
+                image = Image.fromarray(np.zeros((height, width, 3), dtype=np.uint8))
+                _, grid_thw = processor.resize_and_normalize(image)
+                self.assertEqual(
+                    processor.grid_thw(height, width), tuple(grid_thw.tolist())
+                )
 
 
 class TestVisionProcessorVideo(unittest.TestCase):
