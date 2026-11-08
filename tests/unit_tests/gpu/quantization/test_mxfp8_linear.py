@@ -7,18 +7,12 @@
 import pytest
 import torch
 import torch.nn as nn
+
+import torchtitan.quantization.mxfp8.linear as mxfp8_linear
 from torch.utils.checkpoint import checkpoint
-
-
-pytest.importorskip("torchao")
-pytest.importorskip("torchao.prototype.moe_training.kernels.mxfp8")
-
-import torchtitan.quantization.mxfp8.linear as mxfp8_linear  # noqa: E402
-from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor  # noqa: E402
-from torchtitan.quantization.mxfp8.linear import MXFP8Linear  # noqa: E402
-from torchtitan.quantization.mxfp8.tensor import (  # noqa: E402
-    _LinearShardedTensorWithMXFP8Compute,
-)
+from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor
+from torchtitan.quantization.mxfp8.linear import MXFP8Linear
+from torchtitan.quantization.mxfp8.tensor import _LinearShardedTensorWithMXFP8Compute
 
 
 pytestmark = [

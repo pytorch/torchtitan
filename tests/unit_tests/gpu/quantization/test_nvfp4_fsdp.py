@@ -10,20 +10,14 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+
+import torchtitan.quantization.nvfp4.tensor as nvfp4_tensor
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.elastic.utils.distributed import get_free_port
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
-
-
-pytest.importorskip("torchao")
-pytest.importorskip("torchao.prototype.moe_training.nvfp4_training")
-
-import torchtitan.quantization.nvfp4.tensor as nvfp4_tensor  # noqa: E402
-from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor  # noqa: E402
-from torchtitan.quantization.nvfp4 import NVFP4Linear  # noqa: E402
-from torchtitan.quantization.nvfp4.tensor import (  # noqa: E402
-    _LinearShardedTensorWithNVFP4Compute,
-)
+from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor
+from torchtitan.quantization.nvfp4 import NVFP4Linear
+from torchtitan.quantization.nvfp4.tensor import _LinearShardedTensorWithNVFP4Compute
 
 
 pytestmark = [
