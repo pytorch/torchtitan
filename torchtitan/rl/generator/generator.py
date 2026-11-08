@@ -75,8 +75,6 @@ class Generator(Configurable):
         config: Generator-specific configuration, including its model.
         precision: The trainer's dtypes, which the generator's model mirrors.
         model_path: Path to the HF model checkpoint.
-        max_num_seqs: The engine's upper bound on concurrently scheduled sequences (it may admit
-            fewer if KV is tight).
         output_dir: Structured-logger output directory.
         open_result_channel: Opens the asynchronous channel used to fan in
             completions from nonzero data-parallel replicas to rank 0. It must
@@ -129,6 +127,12 @@ class Generator(Configurable):
         """The engine's chunked-prefill chunk size: max tokens scheduled per engine step
         (prefill + decode, summed over the batch). ``None`` (default) leaves the
         engine's own default in place."""
+
+        max_num_seqs: int = 512
+        """The most requests each engine DP rank runs at once; the rest wait in its queue. It
+        also sizes per-request buffers and the decode CUDA graphs, so a cap above what a run sends
+        costs some KV cache. Lower it if the engine refuses to start (hybrid GDN models need one
+        state block per request) or to free memory."""
 
         checkpointer: CheckpointManager.Config | None = None
         """Optional initial-weight loader for the engine's model.
@@ -206,7 +210,6 @@ class Generator(Configurable):
         *,
         precision: PrecisionConfig,
         model_path: str,
-        max_num_seqs: int,
         output_dir: str,
         rank: int | None = None,
         generator_name: str = "generator",
@@ -243,7 +246,7 @@ class Generator(Configurable):
                     model=config.model,
                     parallelism=config.parallelism,
                     model_path=model_path,
-                    max_num_seqs=max_num_seqs,
+                    max_num_seqs=config.max_num_seqs,
                     precision=precision,
                     gpu_memory_limit=config.gpu_memory_limit,
                     max_num_batched_tokens=config.max_num_batched_tokens,

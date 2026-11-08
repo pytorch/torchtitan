@@ -596,36 +596,13 @@ class Controller(Configurable):
         workers through the actor system, and synchronizes initial weights from
         trainer to generator. Must be called before :meth:`run`.
         """
-        # Peak concurrent rollout sequences (groups * num_samples_per_prompt, or the validation pass); sizes max_num_seqs below.
         async_loop = self.config.async_loop
-        max_active_rollout_groups = async_loop.max_active_rollout_groups
-        num_validation_groups = len(
-            self._rollouter.get_validation_samples(async_loop.validation.steps)
-        )
-        rollout_concurrency = max(
-            max_active_rollout_groups * async_loop.num_samples_per_prompt,
-            num_validation_groups,
-        )
         config = self.config
 
         trainer_parallelism = config.trainer.parallelism
         dp_shard = max(trainer_parallelism.data_parallel_shard_degree, 1)
         self.trainer_dp_degree = (
             trainer_parallelism.data_parallel_replicate_degree * dp_shard
-        )
-
-        # Ceiling (not target) for each generator DP rank's max_num_seqs, vLLM's cap on
-        # concurrently running sequences: vLLM queues requests above it even when KV has
-        # room. Sticky routing can send a rank more than an even share, so size it for
-        # every rollout sequence and let the KV budget limit admission. Capped at 512,
-        # vLLM's default largest CUDA graph capture size, to bound per-request buffers;
-        # this also sets CUDA-graph capture sizes.
-        max_num_seqs = min(rollout_concurrency, 512)
-
-        logger.info(
-            "max_num_seqs=%d per generator DP rank (rollout_concurrency=%d)",
-            max_num_seqs,
-            rollout_concurrency,
         )
 
         with sl.log_trace_span("mesh_spawn"):
@@ -650,7 +627,6 @@ class Controller(Configurable):
                 generator_config=config.generator,
                 precision=config.precision,
                 model_path=config.hf_assets_path,
-                max_num_seqs=max_num_seqs,
                 output_dir=config.dump_folder,
             )
             self.batcher = await actor_system.spawn_batcher(
