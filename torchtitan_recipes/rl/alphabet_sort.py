@@ -641,8 +641,9 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            # TODO: use FULL CUDA graphs once the EP > 1 MoE token dispatcher can be
-            # captured; its all-to-all copies split sizes to the host.
+            # TODO: use the default FULL mode after moving off AllToAllTokenDispatcher.
+            # With EP > 1 it copies split sizes to the host, which CUDA graph capture
+            # does not allow.
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             parallelism=generator_parallelism,
             checkpointer=None,

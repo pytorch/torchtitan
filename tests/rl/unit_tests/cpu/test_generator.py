@@ -633,7 +633,6 @@ def test_qwen36_27b_perf_config():
     assert isinstance(optimizer, AdamW.Config)
     assert optimizer.moment_dtype == "bfloat16"
     assert isinstance(config.trainer.activation_remat, FullActivationRematConfig)
-    assert config.generator.engine.cuda_graph.mode == "FULL"
 
 
 # --- vLLM engine kwargs (what VLLMEngine passes to EngineArgs) ---

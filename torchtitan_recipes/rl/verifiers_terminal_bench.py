@@ -401,8 +401,6 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            # TODO: use FULL CUDA graphs once the EP > 1 MoE token dispatcher can be
-            # captured; its all-to-all copies split sizes to the host.
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             parallelism=generator_parallelism,
             checkpointer=None,
