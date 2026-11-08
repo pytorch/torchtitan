@@ -728,8 +728,6 @@ class Controller(Configurable):
         logger.info(f"Running {num_training_steps} steps of async RL training")
 
         sl.log_trace_instant("training_start")
-        if self.evaluator is not None:
-            self.evaluator.on_step(self.start_step)
 
         # Trainer policy version, seeded from the resumed step; advances at each optimizer step.
         self._trainer_policy_version = self.start_step
@@ -808,6 +806,8 @@ class Controller(Configurable):
         ]
         training_completed = False
         try:
+            if self.evaluator is not None:
+                self.evaluator.on_step(self.start_step)
             done, _ = await asyncio.wait(
                 [trainer_task, *background_tasks], return_when=asyncio.FIRST_COMPLETED
             )

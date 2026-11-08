@@ -248,8 +248,13 @@ class _ThreePromptDataset(RLDataset):
         return iter(range(3))
 
 
-def test_failed_periodic_pass_is_logged_and_failed_final_pass_raises() -> None:
-    """The dataset ends inside the pass, with 3 groups running; the error comes out as itself."""
+@pytest.mark.parametrize("raised_by", ["on_step", "close"])
+def test_failed_pass_raises_from_the_next_on_step_or_close(raised_by: str) -> None:
+    """The dataset ends inside the start pass, with 3 groups running; the error comes out as itself.
+
+    on_step: the next step raises; then a crash's close() returns normally.
+    close:   training ends first; a completed run's close() raises (no final pass is asked).
+    """
 
     async def run_test() -> list[tuple[int, dict[str, float]]]:
         rollouter = _FakeRollouter(list(range(3)))
@@ -259,12 +264,19 @@ def test_failed_periodic_pass_is_logged_and_failed_final_pass_raises() -> None:
             ).build()
         )
         metrics_processor = _RecordingMetricsProcessor()
-        evaluator = _evaluator(rollouter, metrics_processor)
+        evaluator = _evaluator(
+            rollouter, metrics_processor, validate_after_training=False
+        )
         evaluator.on_step(0)
-        await _wait_until(lambda: metrics_processor.logged)
-        evaluator.on_step(10)
-        with pytest.raises(RuntimeError, match="ended after 3 prompts"):
-            await evaluator.close(training_completed=True)
+        await _wait_until(lambda: evaluator._pass_task.done())
+        assert rollouter.groups_started == [0, 1, 2]
+        if raised_by == "on_step":
+            with pytest.raises(RuntimeError, match="ended after 3 prompts"):
+                evaluator.on_step(1)
+            await evaluator.close(training_completed=False)
+        else:
+            with pytest.raises(RuntimeError, match="ended after 3 prompts"):
+                await evaluator.close(training_completed=True)
         return metrics_processor.logged
 
-    assert asyncio.run(run_test()) == [(0, {"validation/failed_passes/sum": 1.0})]
+    assert asyncio.run(run_test()) == []

@@ -72,6 +72,8 @@ class RolloutEvaluator(Evaluator):
     A pass logs at the last step `on_step` saw when it ended. So a pass that ends between the last
     `on_step` and `close()` also logs at N, next to the final pass; the final one has
     `validation/policy_version/min == N`.
+    A failed group counts in `validation/group_failures`. A failed pass fails the run: the next
+    `on_step`, or `close`, raises its error.
 
     Example: freq=10, 40 steps, each pass takes ~13 steps.
         due 0:   starts at step 0, logs at 12
@@ -144,6 +146,9 @@ class RolloutEvaluator(Evaluator):
         self._group_ids = itertools.count(-1, -1)
 
     def on_step(self, step: int) -> None:
+        # A pass-level error (the dataset, a dead generator) would repeat on every pass: raise it now.
+        if self._pass_task is not None and self._pass_task.done():
+            self._pass_task.result()
         self._step = step
         config = self.config
         is_due = (step == 0 and config.validate_at_start) or (
@@ -171,7 +176,6 @@ class RolloutEvaluator(Evaluator):
                 self._run_pass(due_step=self._waiting_due_step),
                 name=f"validation pass due at step {self._waiting_due_step}",
             )
-            self._pass_task.add_done_callback(self._log_failed_pass)
             self._waiting_due_step = None
 
     async def close(self, *, training_completed: bool) -> None:
@@ -189,6 +193,9 @@ class RolloutEvaluator(Evaluator):
             # A bare `await` re-raises the cancelled pass's CancelledError: it would replace
             # the training error being raised, or end a healthy run before the final pass.
             await asyncio.gather(self._pass_task, return_exceptions=True)
+            # A pass that failed after the last `on_step`. After a crash, the crash's error wins.
+            if training_completed and not self._pass_task.cancelled():
+                self._pass_task.result()
 
         if training_completed and self.config.validate_after_training:
             # TODO: abort the training requests still in the generators before this pass. They
@@ -301,18 +308,3 @@ class RolloutEvaluator(Evaluator):
             ]
         )
         return group_metrics
-
-    def _log_failed_pass(self, pass_task: asyncio.Task[None]) -> None:
-        """Log a failed periodic pass at the last step seen; training goes on and the next due pass retries."""
-        if pass_task.cancelled() or pass_task.exception() is None:
-            return
-        logger.error(
-            "The %s failed; training goes on",
-            pass_task.get_name(),
-            exc_info=pass_task.exception(),
-        )
-        self._metrics_processor.log(
-            step=self._step,
-            metrics=[m.Metric("validation/failed_passes", m.Sum(1.0))],
-            is_validation=True,
-        )
