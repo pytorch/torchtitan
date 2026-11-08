@@ -448,13 +448,16 @@ class Controller(Configurable):
                     )
 
         @property
-        def generator_max_num_seqs(self) -> int:
+        def max_num_seqs_per_generator_dp_rank(self) -> int:
             """``generator.max_num_seqs`` if set, else 2x each generator DP rank's even share
-            of the training rollouts in flight, clamped to [32, 2048].
+            of the training rollouts in flight, rounded up to a power of two, clamped to
+            [32, token budget]. The token budget is ``generator.max_num_batched_tokens``, or
+            2048 when unset.
 
-            Example (``generator.max_num_seqs`` is None):
-                1536 rollouts in flight, 8 generator DP ranks -> 2 x 192 = 384
-                100 rollouts in flight, 8 generator DP ranks  -> 2 x 13 = 26 -> 32
+            Example (``generator.max_num_seqs`` and the token budget unset):
+                1536 rollouts in flight, 8 generator DP ranks -> 2 x 192 = 384 -> 512
+                64 rollouts in flight, 3 generator DP ranks   -> 2 x 22 = 44   -> 64
+                16 rollouts in flight, 2 generator DP ranks   -> 2 x 8 = 16    -> 32
             """
             if self.generator.max_num_seqs is not None:
                 return self.generator.max_num_seqs
@@ -465,17 +468,19 @@ class Controller(Configurable):
             num_generator_dp_ranks = (
                 self.num_generators * self.generator.parallelism.data_parallel_degree
             )
-            # 2x leaves room for validation requests running beside training, and for uneven
-            # routing: the default router lets a rank reach 1.5x the mean load before it moves
-            # a session.
-            max_num_seqs = 2 * math.ceil(
-                max_rollouts_in_flight / num_generator_dp_ranks
-            )
-            # vLLM requires max_num_seqs <= max_num_batched_tokens, which defaults to 2048.
-            # TODO(https://github.com/Dao-AILab/flash-attention/issues/3117): drop the floor of
-            # 32 once fixed. vLLM's memory profile splits 2048 tokens over max_num_seqs dummy
-            # requests, and FlashAttention-2 writes out of bounds at 65+ tokens per request.
-            return min(max(max_num_seqs, 32), 2048)
+            even_share = math.ceil(max_rollouts_in_flight / num_generator_dp_ranks)
+            # 2x is headroom for uneven routing: the router moves a session only once its rank
+            # is well above the mean load. A rank at the cap queues new requests.
+            max_num_seqs = 2 ** math.ceil(math.log2(2 * even_share))
+            # TODO(https://github.com/Dao-AILab/flash-attention/issues/3117): drop the power of
+            # two and the floor of 32 once fixed. vLLM's memory profile splits the token budget
+            # over max_num_seqs dummy requests and adds the remainder to the last one. With
+            # FlashAttention-2, a dummy request of 65+ tokens writes out of bounds. A power of
+            # two >= 32 splits 2048 tokens evenly, into at most 64 per request.
+            max_num_seqs = max(max_num_seqs, 32)
+            # vLLM requires max_num_seqs <= max_num_batched_tokens. 2048 is the smallest budget
+            # vLLM picks when it is unset.
+            return min(max_num_seqs, self.generator.max_num_batched_tokens or 2048)
 
     def __init__(self, config: Config):
         self.config = config
@@ -635,7 +640,7 @@ class Controller(Configurable):
             trainer_parallelism.data_parallel_replicate_degree * dp_shard
         )
 
-        max_num_seqs = config.generator_max_num_seqs
+        max_num_seqs = config.max_num_seqs_per_generator_dp_rank
         logger.info("max_num_seqs=%d per generator DP rank", max_num_seqs)
 
         with sl.log_trace_span("mesh_spawn"):

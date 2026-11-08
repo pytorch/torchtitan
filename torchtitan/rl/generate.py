@@ -114,7 +114,7 @@ def generate() -> None:
     if not filesystem.is_remote(model_path):
         model_path = os.path.abspath(model_path)
     max_num_seqs = (
-        config.generator_max_num_seqs
+        config.max_num_seqs_per_generator_dp_rank
         if args.max_num_seqs is None
         else args.max_num_seqs
     )
