@@ -27,7 +27,9 @@ package and dependencies: [`dapo_math/`](./dapo_math) (single-turn math) and
 2. [`env_server.py`](./env_server.py) currently spawns and owns the Verifiers server as
    a separate local process on the TitanRL controller host. The configured
    Verifiers runtime is independent: for example, `SubprocessConfig` or
-   `DockerConfig` for the agent.
+   `DockerConfig` for the agent. The server and each of its pool workers first run
+   [`worker_setup.py`](./worker_setup.py). Every worker imports that module, so it
+   must not import torch.
 3. [`generation_server.py`](./generation_server.py) exposes TitanRL's `GenerateFn` through the
    HTTP token-generation protocol expected by Verifiers. It also retains the
    policy-version span and metrics that are absent from Verifiers traces.
@@ -55,6 +57,7 @@ verifiers/
   env_server.py
   generation_server.py
   rollouter.py
+  worker_setup.py
   my_task/
     __init__.py
     recipe module
@@ -83,4 +86,4 @@ python -m torchtitan.rl.train \
 
 See [DAPO Math](./dapo_math) for a complete single-turn example and
 [Terminal-Bench](./terminal_bench) for a multi-turn agent example. This
-integration pins Verifiers 0.3.1 and uses its `verifiers.v1` API.
+integration pins Verifiers 0.4.0 and uses its `verifiers.v1` API.

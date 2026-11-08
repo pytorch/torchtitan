@@ -7,19 +7,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any
 
 import spmd_types as spmd
 import torch
 import torch_remat as remat
-from torch import nn
 
-from torchtitan.config import TrainingConfig
-from torchtitan.config.configurable import Configurable
+from torchtitan.config import PrecisionConfig
 from torchtitan.config.function import Function
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
-from torchtitan.distributed.local_compile import apply_local_compile, local_compile
+from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -32,16 +30,10 @@ from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     LinearAttentionMetadata,
 )
-from torchtitan.models.common.attention.kda import KDA
-from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
     token_id_placement,
-)
-from torchtitan.models.common.flops import (
-    delta_rule_flops_per_token,
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
 )
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
@@ -55,7 +47,6 @@ from torchtitan.models.common.multimodal import (
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 
-from .attention import KimiMLAAttention
 from .moe import KimiLatentMoE
 from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import KimiK3VisionEncoder
@@ -70,7 +61,7 @@ class AttentionResidual(Function[torch.Tensor]):
     """Configurable callable for Kimi K3 attention residual aggregation."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):  # pyrefly: ignore[bad-override]
+    class Config(Function.Config):
         pass
 
     def __init__(self, config: Config) -> None:
@@ -219,7 +210,8 @@ class KimiK3Model(MultimodalModel):
         return pipeline_kimi_k3(self, **kwargs)
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
+    class Config(MultimodalModel.Config):
+        # pyrefly: ignore [bad-override]
         layers: list[KimiK3TransformerBlock.Config]
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
@@ -227,44 +219,17 @@ class KimiK3Model(MultimodalModel):
         attention_residual: AttentionResidual.Config = field(
             default_factory=AttentionResidual.Config
         )
-        local_compile_regions: list[str] = field(
-            default_factory=lambda: [
-                "loss",
-                "gated_rmsnorm",
-                "fused_binary_activation",
-                "fp32_to_bf16_split",
-                "attention_residual",
-            ]
-        )
-
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
-            kimi_model = cast("KimiK3Model", model)
-            nparams, active_nparams = get_nparams_and_active_nparams(
-                model,
-                modules_excluded_from_active_params=(kimi_model.vision_encoder,),
+        local_compile: LocalCompileConfig = field(
+            default_factory=lambda: LocalCompileConfig(
+                regions=[
+                    "loss",
+                    "gated_rmsnorm",
+                    "fused_binary_activation",
+                    "fp32_to_bf16_split",
+                    "attention_residual",
+                ]
             )
-            attention_op_flops = 0
-            for layer in self.layers:
-                if isinstance(layer.attention, KimiMLAAttention.Config):
-                    attention = layer.attention
-                    attention_op_flops += quadratic_attention_flops_per_token(
-                        num_heads=attention.n_heads,
-                        qk_head_dim=(
-                            attention.qk_nope_head_dim + attention.qk_rope_head_dim
-                        ),
-                        v_head_dim=attention.v_head_dim,
-                        seq_len=seq_len,
-                    )
-                elif isinstance(layer.attention, KDA.Config):
-                    delta_attention = layer.attention
-                    attention_op_flops += delta_rule_flops_per_token(
-                        num_heads=delta_attention.n_heads,
-                        key_head_dim=delta_attention.head_dim,
-                        v_head_dim=delta_attention.head_dim,
-                    )
-            return nparams, 6 * active_nparams + attention_op_flops
+        )
 
     def __init__(self, config: Config):
         from torchtitan.distributed.spmd_types import spmd_mesh_size
@@ -292,14 +257,14 @@ class KimiK3Model(MultimodalModel):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
-        local_compile_regions: list[str],
+        local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
         dump_folder: str,
     ) -> KimiK3Model:
         # Bind local implementations early; torch.compile traces on first use.
-        apply_local_compile(local_compile_regions)
+        local_compile.apply()
         with parallelism_context.activate_spmd():
             annotate_replicated_parameters(self, parallelism_context)
             self._parallelize(parallelism_context)
@@ -309,7 +274,7 @@ class KimiK3Model(MultimodalModel):
                     activation_remat.apply(self.vision_encoder)
             self._apply_fsdp(
                 parallelism_context=parallelism_context,
-                training=training,
+                precision=precision,
                 parallelism=parallelism,
             )
         return self
@@ -321,12 +286,12 @@ class KimiK3Model(MultimodalModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Build metadata, CP-shard inputs, and annotate K3 layouts."""
         del kwargs
+        loss_kwargs = input_dict.pop("loss_kwargs", {})
         positions = input_dict.get("positions")
         padding_mask = input_dict.get("padding_mask", None)
         if positions is not None:
@@ -334,7 +299,6 @@ class KimiK3Model(MultimodalModel):
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
             )
 
         pixel_values = input_dict.get("pixel_values")
@@ -359,6 +323,8 @@ class KimiK3Model(MultimodalModel):
         }
         if "vision_bank_indices_T" in input_dict:
             input_shardings["vision_bank_indices_T"] = token_id_placement()
+        input_shardings.update(dict.fromkeys(loss_kwargs, input_shardings["labels"]))
+        input_dict.update(loss_kwargs)
         if parallelism_context.cp_enabled:
             input_dict = self._cp_shard(
                 input_dict,
@@ -375,10 +341,11 @@ class KimiK3Model(MultimodalModel):
                 if isinstance(metadata, LinearAttentionMetadata):
                     metadata.annotate_spmd_types()
 
+        loss_kwargs = {name: input_dict.pop(name) for name in loss_kwargs}
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
         input_dict["aux_loss_denominators"] = global_routing_token_counts
-        return inputs, labels, input_dict
+        return inputs, labels, input_dict, loss_kwargs
 
     def _prepare_multimodal_embeds(
         self,

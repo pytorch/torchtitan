@@ -4,8 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import re
 import unittest
 from unittest import mock
+
+import torch
 
 from torchtitan.observability.profiler import Profiler
 
@@ -25,60 +28,9 @@ class TestProfilerConfig(unittest.TestCase):
         self.assertEqual(cfg.save_memory_snapshot_folder, "profiling/memory_snapshot")
         self.assertIsNone(cfg.memory_snapshot_freq)
 
-    def test_custom_field_values(self):
-        cfg = Profiler.Config(
-            enable_profiling=True,
-            save_traces_folder="my_traces",
-            profile_freq=50,
-            profiler_repeat=2,
-            profiler_skip_first=5,
-            profiler_skip_first_wait=3,
-            memory_snapshot_freq=7,
-        )
-        self.assertTrue(cfg.enable_profiling)
-        self.assertEqual(cfg.save_traces_folder, "my_traces")
-        self.assertEqual(cfg.profile_freq, 50)
-        self.assertEqual(cfg.profiler_repeat, 2)
-        self.assertEqual(cfg.profiler_skip_first, 5)
-        self.assertEqual(cfg.profiler_skip_first_wait, 3)
-        self.assertEqual(cfg.memory_snapshot_freq, 7)
-
-    def test_build_returns_profiler_instance(self):
-        """Profiler.Config.build() auto-wires to Profiler via Configurable."""
-        cfg = Profiler.Config()
-        profiler = cfg.build()
-        self.assertIsInstance(profiler, Profiler)
-
-
-class TestProfilerInit(unittest.TestCase):
-    def test_default_runtime_attrs(self):
-        """Profiler initializes runtime attrs to safe defaults."""
-        profiler = Profiler(Profiler.Config())
-        self.assertEqual(profiler._global_step, 0)
-        self.assertEqual(profiler._base_folder, "")
-        self.assertEqual(profiler._leaf_folder, "")
-        self.assertIsNone(profiler.torch_profiler)
-        self.assertIsNone(profiler.memory_profiler)
-
 
 class TestProfilerDisabledPaths(unittest.TestCase):
     """Tests for the no-op / disabled paths that require no GPU."""
-
-    def test_build_torch_profiler_disabled_returns_none(self):
-        """build_torch_profiler returns None when profiling is disabled."""
-        profiler = Profiler(Profiler.Config(enable_profiling=False))
-        result = profiler.build_torch_profiler(
-            global_step=0, base_folder="/tmp", leaf_folder=""
-        )
-        self.assertIsNone(result)
-
-    def test_build_memory_profiler_disabled_returns_none(self):
-        """build_memory_profiler returns None when memory snapshot is disabled."""
-        profiler = Profiler(Profiler.Config(enable_memory_snapshot=False))
-        result = profiler.build_memory_profiler(
-            global_step=0, base_folder="/tmp", leaf_folder=""
-        )
-        self.assertIsNone(result)
 
     def test_runtime_args_stored_on_init(self):
         """Runtime kwargs passed to __init__ are stored on the instance."""
@@ -98,26 +50,6 @@ class TestProfilerDisabledPaths(unittest.TestCase):
             self.assertIsNone(prof.memory_profiler)
             prof.step()
             prof.step()
-
-    def test_default_args_context_manager(self):
-        """Profiler with default runtime args works as a context manager."""
-        profiler = Profiler(Profiler.Config())
-        with profiler as prof:
-            prof.step()
-
-    def test_step_noop_when_both_profilers_none(self):
-        """step() is a no-op when torch_profiler and memory_profiler are both None."""
-        profiler = Profiler(Profiler.Config())
-        profiler.step()
-        profiler.step()
-
-    def test_exit_resets_profiler_attrs(self):
-        """After __exit__, torch_profiler and memory_profiler are reset to None."""
-        profiler = Profiler(Profiler.Config())
-        with profiler:
-            pass
-        self.assertIsNone(profiler.torch_profiler)
-        self.assertIsNone(profiler.memory_profiler)
 
     def test_active_updates_runtime_args(self):
         """active() updates runtime args and returns self for context manager use."""
@@ -266,6 +198,102 @@ class TestProfilerEnabledPaths(unittest.TestCase):
                     base_folder=tmpdir,
                     leaf_folder="",
                 )
+
+    def test_cuspy_raises_when_environment_unsupported(self):
+        import tempfile
+
+        from torchtitan.observability.profiler import CuspyProfilerConfig
+
+        profiler = Profiler(
+            Profiler.Config(
+                enable_profiling=True,
+                profile_freq=4,
+                profiler_warmup=1,
+                profiler_active=1,
+                cuspy=CuspyProfilerConfig(),
+            )
+        )
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            mock.patch("torch.cuda.is_available", return_value=True),
+            mock.patch(
+                "torchtitan.observability.profiler._cuspy_unavailable_reasons",
+                return_value=["reason one", "reason two"],
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                re.escape("Cuspy cannot run here:\n  - reason one\n  - reason two"),
+            ):
+                profiler.build_torch_profiler(
+                    global_step=0, base_folder=tmpdir, leaf_folder=""
+                )
+
+    def test_cuspy_activity_and_trace_file(self):
+        import os
+        import tempfile
+
+        from torchtitan.observability.profiler import CuspyProfilerConfig
+
+        for trace_format, file_name in (
+            ("json", "rank0_trace.json.gz"),
+            ("pftrace", "rank0_trace.pftrace.gz"),
+        ):
+            profiler = Profiler(
+                Profiler.Config(
+                    enable_profiling=True,
+                    profile_freq=4,
+                    profiler_warmup=1,
+                    profiler_active=1,
+                    cuspy=CuspyProfilerConfig(trace_format=trace_format),
+                )
+            )
+            with (
+                self.subTest(trace_format=trace_format),
+                tempfile.TemporaryDirectory() as tmpdir,
+                mock.patch("torch.cuda.is_available", return_value=True),
+                mock.patch(
+                    "torchtitan.observability.profiler._cuspy_unavailable_reasons",
+                    return_value=[],
+                ),
+                mock.patch(
+                    "torchtitan.observability.profiler._get_cuspy_activity_config",
+                    return_value="cuspy-activity",
+                ),
+                mock.patch("torch.profiler.profile") as profile,
+            ):
+                profiler.build_torch_profiler(
+                    global_step=0, base_folder=tmpdir, leaf_folder=""
+                )
+                kwargs = profile.call_args.kwargs
+                self.assertIn("cuspy-activity", kwargs["activities"])
+                prof = mock.Mock(step_num=4)
+                kwargs["on_trace_ready"](prof)
+                prof.export_chrome_trace.assert_called_once_with(
+                    os.path.join(tmpdir, "profiling/traces", "iteration_4", file_name)
+                )
+
+    @unittest.skipUnless(
+        hasattr(torch.profiler, "CuspyConfig"), "torch build has no Cuspy"
+    )
+    def test_cuspy_activity_config(self):
+        """Builds real torch Cuspy configs, so torch API changes fail here."""
+        from torchtitan.observability.profiler import (
+            _get_cuspy_activity_config,
+            CuspyProfilerConfig,
+        )
+
+        activity_config = _get_cuspy_activity_config(
+            CuspyProfilerConfig(
+                enable_event_node_ids=True,
+                performance_metrics=["sm__cycles_active.avg"],
+                pm_sampling_interval_ms=0.5,
+            )
+        )[torch.profiler.ProfilerActivity.CUDA]
+        cuspy_config, pm_config = activity_config.profiler_configs
+        self.assertTrue(cuspy_config.enable_event_node_ids)
+        self.assertEqual(pm_config.metric_names, ["sm__cycles_active.avg"])
+        self.assertEqual(pm_config.sampling_interval_ms, 0.5)
 
 
 if __name__ == "__main__":

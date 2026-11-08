@@ -77,7 +77,7 @@ Design references:
 - CUDA-graph-compatible GraphPP RFC: https://github.com/pytorch/torchtitan/issues/3820
 
 ```python
-config.training.disable_cuda_graphs = True
+config.training.disable_accelerator_graphs = True
 config.parallelism.pipeline_parallel_degree = 2
 config.parallelism.num_pp_microbatches = 8
 config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
@@ -130,7 +130,48 @@ The graph-level CUDA graph and kernel annotation passes remain available in
 can apply them explicitly with `construct_cuda_graph_passes`. By default, CUDA
 graph capture is owned by the client around the complete forward/backward
 execution. Users can disable CUDA graphs with
-`config.training.disable_cuda_graphs = True`.
+`config.training.disable_accelerator_graphs = True`.
+
+#### Registered Graph Passes
+
+Model- or shape-specialized rewrites, such as replacing a subgraph with a
+handwritten kernel, are registered graph passes. Register one with
+`@register_graph_pass` from `registry.py` in any module, including one outside
+torchtitan, and enable it by name in the recipe that imports it:
+
+```python
+# my_pkg/fusions.py
+from torchtitan.experiments.graph_trainer.registry import register_graph_pass
+
+
+@register_graph_pass
+def my_kernel_fusion_pass(gm, example_inputs):
+    ...  # replace matched subgraphs with calls to a custom op
+    return gm
+
+
+# recipe
+from my_pkg.fusions import my_kernel_fusion_pass
+
+config.compile.extra_passes = [my_kernel_fusion_pass.__name__]
+```
+
+Selected passes run in list order on the joint forward/backward graph, after
+the other GraphTrainer passes and right before Inductor compilation:
+
+```
+... -> tag_with_memory_policy -> selective_activation_remat -> bucketing/reordering
+  -> [async_tensor_parallel] -> [compile.extra_passes]
+  -> annotate_flex_attention -> regional_inductor
+```
+
+GraphPP and SPMD gradient accumulation run them on the joint graph before
+splitting it into per-action graphs. A pass sees the graph as the earlier
+passes left it: recomputed forward ops are already duplicated in front of their
+backward users, and collectives are bucketed and reordered. An unregistered or
+repeated name in `compile.extra_passes` raises at trainer init. A replacement
+node should copy the meta of the node it replaces, which carries the fake
+value, module FQN, and forward/backward marker that later passes read.
 
 ### Expert Parallel Overlap
 
@@ -257,6 +298,19 @@ GraphRuntime composability status:
 |Graph-based Pipeline Parallelism| 🚧 |
 |Micro-batch overlap| 🚧 |
 |Pre-compile| 🚧 |
+
+### Supported Models
+
+GraphTrainer traces one static-shape training step, so multimodal models run
+text-only flavors without a vision encoder.
+
+| Model | Notes |
+| :-------- | :-------- |
+| Llama 3 | |
+| DeepSeek V3 | |
+| Qwen3 (dense and MoE) | |
+| Muse Glimmer | Text-only flavors; no CP |
+| GPT-OSS | FSDP, TP, EP, and PP; no CP |
 
 ### Citation
 

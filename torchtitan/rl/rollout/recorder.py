@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, is_dataclass
 from enum import Enum
 from pathlib import Path
@@ -17,6 +19,8 @@ from typing import Any
 from torchtitan.config import Configurable
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.rollout import Rollout, RolloutGroup, RolloutTurn
+
+logger = logging.getLogger(__name__)
 
 # TODO(recorders): if a second recorder appears (e.g. an training_sample recorder), generalize to a list of
 # recorders behind one interface, instead of bespoke per-type classes.
@@ -28,6 +32,12 @@ def _json_default(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _log_write_error(write_future: Future) -> None:
+    error = write_future.exception()
+    if error is not None:
+        logger.error("Failed to write rollout samples", exc_info=error)
 
 
 class KeepExtremeRewardsFilter(Configurable):
@@ -91,6 +101,7 @@ class RolloutSampleRecorder(Configurable):
 
         recorder = RolloutSampleRecorder.Config().build(dump_dir="outputs/rl")
         recorder.record(is_validation=False, rollout_groups=groups)
+        recorder.close()
         # -> outputs/rl/rollout_samples.jsonl, one JSON line per recorded rollout
     """
 
@@ -114,6 +125,13 @@ class RolloutSampleRecorder(Configurable):
         self._log_logprobs = config.log_logprobs
         self._path = Path(dump_dir) / config.filename
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        # `record` runs on the controller's event loop, so a writer thread does the file
+        # I/O; one thread keeps the lines in call order. The file stays open: reopening
+        # it per call is slow on a network filesystem (FUSE/NFS).
+        self._file = self._path.open("a", encoding="utf-8")
+        self._write_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="rollout_recorder"
+        )
 
     @sl.log_trace_span("rollout_record")
     def record(
@@ -122,7 +140,10 @@ class RolloutSampleRecorder(Configurable):
         is_validation: bool,
         rollout_groups: list[RolloutGroup],
     ) -> None:
-        """Append the filtered rollouts to the JSONL, one JSON object per rollout."""
+        """Queue the filtered rollouts for the JSONL, one JSON object per rollout.
+
+        The rollouts are encoded here; the writer thread appends them to the file.
+        """
         lines = []
         for rollout in self._filter(rollout_groups):
             record = {
@@ -132,8 +153,17 @@ class RolloutSampleRecorder(Configurable):
             # Rollout messages can hold objects json.dumps can't serialize
             # natively, e.g. tool-calling results
             lines.append(json.dumps(record, default=_json_default) + "\n")
-        with self._path.open("a", encoding="utf-8") as file:
-            file.write("".join(lines))
+        write_future = self._write_executor.submit(self._append, "".join(lines))
+        write_future.add_done_callback(_log_write_error)
+
+    def _append(self, text: str) -> None:
+        self._file.write(text)
+        self._file.flush()
+
+    def close(self) -> None:
+        """Wait until every recorded rollout is in the file, then close it."""
+        self._write_executor.shutdown(wait=True)
+        self._file.close()
 
     def _encode_rollout(self, rollout: Rollout) -> dict:
         """One JSON object per rollout: its scalar fields + each turn (see `_encode_turn`)."""

@@ -37,13 +37,14 @@ torch._dynamo.config.disable = True
 
 from torchtitan.components.checkpointer import ModelWrapper
 from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
-from torchtitan.components.data.multimodal.utils.image import (
-    process_image,
-    vision_to_patches,
-)
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import InnerAttention
-from torchtitan.models.qwen3_5 import build_model_config, QWEN3_5_SPECIAL_TOKENS
+from torchtitan.models.qwen3_5 import (
+    build_model_config,
+    QWEN3_5_SPECIAL_TOKENS,
+    QWEN3_5_VISION_PROCESSOR_KWARGS,
+)
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
 
@@ -100,6 +101,7 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
     patch_size = encoder_config.patch_size
     temporal_patch_size = encoder_config.temporal_patch_size
     merge_size = encoder_config.spatial_merge_size
+    vision_processor = VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS).build()
 
     image_token_id = processor.tokenizer.convert_tokens_to_ids(
         QWEN3_5_SPECIAL_TOKENS["image_token"]
@@ -108,9 +110,8 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
         QWEN3_5_SPECIAL_TOKENS["video_token"]
     )
     special_tokens = {"image_id": image_token_id, "video_id": video_token_id}
-    # Reuse the collator's MRoPE builder (only needs spatial_merge_size) so the
-    # 3D position IDs match the training path exactly.
-    mrope_builder = types.SimpleNamespace(spatial_merge_size=merge_size)
+    # The collator reads the merge size from its vision processor.
+    mrope_builder = types.SimpleNamespace(vision_processor=vision_processor)
 
     hf_inputs, tt_inputs, pixel_comparisons = [], [], []
 
@@ -143,40 +144,29 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
         hf_inputs.append(hf_in)
 
         # --- TT path ---
-        img_tensor = process_image(
-            pil_image, patch_size=patch_size, merge_size=merge_size
-        )
-        assert img_tensor is not None, f"process_image failed for sample {i}"
-        patches, grid_thw = vision_to_patches(
-            img_tensor,
-            patch_size,
-            temporal_patch_size,
-            merge_size,
-        )
-        # 3D MRoPE positions (1, S, 3); positions=None → single document.
+        pixels, _ = vision_processor.resize_and_normalize(pil_image)
+        patches, grid_thw = vision_processor.patchify(pixels)
+        grid_thw_13 = grid_thw.unsqueeze(0)
+        # One document. patchify returns patches (N, P) and grid_thw (3,).
+        # The packed forward wants tokens (S,), those patches, grid
+        # (num_images, 3), and MRoPE positions (S, 3).
+        input_ids_S = hf_in["input_ids"].squeeze(0)
         mrope_positions = MultiModalCollator._build_mrope_positions(
             mrope_builder,  # pyrefly: ignore [bad-argument-type]
-            hf_in["input_ids"],
-            grid_thw.unsqueeze(0),
+            input_ids_S,
+            grid_thw_13,
             None,
             None,
             image_token_id=image_token_id,
             video_token_id=video_token_id,
         )
-        tt_inputs.append(
-            (
-                hf_in["input_ids"],
-                patches.unsqueeze(0),
-                grid_thw.unsqueeze(0),
-                mrope_positions,
-            )
-        )
+        tt_inputs.append((input_ids_S, patches, grid_thw_13, mrope_positions))
 
         # --- Compare pixel values in image space ---
         # Reshape patches back to image space for pixel-level comparison.
         # Only compare frame 0 (actual image); frame 1 is temporal padding.
         hf_pv = hf_in["pixel_values"]
-        t_p, h_p, w_p = grid_thw.tolist()
+        t_p, h_p, w_p = grid_thw_13[0].tolist()
         pattern = "(t bh bw m n) (c pt ph pw) -> (t pt) (bh m ph) (bw n pw) c"
         kwargs = dict(
             t=t_p,
@@ -276,9 +266,9 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
     model_config = build_model_config(model_flavor, parallelism=ParallelismConfig())
     with torch.device("meta"):
         model = model_config.build()
+    model.half()
     model.to_empty(device="cpu")
     model.init_states(buffer_device=torch.device("cpu"))
-    model.half()
 
     state_dict = ModelWrapper(model)._get_state_dict()
     print(f"  Loading checkpoint: {checkpoint_path}")
@@ -292,11 +282,16 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
             super().__init__()
             self.is_causal = is_causal
 
-        def forward(self, q_BLHK, k_BLHK, v_BLHV, **kwargs):
+        def forward(self, q_THK, k_THK, v_THV, **kwargs):
             if self.is_causal and kwargs.get("attention_metadata") is not None:
                 raise ValueError(
                     "The checkpoint SDPA reference requires a single document."
                 )
+            # Packed Q/K/V are (num_tokens, num_heads, head_dim). SDPA wants
+            # (batch, heads, seq, dim). One batch matches FlexInnerAttention.
+            q_1HTK = q_THK.transpose(0, 1).unsqueeze(0)
+            k_1HTK = k_THK.transpose(0, 1).unsqueeze(0)
+            v_1HTV = v_THV.transpose(0, 1).unsqueeze(0)
             backend_context = (
                 sdpa_kernel(
                     [
@@ -310,15 +305,15 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
                 else nullcontext()
             )
             with backend_context:
-                out_BHLV = F.scaled_dot_product_attention(
-                    q_BLHK.transpose(1, 2),
-                    k_BLHK.transpose(1, 2),
-                    v_BLHV.transpose(1, 2),
+                out_1HTV = F.scaled_dot_product_attention(
+                    q_1HTK,
+                    k_1HTK,
+                    v_1HTV,
                     is_causal=self.is_causal,
                     scale=kwargs.get("scale"),
                     enable_gqa=kwargs.get("enable_gqa", False),
                 )
-            return out_BHLV.transpose(1, 2)
+            return out_1HTV.squeeze(0).transpose(0, 1)
 
     # Replace FlexInnerAttention with SDPA for single-process inference
     # (unfused FlexInnerAttention without torch.compile has poor fp16 numerics).
@@ -340,7 +335,8 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
             positions=mrope_positions.to(device),
             special_tokens=special_tokens,
         )
-        outputs.append(logits[:, -1:, :].cpu())
+        # lm_head returns (num_tokens, vocab). Match HF's (1, 1, vocab).
+        outputs.append(logits[-1:].unsqueeze(0).cpu())
         print(f"  TT  {i + 1}/{len(tt_inputs)}")
 
     del model

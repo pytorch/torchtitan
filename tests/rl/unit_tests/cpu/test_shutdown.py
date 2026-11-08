@@ -116,7 +116,7 @@ def test_async_loop_config_rejects_bad_windowed_fifo_batches() -> None:
         AsyncLoopConfig(window_fraction=0.3)  # type: ignore[call-arg]
 
 
-def _make_stub_rl_trainer():
+def _make_stub_rl_trainer(tmp_path):
     """Create an Controller with a minimal stub config (no Generator validation)."""
     from torchtitan.rl.observability import metrics as m
 
@@ -127,7 +127,7 @@ def _make_stub_rl_trainer():
     class _StubConfig:
         async_loop = AsyncLoopConfig()
         metrics = m.MetricsProcessor.Config()
-        dump_folder = "/tmp/test_rl"
+        dump_folder = str(tmp_path)
         rollout_recorder = RolloutSampleRecorder.Config()
         hf_assets_path = "./tests/assets/tokenizer"
         # __init__ builds these too; stub them so construction does no real work.
@@ -137,8 +137,8 @@ def _make_stub_rl_trainer():
         renderer = SimpleNamespace(
             build=lambda *, tokenizer: SimpleNamespace(get_stop_token_ids=lambda: [])
         )
-        # __init__ copies each role's model, reads generator.sampling (a dataclass,
-        # for replace) + generator.debug.seed, and applies the (empty) override.
+        # __init__ reads generator.sampling (a dataclass, for replace) and
+        # generator.debug.seed; resolve_overrides is stubbed below.
         trainer = SimpleNamespace(model=None)
         generator = SimpleNamespace(
             model=None, sampling=SamplingConfig(), debug=SimpleNamespace(seed=None)
@@ -148,6 +148,9 @@ def _make_stub_rl_trainer():
 
         def to_dict(self):
             return {}
+
+        def resolve_overrides(self) -> None:
+            pass
 
         def maybe_log(self) -> None:
             pass
@@ -188,8 +191,8 @@ def test_main_shuts_down_after_setup_failure(monkeypatch):
     assert _FakeController.instances[0].events == ["setup", "close"]
 
 
-def test_rl_trainer_shutdown_is_noop_before_meshes_spawn():
-    trainer = _make_stub_rl_trainer()
+def test_rl_trainer_shutdown_is_noop_before_meshes_spawn(tmp_path):
+    trainer = _make_stub_rl_trainer(tmp_path)
 
     asyncio.run(trainer.close())
 
@@ -288,10 +291,15 @@ def _set_generator_router(rl_trainer, generators):
     )
 
 
-def test_shutdown_calls_actor_close_before_mesh_stop():
+def test_shutdown_calls_actor_close_before_mesh_stop(tmp_path):
     events: list[str] = []
-    rl_trainer = _make_stub_rl_trainer()
+    rl_trainer = _make_stub_rl_trainer(tmp_path)
     rl_trainer.trainer = _trainer(_StubActor("trainer.close", events))
+
+    async def close_rollouter():
+        events.append("rollouter.close")
+
+    rl_trainer._rollouter = SimpleNamespace(close=close_rollouter)
     _set_generator_router(rl_trainer, [_StubActor("generator.close", events)])
     rl_trainer.actor_system = _actor_system(
         "mesh.stop[router]",
@@ -303,9 +311,11 @@ def test_shutdown_calls_actor_close_before_mesh_stop():
 
     asyncio.run(rl_trainer.close())
 
+    # Generators close before the rollouter, so their failed replies reach live workers.
     assert events == [
         "trainer.close",
         "generator.close",
+        "rollouter.close",
         "mesh.stop[router]",
         "mesh.stop[batcher]",
         "mesh.stop[trainer]",
@@ -313,12 +323,12 @@ def test_shutdown_calls_actor_close_before_mesh_stop():
     ]
     # A second stop has nothing left to stop.
     asyncio.run(rl_trainer.actor_system.stop())
-    assert len(events) == 6
+    assert len(events) == 7
 
 
-def test_shutdown_closes_all_generators():
+def test_shutdown_closes_all_generators(tmp_path):
     events: list[str] = []
-    rl_trainer = _make_stub_rl_trainer()
+    rl_trainer = _make_stub_rl_trainer(tmp_path)
     rl_trainer.trainer = _trainer(_StubActor("trainer.close", events))
     _set_generator_router(
         rl_trainer,
@@ -342,9 +352,9 @@ def test_shutdown_closes_all_generators():
     ]
 
 
-def test_shutdown_continues_after_actor_close_failure():
+def test_shutdown_continues_after_actor_close_failure(tmp_path):
     events: list[str] = []
-    rl_trainer = _make_stub_rl_trainer()
+    rl_trainer = _make_stub_rl_trainer(tmp_path)
     rl_trainer.trainer = _trainer(_StubActor("trainer.close", events, raises=True))
     _set_generator_router(rl_trainer, [_StubActor("generator.close", events)])
     rl_trainer.actor_system = _actor_system(
@@ -362,9 +372,9 @@ def test_shutdown_continues_after_actor_close_failure():
     ]
 
 
-def test_shutdown_continues_after_generator_close_failure():
+def test_shutdown_continues_after_generator_close_failure(tmp_path):
     events: list[str] = []
-    rl_trainer = _make_stub_rl_trainer()
+    rl_trainer = _make_stub_rl_trainer(tmp_path)
     rl_trainer.trainer = _trainer(_StubActor("trainer.close", events))
     _set_generator_router(
         rl_trainer,
@@ -471,7 +481,7 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
         events.append(
             f"gpu meshes {trainer_world_size}+"
             f"{kwargs['num_generators']}x{per_generator_world_size} "
-            f"on {kwargs['host_meshes']} with {kwargs['generator_env']}"
+            f"on {kwargs['host_meshes']}"
         )
         return "trainer_mesh", ["generator_mesh_0", "generator_mesh_1"]
 
@@ -487,9 +497,7 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
     monkeypatch.setattr(
         monarch_system, "setup_torch_elastic_env", setup_torch_elastic_env
     )
-    actor_system = MonarchActorSystem.Config().build(
-        host_meshes="host_meshes", generator_env={"KEY": "value"}
-    )
+    actor_system = MonarchActorSystem.Config().build(host_meshes="host_meshes")
 
     asyncio.run(
         actor_system.provision(
@@ -500,7 +508,7 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
     )
 
     assert events == [
-        "gpu meshes 2+2x2 on host_meshes with {'KEY': 'value'}",
+        "gpu meshes 2+2x2 on host_meshes",
         "cpu procs 1",
         "cpu procs 1",
         "torch elastic trainer_mesh",
@@ -510,8 +518,8 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
 
 
 class _FakeTrainerRanks:
-    """A trainer actor mesh of ranks laid out as (dp, cp_tp); ``get_dp_rank`` reports
-    ``reported_dp_ranks`` for those ranks."""
+    """A trainer actor mesh of ranks laid out as (pp, dp, cp_tp); ``get_dp_rank``
+    reports ``reported_dp_ranks`` for those ranks."""
 
     def __init__(self, reported_dp_ranks: list[int], ranks: list[int] | None = None):
         self.reported_dp_ranks = reported_dp_ranks
@@ -524,28 +532,34 @@ class _FakeTrainerRanks:
     def flatten(self, name):
         return self
 
-    def split(self, *, rank, dp):
+    def split(self, *, rank, pp, dp):
+        self.pp_degree = pp
         self.dp_degree = dp
         return self
 
     def slice(self, *, rank=None, dp=None):
         if rank is not None:
             return _FakeTrainerRanks(self.reported_dp_ranks, [self.ranks[rank]])
-        num_ranks_per_dp_rank = len(self.ranks) // self.dp_degree
-        start = dp * num_ranks_per_dp_rank
-        return _FakeTrainerRanks(
-            self.reported_dp_ranks, self.ranks[start : start + num_ranks_per_dp_rank]
-        )
+        num_ranks_per_stage = len(self.ranks) // self.pp_degree
+        num_ranks_per_dp_rank = num_ranks_per_stage // self.dp_degree
+        ranks_at_dp_rank = []
+        for stage in range(self.pp_degree):
+            start = stage * num_ranks_per_stage + dp * num_ranks_per_dp_rank
+            ranks_at_dp_rank.extend(self.ranks[start : start + num_ranks_per_dp_rank])
+        return _FakeTrainerRanks(self.reported_dp_ranks, ranks_at_dp_rank)
 
 
-def _spawn_trainer(trainer_ranks: _FakeTrainerRanks, *, dp_degree: int):
+def _spawn_trainer(
+    trainer_ranks: _FakeTrainerRanks, *, dp_degree: int, pp_degree: int = 1
+):
     actor_system = MonarchActorSystem(MonarchActorSystem.Config())
     actor_system._trainer_mesh = SimpleNamespace(
         spawn=lambda name, actor_cls, config, **kwargs: trainer_ranks
     )
-    return asyncio.run(
-        actor_system.spawn_trainer("trainer_config", dp_degree=dp_degree)
+    trainer_config = SimpleNamespace(
+        parallelism=SimpleNamespace(pipeline_parallel_degree=pp_degree)
     )
+    return asyncio.run(actor_system.spawn_trainer(trainer_config, dp_degree=dp_degree))
 
 
 def test_monarch_actor_system_groups_trainer_ranks_by_dp_rank():
@@ -556,12 +570,14 @@ def test_monarch_actor_system_groups_trainer_ranks_by_dp_rank():
     assert trainer.rank0.ranks == [0]
 
 
+def test_monarch_actor_system_spans_pipeline_stages_per_dp_rank():
+    """PP degree 2, DP degree 2, cp * tp = 1: each pipeline stage holds one rank
+    per DP rank, so DP rank 0 is ranks 0 and 2."""
+    trainer = _spawn_trainer(_FakeTrainerRanks([0, 1, 0, 1]), dp_degree=2, pp_degree=2)
+
+    assert [handle.ranks for handle in trainer.by_dp_rank] == [[0, 2], [1, 3]]
+
+
 def test_monarch_actor_system_rejects_a_trainer_not_laid_out_as_dp_cp_tp():
     with pytest.raises(RuntimeError, match="DP rank 0 report DP ranks"):
         _spawn_trainer(_FakeTrainerRanks([0, 1, 0, 1]), dp_degree=2)
-
-
-def test_controller_defaults_to_the_monarch_actor_system():
-    from torchtitan.rl.controller.controller import _default_actor_system_config
-
-    assert isinstance(_default_actor_system_config(), MonarchActorSystem.Config)

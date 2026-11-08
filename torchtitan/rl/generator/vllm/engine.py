@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -19,14 +20,12 @@ from vllm.config import AttentionConfig
 from vllm.exceptions import VLLMClientError
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import DebugConfig
-from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
+from torchtitan.config import DebugConfig, PrecisionConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
-from torchtitan.rl.generator.engine import GenerationEngine
+from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import (
     EngineRequest,
@@ -42,6 +41,7 @@ from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
+    vllm_attention_backend,
 )
 from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.generator.vllm.stat_logger import (
@@ -121,13 +121,14 @@ class VLLMEngine(GenerationEngine):
         parallelism: InferenceParallelismConfig,
         model_path: str,
         max_num_seqs: int,
-        model_dtype: str,
+        precision: PrecisionConfig,
         gpu_memory_limit: float,
         max_num_batched_tokens: int | None,
         checkpointer: CheckpointManager.Config | None,
         dist_moe_runtime: DistMoeRuntime.Config | None,
         debug: DebugConfig,
         reset_kv_cache_on_model_state_dict_load: bool,
+        model_state_dict_load_mode: ModelStateDictLoadMode,
         rank: int,
         generator_name: str,
         output_dir: str,
@@ -147,16 +148,18 @@ class VLLMEngine(GenerationEngine):
         self._setup(
             model,
             parallelism=parallelism,
+            precision=precision,
             checkpointer=checkpointer,
             dist_moe_runtime=dist_moe_runtime,
             batch_invariant=debug.batch_invariant,
+            model_state_dict_load_mode=model_state_dict_load_mode,
         )
         engine_args = self._build_engine_args(
             model,
             parallelism=parallelism,
             model_path=model_path,
             max_num_seqs=max_num_seqs,
-            model_dtype=model_dtype,
+            param_dtype=precision.param_dtype,
             gpu_memory_limit=gpu_memory_limit,
             max_num_batched_tokens=max_num_batched_tokens,
             seed=debug.seed,
@@ -190,17 +193,21 @@ class VLLMEngine(GenerationEngine):
         model: Decoder.Config,
         *,
         parallelism: InferenceParallelismConfig,
+        precision: PrecisionConfig,
         checkpointer: CheckpointManager.Config | None,
         dist_moe_runtime: DistMoeRuntime.Config | None,
         batch_invariant: bool,
+        model_state_dict_load_mode: ModelStateDictLoadMode,
     ) -> None:
         """Process-wide vLLM setup before the engine build: register the TorchTitan model
         and config parser with vLLM, and select vLLM's model runner."""
         register_to_vllm(
             model,
             parallelism=parallelism,
+            precision=precision,
             checkpointer_config=checkpointer,
             dist_moe_runtime=dist_moe_runtime,
+            model_state_dict_load_mode=model_state_dict_load_mode,
         )
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         if batch_invariant:
@@ -215,20 +222,12 @@ class VLLMEngine(GenerationEngine):
         parallelism: InferenceParallelismConfig,
         model_path: str,
         max_num_seqs: int,
-        model_dtype: str,
+        param_dtype: str,
         gpu_memory_limit: float,
         max_num_batched_tokens: int | None,
         seed: int | None,
     ) -> EngineArgs:
         """Build the vLLM ``EngineArgs`` (see ``GenerationEngine`` for the arguments)."""
-        attention = model.first_full_attention
-        assert attention is not None, "No full attention layer found in the model spec."
-        inner_attention_config = attention.inner_attention
-        assert isinstance(
-            inner_attention_config,
-            (VarlenInnerAttention.Config, FlexInnerAttention.Config),
-        ), "Only varlen and flex attention backends are allowed."
-
         enable_ep = parallelism.expert_parallel_degree > 1
         engine_kwargs = dict(
             # ``model`` is the path to the HF checkpoint directory. The
@@ -242,7 +241,7 @@ class VLLMEngine(GenerationEngine):
             # register_to_vllm in _setup). It builds PretrainedConfig from
             # model config instead of reading config.json from disk.
             config_format=TORCHTITAN_CONFIG_FORMAT,
-            dtype=model_dtype,
+            dtype=param_dtype,
             tensor_parallel_size=parallelism.tensor_parallel_degree,
             data_parallel_size=parallelism.data_parallel_degree,
             # NOTE: Monarch launches the generator workers and sets the torch
@@ -257,13 +256,7 @@ class VLLMEngine(GenerationEngine):
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=gpu_memory_limit,
             enforce_eager=self.config.cuda_graph.mode == "NONE",
-            attention_config=AttentionConfig(
-                backend=(
-                    AttentionBackendEnum.FLEX_ATTENTION
-                    if isinstance(inner_attention_config, FlexInnerAttention.Config)
-                    else AttentionBackendEnum.CUSTOM
-                ),
-            ),
+            attention_config=AttentionConfig(backend=vllm_attention_backend(model)),
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
             enable_cumem_allocator=False,
@@ -299,6 +292,7 @@ class VLLMEngine(GenerationEngine):
             engine_kwargs["block_size"] = 256
         vllm_compilation_config = self.config.cuda_graph.get_vllm_compilation_config(
             max_num_seqs=max_num_seqs,
+            max_model_len=model.max_context_length,
             max_num_batched_tokens=max_num_batched_tokens,
             expert_sequence_parallel_size=parallelism.expert_sequence_parallel_size,
             enable_sequence_parallel=parallelism.enable_sequence_parallel,
@@ -345,9 +339,10 @@ class VLLMEngine(GenerationEngine):
         return self._session_kv_holder is not None
 
     @property
-    def prefetched_model_state_dict(self) -> dict[str, torch.Tensor]:
+    def prefetched_model_state_dict(self) -> dict[str, torch.Tensor] | None:
         """The pinned CPU buffers a model state dict is prefetched into, and loaded from by
-        ``load_prefetched_model_state_dict``. Safe to fill from any thread while no load runs."""
+        a model state dict load. Safe to fill from any thread while no load runs. None with
+        ``model_state_dict_load_mode="gpu_fetch"``."""
         return self._get_model()._prefetched_model_state_dict
 
     def add_requests(
@@ -417,11 +412,12 @@ class VLLMEngine(GenerationEngine):
                 self._session_kv_holder.num_evicted,
             )
 
-    def load_prefetched_model_state_dict(self) -> None:
-        """Copy the prefetched model state dict from pinned CPU memory into the model, and
+    def load_model_state_dict(
+        self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
+    ) -> None:
+        """Fetch the model state dict into the model's weights one FSDP group at a time, and
         reset the KV cache when configured."""
-        model = self._get_model()
-        model.load_state_dict(model._prefetched_model_state_dict)
+        self._get_model().load_model_state_dict(fetch)
         if self._reset_kv_cache_on_model_state_dict_load:
             # Always reset running requests too: the only reason to reset is a strict
             # recompute under the new weights. Keeping running requests' KV while hiding

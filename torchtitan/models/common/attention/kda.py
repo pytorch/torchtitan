@@ -19,12 +19,12 @@ from torchtitan.models.common.attn_gym import (
     _ChunkKDA,
     _FusedGate,
     _MaskRows,
-    _MissingKernel,
     bound_gate,
     causal_conv1d,
     chunk_kda,
     ChunkKdaCudnn,
     ContextParallelRouting,
+    is_missing_kernel,
     l2norm,
     require_attn_gym,
 )
@@ -52,7 +52,7 @@ from .linear_attention import (
 # The Attention Gym kernels run on rank-local heads inside InnerKDA's local
 # SPMD region.
 for _kernel_function in (_FusedGate, _ChunkKDA, ChunkKdaCudnn, _MaskRows):
-    if _kernel_function is not _MissingKernel:
+    if not is_missing_kernel(_kernel_function):
         spmd.register_local_autograd_function(_kernel_function)
 
 
@@ -71,7 +71,8 @@ class KDAKernel(Module):
                 )
 
     def __init__(self, config: Config):
-        require_attn_gym()
+        # Every attn_gym export this module calls; keep the list in sync.
+        require_attn_gym(chunk_kda, bound_gate, l2norm)
         super().__init__()
         self.lower_bound = config.lower_bound
 
@@ -122,8 +123,8 @@ class KDAKernel(Module):
 
         gate_1THK = bound_gate(
             raw_gate_1THK,
-            # TODO: The long-term solution is to specify mixed precision per FQN
-            # instead of per layer. https://github.com/pytorch/pytorch/issues/156784
+            # A no-op unless the master weights are bf16 (preserve_dtype_params
+            # keeps them out of FSDP's cast).
             A_log_H.float(),
             dt_bias_HK.float(),
             lower_bound=self.lower_bound,
@@ -173,6 +174,8 @@ class InnerKDA(InnerAttention):
             )
 
     def __init__(self, config: Config):
+        # Every attn_gym export this module calls; keep the list in sync.
+        require_attn_gym(causal_conv1d)
         super().__init__()
         self.head_dim = config.head_dim
         self.kernel = config.kernel.build()
@@ -314,6 +317,8 @@ class KDA(LinearAttention):
     class Config(LinearAttention.Config):
         head_dim: int
         conv_kernel_size: int
+        # The gate reads A_log and dt_bias in float32.
+        preserve_dtype_params: tuple[str, ...] = ("A_log", "dt_bias")
         q_proj: Linear.Config
         k_proj: Linear.Config
         v_proj: Linear.Config
@@ -339,6 +344,15 @@ class KDA(LinearAttention):
                 raise ValueError(
                     f"conv_kernel_size must be positive, got {self.conv_kernel_size}"
                 )
+
+        def flops_per_token(self, seq_len: int) -> int:
+            from torchtitan.models.common.flops import delta_rule_flops_per_token
+
+            return delta_rule_flops_per_token(
+                num_heads=self.n_heads,
+                key_head_dim=self.head_dim,
+                v_head_dim=self.head_dim,
+            )
 
     def __init__(self, config: Config):
         super().__init__()

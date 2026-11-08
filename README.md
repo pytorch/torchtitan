@@ -1,6 +1,10 @@
 <div align="center">
 
-# torchtitan
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/images/logo/torchtitan-rectangle-torch-white.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/images/logo/torchtitan-rectangle-torch-black.svg">
+  <img alt="torchtitan" src="assets/images/logo/torchtitan-rectangle-torch-black.svg" width="560">
+</picture>
 
 **A PyTorch-native platform for pretraining and post-training generative AI models at scale**
 
@@ -109,7 +113,7 @@ and [`torchtitan_recipes`](torchtitan_recipes/README.md) for the verified recipe
 | [Kimi K2.7](torchtitan/models/kimi_k2_7) | Moonlight-16B-A3B, Kimi-VL-A3B, K2.5 | Text, vision | | |
 | [Kimi K3](torchtitan/models/kimi_k3) | K3 | Text, vision | | Soon |
 | [Muse Glimmer](torchtitan/models/muse_glimmer) | 30B | Text, vision | `muse_glimmer_30b` | ✅ |
-| [Muse-Spark-Open](torchtitan/models/muse_spark) | 816B-A42B | Text, vision, audio | `muse_spark_816b_a42b` | ✅ text |
+| [Muse-Spark-Open](torchtitan/models/muse_spark) | 816B-A42B | Text, vision, audio | `muse_spark_816b_a42b_dist_moe_bf16_spmd_256` | ✅ text |
 | [FLUX](torchtitan/models/flux) | dev, schnell | Text-to-image | `flux_dev`, `flux_schnell` | |
 
 Every model has debug configurations exercised in CI. Verified recipes have
@@ -159,7 +163,8 @@ the [model guide](torchtitan/models/README.md).
 
 **Debugging and observability**
 - [Metrics](torchtitan/observability/METRICS.md): loss, memory, throughput, TFLOPs, and MFU in TensorBoard or W&B
-- [Profiling, memory snapshots, and Flight Recorder](docs/debugging.md)
+- [Profiling and memory snapshots](torchtitan/observability/README.md)
+- [Flight Recorder and other debugging tools](docs/debugging.md)
 - Fake-backend dry runs of large layouts on one GPU
 - Deterministic mode and [loss comparison](scripts/loss_compare.py) across commits
 - [SDC replay](torchtitan/observability/SILENT_DATA_CORRUPTION.md) and [structured logging](torchtitan/observability/structured_logger/README.md)

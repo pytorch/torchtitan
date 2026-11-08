@@ -227,12 +227,12 @@ class _RoutedExpertsBlock(Module):
         topk_expert_ids_T1 = torch.zeros(
             num_tokens, 1, device=x_TD.device, dtype=torch.long
         )
-        num_tokens_per_expert_1 = torch.tensor([num_tokens], device=x_TD.device)
+        routing_map_T1 = torch.ones(num_tokens, 1, device=x_TD.device, dtype=torch.bool)
         out_TD = self.routed_experts(
             x_TD,
             topk_scores_T1,
             topk_expert_ids_T1,
-            num_tokens_per_expert_1,
+            routing_map_T1,
         )
         # The sum is a bare consumer of the routed-expert output.
         remat.recompute_needs_tensor(out_TD)
@@ -1049,11 +1049,17 @@ class TestRematRegions(unittest.TestCase):
                         output = model(x_TD)
                     output.backward()
 
+                region_names = (
+                    ("grouped_mm", "bias_add")
+                    if isinstance(config.w13, GptOssGroupedLinear.Config)
+                    else ("grouped_mm",)
+                )
                 self.assertEqual(
                     [entry.name for entry in trace.entries],
                     [
-                        "routed_experts.w13.grouped_mm",
-                        "routed_experts.w2.grouped_mm",
+                        f"routed_experts.{projection}.{name}"
+                        for projection in ("w13", "w2")
+                        for name in region_names
                     ],
                 )
                 self.assertIsNotNone(x_TD.grad)

@@ -13,14 +13,14 @@ TorchTitan models for vLLM.
 
 import copy
 import dataclasses
-from collections import defaultdict
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any, cast
 
 import spmd_types as spmd
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed._state_dict_utils import _create_cpu_state_dict
 from torch.distributed.tensor import DTensor, Replicate
@@ -32,22 +32,30 @@ from vllm.logger import init_logger
 from vllm.utils import torch_utils as _torch_utils
 
 # Registers the "loss" local-compile region. The generator shares the trainer's
-# model config, whose local_compile_regions may name it, but never builds a loss.
+# model config, whose local_compile.regions may name it, but never builds a loss.
 from torchtitan.components import loss as _loss  # noqa: F401
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import TrainingConfig
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.base.module import Module
-from torchtitan.models.common.attention import Attention, LinearAttention
+from torchtitan.models.common.attention import (
+    Attention,
+    FlexInnerAttention,
+    LinearAttention,
+    MLAAttention,
+)
 from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
+from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.vllm.registry import uses_compressed_mla_cache
+from torchtitan.tools.utils import set_default_dtype
 
 
 logger = init_logger(__name__)
@@ -59,9 +67,13 @@ def _replace_vllm_layer_configs(model_config):
     # Defer imports until vLLM constructs the model, after the generator has set
     # that environment. Import the GDN adapter only for hybrid models so other
     # models do not acquire its vLLM-specific dependencies.
-    from torchtitan.rl.generator.vllm.attention import (
+    from torchtitan.rl.generator.vllm.attention.attention import (
         get_attention_dimensions,
         VLLMInnerAttention,
+    )
+    from torchtitan.rl.generator.vllm.attention.mla import (
+        VLLMMLAAttention,
+        VLLMMLAInnerAttention,
     )
 
     new_layers = []
@@ -78,36 +90,67 @@ def _replace_vllm_layer_configs(model_config):
                 head_dim,
                 value_head_dim,
             ) = get_attention_dimensions(attention_cfg, model_config.dim)
-            vllm_attention_cfg = VLLMInnerAttention.Config(
-                hidden_size=model_config.dim,
-                num_heads=num_heads,
-                num_kv_heads=num_kv_heads,
-                head_dim=head_dim,
-                value_head_dim=value_head_dim,
-                scale=attention_cfg.softmax_scale,
-                sliding_window_size=getattr(attention_cfg, "sliding_window_size", None),
-                sharding_config=attention_cfg.inner_attention.sharding_config,
+            backend_cfg = attention_cfg.inner_attention
+            is_mla = isinstance(backend_cfg, MLAAttention.Config)
+            if uses_compressed_mla_cache(backend_cfg):
+                vllm_attention_cfg = VLLMMLAAttention.Config(
+                    wkv_b=backend_cfg.wkv_b,
+                    packed_kv_head_dim=backend_cfg.packed_kv_head_dim,
+                    inner_attention=VLLMMLAInnerAttention.Config(
+                        num_heads=num_heads,
+                        kv_lora_rank=attention_cfg.kv_lora_rank,
+                        qk_nope_head_dim=attention_cfg.qk_nope_head_dim,
+                        qk_rope_head_dim=attention_cfg.qk_rope_head_dim,
+                        v_head_dim=attention_cfg.v_head_dim,
+                        scale=attention_cfg.softmax_scale,
+                        sharding_config=backend_cfg.inner_attention.sharding_config,
+                    ),
+                    sharding_config=backend_cfg.sharding_config,
+                )
+            else:
+                kernel_cfg = backend_cfg.inner_attention if is_mla else backend_cfg
+                if is_mla and isinstance(kernel_cfg, FlexInnerAttention.Config):
+                    raise ValueError(
+                        f"layers[{layer_idx}]: MLA with a materialized K/V cache "
+                        "does not support the flex attention backend in the "
+                        "TorchTitan vLLM wrapper yet; use varlen."
+                    )
+                vllm_attention_cfg = VLLMInnerAttention.Config(
+                    hidden_size=model_config.dim,
+                    num_heads=num_heads,
+                    num_kv_heads=num_kv_heads,
+                    head_dim=head_dim,
+                    value_head_dim=value_head_dim,
+                    scale=attention_cfg.softmax_scale,
+                    sliding_window_size=getattr(
+                        attention_cfg, "sliding_window_size", None
+                    ),
+                    sharding_config=kernel_cfg.sharding_config,
+                )
+                if is_mla:
+                    vllm_attention_cfg = MLAAttention.Config(
+                        wkv_b=backend_cfg.wkv_b,
+                        packed_kv_head_dim=backend_cfg.packed_kv_head_dim,
+                        inner_attention=vllm_attention_cfg,
+                        sharding_config=backend_cfg.sharding_config,
+                    )
+            attention_cfg = dataclasses.replace(
+                attention_cfg,
+                inner_attention=vllm_attention_cfg,
             )
             new_layer_cfg = dataclasses.replace(
                 new_layer_cfg,
-                attention=dataclasses.replace(
-                    attention_cfg,
-                    inner_attention=vllm_attention_cfg,
-                ),
+                attention=attention_cfg,
             )
 
         elif isinstance(attention_cfg, GDN.Config):
             delta_net_cfg = attention_cfg
-            from torchtitan.rl.generator.vllm.gdn import VLLMInnerGDN
+            from torchtitan.rl.generator.vllm.attention.gdn import VLLMInnerGDN
 
             vllm_inner_gdn_cfg = VLLMInnerGDN.Config(
                 layer_idx=layer_idx,
-                num_k_heads=(
-                    delta_net_cfg.in_proj_q.out_features // delta_net_cfg.key_head_dim
-                ),
-                num_v_heads=(
-                    delta_net_cfg.in_proj_v.out_features // delta_net_cfg.value_head_dim
-                ),
+                num_k_heads=delta_net_cfg.n_key_heads,
+                num_v_heads=delta_net_cfg.n_heads,
                 head_k_dim=delta_net_cfg.key_head_dim,
                 head_v_dim=delta_net_cfg.value_head_dim,
                 conv_kernel_size=delta_net_cfg.conv_kernel_size,
@@ -123,7 +166,7 @@ def _replace_vllm_layer_configs(model_config):
 
         elif isinstance(attention_cfg, KDA.Config):
             kda_cfg = attention_cfg
-            from torchtitan.rl.generator.vllm.kda import VLLMInnerKDA
+            from torchtitan.rl.generator.vllm.attention.kda import VLLMInnerKDA
 
             vllm_inner_kda_cfg = VLLMInnerKDA.Config(
                 num_heads=kda_cfg.n_heads,
@@ -261,6 +304,18 @@ def _sharded_param_storages(module: FSDPModule) -> Iterator[torch.Tensor]:
             yield sharded_data
 
 
+def _reshard(module: FSDPModule) -> None:
+    """Reshard ``module``'s FSDP group unconditionally, like FSDP's load_state_dict pre-hook.
+
+    ``module.reshard()`` is a no-op for a group left in the FORWARD state with
+    reshard_after_forward=False, e.g. the tied [tok_embeddings, norm, lm_head]
+    group after ``compute_logits`` calls lm_head alone.
+    """
+    # TODO: replace with a public FSDP API that reshards regardless of training state.
+    for param_group in module._get_fsdp_state()._fsdp_param_groups:
+        param_group._to_sharded()
+
+
 def _restore_sharded_params(module: FSDPModule) -> None:
     """Re-allocate the sharded buffers of `module`'s FSDP group so new weights can be copied in.
 
@@ -295,6 +350,53 @@ def _unshard_and_free_sharded_params(module: FSDPModule) -> None:
             free_storage(sharded_data)
 
 
+def _fsdp_load_groups(
+    model: nn.Module,
+) -> tuple[list[tuple[FSDPModule, list[tuple[str, Any]]]], list[str]]:
+    """Group ``model.state_dict()`` keys by the FSDP group whose sharded parameters hold them.
+
+    Must run while every group is sharded, so the state dict holds the sharded
+    parameters. Tied parameters list each of their keys under the same group.
+
+    Returns:
+        ``(groups, buffer_keys)``: one ``(module, [(key, fsdp_param), ...])`` per FSDP
+        group in module order, where ``module`` is the group's first module; and the
+        keys of the buffers.
+    """
+    sharded_param_to_group: dict[int, tuple[FSDPModule, Any]] = {}
+    group_modules: dict[Any, FSDPModule] = {}
+    for module in model.modules():
+        if not isinstance(module, FSDPModule):
+            continue
+        state = module._get_fsdp_state()
+        if state in group_modules:
+            continue
+        group_modules[state] = module
+        for param_group in state._fsdp_param_groups:
+            for fsdp_param in param_group.fsdp_params:
+                sharded_param_to_group[id(fsdp_param.sharded_param)] = (
+                    module,
+                    fsdp_param,
+                )
+
+    keys_by_module: dict[FSDPModule, list[tuple[str, Any]]] = {
+        module: [] for module in group_modules.values()
+    }
+    buffers = {id(buffer) for buffer in model.buffers()}
+    buffer_keys = []
+    for key, value in model.state_dict(keep_vars=True).items():
+        group = sharded_param_to_group.get(id(value))
+        if group is None:
+            # A parameter here would be loaded outside the reshard/unshard sequence.
+            assert id(value) in buffers, f"{key} is neither FSDP-sharded nor a buffer"
+            buffer_keys.append(key)
+            continue
+        module, fsdp_param = group
+        keys_by_module[module].append((key, fsdp_param))
+    groups = [(module, keyed) for module, keyed in keys_by_module.items() if keyed]
+    return groups, buffer_keys
+
+
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,
@@ -325,10 +427,12 @@ class VLLMModelWrapper(Module):
         *,
         model_config: Decoder.Config,
         parallelism: InferenceParallelismConfig,
+        precision: PrecisionConfig,
         checkpointer_config: CheckpointManager.Config | None,
         vllm_config: VllmConfig,
         prefix: str = "",
         dist_moe_runtime: DistMoeRuntime.Config | None = None,
+        model_state_dict_load_mode: ModelStateDictLoadMode,
     ):
         super().__init__()
 
@@ -356,18 +460,50 @@ class VLLMModelWrapper(Module):
 
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
-        # Build model on meta device to avoid allocating full model on every GPU
-        with self.parallelism_context.activate_spmd(), torch.device("meta"):
+        param_dtype = TORCH_DTYPE_MAP[precision.param_dtype]
+        if vllm_config.model_config.dtype != param_dtype:
+            raise ValueError(
+                f"vLLM computes in {vllm_config.model_config.dtype}, but the trainer computes "
+                f"in precision.param_dtype={precision.param_dtype!r}. Pass "
+                "precision.param_dtype as the engine dtype."
+            )
+        # Build model on meta device to avoid allocating full model on every GPU.
+        # Build in the trainer's master dtype (`precision.dtype`), so buffers and
+        # `preserve_dtype_params` get the dtypes the trainer has and sends.
+        with (
+            self.parallelism_context.activate_spmd(),
+            torch.device("meta"),
+            set_default_dtype(TORCH_DTYPE_MAP[precision.dtype]),
+        ):
             self.model = self.config.build()
+        # The generator never computes gradients. Frozen parameters also let FSDP
+        # hold mixed dtypes, and Dist-MoE's inference context rejects any operand
+        # with requires_grad.
+        self.model.requires_grad_(False)
+        # Hold the other parameters in `precision.param_dtype`, the dtype the trainer
+        # computes with and sends, so the FSDP below casts none of them. Swap each
+        # parameter's tensor rather than assigning `param.data`, which keeps a
+        # quantized tensor subclass's inner tensor in the old dtype; keep the
+        # parameter's attributes (e.g. its SPMD type).
+        preserved = {param for _, param in self.model.named_preserve_dtype_params()}
+        for param in self.model.parameters():
+            if param in preserved or param.dtype == param_dtype:
+                continue
+            new_param = nn.Parameter(
+                param.detach().to(param_dtype), requires_grad=False
+            )
+            for name, value in param.__dict__.items():
+                new_param.__dict__.setdefault(name, value)
+            torch.utils.swap_tensors(param, new_param)
         self.model._skip_lm_head = True
         if getattr(self.model, "vision_encoder", None) is not None:
             self.model.vision_encoder = None
 
         self.model = self.model.parallelize(
             parallelism_context=self.parallelism_context,
-            training=TrainingConfig(),
+            precision=precision,
             parallelism=training_parallelism,
-            local_compile_regions=self.config.local_compile_regions,
+            local_compile=self.config.local_compile,
             activation_remat=None,
             dump_folder="",
         )
@@ -410,14 +546,31 @@ class VLLMModelWrapper(Module):
         if self.parallelism_context.tp_enabled and not is_in_batch_invariant_mode():
             _patch_vllm_all_reduce()
 
-        # Build pinned CPU receive buffers for model state dict loads while the model
-        # is still sharded. Bind first so first-touch places them on the
-        # NUMA node local to this rank's GPU.
+        self._fsdp_load_groups, self._buffer_keys = _fsdp_load_groups(self.model)
+        if model_state_dict_load_mode == "gpu_fetch":
+            # gpu_fetch writes into the sharded parameter itself, not a quantized
+            # parameter's high-precision _tensor.
+            for _, keyed_params in self._fsdp_load_groups:
+                for key, fsdp_param in keyed_params:
+                    if isinstance(fsdp_param._sharded_param_data, _ShardedFSDPTensor):
+                        raise ValueError(
+                            "model_state_dict_load_mode='gpu_fetch' does not support "
+                            f"quantized parameters ({key})"
+                        )
+
+        # With cpu_prefetch, build pinned CPU receive buffers for model state dict
+        # loads while the model is still sharded. Bind first so first-touch places
+        # them on the NUMA node local to this rank's GPU.
         maybe_apply_numa_binding(torch.cuda.current_device(), "cuda")
-        with torch.device("cpu"):
-            self._prefetched_model_state_dict = _create_cpu_state_dict(
-                self.model.state_dict(), pin_memory=True
-            )
+        self._prefetched_model_state_dict: dict[str, torch.Tensor] | None = None
+        if model_state_dict_load_mode == "cpu_prefetch":
+            # The sharded state dict has the dtypes the trainer sends (see
+            # `Trainer._put_model_state_dict`); torchstore's RDMA transport copies
+            # bytes and asserts matching dtypes.
+            with torch.device("cpu"):
+                self._prefetched_model_state_dict = _create_cpu_state_dict(
+                    self.model.state_dict(), pin_memory=True
+                )
 
         # Unshard the model here so vLLM performs its GPU memory profiling
         # based on the model's actual representation used during forward
@@ -425,55 +578,68 @@ class VLLMModelWrapper(Module):
             if isinstance(module, FSDPModule):
                 _unshard_and_free_sharded_params(module)
 
-    def load_state_dict(self, state_dict: Mapping[str, Any]):
-        """Copy new weights into `self.model`, allocating about one FSDP group's sharded buffers at a time.
+    def load_model_state_dict(
+        self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
+    ) -> None:
+        """Fetch new weights into `self.model`, allocating one FSDP group's sharded buffers at a time.
 
-        Each group is allocated right before its first module loads and freed right after its last:
+        Each group is allocated, filled by `fetch`, then unsharded and freed:
 
-            load order:     tok_embeddings | layers.0 | ... | layers.N | norm     lm_head
-            FSDP group:     [emb]          | [l0]     |     | [lN]     | [norm,   lm_head]
-            allocate:       emb            | l0       |     | lN       | norm
-            unshard, free:  emb            | l0       |     | lN       |          lm_head
+            FSDP group:     [emb] | [l0] | ... | [lN] | [norm, lm_head] | buffers
+            allocate:       emb   | l0   |     | lN   | norm, lm_head   |
+            fetch:          emb   | l0   |     | lN   | norm, lm_head   | buffers
+            unshard, free:  emb   | l0   |     | lN   | norm, lm_head   |
 
-        With tied embeddings the group is [tok_embeddings, norm, lm_head], so it stays
-        allocated for the whole load.
+        With tied embeddings the group is [tok_embeddings, norm, lm_head].
 
         Why this shape:
           - Memory: allocating every sharded buffer first adds a second copy of the weights at
             FSDP degree 1: 64.6 GiB extra for bf16 Qwen3.5-35B-A3B at TP1, vs 1.6 GiB here.
           - Per group: modules from one `fully_shard` call share one FSDP state, so unsharding
             after `norm` would all-gather `lm_head` before it loads.
-          - Hooks: a `load_state_dict` per module would also load its nested FSDP modules
-            (the root holds every block), whose sharded buffers are still freed.
 
         Args:
-            state_dict: Keyed like `self.model.state_dict()`, not `self.state_dict()`
-                (no `model.` prefix), e.g. the generator's pinned CPU copy.
+            fetch: Fills each tensor of the given subset of `self.model.state_dict()`
+                (each in its own dtype, as the trainer sends it) in place with the
+                new weights and returns the keys it filled, e.g. a
+                copy from the generator's pinned CPU buffers or a TorchStore read. Each
+                group's sharded storage is reallocated just before its fetch, so a
+                fetch writing outside the current stream (e.g. RDMA) must first wait
+                for queued device work, and must finish writing before it returns.
         """
-        # One entry per FSDP group: fully_shard([norm, lm_head]) gives both modules one
-        # state, and its sharded buffers are allocated and freed together.
-        modules_by_fsdp_state = defaultdict(list)
-        for module in self.model.modules():
-            if isinstance(module, FSDPModule):
-                modules_by_fsdp_state[module._get_fsdp_state()].append(module)
-        # Hooks run inside the one load_state_dict call, just before and after each group
-        # loads; a call per module would also load its nested modules while they are freed.
-        handles = []
-        for modules in modules_by_fsdp_state.values():
-            handles.append(
-                modules[0].register_load_state_dict_pre_hook(
-                    lambda module, *args: _restore_sharded_params(module)
-                )
-            )
-            handles.append(
-                modules[-1].register_load_state_dict_post_hook(
-                    lambda module, *args: _unshard_and_free_sharded_params(module)
-                )
-            )
-        incompatible_keys = self.model.load_state_dict(state_dict, strict=True)
-        for handle in handles:
-            handle.remove()
-        return incompatible_keys
+        error = None
+        for module, keyed_params in self._fsdp_load_groups:
+            # unshard() is a no-op while the group is unsharded. Resharding registers
+            # the sharded parameters and keeps the unsharded storage CUDA graphs read.
+            _reshard(module)
+            _restore_sharded_params(module)
+            # After a failed fetch, keep unsharding the remaining groups: unshard()
+            # all-gathers across the FSDP group and the other ranks are still loading.
+            if error is None:
+                try:
+                    # The trainer sends each parameter in the dtype the generator
+                    # holds it in, so fetch fills the sharded parameters in place.
+                    params = {
+                        key: fsdp_param.sharded_param
+                        for key, fsdp_param in keyed_params
+                    }
+                    # An unfilled parameter would load its just-reallocated,
+                    # uninitialized storage.
+                    missing = params.keys() - fetch(params)
+                    if missing:
+                        raise RuntimeError(
+                            f"fetch did not fill {len(missing)} weights, e.g. "
+                            f"{sorted(missing)[:5]}"
+                        )
+                except Exception as e:
+                    error = e
+            _unshard_and_free_sharded_params(module)
+        if error is not None:
+            raise error
+        # Buffers load after every FSDP collective, so a failure here cannot hang
+        # peers. A fetch that skips unpublished keys (gpu_fetch) leaves them as is.
+        if self._buffer_keys:
+            fetch({key: self.model.get_buffer(key) for key in self._buffer_keys})
 
     def set_num_valid_tokens(self, num_valid_tokens: int) -> None:
         """Publish how many of this step's tokens are real, for the padding mask.
@@ -548,11 +714,6 @@ class VLLMModelWrapper(Module):
                 "backward, so a training context's activation slots would reserve "
                 "memory it can never use."
             )
-        # An inference context rejects any operand carrying requires_grad, and
-        # it tests the attribute rather than whether grad is enabled.
-        for module in self.model.modules():
-            if isinstance(module, DistMoeRoutedExperts):
-                module.requires_grad_(False)
         self._dist_moe_runtime = runtime_config.build(
             model_parts=[self.model],
             parallelism_context=self.parallelism_context,

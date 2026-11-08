@@ -5,10 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-import unittest.mock
 
 import spmd_types as spmd
 import torch
+from torch._subclasses.fake_tensor import FakeTensorMode
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.decoder_sharding import dense_param_placement
@@ -19,6 +19,24 @@ from torchtitan.trainer import Trainer
 
 
 class TestTokenDispatcherModule(unittest.TestCase):
+    def test_hybridep_backward_is_fake_tensor_traceable(self):
+        # Setup contexts must not read the CPU handle ID during AOT tracing.
+        from torchtitan.distributed.deepep import hybridep  # noqa: F401
+
+        with FakeTensorMode():
+            x_TD = torch.empty(64, 256, requires_grad=True)
+            expert_ids_TK = torch.empty(64, 2, dtype=torch.int64)
+            scores_TK = torch.empty(64, 2, requires_grad=True)
+            hidden_RD, scores_R, _, handle_id = torch.ops.hybridep.dispatch(
+                x_TD, expert_ids_TK, scores_TK, 8, 2, "ep", True, 1.0, None
+            )
+            out_TD = torch.ops.hybridep.combine(
+                hidden_RD * scores_R[:, None], handle_id, 64, None
+            )
+            out_TD.sum().backward()
+            self.assertEqual(x_TD.grad.shape, x_TD.shape)
+            self.assertEqual(scores_TK.grad.shape, scores_TK.shape)
+
     def test_dispatcher_has_no_checkpoint_state(self):
         dispatcher = AllToAllTokenDispatcher.Config(
             num_experts=2,
@@ -40,8 +58,7 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
         runtime_config = Trainer.Config(
             model=model_config,
             training=TrainingConfig(
-                max_context_length=model_config.max_context_length,
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
             ),
             parallelism=parallelism,
         )
@@ -65,8 +82,7 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
             Trainer.Config(
                 model=model_config,
                 training=TrainingConfig(
-                    max_context_length=model_config.max_context_length,
-                    disable_cuda_graphs=True,
+                    disable_accelerator_graphs=True,
                 ),
                 parallelism=ParallelismConfig(expert_parallel_degree=8),
             )
@@ -93,8 +109,7 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
         runtime_config = Trainer.Config(
             model=model_config,
             training=TrainingConfig(
-                max_context_length=model_config.max_context_length,
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
             ),
             parallelism=ParallelismConfig(tensor_parallel_degree=2),
         )
@@ -150,20 +165,36 @@ class TestPermute(unittest.TestCase):
     def _permute(self, tokens_per_expert_group, experts_per_rank, num_ranks):
         """Helper that calls _permute and returns (permuted_indices, num_tokens_per_expert)."""
         dispatcher = self._make_dispatcher()
-        mock_mesh = unittest.mock.MagicMock()
-        mock_mesh.size.return_value = num_ranks
         total = tokens_per_expert_group.sum().item()
         dummy_input = torch.zeros(total, 1)
-        with unittest.mock.patch.object(
-            AllToAllTokenDispatcher,
-            "ep_mesh",
-            new_callable=unittest.mock.PropertyMock,
-            return_value=mock_mesh,
-        ):
-            _, permuted_indices, num_tokens_per_expert = dispatcher._permute(
-                dummy_input, tokens_per_expert_group
-            )
+        _, permuted_indices, num_tokens_per_expert = dispatcher._permute(
+            dummy_input, tokens_per_expert_group, ep_size=num_ranks
+        )
         return permuted_indices, num_tokens_per_expert
+
+    def test_permute_and_unpermute_match_indexing_with_grads(self):
+        # 2 ranks, 3 experts per rank; rows are moved by gathers in both directions.
+        tokens_per_expert_group = torch.tensor([2, 0, 3, 1, 4, 2])
+        dispatcher = self._make_dispatcher()
+        x_RD = torch.randn(12, 4, requires_grad=True)
+        grad_RD = torch.randn(12, 4)
+        permuted_RD, permuted_indices, _ = dispatcher._permute(
+            x_RD, tokens_per_expert_group, ep_size=2
+        )
+        restored_RD = dispatcher._unpermute(
+            permuted_RD * 2, x_RD.shape, permuted_indices
+        )
+        (permuted_RD * grad_RD).sum().backward(retain_graph=True)
+        grad_permute_RD = x_RD.grad.clone()
+        x_RD.grad = None
+        restored_RD.backward(grad_RD)
+
+        torch.testing.assert_close(permuted_RD, x_RD[permuted_indices], rtol=0, atol=0)
+        torch.testing.assert_close(restored_RD, x_RD * 2, rtol=0, atol=0)
+        expected_grad_RD = torch.zeros_like(grad_RD)
+        expected_grad_RD[permuted_indices] = grad_RD
+        torch.testing.assert_close(grad_permute_RD, expected_grad_RD, rtol=0, atol=0)
+        torch.testing.assert_close(x_RD.grad, grad_RD * 2, rtol=0, atol=0)
 
     def test_basic_2ranks_2experts(self):
         # 2 ranks, 2 experts per rank

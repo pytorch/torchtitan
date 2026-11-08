@@ -281,7 +281,33 @@ class TestDownloadHfAssets(unittest.TestCase):
         """Test error handling for unknown asset type"""
         with self.assertRaises(ValueError) as context:
             self._call_download_hf_assets(asset_types=["unknown_type"])
-        self.assertIn("Unknown asset type unknown_type", str(context.exception))
+        # A single message argument, so str() is the text, not a tuple repr.
+        self.assertEqual(len(context.exception.args), 1)
+        message = str(context.exception)
+        self.assertTrue(message.startswith("Unknown asset type unknown_type."))
+        self.assertIn("--assets tokenizer safetensors index config", message)
+        self.assertIn("Or use --all to download all files", message)
+
+    @patch("huggingface_hub.list_repo_files")
+    @patch("huggingface_hub.hf_hub_download")
+    def test_reused_asset_types_list_is_not_mutated(
+        self, mock_download, mock_list_files
+    ):
+        """A caller's asset_types list can be reused with additional_patterns."""
+        test_files = ["tokenizer.json", "custom_file.txt", "README.md"]
+        self._setup_mocks(mock_download, mock_list_files, repo_files=test_files)
+        asset_types = ["tokenizer"]
+
+        for _ in range(2):
+            self._call_download_hf_assets(
+                asset_types=asset_types, additional_patterns=["*.txt"]
+            )
+
+        self.assertEqual(asset_types, ["tokenizer"])
+        self.assertEqual(
+            self._get_downloaded_files(mock_download),
+            ["tokenizer.json", "custom_file.txt"] * 2,
+        )
 
 
 if __name__ == "__main__":

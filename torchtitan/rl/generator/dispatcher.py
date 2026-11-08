@@ -125,13 +125,13 @@ class RequestDispatcher:
             reply=reply, metrics_prefix=metrics_prefix
         )
 
-    def rank0_has_outstanding_generations(self) -> bool:
-        """RANK 0: whether any generation is outstanding (reply unresolved).
+    def rank0_num_outstanding_generations(self) -> int:
+        """RANK 0: the number of outstanding generations (reply unresolved).
 
-        A generation stays registered until its completion comes back, so this stays
-        True while any peer DP rank is still running it.
+        A generation stays registered until its completion comes back, so it stays
+        counted while any peer DP rank is still running it.
         """
-        return bool(self._rank0_outstanding_generations)
+        return len(self._rank0_outstanding_generations)
 
     def rank0_route(self, requests: list[EngineRequest]) -> list[list[EngineRequest]]:
         """RANK 0: pick which DP rank serves each queued request.
@@ -174,7 +174,7 @@ class RequestDispatcher:
                     request.request_id
                 ].min_policy_version = request.min_policy_version
 
-    def setup(self) -> None:
+    def setup(self, on_result_drain_failure: Callable[[Exception], None]) -> None:
         """One-time setup before the engine loop starts (DP>1): distribute rank 0's
         result-fan-in port and start rank 0's drain task.
 
@@ -208,7 +208,9 @@ class RequestDispatcher:
         if self._rank != 0 and self._tp_rank == 0:
             self._result_port = cloudpickle.loads(container[0])
         if self._rank == 0:
-            self._rank0_drain_task = asyncio.create_task(self._rank0_drain_results())
+            self._rank0_drain_task = asyncio.create_task(
+                self._rank0_drain_results(on_result_drain_failure)
+            )
 
     def process_finished_requests(
         self, finished_requests: list[FinishedRequest], policy_version: int
@@ -302,21 +304,25 @@ class RequestDispatcher:
             if self._rank0_dp_router is not None:
                 self._rank0_dp_router.release(request_id)
 
-    async def _rank0_drain_results(self) -> None:
+    async def _rank0_drain_results(
+        self, on_result_drain_failure: Callable[[Exception], None]
+    ) -> None:
         """RANK 0 background task which receives and resolves finished (or rejected) requests
         pushed by peer TP rank 0s.
         """
-        # TODO: wait_engine_loop does not watch this task. If it raises (e.g. an unknown request
-        # id), later peer replies are never resolved and their generate() calls hang; make its
-        # failure fail the engine loop.
-        while True:
-            results = await self._rank0_result_receiver.recv()
-            if isinstance(results, _RejectedRequests):
-                self._rank0_fail_generations(results.requests)
-            else:
-                self._rank0_resolve_generations(
-                    results.requests, results.policy_version
-                )
+        try:
+            while True:
+                results = await self._rank0_result_receiver.recv()
+                if isinstance(results, _RejectedRequests):
+                    self._rank0_fail_generations(results.requests)
+                else:
+                    self._rank0_resolve_generations(
+                        results.requests, results.policy_version
+                    )
+        except Exception as exc:
+            logger.exception("rank 0 result drain task failed")
+            on_result_drain_failure(exc)
+            raise
 
     def fail_outstanding_generations(self, exc: BaseException) -> None:
         """RANK 0: fail the reply of every outstanding generation after an exception or

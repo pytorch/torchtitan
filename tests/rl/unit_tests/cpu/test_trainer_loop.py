@@ -32,6 +32,9 @@ class _RankValues:
     def get(self, rank):
         return self._value
 
+    def values(self):
+        return [self._value]
+
 
 class _Endpoint:
     """Stands in for a Monarch endpoint; `on_call` runs on each call."""
@@ -108,7 +111,7 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
 
     controller._rollouter = SimpleNamespace(
         sync_log_step=sync_log_step,
-        acknowledge_training_sample_ids=lambda group_ids: None,
+        commit_training_sample_ids=lambda group_ids: None,
         state_dict=lambda: {},
     )
     controller._group_buffer = SimpleNamespace(
@@ -128,7 +131,7 @@ def _batch_queue(num_batches: int) -> asyncio.Queue:
     for _ in range(num_batches):
         queue.put_nowait(
             SimpleNamespace(
-                microbatches=[],
+                microbatch_groups=[],
                 global_loss_token_counts=[1],
                 global_routing_token_counts=None,
                 group_ids=[],
