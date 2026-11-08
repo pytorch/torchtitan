@@ -157,16 +157,20 @@ def _runner(model) -> TorchTitanGPUModelRunner:
     runner = cast(Any, object.__new__(TorchTitanGPUModelRunner))
     runner.get_model = lambda: model  # type: ignore[method-assign]
     runner.attn_groups = []
+    runner._num_unpadded_tokens = 0
+    runner._num_padded_tokens = 0
+    runner._is_dummy_run = False
     return runner
 
 
 def test_runner_publishes_the_unpadded_count_before_vllm_pads():
     model = _Model()
-    sentinel = (object(), object())
+    sentinel = (object(), SimpleNamespace(num_tokens=32))
     with patch.object(
         GPUModelRunner, "_determine_batch_execution_and_padding", return_value=sentinel
     ) as parent:
-        out = _runner(model)._determine_batch_execution_and_padding(
+        runner = _runner(model)
+        out = runner._determine_batch_execution_and_padding(
             31, 3, None, 1, False, force_eager=True
         )
     assert out is sentinel
@@ -174,3 +178,5 @@ def test_runner_publishes_the_unpadded_count_before_vllm_pads():
     parent.assert_called_once()
     assert parent.call_args.args[0] == 31
     assert parent.call_args.kwargs == {"force_eager": True}
+    assert runner.pop_forward_token_counts() == (31, 32)
+    assert runner.pop_forward_token_counts() == (0, 0)

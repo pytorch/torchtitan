@@ -421,8 +421,18 @@ def _prepare_generation_request_metrics(
             ] = first_to_last_token_ms / (inputs.num_generation_tokens - 1)
 
     # Emit each value with both Mean and Max aggregators.
-    return [
+    metrics = [
         metric
         for key, value in metric_values.items()
         for metric in (m.Metric(key, m.Mean(value)), m.Metric(key, m.Max(value)))
     ]
+    if inputs.num_padded_tokens > 0:
+        # Weighted by padded tokens, so a step's mean is its total padding / total forward tokens.
+        num_padding_tokens = inputs.num_padded_tokens - inputs.num_unpadded_tokens
+        metrics.append(
+            m.Metric(
+                f"{prefix}/cudagraph_padding_fraction",
+                m.Mean(num_padding_tokens, count=inputs.num_padded_tokens),
+            )
+        )
+    return metrics

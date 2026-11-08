@@ -88,6 +88,10 @@ class RequestMetricsInputs:
     first_token_latency: float = 0.0
     num_generation_tokens: int = 0
     num_preemptions: int = 0
+    # The engine's forward tokens since its previous finished request, before and after
+    # padding; 0 on all but one request per engine step.
+    num_unpadded_tokens: int = 0
+    num_padded_tokens: int = 0
 
 
 @dataclass(kw_only=True, slots=True)

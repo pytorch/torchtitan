@@ -104,6 +104,25 @@ class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
 class TorchTitanGPUModelRunner(GPUModelRunner):
     """V1 runner with sequence-parallel padding and FULL-graph decode specialization."""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Tokens of real forwards (dummy runs excluded) since the last `pop_forward_token_counts`.
+        self._num_unpadded_tokens = 0
+        self._num_padded_tokens = 0
+        self._is_dummy_run = False
+
+    def pop_forward_token_counts(self) -> tuple[int, int]:
+        """Return and reset ``(unpadded, padded)`` token counts of the real forwards since the
+        last call. Padding is what vLLM's ``CUDAGraphStat`` counts: CUDA graph capture sizes, TP
+        rounding and DP equalization.
+
+        Example: decodes of 3 and 5 requests replay the 4- and 8-token graphs -> (8, 12)
+        """
+        counts = (self._num_unpadded_tokens, self._num_padded_tokens)
+        self._num_unpadded_tokens = 0
+        self._num_padded_tokens = 0
+        return counts
+
     def load_model(self, load_dummy_weights: bool = False) -> None:
         super().load_model(load_dummy_weights)
         assert not self.cudagraph_dispatcher.keys_initialized
@@ -134,13 +153,19 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
             and num_tokens > self.max_model_len
         ):
             profile_seq_lens = self.max_model_len
-        return super()._dummy_run(
-            num_tokens,
-            *args,
-            uniform_decode=uniform_decode,
-            profile_seq_lens=profile_seq_lens,
-            **kwargs,
-        )
+        # Profiling, capture and an idle DP rank's batch are not real forwards: keep them out
+        # of `pop_forward_token_counts`.
+        self._is_dummy_run = True
+        try:
+            return super()._dummy_run(
+                num_tokens,
+                *args,
+                uniform_decode=uniform_decode,
+                profile_seq_lens=profile_seq_lens,
+                **kwargs,
+            )
+        finally:
+            self._is_dummy_run = False
 
     def initialize_kv_cache(
         self, kv_cache_config, is_profiling: bool = False, **kwargs
@@ -179,6 +204,9 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
         # TODO: drop once vLLM passes the dispatched (cudagraph_mode, batch_descriptor)
         # to AttentionMetadataBuilder.build.
         cudagraph_mode, batch_descriptor = result[:2]
+        if not self._is_dummy_run:
+            self._num_unpadded_tokens += num_tokens
+            self._num_padded_tokens += batch_descriptor.num_tokens
         replays_packed_graph = (
             cudagraph_mode == CUDAGraphMode.FULL and not batch_descriptor.uniform
         )
