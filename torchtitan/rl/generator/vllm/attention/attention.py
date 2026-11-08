@@ -107,6 +107,9 @@ class TorchTitanVarlenInnerAttentionBackend(_FA4PageSize, FlashAttentionBackend)
             FlashAttentionMetadataBuilder
         ):
             _cudagraph_support = AttentionCGSupport.ALWAYS
+            # Single-token rows first: TorchTitanVarlenInnerAttentionImpl.forward runs them
+            # as their own FA4 call.
+            reorder_batch_threshold = 1
 
         return TorchTitanVarlenInnerAttentionMetadataBuilder
 
@@ -274,21 +277,54 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         if self.out_transform is not None:
             extra_kwargs["return_aux"] = AuxRequest(lse=True)
 
-        result = torch.nn.attention.varlen.varlen_attn_out(
-            output[:num_actual_tokens],
-            query[:num_actual_tokens],
-            key_cache,
-            value_cache,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            scale=self.scale,
-            window_size=sliding_window_size,
-            block_table=block_table,
-            seqused_k=seqused_k,
-            **extra_kwargs,
-        )
+        # TODO(https://github.com/Dao-AILab/flash-attention/issues/3146): FA4 picks one
+        # kernel configuration per call from max_seqlen_q, so the single-token decode rows
+        # of a mixed prefill/decode step lose the configuration they get in a decode-only
+        # step and run 3-8x slower (e.g. at head dim 256, when the GQA ratio does not
+        # divide 128, FA4 turns PackGQA off above 128 query tokens). Until FA4 decides per
+        # sequence, run those rows as their own call. The builder puts them first
+        # (reorder_batch_threshold = 1), so clamping cu_seqlens_q at their token count
+        # splits the batch on device, inside CUDA graphs too. Each call gets the other
+        # call's rows with zero KV length, since FA4 can still process the KV of a row
+        # that has no query tokens:
+        #   cu_seqlens_q            [0, 1, 2, 3, 653]   (3 decode rows, one 650-token row)
+        #   decode call   min(., 3) [0, 1, 2, 3, 3]     max_seqlen_q 1    seqused_k [k0, k1, k2, 0]
+        #   prefill call  max(., 3) [3, 3, 3, 3, 653]   max_seqlen_q 650  seqused_k [0, 0, 0, k3]
+        # A 1-token prompt sorts after the prefills and runs in the prefill call.
+        if fa_impl == "FA4" and max_seqlen_q > 1 and self.out_transform is None:
+            is_single_token = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]) == 1
+            is_leading_single_token = is_single_token.int().cumprod(0).bool()
+            num_leading_single_tokens = is_leading_single_token.sum(dtype=torch.int32)
+            calls = [
+                (
+                    torch.minimum(cu_seqlens_q, num_leading_single_tokens),
+                    1,
+                    torch.where(is_leading_single_token, seqused_k, 0),
+                ),
+                (
+                    torch.maximum(cu_seqlens_q, num_leading_single_tokens),
+                    max_seqlen_q,
+                    torch.where(is_leading_single_token, 0, seqused_k),
+                ),
+            ]
+        else:
+            calls = [(cu_seqlens_q, max_seqlen_q, seqused_k)]
+        for call_cu_seqlens_q, call_max_seqlen_q, call_seqused_k in calls:
+            result = torch.nn.attention.varlen.varlen_attn_out(
+                output[:num_actual_tokens],
+                query[:num_actual_tokens],
+                key_cache,
+                value_cache,
+                call_cu_seqlens_q,
+                cu_seqlens_k,
+                call_max_seqlen_q,
+                max_seqlen_k,
+                scale=self.scale,
+                window_size=sliding_window_size,
+                block_table=block_table,
+                seqused_k=call_seqused_k,
+                **extra_kwargs,
+            )
         if self.out_transform is None:
             return result
 
