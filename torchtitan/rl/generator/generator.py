@@ -146,16 +146,6 @@ class Generator(Configurable):
         Every generation call is queued for execution by the `engine_loop`. A higher value enables buffering
         of more requests to avoid a prefill between every engine decode step, which is inefficient."""
 
-        reset_kv_cache_on_model_state_dict_load: bool = False
-        """Reset cached and running-request KV after each model state dict load.
-
-        The default preserves in-flight requests and their KV: a rollout group keeps the
-        cache salt pinned when this generator first admitted it, so its rollouts and
-        later turns reuse its KV across model state dict loads, while new groups use the current
-        version.
-        Enable this to clear prefix-cache entries and preempt running requests; the engine
-        then recomputes their KV under the new weights when they resume."""
-
         model_state_dict_load_mode: ModelStateDictLoadMode = "cpu_prefetch"
         """How a model state dict load moves the StorageVolume snapshot into the engine's weights.
 
@@ -189,15 +179,6 @@ class Generator(Configurable):
                     f"expert_parallel_degree ({p.expert_parallel_degree}) must be 1 "
                     f"(no expert parallelism) or equal data_parallel_degree * "
                     f"tensor_parallel_degree ({full_ep}) in the generator."
-                )
-
-            if (
-                self.debug.batch_invariant
-                and not self.reset_kv_cache_on_model_state_dict_load
-            ):
-                raise ValueError(
-                    "batch_invariant requires reset_kv_cache_on_model_state_dict_load=True so "
-                    "cached KV cannot cross a policy update"
                 )
 
     def __init__(
@@ -250,9 +231,6 @@ class Generator(Configurable):
                     checkpointer=config.checkpointer,
                     dist_moe_runtime=config.dist_moe_runtime,
                     debug=config.debug,
-                    reset_kv_cache_on_model_state_dict_load=(
-                        config.reset_kv_cache_on_model_state_dict_load
-                    ),
                     model_state_dict_load_mode=config.model_state_dict_load_mode,
                     rank=self._rank,
                     generator_name=generator_name,
@@ -313,7 +291,6 @@ class Generator(Configurable):
             rank=self._rank,
             broadcast_group=broadcast_group,
             max_engine_steps_between_decisions=config.max_engine_steps_between_decisions,
-            reset_kv_cache_on_model_state_dict_load=config.reset_kv_cache_on_model_state_dict_load,
             fetch_model_state_dict=(
                 self._copy_prefetched_model_state_dict
                 if config.model_state_dict_load_mode == "cpu_prefetch"

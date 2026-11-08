@@ -30,6 +30,10 @@ class GenerationEngine(Configurable, abc.ABC):
     replica receives the same calls in the same order, so collectives inside them (e.g. a
     TP engine step) line up across ranks.
 
+    A request may reuse only KV cached by requests with the same
+    ``EngineRequest.min_policy_version``. A model state dict load leaves cached and running
+    KV in place.
+
     ``build`` passes the engine's own ``config`` and these keyword arguments, which every
     engine accepts:
 
@@ -49,9 +53,6 @@ class GenerationEngine(Configurable, abc.ABC):
             model state dict loads.
         dist_moe_runtime: Dist-MoE runtime policy, when the model has Dist-MoE experts.
         debug: Debug and determinism settings.
-        reset_kv_cache_on_model_state_dict_load: Whether each model state dict load resets
-            all KV. When False, a request may reuse only KV computed under its
-            ``min_policy_version``.
         model_state_dict_load_mode: ``"cpu_prefetch"`` allocates the pinned CPU buffers of
             ``prefetched_model_state_dict``; ``"gpu_fetch"`` does not.
         rank: Global rank of this process.
@@ -99,8 +100,7 @@ class GenerationEngine(Configurable, abc.ABC):
     def load_model_state_dict(
         self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
     ) -> None:
-        """Load a model state dict by having ``fetch`` fill the model's weights in place, and
-        reset the KV cache when configured.
+        """Load a model state dict by having ``fetch`` fill the model's weights in place.
 
         Args:
             fetch: Fills each tensor of the given subset of the model state dict in place

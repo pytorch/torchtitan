@@ -68,9 +68,9 @@ class EngineRequest:
     """Rank 0's `time.time()` in `generate`; vLLM breaks priority ties by it and measures TTFT from it.
     All TP ranks pass this one value, so they order ties the same way even if their clocks differ."""
     min_policy_version: int = field(init=False)
-    """Oldest policy version this request's KV can come from; rank 0 sets it at admission.
-    Without a KV reset on model state dict load it is the group's pinned version and salts the
-    prefix cache."""
+    """Oldest policy version this request's KV can come from. It is also the prefix cache salt,
+    so the request reuses only KV cached by requests with the same value. Rank 0 sets it at
+    admission to the version its group was pinned to."""
 
 
 @dataclass(kw_only=True, slots=True)

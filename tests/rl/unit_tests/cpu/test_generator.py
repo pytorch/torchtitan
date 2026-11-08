@@ -26,7 +26,7 @@ import torchtitan.rl.generator.generator as generator_module
 import torchtitan.rl.generator.vllm.engine as vllm_engine_module
 from torchstore import RankRole
 from torchtitan.components.optim import AdamW
-from torchtitan.config import DebugConfig, PrecisionConfig
+from torchtitan.config import PrecisionConfig
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.rl.generator.dispatcher import (
@@ -46,7 +46,6 @@ from torchtitan.rl.generator.vllm.engine import (
     add_extra_vllm_engine_args,
     VLLMEngine,
 )
-from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.generator.vllm.worker import (
     TorchTitanCudagraphDispatcher,
     TorchTitanGPUModelRunner,
@@ -89,7 +88,6 @@ class _FakeRenderer:
 class _FakeLLMEngine:
     def __init__(self):
         self.add_requests = []
-        self.reset_prefix_cache_calls = []
         self.renderer = _FakeRenderer()
 
     def add_request(self, *args, **kwargs):
@@ -97,9 +95,6 @@ class _FakeLLMEngine:
 
     def has_unfinished_requests(self):
         return False
-
-    def reset_prefix_cache(self, *args, **kwargs):
-        self.reset_prefix_cache_calls.append((args, kwargs))
 
 
 def _sample(*, token_ids=(10, 11), finish_reason="stop"):
@@ -133,14 +128,10 @@ def _request_output(
     )
 
 
-def _vllm_engine(*, reset_kv_cache_on_model_state_dict_load=False, model=None):
+def _vllm_engine():
     """A `VLLMEngine` around a fake `LLMEngine` (no engine build)."""
     engine = VLLMEngine.__new__(VLLMEngine)
     engine._engine = _FakeLLMEngine()
-    engine._reset_kv_cache_on_model_state_dict_load = (
-        reset_kv_cache_on_model_state_dict_load
-    )
-    engine._get_model = lambda: model
     engine._session_kv_holder = None
     return engine
 
@@ -375,15 +366,6 @@ def test_admission_salts_prompt_with_min_policy_version():
     assert kwargs["prompt"]["cache_salt"] == "6"
 
 
-def test_admission_with_kv_reset_does_not_salt_prompt():
-    engine = _vllm_engine(reset_kv_cache_on_model_state_dict_load=True)
-
-    engine.add_requests([_engine_request("r0", min_policy_version=6)])
-
-    _, kwargs = cast(_FakeLLMEngine, engine._engine).add_requests[0]
-    assert kwargs["prompt"]["cache_salt"] is None
-
-
 def test_admission_rejects_only_the_invalid_request():
     engine = _vllm_engine()
     invalid = _engine_request("invalid", min_policy_version=6)
@@ -501,21 +483,6 @@ def test_shutdown_closes_the_renderer():
     engine._engine.renderer.shutdown.assert_called_once_with()
 
 
-@pytest.mark.parametrize("reset_kv_cache", [False, True])
-def test_reset_kv_cache_on_model_state_dict_load_controls_cache_reset(
-    reset_kv_cache: bool,
-):
-    model = SimpleNamespace(load_model_state_dict=lambda fetch: None)
-    engine = _vllm_engine(
-        reset_kv_cache_on_model_state_dict_load=reset_kv_cache, model=model
-    )
-
-    engine.load_model_state_dict(lambda state_dict: state_dict.keys())
-
-    expected = [((), {"reset_running_requests": True})] if reset_kv_cache else []
-    assert cast(_FakeLLMEngine, engine._engine).reset_prefix_cache_calls == expected
-
-
 def test_sampling_config_rejects_top_p_below_one():
     with pytest.raises(ValueError, match="top_p must be 1.0, got 0.95"):
         SamplingConfig(top_p=0.95)
@@ -586,38 +553,6 @@ def test_generator_dp_can_supply_expert_parallelism():
     )
 
 
-def test_batch_invariant_requires_kv_cache_reset():
-    with pytest.raises(ValueError, match="reset_kv_cache_on_model_state_dict_load"):
-        Generator.Config(
-            model=_MODEL_CONFIG,
-            parallelism=_PARALLELISM,
-            debug=DebugConfig(batch_invariant=True),
-        )
-
-
-def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_path):
-    with pytest.raises(
-        ValueError, match="needs reset_kv_cache_on_model_state_dict_load=False"
-    ):
-        VLLMEngine.Config(session_kv_holder=VLLMSessionKVHolder.Config()).build(
-            model=_MODEL_CONFIG,
-            parallelism=_PARALLELISM,
-            model_path="unused",
-            max_num_seqs=8,
-            precision=PrecisionConfig(),
-            gpu_memory_limit=0.9,
-            max_num_batched_tokens=None,
-            checkpointer=None,
-            dist_moe_runtime=None,
-            debug=DebugConfig(),
-            reset_kv_cache_on_model_state_dict_load=True,
-            model_state_dict_load_mode="cpu_prefetch",
-            rank=0,
-            generator_name="generator",
-            output_dir=str(tmp_path),
-        )
-
-
 def test_qwen36_27b_perf_config():
     from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_6_27b_varlen_perf
 
@@ -658,7 +593,6 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dic
         checkpointer=None,
         dist_moe_runtime=None,
         debug=config.debug,
-        reset_kv_cache_on_model_state_dict_load=False,
         model_state_dict_load_mode="cpu_prefetch",
         rank=0,
         generator_name="generator",
