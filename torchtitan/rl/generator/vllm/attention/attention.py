@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import itertools
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, ClassVar
 
 import spmd_types as spmd
@@ -27,7 +27,7 @@ from vllm.v1.attention.backends.flash_attn_diffkv import (
     FlashAttentionDiffKVImpl,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.base.module import Module
@@ -122,6 +122,13 @@ class TorchTitanVarlenInnerAttentionDiffKVBackend(
     @staticmethod
     def get_name():
         return "CUSTOM"
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        # For a hybrid model, vLLM sizes the attention page from the model's head size
+        # alone, so V gets K's head size and the shared page outgrows the layer's real
+        # page. vLLM then cannot split a block into smaller kernel blocks (FA4 on SM100).
+        return replace(super().customize_spec(spec), head_size_v=cls.head_size_v)
 
     @staticmethod
     def get_impl_cls():
