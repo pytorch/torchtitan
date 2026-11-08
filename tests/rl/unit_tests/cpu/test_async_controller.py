@@ -55,6 +55,17 @@ def test_controller_config_maybe_log(tmp_path, caplog) -> None:
     assert saved_config["trainer"]["model"]["max_context_length"] == 128
 
 
+def test_batch_invariant_requires_on_policy_async_loop() -> None:
+    from torchtitan_recipes.tests.rl.alphabet_sort import (
+        rl_grpo_qwen3_5_debug_varlen_batch_invariant,
+    )
+
+    config = rl_grpo_qwen3_5_debug_varlen_batch_invariant()
+    config.async_loop.target_offpolicy_steps = 1
+    with pytest.raises(ValueError, match="target_offpolicy_steps=0, got 1"):
+        config.__post_init__()
+
+
 def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:
     return TrainingSample(
         min_policy_version=0,

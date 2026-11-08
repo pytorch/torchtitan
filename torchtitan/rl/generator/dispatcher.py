@@ -164,10 +164,10 @@ class RequestDispatcher:
         requests_per_dp_rank: list[list[EngineRequest]],
     ) -> None:
         """RANK 0: stamp each request's min policy version on its outstanding generation, for every
-        request in this `LoopAction.STEP` decision, across all DP ranks. Without a KV reset the request
-        may reuse KV cached under that version, so it is the oldest policy the completion can depend
-        on. Rank 0 holds the outstanding generations regardless of which DP rank serves the request,
-        so it stamps them all here."""
+        request in this `LoopAction.STEP` decision, across all DP ranks. It is the request's prefix
+        cache salt, so the request reuses only KV cached by requests with the same version: it is the
+        oldest policy the completion can depend on. Rank 0 holds the outstanding generations
+        regardless of which DP rank serves the request, so it stamps them all here."""
         for dp_requests in requests_per_dp_rank:
             for request in dp_requests:
                 self._rank0_outstanding_generations[
@@ -352,7 +352,8 @@ class OutstandingGeneration:
     metrics_prefix: str
     """Namespaces this generation's metrics (e.g. `generator` vs `validation_generator`)."""
     min_policy_version: int = field(init=False)
-    """Policy version the request was admitted (sampled) under; the max is read at finish (see `Completion`)."""
+    """The request's `EngineRequest.min_policy_version`, stamped at admission; the max is read at finish (see
+    `Completion`)."""
 
 
 @dataclass(frozen=True, slots=True)

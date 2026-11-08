@@ -930,7 +930,8 @@ class TestBitwiseParityQwen35DebugVarlen(BitwiseParityTestBase):
 
         def reload() -> None:
             _sync_trainer_weights_to_vllm(self.model, engine)
-            # As the generator does after a load: drop KV computed with the old weights.
+            # Drop KV computed with the old weights. The generator salts each request with
+            # its policy version instead; these requests carry no salt.
             engine.reset_prefix_cache(reset_running_requests=True)
 
         vllm_generate(engine, self.prompt_ids, self.MAX_GEN_TOKENS)

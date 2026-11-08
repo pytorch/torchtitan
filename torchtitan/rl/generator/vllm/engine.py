@@ -127,24 +127,12 @@ class VLLMEngine(GenerationEngine):
         checkpointer: CheckpointManager.Config | None,
         dist_moe_runtime: DistMoeRuntime.Config | None,
         debug: DebugConfig,
-        reset_kv_cache_on_model_state_dict_load: bool,
         model_state_dict_load_mode: ModelStateDictLoadMode,
         rank: int,
         generator_name: str,
         output_dir: str,
     ):
-        if (
-            config.session_kv_holder is not None
-            and reset_kv_cache_on_model_state_dict_load
-        ):
-            raise ValueError(
-                "session_kv_holder needs reset_kv_cache_on_model_state_dict_load=False: vLLM "
-                "cannot reset the prefix cache while blocks are held"
-            )
         self.config = config
-        self._reset_kv_cache_on_model_state_dict_load = (
-            reset_kv_cache_on_model_state_dict_load
-        )
         self._setup(
             model,
             parallelism=parallelism,
@@ -352,11 +340,11 @@ class VLLMEngine(GenerationEngine):
         vLLM rejected."""
         rejected_requests: list[tuple[str, Exception]] = []
         for request in requests:
-            prompt = {"prompt_token_ids": request.prompt_token_ids}
-            if not self._reset_kv_cache_on_model_state_dict_load:
-                # Salt by the pinned version so a request only reuses KV
-                # computed under that version.
-                prompt["cache_salt"] = str(request.min_policy_version)
+            # Salt by the version, so a request reuses only KV cached by same-version requests.
+            prompt = {
+                "prompt_token_ids": request.prompt_token_ids,
+                "cache_salt": str(request.min_policy_version),
+            }
             # vLLM validates a request (prompt length, sampling params, token ids) as it
             # admits it: render_cmpl and InputProcessor.process_inputs raise
             # VLLMClientError (e.g. VLLMValidationError, not a ValueError subclass) or
@@ -415,16 +403,9 @@ class VLLMEngine(GenerationEngine):
     def load_model_state_dict(
         self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
     ) -> None:
-        """Fetch the model state dict into the model's weights one FSDP group at a time, and
-        reset the KV cache when configured."""
+        """Fetch the model state dict into the model's weights one FSDP group at a time.
+        Cached and running KV stay; each later request's cache salt decides what it reuses."""
         self._get_model().load_model_state_dict(fetch)
-        if self._reset_kv_cache_on_model_state_dict_load:
-            # Always reset running requests too: the only reason to reset is a strict
-            # recompute under the new weights. Keeping running requests' KV while hiding
-            # old KV from new requests is already what the default (no reset) does via the salt.
-            self._engine.reset_prefix_cache(
-                reset_running_requests=True,
-            )
 
     def shutdown(self) -> None:
         """Close renderer-local resources.

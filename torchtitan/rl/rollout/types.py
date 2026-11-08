@@ -63,7 +63,8 @@ class Completion:
     """
 
     min_policy_version: int
-    """Oldest policy version among this turn's decode."""
+    """Oldest policy version this turn can depend on, stamped when the generator admitted it: its
+    KV and tokens come from this version or newer."""
     max_policy_version: int
     """Newest policy version among this turn's decode."""
     # TODO(async-rl): for exact per-token version attribution, switch the engine to
@@ -103,8 +104,9 @@ class GenerateFn(Protocol):
         Args:
             prompt_token_ids: The tokenized prompt to generate from.
             request_id: Unique per call; identifies the exact turn (e.g. ".../turn=2") in logs.
-            group_id: Rollout group this call belongs to. Calls of one group share a prefix
-                cache namespace, so siblings and later turns can reuse the group's KV.
+            group_id: Rollout group this call belongs to. Siblings and later turns can reuse
+                the group's cached KV; across policy versions, see
+                `Generator.Config.reprefill_after_model_state_dict_load`.
             routing_session_id: Optional stable key for the routing session this call
                 belongs to. A router may use it for session affinity, routing same-key
                 calls to the same generator when possible. `None` means no affinity.
@@ -195,7 +197,8 @@ class RolloutTurn:
 
     # Filtering
     min_policy_version: int | None = None
-    """Oldest policy version this turn was sampled under; `None` if no generation happened."""
+    """Oldest policy version this turn can depend on (see `Completion.min_policy_version`); `None` if
+    no generation happened."""
 
     max_policy_version: int | None = None
     """Newest policy version this turn was sampled under; `None` if no generation happened."""

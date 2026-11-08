@@ -30,7 +30,11 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.generator.dispatcher import RequestDispatcher
 from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
-from torchtitan.rl.generator.engine_loop import EngineLoop, EngineLoopThread
+from torchtitan.rl.generator.engine_loop import (
+    EngineLoop,
+    EngineLoopThread,
+    ReprefillMode,
+)
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
 from torchtitan.rl.rollout.types import Completion
@@ -146,15 +150,28 @@ class Generator(Configurable):
         Every generation call is queued for execution by the `engine_loop`. A higher value enables buffering
         of more requests to avoid a prefill between every engine decode step, which is inefficient."""
 
-        reset_kv_cache_on_model_state_dict_load: bool = False
-        """Reset cached and running-request KV after each model state dict load.
+        reprefill_after_model_state_dict_load: ReprefillMode = "new_groups"
+        """Which requests prefill again under the new weights after a model state dict load,
+        instead of reusing KV cached under older weights. A request running at the load keeps its
+        KV and continues decoding under the new weights.
 
-        The default preserves in-flight requests and their KV: a rollout group keeps the
-        cache salt pinned when this generator first admitted it, so its rollouts and
-        later turns reuse its KV across model state dict loads, while new groups use the current
-        version.
-        Enable this to clear prefix-cache entries and preempt running requests; the engine
-        then recomputes their KV under the new weights when they resume."""
+        - ``"new_groups"``: only groups first admitted after the load. A group's later turns and
+          siblings reuse its KV across any number of loads, so that KV can be many versions old.
+        - ``"next_turn"``: every request admitted after the load. A rollout's next turn prefills
+          its history again, once (two loads between turns cost one prefill); later turns at that
+          version reuse it.
+
+        Example: one rollout; v+1 loads while turn 2 decodes.
+
+            turn 2 at v:   prefill the new tokens, decode; load v+1; keep decoding on the same KV
+            turn 3 at v+1: "new_groups": reuse turns 1-2's KV, prefill only the new tokens
+                           "next_turn":  prefill the whole history under v+1
+
+        A request already queued in the engine at the load, but not yet started, keeps the older
+        version: it can reuse KV from before the load, and its ``min_policy_version`` says so.
+        With ``"next_turn"`` and the engine's session KV holder, a session's hold is unusable after
+        a load until its next prefill replaces it.
+        """
 
         model_state_dict_load_mode: ModelStateDictLoadMode = "cpu_prefetch"
         """How a model state dict load moves the StorageVolume snapshot into the engine's weights.
@@ -189,15 +206,6 @@ class Generator(Configurable):
                     f"expert_parallel_degree ({p.expert_parallel_degree}) must be 1 "
                     f"(no expert parallelism) or equal data_parallel_degree * "
                     f"tensor_parallel_degree ({full_ep}) in the generator."
-                )
-
-            if (
-                self.debug.batch_invariant
-                and not self.reset_kv_cache_on_model_state_dict_load
-            ):
-                raise ValueError(
-                    "batch_invariant requires reset_kv_cache_on_model_state_dict_load=True so "
-                    "cached KV cannot cross a policy update"
                 )
 
     def __init__(
@@ -250,9 +258,6 @@ class Generator(Configurable):
                     checkpointer=config.checkpointer,
                     dist_moe_runtime=config.dist_moe_runtime,
                     debug=config.debug,
-                    reset_kv_cache_on_model_state_dict_load=(
-                        config.reset_kv_cache_on_model_state_dict_load
-                    ),
                     model_state_dict_load_mode=config.model_state_dict_load_mode,
                     rank=self._rank,
                     generator_name=generator_name,
@@ -313,7 +318,7 @@ class Generator(Configurable):
             rank=self._rank,
             broadcast_group=broadcast_group,
             max_engine_steps_between_decisions=config.max_engine_steps_between_decisions,
-            reset_kv_cache_on_model_state_dict_load=config.reset_kv_cache_on_model_state_dict_load,
+            reprefill_after_model_state_dict_load=config.reprefill_after_model_state_dict_load,
             fetch_model_state_dict=(
                 self._copy_prefetched_model_state_dict
                 if config.model_state_dict_load_mode == "cpu_prefetch"
@@ -387,9 +392,9 @@ class Generator(Configurable):
         Args:
             prompt_token_ids: One tokenized prompt `[token_ids]`.
             request_id: Unique id for this request, echoed on the `Completion`.
-            group_id: Rollout group id. Requests of one group share a prefix cache
-                salt; `release_groups` drops it. Also sets the vLLM priority; see
-                `EngineRequest.group_id`.
+            group_id: Rollout group id. Sets the vLLM priority (see `EngineRequest.group_id`)
+                and, with ``reprefill_after_model_state_dict_load="new_groups"``, the group's
+                pinned prefix cache salt, which `release_groups` drops.
             routing_session_id: Stable session key for in-mesh DP routing.
             sampling_config: Optional per-call override for the generator's
                 default SamplingConfig.

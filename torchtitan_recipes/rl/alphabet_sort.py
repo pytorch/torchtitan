@@ -328,7 +328,6 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     config.generator = dataclasses.replace(
         config.generator,
         debug=_BATCH_INVARIANT_DEBUG,
-        reset_kv_cache_on_model_state_dict_load=True,
     )
     config.trainer.model, config.generator.model = _qwen3_rl_model_configs(
         "0.6B",
@@ -760,7 +759,6 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
                 max_tokens=700,
             ),
             debug=batch_invariant_config,
-            reset_kv_cache_on_model_state_dict_load=True,
         ),
     )
 
@@ -876,7 +874,6 @@ def rl_grpo_qwen3_5_9b_varlen_batch_invariant() -> Controller.Config:
     config.generator = dataclasses.replace(
         config.generator,
         debug=_BATCH_INVARIANT_DEBUG,
-        reset_kv_cache_on_model_state_dict_load=True,
     )
     config.trainer.model, config.generator.model = _qwen3_5_rl_model_configs(
         "9B",

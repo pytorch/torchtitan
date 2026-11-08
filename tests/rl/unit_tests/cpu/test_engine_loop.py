@@ -45,6 +45,7 @@ from torchtitan.rl.generator.engine_loop import (
     LoopAction,
     LoopDecision,
     ModelStateDictLoadMessage,
+    ReprefillMode,
     SessionReleaseMessage,
 )
 from torchtitan.rl.generator.generator import Generator
@@ -101,7 +102,7 @@ def _bare_loop(
     inflight: bool = False,
     dp_size: int = 1,
     dp_routing_strategy: RoutingStrategy.Config | None = None,
-    reset_kv_cache_on_model_state_dict_load: bool = False,
+    reprefill_after_model_state_dict_load: ReprefillMode = "new_groups",
     fetch_model_state_dict: Callable[[dict], Any] = lambda weights: weights.keys(),
 ) -> EngineLoop:
     # _decide_next_action delegates the in-flight check and routing to the
@@ -114,7 +115,7 @@ def _bare_loop(
         rank=rank,
         broadcast_group=None,
         max_engine_steps_between_decisions=16,
-        reset_kv_cache_on_model_state_dict_load=reset_kv_cache_on_model_state_dict_load,
+        reprefill_after_model_state_dict_load=reprefill_after_model_state_dict_load,
         fetch_model_state_dict=fetch_model_state_dict,
     )
     # An outstanding generation models in-flight work (possibly in a peer DP rank).
@@ -541,9 +542,9 @@ def test_step_pins_min_policy_version_per_group(runner) -> None:
     )
 
 
-def test_step_with_kv_reset_uses_current_version_without_pins(runner) -> None:
+def test_step_next_turn_stamps_the_installed_version_without_pins(runner) -> None:
     engine_loop = _bare_loop(
-        event_loop=runner.get_loop(), reset_kv_cache_on_model_state_dict_load=True
+        event_loop=runner.get_loop(), reprefill_after_model_state_dict_load="next_turn"
     )
     engine_loop.policy_version = 3
     assert (
@@ -552,8 +553,14 @@ def test_step_with_kv_reset_uses_current_version_without_pins(runner) -> None:
     )
 
     engine_loop.policy_version = 4
+    # The rollout's next turn and a sibling first admitted after the load both take the new
+    # version, so neither reuses the group's KV from version 3.
     assert (
         _admit(runner, engine_loop, _request("t1", group_id=1, routing_session_id="s0"))
+        == 4
+    )
+    assert (
+        _admit(runner, engine_loop, _request("t2", group_id=1, routing_session_id="s1"))
         == 4
     )
     assert engine_loop._group_min_policy_versions == {}
