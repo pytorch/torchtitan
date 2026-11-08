@@ -24,12 +24,14 @@ class _GeneratorActorEndpoints:
         *,
         precision: PrecisionConfig,
         model_path: str,
+        max_num_seqs: int,
         output_dir: str,
     ) -> None:
         super().__init__(
             config,
             precision=precision,
             model_path=model_path,
+            max_num_seqs=max_num_seqs,
             output_dir=output_dir,
             rank=current_rank().rank,
             generator_name=context().actor_instance.actor_id.actor_name,

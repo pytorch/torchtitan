@@ -75,6 +75,8 @@ class Generator(Configurable):
         config: Generator-specific configuration, including its model.
         precision: The trainer's dtypes, which the generator's model mirrors.
         model_path: Path to the HF model checkpoint.
+        max_num_seqs: The engine's upper bound on concurrently scheduled sequences (it may admit
+            fewer if KV is tight).
         output_dir: Structured-logger output directory.
         open_result_channel: Opens the asynchronous channel used to fan in
             completions from nonzero data-parallel replicas to rank 0. It must
@@ -128,17 +130,12 @@ class Generator(Configurable):
         (prefill + decode, summed over the batch). ``None`` (default) leaves the
         engine's own default in place."""
 
-        max_num_seqs: int = 512
-        """The most requests each engine DP rank runs at once; the rest wait in its queue. It
-        also sizes per-request buffers and the decode CUDA graphs. 512 is what large recipes
-        run at; a cap above what a run sends costs little (some KV cache and more decode-only
-        CUDA graphs). It must be <= ``max_num_batched_tokens``. Lower it if vLLM refuses to
-        start a linear-attention model (GDN, KDA) with FULL or FULL_DECODE_ONLY CUDA graphs:
-        each running request needs one state block.
-
-        TODO(https://github.com/Dao-AILab/flash-attention/issues/3117): with FlashAttention-2,
-        values below ~32 make vLLM's memory profile hit an out-of-bounds write in the varlen +
-        paged-KV split-KV kernel (it splits 2048 tokens over ``max_num_seqs`` dummy requests)."""
+        max_num_seqs: int | None = None
+        """The most requests each engine DP rank runs at once; the rest wait in its queue.
+        ``None`` (default) derives it from the rollouts in flight; see
+        ``Controller.Config.generator_max_num_seqs``. Lower it if vLLM says "max_num_seqs
+        exceeds available Mamba cache blocks": GDN and KDA models with FULL or
+        FULL_DECODE_ONLY CUDA graphs need one KV cache block per running request."""
 
         checkpointer: CheckpointManager.Config | None = None
         """Optional initial-weight loader for the engine's model.
@@ -216,6 +213,7 @@ class Generator(Configurable):
         *,
         precision: PrecisionConfig,
         model_path: str,
+        max_num_seqs: int,
         output_dir: str,
         rank: int | None = None,
         generator_name: str = "generator",
@@ -252,7 +250,7 @@ class Generator(Configurable):
                     model=config.model,
                     parallelism=config.parallelism,
                     model_path=model_path,
-                    max_num_seqs=config.max_num_seqs,
+                    max_num_seqs=max_num_seqs,
                     precision=precision,
                     gpu_memory_limit=config.gpu_memory_limit,
                     max_num_batched_tokens=config.max_num_batched_tokens,

@@ -447,6 +447,36 @@ class Controller(Configurable):
                         "and has not been validated for determinism."
                     )
 
+        @property
+        def generator_max_num_seqs(self) -> int:
+            """``generator.max_num_seqs`` if set, else 2x each generator DP rank's even share
+            of the training rollouts in flight, clamped to [32, 2048].
+
+            Example (``generator.max_num_seqs`` is None):
+                1536 rollouts in flight, 8 generator DP ranks -> 2 x 192 = 384
+                100 rollouts in flight, 8 generator DP ranks  -> 2 x 13 = 26 -> 32
+            """
+            if self.generator.max_num_seqs is not None:
+                return self.generator.max_num_seqs
+            async_loop = self.async_loop
+            max_rollouts_in_flight = (
+                async_loop.max_active_rollout_groups * async_loop.num_samples_per_prompt
+            )
+            num_generator_dp_ranks = (
+                self.num_generators * self.generator.parallelism.data_parallel_degree
+            )
+            # 2x leaves room for validation requests running beside training, and for uneven
+            # routing: the default router lets a rank reach 1.5x the mean load before it moves
+            # a session.
+            max_num_seqs = 2 * math.ceil(
+                max_rollouts_in_flight / num_generator_dp_ranks
+            )
+            # vLLM requires max_num_seqs <= max_num_batched_tokens, which defaults to 2048.
+            # TODO(https://github.com/Dao-AILab/flash-attention/issues/3117): drop the floor of
+            # 32 once fixed. vLLM's memory profile splits 2048 tokens over max_num_seqs dummy
+            # requests, and FlashAttention-2 writes out of bounds at 65+ tokens per request.
+            return min(max(max_num_seqs, 32), 2048)
+
     def __init__(self, config: Config):
         self.config = config
         config.resolve_overrides()
@@ -605,6 +635,9 @@ class Controller(Configurable):
             trainer_parallelism.data_parallel_replicate_degree * dp_shard
         )
 
+        max_num_seqs = config.generator_max_num_seqs
+        logger.info("max_num_seqs=%d per generator DP rank", max_num_seqs)
+
         with sl.log_trace_span("mesh_spawn"):
             actor_system = await self._build_actor_system()
             self.actor_system = actor_system
@@ -627,6 +660,7 @@ class Controller(Configurable):
                 generator_config=config.generator,
                 precision=config.precision,
                 model_path=config.hf_assets_path,
+                max_num_seqs=max_num_seqs,
                 output_dir=config.dump_folder,
             )
             self.batcher = await actor_system.spawn_batcher(

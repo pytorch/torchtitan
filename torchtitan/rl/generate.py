@@ -114,7 +114,9 @@ def generate() -> None:
     if not filesystem.is_remote(model_path):
         model_path = os.path.abspath(model_path)
     max_num_seqs = (
-        gen_config.max_num_seqs if args.max_num_seqs is None else args.max_num_seqs
+        config.generator_max_num_seqs
+        if args.max_num_seqs is None
+        else args.max_num_seqs
     )
     is_rank0 = os.environ.get("RANK", "0") == "0"
 
