@@ -44,6 +44,9 @@ from torchtitan.experiments.graph_trainer.deepseek_v3 import (
 from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
     maybe_apply_ep_overlap_eager_chunking,
 )
+from torchtitan.experiments.graph_trainer.gpt_oss import (
+    build_model_config as build_gpt_oss_model_config,
+)
 from torchtitan.experiments.graph_trainer.llama3 import (
     build_model_config as build_llama3_model_config,
 )
@@ -149,7 +152,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             dataloader=BaseDataLoader.Config(max_num_documents=BATCH_SIZE),
             training=TrainingConfig(
                 num_tokens_per_microbatch_per_dp_rank=NUM_TOKENS,
-                max_context_length=SEQ_LEN,
                 steps=NUM_STEPS,
             ),
             parallelism=ParallelismConfig(),
@@ -181,7 +183,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
         attention_metadata = model._get_attention_metadata(
             self.positions,
             max_num_documents=BATCH_SIZE,
-            max_context_length=SEQ_LEN,
         )
         return {"attention_metadata": attention_metadata}
 
@@ -191,7 +192,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         trainer_cls: type,
         *,
         enable_passes: bool = True,
-        compile_passes: list[str] | None = None,
+        compile_extra_passes: list[str] | None = None,
         compile_ep_overlap_enabled: bool = False,
         compile_ep_overlap_chunk_dim: str = "batch",
         compile_ep_overlap_module_fqn: str = "layers.*",
@@ -213,7 +214,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
             self.model_config,
             trainer_cls,
             compile_enable_passes=enable_passes,
-            compile_passes=compile_passes,
+            compile_extra_passes=compile_extra_passes,
             compile_ep_overlap_enabled=compile_ep_overlap_enabled,
             compile_ep_overlap_chunk_dim=compile_ep_overlap_chunk_dim,
             compile_ep_overlap_module_fqn=compile_ep_overlap_module_fqn,
@@ -224,7 +225,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             parallelism_context=self.parallelism_context,
             max_num_documents=BATCH_SIZE,
         )
-        trainer.config.training.max_context_length = SEQ_LEN
         global_loss_token_counts = torch.tensor(
             NUM_TOKENS, dtype=torch.float, device="cuda"
         )
@@ -291,7 +291,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             parallelism_context=self.parallelism_context,
             max_num_documents=BATCH_SIZE,
         )
-        trainer.config.training.max_context_length = SEQ_LEN
         fwd_bwd_fn = make_fwd_bwd_step(model, trainer.engine.loss_fn)
 
         global_loss_token_counts = torch.tensor(
@@ -840,6 +839,58 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         )
 
         self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
+
+
+class TestGptOssBitwiseDeterministic(BitwiseDeterministicBase):
+    """Bitwise determinism tests for the GPT-OSS debug model.
+
+    Covers attention sinks, sliding-window attention, and biased grouped
+    experts.
+    """
+
+    build_model_config = staticmethod(build_gpt_oss_model_config)
+    model_flavor = "debugmodel"
+    annotate_model = staticmethod(annotate_graph_trainer_model)
+
+    def test_aot_fx_trace_vs_eager(self):
+        """aot_fx_trace and eager produce bitwise identical losses and grads."""
+        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+
+        self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
+
+    def test_precompile_vs_trace(self):
+        """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
+        if self.attn_backend == "flex":
+            # FlexInnerAttention's BlockMask mask_mod closures are Python code objects
+            # that pickle.dumps cannot serialize. The Varlen subclass covers this
+            # path with tensor-based sequence metadata.
+            self.skipTest("FlexInnerAttention graphs contain unpicklable code objects")
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+        run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
+
+        self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
+
+    def test_numerics_changing_optim_run_to_run(self):
+        """Two runs with numerics_changing_optim produce bitwise identical results."""
+        run_a = self._run_steps(
+            copy.deepcopy(self.model),
+            GraphTrainer,
+            numerics_changing_optim=True,
+        )
+        run_b = self._run_steps(
+            copy.deepcopy(self.model),
+            GraphTrainer,
+            numerics_changing_optim=True,
+        )
+
+        self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
+
+
+class TestGptOssFlexAttnBitwiseDeterministic(TestGptOssBitwiseDeterministic):
+    """Bitwise determinism tests for GPT-OSS with FlexInnerAttention."""
+
+    attn_backend = "flex"
 
 
 if __name__ == "__main__":

@@ -383,7 +383,7 @@ def configure_nccl_for_ulysses(
     if device_type != "cuda" or comm_backend in {"fake", "real_pp_fake_spmd"}:
         return
 
-    from torchtitan.models.common.attention.cp_attention import UlyssesInnerAttention
+    from torchtitan.models.common.attention.cp_attention import Ulysses
 
     # TODO: Remove this workaround once supported PyTorch builds ship
     # NCCL >= 2.32.3.
@@ -392,7 +392,7 @@ def configure_nccl_for_ulysses(
 
     # We could only reproduce this issue with Ulysses. Always turning on
     # this flag may have performance regressions.
-    if not any(model.traverse(UlyssesInnerAttention.Config)):
+    if not any(model.traverse(Ulysses.Config)):
         return
 
     _warn_overwrite_env("NCCL_GRAPH_REGISTER", "0")
@@ -412,8 +412,9 @@ def build_alternative_fsdp_mesh(
     new communicators rather than looking them up in a persistent cache.
 
     Requires NCCL on the FSDP shard axes; other backends raise ``ValueError``.
-    The fake backend preserves its groups with a warning. A mesh without FSDP
-    shard axes is returned unchanged with a warning that the cap is not applied.
+    The fake backend preserves its groups, with a warning unless a group has one
+    rank. A mesh without FSDP shard axes is returned unchanged with a warning
+    that the cap is not applied.
     """
     mesh_axis_names = storage_mesh.mesh_dim_names
     if mesh_axis_names is None:
@@ -439,11 +440,14 @@ def build_alternative_fsdp_mesh(
 
         backend = dist.get_backend(parent_group)
         if backend == "fake":
-            warnings.warn(
-                "Redistribution max_ctas is not modeled by the fake process "
-                "group; using the storage-mesh process group",
-                stacklevel=2,
-            )
+            # A one-rank group, such as a size-1 dp_shard or edp_shard, has
+            # nothing to cap.
+            if storage_mesh[axis_name].size() != 1:
+                warnings.warn(
+                    "Redistribution max_ctas is not modeled by the fake process "
+                    "group; using the storage-mesh process group",
+                    stacklevel=2,
+                )
             groups.append(parent_group)
             continue
         if backend != dist.Backend.NCCL:

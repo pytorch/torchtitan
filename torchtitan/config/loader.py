@@ -51,6 +51,9 @@ class ConfigLoader:
 
         self._apply_launch_options(config, namespace)
         self._validate_assets_path(config)
+        # Recipes assign fields after the constructing __post_init__, and the
+        # launch options assign more. Overrides run later, in apply_overrides.
+        config.__post_init__()
 
         if namespace.print_config:
             pprint.pprint(config)

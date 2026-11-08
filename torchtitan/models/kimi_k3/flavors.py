@@ -704,7 +704,7 @@ def _debugmodel(
         attn_res_block_size=4,
         num_heads=4,
         q_lora_rank=128,
-        kv_lora_rank=64,
+        kv_lora_rank=512,
         qk_nope_head_dim=128,
         qk_rope_head_dim=64,
         v_head_dim=128,

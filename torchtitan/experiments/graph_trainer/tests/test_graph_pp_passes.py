@@ -158,7 +158,6 @@ def _trace_dsv3_moe_block_stage(
             model=model_config,
             training=TrainingConfig(
                 num_tokens_per_microbatch_per_dp_rank=batch_size * seq_len,
-                max_context_length=seq_len,
                 steps=1,
                 disable_accelerator_graphs=True,
             ),
@@ -178,14 +177,14 @@ def _trace_dsv3_moe_block_stage(
             torch.device("meta"),
         ):
             model = model_config.build()
-        model.to_empty(device="cuda")
-        with torch.no_grad():
-            model.init_states(buffer_device=None)
         model._apply(
             lambda tensor: tensor.to(dtype=torch.bfloat16)
             if tensor.is_floating_point()
             else tensor
         )
+        model.to_empty(device="cuda")
+        with torch.no_grad():
+            model.init_states(buffer_device=None)
         model.train()
 
         block = model.layers["1"]

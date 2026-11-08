@@ -17,19 +17,21 @@ import torch
 from batch_invariant_ops import enable_batch_invariant_mode
 from torchtitan.components.checkpointer import CheckpointManager
 
+from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.batch_invariant import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
 )
 from torchtitan.models.qwen3_5 import build_model_config
-from torchtitan.rl.generator.vllm import gdn, registry
-from torchtitan.rl.generator.vllm.batch_invariance import (
-    force_logprobs_fn_for_batch_invariance,
-)
-from torchtitan.rl.generator.vllm.linear_attention import (
+from torchtitan.rl.generator.vllm import registry
+from torchtitan.rl.generator.vllm.attention import gdn
+from torchtitan.rl.generator.vllm.attention.linear_attention import (
     LinearAttentionExecutionPath,
     TorchTitanLinearAttentionMetadata,
+)
+from torchtitan.rl.generator.vllm.batch_invariance import (
+    force_logprobs_fn_for_batch_invariance,
 )
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.forward_context import (
@@ -308,9 +310,11 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
     registry.register_to_vllm(
         model_config,
         parallelism=registry.InferenceParallelismConfig(tensor_parallel_degree=1),
+        precision=PrecisionConfig(),
         checkpointer_config=CheckpointManager.Config(
             initial_load_in_hf=True, initial_load_path=model
         ),
+        model_state_dict_load_mode="cpu_prefetch",
     )
     engine = LLMEngine.from_engine_args(
         EngineArgs(

@@ -14,7 +14,7 @@ import enum
 import gc
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import TypeVar
 
@@ -109,11 +109,20 @@ class EngineLoop:
 
     A model state dict load rides the same loop: `load_model_state_dict` puts a
     `ModelStateDictLoadMessage` on the queue, which rank 0 turns into a
-    `LoopDecision(LoopAction.LOAD_MODEL_STATE_DICT)` applied between step bursts. The engine does
-    NOT drain in-flight requests first ("hotswap"). This behavior can be changed in the
-    inter-generator router, by blocking new requests until the engine is drained. The network
-    transfer into the engine's pinned CPU buffers happens before this loop action, which then
-    performs the local CPU-to-GPU copy.
+    `LoopDecision(LoopAction.LOAD_MODEL_STATE_DICT)` applied between step bursts. Without `drain`
+    ("hot swap"), the load is applied at the next decision, mid-flight for running requests. With
+    `drain`, rank 0 first stops admitting requests and keeps stepping the admitted ones until none
+    is left, then loads; requests that arrive meanwhile are admitted right after the load:
+
+        load(drain=True) queued, r0 admitted earlier, r1 arrives
+        decision: STEP, admit nothing    # r0 keeps stepping; r1 is held back
+        decision: STEP, admit nothing    # ... until r0 finishes
+        decision: LOAD_MODEL_STATE_DICT
+        decision: STEP, admit [r1]       # under the new weights
+
+    The load fills the engine's weights through `fetch_model_state_dict`: with
+    ``model_state_dict_load_mode="cpu_prefetch"`` a local copy from the pinned CPU buffers the
+    network transfer already filled, with ``"gpu_fetch"`` the network transfer itself.
 
     Args:
         engine: The inference engine, built on the engine loop thread. The loop releases it on exit.
@@ -123,6 +132,8 @@ class EngineLoop:
         broadcast_group: All-ranks gloo group that `LoopDecision`s are broadcast over.
         max_engine_steps_between_decisions: ``Generator.Config``'s field.
         reset_kv_cache_on_model_state_dict_load: ``Generator.Config``'s field.
+        fetch_model_state_dict: Fills the given model state dict tensors in place with the new
+            weights and returns the keys it filled.
     """
 
     def __init__(
@@ -135,8 +146,10 @@ class EngineLoop:
         broadcast_group: dist.ProcessGroup,
         max_engine_steps_between_decisions: int,
         reset_kv_cache_on_model_state_dict_load: bool,
+        fetch_model_state_dict: Callable[[dict[str, torch.Tensor]], Iterable[str]],
     ):
         self._engine: GenerationEngine | None = engine
+        self._fetch_model_state_dict = fetch_model_state_dict
         self._event_loop = event_loop
         self._request_dispatcher = request_dispatcher
         self._rank = rank
@@ -199,12 +212,16 @@ class EngineLoop:
         )
         return await asyncio.wrap_future(reply)
 
-    async def load_model_state_dict(self, version: int) -> None:
+    async def load_model_state_dict(self, version: int, *, drain: bool) -> None:
         """RANK 0: queue a model state dict load for `version` and wait until the loop has applied
-        it. Loads queued together are applied once, at the highest version."""
+        it. Loads queued together are applied once, at the highest version. With `drain`, the
+        loop first finishes every admitted request and holds back new ones until the load is
+        applied."""
         self._rank0_check_running("load_model_state_dict")
         reply: concurrent.futures.Future[None] = concurrent.futures.Future()
-        self._queue.put(ModelStateDictLoadMessage(version=version, reply=reply))
+        self._queue.put(
+            ModelStateDictLoadMessage(version=version, drain=drain, reply=reply)
+        )
         await asyncio.wrap_future(reply)
 
     def release_groups(self, group_ids: list[int]) -> None:
@@ -286,7 +303,8 @@ class EngineLoop:
         # We need to cache such requests in this field, so they can be carried across `_decide_next_action` calls.
         # Note these requests' parent `GenerationMessage`s have been registered as `OutstandingGeneration` in dispatcher.
         pending_engine_requests: list[EngineRequest] = []
-        # Loop state (rank 0): model state dict loads taken off the queue but not yet applied.
+        # Loop state (rank 0): model state dict loads taken off the queue but not yet applied. They
+        # carry across decisions only while a drain waits for admitted requests to finish.
         pending_load_messages: list[ModelStateDictLoadMessage] = []
         try:
             # One-time dispatcher setup before the loop starts.
@@ -418,16 +436,16 @@ class EngineLoop:
         """RANK 0: takes everything off the queue and picks the next action. Sleeps until there is
         something to do.
         """
-        if pending_load_messages:
-            raise AssertionError(
-                "the engine loop applies or fails every load before deciding again"
-            )
-
-        # * If there are outstanding generations, we drain the queue and make the next decision right away,
+        # * If there are outstanding generations, we empty the queue and make the next decision right away,
         #   so outstanding generations can keep stepping.
-        # * If there are none, there is nothing to step, so we wait on the queue for the next decision.
+        # * If a draining load is pending, decide right away too: its last admitted request may just
+        #   have finished, and nothing else may arrive to wake the loop.
+        # * Otherwise there is nothing to step, so we wait on the queue for the next decision.
         messages: list[EngineLoopMessage]
-        if self._request_dispatcher.rank0_has_outstanding_generations():
+        if (
+            self._request_dispatcher.rank0_num_outstanding_generations()
+            or pending_load_messages
+        ):
             messages = []
         else:
             if pending_engine_requests:
@@ -470,10 +488,27 @@ class EngineLoop:
                 )
                 pending_engine_requests.append(message.engine_request)
 
-        # A model state dict load takes priority over admitting new requests. Loads taken off the queue
-        # together are coalesced into one, at the highest version: every load reads the latest push from
-        # one TorchStore key, so the weights read are at least as new as any version requested.
-        if pending_load_messages:
+        # A model state dict load takes priority over admitting new requests.
+        # Generations are registered when taken off the queue, before admission, so the admitted
+        # ones are those outstanding minus `pending_engine_requests`. Counting those too would
+        # deadlock: the load would wait for them, and they wait for the load.
+        num_admitted_generations = (
+            self._request_dispatcher.rank0_num_outstanding_generations()
+            - len(pending_engine_requests)
+        )
+        if (
+            any(load.drain for load in pending_load_messages)
+            and num_admitted_generations > 0
+        ):
+            # Drain: keep stepping the admitted requests, and admit nothing until the load.
+            decision = LoopDecision(
+                action=LoopAction.STEP,
+                requests_per_dp_rank=self._request_dispatcher.rank0_route([]),
+            )
+        elif pending_load_messages:
+            # Pending loads are coalesced into one, at the highest version: every load reads the
+            # latest push from one TorchStore key, so the weights read are at least as new as any
+            # version requested.
             decision = LoopDecision(
                 action=LoopAction.LOAD_MODEL_STATE_DICT,
                 requests_per_dp_rank=[],
@@ -505,13 +540,27 @@ class EngineLoop:
 
     @sl.log_trace_span("load_model_state_dict_copy")
     async def _load_model_state_dict(self, version: int) -> None:
-        """ALL RANKS: collectively load the prefetched model state dict and bump the policy
-        version.
+        """ALL RANKS: collectively load the model state dict through `fetch_model_state_dict`,
+        wait for every rank to finish, and bump the policy version.
 
-        The model state dict was already fetched into the engine's pinned CPU buffers; this
-        performs the local CPU-to-GPU copy.
+        Rank 0 replies to the load right after this returns, and the trainer may then
+        overwrite the StorageVolume snapshot the other ranks read from. A fetch that fails on
+        one rank stops every rank here instead of leaving the others in the next decision
+        broadcast; a failure in an FSDP reshard or unshard relies on collective timeouts.
         """
-        self._engine.load_prefetched_model_state_dict()
+        error: Exception | None = None
+        try:
+            self._engine.load_model_state_dict(self._fetch_model_state_dict)
+        except Exception as e:
+            # Log now: peers may be stuck in a collective until it times out.
+            logger.exception("Model state dict load failed")
+            error = e
+        failed = torch.tensor([int(error is not None)])
+        await asyncio.to_thread(dist.all_reduce, failed, group=self._broadcast_group)
+        if error is not None:
+            raise error
+        if failed.item():
+            raise RuntimeError("model state dict load failed on another generator rank")
         self.policy_version = version
         gc.collect()
 
@@ -547,10 +596,11 @@ class GenerationMessage:
 
 @dataclass(kw_only=True, slots=True)
 class ModelStateDictLoadMessage:
-    """A queued model state dict load: the policy `version` to load, and the `reply` the engine
-    loop resolves once the load has been applied."""
+    """A queued model state dict load: the policy `version` to load, whether to `drain` admitted
+    requests first, and the `reply` the engine loop resolves once the load has been applied."""
 
     version: int
+    drain: bool
     reply: concurrent.futures.Future[None]
 
 

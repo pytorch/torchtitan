@@ -124,7 +124,7 @@ if [[ "${VALIDATION_SUITE}" == rl* ]]; then
     python -m pip install "nvidia-cuda-nvcc==13.2.*"
   fi
   if [[ "${VALIDATION_SUITE}" == "rl-b200" ]]; then
-    python -m pip install "flash-attn-4[cu13]>=4.0.0b34"
+    python -m pip install "flash-attn-4[cu13]>=4.0.0b38"
   fi
   if [[ "${VALIDATION_SUITE}" == "rl-b200" ]]; then
     python -m pip install "git+https://github.com/meta-pytorch/dist_moe.git@main"
@@ -406,6 +406,13 @@ run_h100_tests() {
   fi
 
   install_hybrid_ep
+  # Run remat tests after switching to HybridEP: its deep_ep API is incompatible
+  # with DeepEP v2, so the earlier pytest invocation skips the HybridEP tests.
+  if ! CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 python -m pytest \
+    tests/unit_tests/gpu/distributed/test_deepep_activation_checkpoint.py \
+    -v -k HybridEP; then
+    status=1
+  fi
   if ! python -m tests.integration_tests.run_tests \
     --test_suite h100 \
     --execution_mode real_pg \
