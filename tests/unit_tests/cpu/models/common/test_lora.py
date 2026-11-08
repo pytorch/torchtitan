@@ -44,10 +44,13 @@ from torchtitan.models.common.linear import (
     Linear,
     RowParallelLinear,
 )
+from torchtitan.models.common.lora import _adapter_matmul
+from torchtitan.models.common.moe.moe import RoutedExperts
 from torchtitan.models.common.moe.sharding import (
     expert_param_placement_sparse,
     replicated_param_placement_sparse,
 )
+from torchtitan.models.common.moe.token_dispatcher import LocalTokenDispatcher
 from torchtitan.models.common.vision_encoder import (
     InvariantRowParallelLinear,
     VisionMLP,
@@ -290,24 +293,11 @@ def test_lora_targets_fused_grouped_projection():
     assert grouped.lora_b.weight.grad is not None
 
 
-class _RoutedProjections(Module):
-    """The two grouped projections of a routed-expert block, by their field names."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        w13: GroupedLinear.Config
-        w2: GroupedLinear.Config
-
-    def __init__(self, config: Config) -> None:
-        super().__init__()
-        self.w13 = config.w13.build()
-        self.w2 = config.w2.build()
-
-
 def _routed_projections_config(
     *, num_experts: int = 2, dim: int = 8, hidden_dim: int = 16
-) -> _RoutedProjections.Config:
-    return _RoutedProjections.Config(
+) -> RoutedExperts.Config:
+    return RoutedExperts.Config(
+        token_dispatcher=LocalTokenDispatcher.Config(num_experts=num_experts, top_k=1),
         w13=GroupedLinear.Config(
             group_size=num_experts,
             in_features=dim,
@@ -397,6 +387,136 @@ def test_shared_outer_adapters_share_the_model_side_factor():
         assert projection.lora_b.weight.grad is not None
 
 
+def test_shared_outer_matches_per_expert_with_grouped_bias():
+    """Fused W13 and GPT-OSS bias behave identically in either adapter layout."""
+
+    def build_experts(layout):
+        config = RoutedExperts.Config(
+            token_dispatcher=LocalTokenDispatcher.Config(num_experts=2, top_k=1),
+            w13=GptOssGroupedLinear.Config(
+                group_size=2,
+                in_features=8,
+                out_features=16,
+                num_linears=2,
+                param_init={
+                    "weight": torch.nn.init.ones_,
+                    "bias": torch.nn.init.zeros_,
+                },
+            ),
+            w2=GptOssGroupedLinear.Config(
+                group_size=2,
+                in_features=16,
+                out_features=8,
+                param_init={
+                    "weight": torch.nn.init.ones_,
+                    "bias": torch.nn.init.zeros_,
+                },
+            ),
+        )
+        experts = (
+            LoRATransform(rank=8, alpha=16.0, expert_adapter_layout=layout)
+            .transform(config)
+            .build()
+        )
+        experts.init_states()
+        return experts
+
+    torch.manual_seed(42)
+    shared = build_experts("shared_outer")
+    per_expert = build_experts("per_expert")
+    with torch.no_grad():
+        for name in ("w13", "w2"):
+            shared_projection = getattr(shared, name)
+            per_projection = getattr(per_expert, name)
+            shared_projection.bias.normal_()
+            shared_projection.lora_a.weight.normal_()
+            shared_projection.lora_b.weight.normal_()
+            per_projection.weight.copy_(shared_projection.weight)
+            per_projection.bias.copy_(shared_projection.bias)
+            per_projection.lora_a.weight.copy_(
+                shared_projection.lora_a.weight.unsqueeze(0).expand(2, -1, -1)
+                if name == "w13"
+                else shared_projection.lora_a.weight
+            )
+            per_projection.lora_b.weight.copy_(
+                shared_projection.lora_b.weight
+                if name == "w13"
+                else shared_projection.lora_b.weight.unsqueeze(0).expand(2, -1, -1)
+            )
+
+    offsets_E = torch.tensor([2, 5], dtype=torch.int32)
+    for name, in_features in (("w13", 8), ("w2", 16)):
+        shared_projection = getattr(shared, name)
+        per_projection = getattr(per_expert, name)
+        shared_input = torch.randn(
+            5, in_features, dtype=torch.bfloat16, requires_grad=True
+        )
+        per_input = shared_input.detach().clone().requires_grad_()
+        shared_output = shared_projection(shared_input, offsets_E)
+        per_output = per_projection(per_input, offsets_E)
+        torch.testing.assert_close(shared_output, per_output)
+
+        output_grad = torch.randn_like(shared_output)
+        shared_output.backward(output_grad)
+        per_output.backward(output_grad)
+        torch.testing.assert_close(shared_input.grad, per_input.grad)
+        assert shared_projection.bias.grad is None
+        assert per_projection.bias.grad is None
+        for factor in ("lora_a", "lora_b"):
+            shared_grad = getattr(shared_projection, factor).weight.grad
+            per_grad = getattr(per_projection, factor).weight.grad
+            if (name == "w13" and factor == "lora_a") or (
+                name == "w2" and factor == "lora_b"
+            ):
+                per_grad = per_grad.sum(0)
+            # The shared stride-0 backward reduces expert contributions in a
+            # different order from summing separate per-expert gradients.
+            torch.testing.assert_close(shared_grad, per_grad, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize(
+    ("projection_name", "shared_factor"),
+    [("w13", "lora_a"), ("w2", "lora_b")],
+)
+def test_shared_adapter_gradients_ignore_uninitialized_tail_rows(
+    projection_name, shared_factor
+):
+    """Shared factors skip rows beyond the last expert offset in forward and backward."""
+    experts = (
+        LoRATransform(rank=8, alpha=16.0, expert_adapter_layout="shared_outer")
+        .transform(_routed_projections_config())
+        .build()
+    )
+    adapter = getattr(getattr(experts, projection_name), shared_factor)
+    with torch.no_grad():
+        adapter.weight.normal_()
+    input_RI = torch.randn(
+        7,
+        adapter.weight.shape[-1],
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+    offsets_E = torch.tensor([2, 5], dtype=torch.int32)
+    with torch.no_grad():
+        input_RI[5:].fill_(torch.nan)
+
+    output_RO = _adapter_matmul(adapter, input_RI, offsets_E)
+
+    reference_weight = adapter.weight.detach().clone().requires_grad_()
+    reference_weight_1OI = reference_weight.bfloat16().flatten(0, -2).unsqueeze(0)
+    reference_weight_EOI = reference_weight_1OI.expand(offsets_E.shape[0], -1, -1)
+    reference_output_RO = torch._grouped_mm(
+        input_RI[:5].detach(),
+        reference_weight_EOI.transpose(-2, -1),
+        offs=offsets_E,
+    )
+    torch.testing.assert_close(output_RO[:5], reference_output_RO)
+
+    output_RO[:5].float().sum().backward()
+    reference_output_RO.float().sum().backward()
+    torch.testing.assert_close(adapter.weight.grad, reference_weight.grad)
+
+
 def test_shared_outer_adapters_follow_expert_sharding():
     """The shared factor is replicated across experts; the per-expert one keeps the expert placement."""
     expert_placement = expert_param_placement_sparse()
@@ -423,7 +543,7 @@ def test_shared_outer_adapters_follow_expert_sharding():
 
 
 def test_shared_outer_rejects_a_grouped_projection_outside_the_experts():
-    with pytest.raises(ValueError, match="w13 and w2 only"):
+    with pytest.raises(ValueError, match="w13 and w2 of routed experts only"):
         LoRATransform(rank=8, expert_adapter_layout="shared_outer").transform(
             GroupedLinear.Config(group_size=2, in_features=8, out_features=8)
         )

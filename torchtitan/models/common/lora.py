@@ -20,7 +20,6 @@ import spmd_types as spmd
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
@@ -269,8 +268,11 @@ def _adapter_matmul(
             weight_EOI=adapter.weight.flatten(1, -2),
             offsets_E=offsets_E,
         )
-    # Same operand dtype as the grouped matmul, which casts its weight to bf16.
-    return F.linear(input_RI, adapter.weight.flatten(0, -2).bfloat16())
+    # Respect the same row boundaries as the per-expert path: padded tail rows
+    # must not contribute to the shared weight gradient. Expansion is zero-copy.
+    weight_1OI = adapter.weight.bfloat16().flatten(0, -2).unsqueeze(0)
+    weight_EOI = weight_1OI.expand(offsets_E.shape[0], -1, -1)
+    return torch._grouped_mm(input_RI, weight_EOI.transpose(-2, -1), offs=offsets_E)
 
 
 def _adapter_operands(
