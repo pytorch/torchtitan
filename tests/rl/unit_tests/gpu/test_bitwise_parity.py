@@ -67,6 +67,7 @@ from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
+    vllm_block_size,
     VLLM_MODEL_NAME,
 )
 from torchtitan.tools import utils
@@ -239,10 +240,9 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         disable_log_stats=True,
     )
 
-    from torchtitan.tools.utils import has_cuda_capability
-
-    if not has_cuda_capability(9, 0) and not use_flex:
-        engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
+    block_size = vllm_block_size(gen_config.model)
+    if block_size is not None:
+        engine_kwargs["block_size"] = block_size
 
     engine_kwargs["max_model_len"] = gen_config.model.max_context_length
     # Mirror Controller.setup_async for a single engine: derive from active rollout concurrency

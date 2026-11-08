@@ -46,9 +46,9 @@ from torchtitan.rl.generator.vllm.registry import (
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
     vllm_attention_backend,
+    vllm_block_size,
 )
 from torchtitan.tools import filesystem
-from torchtitan.tools.utils import has_cuda_capability
 
 
 logger = init_logger(__name__)
@@ -168,8 +168,9 @@ def generate() -> None:
     engine_kwargs["max_num_seqs"] = max_num_seqs
     if gen_config.max_num_batched_tokens is not None:
         engine_kwargs["max_num_batched_tokens"] = gen_config.max_num_batched_tokens
-    if not has_cuda_capability(9, 0):
-        engine_kwargs["block_size"] = 256
+    block_size = vllm_block_size(model_config)
+    if block_size is not None:
+        engine_kwargs["block_size"] = block_size
     expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
     vllm_compilation_config = engine_config.cuda_graph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
