@@ -567,7 +567,7 @@ def test_generation_server_forwards_token_request() -> None:
             )
 
         server = GenerationServer.Config(max_rollout_tokens=40960).build()
-        server.set_generate_fn(generate_fn)
+        server.generate_fns[1] = generate_fn
         await server.start()
         try:
             async with ClientSession() as session:
@@ -669,7 +669,7 @@ def test_generation_server_rejects_aborted_generation() -> None:
             )
 
         server = GenerationServer.Config(max_rollout_tokens=40960).build()
-        server.set_generate_fn(generate_fn)
+        server.generate_fns[1] = generate_fn
         await server.start()
         try:
             async with ClientSession() as session:
@@ -701,27 +701,44 @@ def test_generation_server_rejects_aborted_generation() -> None:
     asyncio.run(run_test())
 
 
-def test_generation_server_requires_group_id() -> None:
+@pytest.mark.parametrize(
+    "sampling_params, error",
+    [
+        ({}, "torchtitan_group_id"),
+        # A group that is not running, e.g. a late call from a cancelled group.
+        (
+            {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "max_tokens": 2,
+                "torchtitan_group_id": -3,
+                "stop_token_ids": [99],
+            },
+            "rollout group -3 is not running",
+        ),
+    ],
+)
+def test_generation_server_requires_a_running_group_id(sampling_params, error) -> None:
     async def run_test() -> None:
         async def generate_fn(*args, **kwargs):
-            raise AssertionError("generate_fn must not run without a group id")
+            raise AssertionError("generate_fn must not run without a running group id")
 
         server = GenerationServer.Config(max_rollout_tokens=40960).build()
-        server.set_generate_fn(generate_fn)
+        server.generate_fns[1] = generate_fn
         await server.start()
         try:
             async with ClientSession() as session:
                 response = await session.post(
                     f"http://{server.host}:{server.port}/inference/v1/generate",
                     headers={"X-Session-ID": "group=1/rollout=2"},
-                    json={"token_ids": [10, 11], "sampling_params": {}},
+                    json={"token_ids": [10, 11], "sampling_params": sampling_params},
                 )
                 assert response.status == 400
                 payload = await response.json()
         finally:
             await server.close()
 
-        assert "torchtitan_group_id" in payload["error"]
+        assert error in payload["error"]
 
     asyncio.run(run_test())
 
@@ -757,7 +774,7 @@ def test_generation_server_rejects_prompt_without_room_for_output() -> None:
             raise RuntimeError("generator reached")
 
         server = GenerationServer.Config(max_rollout_tokens=8).build()
-        server.set_generate_fn(generate_fn)
+        server.generate_fns[1] = generate_fn
         await server.start()
         try:
             async with ClientSession() as session:
@@ -1029,7 +1046,7 @@ def test_a_failing_rollout_fails_its_group_only_after_every_sibling_finished() -
             finished.append(rollout_id)
 
         rollouter = object.__new__(VerifiersRollouter)
-        rollouter._generation_server = SimpleNamespace(set_generate_fn=lambda fn: None)
+        rollouter._generation_server = SimpleNamespace(generate_fns={})
         rollouter._run_single_rollout = run_single_rollout
         with pytest.raises(RuntimeError, match="rollout 0 failed"):
             await rollouter.run_group_rollouts(
@@ -1040,6 +1057,8 @@ def test_a_failing_rollout_fails_its_group_only_after_every_sibling_finished() -
                 group_size=2,
                 sampling=SamplingConfig(),
             )
+        # The group's GenerateFn is gone, so a late call from it gets a 400.
+        assert rollouter._generation_server.generate_fns == {}
         return finished
 
     assert asyncio.run(run_test()) == [1]
