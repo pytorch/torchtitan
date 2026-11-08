@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import itertools
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, ClassVar
 
 import spmd_types as spmd
@@ -27,7 +27,7 @@ from vllm.v1.attention.backends.flash_attn_diffkv import (
     FlashAttentionDiffKVImpl,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.base.module import Module
@@ -122,6 +122,16 @@ class TorchTitanVarlenInnerAttentionDiffKVBackend(
     @staticmethod
     def get_name():
         return "CUSTOM"
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        # vLLM sizes a hybrid model's attention page from a spec without head_size_v,
+        # so V gets K's head size and the page comes out larger than this layer's real
+        # page. vLLM then cannot split a block into smaller kernel blocks (FA4 on SM100).
+        # vLLM's DiffKV backends keep V's head size on the class (set_head_size_v), so
+        # one V head size per process; Kimi K3 has one.
+        # TODO: drop once vLLM's DiffKV backends set head_size_v in customize_spec.
+        return super().customize_spec(replace(spec, head_size_v=cls.head_size_v))
 
     @staticmethod
     def get_impl_cls():
