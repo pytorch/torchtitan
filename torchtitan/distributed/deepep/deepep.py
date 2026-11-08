@@ -162,7 +162,6 @@ def _dispatch_op_impl(
     the forward is CUDA-graph-capturable; per-expert counts come from the device-side
     ``psum_num_recv_tokens_per_expert``.
     """
-    global _buffer
     buffer = _buffer
     assert buffer is not None, "Buffer must be initialized before dispatch"
 
@@ -233,7 +232,6 @@ def _dispatch_backward(
     dispatched routing scores (DeepEP combine returns the reduced weights too).
     recv_topk_idx is non-differentiable, so grad_recv_topk_idx is ignored.
     """
-    global _buffer
     if grad_recv_x is None:
         return None, None, None, None, None, None
 
@@ -264,7 +262,7 @@ def _combine_op_impl(
     x: torch.Tensor, handle_id: torch.Tensor, will_backward: bool
 ) -> torch.Tensor:
     """Execute DeepEP v2 combine (pure reduction; scores already applied upstream)."""
-    global _buffer, _pending_combine_event
+    global _pending_combine_event
     buffer = _buffer
     assert buffer is not None, "Buffer must be initialized before combine"
 
@@ -301,7 +299,6 @@ def _combine_backward(ctx, grad_combined):
 
     Returns grads for op inputs (x, handle_id, will_backward); only x is differentiable.
     """
-    global _buffer
     buffer = _buffer
     assert buffer is not None, "Buffer must be initialized before dispatch"
 
