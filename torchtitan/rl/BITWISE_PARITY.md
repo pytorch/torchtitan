@@ -124,6 +124,9 @@ to the generator.
 - Sequence parallelism is not supported in batch-invariant mode because
   reduce-scatter lacks a tree-based implementation, and the ring-based
   implementation is non-deterministic.
+- Requires `async_loop.target_offpolicy_steps=0`: the trainer must score each
+  sample with the weights that sampled it. An older sample, or a turn running
+  across a model state dict load, can't match the generator's logprobs.
 
 ## Usage
 

@@ -446,6 +446,14 @@ class Controller(Configurable):
                         "SP uses reduce-scatter which only supports Ring in NCCL "
                         "and has not been validated for determinism."
                     )
+                if self.async_loop.target_offpolicy_steps != 0:
+                    raise ValueError(
+                        "batch_invariant requires async_loop.target_offpolicy_steps=0, got "
+                        f"{self.async_loop.target_offpolicy_steps}: the trainer must score each "
+                        "sample with the weights that sampled it. An older sample, or a turn "
+                        "running across a model state dict load, can't match the generator's "
+                        "logprobs"
+                    )
 
     def __init__(self, config: Config):
         self.config = config
