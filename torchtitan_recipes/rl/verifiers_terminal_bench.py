@@ -37,7 +37,6 @@ from torchtitan.models.muse_glimmer import (
 )
 from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.rl.controller.controller import AsyncLoopConfig, Controller
-from torchtitan.rl.evaluator import RolloutEvaluator
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
 from torchtitan.rl.examples.verifiers.env_server import VerifiersEnvServer
 from torchtitan.rl.examples.verifiers.generation_server import GenerationServer
@@ -196,7 +195,6 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             filter=KeepExtremeRewardsFilter.Config(keep_errors=True)
         ),
         async_loop=async_loop,
-        evaluator=RolloutEvaluator.Config(validate_after_training=True),
         rollouter=_terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
@@ -339,7 +337,6 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             filter=KeepExtremeRewardsFilter.Config(keep_errors=True)
         ),
         async_loop=async_loop,
-        evaluator=RolloutEvaluator.Config(validate_after_training=True),
         rollouter=_terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
@@ -459,7 +456,6 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
             filter=KeepExtremeRewardsFilter.Config(keep_errors=True)
         ),
         async_loop=async_loop,
-        evaluator=RolloutEvaluator.Config(validate_after_training=True),
         rollouter=_terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",

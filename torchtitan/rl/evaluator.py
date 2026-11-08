@@ -69,10 +69,11 @@ class RolloutEvaluator(Evaluator):
     """Rolls out the rollouter's validation prompts on the training generators, beside training.
 
     One pass runs at a time. A pass that comes due meanwhile waits; a newer due pass replaces it.
-    A pass logs at the last step `on_step` saw when it ended. So a pass still running at step N
-    logs at N next to the final pass; the final one has `validation/policy_version/min == N`.
+    A pass logs at the last step `on_step` saw when it ended. So a pass that ends between the last
+    `on_step` and `close()` also logs at N, next to the final pass; the final one has
+    `validation/policy_version/min == N`.
 
-    Example: freq=10, validate_after_training=True, 40 steps, each pass takes ~13 steps.
+    Example: freq=10, 40 steps, each pass takes ~13 steps.
         due 0:   starts at step 0, logs at 12
         due 10:  waits, starts at 13, logs at 25
         due 20:  waits, starts at 26, logs at 38
@@ -94,7 +95,7 @@ class RolloutEvaluator(Evaluator):
         `validation/policy_version/max` says which. Turn it off when you already know that score.
         A resumed run skips it and follows the `freq` grid."""
 
-        validate_after_training: bool = False
+        validate_after_training: bool = True
         """After a completed run, one pass on the final policy. The job waits for it; the trainer GPUs idle."""
 
         max_prompts_in_flight: int = 64
@@ -191,8 +192,8 @@ class RolloutEvaluator(Evaluator):
 
         if training_completed and self.config.validate_after_training:
             # TODO: abort the training requests still in the generators before this pass. They
-            # keep decoding after training ends: a 16-prompt pass took 117 s after training vs
-            # 19.7 s before it (Qwen3.5-4B, 2 GPUs). The generators have no abort path yet.
+            # keep decoding after training ends and slow this pass down several times. The
+            # generators have no abort path yet.
             await self._run_pass(due_step=self._step)
 
     @sl.log_trace_span("validate")

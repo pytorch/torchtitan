@@ -30,7 +30,6 @@ from torchtitan.models.qwen3 import build_model_config
 
 from torchtitan.observability.metrics import WandBLogger
 from torchtitan.rl.controller.controller import AsyncLoopConfig, Controller
-from torchtitan.rl.evaluator import RolloutEvaluator
 from torchtitan.rl.examples.verifiers.dapo_math.data import VerifiersMathTasksetConfig
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
 from torchtitan.rl.examples.verifiers.env_server import VerifiersEnvServer
@@ -137,7 +136,6 @@ def _qwen3_4b_verifiers_config(
             target_offpolicy_steps=4,
         ),
         rollouter=_verifiers_math_rollouter_config(max_rollout_tokens=max_total_tokens),
-        evaluator=RolloutEvaluator.Config(validate_after_training=True),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=True)),
         num_generators=6,
         metrics=MetricsProcessor.Config(

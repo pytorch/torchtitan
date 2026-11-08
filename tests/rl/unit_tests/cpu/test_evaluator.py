@@ -214,7 +214,6 @@ def test_close_cancels_the_running_pass(training_completed: bool) -> None:
             rollouter,
             metrics_processor,
             num_training_steps=4,
-            validate_after_training=True,
         )
         evaluator.on_step(0)
         await _wait_until(lambda: len(rollouter.groups_started) == 3)
@@ -260,9 +259,7 @@ def test_failed_periodic_pass_is_logged_and_failed_final_pass_raises() -> None:
             ).build()
         )
         metrics_processor = _RecordingMetricsProcessor()
-        evaluator = _evaluator(
-            rollouter, metrics_processor, validate_after_training=True
-        )
+        evaluator = _evaluator(rollouter, metrics_processor)
         evaluator.on_step(0)
         await _wait_until(lambda: metrics_processor.logged)
         evaluator.on_step(10)

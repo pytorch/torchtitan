@@ -42,7 +42,6 @@ from torchtitan.models.qwen3 import build_model_config
 
 from torchtitan.observability.metrics import WandBLogger
 from torchtitan.rl.controller.controller import AsyncLoopConfig, Controller
-from torchtitan.rl.evaluator import RolloutEvaluator
 from torchtitan.rl.examples.search_r1.data import SearchR1Dataset
 from torchtitan.rl.examples.search_r1.env import SearchR1Env
 from torchtitan.rl.examples.search_r1.rubric import RewardExactMatch
@@ -127,7 +126,6 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
             num_samples_per_prompt=8,
         ),
         rollouter=_search_r1_rollouter_config(),
-        evaluator=RolloutEvaluator.Config(validate_after_training=True),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
@@ -399,7 +397,6 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
             num_samples_per_prompt=8,
         ),
         rollouter=_search_r1_rollouter_config(),
-        evaluator=RolloutEvaluator.Config(validate_after_training=True),
         renderer=from_renderers(
             CustomRendererConfig(
                 import_path="torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer"

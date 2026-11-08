@@ -51,7 +51,6 @@ from torchtitan.models.qwen3 import build_model_config
 
 from torchtitan.observability.metrics import WandBLogger
 from torchtitan.rl.controller.controller import AsyncLoopConfig, Controller
-from torchtitan.rl.evaluator import RolloutEvaluator
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
@@ -841,8 +840,6 @@ def _configure_ci(
     config.generator.sampling.max_tokens = max_generated_tokens
     config.generator.gpu_memory_limit = 0.8
     config.metrics.loggers = []
-    # A pass at the start, beside training, and one after it, so a broken evaluator fails CI.
-    config.evaluator = RolloutEvaluator.Config(validate_after_training=True)
     config.rollouter.worker.token_env.max_rollout_tokens = (
         config.trainer.model.max_context_length
     )

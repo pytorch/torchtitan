@@ -132,8 +132,9 @@ rollouter = Rollouter.Config(
 )
 ```
 
-`Controller.Config.evaluator` schedules the validation passes, e.g.
-`RolloutEvaluator.Config(freq=10, validate_after_training=True)`. `None` turns them off.
+`Controller.Config.evaluator` schedules the validation passes: by default one at the start, beside
+training, and one after it. `RolloutEvaluator.Config(freq=10)` adds one every 10 steps; `None` turns
+them off.
 
 Subclass `RolloutWorker` or `Rollouter` only when an experiment changes their
 behavior. For example, the Verifiers integration keeps a custom

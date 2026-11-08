@@ -47,7 +47,6 @@ from torchtitan.models.qwen3_5 import build_model_config as build_qwen3_5_model_
 
 from torchtitan.observability.metrics import WandBLogger
 from torchtitan.rl.controller.controller import AsyncLoopConfig, Controller
-from torchtitan.rl.evaluator import RolloutEvaluator
 from torchtitan.rl.examples.alphabet_sort.data import AlphabetSortDataset
 from torchtitan.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.rl.examples.alphabet_sort.rubric import RewardAlphabetSort
@@ -136,7 +135,6 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
         ),
         rollouter=_alphabet_sort_rollouter_config(),
-        evaluator=RolloutEvaluator.Config(validate_after_training=True),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
@@ -213,7 +211,6 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
         ),
         rollouter=_alphabet_sort_rollouter_config(),
-        evaluator=RolloutEvaluator.Config(validate_after_training=True),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         precision=PrecisionConfig(dtype="bfloat16"),
@@ -383,7 +380,6 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
         ),
         rollouter=_alphabet_sort_rollouter_config(),
-        evaluator=RolloutEvaluator.Config(validate_after_training=True),
         renderer=from_renderers(GptOssRendererConfig(reasoning_effort="low")),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
@@ -456,7 +452,6 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
         ),
         rollouter=_alphabet_sort_rollouter_config(),
-        evaluator=RolloutEvaluator.Config(validate_after_training=True),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
@@ -526,7 +521,6 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
         ),
         rollouter=_alphabet_sort_rollouter_config(),
-        evaluator=RolloutEvaluator.Config(validate_after_training=True),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         precision=PrecisionConfig(dtype="bfloat16"),
@@ -606,7 +600,6 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
         ),
         rollouter=_alphabet_sort_rollouter_config(),
-        evaluator=RolloutEvaluator.Config(validate_after_training=True),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         precision=PrecisionConfig(dtype="bfloat16"),
@@ -717,7 +710,6 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
             num_samples_per_prompt=num_samples_per_prompt,
         ),
         rollouter=_alphabet_sort_rollouter_config(),
-        evaluator=RolloutEvaluator.Config(validate_after_training=True),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
@@ -813,7 +805,6 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
         ),
         rollouter=_alphabet_sort_rollouter_config(),
-        evaluator=RolloutEvaluator.Config(validate_after_training=True),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         precision=PrecisionConfig(dtype="bfloat16"),
