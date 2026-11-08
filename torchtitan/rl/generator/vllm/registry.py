@@ -63,7 +63,7 @@ TORCHTITAN_CONFIG_FORMAT = "torchtitan"
 # registered below.
 TORCHTITAN_MODEL_TYPE = "torchtitan"
 
-# Selects the experiment-owned runner that pads tokens for dense and expert SP.
+# Selects TorchTitan's worker, whose runner adds FULL decode graphs to FULL mode.
 TORCHTITAN_WORKER_CLS = "torchtitan.rl.generator.vllm.worker.TorchTitanGPUWorker"
 
 
@@ -251,14 +251,9 @@ def register_to_vllm(
         # be contiguous in vLLM's convolution state cache.
         os.environ["VLLM_SSM_CONV_STATE_LAYOUT"] = "SD"
 
+    from transformers import PreTrainedConfig
     from vllm.model_executor.models.registry import ModelRegistry
-
-    # Pull ``PretrainedConfig`` through vLLM's transformers re-export rather
-    # than from ``transformers`` directly. vLLM already depends on
-    # transformers internally, so this keeps torchtitan free of a direct
-    # ``transformers`` import — when vLLM eventually drops it, this path
-    # disappears with it.
-    from vllm.transformers_utils.config import PretrainedConfig, register_config_parser
+    from vllm.transformers_utils.config import register_config_parser
     from vllm.transformers_utils.config_parser_base import ConfigParserBase
     from vllm.transformers_utils.model_arch_config_convertor import (
         MODEL_ARCH_CONFIG_CONVERTORS,
@@ -313,7 +308,7 @@ def register_to_vllm(
             **kwargs,
         ):
             config_dict = model_config_to_hf_config_dict(model_config)
-            return config_dict, PretrainedConfig.from_dict(config_dict)
+            return config_dict, PreTrainedConfig.from_dict(config_dict)
 
     # vLLM's default is_deepseek_mla only recognizes a hardcoded list of model
     # types, which excludes model_type="torchtitan", so is_mla would be False.

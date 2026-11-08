@@ -238,9 +238,10 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
             and cu_seqlens is not None
             and has_initial_state is not None
         )
-        # SP/model-input rounding need not pad attention metadata. FULL bucket
-        # padding does: its prepared rows and captured slices stay fixed while
-        # the builder restages slots and freshness, including null padding.
+        # Model-input rounding (VLLMModelWrapper.forward pads eager steps to a
+        # multiple of TP) need not pad attention metadata. FULL bucket padding
+        # does: its prepared rows and captured slices stay fixed while the builder
+        # restages slots and freshness, including null padding.
         if gdn_metadata.execution_path is LinearAttentionExecutionPath.SINGLE_TOKEN:
             num_decode_rows = state_indices.numel()
             output = mixed_qkv.new_empty(output_shape)
@@ -340,7 +341,7 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
                 # Adding keeps each row's one kernel result: both kernels give null slots
                 # zero output (Attention Gym's paged GDN contract).
                 output[:num_decode_rows].add_(decode_output)
-        # Zero the rows past the metadata (eager SP/model-input rounding; see above).
+        # Zero the rows past the metadata (eager model-input rounding; see above).
         if num_actual_tokens < num_tokens:
             padding = output.new_zeros(
                 num_tokens - num_actual_tokens, *output.shape[1:]
