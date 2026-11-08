@@ -32,9 +32,9 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonPrefillMetadata,
     QueryLenSupport,
 )
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionLayer, MultipleOf
 from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig

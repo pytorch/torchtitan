@@ -21,6 +21,7 @@ import spmd_types as spmd
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed._state_dict_utils import _create_cpu_state_dict
 from torch.distributed.tensor import DTensor, Replicate
@@ -30,6 +31,7 @@ from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils import torch_utils as _torch_utils
+from vllm.utils.math_utils import cdiv
 
 # Registers the "loss" local-compile region. The generator shares the trainer's
 # model config, whose local_compile.regions may name it, but never builds a loss.
@@ -443,6 +445,7 @@ class VLLMModelWrapper(Module):
         training_parallelism = parallelism.to_training()
         model_config = copy.deepcopy(model_config)
         self.config = _replace_vllm_layer_configs(model_config)
+        self._expert_sequence_parallel_size = parallelism.expert_sequence_parallel_size
 
         # Build ParallelismContext from the translated ParallelismConfig so TP/EP
         # sharding sees the same mesh shape as vLLM. The DP axis is represented
@@ -644,10 +647,10 @@ class VLLMModelWrapper(Module):
     def set_num_valid_tokens(self, num_valid_tokens: int) -> None:
         """Publish how many of this step's tokens are real, for the padding mask.
 
-        vLLM pads a step (tensor-parallel rounding, CUDA-graph capture size,
-        data-parallel equalization) before the model runs. The runner calls this
-        with the unpadded count. It is a device write with no host sync, so it
-        can run before every graph replay. A no-op for models without Dist-MoE.
+        vLLM pads a step (CUDA-graph capture size, data-parallel equalization)
+        before the model runs. The runner calls this with the unpadded count. It
+        is a device write with no host sync, so it can run before every graph
+        replay. A no-op for models without Dist-MoE.
         """
         if self._num_valid_tokens is not None:
             self._num_valid_tokens.fill_(num_valid_tokens)
@@ -655,13 +658,11 @@ class VLLMModelWrapper(Module):
     def _dist_moe_num_local_input_tokens(self, num_tokens: int) -> int:
         """Return the Dist-MoE row count every EP rank passes in this step.
 
-        Every EP rank must pass the same count, and the routed tokens are split
-        evenly over TP, so this is the step's token count over TP.
+        Every EP rank must pass the same count. ``forward`` pads each step to a
+        multiple of TP and the MoE splits it evenly over TP, so this is the largest
+        step's token count over TP, rounded up: DP counts [5, 3] at TP 4 -> 2 rows.
         """
         tp = self.parallelism_context.tp
-        # TorchTitanGPUModelRunner pads every step to a multiple of TP when TP
-        # shards the routed tokens, and every DP replica does the same.
-        assert num_tokens % tp == 0, f"TP={tp} does not divide {num_tokens} tokens"
         dp_metadata = get_forward_context().dp_metadata
         if dp_metadata is not None:
             # vLLM DP > 1: vLLM builds DP metadata for every MoE forward (real
@@ -671,10 +672,9 @@ class VLLMModelWrapper(Module):
             # - with CUDA graphs, vLLM already padded every replica to the graph
             #   size outside the model forward, so the max equals this count.
             num_tokens = int(dp_metadata.num_tokens_across_dp_cpu.max())
-            assert num_tokens % tp == 0, f"TP={tp} does not divide {num_tokens} tokens"
         # Otherwise DP = 1: the EP group is the TP group, which shares this
         # step's batch, so this rank's own count is every EP rank's count.
-        return num_tokens // tp
+        return cdiv(num_tokens, tp)
 
     def _initialize_dist_moe_runtime(
         self,
@@ -785,21 +785,28 @@ class VLLMModelWrapper(Module):
         if input_ids is None:
             raise ValueError("Either input_ids or inputs_embeds must be provided")
 
+        # With EP, the MoE splits its tokens evenly over TP, but vLLM runs eager
+        # steps of any size. Round the step up: attention reads only the real rows
+        # (its metadata's token count), and the extra rows are dropped on return.
+        num_tokens = input_ids.shape[0]
+        num_padding_rows = -num_tokens % self._expert_sequence_parallel_size
+        if num_padding_rows:
+            input_ids = F.pad(input_ids, (0, num_padding_rows))
+            positions = F.pad(positions, (0, num_padding_rows))
+
         with self.parallelism_context.activate_spmd():
-            # Rows past the real token count are padding that vLLM added (true
-            # for padding). Only the MoE reads this mask: Dist-MoE routes those
-            # rows to expert -1. Attention takes its metadata from vLLM, which
-            # already excludes padding.
+            # Rows past the real token count are padding (true for padding). Only
+            # the MoE reads this mask: Dist-MoE routes those rows to expert -1.
+            # Attention takes its metadata from vLLM, which already excludes padding.
             model_kwargs = {}
             if self._dist_moe_runtime is not None:
                 assert self._num_valid_tokens is not None
-                num_tokens = input_ids.shape[0]
                 model_kwargs["padding_mask"] = (
-                    torch.arange(num_tokens, device=input_ids.device)
+                    torch.arange(input_ids.shape[0], device=input_ids.device)
                     >= self._num_valid_tokens
                 )
                 self._dist_moe_runtime.set_num_local_input_tokens_per_call(
-                    self._dist_moe_num_local_input_tokens(num_tokens)
+                    self._dist_moe_num_local_input_tokens(input_ids.shape[0])
                 )
             h = self.model(
                 input_ids, attention_metadata=None, positions=positions, **model_kwargs
@@ -809,7 +816,7 @@ class VLLMModelWrapper(Module):
         if isinstance(h, DTensor):
             assert all(isinstance(p, Replicate) for p in h.placements)
             h = h._local_tensor
-        return h
+        return h[:num_tokens]
 
     def compute_logits(
         self,

@@ -49,7 +49,6 @@ from torchtitan.rl.generator.vllm.engine import (
 from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.generator.vllm.worker import (
     TorchTitanCudagraphDispatcher,
-    TorchTitanGPUModelRunner,
     TorchTitanGPUWorker,
 )
 from torchtitan.rl.observability import metrics as m
@@ -703,19 +702,6 @@ def test_extra_engine_args_rejects_torchtitan_owned_keys(key, match):
 # --- CUDA graph config (VLLMCudaGraphConfig.get_vllm_compilation_config) ---
 
 
-def test_cuda_graph_none_mode_preserves_sequence_parallel_config():
-    compilation_config = VLLMCudaGraphConfig(mode="NONE").get_vllm_compilation_config(
-        max_num_seqs=256,
-        max_model_len=4096,
-        expert_sequence_parallel_size=1,
-        enable_sequence_parallel=True,
-    )
-
-    assert compilation_config.cudagraph_mode.name == "NONE"
-    assert compilation_config.pass_config.enable_sp
-    assert compilation_config.pass_config.sp_min_token_num == 1
-
-
 def test_expert_sequence_parallel_padding_filters_cuda_graph_sizes():
     parallelism = InferenceParallelismConfig(
         tensor_parallel_degree=4,
@@ -727,7 +713,6 @@ def test_expert_sequence_parallel_padding_filters_cuda_graph_sizes():
         max_num_seqs=8,
         max_model_len=4096,
         expert_sequence_parallel_size=parallelism.expert_sequence_parallel_size,
-        enable_sequence_parallel=False,
     )
 
     assert cfg.cudagraph_capture_sizes == [4, 8]
@@ -738,7 +723,6 @@ def test_expert_sequence_parallel_padding_keeps_small_cuda_graph_batches():
         max_num_seqs=1,
         max_model_len=4096,
         expert_sequence_parallel_size=8,
-        enable_sequence_parallel=False,
     )
 
     assert cfg.cudagraph_capture_sizes[0] == 8
@@ -753,7 +737,6 @@ def test_expert_sequence_parallel_padding_rejects_no_valid_cuda_graph_sizes():
             max_num_seqs=3,
             max_model_len=4096,
             expert_sequence_parallel_size=4,
-            enable_sequence_parallel=False,
         )
 
 
@@ -764,35 +747,6 @@ def test_expert_sequence_parallel_padding_disabled_without_ep():
     )
 
     assert parallelism.expert_sequence_parallel_size == 1
-
-
-@pytest.mark.parametrize(
-    ("enable_dense_sp", "enable_expert_sp", "expected_num_tokens"),
-    [
-        (False, True, 8),
-        (True, False, 8),
-        (False, False, 5),
-    ],
-)
-def test_sequence_parallel_padding_rounds_runner_tokens(
-    enable_dense_sp, enable_expert_sp, expected_num_tokens
-):
-    model_runner = SimpleNamespace(
-        compilation_config=SimpleNamespace(
-            pass_config=SimpleNamespace(enable_sp=enable_dense_sp)
-        ),
-        vllm_config=SimpleNamespace(
-            parallel_config=SimpleNamespace(
-                enable_expert_parallel=enable_expert_sp,
-                tensor_parallel_size=4,
-            ),
-        ),
-    )
-
-    assert (
-        TorchTitanGPUModelRunner._pad_for_sequence_parallelism(model_runner, 5)
-        == expected_num_tokens
-    )
 
 
 @pytest.mark.parametrize(
@@ -861,7 +815,6 @@ def test_cuda_graph_default_mode_is_full():
         max_num_seqs=256,
         max_model_len=4096,
         expert_sequence_parallel_size=1,
-        enable_sequence_parallel=False,
     )
     assert cfg.cudagraph_mode.name == "FULL"
     assert int(cfg.mode) == 0
@@ -873,7 +826,6 @@ def test_cuda_graph_full_mode_no_compile():
         max_num_seqs=256,
         max_model_len=4096,
         expert_sequence_parallel_size=1,
-        enable_sequence_parallel=False,
     )
     assert cfg.cudagraph_mode.name == "FULL"
     assert int(cfg.mode) == 0
@@ -885,7 +837,6 @@ def test_cuda_graph_decode_only_capture_sizes_cover_max_num_seqs():
         max_num_seqs=500,
         max_model_len=4096,
         expert_sequence_parallel_size=1,
-        enable_sequence_parallel=False,
     )
     sizes = cfg.cudagraph_capture_sizes
     assert 40 in sizes  # 34 sequences pad to 40, not 64
@@ -899,7 +850,6 @@ def test_cuda_graph_full_mode_extends_capture_sizes_to_chunk():
         max_num_seqs=500,
         max_model_len=16384,
         expert_sequence_parallel_size=1,
-        enable_sequence_parallel=False,
         max_num_batched_tokens=16384,
     )
     sizes = cfg.cudagraph_capture_sizes
@@ -914,7 +864,6 @@ def test_cuda_graph_full_mode_caps_sizes_at_the_largest_step():
         max_num_seqs=8,
         max_model_len=1000,
         expert_sequence_parallel_size=1,
-        enable_sequence_parallel=False,
     )
     # Packed prefills reach the 2048-token budget, so it is graphed.
     cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(**kwargs)
@@ -938,32 +887,4 @@ def test_cuda_graph_rejects_nonpositive_max_num_seqs():
             max_num_seqs=0,
             max_model_len=4096,
             expert_sequence_parallel_size=1,
-            enable_sequence_parallel=False,
         )
-
-
-def test_inference_parallelism_propagates_dense_sequence_parallelism():
-    parallelism = InferenceParallelismConfig(
-        tensor_parallel_degree=4,
-        enable_sequence_parallel=True,
-    )
-
-    assert parallelism.to_training().enable_sequence_parallel
-
-    compilation_config = VLLMCudaGraphConfig(
-        mode="FULL", capture_sizes=[1, 4, 5, 8]
-    ).get_vllm_compilation_config(
-        max_num_seqs=8,
-        max_model_len=4096,
-        expert_sequence_parallel_size=1,
-        enable_sequence_parallel=parallelism.enable_sequence_parallel,
-    )
-    assert compilation_config.cudagraph_capture_sizes == [1, 4, 5, 8]
-    assert compilation_config.pass_config.enable_sp
-    assert compilation_config.pass_config.sp_min_token_num == 1
-
-
-def test_inference_parallelism_disables_dense_sequence_parallelism():
-    parallelism = InferenceParallelismConfig(tensor_parallel_degree=4)
-
-    assert not parallelism.to_training().enable_sequence_parallel

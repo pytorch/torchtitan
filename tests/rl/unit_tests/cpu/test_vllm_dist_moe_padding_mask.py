@@ -27,9 +27,11 @@ class _RecordingModel:
 
     def __init__(self) -> None:
         self.seen: list[dict] = []
+        self.num_rows: list[int] = []
 
     def __call__(self, input_ids, attention_metadata=None, positions=None, **kwargs):
         self.seen.append(kwargs)
+        self.num_rows.append(input_ids.shape[0])
         return input_ids.float()[:, None].expand(-1, 4).contiguous()
 
 
@@ -53,7 +55,11 @@ class _RecordingRuntime:
 
 
 def _wrapper(
-    *, num_valid_tokens: torch.Tensor | None, tp: int = 1, dp: int = 1
+    *,
+    num_valid_tokens: torch.Tensor | None,
+    tp: int = 1,
+    dp: int = 1,
+    expert_sequence_parallel_size: int = 1,
 ) -> VLLMModelWrapper:
     wrapper = cast(Any, object.__new__(VLLMModelWrapper))
     torch.nn.Module.__init__(wrapper)
@@ -66,6 +72,7 @@ def _wrapper(
     wrapper.parallelism_context = SimpleNamespace(
         activate_spmd=activate_spmd, tp=tp, dp_shard=dp
     )
+    wrapper._expert_sequence_parallel_size = expert_sequence_parallel_size
     wrapper._num_valid_tokens = num_valid_tokens
     wrapper._dist_moe_runtime = (
         _RecordingRuntime() if num_valid_tokens is not None else None
@@ -102,6 +109,23 @@ def test_forward_follows_the_scalar_in_place():
     assert wrapper._num_valid_tokens is buffer
 
 
+def test_forward_pads_the_step_to_a_multiple_of_tp():
+    # EP over TP 4: 3 real tokens run as 4 rows; the extra row is padding, dropped after.
+    wrapper = _wrapper(
+        num_valid_tokens=torch.tensor(3, dtype=torch.int32),
+        tp=4,
+        expert_sequence_parallel_size=4,
+    )
+    hidden_states = wrapper.forward(
+        input_ids=torch.arange(3), positions=torch.arange(3)
+    )
+    (kwargs,) = wrapper.model.seen
+    assert wrapper.model.num_rows == [4]
+    assert kwargs["padding_mask"].tolist() == [False, False, False, True]
+    assert wrapper._dist_moe_runtime.num_tokens_per_call == [1]
+    assert hidden_states.shape[0] == 3
+
+
 def test_forward_sets_the_step_dist_moe_call_size():
     wrapper = _wrapper(num_valid_tokens=torch.tensor(3, dtype=torch.int32), tp=4)
     wrapper.forward(input_ids=torch.arange(8))
@@ -115,6 +139,8 @@ def test_forward_sets_the_step_dist_moe_call_size():
         (4, [8, 64, 4, 16], 16),
         # Graph step: every replica already has the same size.
         (4, [16, 16, 16, 16], 4),
+        # Eager step that TP does not divide: the wrapper pads 5 rows to 8.
+        (2, [5, 3], 2),
         # DP 1: no DP metadata; the EP group is the TP group, which shares one batch.
         (1, None, 3),
     ],
