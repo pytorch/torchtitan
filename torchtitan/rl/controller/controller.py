@@ -451,8 +451,8 @@ class Controller(Configurable):
         def max_num_seqs_per_generator_dp_rank(self) -> int:
             """``generator.max_num_seqs`` if set, else 2x each generator DP rank's even share
             of the training rollouts in flight, rounded up to a power of two, clamped to
-            [32, token budget]. The token budget is ``generator.max_num_batched_tokens``, or
-            2048 when unset.
+            [token budget / 64, token budget]. The token budget is
+            ``generator.max_num_batched_tokens``, or 2048 when unset.
 
             Example (``generator.max_num_seqs`` and the token budget unset):
                 1536 rollouts in flight, 8 generator DP ranks -> 2 x 192 = 384 -> 512
@@ -472,16 +472,18 @@ class Controller(Configurable):
             # 2x is headroom for uneven routing: the router moves a session only once its rank
             # is well above the mean load. A rank at the cap queues new requests.
             max_num_seqs = 2 * even_share
+            max_num_batched_tokens = self.generator.max_num_batched_tokens or 2048
             # TODO(https://github.com/Dao-AILab/flash-attention/issues/3117): drop the power of
-            # two and the floor of 32 once fixed. vLLM's memory profile splits the token budget
-            # over max_num_seqs dummy requests and adds the remainder to the last one. With
-            # FlashAttention-2, a dummy request of 65+ tokens writes out of bounds. A power of
-            # two >= 32 splits 2048 tokens evenly, into at most 64 per request. A larger budget
-            # needs a floor of budget / 64.
-            max_num_seqs = max(2 ** math.ceil(math.log2(max_num_seqs)), 32)
+            # two and the budget / 64 floor once fixed. vLLM's memory profile splits the token
+            # budget over max_num_seqs dummy requests and adds the remainder to the last one.
+            # With FlashAttention-2, a dummy request of 65+ tokens writes out of bounds. A power
+            # of two >= budget / 64 splits a power-of-two budget evenly, into at most 64 each.
+            max_num_seqs = 2 ** math.ceil(
+                math.log2(max(max_num_seqs, max_num_batched_tokens / 64))
+            )
             # vLLM requires max_num_seqs <= max_num_batched_tokens, which defaults to 2048 for
             # the engine torchtitan builds.
-            return min(max_num_seqs, self.generator.max_num_batched_tokens or 2048)
+            return min(max_num_seqs, max_num_batched_tokens)
 
     def __init__(self, config: Config):
         self.config = config
