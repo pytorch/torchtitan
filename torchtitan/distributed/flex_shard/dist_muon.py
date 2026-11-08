@@ -1992,7 +1992,8 @@ def _zeropower_via_newtonschulz(
     else:
         # Normalize in float32 straight into the output: a float16 cast first
         # flushes entries below ~6e-8 to zero, while normalized entries are at
-        # most 1. An update whose norm is below eps stays tiny and may still flush.
+        # most 1. An update with norm below eps is divided by eps instead, so its
+        # entries stay small and float16 may flush them.
         if transposed:
             update = update.transpose(-2, -1)
         norm = torch.linalg.vector_norm(
