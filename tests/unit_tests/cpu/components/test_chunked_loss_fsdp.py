@@ -12,8 +12,9 @@ from unittest.mock import patch
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import fully_shard
+from torch.distributed.fsdp import FSDPModule, fully_shard
 from torch.distributed.pipelining import PipelineStage
+from torch.distributed.tensor import DTensor
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -50,33 +51,39 @@ class _Decoder(torch.nn.Module):
         return torch.randn(8, 8, device=device)
 
 
-def _policies(head):
-    state_ctx = head._get_fsdp_state()._state_ctx
-    return state_ctx.is_last_backward, tuple(
+def _policies(model):
+    return model.get_is_last_backward(), tuple(
         (
-            state._auto_reshard_after_forward,
-            tuple(
-                (
-                    group.post_forward_mesh_info,
-                    group.reshard_after_backward,
-                    group.reduce_grads,
-                    group.all_reduce_grads,
-                )
-                for group in state._fsdp_param_groups
-            ),
+            module.get_reshard_after_forward(),
+            module.get_reshard_after_backward(),
+            module.get_requires_gradient_sync(),
+            module.get_requires_all_reduce(),
         )
-        for state in state_ctx.all_states
+        for module in model.modules()
+        if isinstance(module, FSDPModule)
     )
 
 
-def _decoder_prefetch(head):
-    state = head._get_fsdp_state()
-    return tuple(
-        tuple(group._post_forward_indices)
-        for owner in state._state_ctx.all_states
-        for group in owner._fsdp_param_groups
-        if group not in state._fsdp_param_groups
-    )
+def _run_head_passes(head, num_forwards, loss_fn, *args):
+    """Run ``loss_fn(*args)`` and check that it all-gathers the head's
+    parameters at most once, before the head's forwards."""
+    events = []
+    forward_hook = head.register_forward_pre_hook(lambda *_: events.append("forward"))
+
+    def all_gather_single(*args, **kwargs):
+        events.append("all-gather")
+        return real_all_gather_single(*args, **kwargs)
+
+    real_all_gather_single = dist.all_gather_single
+    try:
+        with patch.object(dist, "all_gather_single", all_gather_single):
+            result = loss_fn(*args)
+    finally:
+        forward_hook.remove()
+    num_all_gathers = len(events) - num_forwards
+    if num_all_gathers > 1 or events[num_all_gathers:] != ["forward"] * num_forwards:
+        raise RuntimeError(f"Unexpected head pass order: {events}")
+    return result
 
 
 def _compare(actual, expected, label):
@@ -97,7 +104,7 @@ def _recover_from_chunk_failure(model, loss_fn, count, set_policy, device):
     inputs = model.sample_inputs(device)
     labels = torch.randint(16, (8,), device=device)
     hidden = model(inputs)
-    expected_policies = _policies(model.lm_head)
+    expected_policies = _policies(model)
     real_loss = loss_fn.loss_fn
     chunks = 0
 
@@ -116,11 +123,11 @@ def _recover_from_chunk_failure(model, loss_fn, count, set_policy, device):
             raise
     else:
         raise RuntimeError("The controlled chunk failure did not execute")
-    if _policies(model.lm_head) != expected_policies:
+    if _policies(model) != expected_policies:
         raise RuntimeError("A failed chunk changed the caller's FSDP policy")
     del hidden
     model.reset_iter_state()
-    if _policies(model.lm_head) != expected_policies:
+    if _policies(model) != expected_policies:
         raise RuntimeError("FSDP reset changed the caller's policy")
     loss_fn.loss_fn = real_loss
 
@@ -247,35 +254,16 @@ def _exercise_multi_output_head(device, world_size):
     labels = tuple(torch.randint(16, (8,), device=device) for _ in range(2))
     count = torch.tensor(16, device=device)
     hidden = model(inputs)
-    events = []
-    forward_hook = model.lm_head.register_forward_pre_hook(
-        lambda *_: events.append("forward")
+    loss, _ = _run_head_passes(
+        model.lm_head,
+        2 * loss_fn.num_chunks,
+        loss_fn,
+        (hidden, hidden * 0.5),
+        labels,
+        count,
     )
-    unshard = model.lm_head.unshard
-
-    def record_unshard():
-        events.append("unshard")
-        return unshard()
-
-    group = model.lm_head._get_fsdp_state()._fsdp_param_groups[0]
-    reshard = group.reshard
-
-    def record_reshard():
-        was_unsharded = group.is_unsharded
-        reshard()
-        if was_unsharded and group.is_sharded:
-            events.append("reshard")
-
-    try:
-        with (
-            patch.object(model.lm_head, "unshard", record_unshard),
-            patch.object(group, "reshard", record_reshard),
-        ):
-            loss, _ = loss_fn((hidden, hidden * 0.5), labels, count)
-    finally:
-        forward_hook.remove()
-    if events != ["unshard"] + ["forward"] * (2 * loss_fn.num_chunks) + ["reshard"]:
-        raise RuntimeError(f"Unexpected multi-output head pass order: {events}")
+    if not isinstance(model.lm_head.weight, DTensor):
+        raise RuntimeError("The chunked loss left the head unsharded")
     ref_hidden = reference(inputs)
     expected_loss, _ = two_output_loss(
         (reference.lm_head(ref_hidden), reference.lm_head(ref_hidden * 0.5)),
@@ -370,37 +358,16 @@ class TestChunkedLossFSDP(DTensorTestBase):
                             inputs = model.sample_inputs(device)
                             labels = torch.randint(16, (8,), device=device)
                             hidden = model(inputs)
-                            expected_policies = _policies(model.lm_head)
-                            decoder_prefetch = _decoder_prefetch(model.lm_head)
-                            events = []
-                            forward_hook = model.lm_head.register_forward_pre_hook(
-                                lambda *_: events.append("forward")
+                            expected_policies = _policies(model)
+                            loss, _ = _run_head_passes(
+                                model.lm_head,
+                                loss_fn.num_chunks,
+                                loss_fn,
+                                hidden,
+                                labels,
+                                count,
                             )
-                            unshard = model.lm_head.unshard
-
-                            def record_unshard():
-                                events.append("unshard")
-                                return unshard()
-
-                            try:
-                                with patch.object(
-                                    model.lm_head, "unshard", record_unshard
-                                ):
-                                    loss, _ = loss_fn(hidden, labels, count)
-                            finally:
-                                forward_hook.remove()
-                            if events != ["unshard"] + ["forward"] * loss_fn.num_chunks:
-                                raise RuntimeError(
-                                    f"Unexpected head pass order: {events}"
-                                )
-                            if (
-                                not frozen
-                                and _decoder_prefetch(model.lm_head) != decoder_prefetch
-                            ):
-                                raise RuntimeError(
-                                    "Chunk backward cleared decoder prefetch state"
-                                )
-                            if _policies(model.lm_head) != expected_policies:
+                            if _policies(model) != expected_policies:
                                 raise RuntimeError(
                                     "Chunked loss changed the caller's FSDP policy"
                                 )

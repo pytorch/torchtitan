@@ -11,8 +11,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import fully_shard
-from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
+from torch.distributed.fsdp import FSDPModule, fully_shard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -291,13 +290,19 @@ class TestLoadModelStateDictTwoRanks(DTensorTestBase):
         with torch.no_grad():
             model.lm_head(torch.zeros(1, 16))
 
-        comm_ctx = model._get_fsdp_state()._comm_ctx
-        get_all_gather_streams = comm_ctx.get_all_gather_streams
-        all_gather_states = []
+        # FSDP runs a group's unshard() on the current stream, after the device work
+        # that filled its shards, only once the group's forward is complete
+        complete_grouped_forward = FSDPModule.complete_grouped_forward
+        unshard = FSDPModule.unshard
+        calls = []
 
-        def record_all_gather_state(async_op, training_state):
-            all_gather_states.append(training_state)
-            return get_all_gather_streams(async_op, training_state)
+        def record_complete_grouped_forward(module, *args, **kwargs):
+            calls.append(("complete_grouped_forward", module))
+            return complete_grouped_forward(module, *args, **kwargs)
+
+        def record_unshard(module, *args, **kwargs):
+            calls.append(("unshard", module))
+            return unshard(module, *args, **kwargs)
 
         for version in (1, 2):
             new_state_dict = {k: v + version for k, v in initial_state_dict.items()}
@@ -313,11 +318,23 @@ class TestLoadModelStateDictTwoRanks(DTensorTestBase):
                 )
                 return copy(state_dict)
 
-            with mock.patch.object(
-                comm_ctx, "get_all_gather_streams", record_all_gather_state
+            calls.clear()
+            with (
+                mock.patch.object(
+                    FSDPModule,
+                    "complete_grouped_forward",
+                    record_complete_grouped_forward,
+                ),
+                mock.patch.object(FSDPModule, "unshard", record_unshard),
             ):
                 loader.load(fetch)
-            self.assertEqual(set(all_gather_states), {TrainingState.IDLE})
+            unsharded = [module for call, module in calls if call == "unshard"]
+            self.assertTrue(unsharded)
+            for module in unsharded:
+                self.assertLess(
+                    calls.index(("complete_grouped_forward", module)),
+                    calls.index(("unshard", module)),
+                )
 
             self.assertEqual(
                 fetched_keys,
