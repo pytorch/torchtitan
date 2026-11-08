@@ -449,18 +449,16 @@ class Controller(Configurable):
 
         @property
         def max_num_seqs_per_generator_dp_rank(self) -> int:
-            """``generator.max_num_seqs`` if set, else 2x each generator DP rank's even share
-            of the training rollouts in flight, rounded up to a power of two, clamped to
-            [token budget / 64, token budget]. The token budget is
-            ``generator.max_num_batched_tokens``, or 2048 when unset.
+            """2x each generator DP rank's even share of the training rollouts in flight,
+            rounded up to a power of two, clamped to [token budget / 64, token budget]. The token
+            budget is ``generator.max_num_batched_tokens``, or 2048 when unset.
 
-            Example (``generator.max_num_seqs`` and the token budget unset):
+            Example (token budget unset):
                 1536 rollouts in flight, 8 generator DP ranks -> 2 x 192 = 384 -> 512
                 64 rollouts in flight, 3 generator DP ranks   -> 2 x 22 = 44   -> 64
                 16 rollouts in flight, 2 generator DP ranks   -> 2 x 8 = 16    -> 32
             """
-            if self.generator.max_num_seqs is not None:
-                return self.generator.max_num_seqs
+            # TODO: add a generator.max_num_seqs override when a recipe needs a smaller value.
             async_loop = self.async_loop
             max_rollouts_in_flight = (
                 async_loop.max_active_rollout_groups * async_loop.num_samples_per_prompt
@@ -469,15 +467,11 @@ class Controller(Configurable):
                 self.num_generators * self.generator.parallelism.data_parallel_degree
             )
             even_share = math.ceil(max_rollouts_in_flight / num_generator_dp_ranks)
-            # 2x is headroom for uneven routing: the router moves a session only once its rank
-            # is well above the mean load. A rank at the cap queues new requests.
+            # 2x is headroom
             max_num_seqs = 2 * even_share
             max_num_batched_tokens = self.generator.max_num_batched_tokens or 2048
-            # TODO(https://github.com/Dao-AILab/flash-attention/issues/3117): drop the power of
-            # two and the budget / 64 floor once fixed. vLLM's memory profile splits the token
-            # budget over max_num_seqs dummy requests and adds the remainder to the last one.
-            # With FlashAttention-2, a dummy request of 65+ tokens writes out of bounds. A power
-            # of two >= budget / 64 splits a power-of-two budget evenly, into at most 64 each.
+            # TODO(https://github.com/Dao-AILab/flash-attention/issues/3117): drop once fixed. vLLM's memory
+            # profile splits a power-of-two budget evenly over max_num_seqs; FA2 writes out of bounds past 64 each.
             max_num_seqs = 2 ** math.ceil(
                 math.log2(max(max_num_seqs, max_num_batched_tokens / 64))
             )
