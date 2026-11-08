@@ -10,24 +10,30 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-
-import torchtitan.quantization.mxfp8.tensor as mxfp8_tensor
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.elastic.utils.distributed import get_free_port
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import DTensor
-from torchtitan.distributed.accelerator_graph import (
+
+
+pytest.importorskip("torchao")
+pytest.importorskip("torchao.prototype.moe_training.kernels.mxfp8")
+
+import torchtitan.quantization.mxfp8.tensor as mxfp8_tensor  # noqa: E402
+from torchtitan.distributed.accelerator_graph import (  # noqa: E402
     accelerator_graph_teardown,
     AcceleratorGraphWrapper,
 )
-from torchtitan.experiments.graph_trainer.simple_fsdp import (
+from torchtitan.experiments.graph_trainer.simple_fsdp import (  # noqa: E402
     data_parallel,
     disable_active_parametrization,
     MixedPrecisionPolicy as SimpleFSDPMixedPrecisionPolicy,
 )
-from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor
-from torchtitan.quantization.mxfp8.linear import MXFP8Linear
-from torchtitan.quantization.mxfp8.tensor import _LinearShardedTensorWithMXFP8Compute
+from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor  # noqa: E402
+from torchtitan.quantization.mxfp8.linear import MXFP8Linear  # noqa: E402
+from torchtitan.quantization.mxfp8.tensor import (  # noqa: E402
+    _LinearShardedTensorWithMXFP8Compute,
+)
 
 
 # Every test here spawns a two-rank process group, so the whole module belongs

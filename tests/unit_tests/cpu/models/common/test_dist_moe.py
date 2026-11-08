@@ -1029,8 +1029,11 @@ def test_dist_moe_mxfp8_recipes_quantize_dense_linears_and_lm_head(
     max_documents,
     monkeypatch,
 ):
+    pytest.importorskip("torchao")
     from torchtitan.quantization import MXFP8Linear
 
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     config = factory()
     model_config = config.model

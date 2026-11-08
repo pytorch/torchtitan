@@ -5,4 +5,3 @@ pre-commit
 pyrefly==0.45.1
 transformers
 numpy
-torchao

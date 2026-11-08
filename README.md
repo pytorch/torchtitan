@@ -225,11 +225,11 @@ validated against; see [RELEASE.md](RELEASE.md).
 <details>
 <summary><b>Optional dependencies</b></summary>
 
-- **Low precision (MXFP8, NVFP4):** install a `torchao` nightly matching your
-  `torch` build. It is not in `requirements.txt` so it cannot be resolved
-  against a different `torch`:
+- **Low precision (MXFP8, NVFP4):** install the `torchao` nightly CI pins, from
+  the index matching your `torch` build. It is not in `requirements.txt` so it
+  cannot be resolved against a different `torch`:
   ```bash
-  USE_CPP=0 pip install --pre --upgrade torchao --index-url https://download.pytorch.org/whl/nightly/cu132
+  USE_CPP=0 pip install --pre -r .github/requirements-torchao.txt --index-url https://download.pytorch.org/whl/nightly/cu132
   ```
 - **RL:** `scripts/install_rl_env.sh` installs the vLLM, Monarch, and TorchStore
   nightlies and the FlashAttention build for your GPU. See the

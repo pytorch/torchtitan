@@ -9,13 +9,22 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
-from torchao.prototype.moe_training.nvfp4_training.nvfp4_training import (
+
+pytest.importorskip("torchao")
+pytest.importorskip("torchao.prototype.moe_training.nvfp4_training")
+
+from torchao.prototype.moe_training.nvfp4_training.nvfp4_training import (  # noqa: E402
     NVFP4Linear as TorchAONVFP4Linear,
 )
 
-from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor
-from torchtitan.quantization.nvfp4 import _HARDCODED_SIGN_VECTOR, NVFP4Linear
-from torchtitan.quantization.nvfp4.tensor import _LinearShardedTensorWithNVFP4Compute
+from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor  # noqa: E402
+from torchtitan.quantization.nvfp4 import (  # noqa: E402
+    _HARDCODED_SIGN_VECTOR,
+    NVFP4Linear,
+)
+from torchtitan.quantization.nvfp4.tensor import (  # noqa: E402
+    _LinearShardedTensorWithNVFP4Compute,
+)
 
 
 pytestmark = [

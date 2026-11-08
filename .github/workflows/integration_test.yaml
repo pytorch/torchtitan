@@ -95,7 +95,7 @@ jobs:
         fi
         python -m pip install --force-reinstall --pre \
           "${TORCH_SPEC}" torchvision --index-url ${{ matrix.index-url }}
-        USE_CPP=0 python -m pip install --force-reinstall --pre torchao --index-url ${{ matrix.index-url }}
+        USE_CPP=0 python -m pip install --pre -r .github/requirements-torchao.txt --index-url ${{ matrix.index-url }}
 
         GPU_ARCH="a10g"
 
