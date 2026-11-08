@@ -135,10 +135,10 @@ class Generator(Configurable):
         max_num_seqs: int | None = None
         """The most requests each engine DP rank runs at once; the rest wait in its queue.
         ``None`` (default) derives it from the rollouts in flight; see
-        ``Controller.Config.max_num_seqs_per_generator_dp_rank``. A set value is used as is.
-        Lower it if vLLM says "max_num_seqs exceeds available Mamba cache blocks": GDN and
-        KDA models with FULL or FULL_DECODE_ONLY CUDA graphs need one Mamba cache block per
-        running request."""
+        ``Controller.Config.max_num_seqs_per_generator_dp_rank``. A set value is used as is;
+        on FlashAttention-2 GPUs, use a power of two >= 32. Lower it if vLLM says
+        "max_num_seqs exceeds available Mamba cache blocks": GDN and KDA models with FULL or
+        FULL_DECODE_ONLY CUDA graphs need one Mamba cache block per running request."""
 
         checkpointer: CheckpointManager.Config | None = None
         """Optional initial-weight loader for the engine's model.

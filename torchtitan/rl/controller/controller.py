@@ -471,15 +471,16 @@ class Controller(Configurable):
             even_share = math.ceil(max_rollouts_in_flight / num_generator_dp_ranks)
             # 2x is headroom for uneven routing: the router moves a session only once its rank
             # is well above the mean load. A rank at the cap queues new requests.
-            max_num_seqs = 2 ** math.ceil(math.log2(2 * even_share))
+            max_num_seqs = 2 * even_share
             # TODO(https://github.com/Dao-AILab/flash-attention/issues/3117): drop the power of
             # two and the floor of 32 once fixed. vLLM's memory profile splits the token budget
             # over max_num_seqs dummy requests and adds the remainder to the last one. With
             # FlashAttention-2, a dummy request of 65+ tokens writes out of bounds. A power of
-            # two >= 32 splits 2048 tokens evenly, into at most 64 per request.
-            max_num_seqs = max(max_num_seqs, 32)
-            # vLLM requires max_num_seqs <= max_num_batched_tokens. 2048 is the smallest budget
-            # vLLM picks when it is unset.
+            # two >= 32 splits 2048 tokens evenly, into at most 64 per request. A larger budget
+            # needs a floor of budget / 64.
+            max_num_seqs = max(2 ** math.ceil(math.log2(max_num_seqs)), 32)
+            # vLLM requires max_num_seqs <= max_num_batched_tokens, which defaults to 2048 for
+            # the engine torchtitan builds.
             return min(max_num_seqs, self.generator.max_num_batched_tokens or 2048)
 
     def __init__(self, config: Config):
