@@ -41,11 +41,7 @@ from torchtitan.models.muse_glimmer import (
 from torchtitan.models.qwen3 import build_model_config
 
 from torchtitan.observability.metrics import WandBLogger
-from torchtitan.rl.controller.controller import (
-    AsyncLoopConfig,
-    Controller,
-    ValidationConfig,
-)
+from torchtitan.rl.controller.controller import AsyncLoopConfig, Controller
 from torchtitan.rl.examples.search_r1.data import SearchR1Dataset
 from torchtitan.rl.examples.search_r1.env import SearchR1Env
 from torchtitan.rl.examples.search_r1.rubric import RewardExactMatch
@@ -56,7 +52,7 @@ from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
-from torchtitan.rl.rollout.data import IterableRolloutDataLoader
+from torchtitan.rl.rollout.data import IterableRolloutDataLoader, ValidationDataLoader
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.rollout.token_env import TokenEnv
@@ -74,11 +70,14 @@ def _search_r1_rollouter_config() -> Rollouter.Config:
         training_dataloader=IterableRolloutDataLoader.Config(
             dataset=SearchR1Dataset.Config(filename="train.parquet", seed=42)
         ),
-        validation_dataset=SearchR1Dataset.Config(
-            filename="test.parquet",
-            seed=99,
-            data_source="nq",
-            shuffle=False,
+        validation_dataloader=ValidationDataLoader.Config(
+            dataset=SearchR1Dataset.Config(
+                filename="test.parquet",
+                seed=99,
+                data_source="nq",
+                shuffle=False,
+            ),
+            num_prompts=500,
         ),
         worker=RolloutWorker.Config(
             rubric=Rubric.Config(
@@ -125,7 +124,6 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
             num_training_steps=500,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=8,
-            validation=ValidationConfig(steps=500),
         ),
         rollouter=_search_r1_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
@@ -268,7 +266,6 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             num_training_steps=500,
             num_prompts_per_train_step=32,  # TODO: TBD
             num_samples_per_prompt=8,  # TODO: TBD
-            validation=ValidationConfig(steps=500),
         ),
         rollouter=_search_r1_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
@@ -396,7 +393,6 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
             num_training_steps=500,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=8,
-            validation=ValidationConfig(steps=500),
         ),
         rollouter=_search_r1_rollouter_config(),
         renderer=from_renderers(

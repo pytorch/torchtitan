@@ -229,7 +229,9 @@ def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
     assert environment.agent.timeout.rollout == 7200
     assert environment.taskset == config.training_dataloader.dataset.verifiers_taskset
     assert config.training_dataloader.dataset.verifiers_taskset.dataset == TRAIN_DATASET
-    assert config.validation_dataset.verifiers_taskset.dataset == EVAL_DATASET
+    assert (
+        config.validation_dataloader.dataset.verifiers_taskset.dataset == EVAL_DATASET
+    )
     assert config.verifiers_env_server.local_taskset_module == taskset.__name__
     worker_config = resolve_env_config(env_config_data(environment))
     assert worker_config.agent.harness == environment.agent.harness
@@ -320,7 +322,10 @@ def test_training_recipe_uses_separate_datasets() -> None:
         config.rollouter.training_dataloader.dataset.verifiers_taskset.dataset
         == TRAIN_DATASET
     )
-    assert config.rollouter.validation_dataset.verifiers_taskset.dataset == EVAL_DATASET
+    assert (
+        config.rollouter.validation_dataloader.dataset.verifiers_taskset.dataset
+        == EVAL_DATASET
+    )
 
 
 def _num_kv_heads(model: object) -> int:
@@ -365,7 +370,10 @@ def test_muse_glimmer_terminal_bench_recipe_uses_worker_loadable_renderer() -> N
         config.rollouter.training_dataloader.dataset.verifiers_taskset.dataset
         == TRAIN_DATASET
     )
-    assert config.rollouter.validation_dataset.verifiers_taskset.dataset == EVAL_DATASET
+    assert (
+        config.rollouter.validation_dataloader.dataset.verifiers_taskset.dataset
+        == EVAL_DATASET
+    )
 
 
 @pytest.mark.parametrize(

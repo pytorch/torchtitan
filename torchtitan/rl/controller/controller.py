@@ -137,20 +137,6 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(kw_only=True, slots=True)
-class ValidationConfig:
-    """Held-out validation that runs at the start and end of training"""
-
-    # TODO: enable periodic validation with proper overlapping
-
-    steps: int = 20
-    """Maximum prompts per pass. -1 consumes one finite source pass; 0 disables."""
-
-    def __post_init__(self) -> None:
-        if self.steps < -1:
-            raise ValueError("validation steps must be -1 or non-negative")
-
-
-@dataclass(kw_only=True, slots=True)
 class AsyncLoopConfig(Configurable.Config):
     num_training_steps: int = 10
     """Optimizer steps to run."""
@@ -186,7 +172,6 @@ class AsyncLoopConfig(Configurable.Config):
         default_factory=RolloutGroupWorkBuffer.Config
     )
     batcher: Batcher.Config = field(default_factory=Batcher.Config)
-    validation: ValidationConfig = field(default_factory=ValidationConfig)
 
     def __post_init__(self) -> None:
         if self.num_prompts_per_train_step < 1:
@@ -760,10 +745,9 @@ class Controller(Configurable):
         """
         # TODO: investigate using pass@k for validation.
         t_validate_start = time.perf_counter()
-        steps = self.config.async_loop.validation.steps
-        if steps == 0:  # skip validation (e.g. loss guard CI)
+        if self.config.rollouter.validation_dataloader is None:
             return []
-        samples = self._rollouter.get_validation_samples(steps)
+        samples = list(self._rollouter.iter_validation_samples())
         greedy = replace(self._sampling, temperature=0.0, top_p=1.0)
 
         rollout_groups, validation_metrics = await self._collect_validation_rollouts(

@@ -29,11 +29,7 @@ from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3 import build_model_config
 
 from torchtitan.observability.metrics import WandBLogger
-from torchtitan.rl.controller.controller import (
-    AsyncLoopConfig,
-    Controller,
-    ValidationConfig,
-)
+from torchtitan.rl.controller.controller import AsyncLoopConfig, Controller
 from torchtitan.rl.examples.verifiers.dapo_math.data import VerifiersMathTasksetConfig
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
 from torchtitan.rl.examples.verifiers.env_server import VerifiersEnvServer
@@ -49,7 +45,7 @@ from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
-from torchtitan.rl.rollout.data import IterableRolloutDataLoader
+from torchtitan.rl.rollout.data import IterableRolloutDataLoader, ValidationDataLoader
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.trainer.losses import DAPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
@@ -77,8 +73,11 @@ def _verifiers_math_rollouter_config(
                 verifiers_taskset=_math_taskset_config("dapo_math")
             ),
         ),
-        validation_dataset=VerifiersTaskDataset.Config(
-            verifiers_taskset=_math_taskset_config("aime2025"),
+        validation_dataloader=ValidationDataLoader.Config(
+            dataset=VerifiersTaskDataset.Config(
+                verifiers_taskset=_math_taskset_config("aime2025"),
+            ),
+            num_prompts=30,
         ),
         verifiers_env_server=VerifiersEnvServer.Config(
             environment=vf.SingleAgentEnvConfig(
@@ -110,7 +109,6 @@ def _qwen3_4b_verifiers_config(
     dump_folder: str,
 ) -> Controller.Config:
     """Build the Qwen3-4B DAPO-Math configuration using Verifiers."""
-    num_validation_samples = 30
     trainer_parallelism = ParallelismConfig(
         data_parallel_replicate_degree=1,
         data_parallel_shard_degree=1,
@@ -136,7 +134,6 @@ def _qwen3_4b_verifiers_config(
             num_prompts_per_train_step=8,
             num_samples_per_prompt=16,
             target_offpolicy_steps=4,
-            validation=ValidationConfig(steps=num_validation_samples),
         ),
         rollouter=_verifiers_math_rollouter_config(max_rollout_tokens=max_total_tokens),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=True)),
