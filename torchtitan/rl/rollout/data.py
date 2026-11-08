@@ -32,10 +32,10 @@ class ValidationDataLoader(Configurable):
     """Builds the validation dataset and yields one pass of it, one prompt at a time.
 
     Example: 30 AIME problems.
-        num_prompts=30                    -> problems 0..29
-        num_prompts=60, a finite dataset  -> RuntimeError after problem 29
-        num_prompts=60, a dataset that wraps around (every one in the repo)
-                                          -> problems 0..29, twice: the repeats add cost, not signal
+        num_prompts=30                       -> problems 0..29
+        num_prompts=60, a finite dataset     -> RuntimeError after problem 29
+        num_prompts=60, a dataset that wraps -> problems 0..29, twice: the repeats add cost, not signal
+    A generated dataset (e.g. AlphabetSort's) never repeats; its seed gives every pass the same prompts.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -44,8 +44,8 @@ class ValidationDataLoader(Configurable):
         """Built again for every pass, so each pass reads the same prompts in the same order."""
 
         num_prompts: int
-        """Prompts per pass (>= 1). The validation datasets in the repo wrap around, so this ends the pass;
-        set it to the dataset's size."""
+        """Prompts per pass (>= 1). The validation datasets in the repo never end: they wrap around or,
+        like AlphabetSort's, generate new prompts. So this ends the pass; keep it at most the dataset's size."""
 
         def __post_init__(self) -> None:
             if self.num_prompts < 1:
