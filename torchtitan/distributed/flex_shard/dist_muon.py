@@ -200,20 +200,12 @@ class DistMuon(Optimizer):
     share scratch with a separate CUDA-graph private pool. Parameters, optimizer
     state, and communication resources remain owned.
 
-    ``ns_dtype`` is the dtype of the Newton-Schulz iteration only. Inputs and
-    directions still cross ranks in BF16 (``ComputeLayout.compute_dtype``).
-    ``torch.float16`` keeps 3 more mantissa bits in the iteration, which cuts
-    the iteration's own rounding error but not the BF16 rounding of its input.
-    Parameters that need no redistribution pass their storage dtype straight
-    to Newton-Schulz, so with float32 storage they skip that BF16 rounding.
-    Step 3.5 Flash (arXiv 2602.10604, Section 4.1.1) traced rare, unrecoverable
-    loss spikes to error inside a BF16 6-step Polar Express iteration, and cast
-    that iteration to float16 to fix them.
-    Consider float16 when Newton-Schulz runs on the accelerator. The default
-    stays BF16, so existing recipes keep their numerics. Keep BF16 when
-    Newton-Schulz runs on the host: float16 matmuls there were 1.9-3.2x slower
-    (1024x131072 GEMMs, Neoverse-V2 host), and float16 there also needs more
-    temporary memory.
+    ``ns_dtype`` is the dtype of the Newton-Schulz iteration only. Redistributed
+    inputs and directions stay in ``ComputeLayout.compute_dtype`` (BF16).
+    Consider ``torch.float16`` when Newton-Schulz runs on the accelerator: its 3
+    extra mantissa bits cut the iteration's rounding error (Step 3.5 Flash,
+    arXiv 2602.10604, Section 4.1.1). Keep BF16 when Newton-Schulz runs on the
+    host, where float16 matmuls are slower and need more temporary memory.
 
     ``ns_device`` selects where Newton-Schulz runs. ``None`` keeps the storage
     device, where each parameter's local shard lives (the host under FSDP2 CPU
@@ -250,8 +242,7 @@ class DistMuon(Optimizer):
         self._ns_device = self._resolve_ns_device(ns_device)
         if ns_dtype not in (torch.bfloat16, torch.float16):
             raise ValueError(
-                f"ns_dtype must be torch.bfloat16 or torch.float16, got {ns_dtype!r} "
-                "(DistMuon.Config takes the strings 'bfloat16' and 'float16')"
+                f"ns_dtype must be torch.bfloat16 or torch.float16, got {ns_dtype}"
             )
         self._ns_dtype = ns_dtype
         defaults = {
@@ -385,9 +376,8 @@ class DistMuon(Optimizer):
                 raise NotImplementedError(
                     f"{fqn!r} would exchange in {compute_dtype}: compute_dtype "
                     "sets DistMuon's exchange buffers and must be torch.bfloat16. "
-                    "For a float16 Newton-Schulz iteration, set ns_dtype: "
-                    "'float16' in DistMuon.Config, torch.float16 in FlexShard's "
-                    "DistMuon."
+                    "For a float16 Newton-Schulz iteration, set "
+                    "ns_dtype=torch.float16."
                 )
             compute_layouts.append(
                 _ParameterComputeLayout(
@@ -1983,22 +1973,23 @@ def _zeropower_via_newtonschulz(
     ns_coefficients: _NSCoefficientSchedule,
     ns_steps: int,
     eps: float,
-    ns_dtype: torch.dtype = torch.bfloat16,
+    ns_dtype: torch.dtype,
 ) -> Tensor:
     """Compute Muon's approximate polar factor without optimizer state."""
     coefficients_by_step = _ns_coefficients_by_step(ns_coefficients, ns_steps)
     transposed = update.shape[-2] > update.shape[-1]
     if ns_dtype is torch.bfloat16:
+        # TODO: also take the float32-norm path below for BF16. It rounds the
+        # normalized entries once instead of twice, but changes the numerics
+        # (and loss goldens) of every BF16 recipe.
         result = update.to(dtype=torch.bfloat16, copy=True)
         if transposed:
             result = result.transpose(-2, -1)
         result.div_(result.norm(dim=(-2, -1), keepdim=True).clamp_min(eps))
     else:
-        # Take the norm in float32 and divide straight into float16. A float16 cast
-        # before the division flushes entries below ~6e-8 to zero. A BF16 division
-        # would round the normalized entries a second time. Normalized entries are
-        # at most 1. Below eps the entries stay small and float16 can flush them;
-        # such directions are tiny.
+        # Normalize in float32 straight into the output: a float16 cast first
+        # flushes entries below ~6e-8 to zero, while normalized entries are at
+        # most 1. An update whose norm is below eps stays tiny and may still flush.
         if transposed:
             update = update.transpose(-2, -1)
         norm = torch.linalg.vector_norm(
@@ -2017,7 +2008,7 @@ def _zeropower_via_newtonschulz(
     else:
         original_shape = result.shape
         matrices = result.reshape(-1, *original_shape[-2:])
-        # The loop replaces matrices; do not retain the initial BF16 storage.
+        # The loop replaces matrices; do not retain the initial storage.
         del result
         # Batched kernels and independent matrix calls can use different
         # low-precision reduction orders.

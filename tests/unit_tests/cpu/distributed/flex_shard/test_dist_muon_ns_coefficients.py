@@ -25,18 +25,21 @@ def test_dist_muon_applies_shared_or_per_step_ns_coefficients() -> None:
         ns_coefficients=shared,
         ns_steps=2,
         eps=1e-7,
+        ns_dtype=torch.bfloat16,
     )
     repeated_result = _zeropower_via_newtonschulz(
         update,
         ns_coefficients=repeated,
         ns_steps=2,
         eps=1e-7,
+        ns_dtype=torch.bfloat16,
     )
     per_step_result = _zeropower_via_newtonschulz(
         update,
         ns_coefficients=per_step,
         ns_steps=2,
         eps=1e-7,
+        ns_dtype=torch.bfloat16,
     )
 
     assert torch.equal(shared_result, repeated_result)

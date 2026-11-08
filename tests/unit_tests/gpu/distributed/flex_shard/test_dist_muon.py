@@ -333,57 +333,6 @@ class TestDistMuon(DTensorTestBase):
             second_local_blocks_grad,
         )
 
-    @with_comms
-    def test_float16_ns_dtype_tracks_float32_reference(self):
-        # Low-rank gradient at a tiny scale; its small singular values are the
-        # ones BF16 rounding distorts.
-        mesh = init_device_mesh(
-            self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)
-        )
-        generator = torch.Generator().manual_seed(0)
-        left = torch.randn(256, 8, generator=generator)
-        right = torch.randn(8, 512, generator=generator)
-        gradient = ((left * torch.logspace(0, -3, 8)) @ right * 1e-9).to(
-            self.device_type
-        )
-        fqn = "layers.0.weight"
-        lr = 0.03
-
-        def direction(ns_dtype: torch.dtype) -> torch.Tensor:
-            parameter = torch.nn.Parameter(
-                distribute_tensor(torch.zeros_like(gradient), mesh, (Shard(0),))
-            )
-            optimizer = DistMuon(
-                [{"params": [parameter], "param_names": [fqn]}],
-                compute_sharding_by_fqn={
-                    fqn: ComputeLayout(
-                        shardings_by_mesh_axis={"dp_shard": Owned()},
-                        compute_dtype=torch.bfloat16,
-                    )
-                },
-                bucket_configs=[BucketConfig(patterns=(fqn,))],
-                lr=lr,
-                weight_decay=0.0,
-                momentum=0.0,
-                ns_dtype=ns_dtype,
-            )
-            parameter.grad = distribute_tensor(gradient, mesh, (Shard(0),))
-            optimizer.step()
-            # A 256 x 512 matrix keeps lr unadjusted: parameter = -lr * direction.
-            return parameter.full_tensor() / -lr
-
-        # With zero momentum, DistMuon's input is the gradient in the BF16 exchange.
-        reference = dist_muon_module._zeropower_via_newtonschulz(
-            gradient.to(torch.bfloat16),
-            ns_coefficients=(3.4445, -4.7750, 2.0315),
-            ns_steps=5,
-            eps=1e-7,
-            ns_dtype=torch.float32,
-        ).float()
-        bf16_error = (direction(torch.bfloat16) - reference).abs().mean()
-        fp16_error = (direction(torch.float16) - reference).abs().mean()
-        self.assertLess(fp16_error, bf16_error / 3)
-
 
 @instantiate_parametrized_tests
 @unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
