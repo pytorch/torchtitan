@@ -401,15 +401,13 @@ class VLLMEngine(GenerationEngine):
             _finished_request(request_output) for request_output in request_outputs
         ]
         if finished_requests:
-            # One request carries the forward token counts since the last finished request,
-            # so rank 0 adds up each DP rank's counts exactly once.
-            (
-                num_unpadded_tokens,
-                num_padded_tokens,
-            ) = self._get_model_runner().pop_forward_token_counts()
+            # One request carries the engine's forward token counts since the last report, so
+            # rank 0 adds up each DP rank's counts exactly once.
+            runner = self._get_model_runner()
+            num_unpadded_tokens, num_padded_tokens = runner.pop_forward_token_counts()
             metrics_inputs = finished_requests[0].metrics_inputs
-            metrics_inputs.num_unpadded_tokens = num_unpadded_tokens
-            metrics_inputs.num_padded_tokens = num_padded_tokens
+            metrics_inputs.num_engine_unpadded_tokens = num_unpadded_tokens
+            metrics_inputs.num_engine_padded_tokens = num_padded_tokens
         return finished_requests
 
     def release_sessions(self, session_ids: list[str], group_ids: list[int]) -> None:

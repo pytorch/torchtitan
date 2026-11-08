@@ -104,17 +104,16 @@ class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
 class TorchTitanGPUModelRunner(GPUModelRunner):
     """V1 runner with sequence-parallel padding and FULL-graph decode specialization."""
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Tokens of real forwards (dummy runs excluded) since the last `pop_forward_token_counts`.
-        self._num_unpadded_tokens = 0
-        self._num_padded_tokens = 0
-        self._is_dummy_run = False
+    # Tokens of real forwards since the last `pop_forward_token_counts`; dummy runs set the flag.
+    _num_unpadded_tokens = 0
+    _num_padded_tokens = 0
+    _is_dummy_run = False
 
     def pop_forward_token_counts(self) -> tuple[int, int]:
         """Return and reset ``(unpadded, padded)`` token counts of the real forwards since the
-        last call. Padding is what vLLM's ``CUDAGraphStat`` counts: CUDA graph capture sizes, TP
-        rounding and DP equalization.
+        last call. Padding is what vLLM's ``CUDAGraphStat`` counts: CUDA graph capture sizes,
+        sequence-parallel rounding and DP equalization. Dummy forwards are not counted, including
+        an idle DP rank's.
 
         Example: decodes of 3 and 5 requests replay the 4- and 8-token graphs -> (8, 12)
         """
@@ -153,8 +152,8 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
             and num_tokens > self.max_model_len
         ):
             profile_seq_lens = self.max_model_len
-        # Profiling, capture and an idle DP rank's batch are not real forwards: keep them out
-        # of `pop_forward_token_counts`.
+        # Dummy forwards (profiling, capture, an idle DP rank's batch) are not counted in
+        # `pop_forward_token_counts`.
         self._is_dummy_run = True
         try:
             return super()._dummy_run(
@@ -195,18 +194,19 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
         equalization). The model turns the count into a padding mask, which keeps
         those rows off Dist-MoE's network; graph replay reads the value published
         for the real step. Linear attention (GDN/KDA) builders then learn whether
-        the step replays a packed FULL graph.
+        the step replays a packed FULL graph. Real forwards also add their token
+        counts for ``pop_forward_token_counts``.
         """
         self.get_model().set_num_valid_tokens(num_tokens)
         result = super()._determine_batch_execution_and_padding(
             num_tokens, *args, **kwargs
         )
-        # TODO: drop once vLLM passes the dispatched (cudagraph_mode, batch_descriptor)
-        # to AttentionMetadataBuilder.build.
         cudagraph_mode, batch_descriptor = result[:2]
         if not self._is_dummy_run:
             self._num_unpadded_tokens += num_tokens
             self._num_padded_tokens += batch_descriptor.num_tokens
+        # TODO: drop once vLLM passes the dispatched (cudagraph_mode, batch_descriptor)
+        # to AttentionMetadataBuilder.build.
         replays_packed_graph = (
             cudagraph_mode == CUDAGraphMode.FULL and not batch_descriptor.uniform
         )

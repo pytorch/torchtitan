@@ -489,8 +489,8 @@ def test_step_returns_finished_requests_without_grad():
     assert finished.token_logprobs == [-0.1, -0.1]
     assert finished.finish_reason == "stop"
     assert finished.metrics_inputs.num_generation_tokens == 4
-    assert finished.metrics_inputs.num_unpadded_tokens == 8
-    assert finished.metrics_inputs.num_padded_tokens == 12
+    assert finished.metrics_inputs.num_engine_unpadded_tokens == 8
+    assert finished.metrics_inputs.num_engine_padded_tokens == 12
 
 
 def test_step_rejects_more_than_one_sample_per_request():
@@ -550,28 +550,31 @@ def test_metric_timing_math_and_prefix_override():
     ] == pytest.approx(10)
 
 
-def test_cudagraph_padding_fraction_weights_each_engine_step_by_its_tokens():
+def test_cudagraph_padding_frac_weights_each_engine_step_by_its_tokens():
     # Two engine steps: 8 real tokens padded to 12, and 4 real tokens with no padding.
     padded = RequestMetricsInputs(
         num_cached_tokens=None,
         has_stats=False,
-        num_unpadded_tokens=8,
-        num_padded_tokens=12,
+        num_engine_unpadded_tokens=8,
+        num_engine_padded_tokens=12,
     )
     unpadded = RequestMetricsInputs(
         num_cached_tokens=None,
         has_stats=False,
-        num_unpadded_tokens=4,
-        num_padded_tokens=4,
+        num_engine_unpadded_tokens=4,
+        num_engine_padded_tokens=4,
     )
     no_step = RequestMetricsInputs(num_cached_tokens=None, has_stats=False)
     metrics = [
         metric
         for inputs in (padded, unpadded, no_step)
-        for metric in _prepare_generation_request_metrics(inputs, prefix="generator")
+        for metric in _prepare_generation_request_metrics(
+            inputs, prefix="validation_generator"
+        )
     ]
     aggregate = m.MetricsProcessor._aggregate_metrics(metrics)
-    assert aggregate["generator/cudagraph_padding_fraction/mean"] == 4 / 16
+    # An engine-wide key: the carrying request's prefix doesn't change it.
+    assert aggregate["generator/cudagraph_padding_frac/mean"] == 4 / 16
 
 
 def test_decode_metrics_absent_for_single_generated_token():

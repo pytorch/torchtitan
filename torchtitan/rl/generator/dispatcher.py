@@ -388,10 +388,10 @@ def _prepare_generation_request_metrics(
     # TODO: Per-request fields here come from vLLM's RequestOutput.metrics
     # (RequestStateStats). Engine-aggregate stats, such as KV-cache usage,
     # prefix-cache hit rate, exact preemption counts, and batch occupancy, live
-    # in SchedulerStats / IterationStats and require registering a
-    # vllm.v1.metrics.loggers.StatLoggerBase via
-    # LLMEngine.from_engine_args(..., stat_loggers=[...]); VllmOtelStatLogger
-    # does this when VLLMEngine.Config.stat_logger is set.
+    # in SchedulerStats / IterationStats, which only reach a registered
+    # vllm.v1.metrics.loggers.StatLoggerBase (VllmOtelStatLogger, when
+    # VLLMEngine.Config.stat_logger is set). To log one to W&B, carry it on a
+    # finished request like the CUDA graph padding counts (VLLMEngine.step).
 
     metric_values: dict[str, float] = {}
     if inputs.num_cached_tokens is not None:
@@ -426,13 +426,17 @@ def _prepare_generation_request_metrics(
         for key, value in metric_values.items()
         for metric in (m.Metric(key, m.Mean(value)), m.Metric(key, m.Max(value)))
     ]
-    if inputs.num_padded_tokens > 0:
-        # Weighted by padded tokens, so a step's mean is its total padding / total forward tokens.
-        num_padding_tokens = inputs.num_padded_tokens - inputs.num_unpadded_tokens
+    if inputs.num_engine_padded_tokens > 0:
+        # Covers every request in the engine since its last report, training and validation
+        # alike, so the key has no prefix. Weighted by forward tokens. Eager steps count only
+        # sequence-parallel rounding.
+        num_paddings = (
+            inputs.num_engine_padded_tokens - inputs.num_engine_unpadded_tokens
+        )
         metrics.append(
             m.Metric(
-                f"{prefix}/cudagraph_padding_fraction",
-                m.Mean(num_padding_tokens, count=inputs.num_padded_tokens),
+                "generator/cudagraph_padding_frac",
+                m.Mean(num_paddings, count=inputs.num_engine_padded_tokens),
             )
         )
     return metrics
