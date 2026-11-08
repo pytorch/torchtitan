@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
+from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
 from torchtitan.rl.generator.vllm.model_wrapper import VLLMModelWrapper
 from torchtitan.rl.generator.vllm.worker import TorchTitanGPUModelRunner
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -200,3 +201,20 @@ def test_runner_publishes_the_unpadded_count_before_vllm_pads():
     parent.assert_called_once()
     assert parent.call_args.args[0] == 31
     assert parent.call_args.kwargs == {"force_eager": True}
+
+
+def test_dist_moe_needs_ep_when_tp_splits_tokens():
+    # Dist-MoE splits each step over TP, but forward pads to a multiple of TP only with EP.
+    wrapper = cast(Any, object.__new__(VLLMModelWrapper))
+    torch.nn.Module.__init__(wrapper)
+    experts = cast(Any, object.__new__(DistMoeRoutedExperts))
+    torch.nn.Module.__init__(experts)
+    wrapper.model = torch.nn.Sequential(experts)
+    wrapper.parallelism_context = SimpleNamespace(tp=2, ep=1)
+    wrapper._expert_sequence_parallel_size = 1
+    with pytest.raises(
+        ValueError, match="tensor_parallel_degree=2, expert_parallel_degree=1"
+    ):
+        wrapper._initialize_dist_moe_runtime(
+            DistMoeRuntime.Config(inference=True), 16, torch.device("cpu")
+        )

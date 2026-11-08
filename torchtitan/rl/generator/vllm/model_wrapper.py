@@ -436,6 +436,15 @@ class VLLMModelWrapper(Module):
                 "backward, so a training context's activation slots would reserve "
                 "memory it can never use."
             )
+        tp = self.parallelism_context.tp
+        if self._expert_sequence_parallel_size != tp:
+            # Dist-MoE splits each step's tokens over TP, but forward pads eager steps
+            # to a multiple of TP only with EP (expert_sequence_parallel_size).
+            raise ValueError(
+                "Dist-MoE in the generator needs expert_parallel_degree > 1 when "
+                f"tensor_parallel_degree > 1; got tensor_parallel_degree={tp}, "
+                f"expert_parallel_degree={self.parallelism_context.ep}."
+            )
         self._dist_moe_runtime = runtime_config.build(
             model_parts=[self.model],
             parallelism_context=self.parallelism_context,
