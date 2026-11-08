@@ -392,8 +392,6 @@ class TrainingSampleBuilder(Configurable):
                 np.zeros(num_delta, dtype=np.float32),
                 np.full(num_completion, rollout_advantage, dtype=np.float32),
             ]
-            # Widen the segment's version span to include this turn. A later turn can be older than
-            # the opening one: its session moved to a generator that has not loaded the new weights.
             sample_in_progress.min_policy_version = min(
                 sample_in_progress.min_policy_version, rollout_turn.min_policy_version
             )
