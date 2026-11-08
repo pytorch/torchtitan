@@ -12,7 +12,7 @@ import itertools
 import math
 import os
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, cast, Literal
 
 from renderers import Message, ToolSpec
@@ -29,6 +29,7 @@ from torchtitan.components.data import (
     IndexedJsonlSource,
     SingleDatasetConfig,
 )
+from torchtitan.components.data.multimodal.vision_processor import ResizeRule
 from torchtitan.components.data.text_datasets import ChatProcessor, DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
@@ -56,12 +57,16 @@ from torchtitan.models.common.activation import ClampedSwiGLU
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.attention.cp_attention import (
     AllGatherKVFlexInnerAttention,
     AllGatherKVSlidingWindowFlexInnerAttention,
     UlyssesFlexInnerAttention,
     UlyssesSlidingWindowFlexInnerAttention,
+    UlyssesSlidingWindowVarlenInnerAttention,
+    UlyssesVarlenInnerAttention,
 )
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.moe import (
@@ -96,6 +101,10 @@ def _muse_spark_context_parallel_transform() -> ContextParallelTransform:
         inner_attention_map={
             FlexInnerAttention: UlyssesFlexInnerAttention,
             SlidingWindowFlexInnerAttention: (UlyssesSlidingWindowFlexInnerAttention),
+            VarlenInnerAttention: UlyssesVarlenInnerAttention,
+            SlidingWindowVarlenInnerAttention: (
+                UlyssesSlidingWindowVarlenInnerAttention
+            ),
         },
     )
 
@@ -220,84 +229,94 @@ def _use_flex_flash_attention(model_config: MuseSparkModel.Config) -> None:
         attention.inner_attention = inner_attention
 
 
-def _resize_to_muse_glimmer_patch_grid(
-    height: int,
-    width: int,
-    *,
-    patch_size: int,
-    merge_size: int,
-    max_image_tokens: int = _MUSE_GLIMMER_MAX_IMAGE_TOKENS,
-    **_: object,
-) -> tuple[int, int, int, int]:
+class MuseGlimmerPatchGridResize(ResizeRule):
     """Select the closest-aspect-ratio merged-patch grid under the token cap."""
-    merged_patch_size = patch_size * merge_size
-    ideal_grid_h = height / merged_patch_size
-    ideal_grid_w = width / merged_patch_size
-    aspect_ratio = ideal_grid_w / ideal_grid_h if ideal_grid_h > 0 else 1.0
-    if ideal_grid_h * ideal_grid_w > max_image_tokens:
-        ideal_grid_h = math.sqrt(max_image_tokens / aspect_ratio)
-        ideal_grid_w = ideal_grid_h * aspect_ratio
 
-    candidates = list(
-        set(
-            itertools.product(
-                [math.floor(ideal_grid_h), math.ceil(ideal_grid_h)],
-                [math.floor(ideal_grid_w), math.ceil(ideal_grid_w)],
+    @dataclass(kw_only=True, slots=True)
+    class Config(ResizeRule.Config):
+        max_image_tokens: int
+        """Cap on the merged-patch grid size, i.e. the placeholder tokens of
+        one image or frame."""
+
+    def __init__(self, config: Config) -> None:
+        self.max_image_tokens = config.max_image_tokens
+
+    def __call__(
+        self, height: int, width: int, *, patch_size: int, merge_size: int
+    ) -> tuple[int, int, int, int]:
+        max_image_tokens = self.max_image_tokens
+        merged_patch_size = patch_size * merge_size
+        ideal_grid_h = height / merged_patch_size
+        ideal_grid_w = width / merged_patch_size
+        aspect_ratio = ideal_grid_w / ideal_grid_h if ideal_grid_h > 0 else 1.0
+        if ideal_grid_h * ideal_grid_w > max_image_tokens:
+            ideal_grid_h = math.sqrt(max_image_tokens / aspect_ratio)
+            ideal_grid_w = ideal_grid_h * aspect_ratio
+
+        candidates = list(
+            set(
+                itertools.product(
+                    [math.floor(ideal_grid_h), math.ceil(ideal_grid_h)],
+                    [math.floor(ideal_grid_w), math.ceil(ideal_grid_w)],
+                )
             )
         )
-    )
-    candidates = [
-        (grid_h, grid_w)
-        for grid_h, grid_w in candidates
-        if grid_h >= 1 and grid_w >= 1 and grid_h * grid_w <= max_image_tokens
-    ]
-    if not candidates:
-        candidates = [(max(1, round(ideal_grid_h)), max(1, round(ideal_grid_w)))]
+        candidates = [
+            (grid_h, grid_w)
+            for grid_h, grid_w in candidates
+            if grid_h >= 1 and grid_w >= 1 and grid_h * grid_w <= max_image_tokens
+        ]
+        if not candidates:
+            candidates = [(max(1, round(ideal_grid_h)), max(1, round(ideal_grid_w)))]
 
-    grid_h, grid_w = min(
-        candidates,
-        key=lambda grid: abs(grid[0] / grid[1] - height / width),
-    )
-    return (
-        grid_h * merged_patch_size,
-        grid_w * merged_patch_size,
-        0,
-        0,
-    )
+        grid_h, grid_w = min(
+            candidates,
+            key=lambda grid: abs(grid[0] / grid[1] - height / width),
+        )
+        return (
+            grid_h * merged_patch_size,
+            grid_w * merged_patch_size,
+            0,
+            0,
+        )
+
+
+# ``VisionProcessor.Config`` fields, used like the special tokens:
+# ``VisionProcessor.Config(**MUSE_SPARK_VISION_PROCESSOR_KWARGS)``. The patch
+# sizes match the NaViT encoder (``patch_size``, ``patch_temporal``,
+# ``downsample_factor``). Video applies the image settings to every frame.
+MUSE_SPARK_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
+    "patch_size": 14,
+    "temporal_patch_size": 2,
+    "spatial_merge_size": 2,
+    "image_mean": (0.5, 0.5, 0.5),
+    "image_std": (0.5, 0.5, 0.5),
+    "resize": MuseGlimmerPatchGridResize.Config(
+        max_image_tokens=_MUSE_GLIMMER_MAX_IMAGE_TOKENS
+    ),
+    "patch_order": "raster",
+    "video_resize": MuseGlimmerPatchGridResize.Config(
+        max_image_tokens=_MUSE_GLIMMER_MAX_IMAGE_TOKENS
+    ),
+}
 
 
 def _muse_spark_mm_dataloader(
     model_config: MuseSparkModel.Config,
     dataset: SingleDatasetConfig,
 ) -> GrainDataLoader.Config:
+    """Multimodal dataloader for ``dataset``. The trainer config also needs
+    ``vision_processor`` built from ``MUSE_SPARK_VISION_PROCESSOR_KWARGS``."""
     from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
-    from torchtitan.components.data.multimodal.mm_datasets import VisionProcessor
 
-    vision_encoder = model_config.vision_encoder
-    if vision_encoder is None:
+    if model_config.vision_encoder is None:
         raise ValueError("Multimodal Muse Spark must own a vision encoder")
 
-    base_processor = dataset.processor
-    if not isinstance(base_processor, VisionProcessor.Config):
-        raise ValueError("Multimodal vision datasets must use VisionProcessor.Config")
-    processor = replace(
-        base_processor,
-        patch_size=vision_encoder.patch_size,
-        temporal_patch_size=vision_encoder.patch_temporal,
-        spatial_merge_size=vision_encoder.downsample_factor,
-        resize_fn=_resize_to_muse_glimmer_patch_grid,
-        image_mean=(0.5, 0.5, 0.5),
-        image_std=(0.5, 0.5, 0.5),
-    )
     audio_encoder = model_config.audio_encoder
     return GrainDataLoader.Config(
-        dataset=replace(dataset, processor=processor),
+        dataset=dataset,
         collator=MultiModalCollator.Config(
             max_images_per_microbatch=8,
-            patch_size=processor.patch_size,
-            temporal_patch_size=processor.temporal_patch_size,
-            spatial_merge_size=processor.spatial_merge_size,
-            patch_order="raster",
             build_mrope_positions=False,
             waveform_pad_multiple=(
                 None if audio_encoder is None else audio_encoder.patch_size
@@ -313,6 +332,7 @@ def _muse_spark_816b_a42b(
     seq_len: int | None = None,
     *,
     parallelism: ParallelismConfig | None = None,
+    attn_backend: str = "flex",
 ) -> Trainer.Config:
     """Configure full-parameter text continuation from the Muse Spark Open checkpoint.
 
@@ -336,7 +356,7 @@ def _muse_spark_816b_a42b(
         parallelism=parallelism,
         seq_len=seq_len,
         moe_comm_backend="standard",
-        attn_backend="flex",
+        attn_backend=attn_backend,
     )
     if parallelism.context_parallel_degree > 1:
         transform_model_config_(
@@ -760,6 +780,7 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
             enable_sequence_parallel=False,
             context_parallel_load_balancer=None,
         ),
+        attn_backend="varlen",
     )
     config.hf_assets_path = os.environ.get(
         "MUSE_SPARK_HF_ASSETS_PATH", _MUSE_SPARK_HF_ASSETS_PATH
@@ -820,7 +841,7 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
             _ultradata_lora_sft_transform(),
         ],
     )
-    for _, inner_attention, _, _ in config.model.traverse(FlexInnerAttention.Config):
-        inner_attention.kernel_options = {"BACKEND": "FLASH"}
-        inner_attention.block_size = 256
+    # VarlenInnerAttention defaults to cuDNN first; on the 128k global layers it is ~13% slower than FA4.
+    for _, inner_attention, _, _ in config.model.traverse(VarlenInnerAttention.Config):
+        inner_attention.sdpa_backends = ["FLASH_ATTENTION"]
     return config

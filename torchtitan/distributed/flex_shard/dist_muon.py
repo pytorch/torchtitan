@@ -191,6 +191,15 @@ class DistMuon(Optimizer):
     time, but bitwise equality across the two kernel schedules is not part of
     the contract.
 
+    Eager updates regrow accelerator exchange and compute scratch storage, then
+    release it while retaining tensor metadata. Host storage stays allocated
+    between updates. Construction and checkpoint loading prepare capacities and
+    communication events once per plan. Later
+    eager work on the caller stream can reuse the released blocks, including
+    another eager optimizer when forward/backward use CUDA graphs. This does not
+    share scratch with a separate CUDA-graph private pool. Parameters, optimizer
+    state, and communication resources remain owned.
+
     ``ns_dtype`` is the dtype of the Newton-Schulz iteration only. Inputs and
     directions still cross ranks in BF16 (``ComputeLayout.compute_dtype``).
     ``torch.float16`` keeps 3 more mantissa bits in the iteration, which cuts
@@ -303,6 +312,7 @@ class DistMuon(Optimizer):
             compute=self._compute_update,
             finalize=self._apply_update,
         )
+        self._redistribution_runtime.release_buffers()
         return loss
 
     def add_param_group(self, param_group: dict[str, Any]) -> None:
@@ -2001,16 +2011,22 @@ def _zeropower_via_newtonschulz(
         for a, b, c in coefficients_by_step:
             gram = result @ result.T
             gram_update = torch.addmm(gram, gram, gram, beta=b, alpha=c)
+            del gram
             result = torch.addmm(result, gram_update, result, beta=a)
+            del gram_update
     else:
         original_shape = result.shape
         matrices = result.reshape(-1, *original_shape[-2:])
+        # The loop replaces matrices; do not retain the initial BF16 storage.
+        del result
         # Batched kernels and independent matrix calls can use different
         # low-precision reduction orders.
         for a, b, c in coefficients_by_step:
             gram = matrices @ matrices.transpose(-2, -1)
             gram_update = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)
+            del gram
             matrices = torch.baddbmm(matrices, gram_update, matrices, beta=a)
+            del gram_update
         result = matrices.reshape(original_shape)
 
     return result.transpose(-2, -1) if transposed else result

@@ -125,13 +125,13 @@ class RequestDispatcher:
             reply=reply, metrics_prefix=metrics_prefix
         )
 
-    def rank0_has_outstanding_generations(self) -> bool:
-        """RANK 0: whether any generation is outstanding (reply unresolved).
+    def rank0_num_outstanding_generations(self) -> int:
+        """RANK 0: the number of outstanding generations (reply unresolved).
 
-        A generation stays registered until its completion comes back, so this stays
-        True while any peer DP rank is still running it.
+        A generation stays registered until its completion comes back, so it stays
+        counted while any peer DP rank is still running it.
         """
-        return bool(self._rank0_outstanding_generations)
+        return len(self._rank0_outstanding_generations)
 
     def rank0_route(self, requests: list[EngineRequest]) -> list[list[EngineRequest]]:
         """RANK 0: pick which DP rank serves each queued request.

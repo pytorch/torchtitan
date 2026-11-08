@@ -20,7 +20,10 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpointer import DATALOADER
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
+
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.data.types import TrainingMicrobatch
+from torchtitan.components.loss import combine_loss_metrics
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validator import BaseValidator, Validator
 from torchtitan.config import (
@@ -72,6 +75,11 @@ class Trainer(Configurable):
         tokenizer: BaseTokenizer.Config = field(
             default_factory=HuggingFaceTokenizer.Config
         )
+        vision_processor: VisionProcessor.Config | None = None
+        """The model's image and video preprocessing, e.g.
+        ``VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS)`` with the
+        settings next to the model's special tokens. Built once and handed to
+        the dataloader, like the tokenizer. None: no image or video inputs."""
         dataloader: BaseDataLoader.Config = field(default_factory=BaseDataLoader.Config)
         validator: Validator.Config | None = None
         dump_folder: str = "./outputs"
@@ -150,6 +158,7 @@ class Trainer(Configurable):
     engine_cls: type[TrainingEngine] = TrainingEngine
 
     tokenizer: BaseTokenizer
+    vision_processor: VisionProcessor | None
     dataloader: BaseDataLoader
     validator: BaseValidator
     metrics_processor: MetricsProcessor
@@ -220,6 +229,11 @@ class Trainer(Configurable):
         )
 
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
+        self.vision_processor = (
+            config.vision_processor.build()
+            if config.vision_processor is not None
+            else None
+        )
         num_tokens_per_microbatch = (
             config.training.num_tokens_per_microbatch_per_dp_rank
         )
@@ -229,6 +243,7 @@ class Trainer(Configurable):
             tokenizer=self.tokenizer,
             max_context_length=config.model.max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
+            vision_processor=self.vision_processor,
         )
 
         try:
@@ -252,10 +267,11 @@ class Trainer(Configurable):
         self.metrics_processor.optimizers = engine.optim.optimizers
         self.metrics_processor.model_parts = engine.model_parts
 
-        logger.info(
-            "Peak FLOPS used for computing MFU: "
-            f"{self.metrics_processor.gpu_peak_flops:.3e}"
-        )
+        if self.metrics_processor.gpu_peak_flops is not None:
+            logger.info(
+                "Peak FLOPS used for computing MFU: "
+                f"{self.metrics_processor.gpu_peak_flops:.3e}"
+            )
         logger.info(
             f"{engine.device.type.upper()} memory usage for model: "
             f"{engine.model_device_mem_stats.max_reserved_gib:.2f}GiB"
@@ -281,6 +297,7 @@ class Trainer(Configurable):
                 dp_world_size=dp_degree,
                 dp_rank=dp_rank,
                 tokenizer=self.tokenizer,
+                vision_processor=self.vision_processor,
                 parallelism_context=parallelism_context,
                 loss_fn=engine.loss_fn,
                 metrics_processor=self.metrics_processor,
@@ -422,8 +439,24 @@ class Trainer(Configurable):
                 {"global_valid_tokens": int(global_main_loss_token_count)}
             )
 
+            # Combine loss metrics over microbatches and loss-mesh ranks; under PP,
+            # ranks without the last stage have none.
+            # TODO(#4202): migrate loss-metric collection to the distributed
+            # tensor logging framework once it lands.
+            loss_mesh = parallelism_context.get_optional_mesh("loss")
+            loss_metrics = {
+                key: float(value.item())
+                for key, value in combine_loss_metrics(
+                    (
+                        microbatch_metrics
+                        for group_metrics in forward_backward_result.loss_metrics
+                        for microbatch_metrics in group_metrics
+                    ),
+                    mesh=loss_mesh,
+                ).items()
+            }
+
             if parallelism_context.dp_cp_enabled:
-                loss_mesh = parallelism_context.get_mesh("loss")
 
                 # For global_avg_loss, we want the average loss across all ranks:
                 # accumulated_loss = local_loss_sum / global_valid_tokens
@@ -452,17 +485,11 @@ class Trainer(Configurable):
                     ),
                 )
                 if parallelism_context.dp_enabled:
-                    dp_mesh = parallelism_context.get_mesh("dp")
-                    mean_num_flops = (
-                        dist_utils.dist_sum(
-                            torch.tensor(
-                                mean_num_flops,
-                                dtype=torch.float64,
-                                device=engine.device,
-                            ),
-                            dp_mesh,
-                        )
-                        / dp_mesh.size()
+                    mean_num_flops = dist_utils.dist_mean(
+                        torch.tensor(
+                            mean_num_flops, dtype=torch.float64, device=engine.device
+                        ),
+                        parallelism_context.get_mesh("dp"),
                     )
             else:
                 global_avg_loss = global_max_loss = float(accumulated_loss.item())
@@ -472,6 +499,7 @@ class Trainer(Configurable):
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
             **collect_aux_loss_metrics(parallelism_context),
+            **loss_metrics,
         }
         self.metrics_processor.log(
             engine.num_completed_steps,
