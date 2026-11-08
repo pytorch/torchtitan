@@ -1982,10 +1982,10 @@ def _zeropower_via_newtonschulz(
     coefficients_by_step = _ns_coefficients_by_step(ns_coefficients, ns_steps)
     transposed = update.shape[-2] > update.shape[-1]
     if ns_dtype is torch.bfloat16:
-        # BF16 keeps BF16 normalization. After a BF16 iteration, the float32-norm
-        # path below is more accurate only for float32 inputs (parameters that skip
-        # the BF16 exchange). It also makes a float32 copy on the host, and it would
-        # change every BF16 recipe's numerics and loss goldens.
+        # BF16 keeps BF16 normalization: the float32-norm path below would change
+        # every BF16 recipe's numerics and loss goldens, and make a float32 copy on
+        # the host. After a BF16 iteration, it helps mostly float32 inputs
+        # (parameters that skip the BF16 exchange).
         result = update.to(dtype=torch.bfloat16, copy=True)
         if transposed:
             result = result.transpose(-2, -1)
