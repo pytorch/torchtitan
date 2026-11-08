@@ -269,6 +269,7 @@ def apply_fsdp_to_multimodal_encoder(
     cpu_offload: bool = False,
     *,
     dp_mesh_dims: DataParallelMeshDims | None = None,
+    unshard_in_current_stream: bool = False,
 ) -> None:
     """Apply FSDP to a multimodal encoder as a single unit.
 
@@ -283,6 +284,13 @@ def apply_fsdp_to_multimodal_encoder(
     "attempting to assign a gradient with device type 'cuda' to a tensor with
     device type 'cpu'".
     """
+    if unshard_in_current_stream:
+        # The explicit prefetching chain in apply_fsdp_to_decoder does not
+        # cover encoders, so their all-gathers would not overlap with compute.
+        raise ValueError(
+            "parallelism.fsdp_unshard_in_current_stream is not supported for models "
+            "with multimodal encoders."
+        )
     mp_policy = mixed_precision_policy(
         encoder, param_dtype=param_dtype, reduce_dtype=reduce_dtype
     )

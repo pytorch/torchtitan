@@ -86,9 +86,8 @@ class ParallelismConfig:
 
     Supported for decoders whose FSDP units run in the order
     ``tok_embeddings -> layers -> norm/lm_head``, which is the chain the
-    explicit prefetching follows. Raises for models with MTP layers and for
-    Flux. Multimodal encoder all-gathers are not prefetched, so they do not
-    overlap with compute.
+    explicit prefetching follows. Raises for models with MTP layers or
+    multimodal encoders, and for Flux.
     """
 
     tensor_parallel_degree: int = 1
