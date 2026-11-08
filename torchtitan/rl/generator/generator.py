@@ -128,7 +128,7 @@ class Generator(Configurable):
         max_num_batched_tokens: int | None = None
         """The engine's chunked-prefill chunk size: max tokens scheduled per engine step
         (prefill + decode, summed over the batch). ``None`` (default): the engine's default
-        for this GPU. For vLLM, that is what ``vllm serve`` picks, e.g. 16384 on GB300
+        for this GPU. For vLLM, that is what ``vllm serve`` picks
         (see ``resolve_max_num_batched_tokens``)."""
 
         checkpointer: CheckpointManager.Config | None = None

@@ -25,26 +25,23 @@ def resolve_max_num_batched_tokens(
     *,
     max_num_seqs: int,
     max_model_len: int,
-    tensor_parallel_size: int,
 ) -> int:
     """Return ``max_num_batched_tokens``, or what ``vllm serve`` picks for this GPU when it is None.
 
     ``vllm serve`` reads vLLM's per-GPU table (``EngineArgs.get_batch_defaults``) and caps the
-    value at ``max_num_seqs * max_model_len``. The table today:
+    value at ``max_num_seqs * max_model_len``. The table as of vLLM 0.32:
         >= 160 GB (B200, GB300)     -> 16384
         >= 70 GB, not A100 (H100)   -> 8192
         other GPUs (A100, A10G)     -> 2048
 
     ``LLMEngine.from_engine_args`` uses ``UsageContext.ENGINE_CONTEXT``, which has no entry in
     that table, so vLLM itself would pick 2048 on every GPU. The engine and the FULL CUDA graph
-    cap both take the value returned here. ``tensor_parallel_size`` matters only on vLLM's CPU
-    backend.
+    cap both take the value returned here.
     """
     if max_num_batched_tokens is not None:
         return max_num_batched_tokens
-    default_max_num_batched_tokens, _ = EngineArgs.get_batch_defaults(
-        tensor_parallel_size
-    )
+    # world_size scales the table only on vLLM's CPU backend, which the generator never uses.
+    default_max_num_batched_tokens, _ = EngineArgs.get_batch_defaults(world_size=1)
     return min(
         default_max_num_batched_tokens[UsageContext.OPENAI_API_SERVER],
         max_num_seqs * max_model_len,

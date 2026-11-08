@@ -261,7 +261,6 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         gen_config.max_num_batched_tokens,
         max_num_seqs=max_num_seqs,
         max_model_len=gen_config.model.max_context_length,
-        tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
     )
     engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
     expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size

@@ -171,7 +171,6 @@ def generate() -> None:
         gen_config.max_num_batched_tokens,
         max_num_seqs=max_num_seqs,
         max_model_len=model_config.max_context_length,
-        tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
     )
     engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
     if not has_cuda_capability(9, 0):

@@ -278,7 +278,6 @@ class VLLMEngine(GenerationEngine):
             max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
             max_model_len=model.max_context_length,
-            tensor_parallel_size=parallelism.tensor_parallel_degree,
         )
         engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
         # Smaller `priority` runs first and is preempted last; we pass `EngineRequest.group_id`
