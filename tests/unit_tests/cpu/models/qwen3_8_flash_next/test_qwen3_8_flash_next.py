@@ -539,7 +539,11 @@ def test_deltanet_uses_sigmoid_output_gate(config, dtype):
 
 def test_router_bfloat16_ties_mixing_and_backward(config):
     """Round before expert selection and retain differentiable normalized gates."""
-    router = config.layers[3].feed_forward.router.build().bfloat16().eval()
+    with torch.device("meta"):
+        router = config.layers[3].feed_forward.router.build().bfloat16()
+    router.to_empty(device="cpu")
+    router.init_states()
+    router.eval()
     with torch.no_grad():
         router.gate.weight.zero_()
         router.gate.weight[0, :2] = torch.tensor([1.0, 1 / 256])
