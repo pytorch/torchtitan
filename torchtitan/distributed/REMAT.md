@@ -294,13 +294,11 @@ communication regions:
   and the expert-major permute; `combine` covers the unpermute, the combine
   all-to-all and the score-weighted scatter-add. The DeepEP and HybridEP
   dispatchers instead declare `ep_communication.dispatch` and
-  `ep_communication.combine`. DeepEP's dispatch follows `ep_communication`,
-  while its complete combine region, including unpermute, is always saved.
-  Dispatch replay must receive tokens in the forward's order, so DeepEP uses a
-  deterministic buffer, adding a sort per dispatch. HybridEP saves or replays
-  dispatch and combine together under `ep_communication`, preserving token
-  positions through prefix scans. `FullActivationRematConfig` therefore replays
-  DeepEP dispatch and both HybridEP communication regions.
+  `ep_communication.combine` around their kernels. Both save or replay
+  dispatch and combine together, following `ep_communication`. A replay must
+  receive tokens in the forward's order, so DeepEP uses a deterministic buffer, which
+  adds a sort to every dispatch. HybridEP derives token positions from prefix
+  scans. `FullActivationRematConfig` replays both backends' communication.
 - Shared-expert linear regions. The shared `w2.tp_reduce` region is the
   `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled;
   save it together with `w2.linear`.
@@ -329,11 +327,3 @@ and the score-weighted scatter-add are ordinary operations. Operations outside
 these regions, including token-shard zero-fill and branch addition, are
 recomputed. Routing decisions are retained separately to keep expert selection
 identical during replay.
-
-DeepEP's [router-score absorption](../models/common/moe/ROUTER_SCORE_ABSORPTION.md)
-removes the score gradient's dependency on the W2 output when there is no
-output postprocess. Saving `w2.grouped_mm` can then skip that forward GEMM on
-replay without retaining its routed output. Full remat still configures W2 to
-replay; absorption does not automatically save it. Real output dtype casts and
-postprocessing can still require W2's output. See the absorption guide for the
-memory/recompute comparison and biased-expert caveats.

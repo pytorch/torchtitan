@@ -36,11 +36,8 @@ Dispatch/combine microbenchmarks alone do not measure overlap with expert GEMMs
 or the cost of activation rematerialization. Run at least 10 training steps so
 startup does not dominate the comparison.
 
-DeepEP absorbs router scores before W2 when there is no output postprocess.
-This lets a policy save W2 without keeping its full routed output for the
-score gradient. Full remat still replays W2 unless that region is saved. See
-[router-score absorption](ROUTER_SCORE_ABSORPTION.md) for forward/backward
-diagrams, memory and recompute tradeoffs, and bias/postprocess limitations.
+See [router-score absorption](ROUTER_SCORE_ABSORPTION.md) for diagrams of DeepEP
+score placement, biased experts, postprocessing, and checkpoint dependencies.
 
 ## Configure a dispatcher
 
