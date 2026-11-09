@@ -160,12 +160,12 @@ class ValidationConfig:
     """Maximum prompts per pass. -1 consumes one finite source pass; 0 disables."""
 
     freq: int | None = None
-    """A pass comes due at each multiple of `freq` after the start step; none starts at the last step.
-    None: no periodic passes."""
+    """A pass comes due at each multiple of `freq` after step 0; none starts at the last step. None: no
+    periodic passes. A resumed run's start step follows the same rule: freq=25, resumed at 25 -> due at
+    25, 50, ...; resumed at 13 -> due at 25, 50, ..."""
 
-    validate_at_start: bool = True
-    """A pass comes due at the start step (0, or the step a resumed run starts at). Turn it off when
-    you already know that score."""
+    validate_at_step_0: bool = True
+    """A pass that starts at step 0. Turn it off when you already know that score."""
 
     validate_after_training: bool = False
     """After a completed run, one more pass on the final policy. Wasteful: the trainer GPUs sit idle
@@ -1019,8 +1019,8 @@ class Controller(Configurable):
         if step >= async_loop.num_training_steps:
             return
         validation = async_loop.validation
-        if step == self.start_step:
-            is_due = validation.validate_at_start
+        if step == 0:
+            is_due = validation.validate_at_step_0
         else:
             is_due = validation.freq is not None and step % validation.freq == 0
         self._is_validation_due = self._is_validation_due or is_due

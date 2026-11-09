@@ -906,18 +906,20 @@ def test_run_ends_validation(
 
 
 @pytest.mark.parametrize(
-    "start_step, validate_at_start, defer_new_if_not_finished, started_steps, logged",
+    "start_step, validate_at_step_0, defer_new_if_not_finished, started_steps, logged",
     [
         # The pass started at 3 came due at 2; the one started at 6 covers steps 4 and 6.
         (0, True, True, [0, 3, 6], [(3, "pass_0"), (6, "pass_3")]),
         (0, True, False, [0, 2, 4, 6], [(3, "pass_0"), (5, "pass_2"), (7, "pass_4")]),
         (0, False, True, [2, 5], [(5, "pass_2"), (8, "pass_5")]),
-        # A run resumed at step 3: its start step is due.
-        (3, True, True, [3, 6], [(6, "pass_3")]),
+        # Resumed at step 2, a multiple of freq: a pass starts there. validate_at_step_0 is for step 0 only.
+        (2, False, True, [2, 5], [(5, "pass_2"), (8, "pass_5")]),
+        # Resumed at step 3: the first pass starts at 4, also with validate_at_step_0.
+        (3, True, True, [4, 7], [(7, "pass_4")]),
     ],
 )
 def test_validation_schedule(
-    start_step, validate_at_start, defer_new_if_not_finished, started_steps, logged
+    start_step, validate_at_step_0, defer_new_if_not_finished, started_steps, logged
 ) -> None:
     """freq=2, 8 steps, each pass ends 3 steps after it starts and is logged at that step.
 
@@ -936,12 +938,11 @@ def test_validation_schedule(
             num_training_steps=8,
             validation=ValidationConfig(
                 freq=2,
-                validate_at_start=validate_at_start,
+                validate_at_step_0=validate_at_step_0,
                 defer_new_if_not_finished=defer_new_if_not_finished,
             ),
         )
     )
-    controller.start_step = start_step
     controller._validation_tasks = []
     controller._is_validation_due = False
     controller.validate = validate
