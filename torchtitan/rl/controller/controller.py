@@ -447,6 +447,38 @@ class Controller(Configurable):
                         "and has not been validated for determinism."
                     )
 
+        @property
+        def max_num_seqs_per_generator_dp_rank(self) -> int:
+            """2x each generator DP rank's even share of the training rollouts in flight,
+            rounded up to a power of two, clamped to [token budget / 64, token budget]. The token
+            budget is ``generator.max_num_batched_tokens``, or 2048 when unset.
+
+            Example (token budget unset):
+                1536 rollouts in flight, 8 generator DP ranks -> 2 x 192 = 384 -> 512
+                64 rollouts in flight, 3 generator DP ranks   -> 2 x 22 = 44   -> 64
+                16 rollouts in flight, 2 generator DP ranks   -> 2 x 8 = 16    -> 32
+            """
+            # TODO: add a generator.max_num_seqs override when a recipe needs a smaller value.
+            async_loop = self.async_loop
+            max_rollouts_in_flight = (
+                async_loop.max_active_rollout_groups * async_loop.num_samples_per_prompt
+            )
+            num_generator_dp_ranks = (
+                self.num_generators * self.generator.parallelism.data_parallel_degree
+            )
+            even_share = math.ceil(max_rollouts_in_flight / num_generator_dp_ranks)
+            # 2x is headroom
+            max_num_seqs = 2 * even_share
+            max_num_batched_tokens = self.generator.max_num_batched_tokens or 2048
+            # TODO(https://github.com/Dao-AILab/flash-attention/issues/3117): drop once fixed. vLLM's memory
+            # profile splits a power-of-two budget evenly over max_num_seqs; FA2 writes out of bounds past 64 each.
+            max_num_seqs = 2 ** math.ceil(
+                math.log2(max(max_num_seqs, max_num_batched_tokens / 64))
+            )
+            # vLLM requires max_num_seqs <= max_num_batched_tokens, which defaults to 2048 for
+            # the engine torchtitan builds.
+            return min(max_num_seqs, max_num_batched_tokens)
+
     def __init__(self, config: Config):
         self.config = config
         config.resolve_overrides()
@@ -596,16 +628,7 @@ class Controller(Configurable):
         workers through the actor system, and synchronizes initial weights from
         trainer to generator. Must be called before :meth:`run`.
         """
-        # Peak concurrent rollout sequences (groups * num_samples_per_prompt, or the validation pass); sizes max_num_seqs below.
         async_loop = self.config.async_loop
-        max_active_rollout_groups = async_loop.max_active_rollout_groups
-        num_validation_groups = len(
-            self._rollouter.get_validation_samples(async_loop.validation.steps)
-        )
-        rollout_concurrency = max(
-            max_active_rollout_groups * async_loop.num_samples_per_prompt,
-            num_validation_groups,
-        )
         config = self.config
 
         trainer_parallelism = config.trainer.parallelism
@@ -614,19 +637,8 @@ class Controller(Configurable):
             trainer_parallelism.data_parallel_replicate_degree * dp_shard
         )
 
-        # Ceiling (not target) for each generator DP rank's max_num_seqs, vLLM's cap on
-        # concurrently running sequences: vLLM queues requests above it even when KV has
-        # room. Sticky routing can send a rank more than an even share, so size it for
-        # every rollout sequence and let the KV budget limit admission. Capped at 512,
-        # vLLM's default largest CUDA graph capture size, to bound per-request buffers;
-        # this also sets CUDA-graph capture sizes.
-        max_num_seqs = min(rollout_concurrency, 512)
-
-        logger.info(
-            "max_num_seqs=%d per generator DP rank (rollout_concurrency=%d)",
-            max_num_seqs,
-            rollout_concurrency,
-        )
+        max_num_seqs = config.max_num_seqs_per_generator_dp_rank
+        logger.info("max_num_seqs=%d per generator DP rank", max_num_seqs)
 
         with sl.log_trace_span("mesh_spawn"):
             actor_system = await self._build_actor_system()
