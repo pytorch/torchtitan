@@ -297,6 +297,8 @@ class MuseGlimmerModel(MultimodalModel):
     class Config(MultimodalModel.Config):
         dim: int = 6656
         vocab_size: int = 202048
+        # pyrefly: ignore [bad-override]
+        layers: list[MuseGlimmerTransformerBlock.Config]
         local_compile: LocalCompileConfig = field(
             default_factory=lambda: LocalCompileConfig(
                 regions=[

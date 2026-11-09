@@ -203,6 +203,11 @@ class FaultTolerantTrainer(Configurable):
             if config.tokenizer is not None
             else None
         )
+        self.vision_processor = (
+            config.vision_processor.build()
+            if config.vision_processor is not None
+            else None
+        )
 
         num_pp_microbatches = (
             config.parallelism.num_pp_microbatches
@@ -219,6 +224,7 @@ class FaultTolerantTrainer(Configurable):
             tokenizer=self.tokenizer,
             max_context_length=config.model.max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
+            vision_processor=self.vision_processor,
         )
 
         # metrics logging (FT addition: ft_enable, ft_replica_id)
@@ -279,7 +285,8 @@ class FaultTolerantTrainer(Configurable):
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = engine.device_memory_monitor
         gpu_peak_flops = utils.get_peak_flops(device_memory_monitor.device_name)
-        logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
+        if gpu_peak_flops is not None:
+            logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
         logger.info(
             f"{engine.device.type.upper()} memory usage for model: "
             f"{engine.model_device_mem_stats.max_reserved_gib:.2f}GiB"
@@ -310,6 +317,7 @@ class FaultTolerantTrainer(Configurable):
                 dp_world_size=dp_degree,
                 dp_rank=dp_rank,
                 tokenizer=self.tokenizer,
+                vision_processor=self.vision_processor,
                 parallelism_context=parallelism_context,
                 loss_fn=engine.loss_fn,
                 metrics_processor=self.metrics_processor,

@@ -590,7 +590,7 @@ def test_grouped_mm_overrides_keep_the_seam_signature(make_quantized_cls, parent
 
 def test_mxfp8_grouped_linear_flattens_structured_w13(monkeypatch):
     """MXFP8 receives flattened W13 and returns its structured output."""
-    from torchao.prototype.moe_training import utils as moe_training_utils
+    moe_training_utils = pytest.importorskip("torchao.prototype.moe_training.utils")
 
     captured = {}
 

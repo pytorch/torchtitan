@@ -236,9 +236,9 @@ def test_full_metadata_and_native_dispatch_variants():
         slot_mapping=torch.zeros(32, dtype=torch.int64),
         _num_computed_tokens_cache=None,
     )
-    with pytest.raises(ValueError, match="max_num_batched_tokens"):
+    with pytest.raises(ValueError, match="block-table capacity"):
         builder.build(0, oversized_common)
-    with pytest.raises(ValueError, match="max_num_batched_tokens"):
+    with pytest.raises(ValueError, match="block-table capacity"):
         builder.build_for_cudagraph_capture(oversized_common)
 
     dispatcher.initialize_cudagraph_keys(CUDAGraphMode.NONE)

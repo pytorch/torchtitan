@@ -42,6 +42,12 @@ class Module(nn.Module, Configurable):
     Subclasses should NOT override ``init_states`` unless they need custom
     ordering (e.g., weight tying before init). Override ``_init_self_buffers``
     for buffer initialization.
+
+    Materialized buffers owned by this module reject dtype changes. Cast a
+    meta-built model before ``to_empty`` and ``init_states``, which rebuild
+    buffers in their intended dtypes. The guard keeps a buffer's current dtype.
+    It does not restore a canonical dtype after direct assignment or loading.
+    A failed cast may leave earlier parameters or children converted.
     """
 
     _param_init: dict[str, Callable] | None = None
@@ -174,9 +180,37 @@ class Module(nn.Module, Configurable):
             self._init_self_buffers(buffer_device=buffer_device)
 
     def _apply(self, fn, recurse=True):
-        """Override to preserve annotations across model.to_empty() in trainer.py"""
+        """Preserve SPMD annotations and reject dtype changes to materialized buffers.
+
+        Check each conversion result before PyTorch installs it. The conversion
+        runs once per tensor, with no rollback of earlier changes. Functions that
+        mutate their input in place are outside this guard's contract.
+        """
+        protected = {
+            id(buffer): (name, buffer.dtype)
+            for name, buffer in self.named_buffers(
+                recurse=False, remove_duplicate=False
+            )
+            if not buffer.is_meta
+        }
+
+        def checked_fn(tensor):
+            result = fn(tensor)
+            if (requirement := protected.get(id(tensor))) is not None:
+                name, dtype = requirement
+                if result.dtype != dtype:
+                    raise ValueError(
+                        f"Cannot convert {type(self).__name__}.{name} from "
+                        f"{dtype} to {result.dtype}. "
+                        "torchtitan Module buffers keep their dtype. "
+                        "For a model constructed on meta, apply the dtype cast "
+                        "before to_empty() and init_states(). Earlier tensors may "
+                        "already have changed; recreate the model after failure."
+                    )
+            return result
+
         with self._preserve_buffer_spmd_types():
-            return super()._apply(fn, recurse=recurse)
+            return super()._apply(checked_fn if protected else fn, recurse=recurse)
 
     @contextlib.contextmanager
     def _preserve_buffer_spmd_types(self) -> Iterator[None]:

@@ -8,7 +8,7 @@
 
 import sys
 from types import ModuleType, SimpleNamespace
-from unittest.mock import Mock, patch, PropertyMock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -31,7 +31,8 @@ def test_compile_config_controls_dispatch_split(monkeypatch, overlap, disable_pa
     backend = ModuleType(backend_name)
     x_TD = torch.zeros(4, 8)
     counts_E = torch.zeros(4, dtype=torch.int32)
-    dispatch_tokens = Mock(return_value=(x_TD, counts_E, object()))
+    scores_R = torch.ones(x_TD.shape[0])
+    dispatch_tokens = Mock(return_value=(x_TD, counts_E, scores_R, object()))
     backend.dispatch_tokens = dispatch_tokens
     monkeypatch.setitem(sys.modules, backend_name, backend)
 
@@ -41,18 +42,18 @@ def test_compile_config_controls_dispatch_split(monkeypatch, overlap, disable_pa
         )
     )
     model = torch.nn.Sequential(torch.nn.Sequential(dispatcher))
-    mesh = Mock()
-    mesh.get_group.return_value.size.return_value = 2
+    ep_group = Mock()
+    ep_group.size.return_value = 2
     inputs = (
         x_TD,
         torch.ones(4, 2),
         torch.zeros(4, 2, dtype=torch.int64),
         counts_E,
     )
-    with patch.object(
-        DeepEPTokenDispatcher, "ep_mesh", new_callable=PropertyMock
-    ) as ep_mesh:
-        ep_mesh.return_value = mesh
+    with patch(
+        "torchtitan.models.common.moe.token_dispatcher._ep_process_group",
+        return_value=ep_group,
+    ):
         dispatcher.dispatch(*inputs)
         assert dispatch_tokens.call_args.kwargs["split_launch_wait"] is False
 
