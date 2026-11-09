@@ -35,7 +35,7 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.models.common.rope import YaRNScalingConfig
+from torchtitan.models.common.rope import ComplexVisionRoPE, YaRNScalingConfig
 from torchtitan.models.common.vision_encoder import (
     InvariantRowParallelLinear,
     VisionAttention,
@@ -61,17 +61,12 @@ from .sharding import (
     sequence_parallel_first_layer_sharding_config,
 )
 
-from .vision_encoder import (
-    KimiK25VisionEncoder,
-    VisionProjector,
-    VisionRotaryEmbedding2D,
-)
+from .vision_encoder import KimiK25VisionEncoder, VisionProjector
 
 __all__ = [
     "KimiK25Model",
     "KimiK25VisionEncoder",
     "VisionProjector",
-    "VisionRotaryEmbedding2D",
     "build_model_config",
     "MODEL_FLAVORS",
     "KIMI_K2_5_SPECIAL_TOKENS",
@@ -193,10 +188,11 @@ def _vision_encoder_config(
         attn=VisionAttention.Config(
             dim=dim,
             num_heads=num_heads,
-            rope=VisionRotaryEmbedding2D.Config(
+            rope=ComplexVisionRoPE.Config(
                 dim=head_dim,
                 max_context_length=max_rope_positions,
                 theta=rope_theta,
+                pair_layout="interleaved",
                 sharding_config=vision_rope_sharding_config(),
             ),
             wq=_vl_linear(

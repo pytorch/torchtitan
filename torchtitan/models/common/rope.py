@@ -5,10 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 # Shape suffixes: P = cached positions, F = rotary frequency pairs,
-# D = rotary width; query/key use the existing public argument names.
+# D = rotary width, T = tokens, R = row and column pairs together;
+# query/key use the existing public argument names.
 
 import math
 from dataclasses import dataclass
+from typing import Literal
 
 import spmd_types as spmd
 import torch
@@ -18,6 +20,7 @@ from torchtitan.models.base.module import Module
 
 __all__ = [
     "ComplexRoPE",
+    "ComplexVisionRoPE",
     "CosSinRoPE",
     "Llama3ScalingConfig",
     "RoPE",
@@ -370,6 +373,75 @@ class _RotatePairs(torch.autograd.Function):
             high = imag.view(torch.int16).to(torch.int32) << 16
             return low | high if packed else (low | high).view(torch.bfloat16)
         return torch.stack((real, imag), dim=-1).flatten(-2)
+
+
+class ComplexVisionRoPE(ComplexRoPE):
+    """2D RoPE over ``(row, column)`` coordinates, column pairs first.
+
+    ``"interleaved"`` alternates column and row pairs per frequency (MoonViT);
+    ``"concatenated"`` puts all column pairs before all row pairs (NaViT).
+    ``max_context_length`` bounds each coordinate, not the sequence length.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ComplexRoPE.Config):
+        pair_layout: Literal["interleaved", "concatenated"]
+
+        def __post_init__(self) -> None:
+            if self.dim % 4 != 0:
+                raise ValueError(
+                    f"2D RoPE requires head_dim divisible by 4, got {self.dim}."
+                )
+            if self.scaling is not None:
+                raise ValueError(
+                    "ComplexVisionRoPE does not support frequency scaling."
+                )
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.pair_layout = config.pair_layout
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Apply the rotation outside the text ``"rope"`` compile region."""
+        reshaped_cache = self._reshape_cache(query, positions)
+        return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
+
+    def _precompute_cache(self) -> torch.Tensor:
+        """Complex rotation table ``(max_context_length, dim / 4)``."""
+        # inv_freq[k] = theta**(-4k/head_dim) for k in [0, head_dim/4); the
+        # step of 4 leaves room for the row/col split of the 2D rotation.
+        inv_freq_F = 1.0 / (
+            self.theta ** (torch.arange(0, self.dim, 4, dtype=torch.float32) / self.dim)
+        )
+        positions_P = torch.arange(
+            self.max_context_length, device=inv_freq_F.device, dtype=inv_freq_F.dtype
+        )
+        angles_PF = torch.outer(positions_P, inv_freq_F)
+        return torch.polar(torch.ones_like(angles_PF), angles_PF)
+
+    def _reshape_cache(
+        self,
+        query: torch.Tensor,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Gather per-token rotation coefficients for ``(T, 2)`` coordinates."""
+        assert positions is not None
+        _maybe_check_max_pos(positions, max_valid_pos=self.cache.shape[0] - 1)
+        row_TF2, col_TF2 = torch.view_as_real(self.cache)[positions].unbind(1)
+        if self.pair_layout == "interleaved":
+            rotation_TR2 = torch.stack((col_TF2, row_TF2), dim=-2).flatten(-3, -2)
+        else:
+            rotation_TR2 = torch.cat((col_TF2, row_TF2), dim=-2)
+        if torch.compiler.is_compiling():
+            return rotation_TR2.flatten(-2).unsqueeze(1)
+        return torch.view_as_complex(rotation_TR2).unsqueeze(1)
 
 
 class CosSinRoPE(RoPE):

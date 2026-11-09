@@ -16,8 +16,6 @@ Shape suffixes:
 - M = merged tokens
 - K = merged feature dim (kh*kw*D)
 - C = two spatial coordinates (row, column)
-- P = cached coordinate positions
-- F = rotary frequencies per coordinate (head_dim / 4)
 """
 
 from dataclasses import dataclass, field
@@ -33,7 +31,6 @@ from torchtitan.models.common import Linear
 
 from torchtitan.models.common.flops import active_parameter_flops_per_token
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
-from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     get_packed_vision_grids,
@@ -207,101 +204,6 @@ def _tpool_patch_merger(
 
     packed_merged = torch.cat(merged, dim=0)
     return packed_merged
-
-
-class VisionRotaryEmbedding2D(ComplexRoPE):
-    """2D rotary position embedding for the vision tower.
-
-    Holds the per-axis rotation table (``head_dim/4`` complex values per
-    position, shared by the row and column axes). ``_reshape_cache``
-    gathers per-patch row/col coefficients, and ``forward`` applies them
-    through ``ComplexRoPE.apply_rotary_emb``.
-    ``head_dim`` must be divisible by 4.
-
-    Coordinates are zero-based ``(row, column)`` pairs in token order.
-    ``max_context_length`` is the exclusive bound on either coordinate.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ComplexRoPE.Config):
-        pass
-
-    def __init__(self, config: Config):
-        if config.dim % 4 != 0:
-            raise ValueError(
-                f"2D RoPE requires head_dim divisible by 4, got {config.dim}."
-            )
-        if config.scaling is not None:
-            raise ValueError(
-                "VisionRotaryEmbedding2D does not support frequency scaling."
-            )
-        super().__init__(config)
-
-    def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor | None = None,
-        positions: torch.Tensor | None = None,
-        *,
-        inverse: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Apply the rotation outside the text ``"rope"`` compile region."""
-        reshaped_cache = self._reshape_cache(query, positions)
-        return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
-
-    def _precompute_cache(self) -> torch.Tensor:
-        """Complex rotation table ``(max_context_length, head_dim/4)`` for
-        positions ``[0, max_context_length)``.
-        """
-        # Meta construction needs only the table shape and dtype.
-        if torch.get_default_device().type == "meta":
-            return torch.empty(
-                (self.max_context_length, self.dim // 4),
-                dtype=torch.complex64,
-                device="meta",
-            )
-        # inv_freq[k] = theta**(-4k/head_dim) for k in [0, head_dim/4); the
-        # step of 4 leaves room for the row/col split of the 2D rotation.
-        inv_freq_F = 1.0 / (
-            self.theta ** (torch.arange(0, self.dim, 4, dtype=torch.float32) / self.dim)
-        )
-        positions_P = torch.arange(
-            self.max_context_length, device=inv_freq_F.device, dtype=inv_freq_F.dtype
-        )
-        angles_PF = torch.outer(positions_P, inv_freq_F)
-        return torch.polar(torch.ones_like(angles_PF), angles_PF)
-
-    def _reshape_cache(
-        self,
-        query: torch.Tensor,
-        positions: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Gather packed 2D RoPE rotation coefficients in token order.
-
-        For head-dim pair index ``k`` (``k`` in ``[0, head_dim/4)``), even output
-        pairs are rotated by the *column* (x) position and odd pairs by the *row*
-        (y) position. The per-axis angle for a position ``p`` is ``p * inv_freq[k]``;
-        its complex rotation coefficient is gathered from this module's table.
-
-        Args:
-            query: Query tensor with shape ``[T, N, H]``.
-            positions: ``(total_num_patches, 2)`` row/column coordinates.
-
-        Returns:
-            ``(total_num_patches, 1, head_dim/2)`` complex64. The singleton head
-            axis broadcasts over attention heads. Under compile, the real view
-            has shape ``(total_num_patches, 1, head_dim)``.
-        """
-        assert positions is not None
-        _maybe_check_max_pos(positions, max_valid_pos=self.cache.shape[0] - 1)
-        # Interleave x/y so pair 2k uses x-position, pair 2k+1 uses y-position.
-        if torch.compiler.is_compiling():
-            cache_PF2 = torch.view_as_real(self.cache)
-            row_TF2, col_TF2 = cache_PF2[positions].unbind(1)
-            return torch.stack((col_TF2, row_TF2), dim=-2).flatten(-3).unsqueeze(1)
-        row_TF, col_TF = self.cache[positions].unbind(1)
-        # Complex unit-modulus cache; unsqueeze the head axis for broadcast.
-        return torch.stack((col_TF, row_TF), dim=-1).flatten(-2).unsqueeze(1)
 
 
 class VisionProjector(Module):

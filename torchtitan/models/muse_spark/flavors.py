@@ -64,7 +64,7 @@ from torchtitan.models.common.moe.sharding import (
 from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.common.nn_modules import Conv1d, GELU, LayerNorm, RMSNorm
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.models.common.rope import ComplexRoPE, RoPE
+from torchtitan.models.common.rope import ComplexRoPE, ComplexVisionRoPE, RoPE
 from torchtitan.models.common.vision_encoder import (
     InvariantRowParallelLinear,
     VisionAttention,
@@ -111,7 +111,7 @@ from .sharding import (
     residual_gate_sharding_config,
     transformer_block_sharding_config,
 )
-from .vision_encoder import MuseSparkNaViTAdapter, NaViTEncoder, VisionRopeFreq
+from .vision_encoder import MuseSparkNaViTAdapter, NaViTEncoder
 from .vision_encoder_sharding import (
     cp_replicated_vision_sharding_config,
     navit_encoder_sharding_config,
@@ -668,10 +668,11 @@ def muse_spark_navit_encoder_config(
                 latent_dim=latent_dim,
                 num_heads=num_heads,
                 rope=(
-                    VisionRopeFreq.Config(
+                    ComplexVisionRoPE.Config(
                         dim=head_dim,
                         max_context_length=max_rope_positions,
                         theta=rope_theta,
+                        pair_layout="concatenated",
                         sharding_config=vision_rope_sharding_config(),
                     )
                     if use_rope

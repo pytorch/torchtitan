@@ -17,9 +17,6 @@ Shape suffixes:
 - M = merged visual tokens
 - O = adapter output dim
 - C = spatial coordinates (row, column)
-- F = frequencies per coordinate
-- R = combined spatial frequencies
-- L = position table length
 
 """
 
@@ -36,7 +33,6 @@ from torchtitan.models.base.module import Module, ModuleDict
 
 from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
-from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     get_packed_vision_grids,
@@ -94,67 +90,6 @@ class MuseSparkNaViTAdapter(Module):
 
     def forward(self, value_MO: torch.Tensor) -> torch.Tensor:
         return self.act_fn(self.c_proj(self.act_fn(self.c_fc(value_MO))))
-
-
-class VisionRopeFreq(ComplexRoPE):
-    """One-based spatial coordinates with contiguous column/row complex pairs."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ComplexRoPE.Config):
-        def __post_init__(self) -> None:
-            if self.dim % 4:
-                raise ValueError("NaViT attention head size must be divisible by four")
-
-    def __init__(self, config: Config) -> None:
-        if config.scaling is not None:
-            raise ValueError("VisionRopeFreq does not support frequency scaling")
-        super().__init__(config)
-
-    def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor | None = None,
-        positions: torch.Tensor | None = None,
-        *,
-        inverse: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Apply the rotation outside the text ``"rope"`` compile region."""
-        reshaped_cache = self._reshape_cache(query, positions)
-        return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
-
-    def _precompute_cache(self) -> torch.Tensor:
-        """Store angles; evaluate cos/sin once per batch, as in the encoder."""
-        # Meta construction needs only the table shape and dtype.
-        if torch.get_default_device().type == "meta":
-            return torch.empty(
-                (self.max_context_length, self.dim // 4),
-                dtype=torch.float32,
-                device="meta",
-            )
-        half_dim = self.dim // 2
-        inv_freq_F = 1.0 / (
-            self.theta ** (torch.arange(0, half_dim, 2, dtype=torch.float32) / half_dim)
-        )
-        positions_L = torch.arange(
-            self.max_context_length,
-            device=inv_freq_F.device,
-            dtype=inv_freq_F.dtype,
-        )
-        return torch.outer(positions_L, inv_freq_F)
-
-    def _reshape_cache(
-        self,
-        query: torch.Tensor,
-        positions: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        assert positions is not None
-        _maybe_check_max_pos(positions, max_valid_pos=self.cache.shape[0] - 1)
-        row_TF, col_TF = self.cache[positions].unbind(1)
-        angles_TR = torch.cat((col_TF, row_TF), dim=-1)
-        coefficients_TR2 = torch.stack((angles_TR.cos(), angles_TR.sin()), dim=-1)
-        if torch.compiler.is_compiling():
-            return coefficients_TR2.flatten(-2).unsqueeze(1)
-        return torch.view_as_complex(coefficients_TR2).unsqueeze(1)
 
 
 class NaViTEncoder(Module):
@@ -513,6 +448,5 @@ class NaViTEncoder(Module):
 __all__ = [
     "MuseSparkNaViTAdapter",
     "NaViTEncoder",
-    "VisionRopeFreq",
     "reorder_patch_vector_channel_temporal",
 ]

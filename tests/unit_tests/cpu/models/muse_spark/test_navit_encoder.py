@@ -8,14 +8,14 @@ import pytest
 import spmd_types as spmd
 import torch
 from spmd_types.checker import typecheck
+from torchtitan.models.common.rope import ComplexVisionRoPE
 from torchtitan.models.muse_spark.flavors import muse_spark_navit_encoder_config
-from torchtitan.models.muse_spark.vision_encoder import VisionRopeFreq
 
 
 def test_rope_frequency_meta_initialization_matches_hf():
     with torch.device("meta"):
-        rope = VisionRopeFreq.Config(
-            dim=96, max_context_length=9, theta=10000.0
+        rope = ComplexVisionRoPE.Config(
+            dim=96, max_context_length=9, theta=10000.0, pair_layout="concatenated"
         ).build()
     assert rope.cache.device.type == "meta"
     rope.to_empty(device="cpu")
@@ -23,7 +23,8 @@ def test_rope_frequency_meta_initialization_matches_hf():
     exponent = torch.arange(0, 48, 2, dtype=torch.float32) / 48
     inv_freq = 1.0 / (10000.0**exponent)
     angles = torch.outer(torch.arange(9, dtype=torch.float32), inv_freq)
-    torch.testing.assert_close(rope.cache, angles, rtol=0, atol=0)
+    expected = torch.polar(torch.ones_like(angles), angles)
+    torch.testing.assert_close(rope.cache, expected, rtol=0, atol=0)
     assert not rope.state_dict()
 
 

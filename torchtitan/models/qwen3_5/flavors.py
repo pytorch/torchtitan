@@ -88,7 +88,7 @@ from .sharding import (
     vision_merger_sharding_config,
 )
 
-from .vision_encoder import PatchMerger, Qwen35VisionEncoder, VisionRotaryEmbedding
+from .vision_encoder import CosSinVisionRoPE, PatchMerger, Qwen35VisionEncoder
 
 __all__ = [
     "Qwen35Model",
@@ -253,7 +253,7 @@ def _qwen35_vision_encoder_config(
             attn=VisionAttention.Config(
                 dim=dim,
                 num_heads=num_heads,
-                rope=VisionRotaryEmbedding.Config(
+                rope=CosSinVisionRoPE.Config(
                     dim=head_dim,
                     max_context_length=max_rope_positions,
                     theta=rope_theta,

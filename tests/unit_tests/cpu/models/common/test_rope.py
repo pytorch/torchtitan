@@ -22,14 +22,13 @@ from torchtitan.models.common.rope import (
     _maybe_check_max_pos,
     _yarn_inv_freq,
     ComplexRoPE,
+    ComplexVisionRoPE,
     CosSinRoPE,
     RoPE,
     YaRNScalingConfig,
 )
-from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
-from torchtitan.models.muse_spark.vision_encoder import VisionRopeFreq
 from torchtitan.models.qwen3_5.rope import MRoPE
-from torchtitan.models.qwen3_5.vision_encoder import VisionRotaryEmbedding
+from torchtitan.models.qwen3_5.vision_encoder import CosSinVisionRoPE
 
 
 def test_vision_rope_matches_prepared_cache():
@@ -41,17 +40,27 @@ def test_vision_rope_matches_prepared_cache():
     inv_freq = 1.0 / (10000.0 ** (torch.arange(0, 8, 2).float() / 8))
     row, col = positions[:, :1] * inv_freq, positions[:, 1:] * inv_freq
     interleaved = torch.stack((col, row), dim=-1).flatten(-2)
-    contiguous = torch.cat((col, row), dim=-1)
+    concatenated = torch.cat((col, row), dim=-1)
     rotate_half = torch.cat((row, col, row, col), dim=-1)
-    for rope_cls, cache in (
+    for rope_config, cache in (
         (
-            VisionRotaryEmbedding2D,
+            ComplexVisionRoPE.Config(
+                dim=16, max_context_length=8, pair_layout="interleaved"
+            ),
             torch.polar(torch.ones_like(interleaved), interleaved),
         ),
-        (VisionRopeFreq, torch.complex(contiguous.cos(), contiguous.sin())),
-        (VisionRotaryEmbedding, torch.cat((rotate_half.cos(), rotate_half.sin()), -1)),
+        (
+            ComplexVisionRoPE.Config(
+                dim=16, max_context_length=8, pair_layout="concatenated"
+            ),
+            torch.polar(torch.ones_like(concatenated), concatenated),
+        ),
+        (
+            CosSinVisionRoPE.Config(dim=16, max_context_length=8),
+            torch.cat((rotate_half.cos(), rotate_half.sin()), -1),
+        ),
     ):
-        rope = rope_cls.Config(dim=16, max_context_length=8).build()
+        rope = rope_config.build()
         expected = rope.apply_rotary_emb(query, key, cache.unsqueeze(1))
         actual = rope(query, key, positions)
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)

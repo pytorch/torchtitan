@@ -59,6 +59,7 @@ from torchtitan.models.common.moe.sharding import (
     router_sharding_config,
 )
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
+from torchtitan.models.common.rope import ComplexVisionRoPE
 from torchtitan.models.common.vision_encoder import (
     InvariantRowParallelLinear,
     VisionAttention,
@@ -79,7 +80,6 @@ from torchtitan.models.kimi_k2_7.sharding import (
     moonvit_encoder_sharding_config,
     moonvit_projector_sharding_config,
 )
-from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
 from .attention import KimiMLAAttention
 from .model import AttentionResidual, KimiK3Model, KimiK3TransformerBlock
 from .moe import KimiLatentMoE
@@ -462,9 +462,10 @@ def _vision_encoder_config(
         attn=VisionAttention.Config(
             dim=qkv_dim,
             num_heads=num_heads,
-            rope=VisionRotaryEmbedding2D.Config(
+            rope=ComplexVisionRoPE.Config(
                 dim=head_dim,
                 max_context_length=max_rope_positions,
+                pair_layout="interleaved",
                 sharding_config=vision_rope_sharding_config(),
             ),
             wq=_linear(
