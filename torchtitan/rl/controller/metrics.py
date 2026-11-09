@@ -15,7 +15,7 @@ import time
 from collections import defaultdict
 
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.rollout.types import Rollout
+from torchtitan.rl.rollout.types import Rollout, RolloutStatus
 
 logger = logging.getLogger(__name__)
 
@@ -236,8 +236,9 @@ def compute_policy_age_metrics(
 
 
 def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metric]:
-    """Build rollout-derived metrics: lengths, truncation, reward breakdown, and each turn's
-    per-generation metrics (the latter keep their own generator-side keys, unprefixed).
+    """Build rollout-derived metrics: lengths, truncation, unscored rollouts, a rate per status,
+    reward breakdown, and each turn's per-generation metrics (the latter keep their own
+    generator-side keys, unprefixed).
 
     Args:
         prefix: Metric namespace (e.g. `"rollout"` or `"validation"`).
@@ -260,6 +261,7 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
     ]
 
     truncated = [float(rollout.status.is_truncated()) for rollout in rollouts]
+    unscored = [float(rollout.reward is None) for rollout in rollouts]
     rewards = [rollout.reward for rollout in rollouts if rollout.reward is not None]
     num_turns = [float(len(rollout.turns)) for rollout in rollouts]
 
@@ -276,8 +278,20 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
         m.Metric(f"{prefix}/num_turns", m.Mean.from_list(num_turns)),
         m.Metric(f"{prefix}/num_turns", m.Max.from_list(num_turns)),
         m.Metric(f"{prefix}/truncation_rate", m.Mean.from_list(truncated)),
+        # Rollouts with reward None: not scored, so not trained.
+        m.Metric(f"{prefix}/unscored_rate", m.Mean.from_list(unscored)),
         m.Metric(f"{prefix}_reward", m.SummaryStats.from_list(rewards)),
     ]
+
+    # One rate per status, so a status added to `RolloutStatus` is recorded with no change here.
+    out.extend(
+        m.Metric(
+            f"{prefix}/status_rate/{status.value}",
+            m.Mean.from_list([float(rollout.status is status) for rollout in rollouts]),
+        )
+        for status in RolloutStatus
+        if status.is_terminal()
+    )
 
     # Per-component reward breakdown
     values_by_name: dict[str, list[float]] = defaultdict(list)

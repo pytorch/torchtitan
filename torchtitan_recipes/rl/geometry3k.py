@@ -49,6 +49,7 @@ from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
 from torchtitan.rl.rollout.rubric import Rubric
+from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.losses import GRPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
@@ -101,6 +102,7 @@ def rl_grpo_qwen3_5_0_8b_geometry3k() -> Controller.Config:
             worker=MessageEnvRolloutWorker.Config(
                 rubric=Rubric.Config(reward_fns=[RewardMathVerify.Config(weight=1.0)]),
                 message_env=Geometry3kEnv.Config(),
+                token_env=TokenEnv.Config(max_rollout_tokens=seq_len),
             ),
         ),
         vision_processor=VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS),
