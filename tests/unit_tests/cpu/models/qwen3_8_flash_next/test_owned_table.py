@@ -46,7 +46,7 @@ class TestOwnedTable(DTensorTestBase):
 
     @with_comms
     def test_hf_fragments_round_trip_without_gathering(self):
-        """HF parts may cross row owners and feature shards, including empty owners."""
+        """PLE fragments avoid gathers; fused projections retain their row shards."""
         key = "layers.1.ple.ple_embedding.ngram_embedding.weight"
         path = [tempfile.mkdtemp() if self.rank == 0 else None]
         dist.broadcast_object_list(path, src=0)
@@ -76,6 +76,36 @@ class TestOwnedTable(DTensorTestBase):
                 full = torch.arange(num_rows * 6).reshape(num_rows, 6).float()
                 placements = (Shard(0), Shard(0) if hsdp else Shard(1))
                 weight = distribute_tensor(full, mesh, placements)
+                # Four DP owners split GDN's two head groups. Projection/gate
+                # conversion must still preserve each child's native placement.
+                linear_state = {}
+                for layer_id, field in ((0, "in_proj"), (3, "wq")):
+                    linear = getattr(config.layers[layer_id].attention, field)
+                    for child in ("projection", "gates"):
+                        projection = getattr(linear, child)
+                        shape = (projection.out_features, projection.in_features)
+                        full_projection = torch.arange(
+                            shape[0] * shape[1], dtype=torch.float32
+                        ).reshape(shape)
+                        linear_state[
+                            f"layers.{layer_id}.attention.{field}.{child}.weight"
+                        ] = distribute_tensor(full_projection, mesh, placements)
+                linear_hf = adapter.to_hf(
+                    {"lm_head.weight": torch.ones(1, 6), **linear_state}
+                )
+                linear_restored = adapter.from_hf(linear_hf)
+                del linear_restored["lm_head.weight"]
+                self.assertEqual(linear_restored.keys(), linear_state.keys())
+                for name, original in linear_state.items():
+                    restored_projection = linear_restored[name]
+                    self.assertEqual(restored_projection.device_mesh, mesh)
+                    self.assertEqual(restored_projection.placements, placements)
+                    self.assertEqual(
+                        restored_projection.to_local(),
+                        original.to_local(),
+                        atol=0,
+                        rtol=0,
+                    )
                 row_owner, feature_owner = (
                     (self.rank, 0) if hsdp else mesh.get_coordinate()
                 )

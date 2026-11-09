@@ -6,7 +6,7 @@
 
 """Flash-Next checkpoint mapping, including its 128 row-wise n-gram shards."""
 
-# N = embedding rows, D = embedding features.
+# N = embedding rows, D = input features, H = head groups, C = projection channels.
 
 from __future__ import annotations
 
@@ -17,7 +17,10 @@ import torch
 from torch.distributed.checkpoint.protocol import CheckpointableTensor
 from torch.distributed.tensor import DTensor, Shard
 
+from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.qwen3_5.state_dict_adapter import Qwen35StateDictAdapter
+
+from .attention import QSAAttention, SplitLinear
 
 if TYPE_CHECKING:
     from .model import Qwen38FlashNextModel
@@ -30,6 +33,21 @@ class Qwen38FlashNextStateDictAdapter(Qwen35StateDictAdapter):
         super().__init__(model_config, hf_assets_path)
         self.flash_config = model_config
         self._ngram_weight_layouts: dict[int, tuple[DTensor, torch.device]] = {}
+        self._split_projection_layouts: dict[str, tuple[int, int, int]] = {}
+        for layer_id, layer in enumerate(model_config.layers):
+            if isinstance(layer.attention, GDN.Config):
+                field = "in_proj"
+                linear = layer.attention.in_proj
+            else:
+                assert isinstance(layer.attention, QSAAttention.Config)
+                field = "wq"
+                linear = layer.attention.wq
+            assert isinstance(linear, SplitLinear.Config)
+            self._split_projection_layouts[f"layers.{layer_id}.attention.{field}"] = (
+                linear.num_groups,
+                linear.projection.out_features // linear.num_groups,
+                linear.gates.out_features // linear.num_groups,
+            )
         prefix = self.hf_language_model_prefix
         for norm in ("input_layernorm", "post_attention_layernorm"):
             self.from_hf_map.pop(f"{prefix}.layers.{{}}.{norm}.weight")
@@ -76,6 +94,30 @@ class Qwen38FlashNextStateDictAdapter(Qwen35StateDictAdapter):
     def to_hf(
         self, state_dict: dict[str, Any], *, to_quantized_layout: bool = False
     ) -> dict[str, Any]:
+        state_dict = dict(state_dict)
+        for prefix, (num_groups, _, _) in self._split_projection_layouts.items():
+            projection_key = f"{prefix}.projection.weight"
+            if projection_key not in state_dict:
+                continue
+            projections = []
+            for field in ("projection", "gates"):
+                key = f"{prefix}.{field}.weight"
+                weight_CD = state_dict.pop(key)
+                if isinstance(weight_CD, DTensor):
+                    self._qkv_linear_sharding[key] = (
+                        weight_CD.device_mesh,
+                        weight_CD.placements,
+                    )
+                    # A DP row shard may split a head group, as with GDN's
+                    # existing HF conversion. Keep whole groups on column shards.
+                    weight_CD = weight_CD.redistribute(
+                        weight_CD.device_mesh, [Shard(1)] * weight_CD.device_mesh.ndim
+                    )
+                projections.append(weight_CD.unflatten(0, (num_groups, -1)))
+            projection_HCD, gates_HCD = projections
+            state_dict[f"{prefix}.weight"] = torch.cat(
+                (projection_HCD, gates_HCD), 1
+            ).flatten(0, 1)
         result = super().to_hf(state_dict, to_quantized_layout=to_quantized_layout)
         for layer_id, layer in enumerate(self.flash_config.layers):
             if layer.ple is None:
@@ -209,4 +251,32 @@ class Qwen38FlashNextStateDictAdapter(Qwen35StateDictAdapter):
             ):
                 base = f"{self.hf_language_model_prefix}.layers.{layer_id}.ple.ple_embedding.ngram_embedding.weight"
                 state_dict[base] = torch.empty_like(layout, device=device)
-        return super().from_hf(state_dict, is_quantized_layout=is_quantized_layout)
+        result = super().from_hf(state_dict, is_quantized_layout=is_quantized_layout)
+        for prefix, (
+            num_groups,
+            projection_channels,
+            gate_channels,
+        ) in self._split_projection_layouts.items():
+            key = f"{prefix}.weight"
+            if key not in result:
+                continue
+            weight_CD = result.pop(key)
+            if isinstance(weight_CD, DTensor):
+                weight_CD = weight_CD.redistribute(
+                    weight_CD.device_mesh, [Shard(1)] * weight_CD.device_mesh.ndim
+                )
+            weight_HCD = weight_CD.unflatten(0, (num_groups, -1))
+            projection_HCD, gates_HCD = weight_HCD.split(
+                (projection_channels, gate_channels), 1
+            )
+            for field, weight_HCD in (
+                ("projection", projection_HCD),
+                ("gates", gates_HCD),
+            ):
+                key = f"{prefix}.{field}.weight"
+                weight_CD = weight_HCD.flatten(0, 1)
+                if isinstance(weight_CD, DTensor) and key in self._qkv_linear_sharding:
+                    mesh, placements = self._qkv_linear_sharding[key]
+                    weight_CD = weight_CD.redistribute(mesh, placements)
+                result[key] = weight_CD
+        return result

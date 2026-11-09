@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import spmd_types as spmd
 import torch
+import torch.nn.functional as F
 import torch_remat as remat
 
 from torchtitan.config import PrecisionConfig
@@ -25,19 +26,49 @@ from torchtitan.distributed.spmd_types import (
     set_current_spmd_mesh,
     spmd_local_context,
 )
+from torchtitan.models.common.activation import Softmax
 from torchtitan.models.common.attention import AttentionMetadata, AttentionMetadataMap
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import token_id_placement
-from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.nn_modules import Identity
 from torchtitan.models.qwen3_5.model import Qwen35Model
 
 from .attention import QSAAttention, QSAIndexMetadata
 from .embedding import NGramTable, PLELayer
-from .residual import GatedResidual, inject_residual
+from .residual import add_residuals, GatedResidual
 from .state_dict_adapter import Qwen38FlashNextStateDictAdapter
 
 # T = packed tokens, D = model dimension, S = residual streams, C = S * D.
+# E = experts, K = selected experts.
+
+
+class Float32Softmax(Softmax):
+    """Apply FP32 softmax to logits materialized in the activation dtype."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Softmax.Config):
+        pass
+
+    def __call__(self, input_TE: torch.Tensor, **kwargs) -> torch.Tensor:
+        return F.softmax(input_TE, dim=self.dim, dtype=torch.float32)
+
+
+class FlashNextRouter(TokenChoiceTopKRouter):
+    """Shared routing and auxiliary objectives with reference gating dtype."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(TokenChoiceTopKRouter.Config):
+        pass
+
+    def forward(
+        self, x_TD: torch.Tensor, expert_bias_E: torch.Tensor | None = None, **kwargs
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        scores_TK, indices_TK, routing_TE = super().forward(
+            x_TD, expert_bias_E, **kwargs
+        )
+        remat.recompute_needs_tensor(scores_TK)
+        return scores_TK.to(x_TD.dtype), indices_TK, routing_TE
 
 
 class Qwen38FlashNextBlock(TransformerBlock):
@@ -93,7 +124,7 @@ class Qwen38FlashNextBlock(TransformerBlock):
         else:
             update_TD = self.attention(mixed_TD, attention_metadata)
         remat.recompute_needs_tensor(update_TD, write_TS)
-        x_TC = inject_residual(update_TD, residual_TC, write_TS)
+        x_TC = add_residuals(update_TD, residual_TC, write_TS)
         mixed_TD, residual_TC, write_TS = self.mlp_hyper_connection(x_TC)
         mixed_TD = self.ffn_norm(mixed_TD)
         if isinstance(self.feed_forward, MoE):
@@ -105,7 +136,7 @@ class Qwen38FlashNextBlock(TransformerBlock):
         else:
             update_TD = self.feed_forward(mixed_TD)
         remat.recompute_needs_tensor(update_TD, write_TS)
-        return inject_residual(update_TD, residual_TC, write_TS)
+        return add_residuals(update_TD, residual_TC, write_TS)
 
 
 class Qwen38FlashNextModel(Qwen35Model):
