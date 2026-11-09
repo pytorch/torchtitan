@@ -145,8 +145,9 @@ class ValidationConfig:
     priority -1), so steps slow down while a validation runs. The weights change during a validation,
     so one validation can sample several policies.
 
-    A validation is logged at the step it ends. Example: freq=25, 100 steps, each validation takes 30
-    steps (1 char = 5 steps; `.` waits for the running validation, `=` runs, `x` cancelled):
+    A validation is logged at the step it ends; `validation/started_at_step` holds the step it started
+    at. Example: freq=25, 100 steps, each validation takes 30 steps (1 char = 5 steps; `.` waits for the
+    running validation, `=` runs, `x` cancelled):
 
         step          0    25   50   75   100
         training      ====================|
@@ -838,8 +839,8 @@ class Controller(Configurable):
             step: Training step this validation starts at.
 
         Returns:
-            Validation rollout metrics, generation metrics, and validation
-            timing.
+            Validation rollout metrics, generation metrics, validation timing,
+            and the step it started at.
         """
         # TODO: investigate using pass@k for validation.
         t_validate_start = time.perf_counter()
@@ -862,6 +863,9 @@ class Controller(Configurable):
 
         t_validate_s = time.perf_counter() - t_validate_start
         validation_metrics.append(m.Metric("timing/validate", m.NoReduce(t_validate_s)))
+        validation_metrics.append(
+            m.Metric("validation/started_at_step", m.NoReduce(step))
+        )
         return validation_metrics
 
     async def run(self) -> None:
