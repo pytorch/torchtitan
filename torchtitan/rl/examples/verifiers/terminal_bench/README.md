@@ -18,7 +18,7 @@ them.
 
 ```text
 +------------------------- GPU actors (Monarch) -------------------------+
-|  router -> vLLM generators  <-- new weights --  trainer (GRPO loss)    |
+|  vLLM generators (router picks one) <-- new weights -- trainer (GRPO)  |
 +-------^-----------------------------------------------------^----------+
         | 4. generate                                         | 7. batch
 +-------|-------- controller process (torchtitan.rl.train) ---|----------+
