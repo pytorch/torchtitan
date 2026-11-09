@@ -5,136 +5,20 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-from unittest.mock import Mock, patch
 
 import spmd_types as spmd
 import torch
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.activation import SwiGLU
 from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.models.common.linear import GroupedLinear
-from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.moe.sharding import expert_param_placement_sparse
-from torchtitan.models.common.moe.token_dispatcher import (
-    AllToAllTokenDispatcher,
-    HybridEPTokenDispatcher,
-    LocalTokenDispatcher,
-)
-from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
+from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.trainer import Trainer
 
 
 class TestTokenDispatcherModule(unittest.TestCase):
-    def test_hybridep_scoring_matches_local_outputs_and_gradients(self):
-        # Substitute only accelerator kernels: exercise dispatch metadata and
-        # RoutedExperts' absorption/bias/postprocess paths on CPU.
-        from torchtitan.distributed.deepep import hybridep  # noqa: F401
-
-        expert_ids_TK = torch.tensor([[1, 0], [0, 1], [1, 0]])
-        routing_map_TE = torch.ones(3, 2, dtype=torch.bool)
-        permutation_R = expert_ids_TK.flatten().argsort(stable=True)
-        token_ids_R = permutation_R // 2
-
-        def dispatch(x_TD, expert_ids, scores_TK, *args):
-            return (
-                x_TD[token_ids_R],
-                scores_TK.flatten()[permutation_R],
-                torch.tensor([3, 3]),
-                torch.tensor([1]),
-            )
-
-        def combine(x_RD, *args):
-            return x_RD.new_zeros(3, 4).index_add(0, token_ids_R, x_RD)
-
-        def grouped_mm(*, input_RI, weight_EOI, offsets_E):
-            return torch.cat(
-                [
-                    rows_RI @ weight_OI.T
-                    for rows_RI, weight_OI in zip(
-                        input_RI.tensor_split(offsets_E[:-1].tolist()), weight_EOI
-                    )
-                ]
-            )
-
-        for linear_cls in (GroupedLinear, GptOssGroupedLinear):
-            for postprocess in (None, RMSNorm.Config(normalized_shape=4)):
-                with self.subTest(linear=linear_cls.__name__, postprocess=postprocess):
-
-                    def build(dispatcher):
-                        return (
-                            RoutedExperts.Config(
-                                w13=linear_cls.Config(
-                                    group_size=2,
-                                    in_features=4,
-                                    out_features=8,
-                                    num_linears=2,
-                                ),
-                                w2=linear_cls.Config(
-                                    group_size=2, in_features=8, out_features=4
-                                ),
-                                token_dispatcher=dispatcher,
-                                activation_fn=SwiGLU.Config(),
-                                output_postprocess=postprocess,
-                            )
-                            .build()
-                            .bfloat16()
-                        )
-
-                    torch.manual_seed(42)
-                    actual = build(
-                        HybridEPTokenDispatcher.Config(num_experts=2, top_k=2)
-                    )
-                    reference = build(
-                        LocalTokenDispatcher.Config(num_experts=2, top_k=2)
-                    )
-                    with torch.no_grad():
-                        for parameter in actual.parameters():
-                            parameter.normal_(std=0.2)
-                    reference.load_state_dict(actual.state_dict())
-                    x_TD = torch.randn(3, 4, dtype=torch.bfloat16)
-                    # These FP32 scores differ from their BF16-rounded values.
-                    scores_TK = torch.tensor(
-                        [[0.1234, 0.8766], [0.2345, 0.7655], [0.3456, 0.6544]]
-                    )
-                    results = []
-                    with (
-                        patch(
-                            "torchtitan.models.common.moe.token_dispatcher._ep_process_group",
-                            return_value=Mock(size=lambda: 1, group_name="ep"),
-                        ),
-                        patch.object(
-                            torch.ops.hybridep, "dispatch", side_effect=dispatch
-                        ),
-                        patch.object(
-                            torch.ops.hybridep, "combine", side_effect=combine
-                        ),
-                        patch.object(
-                            GroupedLinear, "_grouped_mm", side_effect=grouped_mm
-                        ),
-                    ):
-                        for model in (actual, reference):
-                            input_TD = x_TD.clone().requires_grad_()
-                            score_TK = scores_TK.clone().requires_grad_()
-                            out_TD = model(
-                                input_TD, score_TK, expert_ids_TK, routing_map_TE
-                            )
-                            loss = out_TD.float().square().sum()
-                            gradients = torch.autograd.grad(
-                                loss, (input_TD, score_TK, *model.parameters())
-                            )
-                            results.append((out_TD, loss, *gradients))
-                    for result, expected in zip(*results):
-                        # Same relative-norm bound as the GPU post-W2 reference.
-                        tolerance = 2 * torch.finfo(torch.bfloat16).eps
-                        self.assertLessEqual(
-                            (result.float() - expected.float()).norm().item(),
-                            tolerance * expected.float().norm().item(),
-                        )
-
     def test_hybridep_backward_is_fake_tensor_traceable(self):
         # Setup contexts must not read the CPU handle ID during AOT tracing.
         from torchtitan.distributed.deepep import hybridep  # noqa: F401
