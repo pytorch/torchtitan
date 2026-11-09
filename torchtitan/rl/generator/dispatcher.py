@@ -388,10 +388,11 @@ def _prepare_generation_request_metrics(
     # TODO: Per-request fields here come from vLLM's RequestOutput.metrics
     # (RequestStateStats). Engine-aggregate stats, such as KV-cache usage,
     # prefix-cache hit rate, exact preemption counts, and batch occupancy, live
-    # in SchedulerStats / IterationStats and require registering a
-    # vllm.v1.metrics.loggers.StatLoggerBase via
-    # LLMEngine.from_engine_args(..., stat_loggers=[...]); VllmOtelStatLogger
-    # does this when VLLMEngine.Config.stat_logger is set.
+    # in SchedulerStats / IterationStats, which only reach a registered
+    # vllm.v1.metrics.loggers.StatLoggerBase (VllmOtelStatLogger, when
+    # VLLMEngine.Config.stat_logger is set). To log one to W&B, carry it on a
+    # finished request like the CUDA graph padding counts (VLLMEngine.step). A second
+    # such stat should switch to one list of engine metrics built in VLLMEngine.step.
 
     metric_values: dict[str, float] = {}
     if inputs.num_cached_tokens is not None:
@@ -421,8 +422,22 @@ def _prepare_generation_request_metrics(
             ] = first_to_last_token_ms / (inputs.num_generation_tokens - 1)
 
     # Emit each value with both Mean and Max aggregators.
-    return [
+    metrics = [
         metric
         for key, value in metric_values.items()
         for metric in (m.Metric(key, m.Mean(value)), m.Metric(key, m.Max(value)))
     ]
+    if inputs.num_engine_padded_tokens > 0:
+        # Covers every request in the engine since the last `pop_forward_token_counts`, training
+        # and validation alike, so the key has no prefix. Weighted by forward tokens. Eager steps count only
+        # sequence-parallel rounding.
+        num_paddings = (
+            inputs.num_engine_padded_tokens - inputs.num_engine_unpadded_tokens
+        )
+        metrics.append(
+            m.Metric(
+                "generator/cudagraph_padding_frac",
+                m.Mean(num_paddings, count=inputs.num_engine_padded_tokens),
+            )
+        )
+    return metrics

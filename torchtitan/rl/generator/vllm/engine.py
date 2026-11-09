@@ -397,7 +397,18 @@ class VLLMEngine(GenerationEngine):
             request_outputs = self._engine.step()
         if self._session_kv_holder is not None:
             self._session_kv_holder.after_step()
-        return [_finished_request(request_output) for request_output in request_outputs]
+        finished_requests = [
+            _finished_request(request_output) for request_output in request_outputs
+        ]
+        if finished_requests:
+            # One request carries the forward token counts since the last
+            # `pop_forward_token_counts`, so rank 0 adds up each DP rank's counts exactly once.
+            runner = self._get_model_runner()
+            num_unpadded_tokens, num_padded_tokens = runner.pop_forward_token_counts()
+            metrics_inputs = finished_requests[0].metrics_inputs
+            metrics_inputs.num_engine_unpadded_tokens = num_unpadded_tokens
+            metrics_inputs.num_engine_padded_tokens = num_padded_tokens
+        return finished_requests
 
     def release_sessions(self, session_ids: list[str], group_ids: list[int]) -> None:
         if self._session_kv_holder is not None:
@@ -443,6 +454,10 @@ class VLLMEngine(GenerationEngine):
     def _get_model(self):
         """The ``VLLMModelWrapper`` the engine runs."""
         return self._engine.model_executor.driver_worker.get_model()
+
+    def _get_model_runner(self):
+        """The ``TorchTitanGPUModelRunner`` the engine runs."""
+        return self._engine.model_executor.driver_worker.model_runner
 
 
 def _build_sampling_params(sampling: SamplingConfig) -> SamplingParams:

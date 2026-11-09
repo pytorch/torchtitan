@@ -37,7 +37,11 @@ from torchtitan.rl.generator.dispatcher import (
 )
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
-from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
+from torchtitan.rl.generator.types import (
+    EngineRequest,
+    RequestMetricsInputs,
+    SamplingConfig,
+)
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import (
     _build_sampling_params,
@@ -141,6 +145,9 @@ def _vllm_engine(*, reset_kv_cache_on_model_state_dict_load=False, model=None):
         reset_kv_cache_on_model_state_dict_load
     )
     engine._get_model = lambda: model
+    engine._get_model_runner = lambda: SimpleNamespace(
+        pop_forward_token_counts=lambda: (8, 12)
+    )
     engine._session_kv_holder = None
     return engine
 
@@ -482,6 +489,8 @@ def test_step_returns_finished_requests_without_grad():
     assert finished.token_logprobs == [-0.1, -0.1]
     assert finished.finish_reason == "stop"
     assert finished.metrics_inputs.num_generation_tokens == 4
+    assert finished.metrics_inputs.num_engine_unpadded_tokens == 8
+    assert finished.metrics_inputs.num_engine_padded_tokens == 12
 
 
 def test_step_rejects_more_than_one_sample_per_request():
@@ -539,6 +548,33 @@ def test_metric_timing_math_and_prefix_override():
     assert aggregate[
         "validation_generator/inter_token_latency_ms/mean"
     ] == pytest.approx(10)
+
+
+def test_cudagraph_padding_frac_weights_each_engine_step_by_its_tokens():
+    # Two engine steps: 8 real tokens padded to 12, and 4 real tokens with no padding.
+    padded = RequestMetricsInputs(
+        num_cached_tokens=None,
+        has_stats=False,
+        num_engine_unpadded_tokens=8,
+        num_engine_padded_tokens=12,
+    )
+    unpadded = RequestMetricsInputs(
+        num_cached_tokens=None,
+        has_stats=False,
+        num_engine_unpadded_tokens=4,
+        num_engine_padded_tokens=4,
+    )
+    no_step = RequestMetricsInputs(num_cached_tokens=None, has_stats=False)
+    metrics = [
+        metric
+        for inputs in (padded, unpadded, no_step)
+        for metric in _prepare_generation_request_metrics(
+            inputs, prefix="validation_generator"
+        )
+    ]
+    aggregate = m.MetricsProcessor._aggregate_metrics(metrics)
+    # An engine-wide key: the carrying request's prefix doesn't change it.
+    assert aggregate["generator/cudagraph_padding_frac/mean"] == 4 / 16
 
 
 def test_decode_metrics_absent_for_single_generated_token():

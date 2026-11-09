@@ -162,11 +162,12 @@ def _runner(model) -> TorchTitanGPUModelRunner:
 
 def test_runner_publishes_the_unpadded_count_before_vllm_pads():
     model = _Model()
-    sentinel = (object(), object())
+    sentinel = (object(), SimpleNamespace(num_tokens=32))
     with patch.object(
         GPUModelRunner, "_determine_batch_execution_and_padding", return_value=sentinel
     ) as parent:
-        out = _runner(model)._determine_batch_execution_and_padding(
+        runner = _runner(model)
+        out = runner._determine_batch_execution_and_padding(
             31, 3, None, 1, False, force_eager=True
         )
     assert out is sentinel
@@ -174,3 +175,26 @@ def test_runner_publishes_the_unpadded_count_before_vllm_pads():
     parent.assert_called_once()
     assert parent.call_args.args[0] == 31
     assert parent.call_args.kwargs == {"force_eager": True}
+    assert runner.pop_forward_token_counts() == (31, 32)
+    assert runner.pop_forward_token_counts() == (0, 0)
+
+
+def test_runner_leaves_dummy_runs_out_of_the_token_counts():
+    runner = _runner(_Model())
+    sentinel = (object(), SimpleNamespace(num_tokens=32))
+
+    def dummy_run(self, num_tokens, *args, **kwargs):
+        return self._determine_batch_execution_and_padding(
+            num_tokens, 1, None, 1, False
+        )
+
+    with (
+        patch.object(
+            GPUModelRunner,
+            "_determine_batch_execution_and_padding",
+            return_value=sentinel,
+        ),
+        patch.object(GPUModelRunner, "_dummy_run", dummy_run),
+    ):
+        runner._dummy_run(31, uniform_decode=True)
+    assert runner.pop_forward_token_counts() == (0, 0)
