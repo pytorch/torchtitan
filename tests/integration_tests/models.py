@@ -50,7 +50,7 @@ from torchtitan_recipes.tests.models.qwen3 import (
     qwen3_debugmodel_moe_param_groups,
 )
 from torchtitan_recipes.tests.models.qwen3_8_flash_next import (
-    qwen38_flash_next_debugmodel_ep2,
+    qwen38_flash_next_debugmodel,
     qwen38_flash_next_debugmodel_mm,
 )
 
@@ -71,6 +71,14 @@ def _configure_fsdp_numerics(config: Trainer.Config) -> Trainer.Config:
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
     config.training.disable_accelerator_graphs = True
+    return config
+
+
+def qwen38_flash_next_debugmodel_ep2() -> Trainer.Config:
+    config = qwen38_flash_next_debugmodel(
+        parallelism=ParallelismConfig(expert_parallel_degree=2)
+    )
+    config.debug.spmd_typechecking = True
     return config
 
 

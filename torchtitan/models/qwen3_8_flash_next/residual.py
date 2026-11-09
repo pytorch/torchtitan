@@ -69,7 +69,7 @@ class GatedResidual(Module):
         return mixed_TD, x_TC, write_TS
 
 
-def inject_residual(
+def add_residuals(
     update_TD: torch.Tensor, residual_TC: torch.Tensor, write_TS: torch.Tensor
 ) -> torch.Tensor:
     return residual_TC + (update_TD.unsqueeze(-2) * write_TS.unsqueeze(-1)).flatten(-2)

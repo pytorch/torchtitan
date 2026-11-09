@@ -167,9 +167,11 @@ def _build_fixture(device: torch.device) -> _Fixture:
     hf_config = _reference_text_config()
     hf_config._attn_implementation = "sdpa"
     reference = Qwen4ExpForCausalLM(hf_config).to(device).eval()
-    native = config.build().to(device).eval()
+    with torch.device("meta"):
+        native = config.build().to(torch.bfloat16)
+    native.to_empty(device=device).eval()
     adapter = Qwen38FlashNextStateDictAdapter(config, None)
-    native.init_states()
+    native.init_states(buffer_device=device)
     native.load_state_dict(adapter.from_hf(reference.state_dict()), strict=True)
 
     generator = torch.Generator(device="cpu").manual_seed(FIXTURE_SEED)
@@ -193,7 +195,6 @@ def _build_fixture(device: torch.device) -> _Fixture:
 
     # HF computes rotary frequencies in FP32 even when backbone parameters are BF16.
     rotary = copy.deepcopy(reference.model.rotary_emb)
-    native.to(torch.bfloat16)
     reference.to(torch.bfloat16)
     reference.model.rotary_emb = rotary
     with torch.no_grad():

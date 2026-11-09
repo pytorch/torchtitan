@@ -67,13 +67,23 @@ from torchtitan.models.qwen3_5.sharding import (
     sigmoid_gated_w13_sharding_config,
 )
 
-from .attention import QSAAttention, QSAIndexer, QSAIndexerLoss, QSAInnerAttention
+from .attention import (
+    MRoPE,
+    QSAAttention,
+    QSAIndexer,
+    QSAIndexerLoss,
+    QSAInnerAttention,
+    SplitLinear,
+)
 from .embedding import ngram_vocab_sizes, NGramEmbedding, NGramTable, PLELayer
-from .model import Qwen38FlashNextBlock, Qwen38FlashNextModel
-from .moe import FlashNextRouter, Float32Softmax
+from .model import (
+    FlashNextRouter,
+    Float32Softmax,
+    Qwen38FlashNextBlock,
+    Qwen38FlashNextModel,
+)
 from .norm import GroupedOffsetRMSNorm, InputDtypeGatedRMSNorm
 from .residual import GatedResidual
-from .rope import MRoPE
 from .sharding import (
     block_sharding,
     grouped_norm_sharding,
@@ -224,6 +234,25 @@ def _shared_experts_config(*, dim, hidden_dim, layer_id, enable_sp):
     )
 
 
+def _split_linear(config, *, num_groups, projection_features):
+    assert config.sharding_config is not None
+    return SplitLinear.Config(
+        in_features=config.in_features,
+        out_features=config.out_features,
+        sharding_config=replace(config.sharding_config, state_shardings={}),
+        inplace_wgrad_accum=False,
+        projection=replace(
+            config, out_features=projection_features, inplace_wgrad_accum=False
+        ),
+        gates=replace(
+            config,
+            out_features=config.out_features - projection_features,
+            inplace_wgrad_accum=False,
+        ),
+        num_groups=num_groups,
+    )
+
+
 def _qsa_config(
     *,
     dim,
@@ -273,11 +302,15 @@ def _qsa_config(
         head_dim=head_dim,
         rotary_dim=rotary_dim,
         rope=replace(rope, sharding_config=rope_cache_sharding_config()),
-        wq=Linear.Config(
-            in_features=dim,
-            out_features=num_heads * head_dim * 2,
-            param_init=_LINEAR_INIT,
-            sharding_config=replicated_input_colwise_sharding_config(),
+        wq=_split_linear(
+            Linear.Config(
+                in_features=dim,
+                out_features=num_heads * head_dim * 2,
+                param_init=_LINEAR_INIT,
+                sharding_config=replicated_input_colwise_sharding_config(),
+            ),
+            num_groups=num_heads,
+            projection_features=num_heads * head_dim,
         ),
         wk=Linear.Config(
             in_features=dim,
@@ -405,6 +438,14 @@ def _config(*, debug, multimodal, seq_len, parallelism, indexer_loss):
                 value_head_dim=128,
                 layer_id=layer_id,
                 enable_sp=enable_sp,
+            )
+            attention.in_proj = _split_linear(
+                attention.in_proj,
+                num_groups=attention.n_key_heads,
+                projection_features=(
+                    2 * attention.n_key_heads * attention.key_head_dim
+                    + attention.n_heads * attention.value_head_dim
+                ),
             )
             # Flash-Next uses BF16 A_log and dt_bias in the released reference.
             attention.preserve_dtype_params = ()
