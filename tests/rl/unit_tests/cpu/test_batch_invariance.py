@@ -82,8 +82,8 @@ def test_replicated_policy_stats_do_not_infer_layout_from_spmd_context(monkeypat
     torch.testing.assert_close(actual, expected)
 
 
-def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
-    """The vLLM patch must retain the trainer's batch-invariant op sequence."""
+def test_vllm_sampler_patch_uses_trainer_ops(monkeypatch):
+    """vLLM's sampler computes logprobs and divides by the temperature as the trainer does."""
     # Import by path so this CPU test does not load the RL package initializer,
     # which intentionally requires the optional vLLM runtime.
     module_path = (
@@ -107,6 +107,7 @@ def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
         "vllm.v1.worker.gpu.sample.logprob",
         "vllm.v1.worker.gpu.sample.prompt_logprob",
         "vllm.v1.worker.gpu.sample.states",
+        "vllm.v1.worker.gpu.sample.new_importer",
     )
     modules = {name: ModuleType(name) for name in module_names}
     for name, module in modules.items():
@@ -127,7 +128,7 @@ def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
     sample = "vllm.v1.worker.gpu.sample"
     for name in ("logprob", "prompt_logprob"):
         modules[f"{sample}.{name}"].compute_token_logprobs = vllm_compute_token_logprobs
-    for name in ("gumbel", "states"):
+    for name in ("gumbel", "states", "new_importer"):
         modules[f"{sample}.{name}"].apply_temperature = vllm_apply_temperature
 
     calls = []
@@ -169,10 +170,12 @@ def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
     )
     row_temperature = torch.tensor([0.8, 1.0, 0.7])
     assert torch.equal(scaled, logits / row_temperature.unsqueeze(-1).expand_as(logits))
+    # Any vLLM module that imports a function by name gets the PyTorch version.
+    patched = modules[f"{sample}.gumbel"].apply_temperature
+    assert modules[f"{sample}.new_importer"].apply_temperature is patched
 
-    # A second call (one per engine) patches again.
+    # A second call (one per engine) patches every binding again.
     batch_invariance.patch_vllm_logprob_and_temperature_kernels()
-    # If vLLM stops importing a function by name, the patch raises instead of missing it.
-    modules[f"{sample}.states"].apply_temperature = vllm_apply_temperature
-    with pytest.raises(RuntimeError, match="states.apply_temperature"):
-        batch_invariance.patch_vllm_logprob_and_temperature_kernels()
+    repatched = modules[f"{sample}.gumbel"].apply_temperature
+    assert repatched is not patched
+    assert modules[f"{sample}.states"].apply_temperature is repatched

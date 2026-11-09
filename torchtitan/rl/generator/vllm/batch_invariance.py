@@ -7,12 +7,15 @@
 """Runtime helper for bitwise trainer/generator numerics parity."""
 
 import logging
+import sys
 
 import torch
 
 logger = logging.getLogger(__name__)
 
 
+# TODO: delete once vLLM's batch-invariant mode runs the V2 sampler's logprob and
+# temperature kernels as PyTorch ops.
 def patch_vllm_logprob_and_temperature_kernels() -> None:
     """Replace the Triton logprob and temperature kernels of vLLM's v2 sampler with PyTorch ops.
 
@@ -27,8 +30,6 @@ def patch_vllm_logprob_and_temperature_kernels() -> None:
     """
     import vllm.v1.worker.gpu.sample.gumbel as vllm_gumbel
     import vllm.v1.worker.gpu.sample.logprob as vllm_logprob
-    import vllm.v1.worker.gpu.sample.prompt_logprob as vllm_prompt_logprob
-    import vllm.v1.worker.gpu.sample.states as vllm_sampling_states
 
     from torchtitan.components.loss import compute_logprobs
 
@@ -82,22 +83,19 @@ def patch_vllm_logprob_and_temperature_kernels() -> None:
         row_temperature = torch.where(row_temperature == 0.0, 1.0, row_temperature)
         logits.div_(row_temperature.unsqueeze(-1))
 
-    # prompt_logprob.py and states.py import these functions by name, so their
-    # bindings are patched too. If vLLM moved a function, patching the old binding
-    # would leave its Triton kernel running with no error, so check first.
-    for importer, name, defining_module in (
-        (vllm_prompt_logprob, "compute_token_logprobs", vllm_logprob),
-        (vllm_sampling_states, "apply_temperature", vllm_gumbel),
+    # vLLM modules import these functions by name (prompt_logprob.py and states.py
+    # today), so rebind the name in every loaded vLLM module that holds vLLM's
+    # function. Modules loaded later import the patched function.
+    for name, defining_module, replacement in (
+        ("compute_token_logprobs", vllm_logprob, generator_compute_token_logprobs),
+        ("apply_temperature", vllm_gumbel, generator_apply_temperature),
     ):
-        if getattr(importer, name, None) is not getattr(defining_module, name):
-            raise RuntimeError(
-                f"{importer.__name__}.{name} is not {defining_module.__name__}.{name}: "
-                "vLLM moved it, so update this patch"
-            )
-    vllm_logprob.compute_token_logprobs = generator_compute_token_logprobs
-    vllm_prompt_logprob.compute_token_logprobs = generator_compute_token_logprobs
-    vllm_gumbel.apply_temperature = generator_apply_temperature
-    vllm_sampling_states.apply_temperature = generator_apply_temperature
+        original = getattr(defining_module, name)
+        for module in list(sys.modules.values()):
+            if getattr(module, "__name__", "").startswith("vllm") and (
+                vars(module).get(name) is original
+            ):
+                setattr(module, name, replacement)
     logger.info(
         "Patched vLLM compute_token_logprobs and apply_temperature with PyTorch ops "
         "so generator and trainer share one logprob code path"

@@ -517,6 +517,8 @@ def vllm_prefill(engine, all_prompt_ids):
 
 def vllm_generate(engine, all_prompt_ids, max_tokens):
     """Generate tokens and return (generated_ids, decode_logprobs) per sequence."""
+    # TODO: add a temperature 0.8 arm (processed logprobs, trainer logits / T). Greedy
+    # decoding never runs vLLM's temperature kernel, so no test checks that patch.
     params = SamplingParams(
         temperature=0.0,
         top_p=1.0,
