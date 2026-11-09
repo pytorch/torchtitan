@@ -270,7 +270,8 @@ def test_update_block_table_matches_build(step, mode):
     config.compilation_config = CompilationConfig(
         mode=CompilationMode.NONE,
         cudagraph_mode=CUDAGraphMode.FULL,
-        cudagraph_capture_sizes=[1, 2, 4, 8],
+        prefill_cudagraph_capture_token_sizes=[1, 2, 4, 8],
+        decode_cudagraph_capture_request_sizes=[1, 2],
         max_cudagraph_capture_size=8,
         cudagraph_num_of_warmups=1,
     )

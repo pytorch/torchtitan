@@ -18,6 +18,7 @@ from typing import Any, TYPE_CHECKING, TypeVar
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -53,6 +54,37 @@ class TorchTitanLinearAttentionMetadata(GDNAttentionMetadata):
     # Read by packed steps only: the decode requests' slots for the decode kernel;
     # the chunk kernel reads the inherited prefill_* fields (see `_stage_decode_split`).
     decode_state_indices: torch.Tensor | None = None
+
+
+def get_linear_attention_metadata(
+    prefix: str,
+) -> TorchTitanLinearAttentionMetadata | None:
+    """Return this step's metadata for the GDN/KDA layer ``prefix``, or None if vLLM built none.
+
+    vLLM's warmup runs build no attention metadata, and its kernel-autotune runs
+    (``is_profile`` dummy runs) build none for any linear-attention layer:
+
+      no metadata at all                          -> None
+      no linear-attention layer has metadata      -> None
+      other linear-attention layers have it       -> RuntimeError
+    """
+    attn_metadata = get_forward_context().attn_metadata
+    if attn_metadata is None:
+        return None
+    assert isinstance(attn_metadata, dict)
+    if prefix not in attn_metadata:
+        if any(
+            isinstance(metadata, TorchTitanLinearAttentionMetadata)
+            for metadata in attn_metadata.values()
+        ):
+            raise RuntimeError(
+                f"No attention metadata for {prefix}, but other "
+                "linear-attention layers have it."
+            )
+        return None
+    metadata = attn_metadata[prefix]
+    assert isinstance(metadata, TorchTitanLinearAttentionMetadata)
+    return metadata
 
 
 class TorchTitanLinearAttentionBackend(AttentionBackend):

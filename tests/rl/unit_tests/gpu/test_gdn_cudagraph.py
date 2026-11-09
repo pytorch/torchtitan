@@ -319,7 +319,7 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
         metadata = next(
             metadata
             for metadata in get_forward_context().attn_metadata.values()
-            if isinstance(metadata, gdn.TorchTitanLinearAttentionMetadata)
+            if isinstance(metadata, TorchTitanLinearAttentionMetadata)
         )
         recurrent_calls.append(
             [torch.cuda.is_current_stream_capturing(), metadata.execution_path.name]
