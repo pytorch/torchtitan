@@ -113,6 +113,7 @@ class Qwen38FlashNextModel(Qwen35Model):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Qwen35Model.Config):
+        layers: list[Qwen38FlashNextBlock.Config]  # pyrefly: ignore [bad-override]
         num_streams: int
         hyper_connection_mixer: GatedResidual.Config
         norm: Identity.Config  # pyrefly: ignore [bad-override]
