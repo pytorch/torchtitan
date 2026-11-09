@@ -52,9 +52,6 @@ from torchtitan.rl.examples.verifiers.rollouter import (
 from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
     TerminalBenchTerminusHarnessConfig,
 )
-from torchtitan.rl.examples.verifiers.terminal_bench.taskset import (
-    TerminalTasksetConfig,
-)
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
@@ -75,6 +72,7 @@ from torchtitan.rl.routing.strategies import (
 from torchtitan.rl.trainer.losses import DAPOLoss, GRPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
 from verifiers.v1.configs.agent import TimeoutConfig as AgentTimeoutConfig
+from verifiers.v1.utils.loaders import taskset_config_type
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
@@ -82,29 +80,41 @@ from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 _TERMINAL_BENCH_PACKAGE_ID = "torchtitan_verifiers_terminal_bench"
 
 
-def _terminal_bench_rollouter_config(
+def terminal_bench_rollouter_config(
     train_dataset: str,
     validation_dataset: str,
     *,
     max_context_length: int,
     max_turns: int,
+    taskset_id: str = _TERMINAL_BENCH_PACKAGE_ID,
 ) -> VerifiersRollouter.Config:
-    """Select Harbor datasets by id.
+    """Build the Terminal-Bench rollouter: Harbor datasets by id, local Docker, in-sandbox Terminus-2.
 
-    ``max_context_length`` is the generator's sequence length; the generation
-    server caps each rollout at it. ``max_turns`` is the agent turn limit,
-    which Verifiers enforces.
+    Args:
+        train_dataset: Harbor dataset id for training, e.g. ``"local/tmax@v1"``.
+        validation_dataset: Harbor dataset id for validation; must differ from ``train_dataset``.
+        max_context_length: The generator's sequence length; the generation server caps
+            each rollout at it.
+        max_turns: The agent turn limit, which Verifiers enforces.
+        taskset_id: Verifiers id: the name of a top-level package whose ``__all__`` exports
+            exactly one Taskset (``TerminalTaskset`` or a subclass), and an Env if it needs its
+            own. Both datasets use the config class that Taskset declares. Default: this
+            example's package.
+
+    The harness stays the example's Terminus-2. Runtime and harness are fields of the returned
+    config, e.g. ``worker.environment.agent.runtime``.
     """
     if train_dataset == validation_dataset:
         raise ValueError(
             "Training and Terminal-Bench evaluation must use different datasets"
         )
 
+    taskset_config_cls = taskset_config_type(taskset_id)
     return VerifiersRollouter.Config(
         training_dataloader=IterableRolloutDataLoader.Config(
             dataset=VerifiersTaskDataset.Config(
-                verifiers_taskset=TerminalTasksetConfig(
-                    id=_TERMINAL_BENCH_PACKAGE_ID,
+                verifiers_taskset=taskset_config_cls(
+                    id=taskset_id,
                     dataset=train_dataset,
                     ignore_timeouts=False,
                 ),
@@ -113,8 +123,8 @@ def _terminal_bench_rollouter_config(
             ),
         ),
         validation_dataset=VerifiersTaskDataset.Config(
-            verifiers_taskset=TerminalTasksetConfig(
-                id=_TERMINAL_BENCH_PACKAGE_ID,
+            verifiers_taskset=taskset_config_cls(
+                id=taskset_id,
                 dataset=validation_dataset,
                 ignore_timeouts=False,
             ),
@@ -200,7 +210,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             filter=KeepExtremeRewardsFilter.Config(keep_errors=True)
         ),
         async_loop=async_loop,
-        rollouter=_terminal_bench_rollouter_config(
+        rollouter=terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
@@ -343,7 +353,7 @@ def rl_dapo_qwen35_35b_a3b_terminal_bench_dist_moe() -> Controller.Config:
             filter=KeepExtremeRewardsFilter.Config(keep_errors=True)
         ),
         async_loop=async_loop,
-        rollouter=_terminal_bench_rollouter_config(
+        rollouter=terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
@@ -478,7 +488,7 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
             filter=KeepExtremeRewardsFilter.Config(keep_errors=True)
         ),
         async_loop=async_loop,
-        rollouter=_terminal_bench_rollouter_config(
+        rollouter=terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
