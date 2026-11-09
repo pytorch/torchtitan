@@ -39,9 +39,7 @@ class GenerationEngine(Configurable, abc.ABC):
         model_path: Path to the HF model checkpoint (tokenizer assets and, with a
             ``checkpointer``, initial weights).
         max_num_seqs: Upper bound on concurrently scheduled sequences.
-        precision: The trainer's parameter and compute dtypes, which the engine's model
-            mirrors: it computes in ``param_dtype`` and receives the trainer's weights
-            in the dtypes the trainer sends them.
+        model_dtype: Data type for model weights (auto, float16, bfloat16, float32).
         gpu_memory_limit: Fraction of GPU memory the engine may use.
         max_num_batched_tokens: Max tokens scheduled per engine step, or None for the
             engine's default.

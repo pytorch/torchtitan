@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-from dataclasses import replace
 
 import pytest
 import torch
@@ -39,9 +38,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires 
 
 def _metadata():
     boundaries = torch.tensor([0, 32, 64], device="cuda", dtype=torch.int32)
-    return VarlenAttentionMetadata(
-        cu_seq_q=boundaries, cu_seq_k=boundaries, max_q=32, max_k=32
-    )
+    return VarlenAttentionMetadata(boundaries, boundaries, 32, 32)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -63,7 +60,7 @@ def test_forward_backward_precision(dtype, upcast_qk, window_size):
         for index in range(3)
     ]
     reference_inputs = [x.detach().double().requires_grad_() for x in inputs]
-    metadata = replace(_metadata(), window_size=window_size)
+    metadata = _metadata()._replace(window_size=window_size)
     actual = attention(*inputs, attention_metadata=metadata)
     reference_q, reference_k, reference_v = (
         x.reshape(2, 32, 4, 64).transpose(1, 2) for x in reference_inputs

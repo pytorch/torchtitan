@@ -16,6 +16,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any, cast, Literal, TYPE_CHECKING
 
+import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint import HuggingFaceStorageWriter, Metadata
@@ -35,7 +36,6 @@ from torchtitan.tools.garbage_collector import GarbageCollector
 from .base import (
     BaseCheckpointManager,
     EMA,
-    export_state_dict,
     LR_SCHEDULER,
     MODEL,
     ModelWrapper,
@@ -630,10 +630,16 @@ class CheckpointManager(BaseCheckpointManager):
 
         checkpoint_id = self._create_last_step_id(curr_step)
         if self.last_save_model_only:
-            model = self.states[MODEL]
-            states = export_state_dict(
-                model.state_dict(), dtype=self.export_dtype, model_parts=model.model
-            )
+            states = self.states[MODEL].state_dict()
+
+            states = {
+                k: v.to(self.export_dtype)
+                if isinstance(v, torch.Tensor)
+                and v.is_floating_point()
+                and v.dtype != self.export_dtype
+                else v
+                for k, v in states.items()
+            }
             logger.info(
                 f"Saving a model only checkpoint in {self.export_dtype} "
                 f"at last step, step {curr_step}, to {checkpoint_id}."

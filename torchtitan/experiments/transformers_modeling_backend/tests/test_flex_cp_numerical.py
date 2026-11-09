@@ -97,7 +97,7 @@ def main():
     )
     cfg.training.num_tokens_per_microbatch_per_dp_rank = args.bs * args.seq_len
     # fp32 compute so any CP discrepancy isn't masked by bf16 FSDP mixed precision.
-    cfg.precision.param_dtype = "float32"
+    cfg.training.mixed_precision_param = "float32"
     cfg.parallelism.context_parallel_degree = cp
     cfg.debug.seed = 42
 
@@ -146,7 +146,7 @@ def main():
     parallelize_hf_transformers(
         cp_model,
         parallelism_context=parallelism_context,
-        precision=cfg.precision,
+        training=cfg.training,
         parallelism=cfg.parallelism,
         activation_remat=None,
         dump_folder="/tmp/flex_cp_spike",

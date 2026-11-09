@@ -99,7 +99,7 @@ class TestFluxDataLoader(unittest.TestCase):
                 self.assertIsInstance(processor, FluxSampleProcessor.Config)
                 self.assertEqual(processor.img_size, 256)
                 self.assertEqual(
-                    config.model.max_context_length,
+                    config.training.max_context_length,
                     expected_max_context_length,
                 )
 
@@ -155,10 +155,10 @@ class TestFluxDataLoader(unittest.TestCase):
                     dp_world_size=world_size,
                     dp_rank=rank,
                     num_tokens_per_microbatch=(
-                        batch_size * config.model.max_context_length
+                        batch_size * config.training.max_context_length
                     ),
                     tokenizer=tokenizer,
-                    max_context_length=config.model.max_context_length,
+                    max_context_length=config.training.max_context_length,
                 )
 
                 it = iter(dl)
@@ -187,10 +187,10 @@ class TestFluxDataLoader(unittest.TestCase):
                     dp_world_size=world_size,
                     dp_rank=rank,
                     num_tokens_per_microbatch=(
-                        batch_size * config.model.max_context_length
+                        batch_size * config.training.max_context_length
                     ),
                     tokenizer=tokenizer,
-                    max_context_length=config.model.max_context_length,
+                    max_context_length=config.training.max_context_length,
                 )
                 dl_resumed.load_state_dict(state)
                 it_resumed = iter(dl_resumed)

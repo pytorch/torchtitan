@@ -3,13 +3,18 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+"""Parameter counting and FLOP formulas shared by model ``get_nparams_and_flops``."""
 
+import logging
 from collections.abc import Iterable
 from fractions import Fraction
 
-from torch import nn
+import torch.nn as nn
 
 from torchtitan.models.common.moe import MoE
+
+
+logger = logging.getLogger(__name__)
 
 
 def quadratic_attention_flops_per_token(
@@ -76,11 +81,30 @@ def delta_rule_flops_per_token(
     return 6 * 3 * num_heads * key_head_dim * v_head_dim
 
 
-def _get_active_parameter_weights(
+def get_nparams_and_active_nparams(
     model: nn.Module,
-    parameters: Iterable[nn.Parameter],
-) -> dict[int, Fraction]:
-    parameter_weights = {id(param): Fraction(1) for param in parameters}
+    *,
+    modules_excluded_from_active_params: Iterable[nn.Module | None] = (),
+) -> tuple[int, int]:
+    """Count total and matmul-active parameters for a native decoder.
+
+    Routed-expert parameters are weighted by the owning MoE module's active
+    expert ratio. Embedding tables are excluded unless their parameter is shared
+    with the output head. Explicitly excluded subtrees are also assigned zero
+    per-token parameter cost.
+
+    Args:
+        model: Built model whose parameters are counted.
+        modules_excluded_from_active_params: Module subtrees whose cost does not
+            scale per text token, such as a vision encoder.
+
+    Returns:
+        Total parameter count and effective parameter count for the conventional
+        ``6 * active_parameters`` training FLOP estimate.
+    """
+    named_parameters = list(model.named_parameters())
+    nparams = sum(param.numel() for _, param in named_parameters)
+    parameter_weights = {id(param): Fraction(1) for _, param in named_parameters}
 
     for module in model.modules():
         if isinstance(module, MoE):
@@ -90,73 +114,31 @@ def _get_active_parameter_weights(
             for param in module.routed_experts.parameters():
                 parameter_weights[id(param)] = active_expert_ratio
 
-    return parameter_weights
-
-
-def get_parameter_counts(model: nn.Module) -> tuple[int, int]:
-    """Return total and architecturally active parameter counts.
-
-    Every unique parameter is included in the total count. Routed-expert
-    parameters are weighted by the owning MoE module's active expert ratio for
-    the active count, while all other parameters, including embedding tables,
-    are counted in full. PyTorch's parameter iterator deduplicates parameters
-    shared through weight tying.
-
-    Args:
-        model: Built model whose parameters are counted.
-
-    Returns:
-        The total and architecturally active parameter counts.
-    """
-    parameters = list(model.parameters())
-    parameter_weights = _get_active_parameter_weights(model, parameters)
-    num_parameters = sum(param.numel() for param in parameters)
-    usage_weighted_nparams = sum(
-        param.numel() * parameter_weights[id(param)] for param in parameters
-    )
-    assert (
-        usage_weighted_nparams.denominator == 1
-    ), f"Active parameter count must be integral, got {usage_weighted_nparams}"
-    return num_parameters, usage_weighted_nparams.numerator
-
-
-def active_parameter_flops_per_token(
-    module: nn.Module,
-    *,
-    excluded_submodules: Iterable[nn.Module | None] = (),
-) -> int:
-    """Return parameter-based training FLOPs per token.
-
-    Embedding tables are excluded unless their parameter is shared with the
-    output head. Explicitly excluded subtrees are also assigned zero cost.
-    """
-    parameters = list(module.parameters())
-    parameter_weights = _get_active_parameter_weights(module, parameters)
-
-    lm_head = getattr(module, "lm_head", None)
+    lm_head = getattr(model, "lm_head", None)
     lm_head_parameter_ids = (
         {id(param) for param in lm_head.parameters()}
         if isinstance(lm_head, nn.Module)
         else set()
     )
-    for submodule in module.modules():
-        if isinstance(submodule, nn.Embedding):
-            for param in submodule.parameters(recurse=False):
+    for module in model.modules():
+        if isinstance(module, nn.Embedding):
+            for param in module.parameters(recurse=False):
                 if id(param) not in lm_head_parameter_ids:
                     parameter_weights[id(param)] = Fraction(0)
 
-    for excluded_submodule in excluded_submodules:
-        if excluded_submodule is None:
+    for module_excluded_from_active_params in modules_excluded_from_active_params:
+        if module_excluded_from_active_params is None:
             continue
-        for param in excluded_submodule.parameters():
+        for param in module_excluded_from_active_params.parameters():
             parameter_weights[id(param)] = Fraction(0)
 
-    usage_weighted_nparams = sum(
-        param.numel() * parameter_weights[id(param)] for param in parameters
+    nparams_for_matmul = sum(
+        param.numel() * parameter_weights[id(param)] for _, param in named_parameters
     )
-    assert (
-        usage_weighted_nparams.denominator == 1
-    ), f"Active parameter count must be integral, got {usage_weighted_nparams}"
-    # TODO: Account for frozen weights: forward-only costs 2P per token, while
-    # propagating input gradients without weight gradients costs 4P.
-    return 6 * usage_weighted_nparams.numerator
+    assert nparams_for_matmul.denominator == 1
+    active_nparams = nparams_for_matmul.numerator
+
+    logger.info(
+        f"Total parameter count: {nparams:,}, active parameters: {active_nparams:,}"
+    )
+    return nparams, active_nparams

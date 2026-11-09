@@ -41,7 +41,7 @@ from torchtitan.experiments.graph_trainer.trainer import (
     GraphTrainingEngine,
 )
 from torchtitan.trainer import Trainer
-from torchtitan.training_engine import LossAndMetrics, TrainingEngine
+from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
 
 @contextmanager
@@ -81,7 +81,7 @@ def build_minimal_trainer(
     *,
     activation_remat: ActivationRematConfig | None = None,
     compile_enable_passes: bool = True,
-    compile_extra_passes: list[str] | None = None,
+    compile_passes: list[str] | None = None,
     compile_ep_overlap_enabled: bool = False,
     compile_ep_overlap_chunk_dim: str = "batch",
     compile_ep_overlap_module_fqn: str = "layers.*",
@@ -107,9 +107,6 @@ def build_minimal_trainer(
     trainer.dataloader = SimpleNamespace(max_num_documents=max_num_documents)
     engine.max_num_documents = max_num_documents
     engine.ntokens_seen = 0
-    engine._forward_backward_num_flops = 0
-    # These numerics and compiler tests do not report MFU.
-    engine.flops_estimator = lambda inputs: 0
     engine.num_completed_steps = 0
     engine.sdc_replayer = None
     engine._accelerator_graph_per_microbatch_group_enabled = False
@@ -121,9 +118,7 @@ def build_minimal_trainer(
         trainer.config = SimpleNamespace(
             compile=GraphTrainerCompileConfig(
                 enable_passes=compile_enable_passes,
-                extra_passes=[]
-                if compile_extra_passes is None
-                else list(compile_extra_passes),
+                passes=[] if compile_passes is None else list(compile_passes),
                 disable_passes=(
                     []
                     if compile_disable_passes is None
@@ -212,7 +207,7 @@ def build_minimal_trainer(
 
         def run_direct_graph_accumulation(
             microbatch_groups, global_loss_token_counts
-        ) -> LossAndMetrics:
+        ) -> ForwardBackwardResult:
             """Run all groups through the test's unsplit graph adapter."""
             accumulated_loss = None
             loss_metrics = []
@@ -230,7 +225,7 @@ def build_minimal_trainer(
                 loss_metrics.append([{} for _ in model_kwargs])
 
             assert accumulated_loss is not None
-            return accumulated_loss, loss_metrics
+            return ForwardBackwardResult(accumulated_loss, loss_metrics)
 
         # Compiler component tests inspect the unsplit graph directly.
         engine._run_forward_backward = run_direct_graph_accumulation

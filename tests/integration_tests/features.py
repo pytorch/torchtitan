@@ -32,7 +32,6 @@ from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.components.renderer import from_renderers
 from torchtitan.components.validator import Validator
-from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.distributed.activation_remat import (
@@ -84,14 +83,12 @@ class SDCReplayMismatchTrainingEngine(TrainingEngine):
         config: TrainingEngine.Config,
         *,
         model_config: BaseModel.Config,
-        precision: PrecisionConfig,
         max_num_documents: int | None,
         output_dir: str,
     ) -> None:
         super().__init__(
             config,
             model_config=model_config,
-            precision=precision,
             max_num_documents=max_num_documents,
             output_dir=output_dir,
         )
@@ -398,6 +395,17 @@ def llama3_debugmodel_fsdp2_tp2_pp2_load() -> Trainer.Config:
     return config
 
 
+def llama3_debugmodel_fsdp2_tp2_pp2() -> Trainer.Config:
+    config = llama3_debugmodel(seq_len=2048)
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
+    return config
+
+
 def llama3_debugmodel_pp4_interleaved_1f1b() -> Trainer.Config:
     """PP-only; see ``llama3_debugmodel_pp2_1f1b`` for why type checking is off."""
     config = llama3_debugmodel(seq_len=2048)
@@ -457,7 +465,7 @@ def llama3_debugmodel_pp2_custom_csv() -> Trainer.Config:
 def muse_glimmer_debugmodel_optimizer_bf16_states() -> Trainer.Config:
     config = muse_glimmer_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
-    config.precision.reduce_dtype = "float32"
+    config.training.mixed_precision_reduce = "float32"
     config.optim.optimizer = OptimizersContainer.Config(
         optimizers=[AdamW.Config(pattern=r".*", moment_dtype="bfloat16")]
     )
@@ -971,6 +979,13 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             ],
             test_descr="PP+DP+TP 3D test with save/load resume ckpt",
             test_name="pp_dp_tp",
+            ngpu=8,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[llama3_debugmodel_fsdp2_tp2_pp2],
+            test_descr="PP+DP+TP 3D test",
+            test_name="3d",
             ngpu=8,
             use_real_pg=True,
         ),

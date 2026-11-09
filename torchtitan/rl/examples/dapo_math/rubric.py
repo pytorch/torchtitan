@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 from torchtitan.rl.examples.dapo_math.data import DapoMathSample
 from torchtitan.rl.examples.dapo_math.math_verify_pool import MathVerifyPool
-from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import Rollout
 from torchtitan.rl.rollout.rubric import RewardFn
 
@@ -43,23 +42,6 @@ class RewardMathVerify(RewardFn):
         response = (
             (completion_message.get("content") or "") if completion_message else ""
         )
-        result = await self._pool.score(
+        return await self._pool.score(
             response=response, ground_truth=env_input.ground_truth
         )
-        rollout.turns[-1].metrics.extend(
-            [
-                m.Metric(
-                    "math_verify/timeouts",
-                    m.Sum(float(result.status == "timed_out")),
-                ),
-                m.Metric(
-                    "math_verify/worker_deaths",
-                    m.Sum(float(result.status == "worker_died")),
-                ),
-                m.Metric(
-                    "math_verify/invalid_outputs",
-                    m.Sum(float(result.status == "invalid_output")),
-                ),
-            ]
-        )
-        return result.score

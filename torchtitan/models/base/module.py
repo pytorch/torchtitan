@@ -46,7 +46,6 @@ class Module(nn.Module, Configurable):
 
     _param_init: dict[str, Callable] | None = None
     _sharding_config: ShardingConfig | None = None
-    _preserve_dtype_params: tuple[str, ...] = ()
     _pos_arg_list: list[str] | None = None
     _parallelized: bool = False
     # ActivationRematConfig.apply replaces these defaults on every Module in a
@@ -71,21 +70,6 @@ class Module(nn.Module, Configurable):
             fnmatch(qualified_name, pattern)
             for pattern in self._remat_recompute_patterns
         )
-
-    def named_preserve_dtype_params(self) -> Iterator[tuple[str, nn.Parameter]]:
-        """Yield ``(fqn, parameter)`` for the ``preserve_dtype_params`` of every
-        module in this tree, with FQNs relative to this module.
-
-        Parameters are looked up when called, so after FSDP these are the sharded
-        parameters.
-        """
-        for module_fqn, module in self.named_modules():
-            if not isinstance(module, Module):
-                continue
-            for name in module._preserve_dtype_params:
-                yield f"{module_fqn}.{name}" if module_fqn else name, getattr(
-                    module, name
-                )
 
     def configure_remat_regions(
         self,
@@ -112,13 +96,6 @@ class Module(nn.Module, Configurable):
     class Config(Configurable.Config):
         param_init: dict | None = None
         sharding_config: ShardingConfig | None = None
-        preserve_dtype_params: tuple[str, ...] = ()
-        """Names of this module's own parameters that bulk casts never lower in
-        precision: FSDP's mixed precision ``param_dtype`` and the checkpoint
-        ``export_dtype`` keep a parameter's own dtype when it is wider, and the RL
-        weight sync sends it in its own dtype. For parameters whose numerics
-        need master precision, e.g. a linear-attention decay that the reference
-        checkpoint stores in float32."""
 
         def build(self, **kwargs):
             # slots=True prevents super().build() from working; call explicitly.
@@ -129,18 +106,6 @@ class Module(nn.Module, Configurable):
                 instance._param_init = self.param_init
             if self.sharding_config is not None:
                 instance._sharding_config = self.sharding_config
-            if self.preserve_dtype_params:
-                params = {
-                    name for name, p in instance._parameters.items() if p is not None
-                }
-                unknown = set(self.preserve_dtype_params) - params
-                if unknown:
-                    raise ValueError(
-                        f"preserve_dtype_params names {sorted(unknown)}, which are "
-                        f"not parameters of {type(instance).__name__}. Its "
-                        f"parameters are {sorted(params)}."
-                    )
-                instance._preserve_dtype_params = self.preserve_dtype_params
             return instance
 
     def init_states(

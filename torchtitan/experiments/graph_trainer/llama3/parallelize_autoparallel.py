@@ -19,7 +19,7 @@ import torch
 from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor.placement_types import Replicate, Shard
 
-from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_remat import ActivationRematConfig
@@ -40,7 +40,6 @@ def parallelize_autoparallel_llama(
     model,
     *,
     parallelism_context: ParallelismContext,
-    precision: PrecisionConfig,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: GraphTrainerCompileConfig,
@@ -88,12 +87,12 @@ def parallelize_autoparallel_llama(
                 dtype=torch.int32,
                 device=torch.device(device_type),
             )
-            % model.config.max_context_length
+            % training.max_context_length
         )
         return tokens, positions
 
-    param_dtype = TORCH_DTYPE_MAP[precision.param_dtype]
-    reduce_dtype = TORCH_DTYPE_MAP[precision.reduce_dtype]
+    param_dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]
+    reduce_dtype = TORCH_DTYPE_MAP[training.mixed_precision_reduce]
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
         reduce_dtype=reduce_dtype,

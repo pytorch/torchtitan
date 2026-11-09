@@ -52,7 +52,7 @@ def _numerics_config():
         deterministic=True,
     )
     config.training.steps = 1
-    config.precision.param_dtype = "float32"
+    config.training.mixed_precision_param = "float32"
     config.debug.seed = 42
     return config
 

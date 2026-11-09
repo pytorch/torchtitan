@@ -342,6 +342,7 @@ def deepseek_v4_debugmodel(
             # cannot run under CUDA graphs.
             disable_accelerator_graphs=parallelism.expert_parallel_degree > 1,
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=parallelism,
@@ -412,6 +413,7 @@ def deepseek_v4_mtp_debugmodel(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=parallelism,
@@ -466,6 +468,7 @@ def deepseek_v4_flash(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=parallelism,
@@ -520,6 +523,7 @@ def deepseek_v4_pro(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=parallelism,

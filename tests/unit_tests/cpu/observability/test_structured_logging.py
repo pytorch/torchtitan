@@ -196,6 +196,12 @@ class TestStepTags:
         clear_step_tags()
         assert get_step_tags() == ()
 
+    def test_step_tags_are_tuples(self):
+        """Step tags are tuples (immutable) to avoid shared-reference issues."""
+        add_step_tag("a")
+        tags = get_step_tags()
+        assert isinstance(tags, tuple)
+
     def test_set_step_clears_tags(self):
         add_step_tag("gc")
         set_step(2)

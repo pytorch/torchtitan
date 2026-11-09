@@ -22,6 +22,7 @@ from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_router_config,
 )
+from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan_recipes.overrides.fused_swiglu import FusedSwiGLU
 
@@ -70,6 +71,15 @@ def _deepep(cfg, **kwargs):
 
 
 class TestInferenceMoEComposition(unittest.TestCase):
+    def test_grouped_linears_and_dispatcher_are_siblings(self):
+        """Expert projections and the dispatcher are first-class siblings."""
+        cfg = _deepep(_moe_config())
+        self.assertIsInstance(cfg.routed_experts.w13, GroupedLinear.Config)
+        self.assertIsInstance(cfg.routed_experts.w2, GroupedLinear.Config)
+        self.assertIsInstance(
+            cfg.routed_experts.token_dispatcher, DeepEPTokenDispatcher.Config
+        )
+
     def test_generator_transform_and_fused_override_compose(self):
         cfg = _deepep(_moe_config(), cuda_graph_compatible=True)
 

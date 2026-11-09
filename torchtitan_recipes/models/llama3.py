@@ -58,6 +58,7 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
+            max_context_length=model_config.max_context_length,
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
@@ -93,6 +94,7 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
+            max_context_length=model_config.max_context_length,
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(

@@ -381,7 +381,6 @@ def _make_v4_attn_config(
             out_features=n_heads,
             bias=False,
             param_init=_LINEAR_INIT,
-            preserve_dtype_params=("weight",),
             sharding_config=attn_sink_sharding_config(),
         ),
         compressor=compressor_cfg,

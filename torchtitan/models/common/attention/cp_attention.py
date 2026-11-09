@@ -10,14 +10,13 @@ Tensor suffixes: ``T`` tokens, ``H`` heads, ``K`` qk head dim, ``V`` v head dim.
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, fields
-from typing import Generic, Literal, TypeVar
+from dataclasses import dataclass
+from typing import Generic, Literal, NamedTuple, TypeVar
 
 import spmd_types as spmd
 
 import torch
 import torch.distributed as dist
-from torch.export import register_dataclass
 
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.context_parallel import cp_all_gather_tensors
@@ -260,14 +259,11 @@ class AllGatherKVSlidingWindowFlexInnerAttention(
         return super().forward(q_THK, k_THK, v_THV, **kwargs)
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class AllGatherKVVarlenAttentionMetadata(VarlenAttentionMetadata):
+class AllGatherKVVarlenAttentionMetadata(NamedTuple):
     """Global document offsets and optional K/V reordering indices."""
 
+    varlen_metadata: VarlenAttentionMetadata
     inverse_permutation: torch.Tensor | None
-
-
-register_dataclass(AllGatherKVVarlenAttentionMetadata)
 
 
 class AllGatherKVVarlen(
@@ -298,25 +294,25 @@ class AllGatherKVVarlen(
             raise ValueError("K/V all-gather varlen CP requires a causal window.")
         if attention_metadata.cu_seq_k is not attention_metadata.cu_seq_q:
             raise ValueError("Varlen K/V all-gather CP supports only self-attention.")
-        inverse_permutation = None
-        if permutation is not None:
-            # A permutation must come from global head-tail load balancing.
-            if permutation.ndim != 2 or permutation.shape[0] != 1:
-                raise ValueError(
-                    "Head-tail varlen CP requires a permutation with shape (1, seq_len)."
-                )
-            seq_len = permutation.shape[1]
-            inverse_permutation = torch.empty_like(permutation[0])
-            inverse_permutation[permutation[0]] = torch.arange(
-                seq_len,
-                device=permutation.device,
-                dtype=permutation.dtype,
+        if permutation is None:
+            return AllGatherKVVarlenAttentionMetadata(
+                varlen_metadata=attention_metadata, inverse_permutation=None
             )
+        # A permutation must come from global head-tail load balancing.
+        if permutation.ndim != 2 or permutation.shape[0] != 1:
+            raise ValueError(
+                "Head-tail varlen CP requires a permutation with shape (1, seq_len)."
+            )
+
+        seq_len = permutation.shape[1]
+        inverse_permutation = torch.empty_like(permutation[0])
+        inverse_permutation[permutation[0]] = torch.arange(
+            seq_len,
+            device=permutation.device,
+            dtype=permutation.dtype,
+        )
         return AllGatherKVVarlenAttentionMetadata(
-            **{
-                field.name: getattr(attention_metadata, field.name)
-                for field in fields(VarlenAttentionMetadata)
-            },
+            varlen_metadata=attention_metadata,
             inverse_permutation=inverse_permutation,
         )
 
@@ -359,7 +355,9 @@ class AllGatherKVVarlen(
         k_THK: torch.Tensor,
         v_THV: torch.Tensor,
         *,
-        attention_metadata: AllGatherKVVarlenAttentionMetadata,
+        attention_metadata: (
+            VarlenAttentionMetadata | AllGatherKVVarlenAttentionMetadata
+        ),
         **kwargs,
     ) -> torch.Tensor:
         if not isinstance(attention_metadata, AllGatherKVVarlenAttentionMetadata):
@@ -367,28 +365,29 @@ class AllGatherKVVarlen(
                 f"{type(self).__name__} requires AllGatherKVVarlenAttentionMetadata, "
                 f"but got {type(attention_metadata).__name__}."
             )
-        assert isinstance(self, VarlenInnerAttention)
+        varlen_metadata = attention_metadata.varlen_metadata
         k_THK, v_THV = cp_all_gather_tensors(
             (k_THK, v_THV),
             reduce_dtype=self.reduce_dtype,
         )
 
-        left = attention_metadata.window_size[0]
+        left = varlen_metadata.window_size[0]
         # A chunk needs at most one document length of earlier keys.
-        max_document_length = attention_metadata.max_k
+        max_document_length = varlen_metadata.max_k
         max_lookback = (
             max_document_length if left == -1 else min(left, max_document_length)
         )
         cp_group = spmd_mesh_group(MeshAxisName.CP)
         assert cp_group is not None
         cp_rank = dist.get_rank(cp_group)
-        varlen_forward = self._forward_varlen
+
+        varlen_forward = super().forward
 
         def run_chunk(q_chunk_THK: torch.Tensor, q_start: int) -> torch.Tensor:
             end = q_start + q_chunk_THK.shape[0]
             kv_start = max(0, q_start - max_lookback)
             metadata = self._chunk_metadata(
-                attention_metadata,
+                varlen_metadata,
                 q_start=q_start,
                 end=end,
                 kv_start=kv_start,
@@ -433,7 +432,7 @@ class AllGatherKVVarlen(
 
 class AllGatherKVVarlenInnerAttention(
     AllGatherKVVarlen,
-    VarlenInnerAttention[AllGatherKVVarlenAttentionMetadata],
+    VarlenInnerAttention,
 ):
     """Varlen attention with sharded Q and all-gathered K/V."""
 
@@ -452,7 +451,7 @@ class AllGatherKVVarlenInnerAttention(
 
 class AllGatherKVSlidingWindowVarlenInnerAttention(
     AllGatherKVVarlen,
-    SlidingWindowVarlenInnerAttention[AllGatherKVVarlenAttentionMetadata],
+    SlidingWindowVarlenInnerAttention,
 ):
     """Sliding-window varlen attention with sharded Q and all-gathered K/V."""
 

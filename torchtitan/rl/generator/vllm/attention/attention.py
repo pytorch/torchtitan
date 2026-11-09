@@ -38,7 +38,7 @@ from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.observability.logging import warn_once
-from torchtitan.tools.utils import get_cuda_flash_attention_impl, set_default_dtype
+from torchtitan.tools.utils import get_cuda_flash_attention_impl
 
 logger = logging.getLogger(__name__)
 
@@ -401,21 +401,17 @@ class VLLMInnerAttention(InnerAttention):
                 "head_size_v": value_head_dim,
                 "attn_backend": TorchTitanVarlenInnerAttentionDiffKVBackend,
             }
-        # vLLM selects the attention backend from the default dtype. Build the layer
-        # in vLLM's model dtype, as vLLM builds its own models; the wrapper builds
-        # the TorchTitan model in the trainer's master dtype (``precision.dtype``).
-        with set_default_dtype(vllm_config.model_config.dtype):
-            self.vllm_attn = _VLLMAttention(
-                num_heads=num_heads,
-                head_size=head_dim,
-                scale=scale,
-                num_kv_heads=num_kv_heads,
-                cache_config=cache_config,
-                quant_config=None,
-                per_layer_sliding_window=config.sliding_window_size,
-                prefix=f"model.layers.{layer_id}.attention.inner_attention",
-                **diff_kv_kwargs,
-            )
+        self.vllm_attn = _VLLMAttention(
+            num_heads=num_heads,
+            head_size=head_dim,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            cache_config=cache_config,
+            quant_config=None,
+            per_layer_sliding_window=config.sliding_window_size,
+            prefix=f"model.layers.{layer_id}.attention.inner_attention",
+            **diff_kv_kwargs,
+        )
         _exclude_vllm_attn_scales_from_state_dict(self.vllm_attn)
         # Set sharding config for the inner vLLM attention module, which has scale
         # buffers that need to be replicated on all ranks in the dense mesh

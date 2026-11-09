@@ -100,6 +100,7 @@ def qwen3_debugmodel(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
+            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=parallelism,
@@ -224,6 +225,7 @@ def qwen3_debugmodel_flex_flash(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         checkpointer=None,
@@ -259,6 +261,7 @@ def qwen3_0_6b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
+            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         checkpointer=None,
@@ -293,6 +296,7 @@ def qwen3_1_7b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
+            max_context_length=model_config.max_context_length,
             steps=100,
         ),
         checkpointer=None,
@@ -337,6 +341,7 @@ def qwen3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.Co
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=180,
         ),
         dataloader=GrainDataLoader.Config(
@@ -414,6 +419,7 @@ def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
+            max_context_length=model_config.max_context_length,
             steps=3000,
         ),
         parallelism=parallelism,
@@ -455,6 +461,7 @@ def qwen3_30b_a3b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
+            max_context_length=model_config.max_context_length,
             steps=3000,
         ),
         parallelism=parallelism,
@@ -494,6 +501,7 @@ def qwen3_32b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
+            max_context_length=model_config.max_context_length,
             steps=3000,
         ),
         parallelism=parallelism,
@@ -548,6 +556,7 @@ def qwen3_moe_debug(
         training=TrainingConfig(
             disable_accelerator_graphs=disable_accelerator_graphs,
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
+            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=parallelism,
@@ -598,6 +607,7 @@ def qwen3_moe_deepep(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=2 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10,
             disable_accelerator_graphs=True,
         ),
@@ -662,6 +672,7 @@ def sft_qwen3_8b_math(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=180,
         ),
         dataloader=GrainDataLoader.Config(

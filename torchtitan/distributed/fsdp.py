@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+from collections.abc import Callable
 from typing import Any, cast, TYPE_CHECKING
 
 import torch
@@ -20,9 +21,7 @@ from torch.distributed.fsdp import (
 from torch.distributed.tensor import Shard
 
 from torchtitan.config.parallelism import FSDPSymmMemScope
-from torchtitan.distributed.fsdp_lifecycle import complete_fsdp_grouped_forward
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import MoE
 
@@ -34,7 +33,6 @@ __all__ = [
     "post_validate_fsdp_for_accelerator_graph",
     "get_fsdp_reshard_after_forward_policy",
     "linear_param_shard_placements",
-    "mixed_precision_policy",
     "resolve_fsdp_mesh",
     "resolve_sparse_fsdp_mesh",
 ]
@@ -50,11 +48,15 @@ def post_validate_fsdp_for_accelerator_graph(model_parts: list[nn.Module]) -> No
     A group containing norm and lm_head can still have norm pending. Validation
     has no backward callback to clear this state.
     """
+    # TODO: Use public FSDP APIs for grouped eval cleanup.
     for model in model_parts:
         for module in model.modules():
             if not isinstance(module, FSDPModule):
                 continue
-            complete_fsdp_grouped_forward(module, None)
+            state = module._get_fsdp_state()
+            if state._modules_to_run_forward:
+                state._post_forward(module, None, None)
+                state._modules_to_run_forward.clear()
             module.reshard()
 
 
@@ -229,38 +231,8 @@ def get_fsdp_reshard_after_forward_policy(
             )
 
 
-def mixed_precision_policy(
-    module: Module,
-    *,
-    param_dtype: torch.dtype,
-    reduce_dtype: torch.dtype,
-    cast_forward_inputs: bool = True,
-) -> MixedPrecisionPolicy:
-    """Build the FSDP mixed precision policy for the parameters of ``module``.
-
-    Parameters listed in their module's ``preserve_dtype_params`` are
-    all-gathered and computed in the wider of their own dtype and
-    ``param_dtype``; the rest in ``param_dtype``.
-    Call before ``fully_shard`` replaces the parameters: the override matches
-    parameters by identity.
-    """
-    preserved = {param for _, param in module.named_preserve_dtype_params()}
-
-    def param_dtype_override_fn(param: nn.Parameter) -> torch.dtype | None:
-        if param not in preserved:
-            return None
-        return torch.promote_types(param.dtype, param_dtype)
-
-    return MixedPrecisionPolicy(
-        param_dtype=param_dtype,
-        reduce_dtype=reduce_dtype,
-        cast_forward_inputs=cast_forward_inputs,
-        param_dtype_override_fn=param_dtype_override_fn if preserved else None,
-    )
-
-
 def apply_fsdp_to_multimodal_encoder(
-    encoder: Module,
+    encoder: nn.Module,
     dp_mesh: DeviceMesh,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
@@ -277,15 +249,13 @@ def apply_fsdp_to_multimodal_encoder(
     ``apply_fsdp_to_decoder`` so the encoder is already sharded.
 
     ``cpu_offload`` must match what the caller passes to ``apply_fsdp_to_decoder``.
-    Under ``parallelism.fsdp_enable_cpu_offloading`` the trainer materializes the whole model
+    Under ``training.enable_cpu_offload`` the trainer materializes the whole model
     on CPU, so an encoder sharded without ``CPUOffloadPolicy`` keeps CPU
     parameters while FSDP produces CUDA gradients for them, and backward dies with
     "attempting to assign a gradient with device type 'cuda' to a tensor with
     device type 'cpu'".
     """
-    mp_policy = mixed_precision_policy(
-        encoder, param_dtype=param_dtype, reduce_dtype=reduce_dtype
-    )
+    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     reshard_after_forward = get_fsdp_reshard_after_forward_policy(
         reshard_after_forward_policy, pp_enabled=pp_enabled
     )
@@ -313,6 +283,8 @@ def apply_fsdp_to_decoder(
     dp_mesh_dims: "DataParallelMeshDims | None" = None,
     edp_mesh_dims: "DataParallelMeshDims | None" = None,
     symm_mem_scope: FSDPSymmMemScope = None,
+    *,
+    param_dtype_override_fn: Callable[[nn.Parameter], torch.dtype | None] | None = None,
 ):
     """
     Apply data parallelism (via FSDP2) to a decoder-style transformer model.
@@ -353,12 +325,14 @@ def apply_fsdp_to_decoder(
         edp_mesh_dims: Sibling of ``dp_mesh_dims`` for the sparse SPMD mesh
             used by routed experts.
         symm_mem_scope: Which FSDP modules use symmetric-memory communication.
+        param_dtype_override_fn: Optional callback that overrides ``param_dtype``
+            for selected parameters.
     """
-    mp_policy = mixed_precision_policy(
-        model,
+    mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
         reduce_dtype=reduce_dtype,
         cast_forward_inputs=False,
+        param_dtype_override_fn=param_dtype_override_fn,
     )
     fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if dp_mesh_dims is not None:

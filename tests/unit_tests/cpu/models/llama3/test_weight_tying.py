@@ -76,7 +76,7 @@ class TestLlama3WeightTying(unittest.TestCase):
         unique_param_count = sum(
             p.numel() for p in {id(p): p for p in model.parameters()}.values()
         )
-        reported_param_count, _ = config.get_parameter_counts(model)
+        reported_param_count, _ = config.get_nparams_and_flops(model, seq_len=512)
 
         self.assertEqual(reported_param_count, unique_param_count)
 
@@ -88,6 +88,7 @@ class TestLlama3WeightTying(unittest.TestCase):
             Trainer.Config(
                 model=config,
                 training=TrainingConfig(
+                    max_context_length=config.max_context_length,
                     disable_accelerator_graphs=True,
                 ),
                 parallelism=ParallelismConfig(pipeline_parallel_degree=2),
@@ -100,6 +101,7 @@ class TestLlama3WeightTying(unittest.TestCase):
         Trainer.Config(
             model=config,
             training=TrainingConfig(
+                max_context_length=config.max_context_length,
                 disable_accelerator_graphs=True,
             ),
             parallelism=ParallelismConfig(pipeline_parallel_degree=2),

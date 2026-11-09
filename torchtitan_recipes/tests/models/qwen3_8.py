@@ -93,6 +93,7 @@ def qwen38_debugmodel(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         checkpointer=None,
@@ -150,6 +151,7 @@ def qwen38_debugmodel_moe(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10,
             disable_accelerator_graphs=True,
         ),
@@ -189,6 +191,7 @@ def qwen38_27b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=1000,
         ),
         parallelism=parallelism,
@@ -230,6 +233,7 @@ def qwen38_2_4t_a95b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
+            max_context_length=model_config.max_context_length,
             steps=1000,
             disable_accelerator_graphs=True,
         ),

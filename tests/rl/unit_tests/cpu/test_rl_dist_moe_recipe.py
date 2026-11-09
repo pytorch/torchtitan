@@ -7,7 +7,6 @@
 """The RL integration test for Dist-MoE only guards anything if its recipe is wired right."""
 
 import pytest
-from torchtitan.config import PrecisionConfig
 
 pytest.importorskip(
     "dist_moe",
@@ -41,11 +40,6 @@ def test_rl_integration_recipe_runs_dist_moe_on_both_roles():
     assert config.generator.parallelism.data_parallel_degree == 2
     assert config.generator.parallelism.expert_parallel_degree == 4
     assert config.trainer.parallelism.expert_parallel_degree == 4
-
-    # Controller.Config's Dist-MoE precision check is the only one RL trainers get.
-    config.precision = PrecisionConfig(param_dtype="float32")
-    with pytest.raises(ValueError, match="param_dtype='bfloat16'"):
-        config.__post_init__()
 
 
 def test_b200_rl_suite_runs_h100_tests_and_dist_moe():

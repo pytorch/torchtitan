@@ -28,7 +28,7 @@ import torch.distributed as dist
 # Registers the "loss" local compile region that the Qwen3.5 config lists.
 import torchtitan.components.loss  # noqa: F401
 
-from torchtitan.config import PrecisionConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
@@ -81,7 +81,13 @@ def run_worker(args):
     )
     parallelism_context.build_mesh()
 
-    precision = PrecisionConfig(param_dtype="bfloat16", reduce_dtype="float32")
+    training = TrainingConfig(
+        num_tokens_per_microbatch_per_dp_rank=1 * 128,
+        max_context_length=seq_len,
+        steps=1,
+        mixed_precision_param="bfloat16",
+        mixed_precision_reduce="float32",
+    )
 
     with parallelism_context.activate_spmd():
         model = config.build()
@@ -90,7 +96,7 @@ def run_worker(args):
 
     model = model.parallelize(
         parallelism_context=parallelism_context,
-        precision=precision,
+        training=training,
         parallelism=parallelism,
         local_compile=config.local_compile,
         activation_remat=DefaultActivationRematConfig(),

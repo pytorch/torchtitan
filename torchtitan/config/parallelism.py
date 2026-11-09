@@ -61,11 +61,6 @@ class ParallelismConfig:
     fsdp_defer_gradient_reduction: bool = False
     """Defer FSDP gradient reduction until the last accumulation step."""
 
-    fsdp_enable_cpu_offloading: bool = False
-    """
-    Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP
-    """
-
     fsdp_symm_mem_scope: FSDPSymmMemScope = None
     """
     Which FSDP modules use symmetric-memory communication. None disables it.

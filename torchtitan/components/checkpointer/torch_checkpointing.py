@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict_saver import _stateful_to_state_dict
@@ -58,7 +59,6 @@ from torchtitan.tools.garbage_collector import GarbageCollector
 from .base import (
     BaseCheckpointManager,
     EMA,
-    export_state_dict,
     LR_SCHEDULER,
     MODEL,
     ModelWrapper,
@@ -527,10 +527,17 @@ class TorchCheckpointingManager(BaseCheckpointManager):
     def _save_last_step(self, curr_step: int) -> None:
         checkpoint_id = self._create_last_step_id(curr_step)
         if self.last_save_model_only:
-            model = self.states[MODEL]
-            model_state = export_state_dict(
-                model.state_dict(), dtype=self.export_dtype, model_parts=model.model
-            )
+            model_state = self.states[MODEL].state_dict()
+            # Cast floating-point tensors to the export dtype and preserve other
+            # buffers.
+            model_state = {
+                key: value.to(self.export_dtype)
+                if isinstance(value, torch.Tensor)
+                and value.is_floating_point()
+                and value.dtype != self.export_dtype
+                else value
+                for key, value in model_state.items()
+            }
             states: dict[str, Any] = {MODEL: model_state}
             logger.info(
                 f"Saving a model only checkpoint in {self.export_dtype} "

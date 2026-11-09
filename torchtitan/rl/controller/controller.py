@@ -103,12 +103,7 @@ import torch  # noqa: F401
 
 from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.config import (
-    apply_overrides,
-    Configurable,
-    OverrideConfig,
-    PrecisionConfig,
-)
+from torchtitan.config import apply_overrides, Configurable, OverrideConfig
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.system import ActorSystem, TrainerHandle
 from torchtitan.rl.controller.metrics import (
@@ -290,11 +285,6 @@ class Controller(Configurable):
         trainer: Trainer.Config
         """Trainer config. Controls the trainer model, optimizer, training, parallelism."""
 
-        precision: PrecisionConfig = field(default_factory=PrecisionConfig)
-        """Parameter, compute, and gradient-reduction dtypes of the trainer model. The
-        generators mirror it: they compute in ``param_dtype`` and hold the parameters
-        the trainer sends in the dtypes it sends them."""
-
         # TODO: put generator, num generators and generator router in a separate config
         generator: Generator.Config
         """Generator actor configuration (generator model, vLLM engine, sampling)."""
@@ -374,11 +364,6 @@ class Controller(Configurable):
                     "(weights are synced from the trainer via TorchStore). "
                     "Set generator.checkpointer=None."
                 )
-            if (
-                self.trainer.dist_moe_runtime is not None
-                and self.precision.param_dtype != "bfloat16"
-            ):
-                raise ValueError("Dist-MoE requires precision.param_dtype='bfloat16'")
             if self.trainer.training.num_tokens_per_train_step != -1:
                 warnings.warn(
                     "trainer.training.num_tokens_per_train_step is ignored by "
@@ -407,10 +392,10 @@ class Controller(Configurable):
                 )
             if self.trainer.parallelism.enable_sequence_parallel:
                 sp_degree = self.trainer.parallelism.tensor_parallel_degree
-                max_context_length = self.trainer.model.max_context_length
+                max_context_length = self.trainer.training.max_context_length
                 if sp_degree > 1 and max_context_length % sp_degree != 0:
                     raise ValueError(
-                        "trainer.model.max_context_length "
+                        "training.max_context_length "
                         f"({max_context_length}) must be divisible "
                         f"by sequence parallel degree ({sp_degree})."
                     )
@@ -428,17 +413,25 @@ class Controller(Configurable):
                     )
                 if not self.trainer.debug.deterministic:
                     raise ValueError("batch_invariant requires deterministic=True")
-                # Batch-invariant mode computes in bf16. The generator computes in
-                # precision.param_dtype, and so does the trainer forward: the trainer
-                # always wraps the model in FSDP (even at data_parallel_shard_degree=1,
-                # where FSDP acts purely as a mixed-precision boundary), which casts
-                # the master weights to param_dtype before any matmul.
-                if self.precision.param_dtype != "bfloat16":
+                # The trainer forward must compute in bf16 to match the bf16
+                # generator, via FSDP mixed precision. The trainer always wraps
+                # the model in FSDP (even at data_parallel_shard_degree=1, where
+                # FSDP acts purely as a mixed-precision boundary), so
+                # mixed_precision_param == "bfloat16" casts the fp32 master
+                # weights to bf16 for the forward before any matmul.
+                if self.trainer.training.mixed_precision_param != "bfloat16":
                     raise ValueError(
-                        "batch_invariant requires the trainer and generator to compute "
-                        "in bfloat16. Set precision.param_dtype='bfloat16'. "
-                        "Got param_dtype="
-                        f"{self.precision.param_dtype!r}."
+                        "batch_invariant requires the trainer forward to compute "
+                        "in bfloat16 to match the generator. Set "
+                        "training.mixed_precision_param='bfloat16' (fp32 master "
+                        "weights, bf16-cast forward via FSDP mixed precision). "
+                        "Got mixed_precision_param="
+                        f"{self.trainer.training.mixed_precision_param!r}."
+                    )
+                if self.generator.model_dtype != "bfloat16":
+                    raise ValueError(
+                        f"batch_invariant requires bfloat16 generator dtype, "
+                        f"got {self.generator.model_dtype!r}"
                     )
                 if self.trainer.parallelism.enable_sequence_parallel:
                     raise ValueError(
@@ -488,7 +481,11 @@ class Controller(Configurable):
             except Exception:
                 logger.exception("trainer.close failed")
 
-        # Close generators before the rollouter, so in-flight rollout groups fail fast; see `Rollouter.close`.
+        try:
+            await self._rollouter.close()
+        except Exception:
+            logger.exception("rollouter.close failed")
+
         if self.generator_router is not None:
             try:
                 close_results = await self.generator_router.close_generators.call_one()
@@ -506,11 +503,6 @@ class Controller(Configurable):
                         )
             except Exception:
                 logger.exception("generator_router.close_generators failed")
-
-        try:
-            await self._rollouter.close()
-        except Exception:
-            logger.exception("rollouter.close failed")
 
         try:
             self.metrics_processor.close()
@@ -609,18 +601,21 @@ class Controller(Configurable):
             trainer_parallelism.data_parallel_replicate_degree * dp_shard
         )
 
-        # Ceiling (not target) for each generator DP rank's max_num_seqs, vLLM's cap on
-        # concurrently running sequences: vLLM queues requests above it even when KV has
-        # room. Sticky routing can send a rank more than an even share, so size it for
-        # every rollout sequence and let the KV budget limit admission. Capped at 512,
-        # vLLM's default largest CUDA graph capture size, to bound per-request buffers;
-        # this also sets CUDA-graph capture sizes.
-        max_num_seqs = min(rollout_concurrency, 512)
+        generator_dp_degree = max(config.generator.parallelism.data_parallel_degree, 1)
+        num_generator_dp_shards = config.num_generators * generator_dp_degree
+
+        # Ceiling (not target) for the generator's max_num_seqs: the per-generator
+        # upper bound on concurrently scheduled sequences. vLLM may admit fewer if KV
+        # is tight; this also sets CUDA-graph capture sizes.
+        max_num_seqs = min(
+            math.ceil(rollout_concurrency / num_generator_dp_shards), 512
+        )
 
         logger.info(
-            "max_num_seqs=%d per generator DP rank (rollout_concurrency=%d)",
+            "max_num_seqs=%d per generator (rollout_concurrency=%d / generator_dp_shards=%d)",
             max_num_seqs,
             rollout_concurrency,
+            num_generator_dp_shards,
         )
 
         with sl.log_trace_span("mesh_spawn"):
@@ -634,8 +629,8 @@ class Controller(Configurable):
             self.trainer = await actor_system.spawn_trainer(
                 config.trainer,
                 dp_degree=self.trainer_dp_degree,
-                precision=config.precision,
                 hf_assets_path=config.hf_assets_path,
+                generator_dtype=config.generator.model_dtype,
                 max_num_documents=config.async_loop.batcher.max_num_documents,
                 output_dir=config.dump_folder,
             )
@@ -643,7 +638,6 @@ class Controller(Configurable):
             self.generator_router = await actor_system.spawn_generator_router(
                 config.generator_router,
                 generator_config=config.generator,
-                precision=config.precision,
                 model_path=config.hf_assets_path,
                 max_num_seqs=max_num_seqs,
                 output_dir=config.dump_folder,
@@ -653,7 +647,7 @@ class Controller(Configurable):
                 num_tokens_per_microbatch_per_dp_rank=(
                     config.trainer.training.num_tokens_per_microbatch_per_dp_rank
                 ),
-                max_context_length=config.trainer.model.max_context_length,
+                max_context_length=config.trainer.training.max_context_length,
                 num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
                 dp_degree=self.trainer_dp_degree,
                 num_pp_microbatches=(

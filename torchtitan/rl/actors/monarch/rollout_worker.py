@@ -7,11 +7,10 @@
 from __future__ import annotations
 
 import asyncio
-import functools
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from monarch.actor import Actor, concurrent_endpoint, current_rank
+from monarch.actor import Actor, concurrent_endpoint
 
 from torchtitan.components.renderer import RendererConfig
 
@@ -29,12 +28,7 @@ class RolloutWorkerActor(Actor):
         *,
         worker_config: RolloutWorker.Config,
         num_threads: int,
-        structured_logger_init_fn: functools.partial[None] | None,
     ) -> None:
-        if structured_logger_init_fn is not None:
-            structured_logger_init_fn(
-                source="rl_rollout_worker", rank=current_rank().rank
-            )
         asyncio.get_running_loop().set_default_executor(
             ThreadPoolExecutor(max_workers=num_threads)
         )

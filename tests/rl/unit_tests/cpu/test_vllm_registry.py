@@ -10,7 +10,6 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import (
     LinearAttention,
@@ -248,7 +247,6 @@ def test_compressed_mla_configures_vllm_native_mla(monkeypatch, build_config):
     registry.register_to_vllm(
         config,
         parallelism=InferenceParallelismConfig(),
-        precision=PrecisionConfig(),
         checkpointer_config=None,
         model_state_dict_load_mode="cpu_prefetch",
     )

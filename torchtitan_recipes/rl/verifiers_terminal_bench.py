@@ -28,7 +28,7 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.components.renderer import from_renderers
-from torchtitan.config import PrecisionConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
@@ -223,7 +223,6 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
                 "timing/validate",
             ],
         ),
-        precision=PrecisionConfig(dtype="float32"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -245,6 +244,8 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_context_length,
+                max_context_length=max_context_length,
+                dtype="float32",
             ),
             parallelism=trainer_parallelism,
             activation_remat=FullActivationRematConfig(),
@@ -263,6 +264,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
+            model_dtype="bfloat16",
             engine=VLLMEngine.Config(
                 cuda_graph=VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY")
             ),
@@ -366,7 +368,6 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
                 "timing/validate",
             ],
         ),
-        precision=PrecisionConfig(dtype="float32"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -388,6 +389,8 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_context_length,
+                max_context_length=max_context_length,
+                dtype="float32",
             ),
             parallelism=trainer_parallelism,
             activation_remat=FullActivationRematConfig(),
@@ -406,6 +409,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
+            model_dtype="bfloat16",
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             parallelism=generator_parallelism,
             checkpointer=None,
@@ -507,6 +511,7 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_context_length,
+                max_context_length=max_context_length,
             ),
             parallelism=trainer_parallelism,
             activation_remat=FullActivationRematConfig(),
@@ -525,6 +530,7 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
+            model_dtype="bfloat16",
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             parallelism=generator_parallelism,
             checkpointer=None,

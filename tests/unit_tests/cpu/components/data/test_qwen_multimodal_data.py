@@ -102,6 +102,10 @@ class _RowsSourceConfig:
         return _RowsSource(self.rows)
 
 
+def test_multimodal_registry_does_not_enable_packing():
+    assert isinstance(MM_DATASETS["cc12m"], SingleDatasetConfig)
+
+
 def test_vision_processor_forwards_resize_config():
     captured = {}
 

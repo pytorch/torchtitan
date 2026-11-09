@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from torchtitan.config import PrecisionConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 
@@ -84,7 +84,30 @@ class _FakeAutoParallelGraph:
 def _training_config():
     return TrainingConfig(
         num_tokens_per_microbatch_per_dp_rank=2 * 8,
+        max_context_length=8,
+        mixed_precision_param="bfloat16",
+        mixed_precision_reduce="float32",
     )
+
+
+def test_autoparallel_integration_matrix():
+    from torchtitan.experiments.graph_trainer.tests.integration_tests import (
+        build_graph_trainer_autoparallel_h100_test_list,
+        build_graph_trainer_autoparallel_test_list,
+    )
+
+    suites = {
+        "default": build_graph_trainer_autoparallel_test_list(),
+        "h100": build_graph_trainer_autoparallel_h100_test_list(),
+    }
+
+    assert [test.test_name for test in suites["default"]] == [
+        "autoparallel_llama3_fsdp_tp"
+    ]
+    assert [test.test_name for test in suites["h100"]] == [
+        "autoparallel_deepseek_v3_edp_shard_ep"
+    ]
+    assert all(test.ngpu == 4 for tests in suites.values() for test in tests)
 
 
 def test_autoparallel_graph_pass_selection_uses_regular_memory_policy():
@@ -196,7 +219,6 @@ def test_model_autoparallel_uses_fx_module_path_and_resolved_policy(
         call_parallelize(
             model,
             parallelism_context=parallelism_context,
-            precision=PrecisionConfig(param_dtype="bfloat16", reduce_dtype="float32"),
             training=_training_config(),
             parallelism=parallelism,
             compile_config=compile_config,

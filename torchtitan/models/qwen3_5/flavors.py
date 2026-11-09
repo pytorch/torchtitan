@@ -432,7 +432,6 @@ def _qwen35_deltanet_config(
             eps=1e-6,
             activation_fn=SiLU.Config(),
             param_init={"weight": nn.init.ones_},
-            preserve_dtype_params=("weight",),
             sharding_config=gated_rms_norm_sharding_config(),
         ),
         # RowParallelLinear reduce-scatters with SP and all-reduces otherwise.

@@ -295,8 +295,8 @@ class EMA(OptimizersContainer):
                 "EMA is tracking %s tensors. Once the average and the live "
                 "value are close, the per-firing increment rounds away at that "
                 "precision and the EMA stops tracking altogether. Keep the "
-                "tracked tensors in float32 with precision.dtype='float32' "
-                "(FSDP2 still computes in precision.param_dtype).",
+                "tracked tensors in float32 (FSDP2's mixed_precision_param "
+                "already does).",
                 ", ".join(low_precision),
             )
 

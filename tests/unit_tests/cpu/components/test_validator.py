@@ -66,7 +66,6 @@ def _generic_validator(loader):
         pp_enabled=False,
         dp_cp_enabled=False,
         activate_spmd=lambda **kwargs: nullcontext(),
-        get_optional_mesh=lambda axes: None,
     )
     validator.dl_config = SimpleNamespace(
         build=mock.Mock(return_value=loader), max_num_documents=None
@@ -81,7 +80,7 @@ def _generic_validator(loader):
         reset=mock.Mock(),
         log_validation=mock.Mock(),
     )
-    validator.loss_fn = lambda predictions, labels: (predictions.sum(), {})
+    validator.loss_fn = lambda predictions, labels: (predictions.sum(), None)
     validator.parallelism = SimpleNamespace()
     return validator
 
@@ -123,13 +122,13 @@ def test_eval_wrapper_returns_each_real_run(monkeypatch, num_groups):
     validator.validate([model], step=1)
     assert len(calls) == num_groups
     validator.metrics_processor.log_validation.assert_called_once_with(
-        loss=(num_groups + 1) / 2, step=1, extra_metrics={}
+        loss=(num_groups + 1) / 2, step=1
     )
     assert not accelerator_graph_manager.capture_allowed
     validator.validate([model], step=2)
     assert len(calls) == 2 * num_groups
     validator.metrics_processor.log_validation.assert_called_with(
-        loss=(3 * num_groups + 1) / 2, step=2, extra_metrics={}
+        loss=(3 * num_groups + 1) / 2, step=2
     )
     torch.testing.assert_close(calls[-1], row.input, rtol=0, atol=0)
     assert model.training
@@ -167,42 +166,9 @@ def test_validation_preprocessing_uses_validation_document_limit(monkeypatch):
         "parallelism_context": validator.parallelism_context,
         "parallelism": validator.parallelism,
         "max_num_documents": 4,
+        "max_context_length": validator.seq_len,
     }
     torch.testing.assert_close(preprocess.call_args.args[0]["input"], row.input)
-
-
-def test_validation_logs_loss_metrics(monkeypatch):
-    """/mean metrics are raw sums normalized by the valid-token total; /max is not."""
-
-    def microbatch(value, num_tokens):
-        return TokenizedTrainingMicrobatch(
-            input=torch.full((1, num_tokens), float(value)),
-            labels=torch.ones(1, num_tokens, dtype=torch.long),
-            positions=torch.zeros(1, num_tokens, dtype=torch.long),
-            padding_mask=torch.zeros(1, num_tokens, dtype=torch.bool),
-            loss_token_counts=torch.tensor(num_tokens),
-            routing_token_counts=torch.tensor([num_tokens]),
-        )
-
-    validator = _generic_validator(
-        _ClosableLoader([microbatch(1.0, num_tokens=1), microbatch(3.0, num_tokens=3)])
-    )
-    validator.config.steps = 2
-    validator.loss_fn = lambda predictions, labels: (
-        predictions.sum(),
-        {"x/mean": 2 * predictions.sum(), "x/max": predictions.max()},
-    )
-    monkeypatch.setattr(validator_module.utils, "device_type", "cpu")
-    validator.validate([_EchoModel()], step=1)
-    # 4 valid tokens; raw sums 1 + 9 = 10.
-    validator.metrics_processor.log_validation.assert_called_once_with(
-        loss=10 / 4,
-        step=1,
-        extra_metrics={
-            "validation_metrics/x/mean": 20 / 4,
-            "validation_metrics/x/max": 3.0,
-        },
-    )
 
 
 @pytest.mark.parametrize("raises", [False, True])

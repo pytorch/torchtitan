@@ -58,7 +58,7 @@ def graph_trainer_deepseek_v3_debugmodel_mxfp8() -> GraphTrainer.Config:
     # Quantize dense and moe gemms to mxfp8
     base.model = build_deepseek_v3_model_config(
         "debugmodel",
-        seq_len=base.model.max_context_length,
+        seq_len=base.training.max_context_length,
         converters=[
             deepseek_v3_mxfp8_linear_converter_config(),
             MXFP8GroupedLinearConverter.Config(
@@ -79,7 +79,7 @@ def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
     base.model = build_model_config(
         "debugmodel",
         attn_backend="flex",
-        seq_len=base.model.max_context_length,
+        seq_len=base.training.max_context_length,
         parallelism=base.parallelism,
     )
     config = to_graph_trainer_config(base, GraphTrainerDeepSeekV3Model.Config)

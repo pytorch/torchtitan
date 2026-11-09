@@ -20,9 +20,6 @@ from torchtitan_recipes.tests.graph_trainer.b200 import (
 from torchtitan_recipes.tests.graph_trainer.deepseek_v3 import (
     graph_trainer_deepseek_v3_debugmodel,
 )
-from torchtitan_recipes.tests.graph_trainer.gpt_oss import (
-    graph_trainer_gpt_oss_debugmodel_flex,
-)
 from torchtitan_recipes.tests.graph_trainer.llama3 import (
     graph_trainer_llama3_debugmodel,
     graph_trainer_llama3_debugmodel_varlen_cross_entropy_loss,
@@ -35,7 +32,6 @@ from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2,
 )
-from torchtitan_recipes.tests.models.gpt_oss import gpt_oss_debugmodel_flex
 from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 from torchtitan_recipes.tests.models.qwen3 import qwen3_debugmodel, qwen3_moe_debug
 
@@ -296,29 +292,6 @@ def qwen3_moe_graph_numerics():
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 2
     return config
-
-
-def _gpt_oss_numerics_parallelism() -> ParallelismConfig:
-    return ParallelismConfig(
-        data_parallel_shard_degree=2,
-        tensor_parallel_degree=2,
-        expert_parallel_degree=2,
-    )
-
-
-# FlexAttention: FA4's Varlen backward is not deterministic for full causal
-# attention on Blackwell, so a Varlen eager run does not reproduce itself.
-def gpt_oss_eager_numerics():
-    config = gpt_oss_debugmodel_flex(parallelism=_gpt_oss_numerics_parallelism())
-    # Match GraphTrainer, which captures model and loss in one eager FX graph.
-    config.model.local_compile.regions = []
-    return _without_inplace_wgrad_accum(config)
-
-
-def gpt_oss_graph_numerics():
-    return graph_trainer_gpt_oss_debugmodel_flex(
-        parallelism=_gpt_oss_numerics_parallelism()
-    )
 
 
 def llama3_varlen_manual_numerics():

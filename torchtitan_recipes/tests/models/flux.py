@@ -77,11 +77,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
             autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
-        model=build_model_config(
-            "flux-debug",
-            parallelism=parallelism,
-            seq_len=_flux_seq_len(img_size, max_t5_encoding_len),
-        ),
+        model=build_model_config("flux-debug", parallelism=parallelism),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
@@ -94,6 +90,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=2048,
+            max_context_length=_flux_seq_len(img_size, max_t5_encoding_len),
             steps=10,
             disable_accelerator_graphs=True,
         ),

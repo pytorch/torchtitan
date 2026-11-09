@@ -32,7 +32,7 @@ def preprocess_data(
     Args:
         device (torch.device): device to do preprocessing on
         dtype (torch.dtype): data type to do preprocessing in
-        autoencoder (AutoEncoder): autoencoder to use for preprocessing
+        autoencoer(AutoEncoder): autoencoder to use for preprocessing
         clip_encoder (HFEmbedder): CLIPTextModel to use for preprocessing
         t5_encoder (HFEmbedder): T5EncoderModel to use for preprocessing
         batch (dict[str, Tensor]): batch of data to preprocess. Tensor shape: [bsz, ...]

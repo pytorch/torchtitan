@@ -29,7 +29,7 @@ from torch.utils._ordered_set import OrderedSet
 from torch.utils.checkpoint import checkpoint, CheckpointPolicy
 
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
-from torchtitan.config import PrecisionConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
@@ -834,7 +834,7 @@ class TestHSDPGradCollectiveReorderingPass(FSDPTest):
         model = apply_simple_fsdp(
             model,
             parallelism_context=parallelism_context,
-            precision=PrecisionConfig(param_dtype="float32"),
+            training=TrainingConfig(mixed_precision_param="float32"),
         )
         torch.manual_seed(42 + self.rank)
         inputs = torch.randn(4, 16, device="cuda")
