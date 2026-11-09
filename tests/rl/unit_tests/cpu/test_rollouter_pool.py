@@ -96,6 +96,11 @@ class _Worker:
         self.run_group = _RunGroupEndpoint()
         self.sync_log_step = _CallOneEndpoint()
         self.hostname = _CallOneEndpoint()
+        self.process_metrics = SimpleNamespace(
+            call_one=lambda: asyncio.ensure_future(
+                asyncio.sleep(0, result=[f"metric of worker {id(self)}"])
+            )
+        )
 
 
 class _ActorSystem:
@@ -248,6 +253,9 @@ def test_setup_spawns_and_sets_up_every_worker_and_close_stops_them() -> None:
                     "vision_processor_config": None,
                 }
             ]
+        assert await rollouter.process_metrics() == [
+            f"metric of worker {id(worker)}" for worker in actor_system.workers
+        ]
         await rollouter.close()
         assert actor_system.stopped
 
