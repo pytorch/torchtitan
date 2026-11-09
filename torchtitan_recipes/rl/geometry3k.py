@@ -89,8 +89,8 @@ def rl_grpo_qwen3_5_0_8b_geometry3k() -> Controller.Config:
             num_training_steps=100,
             num_prompts_per_train_step=16,
             num_samples_per_prompt=8,
-            # One pass over the 601 test problems (the dataset reshuffles each epoch).
-            validation=ValidationConfig(steps=601),
+            # One pass over the 601 test problems.
+            validation=ValidationConfig(steps=-1),
             # Qwen3.5's image tokens take M-RoPE positions.
             batcher=Batcher.Config(build_mrope_positions=True),
         ),

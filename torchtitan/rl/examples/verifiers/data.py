@@ -66,6 +66,7 @@ class VerifiersTaskDataset(RLDataset):
                 "num_tasks": self.num_tasks,
                 "seed": self.seed,
                 "shuffle": self.shuffle,
+                "repeat": self.repeat,
             }
 
     def __init__(self, config: Config) -> None:
@@ -98,7 +99,9 @@ class VerifiersTaskDataset(RLDataset):
             for task in tasks
         ]
         dataset = grain.MapDataset.source(samples)
-        self._iterator = iter(dataset.repeat().to_iter_dataset())
+        if config.repeat:
+            dataset = dataset.repeat()
+        self._iterator = iter(dataset.to_iter_dataset())
 
     def __iter__(self) -> Iterator[VerifiersTaskSample]:
         return self

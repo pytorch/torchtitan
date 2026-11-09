@@ -160,8 +160,9 @@ class ValidationConfig:
         due at 75                    ...==x   cancelled: training ended
     """
 
-    steps: int = 20
-    """Maximum prompts per validation. -1 reads the finite source once; 0 disables."""
+    steps: int = -1
+    """Prompts per validation, never repeated. -1 reads the whole validation dataset; N > 0 reads
+    the first N and raises if the dataset has fewer. 0 disables."""
 
     freq: int | None = None
     """A validation comes due at each multiple of `freq` after step 0; none starts at the last step. None:
@@ -908,7 +909,8 @@ class Controller(Configurable):
         logger.info(f"Validation started at step {step}")
         # TODO: read prompts as slots free up and drop each once its metrics are folded, instead of
         # reading every prompt first. That also bounds the slots a validation takes in the generators and
-        # in a rollouter's own limit. Do it when validation moves out of the controller.
+        # in a rollouter's own limit. Keep one fresh dataset per validation, so validations that overlap
+        # each start at the first prompt. Do it when validation moves out of the controller.
         # Off the event loop: training runs meanwhile, and building the dataset can take seconds.
         samples = await asyncio.to_thread(self._rollouter.get_validation_samples, steps)
         greedy = replace(self._sampling, temperature=0.0, top_p=1.0)

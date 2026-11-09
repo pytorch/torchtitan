@@ -10,8 +10,10 @@ No GPU, no retrieval server: the retrieval call is monkeypatched.
 """
 
 import asyncio
+import itertools
 
 import numpy as np
+from datasets import Dataset
 from renderers import CustomRendererConfig
 from renderers.base import ParsedToolCall
 
@@ -21,6 +23,7 @@ from torchtitan.rl.controller.controller import Controller
 from torchtitan.rl.examples.search_r1 import (
     env as sr1_env,
     RewardExactMatch,
+    SearchR1Dataset,
     SearchR1Env,
     SearchR1Sample,
 )
@@ -188,3 +191,17 @@ def test_reward_no_search_penalty_anti_closed_book():
         r(_rollout(answer="Paris", tool_results=["capital is Paris"]), EX)
     )
     assert searched == 1.0
+
+
+def test_dataset_without_repeat_ends_after_one_pass(tmp_path) -> None:
+    data_path = str(tmp_path / "test.parquet")
+    Dataset.from_list(
+        [
+            {"question": "q0", "golden_answers": ["a0"], "data_source": "nq"},
+            {"question": "q1", "golden_answers": ["a1"], "data_source": "nq"},
+        ]
+    ).to_parquet(data_path)
+    config = SearchR1Dataset.Config(data_path=data_path, shuffle=False, repeat=False)
+
+    samples = itertools.islice(config.build(), 3)
+    assert [sample.question for sample in samples] == ["q0", "q1"]
