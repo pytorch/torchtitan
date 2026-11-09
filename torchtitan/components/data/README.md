@@ -485,6 +485,33 @@ trainer computes batch 10
 background thread prepares batches 11 and 12
 ```
 
+### Balancing microbatches across ranks
+
+With gradient accumulation, every microbatch synchronizes all data-parallel ranks, so a microbatch runs at the speed of its slowest rank. Packed rows of equal length can differ several times in attention cost with document masking: one full-length document costs far more than many short ones. `balancer` reassigns each optimizer step's microbatches across data-parallel ranks and accumulation slots so each slot holds microbatches of similar cost:
+
+```python
+from torchtitan.components.data import DocumentAttentionCost, MicrobatchBalancer
+
+config.dataloader = GrainDataLoader.Config(
+    dataset=packed_pretraining_ds,
+    balancer=MicrobatchBalancer.Config(
+        cost=DocumentAttentionCost.Config(),  # sum of squared document lengths
+        group_size=0,  # 0: all data-parallel ranks; else consecutive groups
+    ),
+)
+```
+
+Per step, ranks all-gather their microbatch costs over gloo, every rank computes the same assignment (heaviest first, one group of ranks per slot, keeping microbatches on their owner when possible), and only moved microbatches are exchanged. The step's microbatches and the loss normalization are unchanged, so the gradient is unchanged up to summation order.
+
+```text
+balancing group -> data-parallel ranks with the same CP/TP coordinate
+CP/TP peers     -> compute the same plan, receive the same microbatches
+group_size      -> consecutive data-parallel ranks; with HSDP, <= dp_shard stays in one replica
+PP              -> not supported (pipeline schedules need per-replica totals balanced instead)
+```
+
+Balancing runs when the trainer requests a step's first microbatch, so dataloader checkpoints stay exact. The exchange costs are a few floats per rank for costs plus the moved microbatches (about 0.5 MB per 64K-token text row).
+
 # Distributed and checkpoint behavior
 
 Only the effective data-parallel coordinate selects data:
