@@ -38,6 +38,7 @@ from torchtitan.rl.examples.verifiers.generation_server import (
 from torchtitan.rl.examples.verifiers.rollouter import (
     _trainable_token_spans,
     log_failed_rollout,
+    RewardFromVerifiers,
     VERIFIERS_REWARD_KEY,
     verifiers_rollout_logs,
     VerifiersRolloutWorker,
@@ -45,9 +46,29 @@ from torchtitan.rl.examples.verifiers.rollouter import (
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
-from torchtitan.rl.rollout.rubric import RubricOutput
+from torchtitan.rl.rollout.rubric import Rubric, RubricOutput
 from torchtitan.rl.rollout.types import Completion, Rollout, RolloutStatus
 from verifiers.v1.utils.scope import run_scope
+
+
+def _recorded_error(error_type: str, status_code: int | None = None) -> SimpleNamespace:
+    """An error as Verifiers records it on a trace or an episode (`verifiers.v1.trace.Error`)."""
+    fields = {
+        "type": error_type,
+        "message": f"{error_type} happened",
+        "status_code": status_code,
+        "traceback": None,
+    }
+    return SimpleNamespace(**fields, model_dump=lambda mode: fields)
+
+
+def _call(error: SimpleNamespace | None = None) -> SimpleNamespace:
+    """A model call as Verifiers records it on a trace (`verifiers.v1.trace.ModelCall`)."""
+    return SimpleNamespace(time=SimpleNamespace(duration=0.0), error=error)
+
+
+# The renderer or the generation server refused a prompt past the context.
+_REFUSED_CALL = _call(_recorded_error("ProviderError", 400))
 
 
 def test_train_client_config_carries_an_in_tree_renderer() -> None:
@@ -598,6 +619,7 @@ def test_verifiers_rollout_logs_keep_the_failure_reason(caplog) -> None:
         id="trace-1",
         task=SimpleNamespace(key="task-1"),
         stop_condition="error",
+        dropped="a judge gave a drop verdict",
         errors=[
             Error(
                 type="HarnessError",
@@ -634,6 +656,7 @@ def test_verifiers_rollout_logs_keep_the_failure_reason(caplog) -> None:
         6900.0,
         300.0,
     )
+    assert logs["dropped"] == "a judge gave a drop verdict"
     assert logs["model_calls"] == 2
     assert logs["failed_model_calls"] == 1
     assert logs["slowest_model_call_sec"] == 1801.0
@@ -830,7 +853,7 @@ def test_generation_server_requires_group_id() -> None:
                     headers={"X-Session-ID": "group=1/rollout=2"},
                     json={"token_ids": [10, 11], "sampling_params": {}},
                 )
-                assert response.status == 400
+                assert response.status == 422
                 payload = await response.json()
         finally:
             await server.close()
@@ -931,31 +954,41 @@ def _env_whose_rollouts_end_as(episode: object) -> SimpleNamespace:
     return SimpleNamespace(run_slot=AsyncMock(return_value=episode))
 
 
-def test_rollout_whose_first_prompt_does_not_fit_is_flagged(caplog) -> None:
-    # The first model call fails for context length, so the rollout has no turns.
+@pytest.mark.parametrize(
+    "calls, trace_errors, expected",
+    [
+        # The first prompt is past the context: the data's problem, flagged.
+        ([_REFUSED_CALL], [], RolloutStatus.TRUNCATED_PROMPT_TOO_LONG),
+        # The generator unreachable: not the policy's doing, so its group still trains.
+        (
+            [_call(_recorded_error("ProviderError", 503))],
+            [_recorded_error("ProviderError", 503)],
+            RolloutStatus.ERROR_INFRA,
+        ),
+    ],
+)
+def test_rollout_that_ended_before_its_first_turn_has_no_turns(
+    caplog, calls, trace_errors, expected
+) -> None:
     span = SimpleNamespace(duration=0.0)
     trace = SimpleNamespace(
         id="trace",
         task=SimpleNamespace(key="huge-task"),
         agent=SimpleNamespace(trainable=True),
-        ok=True,
+        ok=not trace_errors,
         is_truncated=False,
         is_timeout=False,
         stop_condition="agent_completed",
-        errors=[],
+        dropped=None,
+        errors=trace_errors,
+        last_error=trace_errors[-1] if trace_errors else None,
         timing=SimpleNamespace(
             setup=span,
             agent=SimpleNamespace(duration=0.0, model=span, harness=span),
             scoring=span,
         ),
-        calls=[
-            SimpleNamespace(
-                time=span,
-                error=SimpleNamespace(
-                    message="Prompt length (9) exceeds maximum context length (8)."
-                ),
-            )
-        ],
+        calls=calls,
+        num_turns=0,
         nodes=[],
         branches=[],
     )
@@ -964,7 +997,13 @@ def test_rollout_whose_first_prompt_does_not_fit_is_flagged(caplog) -> None:
         model_id="model", pop_generation_metadata=lambda trace_id: None
     )
     worker._verifiers_env = _env_whose_rollouts_end_as(
-        SimpleNamespace(ok=True, is_timeout=False, errors=[], traces=[trace])
+        SimpleNamespace(
+            ok=not trace_errors,
+            is_timeout=False,
+            errors=[],
+            last_error=None,
+            traces=[trace],
+        )
     )
     worker._verifiers_train_client_config = object()
 
@@ -981,26 +1020,68 @@ def test_rollout_whose_first_prompt_does_not_fit_is_flagged(caplog) -> None:
             )
         )
 
-    assert rollout.status is RolloutStatus.ERROR
-    assert "first prompt of task huge-task does not fit" in caplog.text
+    assert rollout.status is expected and rollout.turns == []
+    is_flagged = "first prompt of task huge-task does not fit" in caplog.text
+    assert is_flagged == (expected is RolloutStatus.TRUNCATED_PROMPT_TOO_LONG)
 
 
 @pytest.mark.parametrize(
-    "ok, is_timeout, episode_is_timeout, expected",
+    "ok, stop_condition, episode_is_timeout, num_turns, last_error, expected",
     [
-        (True, True, False, RolloutStatus.ERROR_TIMEOUT),
-        (False, True, False, RolloutStatus.ERROR_TIMEOUT),
+        (True, "agent_timeout", False, 1, None, RolloutStatus.ERROR_TIMEOUT),
+        (False, "agent_timeout", False, 1, None, RolloutStatus.ERROR_TIMEOUT),
+        # A grading deadline is the grader's, not the policy's.
+        (True, "finalize_timeout", False, 1, None, RolloutStatus.ERROR_INFRA),
+        (True, "scoring_timeout", False, 1, None, RolloutStatus.ERROR_INFRA),
+        # Also after a refused prompt: the grade is broken either way.
+        (
+            True,
+            "scoring_timeout",
+            False,
+            1,
+            _REFUSED_CALL.error,
+            RolloutStatus.ERROR_INFRA,
+        ),
         # The episode's own deadline flags the episode and leaves it not ok.
-        (True, False, True, RolloutStatus.ERROR_TIMEOUT),
-        (False, False, False, RolloutStatus.ERROR),
-        (True, False, False, RolloutStatus.COMPLETED),
+        (True, None, True, 1, None, RolloutStatus.ERROR_TIMEOUT),
+        # The sandbox boot ran past timeout.setup: the policy never sampled.
+        (True, "setup_timeout", False, 0, None, RolloutStatus.ERROR_INFRA),
+        # A generator call failed, and a deadline also passed: the generator's failure.
+        (
+            False,
+            "agent_timeout",
+            False,
+            1,
+            _recorded_error("ProviderError", 503),
+            RolloutStatus.ERROR_INFRA,
+        ),
+        # A failure with no recorded error after a turn: not a failed harness run.
+        (False, None, False, 1, None, RolloutStatus.ERROR_INFRA),
+        (True, None, False, 1, None, RolloutStatus.COMPLETED),
     ],
 )
-def test_rollout_status_maps_timeouts_to_error_timeout(
-    ok: bool, is_timeout: bool, episode_is_timeout: bool, expected: RolloutStatus
+def test_rollout_status_maps_deadlines(
+    ok: bool,
+    stop_condition: str | None,
+    episode_is_timeout: bool,
+    num_turns: int,
+    last_error: SimpleNamespace | None,
+    expected: RolloutStatus,
 ) -> None:
-    trace = SimpleNamespace(ok=ok, is_timeout=is_timeout, is_truncated=False)
-    episode = SimpleNamespace(ok=not episode_is_timeout, is_timeout=episode_is_timeout)
+    trace = SimpleNamespace(
+        ok=ok,
+        # `Trace.record_timeout` sets both: is_timeout, and the stop condition "<stage>_timeout".
+        is_timeout=stop_condition is not None,
+        is_truncated=False,
+        stop_condition=stop_condition,
+        last_error=last_error,
+        # The last model call recorded the trace's last error, if any.
+        calls=[_call(last_error)],
+        num_turns=num_turns,
+    )
+    episode = SimpleNamespace(
+        ok=not episode_is_timeout, is_timeout=episode_is_timeout, last_error=None
+    )
 
     status = VerifiersRolloutWorker.rollout_status(
         verifiers_episode=episode, trace=trace
@@ -1009,7 +1090,217 @@ def test_rollout_status_maps_timeouts_to_error_timeout(
     assert status is expected
 
 
-def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
+@pytest.mark.parametrize(
+    "calls, num_turns, trace_ok, trace_errors, episode_errors, expected",
+    [
+        # The harness died on a prompt past the context, after a turn.
+        (
+            [_call(), _REFUSED_CALL],
+            1,
+            False,
+            [_REFUSED_CALL.error],
+            [],
+            RolloutStatus.TRUNCATED_PROMPT_TOO_LONG,
+        ),
+        # It shortened the prompt and went on: Verifiers' own outcome stands.
+        ([_REFUSED_CALL, _call()], 1, True, [], [], RolloutStatus.COMPLETED),
+        # Before the first turn, any failure is outside the policy: it never sampled.
+        (
+            [],
+            0,
+            False,
+            [_recorded_error("HarnessError")],
+            [],
+            RolloutStatus.ERROR_INFRA,
+        ),
+        (
+            [],
+            0,
+            False,
+            [_recorded_error("SandboxError")],
+            [],
+            RolloutStatus.ERROR_INFRA,
+        ),
+        # A failed generator call is outside the policy, also after a turn.
+        (
+            [_call()],
+            1,
+            False,
+            [_recorded_error("ProviderError", 503)],
+            [],
+            RolloutStatus.ERROR_INFRA,
+        ),
+        (
+            [_call()],
+            1,
+            False,
+            [_recorded_error("InterceptionError")],
+            [],
+            RolloutStatus.ERROR_INFRA,
+        ),
+        # After a turn, a sandbox, tool or task error names the boundary, not who broke it.
+        (
+            [_call()],
+            1,
+            False,
+            [_recorded_error("SandboxError")],
+            [],
+            RolloutStatus.ERROR_INFRA,
+        ),
+        (
+            [_call()],
+            1,
+            False,
+            [_recorded_error("TaskError")],
+            [],
+            RolloutStatus.ERROR_INFRA,
+        ),
+        (
+            [_call()],
+            1,
+            False,
+            [_recorded_error("ToolsetError")],
+            [],
+            RolloutStatus.ERROR_INFRA,
+        ),
+        # The harness run failed with the exact `HarnessError`: the policy's.
+        (
+            [_call()],
+            1,
+            False,
+            [_recorded_error("HarnessError")],
+            [],
+            RolloutStatus.ERROR,
+        ),
+        # An unknown error: not a failed harness run.
+        (
+            [_call()],
+            1,
+            False,
+            [_recorded_error("RuntimeError")],
+            [],
+            RolloutStatus.ERROR_INFRA,
+        ),
+        # A retry puts the earlier attempt's errors first; the last one is the final attempt's.
+        (
+            [_call()],
+            1,
+            False,
+            [_recorded_error("ProviderError", 503), _recorded_error("HarnessError")],
+            [],
+            RolloutStatus.ERROR,
+        ),
+        # An env retry put an earlier attempt's SandboxError on the episode; the final
+        # attempt's trace failed on the generator: the trace's error decides.
+        (
+            [_call()],
+            1,
+            False,
+            [_recorded_error("ProviderError", 503)],
+            [_recorded_error("SandboxError")],
+            RolloutStatus.ERROR_INFRA,
+        ),
+        # The env's own `finalize` failed on a graded trace: infra, not the policy's.
+        (
+            [_call()],
+            1,
+            True,
+            [_recorded_error("ProviderError", 503)],
+            [_recorded_error("EnvError")],
+            RolloutStatus.ERROR_INFRA,
+        ),
+    ],
+)
+def test_rollout_status_reads_the_last_call_the_turns_and_the_failed_error(
+    calls, num_turns, trace_ok, trace_errors, episode_errors, expected
+) -> None:
+    last_error = trace_errors[-1] if trace_errors else None
+    trace = SimpleNamespace(
+        ok=trace_ok,
+        is_timeout=False,
+        is_truncated=False,
+        stop_condition=None,
+        last_error=last_error,
+        calls=calls,
+        num_turns=num_turns,
+    )
+    episode = SimpleNamespace(
+        ok=trace_ok and not episode_errors,
+        is_timeout=False,
+        last_error=episode_errors[-1] if episode_errors else None,
+    )
+
+    status = VerifiersRolloutWorker.rollout_status(
+        verifiers_episode=episode, trace=trace
+    )
+
+    assert status is expected
+
+
+@pytest.mark.parametrize(
+    "calls, errors, expected",
+    [
+        # The harness session never opened: no model call, no node.
+        (
+            [],
+            [{"type": "HarnessError", "message": "opening harness session timed out"}],
+            RolloutStatus.ERROR_INFRA,
+        ),
+        # The first model call was refused as too long.
+        (
+            [
+                {
+                    "error": {
+                        "type": "ProviderError",
+                        "message": "Prompt length (9) exceeds maximum context length (8).",
+                        "status_code": 400,
+                    }
+                }
+            ],
+            [],
+            RolloutStatus.TRUNCATED_PROMPT_TOO_LONG,
+        ),
+    ],
+)
+def test_rollout_status_of_a_verifiers_trace_with_no_turn(
+    calls, errors, expected
+) -> None:
+    from verifiers.v1.episode import WireEpisode
+    from verifiers.v1.trace import WireTrace
+
+    task = {"type": "swe", "data": {}}
+    trace = WireTrace.model_validate(
+        {"task": task, "agent": {"config": {}}, "calls": calls, "errors": errors}
+    )
+    episode = WireEpisode.model_validate({"task": task, "ok": False, "traces": [trace]})
+
+    status = VerifiersRolloutWorker.rollout_status(
+        verifiers_episode=episode, trace=trace
+    )
+
+    assert status is expected
+
+
+def test_a_trace_that_verifiers_dropped_gets_no_reward() -> None:
+    worker = object.__new__(VerifiersRolloutWorker)
+    worker.rubric = Rubric.Config(reward_fns=[RewardFromVerifiers.Config()]).build()
+    rollouts = [
+        Rollout(
+            group_id=1,
+            rollout_id=rollout_id,
+            status=RolloutStatus.COMPLETED,
+            logs={"dropped": dropped},
+        )
+        for rollout_id, dropped in enumerate([None, "a judge gave a drop verdict"])
+    ]
+
+    outputs = asyncio.run(worker.score_group(rollouts, None))
+
+    # No turn carries a Verifiers reward, so the kept trace reads 0.0.
+    assert [output.reward for output in outputs] == [0.0, None]
+
+
+def test_timed_out_rollout_is_logged_and_keeps_its_verifiers_grade(caplog) -> None:
     from verifiers.v1.types import AssistantMessage as VerifiersAssistantMessage
 
     # The agent stage timed out, but Verifiers kept ok=True and still graded the reply.
@@ -1028,8 +1319,11 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
         is_timeout=True,
         is_truncated=False,
         stop_condition="agent_timeout",
+        dropped=None,
         reward=1.0,
         errors=[],
+        last_error=None,
+        num_turns=1,
         timing=SimpleNamespace(
             setup=span,
             agent=SimpleNamespace(duration=0.0, model=span, harness=span),
@@ -1053,7 +1347,9 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
         ),
     )
     worker._verifiers_env = _env_whose_rollouts_end_as(
-        SimpleNamespace(ok=True, is_timeout=False, errors=[], traces=[trace])
+        SimpleNamespace(
+            ok=True, is_timeout=False, errors=[], last_error=None, traces=[trace]
+        )
     )
     worker._verifiers_train_client_config = object()
 
@@ -1070,12 +1366,13 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
 
     assert rollout.status is RolloutStatus.ERROR_TIMEOUT
     assert "Verifiers rollout failed: trace=trace" in caplog.text
-    assert VERIFIERS_REWARD_KEY not in rollout.turns[-1].env_rewards
+    # The rubric applies `error_reward` if set, else it reads this grade, as in `MessageEnvRolloutWorker`.
+    assert rollout.turns[-1].env_rewards[VERIFIERS_REWARD_KEY] == 1.0
 
 
 # TODO: share one fake trace and rollouter between this test,
-# test_rollout_whose_first_prompt_does_not_fit_is_flagged and
-# test_timed_out_rollout_is_logged_and_keeps_no_reward.
+# test_rollout_that_ended_before_its_first_turn_has_no_turns and
+# test_timed_out_rollout_is_logged_and_keeps_its_verifiers_grade.
 def test_rollout_releases_every_trace_session_even_if_one_release_fails(caplog) -> None:
     """Each trace generated under its own id; another agent's trace has one too."""
     span = SimpleNamespace(duration=0.0)
@@ -1088,13 +1385,16 @@ def test_rollout_releases_every_trace_session_even_if_one_release_fails(caplog) 
             is_timeout=False,
             is_truncated=False,
             stop_condition=None,
+            dropped=None,
             errors=[],
+            last_error=None,
             timing=SimpleNamespace(
                 setup=span,
                 agent=SimpleNamespace(duration=0.0, model=span, harness=span),
                 scoring=span,
             ),
             calls=[],
+            num_turns=0,
             nodes=[],
             branches=[],
         )
@@ -1106,7 +1406,9 @@ def test_rollout_releases_every_trace_session_even_if_one_release_fails(caplog) 
         model_id="model", pop_generation_metadata=popped_trace_ids.append
     )
     worker._verifiers_env = _env_whose_rollouts_end_as(
-        SimpleNamespace(ok=True, is_timeout=False, errors=[], traces=traces)
+        SimpleNamespace(
+            ok=True, is_timeout=False, errors=[], last_error=None, traces=traces
+        )
     )
     worker._verifiers_train_client_config = object()
     release_session_fn = AsyncMock(side_effect=[RuntimeError("router down"), None])

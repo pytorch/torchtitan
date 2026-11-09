@@ -439,7 +439,8 @@ class Rollout:
 
     logs: dict[str, Any] = field(default_factory=dict)
     """Rollouter-specific debug record, e.g. why the rollout failed. Saved with the rollout
-    by `RolloutSampleRecorder`; not used for training."""
+    by `RolloutSampleRecorder`. The core doesn't read it; a `score_group` override may (e.g. to
+    drop a rollout)."""
 
 
 @dataclass(kw_only=True, slots=True)
