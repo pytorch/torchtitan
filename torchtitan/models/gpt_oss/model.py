@@ -68,10 +68,9 @@ class GptOssAttention(Attention):
         @property
         def softmax_scale(self) -> float:
             scale = 1.0 / math.sqrt(self.head_dim)
-            if self.rope.scaling == "yarn" and self.rope.rope_factor > 1.0:
-                mscale = 0.1 * math.log(self.rope.rope_factor) + 1.0
-                # RoPE is a pure rotation; apply YaRN's Q/K magnitude here.
-                scale *= mscale * mscale
+            # RoPE is a pure rotation; apply YaRN's Q/K magnitude here.
+            mscale = self.rope.qk_amplitude()
+            scale *= mscale * mscale
             return scale
 
         def flops_per_token(self, seq_len: int) -> int:

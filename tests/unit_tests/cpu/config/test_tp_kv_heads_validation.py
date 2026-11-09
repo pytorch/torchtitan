@@ -34,6 +34,7 @@ try:
         Linear,
         RMSNorm,
     )
+    from torchtitan.models.common.rope import Llama3ScalingConfig
     from torchtitan.models.llama3 import Llama3Model
     from torchtitan.models.llama3.model import Llama3TransformerBlock
 
@@ -86,7 +87,7 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
                         dim=_DIM // n_heads,
                         max_context_length=4096,
                         theta=500000,
-                        scaling="llama",
+                        scaling=Llama3ScalingConfig(),
                     ),
                     enable_sp=True,
                 ),

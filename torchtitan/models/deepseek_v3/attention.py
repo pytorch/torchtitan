@@ -6,7 +6,6 @@
 
 """DeepSeek V3 multi-head latent attention."""
 
-import math
 from dataclasses import dataclass
 
 import spmd_types as spmd
@@ -53,10 +52,8 @@ class DeepSeekMLAAttention(Attention):
         def softmax_scale(self) -> float:
             qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
             scale = qk_head_dim**-0.5
-            if self.rope.scaling == "yarn" and self.rope.rope_factor > 1.0:
-                mscale = 0.1 * self.mscale * math.log(self.rope.rope_factor) + 1.0
-                scale = scale * mscale * mscale
-            return scale
+            mscale = self.rope.qk_amplitude(mscale=self.mscale)
+            return scale * mscale * mscale
 
         def __post_init__(self) -> None:
             Attention.Config.__post_init__(self)
