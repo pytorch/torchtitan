@@ -203,3 +203,5 @@ rl_generator rank 0
 ```
 
 A row named `<label> row <i>` can hold several tasks, one after another; hover a bar to see its task (`task_name` in its args). Markers and metrics have no task: they show on their thread's row when spans ran on that thread outside any task, else on the process's own track, which Perfetto names after the process.
+
+An RL run writes the last 10 steps of its own logs to `{dump_folder}/gantt.json` when it ends, unless `generate_gantt_on_shutdown=False` (`torchtitan/rl/train.py`).
