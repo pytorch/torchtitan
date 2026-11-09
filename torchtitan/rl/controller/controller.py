@@ -568,8 +568,7 @@ class Controller(Configurable):
 
     def _make_generate_fn(self) -> GenerateFn:
         """Build the rollouter's `GenerateFn`: route a completion via the generator router, pinning sticky
-        routing on `routing_session_id` (a sample's turns reuse one generator's prefix KV). Its generation
-        metrics are named `generator/*`; validation renames its own after results return."""
+        routing on `routing_session_id` (a sample's turns reuse one generator's prefix KV)."""
         # TODO: make this a pluggable config (a GenerateFn factory) so non-router generate backends can be swapped in.
         # Bind the router handle to a local so the closure captures it instead of
         # `self`. A GenerateFn may be shipped to another process, where an actor
@@ -776,16 +775,12 @@ class Controller(Configurable):
                 rollout for group in rollout_groups for rollout in group.rollouts
             ],
         )
-        # The generators name every request's metrics `generator/*`; validation's keep their own keys.
-        # Example: generator/queue_time_ms -> validation_generator/queue_time_ms.
-        metrics = [
-            (
-                m.Metric(f"validation_{metric.key}", metric.value)
-                if metric.key.startswith("generator/")
-                else metric
-            )
-            for metric in metrics
-        ]
+        # The generators name every request's metrics `generator/*`. Rename validation's so W&B keeps them
+        # apart from training's.
+        for index, metric in enumerate(metrics):
+            # generator/queue_time_ms -> validation_generator/queue_time_ms
+            if metric.key.startswith("generator/"):
+                metrics[index] = m.Metric(f"validation_{metric.key}", metric.value)
         metrics.append(
             m.Metric("validation/group_failures", m.Sum(float(num_failed_groups)))
         )

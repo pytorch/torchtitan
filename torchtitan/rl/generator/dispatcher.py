@@ -367,6 +367,8 @@ class _RejectedRequests:
 def _prepare_generation_request_metrics(inputs: RequestMetricsInputs) -> list[m.Metric]:
     """Prepare per-request generation metrics from the raw inputs.
 
+    Each key describes this request only; validation renames every `generator/*` key it carries.
+
     Caveat for vLLM under `SamplingParams.n > 1`: vLLM stores one `RequestStateStats`
     per child request; the parent output exposes the **last-finishing**
     child's timeline. `arrival_time` is shared across siblings, but
