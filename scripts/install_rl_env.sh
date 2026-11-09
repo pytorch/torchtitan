@@ -17,7 +17,8 @@
 #   scripts/install_rl_env.sh [--cuda cu132] [--skip-base]
 #       [--flash-attn auto|none|3|4|3,4] [--nvcc] [--constraint FILE]...
 #
-#   --cuda         PyTorch nightly CUDA tag (default: cu132).
+#   --cuda         PyTorch nightly CUDA tag (default: cu132). Only cu132 has
+#                  the pinned vLLM wheel.
 #   --skip-base    Skip requirements.txt and the RL requirements, e.g. in the
 #                  CI image that already contains them.
 #   --flash-attn   Comma-separated versions to install, or auto (default):
@@ -52,10 +53,19 @@ if [[ "$skip_base" == "0" ]]; then
   uv pip install -r requirements.txt -r torchtitan/rl/requirements.txt
 fi
 
-# torchvision must come from the same nightly as torch so its C++ extensions
-# match the torch ABI. xformers has no aarch64 wheel; nothing in TorchTitan
-# imports it, but vLLM uses it when present.
-nightly=(torch torchvision vllm)
+# torchvision nightlies use torch's stable ABI and need only torch>=2.14, so
+# their date can differ from torch's. xformers has no aarch64 wheel; nothing in
+# TorchTitan imports it, but vLLM uses it when present.
+#
+# PyTorch's nightly vLLM wheel is built from the vLLM commit in pytorch's
+# .github/ci_commit_pins/vllm.txt. Newer vLLM deleted the V1 model runner that
+# torchtitan/rl/generator/vllm/worker.py subclasses, so pin the 2026-11-07
+# wheel (vLLM 9f03b510c). Its metadata also pins torch to that date.
+# TODO: by 2026-11-22, install a vLLM PyPI release on the newest torch nightly,
+# so RL CI tests the same torch as core CI. Blocked until the generator runs on
+# vLLM 0.33 (https://github.com/pytorch/torchtitan/pull/5498). Hard limit
+# ~2027-01: the nightly index lists only the newest ~60 days of wheels.
+nightly=(torch torchvision "vllm==1.0.0.dev20261107+${cuda}")
 if [[ "$(uname -m)" == "x86_64" ]]; then
   nightly+=(xformers)
 fi
