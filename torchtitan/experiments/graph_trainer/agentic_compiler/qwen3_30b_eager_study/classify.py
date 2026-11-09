@@ -9,7 +9,8 @@
     PYTHONPATH=<fusion_region_finder scripts>:. python classify.py <report dir> <plan> <dump> <out.json>
 
 Replays the plan's lift passes in order on the dump (as replay.py does) and records, per site:
-phase of each member (autograd_backward), the layers and modules its members come from
+phase of each member (forward, backward, or recompute: a forward op that GraphTrainer's memory
+policy duplicated into the backward, named ``*_recomputed``), the layers and modules its members come from
 (custom.module_fqn, else the forward node with the same seq_nr), the source lines, and what
 produces its external inputs and consumes its outputs.
 """
@@ -63,6 +64,12 @@ def short(path):
                 else "torch/" + path.split(key, 1)[1]
             )
     return path
+
+
+def phase(rec):
+    if rec["name"].endswith("_recomputed"):
+        return "recompute"
+    return "backward" if rec["autograd_backward"] else "forward"
 
 
 def kind(rec):
@@ -122,7 +129,7 @@ def main():
                 if r["op"] != "call_function":
                     continue
                 m = module(n.name)
-                agg["phase"]["backward" if r["autograd_backward"] else "forward"] += 1
+                agg["phase"][phase(r)] += 1
                 agg["module"][norm(m)] += 1
                 if m and (mm := re.match(r"layers\.(\d+)", m)):
                     layers.add(int(mm.group(1)))
@@ -146,14 +153,13 @@ def main():
                             pr = recs[ref]
                             agg["input_from"][
                                 f"{kind(pr)} | {norm(module(ref))} | "
-                                f"{'bwd' if pr['autograd_backward'] else 'fwd'}"
+                                f"{phase(pr)[:3]}"
                             ] += 1
                 for u in r["users"]:
                     if u not in names:
                         ur = recs[u]
                         agg["output_to"][
-                            f"{kind(ur)} | {norm(module(u))} | "
-                            f"{'bwd' if ur['autograd_backward'] else 'fwd'}"
+                            f"{kind(ur)} | {norm(module(u))} | {phase(ur)[:3]}"
                         ] += 1
             per_site_layers[len(layers)] += 1
         result[rid] = {

@@ -145,7 +145,9 @@ Steps 2-4 measure how much of each overlapping region eager's Inductor regions a
 `qwen3_30b_a3b_dist_moe_mxfp8_8gpu`, with the loop's changes: one 32K-token microbatch per step, FA4 varlen
 attention, deterministic, seed 42, fake PG with NGPU=8 on one GB300. Two measurements:
 - **GPU time per step** (`busy.py`): the union of kernel intervals in profiled step 10, with accelerator graphs
-  off. Kernels launched under a collective CPU op (the fake PG's emulated collectives, about 7 ms) are excluded.
+  off. Kernels launched under a c10d collective CPU op (the fake PG's emulated collectives, about 6 ms) are
+  excluded; FSDP2's copy-in and GraphTrainer's bucket packing count. (An earlier version also excluded those
+  copies, about 1 ms in eager and 2.3 ms in the graph; savings were unchanged within 0.1 ms.)
 - **Throughput:** tokens/s at step 20, with accelerator (CUDA) graphs on as the recipe sets them, no profiler.
 
 **Numerics.** With `local_compile` off, eager runs the same aten ops GraphTrainer traces. Step 1 is bitwise
@@ -156,8 +158,8 @@ differ (step-10 loss 5.717879 eager, 5.717247 graph), so the difference is outsi
 
 | Eager | GPU ms/step | tokens/s | Numerics vs `local_compile` off |
 |---|---:|---:|---|
-| `local_compile` off | 984.9 | 33,991 | reference |
-| recipe's `local_compile` regions (loss, rope, fp32_to_bf16_split, ...) | 768.1 | 43,552 | differ from step 1 |
+| `local_compile` off | 986.0 | 33,991 | reference |
+| recipe's `local_compile` regions (loss, rope, fp32_to_bf16_split, ...) | 769.2 | 43,552 | differ from step 1 |
 
 Each `local_compile` region on its own (GPU ms saved against `local_compile` off):
 
@@ -165,7 +167,7 @@ Each `local_compile` region on its own (GPU ms saved against `local_compile` off
 |---|---:|---|
 | `rope` | 187.1 | no |
 | `loss` | 27.9 | no |
-| `fp32_to_bf16_split` | 2.3 | yes |
+| `fp32_to_bf16_split` | 2.4 | yes |
 
 `moe_aux_loss` and `fused_binary_activation` cover nothing in this recipe. The batch-wise aux loss is not
 the microbatch-wise one the region wraps, and Dist-MoE fuses SwiGLU.
@@ -234,26 +236,26 @@ identical to the graph baseline at steps 1, 10 and 20.
 
 | Run | GPU ms | Saving | Numerics |
 |---|---:|---:|---|
-| Graph baseline | 965.8 | - | reference (graph) |
-| **Graph + 15 kernels** | **679.1** | **286.7** | bitwise = graph baseline |
-| Eager, `local_compile` off | 984.9 | - | reference (eager); step 1 = graph |
-| Eager, recipe's `local_compile` (Inductor) | 768.1 | 216.8 | differs |
-| Eager + F1 | 763.4 | 221.5 | bitwise = eager reference |
-| Eager + F1, F2 | 759.8 | 225.1 | bitwise |
-| Eager + F1, F2, F3 | 731.4 | 253.5 | bitwise |
-| Eager + F1-F4 | 706.9 | 278.0 | bitwise |
-| **Eager + F1-F5 (all 15 kernels)** | **694.8** | **290.1** | bitwise |
-| Eager + F1, F2, F3, F5 + Inductor loss | 693.6 | 291.3 | differs (loss region) |
+| Graph baseline | 968.1 | - | reference (graph) |
+| **Graph + 15 kernels** | **681.4** | **286.7** | bitwise = graph baseline |
+| Eager, `local_compile` off | 986.0 | - | reference (eager); step 1 = graph |
+| Eager, recipe's `local_compile` (Inductor) | 769.2 | 216.8 | differs |
+| Eager + F1 | 764.4 | 221.6 | bitwise = eager reference |
+| Eager + F1, F2 | 760.8 | 225.2 | bitwise |
+| Eager + F1, F2, F3 | 732.4 | 253.6 | bitwise |
+| Eager + F1-F4 | 708.0 | 278.0 | bitwise |
+| **Eager + F1-F5 (all 15 kernels)** | **695.8** | **290.2** | bitwise |
+| Eager + F1, F2, F3, F5 + Inductor loss | 694.7 | 291.3 | differs (loss region) |
 
 Per Function, the eager saving matches the graph's per-kernel saving:
 
 | Function | Eager saving | Graph per-kernel saving |
 |---|---:|---:|
-| F1 | 221.5 | 215.1 |
+| F1 | 221.6 | 215.1 |
 | F2 | 3.6 | 7.3 |
 | F3 | 28.4 | 27.8 |
-| F4 | 24.5 | 28.3 |
-| F5 | 12.1 | 3.3 |
+| F4 | 24.4 | 28.3 |
+| F5 | 12.2 | 3.3 |
 
 F5 saves more in eager because eager prepares the expert weights twice per step: FSDP2 reshards the
 block after forward, and the backward unshard runs the quantizer again (192 calls instead of 96). F5 also
@@ -273,7 +275,7 @@ removes eager's separate fp32 -> bf16 cast of the expert weights.
 
 ## Answer: how much of the graph's optimization can eager achieve?
 
-- **All of it, for this model: 15 of 15 kernels and 101% of the GPU-time saving** (290.1 vs 286.7 ms/step).
+- **All of it, for this model: 15 of 15 kernels and 101% of the GPU-time saving** (290.2 vs 286.7 ms/step).
   - Throughput gains 98% as many tokens/s as the graph (+14,232 vs +14,512).
   - Numerics are bitwise identical to stock eager, as the graph's are to the graph baseline.
   - No region needed the whole-step graph: none crosses a layer, and each fits one autograd.Function
@@ -284,9 +286,9 @@ removes eager's separate fp32 -> bf16 cast of the expert weights.
   - Nearly all of that is the Inductor-compiled RoPE (187 ms of F1's 221 ms) and the loss (28 ms).
   - Both change numerics.
   - The loss is the one region where Inductor matches or beats the graph's kernel. With Inductor's loss
-    instead of F4, eager reaches 693.6 ms, but loses bitwise equality.
-- **The gap left after optimization is eager's own overhead, not missing fusions.** Eager stays about 16-19
-  ms/step behind the graph before and after the kernels (984.9 vs 965.8, 694.8 vs 679.1). With all kernels
+    instead of F4, eager reaches 694.7 ms, but loses bitwise equality.
+- **The gap left after optimization is eager's own overhead, not missing fusions.** Eager stays about 14-18
+  ms/step behind the graph before and after the kernels (986.0 vs 968.1, 695.8 vs 681.4). With all kernels
   the difference is:
   - device memcpys: 14.5 vs 8.9 ms;
   - copy/cat kernels (FSDP2's copy-in/copy-out vs the graph's bucketing): 11.4 vs 6.5 ms;
@@ -349,7 +351,7 @@ G15 counted as 3.8 ms):
 | Nothing but the kernel files: contract identical to 30B modulo size literals | G01, G15 (attention input); G28, G45, G19 (attention output); G47, G17, G91, G06 (router); G90, G07 (loss) | 148.0 | 51% |
 | An adapted Function | G-102 (replaces G02), G41 | 94.1 | 32% |
 | New kernels for eager's layout | G-115, G-129 (expert weight prep) | 6.6 | 2% |
-| No eager home in torchtitan | G-105, G-125, G-133, G-111 | 43.3 | 15% |
+| FSDP bucket glue (see the correction below) | G-105, G-125, G-133, G-111 | 43.3 | 15% |
 
 What changed in each case:
 
@@ -373,7 +375,14 @@ What changed in each case:
 - **G-105, G-125, G-133, G-111** pack and pad the FSDP gradient and all-gather buckets: the expert-gradient
   reduce-scatter bucket (31.7 ms), the dense-gradient bucket, the all-gather bucket prep and the LM-head
   gradient padding. They exist because of GraphTrainer's bucketing. In eager, the equivalent copies are
-  FSDP2's own copy-in/copy-out inside PyTorch, which torchtitan cannot override.
+  FSDP2's own copy-in/copy-out inside PyTorch.
+
+  **Correction (from the DSv3 study, `../dsv3_671b_eager_study/`):** an earlier version of this report said
+  torchtitan cannot override these copies. FSDP2's reduce-scatter copy-in can be replaced through its
+  experimental `FSDPModule.set_reduce_scatter_input_fn`; the DSv3 port uses it to run that loop's
+  gradient-bucket pack kernel. So G-105, G-125 and G-111 (the reduce-scatter side) have an eager hook, if
+  their kernels' layouts match FSDP2's buffer, which was not checked for 235B. G-133 (all-gather bucket
+  prep) has no comparable public hook.
 
 **Why the contracts moved.** A graph region's boundaries follow the parallel layout, because the finder
 absorbs parameter-producer chains and bucket packing (R1 and R2 in item 1 of `../TODO.md`). An eager
@@ -393,7 +402,8 @@ would most likely have kept G02's contract, and the attention-input Function wou
 - About 83% of the graph's saving is reachable with the existing Functions: 51% unchanged, 32% after
   adapting the attention-input Function.
 - The expert weight prep needs kernels written for eager's layout (2%).
-- The remaining 15% is FSDP bucket glue that only a change to FSDP2 could address in eager.
+- The remaining 15% is FSDP bucket glue. Its reduce-scatter part could run through FSDP2's experimental
+  copy-in hook if the kernels' layouts match FSDP2's buffer (unchecked); the all-gather part has no hook.
 
 ## This directory
 

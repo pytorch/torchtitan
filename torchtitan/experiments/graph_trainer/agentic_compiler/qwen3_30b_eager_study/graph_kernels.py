@@ -80,7 +80,7 @@ def mxfp8_operands(weight: torch.Tensor):
         return _quantize_mxfp8_weight(hp.flatten(0, -2))
 
 
-def _scaled_mm(a, b, scale_a, scale_b, out_dtype=torch.bfloat16):
+def scaled_mm(a, b, scale_a, scale_b, out_dtype=torch.bfloat16):
     return F.scaled_mm(
         a,
         b,
@@ -94,15 +94,36 @@ def _scaled_mm(a, b, scale_a, scale_b, out_dtype=torch.bfloat16):
     )
 
 
-def _wgrad(grad_col_t, grad_scale_col, x_MK, weight_param, wgrad_dtype, weight_shape):
+def wgrad(grad_col_t, grad_scale_col, x_MK, weight_param, wgrad_dtype, weight_shape):
     """WGRAD of an MXFP8 linear whose BF16 input was saved, as ``_MXFP8LinearFunction``."""
     _, x_col, _, x_scale_col = mxfp8_quantize_cuda(
         x_MK, rowwise=False, colwise=True, scaling_mode=_SCALING_MODE
     )
     x_scale_col = triton_mx_block_rearrange(x_scale_col)
+    return wgrad_from_col(
+        grad_col_t,
+        grad_scale_col,
+        x_col,
+        x_scale_col,
+        weight_param,
+        wgrad_dtype,
+        weight_shape,
+    )
+
+
+def wgrad_from_col(
+    grad_col_t,
+    grad_scale_col,
+    x_col,
+    x_scale_col,
+    weight_param,
+    wgrad_dtype,
+    weight_shape,
+):
+    """WGRAD from the input's columnwise MXFP8 operands, as ``_MXFP8LinearFunction``."""
     grad = running_grad(weight_param)
     if weight_param is None or grad is None:
-        return _scaled_mm(
+        return scaled_mm(
             grad_col_t, x_col, grad_scale_col, x_scale_col, wgrad_dtype
         ).view(weight_shape)
     F.scaled_addmm_(
@@ -151,7 +172,7 @@ class AttentionInput(torch.autograd.Function):
         meta,
     ):
         normed_TD, rstd, x_q, x_s = kernel("kbxm")(x_TD, attn_norm_w)
-        qkv = _scaled_mm(x_q, w_fprop, x_s, w_sfprop)
+        qkv = scaled_mm(x_q, w_fprop, x_s, w_sfprop)
         xq, xk, xv, rq, rk, cos, sin, q, k = kernel("4dzo")(
             qkv, q_norm_w, k_norm_w, cache, positions_T
         )
@@ -208,7 +229,7 @@ class AttentionInput(torch.autograd.Function):
             q_norm_w,
             gv.contiguous(),
         )
-        g_w = _wgrad(
+        g_w = wgrad(
             g_col_t, g_scol, normed_TD, weight_param, wgrad_dtype, ctx.weight_shape
         )
         g_attn_norm_w, g_x = kernel("tl5t")(
@@ -279,8 +300,8 @@ class AttentionOutput(torch.autograd.Function):
             ffn_norm_w,
             g_h_res.contiguous(),
         )
-        g_attn = _scaled_mm(g_row, w_dgrad, g_srow, w_sdgrad)
-        g_w = _wgrad(
+        g_attn = scaled_mm(g_row, w_dgrad, g_srow, w_sdgrad)
+        g_w = wgrad(
             g_col_t, g_scol, attn_TD, weight_param, wgrad_dtype, ctx.weight_shape
         )
         return (g_attn, g_h, g_w, None, None, None, None, g_ffn_w, None)

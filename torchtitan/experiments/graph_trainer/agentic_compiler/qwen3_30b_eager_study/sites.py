@@ -16,7 +16,7 @@ import os
 import re
 import sys
 
-from classify import fqn_of, frames, kind, short
+from classify import fqn_of, frames, kind, phase, short
 from lift_regions import find_matches, lift_hazard, load_dump_graph
 
 root, plan_file, dump = sys.argv[1:4]
@@ -76,10 +76,9 @@ for p in open(plan_file).read().strip().split(","):
         r = recs[member.name]
         if r["op"] != "call_function" or r["target"] == "_operator.getitem":
             continue
-        phase = "B" if r["autograd_backward"] else "F"
         target = r["target"].replace("aten.", "")
         print(
-            f"  {phase} {target:42s} {str(module(member.name)):45s} "
+            f"  {phase(r)[0].upper()} {target:42s} {str(module(member.name)):45s} "
             f"seq={r['seq_nr']} {src(member.name)}"
         )
     ins, outs = set(), set()
@@ -100,8 +99,7 @@ for p in open(plan_file).read().strip().split(","):
                 if r["op"] == "call_function"
                 else r["op"]
             )
-            phase = "B" if r["autograd_backward"] else "F"
             print(
                 f"  {tag} {kind(r):12s} {target:36s} {str(module(e)):42s} "
-                f"layer={rel(e)} {phase}"
+                f"layer={rel(e)} {phase(r)[0].upper()}"
             )

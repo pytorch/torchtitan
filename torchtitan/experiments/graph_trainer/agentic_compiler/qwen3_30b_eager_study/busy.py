@@ -34,16 +34,9 @@ def union(iv):
     return tot + ((ce - cs) if ce is not None else 0.0)
 
 
-COMM = (
-    "c10d",
-    "all_gather",
-    "reduce_scatter",
-    "all_to_all",
-    "allreduce",
-    "all_reduce",
-    "nccl",
-    "record_param_comms",
-)
+# Collective ops only: FSDP2's copy-in (fsdp::all_gather_copy_in) and GraphTrainer's bucket packing
+# (bucketing::_pre_bucket_*) contain collective names but run real kernels, which stay counted.
+COMM = ("c10d::", "_c10d_functional::", "nccl", "record_param_comms")
 
 
 def main():
@@ -58,7 +51,7 @@ def main():
     cpu_ops = [e for e in ev if e.get("ph") == "X" and e.get("cat") == "cpu_op"]
     comm_ops = collections.defaultdict(list)
     for e in cpu_ops:
-        if any(k in e["name"].lower() for k in COMM):
+        if any(k in e["name"] for k in COMM):
             comm_ops[e["tid"]].append((e["ts"], e["ts"] + e["dur"]))
     launches = {
         e["args"].get("correlation"): e

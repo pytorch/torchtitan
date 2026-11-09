@@ -1,7 +1,7 @@
 {
  "setup": "Qwen3 30B-A3B DistMoE MXFP8, FSDP 8 x EP 8, one 32K-token microbatch per step, FA4 varlen attention, deterministic, seed 42, fake PG (NGPU=8, LOCAL_RANK=0) on one GB300; torch 3c53c6f, CUDA 13.0, cutlass-dsl 4.8.0; 2026-11-09",
  "metrics": {
-  "gpu_busy_ms_excl_comm": "profiled step 10, accelerator graphs off: union of kernel/memcpy/memset intervals over all streams, without kernels launched under a collective CPU op (busy.py)",
+  "gpu_busy_ms_excl_comm": "profiled step 10, accelerator graphs off: union of kernel/memcpy/memset intervals over all streams, without kernels launched under a c10d collective CPU op (busy.py)",
   "tokens_per_s_step20": "step 20, accelerator graphs as the recipe sets them (on), no profiler",
   "bitwise_equal_to_reference": "loss and grad_norm (TensorBoard, full precision) equal at every logged step"
  },
@@ -15,7 +15,7 @@
    "steps": 10,
    "memory_gib": 250.3,
    "gpu_busy_ms": 991.3,
-   "gpu_busy_ms_excl_comm": 984.9,
+   "gpu_busy_ms_excl_comm": 986.0,
    "num_kernels": 16597,
    "tensorboard": {
     "loss_metrics/global_avg_loss": {
@@ -41,7 +41,7 @@
    "steps": 10,
    "memory_gib": 240.25,
    "gpu_busy_ms": 774.1,
-   "gpu_busy_ms_excl_comm": 768.1,
+   "gpu_busy_ms_excl_comm": 769.2,
    "num_kernels": 14389,
    "tensorboard": {
     "loss_metrics/global_avg_loss": {
@@ -69,7 +69,7 @@
    "steps": 10,
    "memory_gib": 247.2,
    "gpu_busy_ms": 803.5,
-   "gpu_busy_ms_excl_comm": 797.8,
+   "gpu_busy_ms_excl_comm": 798.9,
    "num_kernels": 14869,
    "tensorboard": {
     "loss_metrics/global_avg_loss": {
@@ -97,7 +97,7 @@
    "steps": 10,
    "memory_gib": 243.35,
    "gpu_busy_ms": 962.8,
-   "gpu_busy_ms_excl_comm": 957.0,
+   "gpu_busy_ms_excl_comm": 958.1,
    "num_kernels": 16549,
    "tensorboard": {
     "loss_metrics/global_avg_loss": {
@@ -125,7 +125,7 @@
    "steps": 10,
    "memory_gib": 250.3,
    "gpu_busy_ms": 988.3,
-   "gpu_busy_ms_excl_comm": 982.6,
+   "gpu_busy_ms_excl_comm": 983.6,
    "num_kernels": 16165,
    "tensorboard": {
     "loss_metrics/global_avg_loss": {
@@ -153,7 +153,7 @@
    "steps": 10,
    "memory_gib": 249.58,
    "gpu_busy_ms": 769.8,
-   "gpu_busy_ms_excl_comm": 763.4,
+   "gpu_busy_ms_excl_comm": 764.4,
    "num_kernels": 14101,
    "tensorboard": {
     "loss_metrics/global_avg_loss": {
@@ -181,7 +181,7 @@
    "steps": 10,
    "memory_gib": 250.13,
    "gpu_busy_ms": 765.8,
-   "gpu_busy_ms_excl_comm": 759.8,
+   "gpu_busy_ms_excl_comm": 760.8,
    "num_kernels": 13813,
    "tensorboard": {
     "loss_metrics/global_avg_loss": {
@@ -209,7 +209,7 @@
    "steps": 10,
    "memory_gib": 250.13,
    "gpu_busy_ms": 737.1,
-   "gpu_busy_ms_excl_comm": 731.4,
+   "gpu_busy_ms_excl_comm": 732.4,
    "num_kernels": 9733,
    "tensorboard": {
     "loss_metrics/global_avg_loss": {
@@ -237,7 +237,7 @@
    "steps": 10,
    "memory_gib": 245.49,
    "gpu_busy_ms": 713.2,
-   "gpu_busy_ms_excl_comm": 706.9,
+   "gpu_busy_ms_excl_comm": 708.0,
    "num_kernels": 9669,
    "tensorboard": {
     "loss_metrics/global_avg_loss": {
@@ -265,7 +265,7 @@
    "steps": 10,
    "memory_gib": 244.82,
    "gpu_busy_ms": 700.5,
-   "gpu_busy_ms_excl_comm": 694.8,
+   "gpu_busy_ms_excl_comm": 695.8,
    "num_kernels": 8901,
    "tensorboard": {
     "loss_metrics/global_avg_loss": {
@@ -293,7 +293,7 @@
    "steps": 10,
    "memory_gib": 243.17,
    "gpu_busy_ms": 707.5,
-   "gpu_busy_ms_excl_comm": 701.7,
+   "gpu_busy_ms_excl_comm": 702.8,
    "num_kernels": 9684,
    "tensorboard": {
     "loss_metrics/global_avg_loss": {
@@ -321,7 +321,7 @@
    "steps": 10,
    "memory_gib": 242.5,
    "gpu_busy_ms": 699.3,
-   "gpu_busy_ms_excl_comm": 693.6,
+   "gpu_busy_ms_excl_comm": 694.7,
    "num_kernels": 8917,
    "tensorboard": {
     "loss_metrics/global_avg_loss": {
@@ -492,7 +492,7 @@
    "steps": 10,
    "memory_gib": 235.99,
    "gpu_busy_ms": 970.9,
-   "gpu_busy_ms_excl_comm": 965.8,
+   "gpu_busy_ms_excl_comm": 968.1,
    "num_kernels": 14687,
    "tensorboard": {
     "loss_metrics/global_avg_loss": {
@@ -518,7 +518,7 @@
    "steps": 10,
    "memory_gib": 231.3,
    "gpu_busy_ms": 684.3,
-   "gpu_busy_ms_excl_comm": 679.1,
+   "gpu_busy_ms_excl_comm": 681.4,
    "num_kernels": 7566,
    "tensorboard": {
     "loss_metrics/global_avg_loss": {

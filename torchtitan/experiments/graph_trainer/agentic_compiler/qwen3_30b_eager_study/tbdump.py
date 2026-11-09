@@ -14,7 +14,9 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 TAGS = [
     "loss_metrics/global_avg_loss",
     "grad_norm",
+    "loss_metrics/global_max_loss",
     "batch_wise_load_balance_loss/mean",
+    "microbatch_wise_load_balance_loss/mean",
 ]
 for run in sys.argv[1:]:
     files = sorted(glob.glob(f"{run}/**/events.out.tfevents.*", recursive=True))
