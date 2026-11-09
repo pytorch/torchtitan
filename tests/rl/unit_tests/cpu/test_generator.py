@@ -687,7 +687,7 @@ def test_engine_config_reaches_engine_args(monkeypatch, tmp_path):
     "sm90_or_newer, table_value, expected",
     [(True, 4096, 4096), (True, 16384, 8192), (False, 16384, 2048)],
 )
-def test_unset_max_num_batched_tokens_uses_vllm_serve_default(
+def test_unset_max_num_batched_tokens_uses_gpu_default(
     monkeypatch, tmp_path, sm90_or_newer, table_value, expected
 ):
     # Injected table values: 4096 is in no real tier, and 16384 is above the 8192 cap.

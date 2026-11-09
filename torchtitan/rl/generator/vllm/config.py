@@ -28,7 +28,7 @@ def resolve_max_num_batched_tokens(
     max_num_seqs: int,
     max_model_len: int,
 ) -> int:
-    """Return ``max_num_batched_tokens``, or what ``vllm serve`` picks for this GPU when it is None.
+    """Return ``max_num_batched_tokens``, or a default for this GPU when it is None.
 
     ``vllm serve`` reads vLLM's table (``EngineArgs.get_batch_defaults``), keyed on total device
     memory plus an A100 name check, and caps the value at ``max_num_seqs * max_model_len``. The
@@ -53,7 +53,8 @@ def resolve_max_num_batched_tokens(
     else:
         # TODO(https://github.com/Dao-AILab/flash-attention/issues/3117): drop once fixed. FA2 writes
         # out of bounds past 64 tokens per profile request, and max_num_seqs_per_generator_dp_rank
-        # floors max_num_seqs for a 2048 budget. vLLM's table gives an A800 80 GB 8192.
+        # floors max_num_seqs for a 2048 budget. vLLM's table gives an A800 80 GB 8192. This branch
+        # also keeps ROCm at 2048; dropping it moves an MI300X to 16384, unmeasured.
         max_num_batched_tokens = 2048
     max_num_batched_tokens = min(max_num_batched_tokens, max_num_seqs * max_model_len)
     logger.info(
