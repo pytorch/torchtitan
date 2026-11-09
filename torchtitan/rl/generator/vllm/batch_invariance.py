@@ -27,11 +27,19 @@ def validate_flex_page_mapping_request_limit(num_requests: int) -> None:
 def enable_rocm_batch_invariant_page_mapping() -> None:
     """Use a request-independent page lookup for ROCm FlexAttention.
 
+    On the tested gfx950 Qwen capture, vLLM's request-indexed page lookup
+    changed the generated reduction order and produced a one-ULP BF16
+    difference from the trainer's contiguous FlexAttention. For that
+    full-attention path, this mapping preserved the mask semantics and
+    reproduced the trainer output.
+
     Each physical page has one logical index. A separate ownership bitmask
     preserves request isolation and shared prefix-cache pages.
     """
     from vllm.v1.attention.backends.flex_attention import FlexAttentionMetadata
 
+    # TODO: Replace this internal-method override with a supported vLLM page mapping
+    # after https://github.com/vllm-project/vllm/issues/66460 is resolved.
     if getattr(
         FlexAttentionMetadata,
         "_torchtitan_rocm_batch_invariant_page_mapping",
