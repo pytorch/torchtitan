@@ -11,6 +11,11 @@ agent and the grading through the [Verifiers bridge](../README.md).
 > on Docker's shared bridge network and reach the internet through the host. For real
 > training, plug in a mature sandbox as the Verifiers runtime. Do not use
 > `SubprocessConfig`: it runs the agent on the host.
+>
+> The recipes set `workers_on_controller_host=True`, so a multi-host job still runs every
+> rollout worker, and so every container, on the controller host. With it False and a launcher,
+> the workers spread over the job's other hosts, and each of those hosts needs Docker, the
+> task images and outbound network while grading.
 
 ## How it works
 

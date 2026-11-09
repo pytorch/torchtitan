@@ -110,6 +110,9 @@ class VerifiersRollouter(Rollouter):
     Arrows cross hosts. weights: the tensors, over TorchStore. The others: Monarch calls.
     No TorchTitan process is pinned to cores: they share the host's CPUs.
     Agents run in the env's runtime: Docker here, remote VMs with PrimeConfig.
+    Workers see no GPU (`CUDA_VISIBLE_DEVICES=""`).
+    With a launcher and `workers_on_controller_host=False`, the workers, watchdogs and containers
+    move to host 1. Then run_group and the calls to the router cross hosts; generate does not.
     Call order, with the release calls: torchtitan/rl/examples/verifiers/README.md.
     """
 
