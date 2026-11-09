@@ -461,6 +461,16 @@ class Controller(Configurable):
                             "batch_invariant mode on ROCm requires FlexAttention "
                             "for every trainer and generator attention layer."
                         )
+
+                    cuda_graph = getattr(self.generator.engine, "cuda_graph", None)
+                    if cuda_graph is not None and cuda_graph.mode != "NONE":
+                        # TODO: Support graph replay after
+                        # https://github.com/pytorch/torchtitan/issues/5725 is resolved.
+                        raise ValueError(
+                            "ROCm FlexAttention batch invariance requires "
+                            "cuda_graph.mode='NONE'"
+                        )
+
                 if not (
                     self.trainer.debug.deterministic
                     and self.generator.debug.deterministic

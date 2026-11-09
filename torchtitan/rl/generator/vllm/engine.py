@@ -23,6 +23,7 @@ from vllm.sampling_params import RequestOutputKind
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import DebugConfig, PrecisionConfig
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
