@@ -12,7 +12,6 @@ import spmd_types as spmd
 
 import torch
 from torch.nn.attention import current_flash_attention_impl
-from torch.nn.attention.varlen import AuxRequest
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionType, MultipleOf
@@ -34,6 +33,7 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.decoder_sharding import dense_param_placement
+from torchtitan.rl.generator.attention.attention import paged_varlen_attention_out
 from torchtitan.tools.utils import (
     activate_cuda_flash_attention_impl,
     get_cuda_flash_attention_impl,
@@ -236,12 +236,6 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
 
         assert not attn_metadata.use_cascade, "Cascade not supported yet."
 
-        cu_seqlens_q = attn_metadata.query_start_loc
-        seqused_k = attn_metadata.seq_lens
-        max_seqlen_q = attn_metadata.max_query_len
-        max_seqlen_k = attn_metadata.max_seq_len
-        block_table = attn_metadata.block_table
-
         assert self.dcp_world_size == 1, "DCP not supported yet."
 
         if not attn_metadata.causal:
@@ -258,35 +252,6 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
 
         assert self.alibi_slopes is None, "Alibi slopes not supported yet."
 
-        # FA3 and FA4 infer key lengths from block_table + seqused_k for paged
-        # KV. FA4 explicitly rejects page_table together with cu_seqlens_k.
-        # FA2 requires cu_seqlens_k to be explicitly set.
-        fa_impl = current_flash_attention_impl()
-        if fa_impl in ("FA3", "FA4"):
-            cu_seqlens_k = None
-        else:
-            num_seqs = seqused_k.shape[0]
-            cu_seqlens_k = torch.zeros(
-                num_seqs + 1, dtype=torch.int32, device=query.device
-            )
-            cu_seqlens_k[1:] = torch.cumsum(seqused_k, dim=0)
-        extra_kwargs: dict[str, Any] = {}
-
-        # TODO(pytorch/pytorch#179760): FA2's auto num_splits heuristic
-        # produces NaN intermittently with paged KV (block_table). Force
-        # num_splits=1 as a workaround until the root cause is fixed
-        # upstream. current_flash_attention_impl() returns None when FA2
-        # is the implicit default (SM < 9.0). For FA3, only force
-        # num_splits=1 in batch-invariant mode (determinism).
-        if fa_impl in (None, "FA2") or is_in_batch_invariant_mode():
-            extra_kwargs["num_splits"] = 1
-
-        if self.enable_gqa:
-            extra_kwargs["enable_gqa"] = True
-
-        if self.out_transform is not None:
-            extra_kwargs["return_aux"] = AuxRequest(lse=True)
-
         # TODO(https://github.com/Dao-AILab/flash-attention/issues/3146): FA4 picks one
         # kernel configuration per call from max_seqlen_q, so the single-token decode rows
         # of a mixed prefill/decode step lose the configuration they get in a decode-only
@@ -301,7 +266,14 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         #   decode call   min(., 3) [0, 1, 2, 3, 3]     max_seqlen_q 1    seqused_k [k0, k1, k2, 0]
         #   prefill call  max(., 3) [3, 3, 3, 3, 653]   max_seqlen_q 650  seqused_k [0, 0, 0, k3]
         # A 1-token prompt sorts after the prefills and runs in the prefill call.
-        if fa_impl == "FA4" and max_seqlen_q > 1 and self.out_transform is None:
+        cu_seqlens_q = attn_metadata.query_start_loc
+        max_seqlen_q = attn_metadata.max_query_len
+        seqused_k = attn_metadata.seq_lens
+        if (
+            current_flash_attention_impl() == "FA4"
+            and max_seqlen_q > 1
+            and self.out_transform is None
+        ):
             is_single_token = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]) == 1
             is_leading_single_token = is_single_token.int().cumprod(0).bool()
             num_leading_single_tokens = is_leading_single_token.sum(dtype=torch.int32)
@@ -320,20 +292,20 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         else:
             calls = [(cu_seqlens_q, max_seqlen_q, seqused_k)]
         for call_cu_seqlens_q, call_max_seqlen_q, call_seqused_k in calls:
-            result = torch.nn.attention.varlen.varlen_attn_out(
+            result = paged_varlen_attention_out(
                 output[:num_actual_tokens],
                 query[:num_actual_tokens],
                 key_cache,
                 value_cache,
-                call_cu_seqlens_q,
-                cu_seqlens_k,
-                call_max_seqlen_q,
-                max_seqlen_k,
+                cu_seqlens_q=call_cu_seqlens_q,
+                max_seqlen_q=call_max_seqlen_q,
+                max_seqlen_k=attn_metadata.max_seq_len,
+                seqused_k=call_seqused_k,
+                block_table=attn_metadata.block_table,
                 scale=self.scale,
                 window_size=sliding_window_size,
-                block_table=block_table,
-                seqused_k=call_seqused_k,
-                **extra_kwargs,
+                enable_gqa=self.enable_gqa,
+                return_lse=self.out_transform is not None,
             )
         if self.out_transform is None:
             return result
@@ -537,19 +509,3 @@ class VLLMInnerAttention(InnerAttention):
         num_tokens = q_THK.shape[0]
         out_TD = out_TD.narrow(0, 0, num_tokens)
         return out_TD.view(num_tokens, -1, self.value_head_dim)
-
-
-def get_attention_dimensions(
-    attention_config, model_dim: int
-) -> tuple[int, int, int, int]:
-    """Return query heads, KV heads, Q/K head dim, and value head dim."""
-    num_heads = attention_config.n_heads
-    num_kv_heads = getattr(attention_config, "n_kv_heads", None) or num_heads
-    if hasattr(attention_config, "qk_nope_head_dim"):
-        head_dim = attention_config.qk_nope_head_dim + attention_config.qk_rope_head_dim
-        value_head_dim = attention_config.v_head_dim
-    else:
-        head_dim = getattr(attention_config, "head_dim", None)
-        head_dim = head_dim if head_dim is not None else model_dim // num_heads
-        value_head_dim = head_dim
-    return num_heads, num_kv_heads, head_dim, value_head_dim

@@ -505,7 +505,9 @@ def test_shutdown_closes_the_renderer():
 def test_reset_kv_cache_on_model_state_dict_load_controls_cache_reset(
     reset_kv_cache: bool,
 ):
-    model = SimpleNamespace(load_model_state_dict=lambda fetch: None)
+    model = SimpleNamespace(
+        model_state_dict_loader=SimpleNamespace(load=lambda fetch: None)
+    )
     engine = _vllm_engine(
         reset_kv_cache_on_model_state_dict_load=reset_kv_cache, model=model
     )
@@ -667,16 +669,20 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dic
     return engine_args.call_args.kwargs
 
 
-def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
+def test_engine_config_reaches_engine_args(monkeypatch, tmp_path):
     engine_kwargs = _build_engine_kwargs(
         monkeypatch,
         tmp_path,
         Generator.Config(
             model=_MODEL_CONFIG,
-            engine=VLLMEngine.Config(extra_engine_args={"watermark": 0.03}),
+            engine=VLLMEngine.Config(
+                watermark=0.03,
+                extra_engine_args={"long_prefill_token_threshold": 4096},
+            ),
         ),
     )
     assert engine_kwargs["watermark"] == 0.03
+    assert engine_kwargs["long_prefill_token_threshold"] == 4096
     assert engine_kwargs["scheduling_policy"] == "priority"
 
 
@@ -691,6 +697,7 @@ def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
             r"use Generator\.Config\.max_num_batched_tokens",
         ),
         ("seed", r"use Generator\.Config\.debug\.seed"),
+        ("watermark", r"use VLLMEngine\.Config\.watermark"),
     ],
 )
 def test_extra_engine_args_rejects_torchtitan_owned_keys(key, match):
