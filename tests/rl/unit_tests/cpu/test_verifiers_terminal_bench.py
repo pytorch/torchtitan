@@ -403,7 +403,7 @@ def test_muse_glimmer_terminal_bench_recipe_uses_worker_loadable_renderer() -> N
     ("name", "trainer_gpus", "num_generators", "gpus_per_generator"),
     [
         ("rl_grpo_qwen35_9b_terminal_bench", 8, 8, 1),
-        ("rl_grpo_qwen35_35b_a3b_terminal_bench", 8, 2, 4),
+        ("rl_dapo_qwen35_35b_a3b_terminal_bench_dist_moe", 4, 16, 1),
     ],
 )
 def test_recipe_layouts_fit_the_model(
@@ -417,8 +417,8 @@ def test_recipe_layouts_fit_the_model(
     The invariants are the ones a launch would otherwise trip over one at a
     time: tensor parallelism divides the KV heads in both roles, and for the MoE
     model expert parallelism divides the experts, is at least the trainer TP
-    degree, and equals DP x TP in the generator. The GPU totals pin the intended
-    16-GPU footprint.
+    degree, and equals DP x TP in the generator. The GPU totals pin each recipe's
+    footprint.
     """
     config = _terminal_bench_config(name)
     trainer = config.trainer.parallelism
@@ -454,16 +454,13 @@ def test_recipe_layouts_fit_the_model(
             generator.data_parallel_degree * generator.tensor_parallel_degree
         )
         assert num_experts % generator.expert_parallel_degree == 0
-        # The standard MoE dispatcher reads split sizes back to the host, which
-        # CUDA graph capture does not allow.
-        assert config.generator.engine.cuda_graph.mode == "NONE"
 
 
 @pytest.mark.parametrize(
     "name",
     [
         "rl_grpo_qwen35_9b_terminal_bench",
-        "rl_grpo_qwen35_35b_a3b_terminal_bench",
+        "rl_dapo_qwen35_35b_a3b_terminal_bench_dist_moe",
     ],
 )
 def test_recipes_share_the_loop_and_keep_fp32_master_weights(name: str) -> None:
