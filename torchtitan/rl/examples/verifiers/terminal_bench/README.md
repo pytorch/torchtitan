@@ -1,11 +1,10 @@
 # Terminal-Bench with Verifiers and TitanRL
 
 This example trains a terminal agent with TitanRL on AI2's TMax tasks and validates it
-on the 89 Terminal-Bench 2.1 tasks at step 0 (set `ValidationConfig.freq` for more
-passes). Each rollout is one attempt at one task: Harbor's Terminus-2 agent works in the
-task's Docker container, every model call goes to TitanRL's generators, and the task's
-own tests grade the result. Verifiers runs the agent and the grading through the
-[Verifiers bridge](../README.md).
+on the 89 Terminal-Bench 2.1 tasks. Each rollout is one attempt at one task: Harbor's
+Terminus-2 agent works in the task's Docker container, every model call goes to
+TitanRL's generators, and the task's own tests grade the result. Verifiers runs the
+agent and the grading through the [Verifiers bridge](../README.md).
 
 > **Toy sandbox.** Local Docker keeps this example self-contained; it is not a sandbox
 > for real training. Containers run untrusted task code on the controller host and, by

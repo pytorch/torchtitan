@@ -846,8 +846,7 @@ class Controller(Configurable):
         logger.info(f"Validation pass started at step {step}")
         # TODO: read prompts as slots free up and drop each once its metrics are folded, instead of
         # building the whole pass first. That also bounds the slots a pass takes in the generators and
-        # in a rollouter's own limit (e.g. the Verifiers env server). Do it when validation moves out
-        # of the controller.
+        # in a rollouter's own limit. Do it when validation moves out of the controller.
         # Off the event loop: training runs meanwhile, and building the dataset can take seconds.
         samples = await asyncio.to_thread(self._rollouter.get_validation_samples, steps)
         greedy = replace(self._sampling, temperature=0.0, top_p=1.0)
@@ -1002,6 +1001,10 @@ class Controller(Configurable):
 
         await self._maybe_run_validation(step=num_training_steps, after_training=True)
 
+    async def _generator_loop(self) -> None:
+        """Wait until every generator's engine loop exits; raise as soon as one crashes."""
+        await self.generator_router.wait_engine_loop.call_one()
+
     async def _maybe_run_validation(
         self, *, step: int, after_training: bool = False
     ) -> None:
@@ -1060,10 +1063,6 @@ class Controller(Configurable):
                 )
             )
             self._is_validation_due = False
-
-    async def _generator_loop(self) -> None:
-        """Wait until every generator's engine loop exits; raise as soon as one crashes."""
-        await self.generator_router.wait_engine_loop.call_one()
 
     async def _data_input_loop(self, group_buffer: RolloutGroupWorkBuffer) -> None:
         """produces a RolloutGroupWork into group_buffer.
