@@ -25,6 +25,7 @@ The package is organized by ownership:
 | `torchtitan_recipes.models.qwen3` | Qwen3 pretraining and SFT | `torchtitan/models/qwen3/README.md` |
 | `torchtitan_recipes.models.flux` | Flux pretraining | `torchtitan/models/flux/README.md` |
 | `torchtitan_recipes.models.muse_glimmer` | Muse Glimmer pretraining | `torchtitan/models/muse_glimmer/README.md` |
+| `torchtitan_recipes.models.muse_spark` | Muse Spark pretraining | `torchtitan/models/muse_spark/README.md` |
 | `torchtitan_recipes.graph_trainer.llama3` | GraphTrainer Llama 3 | `torchtitan/experiments/graph_trainer/README.md` |
 | `torchtitan_recipes.graph_trainer.qwen3` | GraphTrainer Qwen3 | `torchtitan/experiments/graph_trainer/README.md` |
 | `torchtitan_recipes.graph_trainer.deepseek_v3` | GraphTrainer DeepSeek V3 | `torchtitan/experiments/graph_trainer/README.md` |
