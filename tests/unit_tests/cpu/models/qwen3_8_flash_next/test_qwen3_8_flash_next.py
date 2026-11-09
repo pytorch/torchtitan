@@ -51,28 +51,37 @@ def test_released_architecture_and_checkpoint_schema(expert_parallel_degree):
     with torch.device("meta"):
         model = cfg.build()
     hf = Qwen38FlashNextStateDictAdapter(cfg, None).to_hf(model.state_dict())
-    fixture = (
-        Path(__file__).resolve().parents[4]
-        / "assets/qwen3_8_flash_next/checkpoint_schema.json"
-    )
-    expected = json.loads(fixture.read_text())
+    # Captured independently from the decoder/vision safetensors headers at:
+    # https://huggingface.co/Qwen/Qwen3.8-Flash-Next/tree/de4b8e4d43b917e7706784d8bb445c9af86a3540
+    expected_shapes = {
+        "model.language_model.embed_tokens.weight": [248320, 2560],
+        "lm_head.weight": [248320, 2560],
+        "model.language_model.layers.0.linear_attn.in_proj_qkv.weight": [10240, 2560],
+        "model.language_model.layers.3.self_attn.q_proj.weight": [12288, 2560],
+        "model.language_model.layers.3.self_attn.k_proj.weight": [512, 2560],
+        "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight": [
+            2500012,
+            160,
+        ],
+        "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_127.weight": [
+            2500012,
+            160,
+        ],
+        "model.visual.patch_embed.proj.weight": [1152, 3, 2, 16, 16],
+    }
     shapes = {name: list(tensor.shape) for name, tensor in hf.items()}
-    assert len(shapes) == expected["num_tensors"]
-    assert (
-        sum(".ngram_embedding.shard_" in name for name in shapes)
-        == expected["num_ngram_shards"]
-    )
+    assert len(shapes) == 1627
+    assert sum(".ngram_embedding.shard_" in name for name in shapes) == 128
     assert (
         hashlib.sha256("\n".join(sorted(shapes)).encode()).hexdigest()
-        == expected["names_sha256"]
+        == "56b8050fd51b5e8258b278d8de1db63840655ca1662f01487f5d910455572a11"
     )
-    # Both digests come from independently captured, pinned HF checkpoint headers.
     canonical = json.dumps(shapes, sort_keys=True, separators=(",", ":"))
     assert (
         hashlib.sha256(canonical.encode()).hexdigest()
-        == expected["names_and_shapes_sha256"]
+        == "c453af89687fed9659910ed9b990ab4544f7e7d796bbfb7b43dcb6d4ba96c8c4"
     )
-    for name, shape in expected["representative_shapes"].items():
+    for name, shape in expected_shapes.items():
         assert shapes[name] == shape
 
 
@@ -87,6 +96,53 @@ def test_unsupported_attention_configs_are_explicit(config):
         attention.inner_attention.compress_ratio = attention_ratio
         with pytest.raises(ValueError, match="compress_ratio=4"):
             attention.build()
+
+
+@pytest.mark.parametrize("layer_id", [0, 3])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_muon_split_projection_matches_fused_forward_and_backward(layer_id, dtype):
+    """Guard head interleaving and the single fused input-gradient reduction."""
+    from torchtitan_recipes.tests.models.qwen3_8_flash_next import (
+        qwen38_flash_next_debugmodel,
+    )
+
+    torch.manual_seed(42)
+    attention = qwen38_flash_next_debugmodel().model.layers[layer_id].attention
+    config = attention.in_proj if layer_id == 0 else attention.wq
+    linear = config.build().to(dtype)
+    num_groups = config.num_groups
+    projection_rows = config.projection.out_features // num_groups
+    gate_rows = config.gates.out_features // num_groups
+    weight = torch.randn(config.out_features, config.in_features, dtype=dtype)
+    with torch.no_grad():
+        for group in range(num_groups):
+            start = group * (projection_rows + gate_rows)
+            linear.projection.weight[
+                group * projection_rows : (group + 1) * projection_rows
+            ].copy_(weight[start : start + projection_rows])
+            linear.gates.weight[group * gate_rows : (group + 1) * gate_rows].copy_(
+                weight[start + projection_rows : start + projection_rows + gate_rows]
+            )
+    reference_weight = weight.requires_grad_()
+    input = torch.randn(31, config.in_features, dtype=dtype, requires_grad=True)
+    reference_input = input.detach().clone().requires_grad_()
+    actual = linear(input)
+    expected = F.linear(reference_input, reference_weight)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    upstream = torch.randn_like(actual)
+    actual.backward(upstream)
+    expected.backward(upstream)
+    torch.testing.assert_close(input.grad, reference_input.grad, atol=0, rtol=0)
+    actual_weight_grad = torch.cat(
+        (
+            linear.projection.weight.grad.unflatten(0, (num_groups, projection_rows)),
+            linear.gates.weight.grad.unflatten(0, (num_groups, gate_rows)),
+        ),
+        1,
+    ).flatten(0, 1)
+    torch.testing.assert_close(
+        actual_weight_grad, reference_weight.grad, atol=0, rtol=0
+    )
 
 
 def test_gated_residual_forward_and_gradients(config):
@@ -498,7 +554,8 @@ def test_qsa_auxiliary_gradient_only_updates_the_indexer(
     if input_kind == "frozen":
         assert not captured_scores[0].requires_grad
     for module in (attention.wq, attention.wk, attention.wv, attention.wo):
-        assert module.weight.grad is None or not module.weight.grad.any()
+        for parameter in module.parameters():
+            assert parameter.grad is None or not parameter.grad.any()
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])

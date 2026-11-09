@@ -14,8 +14,6 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-# TODO: Switch to the public functional collective API when released:
-# https://github.com/pytorch/pytorch/issues/113669
 from torch.distributed._functional_collectives import (
     all_to_all_single,
     all_to_all_single_autograd,

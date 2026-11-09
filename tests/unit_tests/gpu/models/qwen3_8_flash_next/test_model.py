@@ -31,9 +31,43 @@ from torchtitan_recipes.tests.models.qwen3_8_flash_next import (
 )
 
 
-pytestmark = pytest.mark.multi_gpu
+def test_split_projection_preserves_fp32_wgrad():
+    """A BF16 fused GEMM must return FP32 parameter gradients under FSDP."""
+    recipe = qwen38_flash_next_debugmodel()
+    config = recipe.model.layers[0].attention.in_proj
+    linear = config.build().to(
+        device=torch.accelerator.current_accelerator(), dtype=torch.bfloat16
+    )
+    linear.projection.weight.grad_dtype = torch.float32
+    linear.gates.weight.grad_dtype = torch.float32
+    num_groups = config.num_groups
+    projection_rows = config.projection.out_features // num_groups
+    gate_rows = config.gates.out_features // num_groups
+    input = torch.randn(
+        31,
+        config.in_features,
+        device=linear.projection.weight.device,
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+    output = linear(input)
+    upstream = torch.randn_like(output)
+    output.backward(upstream)
+    expected_weight_grad = torch.mm(
+        upstream.t(), input.detach(), out_dtype=torch.float32
+    )
+    actual_weight_grad = torch.cat(
+        (
+            linear.projection.weight.grad.unflatten(0, (num_groups, projection_rows)),
+            linear.gates.weight.grad.unflatten(0, (num_groups, gate_rows)),
+        ),
+        1,
+    ).flatten(0, 1)
+    assert actual_weight_grad.dtype == torch.float32
+    torch.testing.assert_close(actual_weight_grad, expected_weight_grad, atol=0, rtol=0)
 
 
+@pytest.mark.multi_gpu
 class TestFlashNextFSDP(DTensorTestBase):
     @property
     def world_size(self) -> int:
@@ -41,7 +75,7 @@ class TestFlashNextFSDP(DTensorTestBase):
 
     @with_comms
     def test_owned_ple_training_and_async_checkpoint(self):
-        """Exercise FSDP+EP, persistent rows, fused AdamW and remat."""
+        """Exercise FSDP+EP, Muon/AdamW/Adam updates, async resume and remat."""
         parallelism = ParallelismConfig(
             data_parallel_shard_degree=self.world_size, expert_parallel_degree=2
         )
@@ -150,14 +184,37 @@ class TestFlashNextFSDP(DTensorTestBase):
                             clip_grad_norm_(model.parameters(), 0.5, foreach=True)
                         )
                     )
+                    untouched = ~parameter.grad.to_local().any(-1)
+                    self.assertTrue(untouched.any())
+                    expected_untouched = (
+                        parameter.to_local()[untouched].detach().clone()
+                    )
                     optimizer.step()
+                    self.assertEqual(
+                        parameter.to_local()[untouched],
+                        expected_untouched,
+                        atol=0,
+                        rtol=0,
+                    )
                     wrapper = ModelWrapper(model)
-                    lookup_optimizer = next(iter(optimizer))
                     expected_weight = parameter.detach().clone()
-                    expected_moments = {
-                        key: lookup_optimizer.state[parameter][key].clone()
-                        for key in ("exp_avg", "exp_avg_sq")
-                    }
+                    muon_parameter = model.layers[
+                        "0"
+                    ].attention.in_proj.projection.weight
+                    expected_muon_weight = muon_parameter.detach().clone()
+                    expected_states = [
+                        (
+                            inner_optimizer,
+                            param,
+                            {
+                                key: value.clone()
+                                for key, value in values.items()
+                                if isinstance(value, torch.Tensor)
+                            },
+                        )
+                        for inner_optimizer in optimizer
+                        for param, values in inner_optimizer.state.items()
+                    ]
                     checkpoint_path = path[0] + f"/{use_remat}"
                     state = {"model": wrapper, "optimizer": optimizer}
                     dcp.async_save(
@@ -167,21 +224,27 @@ class TestFlashNextFSDP(DTensorTestBase):
                     ).result()
                     with torch.no_grad():
                         parameter.zero_()
-                        for key in expected_moments:
-                            lookup_optimizer.state[parameter][key].zero_()
+                        muon_parameter.zero_()
+                        for inner_optimizer, param, values in expected_states:
+                            for key in values:
+                                inner_optimizer.state[param][key].zero_()
                     dcp.load(
                         state,
                         checkpoint_id=checkpoint_path,
                         process_group=checkpoint_pg,
                     )
                     self.assertEqual(parameter, expected_weight, atol=0, rtol=0)
-                    for key, expected in expected_moments.items():
-                        self.assertEqual(
-                            lookup_optimizer.state[parameter][key],
-                            expected,
-                            atol=0,
-                            rtol=0,
-                        )
+                    self.assertEqual(
+                        muon_parameter, expected_muon_weight, atol=0, rtol=0
+                    )
+                    for inner_optimizer, param, values in expected_states:
+                        for key, expected in values.items():
+                            self.assertEqual(
+                                inner_optimizer.state[param][key],
+                                expected,
+                                atol=0,
+                                rtol=0,
+                            )
         finally:
             dist.barrier()
             if self.rank == 0:

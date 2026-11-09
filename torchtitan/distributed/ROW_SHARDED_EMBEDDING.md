@@ -2,8 +2,14 @@
 
 `row_sharded_embedding.py` routes embedding requests to persistent row owners
 using PyTorch functional collectives and `F.embedding`. Qwen3.8-Flash-Next uses
-it for PLE. There is no TorchRec or FBGEMM dependency, pooling, cache, planner or
-optimizer update in backward.
+it for PLE.
+
+## Why this implementation fits PLE
+
+PLE needs one table with fixed row ownership and individual vector lookups.
+All-to-all routing and local `F.embedding` cover these needs while reusing
+TorchTitan's DTensor, optimizer, clipping and checkpointing, with less
+integration work than adopting TorchRec's broader embedding stack.
 
 ## Routing and shapes
 
@@ -37,7 +43,7 @@ No rank gathers the table.
 | Prepare | Deduplicate local IDs, sort by owner, exchange counts and unique IDs. Owners receive `[M]` local row indices. |
 | Forward | Read `[M,D]` vectors from local `[R,D]` weights, cast selected vectors, return with all-to-all, expand duplicates in original order. |
 | Backward | Accumulate duplicates on requesters, reverse the vector exchange, sum requester gradients into local master-row gradients. |
-| Optimizer | Accumulate microbatches, clip globally, then update local rows with ordinary AdamW. |
+| Optimizer | Accumulate microbatches, clip globally, then update local rows with the configured optimizer. |
 
 Qwen uses `[T,16]` global hash IDs and receives `[T,16,160]` vectors at released
 geometry. Hash head offsets are already included in the IDs; the helper knows
@@ -49,9 +55,6 @@ empty inputs or empty table shards. All owners must replay response collectives
 together; nonreentrant PyTorch checkpointing must disable early stopping.
 Qwen's full `torch_remat` policy is tested with the actual model.
 
-The functional collectives currently have a private import path; their public
-release is tracked by [PyTorch #113669](https://github.com/pytorch/pytorch/issues/113669).
-
 ## Precision and optimizer semantics
 
 Only selected vectors are cast to the requested compute dtype. With FP32 masters
@@ -62,12 +65,12 @@ second requester's -256 is added; the result is zero, rather than one.
 
 There is no mesh-size division: TorchTitan already normalizes its loss by the
 global valid-token count. Weights stay fixed through accumulated microbatches.
-Gradients and AdamW moments are dense local shards; unvisited rows still receive
-ordinary momentum and weight-decay updates.
+Gradients and optimizer moments are dense local shards. Existing momentum can
+update unvisited rows; weight decay follows the table's optimizer configuration.
 
-Qwen's recipes apply existing regex optimizer configurations to the lookup and
-the remaining parameters, with identical hyperparameters. The lookup weight,
-its gradient and ordinary AdamW moments are DTensors.
+Qwen's debug recipes use a separate Adam optimizer for the lookup table with
+weight decay disabled, as specified in the report. The lookup weight, its
+gradient and Adam moments retain their DTensor placements.
 
 ## Parameter lifecycle, clipping and checkpoints
 
@@ -82,7 +85,7 @@ dtype conversion and native DCP retain the DTensor's global layout.
 The existing clipper combines the table gradient with the other DTensor
 gradients. Using the backbone's storage mesh preserves the norm grouping and
 reduction order. Only scalar norms communicate; the trainer uses L2 clipping.
-Native DCP saves weights and AdamW moments by global coordinates and supports
+Native DCP saves weights and optimizer moments by global coordinates and supports
 resume with a changed owner count.
 
 Qwen's HF adapter uses the public DTensor chunk metadata to intersect local
@@ -102,20 +105,19 @@ different from the master dtype.
 ## Capacity
 
 The released table is `320,001,536 x 160`: 51,200,245,760 parameters.
-Ownership removes the 95.37 GiB BF16 full-table gather. It retains dense AdamW
+Ownership removes the 95.37 GiB BF16 full-table gather. It retains dense Adam
 state and updates every local row at each optimizer step.
 
 | Table storage | Global GiB |
 | --- | ---: |
 | FP32 parameters | 190.74 |
 | FP32 gradients | 190.74 |
-| Two FP32 AdamW moments | 381.47 |
+| Two FP32 Adam moments | 381.47 |
 | Total | 762.94 |
 
 At eight owners the table alone costs 95.37 GiB per owner; at four it costs
-190.74 GiB. Other model state and activations are additional. The full 177.4B
-meta inventory's default FP32 AdamW state exceeds eight GB300s even with ideal
-balance. Released-model capacity and throughput are unqualified.
+190.74 GiB. Other model state and activations are additional.
+Released-model capacity and throughput are unqualified.
 
 Current Qwen support uses DP owners. A PP stage without PLE should own no table
 and join no lookup collectives; PP ranks on other stages do not add capacity to

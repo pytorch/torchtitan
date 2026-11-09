@@ -6,7 +6,8 @@
 
 """Qwen Sparse Attention with complete-block selection and indexer distillation."""
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import cast, NamedTuple
 
 import spmd_types as spmd
@@ -28,15 +29,195 @@ from torchtitan.models.common.aux_loss import AuxLoss
 
 from torchtitan.models.common.decoder_sharding import token_id_placement
 from torchtitan.models.common.linear import maybe_gather_tp_input
+from torchtitan.models.common.linear.inplace_wgrad_accum import (
+    reject_inplace_wgrad_accum,
+)
 from torchtitan.models.qwen3_5.model import OffsetRMSNorm, Qwen35Attention
+from torchtitan.models.qwen3_5.rope import MRoPE as Qwen35MRoPE
 
 from .embedding import document_starts
-from .rope import MRoPE
 
 # T = packed tokens, U = valid tokens, G = complete blocks, R = block size,
 # B = selected blocks, J = selected tokens including the incomplete tail,
 # H = query or KV heads, K = head dimension, V = value dimension,
 # D = model dimension, Q = query chunk, C = projection channels.
+# F = rotary features, M = flattened input rows.
+
+
+class SplitLinear(Linear):
+    """Keep projection and gate parameters separate, with grouped output order."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Linear.Config):
+        projection: Linear.Config
+        gates: Linear.Config
+        num_groups: int
+        param_init: dict[str, Callable] | None = field(default_factory=dict)
+
+        def __post_init__(self) -> None:
+            reject_inplace_wgrad_accum(
+                self, "projection and gate gradients are computed together"
+            )
+            if any(
+                linear.bias or linear.num_linears != 1
+                for linear in (self, self.projection, self.gates)
+            ):
+                raise ValueError("SplitLinear requires one bias-free projection")
+            if self.num_groups < 1 or any(
+                linear.out_features % self.num_groups
+                for linear in (self.projection, self.gates)
+            ):
+                raise ValueError("SplitLinear projections must contain whole groups")
+            if any(
+                linear.in_features != self.in_features
+                for linear in (self.projection, self.gates)
+            ) or self.out_features != (
+                self.projection.out_features + self.gates.out_features
+            ):
+                raise ValueError("SplitLinear dimensions must match its projections")
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        del self.weight
+        self.projection = config.projection.build()
+        self.gates = config.gates.build()
+        self.projection_channels_per_group = (
+            config.projection.out_features // config.num_groups
+        )
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        input_TD = input
+        projection_CD, gates_CD = self.projection.weight, self.gates.weight
+        return remat.region(
+            _SplitLinearFunction.apply,
+            self.remat_region_name("linear"),
+            recompute=self.remat_should_recompute("linear"),
+        )(
+            input_TD,
+            projection_CD,
+            gates_CD,
+            projection_CD.shape[0] // self.projection_channels_per_group,
+        )
+
+
+@spmd.register_autograd_function
+class _SplitLinearFunction(torch.autograd.Function):
+    """Use one fused GEMM while exposing separate Muon and AdamW parameters."""
+
+    @staticmethod
+    def spmd_typecheck(
+        *,
+        input_TD: torch.Tensor,
+        projection_CD: torch.Tensor,
+        gates_CD: torch.Tensor,
+        num_groups: int,
+    ) -> torch.Tensor | spmd.rules.NdimWithSpmdType:
+        output_TC = spmd.rules.einsum(
+            "...d,cd->...c", input_TD, projection_CD, linear_in=(0, 1)
+        )
+        gates_TC = spmd.rules.einsum(
+            "...d,cd->...c", input_TD, gates_CD, linear_in=(0, 1)
+        )
+        # Joining channels within each head is linear in both outputs and
+        # retains their shared token/head layout.
+        return spmd.rules.einsum(
+            "...c,...c->...c", output_TC, gates_TC, linear_in=((0, 1),)
+        )
+
+    @staticmethod
+    def forward(  # pyrefly: ignore[bad-override]
+        ctx,
+        input_TD: torch.Tensor,
+        projection_CD: torch.Tensor,
+        gates_CD: torch.Tensor,
+        num_groups: int,
+    ) -> torch.Tensor:
+        weight_HCD = torch.cat(
+            (
+                projection_CD.unflatten(0, (num_groups, -1)),
+                gates_CD.unflatten(0, (num_groups, -1)),
+            ),
+            1,
+        )
+        weight_CD = weight_HCD.flatten(0, 1)
+        output_TC = F.linear(input_TD, weight_CD)
+        ctx.save_for_backward(
+            input_TD.to(output_TC.dtype), weight_CD.to(output_TC.dtype)
+        )
+        ctx.projection_param, ctx.gates_param = projection_CD, gates_CD
+        ctx.num_groups = num_groups
+        ctx.input_dtype = input_TD.dtype
+        return output_TC
+
+    @staticmethod
+    @torch.autograd.function.once_differentiable
+    def backward(  # pyrefly: ignore[bad-override]
+        ctx, grad_TC: torch.Tensor
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, None]:
+        input_TD, weight_CD = ctx.saved_tensors
+        grad_TC = grad_TC.reshape(-1, grad_TC.shape[-1])
+        input_MD = input_TD.reshape(-1, input_TD.shape[-1])
+        grad_input_TD = grad_projection_CD = grad_gates_CD = None
+        if ctx.needs_input_grad[0]:
+            grad_input_TD = (
+                grad_TC.mm(weight_CD).view(input_TD.shape).to(ctx.input_dtype)
+            )
+        if ctx.needs_input_grad[1] or ctx.needs_input_grad[2]:
+            # Preserve FSDP's FP32 WGRAD instead of rounding it to BF16 before
+            # splitting. Two input-gradient GEMMs would also change rounding.
+            grad_dtype = ctx.projection_param.grad_dtype
+            assert grad_dtype == ctx.gates_param.grad_dtype
+            grad_CD = (
+                grad_TC.t().mm(input_MD)
+                if grad_dtype is None or grad_dtype == input_MD.dtype
+                else torch.mm(grad_TC.t(), input_MD, out_dtype=grad_dtype)
+            )
+            grad_projection_HCD, grad_gates_HCD = grad_CD.unflatten(
+                0, (ctx.num_groups, -1)
+            ).split(
+                (
+                    ctx.projection_param.shape[0] // ctx.num_groups,
+                    ctx.gates_param.shape[0] // ctx.num_groups,
+                ),
+                1,
+            )
+            if ctx.needs_input_grad[1]:
+                grad_projection_CD = grad_projection_HCD.flatten(0, 1)
+            if ctx.needs_input_grad[2]:
+                grad_gates_CD = grad_gates_HCD.flatten(0, 1)
+        return grad_input_TD, grad_projection_CD, grad_gates_CD, None
+
+
+class MRoPE(Qwen35MRoPE):
+    """Reuse Qwen3.5's position selection with activation-dtype rotation."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Qwen35MRoPE.Config):
+        pass
+
+    @staticmethod
+    def apply_rotary_emb(
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        rope_cache: torch.Tensor,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if inverse:
+            raise NotImplementedError("MRoPE does not support inverse rotation")
+        rotary_dim = query.shape[-1]
+        # NOTE: Preserve HF Flash-Next numerics by casting cos/sin to the
+        # activation dtype before rotation. FP32 rotation followed by a final
+        # cast changes BF16 rounding.
+        cos_T1F = rope_cache[..., :rotary_dim].to(query.dtype)
+        sin_T1F = rope_cache[..., rotary_dim:].to(query.dtype)
+
+        def rotate(x_THF: torch.Tensor) -> torch.Tensor:
+            first_THF, second_THF = x_THF.chunk(2, -1)
+            return x_THF * cos_T1F + torch.cat((-second_THF, first_THF), -1) * sin_T1F
+
+        query_THF = rotate(query)
+        return query_THF if key is None else (query_THF, rotate(key))
 
 
 def _select_blocks(
@@ -338,7 +519,7 @@ class QSAInnerAttention(InnerAttention):
             stop = start + self.chunk_size
             indices_QJ = selected_indices_TJ[start:stop]
             # TODO: use Attention Gym's distinct-K/V grouped backward when
-            # available: https://github.com/meta-pytorch/attention-gym/pull/679.
+            # available: https://github.com/meta-pytorch/attention-gym/pull/702.
             # Native checkpoints can nest inside a block torch_remat checkpoint.
             # TODO: use torch_remat after nesting and chunk early-stop are supported.
             # Early-stop tracking: https://github.com/meta-pytorch/remat/issues/6.
