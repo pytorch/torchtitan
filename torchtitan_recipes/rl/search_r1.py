@@ -268,7 +268,10 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             num_training_steps=500,
             num_prompts_per_train_step=32,  # TODO: TBD
             num_samples_per_prompt=8,  # TODO: TBD
-            validation=ValidationConfig(steps=500),
+            # A pass beside training would change the step times this recipe measures: validate at the end.
+            validation=ValidationConfig(
+                steps=500, validate_at_step_0=False, validate_after_training=True
+            ),
         ),
         rollouter=_search_r1_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
