@@ -28,24 +28,30 @@ def resolve_max_num_batched_tokens(
 ) -> int:
     """Return ``max_num_batched_tokens``, or what ``vllm serve`` picks for this GPU when it is None.
 
-    ``vllm serve`` reads vLLM's per-GPU table (``EngineArgs.get_batch_defaults``) and caps the
-    value at ``max_num_seqs * max_model_len``. The table as of vLLM 0.32:
-        >= 160 GB (B200, GB300)     -> 16384
-        >= 70 GB, not A100 (H100)   -> 8192
-        other GPUs (A100, A10G)     -> 2048
+    ``vllm serve`` reads vLLM's table (``EngineArgs.get_batch_defaults``), which keys on total
+    device memory for any GPU vendor, and caps the value at ``max_num_seqs * max_model_len``. The
+    table as of vLLM 0.32:
+        >= 160 GiB (B200, GB300)     -> 16384
+        >= 70 GiB, not A100 (H100)   -> 8192
+        other GPUs (A100, A10G)      -> 2048
 
     ``LLMEngine.from_engine_args`` uses ``UsageContext.ENGINE_CONTEXT``, which has no entry in
-    that table, so vLLM itself would pick 2048 on every GPU. The engine and the FULL CUDA graph
-    cap both take the value returned here.
+    that table, so vLLM itself would pick 2048 on every GPU. The FULL CUDA graph sizes are built
+    before the engine, so the engine and the FULL CUDA graph cap both take the value returned here.
     """
     if max_num_batched_tokens is not None:
         return max_num_batched_tokens
     # world_size scales the table only on vLLM's CPU backend, which the generator never uses.
     default_max_num_batched_tokens, _ = EngineArgs.get_batch_defaults(world_size=1)
-    return min(
+    max_num_batched_tokens = min(
         default_max_num_batched_tokens[UsageContext.OPENAI_API_SERVER],
         max_num_seqs * max_model_len,
     )
+    logger.info(
+        "max_num_batched_tokens is unset: using %d, what `vllm serve` picks for this GPU",
+        max_num_batched_tokens,
+    )
+    return max_num_batched_tokens
 
 
 @dataclass(kw_only=True, slots=True)
@@ -67,7 +73,8 @@ class VLLMCudaGraphConfig:
     - ``"FULL_DECODE_ONLY"``: graph pure-decode batches; prefill / mixed
       batches run eager. Cheap (no inductor compile).
     - ``"FULL"`` (default): graph the whole forward, prefill included, attention
-      captured too.
+      captured too. vLLM switches to ``FULL_DECODE_ONLY``, with a warning, when an
+      attention backend graphs only uniform decode batches (the MLA backend does).
     """
 
     capture_sizes: list[int] | None = None

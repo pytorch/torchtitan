@@ -472,11 +472,13 @@ class Controller(Configurable):
             max_num_batched_tokens = self.generator.max_num_batched_tokens or 2048
             # TODO(https://github.com/Dao-AILab/flash-attention/issues/3117): drop once fixed. vLLM's memory
             # profile splits a power-of-two budget evenly over max_num_seqs; FA2 writes out of bounds past 64 each.
+            # TODO: an unset budget counts as 2048 here, but an FA2 GPU can resolve more (A800 80 GB: 8192).
+            # Set generator.max_num_batched_tokens on such GPUs.
             max_num_seqs = 2 ** math.ceil(
                 math.log2(max(max_num_seqs, max_num_batched_tokens / 64))
             )
-            # vLLM requires max_num_seqs <= max_num_batched_tokens, which defaults to 2048 for
-            # the engine torchtitan builds.
+            # vLLM requires max_num_seqs <= max_num_batched_tokens. An unset budget resolves to at
+            # least the max_num_seqs returned here (resolve_max_num_batched_tokens).
             return min(max_num_seqs, max_num_batched_tokens)
 
     def __init__(self, config: Config):
