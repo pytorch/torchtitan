@@ -1690,6 +1690,108 @@ class TestGenerateGanttTrace:
         assert metric["s"] == "p"
 
     # ------------------------------------------------------------------
+    # Row labels and process names.
+    # ------------------------------------------------------------------
+
+    def _process_rows(self, trace, process_name):
+        """Row names of one process, top to bottom (by tid)."""
+        pid = next(
+            e["pid"]
+            for e in trace["traceEvents"]
+            if e["name"] == "process_name" and e["args"]["name"] == process_name
+        )
+        names = {
+            e["tid"]: e["args"]["name"]
+            for e in trace["traceEvents"]
+            if e["name"] == "thread_name" and e["pid"] == pid
+        }
+        return [names[tid] for tid in sorted(names)]
+
+    def test_rows_are_labeled_packed_and_capped(self, tmp_path):
+        """Named tasks are labeled by name without the trailing number, unnamed ones
+        by their first span; a label keeps at most max_rows_per_label rows. Rows that
+        hold one named task each keep its name; otherwise rows are "<label> row <i>"."""
+        spans = [
+            ("trainer", "train_step", 0, 100),
+            ("data_worker_0", "load", 0, 30),
+            ("data_worker_1", "load", 0, 100),
+            ("data_worker_2", "load", 40, 90),  # shares data_worker_0's row
+            ("rollout_worker_0", "rollout_group", 0, 100),
+            ("rollout_worker_1", "rollout_group", 0, 100),
+            ("rollout_worker_2", "rollout_group", 0, 100),
+            ("Task-1", "generate", 0, 50),
+            ("Task-2", "generate", 10, 40),
+            ("Task-3", "generate", 45, 90),  # reuses Task-2's row, free since 40
+            ("Task-4", "generate", 46, 60),  # both rows busy: a third row, hidden
+        ]
+        records = []
+        for task_name, span_name, start, end in spans:
+            records.append(self._start_rec(span_name, start, task_name))
+            records.append(
+                self._end_rec(span_name, end, (end - start) / 1000, task_name)
+            )
+        records.append(
+            {"log_type_name": "generate_error", "time_us": 55, "task_name": "Task-4"}
+        )
+        log_dir = os.path.join(str(tmp_path), "structured_logs")
+        self._write_jsonl(
+            os.path.join(
+                log_dir, "rl_controller.global_rank_0.20261108-111521-9KSDP5.jsonl"
+            ),
+            records,
+        )
+
+        trace = generate_gantt_trace(
+            log_dir, os.path.join(str(tmp_path), "gantt.json"), max_rows_per_label=2
+        )
+
+        assert self._process_rows(trace, "rl_controller rank 0") == [
+            "trainer",
+            "data_worker row 0",
+            "data_worker row 1",
+            "generate row 0",
+            "generate row 1 (+1 hidden rows)",
+            "rollout_worker_0",
+            "rollout_worker_1 (+1 hidden rows)",
+        ]
+        row_name_by_tid = {
+            e["tid"]: e["args"]["name"]
+            for e in trace["traceEvents"]
+            if e["name"] == "thread_name"
+        }
+        spans = {
+            (e["name"], e["ts"], row_name_by_tid[e["tid"]], e["args"]["task_name"])
+            for e in trace["traceEvents"]
+            if e.get("ph") == "X"
+        }
+        # rollout_worker_2 and Task-4 are on hidden rows, so their spans are left out.
+        assert spans == {
+            ("train_step", 0, "trainer", "trainer"),
+            ("load", 0, "data_worker row 0", "data_worker_0"),
+            ("load", 40, "data_worker row 0", "data_worker_2"),
+            ("load", 0, "data_worker row 1", "data_worker_1"),
+            ("rollout_group", 0, "rollout_worker_0", "rollout_worker_0"),
+            (
+                "rollout_group",
+                0,
+                "rollout_worker_1 (+1 hidden rows)",
+                "rollout_worker_1",
+            ),
+            ("generate", 0, "generate row 0", "Task-1"),
+            ("generate", 10, "generate row 1 (+1 hidden rows)", "Task-2"),
+            ("generate", 45, "generate row 1 (+1 hidden rows)", "Task-3"),
+        }
+        # A hidden task's error shows on its label's last shown row and names its task.
+        error = next(e for e in trace["traceEvents"] if e["name"] == "ERROR: generate")
+        assert row_name_by_tid[error["tid"]] == "generate row 1 (+1 hidden rows)"
+        assert error["args"]["task_name"] == "Task-4"
+
+        with pytest.raises(ValueError, match="max_rows_per_label"):
+            generate_gantt_trace(
+                log_dir, os.path.join(str(tmp_path), "g.json"), max_rows_per_label=0
+            )
+
+    # ------------------------------------------------------------------
     # Reading and pairing records.
     # ------------------------------------------------------------------
 
@@ -1753,13 +1855,43 @@ class TestGenerateGanttTrace:
         assert (by_name["A"]["ts"], by_name["A"]["dur"]) == (1000, 500)
         assert by_name["A"]["args"]["duration_ms"] == "0.70"
         assert (by_name["B"]["ts"], by_name["B"]["dur"]) == (1100, 900)
-        assert by_name["A"]["tid"] != by_name["B"]["tid"]
+        assert self._process_rows(trace, "a") == ["thread 7", "thread 8"]
         # Perfetto merges tid 0 into the row whose tid equals the pid: no row uses either.
         assert all(
             e["tid"] not in (0, e["pid"])
             for e in trace["traceEvents"]
             if e.get("ph") == "X" or e["name"] == "thread_name"
         )
+
+    def test_processes_sort_numbers_as_numbers(self, tmp_path):
+        """Processes sort by name with numbers as numbers: rank 2 before rank 10."""
+        log_dir = os.path.join(str(tmp_path), "structured_logs")
+        for rank in (10, 2, 1):
+            self._write_jsonl(
+                os.path.join(
+                    log_dir, f"trainer.global_rank_{rank}.20261108-111521-9KSDP5.jsonl"
+                ),
+                [
+                    self._start_rec("train_step", 0, "trainer"),
+                    self._end_rec("train_step", 100, 0.1, "trainer"),
+                ],
+            )
+
+        trace = generate_gantt_trace(log_dir, os.path.join(str(tmp_path), "g.json"))
+
+        name_by_pid = {
+            e["pid"]: e["args"]["name"]
+            for e in trace["traceEvents"]
+            if e["name"] == "process_name"
+        }
+        sort_index_by_pid = {
+            e["pid"]: e["args"]["sort_index"]
+            for e in trace["traceEvents"]
+            if e["name"] == "process_sort_index"
+        }
+        assert [
+            name_by_pid[pid] for pid in sorted(name_by_pid, key=sort_index_by_pid.get)
+        ] == ["trainer rank 1", "trainer rank 2", "trainer rank 10"]
 
 
 # ---------------------------------------------------------------------------
