@@ -31,6 +31,7 @@ from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.types import (
+    Prompt,
     Rollout,
     RolloutStatus,
     RolloutTurn,
@@ -1001,6 +1002,44 @@ def test_validation_schedule(
         (call.kwargs["step"], call.kwargs["metrics"][0].key)
         for call in controller.metrics_processor.log.call_args_list
     ] == logged
+
+
+def test_generate_fn_forwards_the_session_and_releases_on_failure() -> None:
+    """A failed call releases its reserved load, or the router would keep counting it."""
+
+    async def generate_call(*args, **kwargs) -> None:
+        # The load stays reserved while the generator runs the call.
+        release.assert_not_awaited()
+        raise RuntimeError("generator failed")
+
+    generate_call = AsyncMock(side_effect=generate_call)
+    reserve = AsyncMock(
+        return_value=SimpleNamespace(generate=SimpleNamespace(call_one=generate_call))
+    )
+    release = AsyncMock()
+    controller = object.__new__(Controller)
+    controller.generator_router = SimpleNamespace(
+        reserve=SimpleNamespace(call_one=reserve),
+        release=SimpleNamespace(call_one=release),
+    )
+    generate = controller._make_generate_fn()
+    prompt = Prompt(token_ids=[1, 2])
+
+    with pytest.raises(RuntimeError, match="generator failed"):
+        asyncio.run(
+            generate(prompt, request_id="r0", group_id=0, routing_session_id="s0")
+        )
+
+    # The session reaches both routing layers: the router and the generator's DP routing.
+    reserve.assert_awaited_once_with("r0", routing_session_id="s0")
+    generate_call.assert_awaited_once_with(
+        prompt,
+        request_id="r0",
+        group_id=0,
+        routing_session_id="s0",
+        sampling_config=None,
+    )
+    release.assert_awaited_once_with("r0")
 
 
 def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
