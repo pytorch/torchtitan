@@ -648,17 +648,12 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
     """
     return [
         IntegrationTestDefinition(
-            configs=[qwen38_flash_next_debugmodel_ep2],
-            test_descr="Qwen3.8-Flash-Next FSDP+EP, row-owned PLE and sparse attention",
-            test_name="qwen3_8_flash_next_fsdp+ep",
-            ngpu=2,
-            use_real_pg=True,
-            skip_rocm_test=True,
-        ),
-        IntegrationTestDefinition(
-            configs=[qwen38_flash_next_debugmodel_mm],
-            test_descr="Qwen3.8-Flash-Next image fusion, PLE and sparse attention with FSDP",
-            test_name="qwen3_8_flash_next_mm_fsdp",
+            configs=[
+                qwen38_flash_next_debugmodel_ep2,
+                qwen38_flash_next_debugmodel_mm,
+            ],
+            test_descr="Qwen3.8-Flash-Next FSDP, EP, image fusion, PLE and sparse attention",
+            test_name="qwen3_8_flash_next_fsdp",
             ngpu=2,
             use_real_pg=True,
             skip_rocm_test=True,
