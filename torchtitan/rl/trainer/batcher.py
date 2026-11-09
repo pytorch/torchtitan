@@ -10,6 +10,7 @@
 """
 
 import asyncio
+import bisect
 import heapq
 import itertools
 import logging
@@ -682,29 +683,52 @@ class Batcher(Configurable):
         num_tokens_per_bin = self._num_rows_per_microbatch * self.seq_len
         bins: list[list[TrainingSample]] = [[] for _ in range(target_num_bins)]
         bin_num_tokens = [0] * target_num_bins
-        bin_workloads = [self._attention_workload([])] * target_num_bins
+        bin_sum_squared_tokens = [0] * target_num_bins
+        empty_workload = self._attention_workload([])
+        # Negative indices preserve max()'s lowest-index tie break.
+        candidates = [(empty_workload, 0, -index) for index in range(target_num_bins)]
+        candidates.sort()
 
         for sample in ordered_samples:
             num_tokens = self.num_tokens_to_pack(sample)
-            destination = max(
-                (
-                    index
-                    for index, bin_ in enumerate(bins)
-                    if bin_num_tokens[index] + num_tokens <= num_tokens_per_bin
-                    and (
-                        self._max_num_documents is None
-                        or len(bin_) < self._max_num_documents
-                    )
-                ),
-                key=lambda index: (bin_workloads[index], -bin_num_tokens[index]),
-                default=None,
-            )
-            if destination is None:
+            selected_candidate = None
+            for candidate in reversed(candidates):
+                _, _, negative_index = candidate
+                index = -negative_index
+                if bin_num_tokens[index] + num_tokens > num_tokens_per_bin:
+                    continue
+                if (
+                    self._max_num_documents is not None
+                    and len(bins[index]) >= self._max_num_documents
+                ):
+                    continue
+                selected_candidate = candidate
+                break
+            if selected_candidate is None:
                 return None
 
+            destination = -selected_candidate[2]
+            candidates.pop(bisect.bisect_left(candidates, selected_candidate))
             bins[destination].append(sample)
             bin_num_tokens[destination] += num_tokens
-            bin_workloads[destination] = self._attention_workload(bins[destination])
+            bin_sum_squared_tokens[destination] += num_tokens**2
+            num_padding_tokens = num_tokens_per_bin - bin_num_tokens[destination]
+            num_full_padding_segments, remaining_padding = divmod(
+                num_padding_tokens, self.seq_len
+            )
+            workload = (
+                bin_sum_squared_tokens[destination]
+                + num_full_padding_segments * self.seq_len**2
+                + remaining_padding**2
+            )
+            bisect.insort(
+                candidates,
+                (
+                    workload,
+                    -bin_num_tokens[destination],
+                    -destination,
+                ),
+            )
 
         return bins
 

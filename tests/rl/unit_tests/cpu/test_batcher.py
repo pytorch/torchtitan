@@ -100,6 +100,28 @@ def test_lpt_does_not_leave_a_full_length_document_in_an_expensive_bin() -> None
     ] == [150, 100]
 
 
+def test_lpt_preserves_deterministic_tie_order() -> None:
+    batcher = Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=20,
+        max_context_length=10,
+        num_prompts_per_train_step=1,
+        dp_degree=2,
+        pad_id=0,
+        temperature=1.0,
+    )
+    samples = _make_samples([10, 10, 8, 8, 6, 6, 4, 4])
+
+    bins = batcher._pack_with_lpt(samples, target_num_bins=4)
+
+    assert bins is not None
+    assert [[sample.rollout_id.rollout_id for sample in bin_] for bin_ in bins] == [
+        [0, 4],
+        [1, 5],
+        [2, 6],
+        [3, 7],
+    ]
+
+
 def test_lpt_rebalances_ffd_bins_with_document_limit() -> None:
     batcher = Batcher.Config(max_num_documents=3).build(
         num_tokens_per_microbatch_per_dp_rank=8,
