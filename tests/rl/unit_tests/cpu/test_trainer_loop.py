@@ -233,14 +233,14 @@ def test_push_failure_fails_the_loop() -> None:
         _run(controller, num_training_steps=2)
 
 
-def test_failed_validation_pass_fails_training() -> None:
-    """freq=1: the pass started at step 1 fails, and step 2's check raises its error."""
+def test_failed_validation_fails_training() -> None:
+    """freq=1: the validation started at step 1 fails, and step 2's check raises its error."""
 
     async def validate(*, step: int) -> list[m.Metric]:
-        raise RuntimeError("validation pass failed")
+        raise RuntimeError("validation failed")
 
     controller = _controller([])
     controller.config.async_loop.validation = ValidationConfig(freq=1)
     controller.validate = validate
-    with pytest.raises(RuntimeError, match="validation pass failed"):
+    with pytest.raises(RuntimeError, match="validation failed"):
         _run(controller, num_training_steps=3)

@@ -879,7 +879,7 @@ def test_run_fails_when_the_engine_loops_exit_mid_run() -> None:
 
 
 @pytest.mark.parametrize(
-    "start_pass, validate_after_training, started_steps, logged_steps",
+    "step_0_validation, validate_after_training, started_steps, logged_steps",
     [
         # Ends before training does: the call after training logs it at step 1.
         ("ends", False, [0], [1]),
@@ -887,32 +887,32 @@ def test_run_fails_when_the_engine_loops_exit_mid_run() -> None:
         ("ends_during_close", False, [0], [1]),
         # Still running: run() cancels it (else run() hangs) and logs nothing.
         ("runs", False, [0], []),
-        # Cancelled, then the pass after training runs and is logged at step 1.
+        # Cancelled, then the validation after training runs and is logged at step 1.
         ("runs", True, [0, 1], [1]),
         # Failed: the call after training raises its error.
         ("fails", False, [0], None),
     ],
 )
 def test_run_ends_validation(
-    start_pass, validate_after_training, started_steps, logged_steps
+    step_0_validation, validate_after_training, started_steps, logged_steps
 ) -> None:
-    """1 training step: what run() does with the start pass and the pass after training."""
+    """1 training step: what run() does with the step-0 validation and the validation after training."""
     started = []
     close_started = asyncio.Event()
 
     async def validate(self, *, step: int) -> list[m.Metric]:
         started.append(step)
-        if step == 0 and start_pass == "ends_during_close":
+        if step == 0 and step_0_validation == "ends_during_close":
             await close_started.wait()
-        if step == 0 and start_pass == "runs":
+        if step == 0 and step_0_validation == "runs":
             await asyncio.Event().wait()
-        if step == 0 and start_pass == "fails":
+        if step == 0 and step_0_validation == "fails":
             raise RuntimeError("validation failed")
-        return [m.Metric(f"pass_{step}", m.Mean(1.0))]
+        return [m.Metric(f"started_{step}", m.Mean(1.0))]
 
     async def close() -> None:
         close_started.set()
-        await asyncio.sleep(0)  # the pass returns
+        await asyncio.sleep(0)  # the validation returns
 
     def run() -> Controller:
         return _run_with_generator_watcher(
@@ -925,7 +925,7 @@ def test_run_ends_validation(
             on_close=close,
         )
 
-    if start_pass == "fails":
+    if step_0_validation == "fails":
         with pytest.raises(RuntimeError, match="validation failed"):
             run()
     else:
@@ -940,29 +940,35 @@ def test_run_ends_validation(
 @pytest.mark.parametrize(
     "start_step, validate_at_step_0, defer_new_if_not_finished, started_steps, logged",
     [
-        # The pass started at 3 came due at 2; the one started at 6 covers steps 4 and 6.
-        (0, True, True, [0, 3, 6], [(3, "pass_0"), (6, "pass_3")]),
-        (0, True, False, [0, 2, 4, 6], [(3, "pass_0"), (5, "pass_2"), (7, "pass_4")]),
-        (0, False, True, [2, 5], [(5, "pass_2"), (8, "pass_5")]),
-        # Resumed at step 2, a multiple of freq: a pass starts there. validate_at_step_0 is for step 0 only.
-        (2, False, True, [2, 5], [(5, "pass_2"), (8, "pass_5")]),
-        # Resumed at step 3: the first pass starts at 4, also with validate_at_step_0.
-        (3, True, True, [4, 7], [(7, "pass_4")]),
+        # The validation started at 3 came due at 2; the one started at 6 covers steps 4 and 6.
+        (0, True, True, [0, 3, 6], [(3, "started_0"), (6, "started_3")]),
+        (
+            0,
+            True,
+            False,
+            [0, 2, 4, 6],
+            [(3, "started_0"), (5, "started_2"), (7, "started_4")],
+        ),
+        (0, False, True, [2, 5], [(5, "started_2"), (8, "started_5")]),
+        # Resumed at step 2, a multiple of freq: a validation starts there. validate_at_step_0 is for step 0 only.
+        (2, False, True, [2, 5], [(5, "started_2"), (8, "started_5")]),
+        # Resumed at step 3: the first validation starts at 4, also with validate_at_step_0.
+        (3, True, True, [4, 7], [(7, "started_4")]),
     ],
 )
 def test_validation_schedule(
     start_step, validate_at_step_0, defer_new_if_not_finished, started_steps, logged
 ) -> None:
-    """freq=2, 8 steps, each pass ends 3 steps after it starts and is logged at that step.
+    """freq=2, 8 steps, each validation ends 3 steps after it starts and is logged at that step.
 
-    No pass starts at step 8, the last step.
+    No validation starts at step 8, the last step.
     """
     end_events: dict[int, asyncio.Event] = {}
 
     async def validate(*, step: int) -> list[m.Metric]:
         end_events[step] = asyncio.Event()
         await end_events[step].wait()
-        return [m.Metric(f"pass_{step}", m.Mean(1.0))]
+        return [m.Metric(f"started_{step}", m.Mean(1.0))]
 
     controller = object.__new__(Controller)
     controller.config = SimpleNamespace(
@@ -984,9 +990,9 @@ def test_validation_schedule(
         for step in range(start_step, 9):
             if step - 3 in end_events:
                 end_events[step - 3].set()
-                await asyncio.sleep(0)  # the pass returns
+                await asyncio.sleep(0)  # the validation returns
             await controller._maybe_run_validation(step=step)
-            await asyncio.sleep(0)  # a new pass starts
+            await asyncio.sleep(0)  # a new validation starts
 
     asyncio.run(run_steps())
 
@@ -999,7 +1005,7 @@ def test_validation_schedule(
 
 def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
     """Validation prefixes its turns' metrics with `validation_` (`generator/x` -> `validation_generator/x`,
-    `math_verify/x` -> `validation_math_verify/x`). Two passes never share a group id."""
+    `math_verify/x` -> `validation_math_verify/x`). Two validations never share a group id."""
 
     async def run_group_rollouts(*, group_id: int, **kwargs) -> RolloutGroup:
         turn = RolloutTurn(
@@ -1034,14 +1040,14 @@ def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
         release_groups=SimpleNamespace(call_one=release_groups)
     )
 
-    async def run_two_passes() -> list[m.Metric]:
+    async def run_two_validations() -> list[m.Metric]:
         for step in (0, 2):
             _, metrics = await controller._collect_validation_rollouts(
                 samples=["prompt 1", "prompt 2"], sampling=SamplingConfig(), step=step
             )
         return metrics
 
-    keys = m.MetricsProcessor._aggregate_metrics(asyncio.run(run_two_passes()))
+    keys = m.MetricsProcessor._aggregate_metrics(asyncio.run(run_two_validations()))
     assert [call.args[0] for call in release_groups.call_args_list] == [
         [-1, -2],
         [-3, -4],
