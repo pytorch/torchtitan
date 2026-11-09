@@ -1384,6 +1384,10 @@ class Controller(Configurable):
             # Starts or logs passes; never waits for one (only after_training does).
             await self._maybe_run_validation(step=step)
 
+        # TODO: if this loop raises (e.g. a failed push, forward/backward, optimizer step or validation pass),
+        # the push and pull still in flight keep running while run() tears down, and nobody reads the copy of
+        # a failed push's error in the pull task ("Task exception was never retrieved"). Cancel or await both
+        # in a `finally`.
         # Finish the last push and pull so generators hold the final weights for the pass after
         # training (`validate_after_training`).
         if push_task is not None:
