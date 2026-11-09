@@ -683,11 +683,18 @@ def test_engine_config_reaches_engine_args(monkeypatch, tmp_path):
 
 
 # max_num_seqs=8 x max_context_length=1024 caps the budget at 8192.
-@pytest.mark.parametrize("table_value, expected", [(4096, 4096), (16384, 8192)])
+@pytest.mark.parametrize(
+    "sm90_or_newer, table_value, expected",
+    [(True, 4096, 4096), (True, 16384, 8192), (False, 16384, 2048)],
+)
 def test_unset_max_num_batched_tokens_uses_vllm_serve_default(
-    monkeypatch, tmp_path, table_value, expected
+    monkeypatch, tmp_path, sm90_or_newer, table_value, expected
 ):
     # Injected table values: 4096 is in no real tier, and 16384 is above the 8192 cap.
+    # GPUs below compute capability 9.0 (FA2) keep 2048 whatever the table says.
+    monkeypatch.setattr(
+        vllm_config_module, "has_cuda_capability", lambda major, minor: sm90_or_newer
+    )
     monkeypatch.setattr(
         vllm_config_module.EngineArgs,
         "get_batch_defaults",

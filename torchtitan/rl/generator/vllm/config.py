@@ -17,6 +17,8 @@ from vllm.config import CompilationConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
 from vllm.usage.usage_lib import UsageContext
 
+from torchtitan.tools.utils import has_cuda_capability
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,12 +30,13 @@ def resolve_max_num_batched_tokens(
 ) -> int:
     """Return ``max_num_batched_tokens``, or what ``vllm serve`` picks for this GPU when it is None.
 
-    ``vllm serve`` reads vLLM's table (``EngineArgs.get_batch_defaults``), which keys on total
-    device memory for any GPU vendor, and caps the value at ``max_num_seqs * max_model_len``. The
+    ``vllm serve`` reads vLLM's table (``EngineArgs.get_batch_defaults``), keyed on total device
+    memory plus an A100 name check, and caps the value at ``max_num_seqs * max_model_len``. The
     table as of vLLM 0.32:
         >= 160 GiB (B200, GB300)     -> 16384
         >= 70 GiB, not A100 (H100)   -> 8192
         other GPUs (A100, A10G)      -> 2048
+    GPUs below compute capability 9.0 (FA2) and ROCm keep 2048.
 
     ``LLMEngine.from_engine_args`` uses ``UsageContext.ENGINE_CONTEXT``, which has no entry in
     that table, so vLLM itself would pick 2048 on every GPU. The FULL CUDA graph sizes are built
@@ -41,15 +44,20 @@ def resolve_max_num_batched_tokens(
     """
     if max_num_batched_tokens is not None:
         return max_num_batched_tokens
-    # world_size scales the table only on vLLM's CPU backend, which the generator never uses.
-    default_max_num_batched_tokens, _ = EngineArgs.get_batch_defaults(world_size=1)
-    max_num_batched_tokens = min(
-        default_max_num_batched_tokens[UsageContext.OPENAI_API_SERVER],
-        max_num_seqs * max_model_len,
-    )
+    if has_cuda_capability(9, 0):
+        # world_size scales the table only on vLLM's CPU backend, which the generator never uses.
+        default_max_num_batched_tokens, _ = EngineArgs.get_batch_defaults(world_size=1)
+        max_num_batched_tokens = default_max_num_batched_tokens[
+            UsageContext.OPENAI_API_SERVER
+        ]
+    else:
+        # TODO(https://github.com/Dao-AILab/flash-attention/issues/3117): drop once fixed. FA2 writes
+        # out of bounds past 64 tokens per profile request, and max_num_seqs_per_generator_dp_rank
+        # floors max_num_seqs for a 2048 budget. vLLM's table gives an A800 80 GB 8192.
+        max_num_batched_tokens = 2048
+    max_num_batched_tokens = min(max_num_batched_tokens, max_num_seqs * max_model_len)
     logger.info(
-        "max_num_batched_tokens is unset: using %d, what `vllm serve` picks for this GPU",
-        max_num_batched_tokens,
+        "max_num_batched_tokens is unset: using %d for this GPU", max_num_batched_tokens
     )
     return max_num_batched_tokens
 

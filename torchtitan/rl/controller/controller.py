@@ -451,7 +451,8 @@ class Controller(Configurable):
         def max_num_seqs_per_generator_dp_rank(self) -> int:
             """2x each generator DP rank's even share of the training rollouts in flight,
             rounded up to a power of two, clamped to [token budget / 64, token budget]. The token
-            budget is ``generator.max_num_batched_tokens``, or 2048 when unset.
+            budget is ``generator.max_num_batched_tokens``, or 2048 when unset: the smallest value in
+            vLLM's table, and what FA2 GPUs keep (``resolve_max_num_batched_tokens``).
 
             Example (token budget unset):
                 1536 rollouts in flight, 8 generator DP ranks -> 2 x 192 = 384 -> 512
@@ -472,8 +473,6 @@ class Controller(Configurable):
             max_num_batched_tokens = self.generator.max_num_batched_tokens or 2048
             # TODO(https://github.com/Dao-AILab/flash-attention/issues/3117): drop once fixed. vLLM's memory
             # profile splits a power-of-two budget evenly over max_num_seqs; FA2 writes out of bounds past 64 each.
-            # TODO: an unset budget counts as 2048 here, but an FA2 GPU can resolve more (A800 80 GB: 8192).
-            # Set generator.max_num_batched_tokens on such GPUs.
             max_num_seqs = 2 ** math.ceil(
                 math.log2(max(max_num_seqs, max_num_batched_tokens / 64))
             )
