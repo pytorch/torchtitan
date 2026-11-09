@@ -28,6 +28,7 @@ from renderers.base import (
 )
 from renderers.parsing import _build_param_type_index, _coerce_arg_value
 
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.renderer import RendererConfig, RendererTokenizerWrapper
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
@@ -86,7 +87,14 @@ class MuseSparkRendererConfig(RendererConfig):
         if self.current_date is not None and not isinstance(self.current_date, str):
             raise TypeError("current_date must be a string or None")
 
-    def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
+    def build(
+        self,
+        *,
+        tokenizer: HuggingFaceTokenizer,
+        vision_processor: VisionProcessor | None = None,
+    ) -> Renderer:
+        if vision_processor is not None:
+            raise ValueError("The Muse Spark renderer reads no image files.")
         return MuseSparkRenderer(RendererTokenizerWrapper(tokenizer), self)
 
 

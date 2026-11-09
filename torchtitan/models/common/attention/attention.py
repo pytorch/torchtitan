@@ -20,12 +20,7 @@ import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch.export import register_dataclass
-from torch.nn.attention import (
-    activate_flash_attention_impl,
-    current_flash_attention_impl,
-    sdpa_kernel,
-    SDPBackend,
-)
+from torch.nn.attention import current_flash_attention_impl, sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _DEFAULT_SPARSE_BLOCK_SIZE,
     _mask_mod_signature,
@@ -49,7 +44,7 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
-from torchtitan.tools.utils import round_up
+from torchtitan.tools.utils import activate_cuda_flash_attention_impl, round_up
 
 if TYPE_CHECKING:
     from . import AttentionMetadata
@@ -414,14 +409,7 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
             getattr(SDPBackend, name) for name in config.sdpa_backends
         ]
 
-        from torchtitan.tools.utils import get_cuda_flash_attention_impl
-
-        flash_attention_impl = get_cuda_flash_attention_impl()
-        if (
-            flash_attention_impl is not None
-            and current_flash_attention_impl() != flash_attention_impl
-        ):
-            activate_flash_attention_impl(flash_attention_impl)
+        activate_cuda_flash_attention_impl()
 
     def forward(
         self,

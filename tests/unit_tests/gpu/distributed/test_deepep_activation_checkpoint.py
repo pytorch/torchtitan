@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import itertools
 import os
 import unittest
 
@@ -26,13 +27,19 @@ from torchtitan.distributed.activation_remat import (
 )
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
 from torchtitan.models.base.module import Module, ModuleDict
-from torchtitan.models.common.activation import SwiGLU
+from torchtitan.models.common.activation import (
+    BinaryActivationFn,
+    ClampedSwiGLU,
+    SwiGLU,
+)
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.moe.token_dispatcher import (
     DeepEPTokenDispatcher,
     HybridEPTokenDispatcher,
 )
+from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 
 deep_ep = pytest.importorskip("deep_ep")
 _EP_BUFFER = getattr(deep_ep, "EPBuffer", None) or deep_ep.ElasticBuffer
@@ -46,7 +53,15 @@ _TOP_K = 2
 
 
 class _EPBlock(Module):
-    def __init__(self, num_experts: int, dispatcher_config):
+    def __init__(
+        self,
+        num_experts: int,
+        dispatcher_config,
+        *,
+        grouped_linear_cls: type[GroupedLinear],
+        activation_fn: BinaryActivationFn.Config,
+        output_postprocess: Module.Config | None,
+    ):
         super().__init__()
         # RoutedExperts.forward runs after EP has selected this rank's local
         # expert-weight shard. This test bypasses parallelization, so construct
@@ -54,19 +69,21 @@ class _EPBlock(Module):
         num_local_experts = num_experts // torch.distributed.get_world_size()
         routed_experts = RoutedExperts.__new__(RoutedExperts)
         Module.__init__(routed_experts)
-        routed_experts.w13 = GroupedLinear.Config(
+        routed_experts.w13 = grouped_linear_cls.Config(
             group_size=num_local_experts,
             in_features=_MODEL_DIM,
             out_features=_MODEL_DIM,
             num_linears=2,
         ).build()
-        routed_experts.w2 = GroupedLinear.Config(
+        routed_experts.w2 = grouped_linear_cls.Config(
             group_size=num_local_experts,
             in_features=_MODEL_DIM,
             out_features=_MODEL_DIM,
         ).build()
-        routed_experts.activation_fn = SwiGLU.Config().build()
-        routed_experts.output_postprocess = None
+        routed_experts.activation_fn = activation_fn.build()
+        routed_experts.output_postprocess = (
+            output_postprocess.build() if output_postprocess is not None else None
+        )
         routed_experts.token_dispatcher = dispatcher_config.build()
         self.gate = torch.nn.Linear(_MODEL_DIM, num_experts, bias=False)
         with torch.no_grad():
@@ -81,7 +98,7 @@ class _EPBlock(Module):
         offsets_1K = torch.arange(_TOP_K, device=x_TD.device).unsqueeze(0)
         expert_ids_TK = (token_ids_T1 + offsets_1K) % self.num_experts
         # Scores depend on the gate, so the router gets a gradient too.
-        scores_TK = torch.sigmoid(self.gate(x_TD)).gather(1, expert_ids_TK)
+        scores_TK = torch.sigmoid(self.gate(x_TD).float()).gather(1, expert_ids_TK)
         routing_map_TE = torch.zeros(
             num_tokens, self.num_experts, dtype=torch.bool, device=x_TD.device
         ).scatter_(1, expert_ids_TK, True)
@@ -92,6 +109,41 @@ class _EPBlock(Module):
             routing_map_TE,
         )
         # The loss is a bare consumer of the routed-expert output.
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD.float().square().sum()
+
+
+class _PostW2(_EPBlock):
+    """Reference DeepEP experts with router scores applied after W2."""
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        num_tokens = x_TD.shape[0]
+        token_ids_T1 = torch.arange(num_tokens, device=x_TD.device).unsqueeze(-1)
+        offsets_1K = torch.arange(_TOP_K, device=x_TD.device).unsqueeze(0)
+        expert_ids_TK = (token_ids_T1 + offsets_1K) % self.num_experts
+        # Scores depend on the gate, so the router gets a gradient too.
+        scores_TK = torch.sigmoid(self.gate(x_TD).float()).gather(1, expert_ids_TK)
+        routing_map_TE = torch.zeros(
+            num_tokens, self.num_experts, dtype=torch.bool, device=x_TD.device
+        ).scatter_(1, expert_ids_TK, True)
+        experts = self.routed_experts
+        routed_RD, counts_E, metadata = experts.token_dispatcher.dispatch(
+            x_TD, scores_TK, expert_ids_TK, routing_map_TE
+        )
+        offsets_E = counts_E.cumsum(dim=0, dtype=torch.int32)
+        gate_up_R2F = experts.w13(routed_RD.bfloat16(), offsets_E)
+        hidden_RF = experts.activation_fn(gate_up_R2F, offsets=offsets_E)
+        routed_output_RD = experts.w2(hidden_RF, offsets_E).type_as(routed_RD)
+        if experts.output_postprocess is not None:
+            routed_output_RD = experts.output_postprocess(routed_output_RD)
+        routed_output_RD = (
+            routed_output_RD * metadata.scores_R.reshape(-1, 1).to(torch.float32)
+        ).to(routed_output_RD.dtype)
+        out_TD = experts.token_dispatcher.combine(
+            routed_output_RD,
+            metadata,
+            x_TD,
+        )
         remat.recompute_needs_tensor(out_TD)
         return out_TD.float().square().sum()
 
@@ -128,8 +180,13 @@ class _EPActivationCheckpointing(DTensorTestBase):
         self,
         ac_configs: tuple,
         *,
-        num_replays: int,
+        num_dispatch_replays: int,
+        num_combine_replays: int,
         dispatcher_config,
+        expert_configs: tuple[
+            tuple[type[GroupedLinear], BinaryActivationFn.Config, Module.Config | None],
+            ...,
+        ],
         buffer_type,
         dispatch_method: str,
         combine_method: str,
@@ -147,26 +204,60 @@ class _EPActivationCheckpointing(DTensorTestBase):
             dense_sp_enabled=False,
         )
         num_experts = 4 * self.world_size
-        for activation_remat in ac_configs:
+        for activation_remat, (
+            grouped_linear_cls,
+            activation_fn,
+            output_postprocess,
+        ) in itertools.product(ac_configs, expert_configs):
             with (
-                self.subTest(ac=type(activation_remat).__qualname__),
+                self.subTest(
+                    ac=type(activation_remat).__qualname__,
+                    linear=grouped_linear_cls.__name__,
+                    postprocess=output_postprocess is not None,
+                ),
                 torch.autograd.set_multithreading_enabled(False),
                 set_current_spmd_mesh(mesh),
             ):
                 torch.manual_seed(42)
-                baseline = _Model(_EPBlock(num_experts, dispatcher_config)).to(
-                    self.device_type, torch.bfloat16
-                )
-                ac_model = _Model(_EPBlock(num_experts, dispatcher_config)).to(
-                    self.device_type, torch.bfloat16
-                )
+                baseline = _Model(
+                    _EPBlock(
+                        num_experts,
+                        dispatcher_config,
+                        grouped_linear_cls=grouped_linear_cls,
+                        activation_fn=activation_fn,
+                        output_postprocess=output_postprocess,
+                    )
+                ).to(self.device_type, torch.bfloat16)
+                ac_model = _Model(
+                    _EPBlock(
+                        num_experts,
+                        dispatcher_config,
+                        grouped_linear_cls=grouped_linear_cls,
+                        activation_fn=activation_fn,
+                        output_postprocess=output_postprocess,
+                    )
+                ).to(self.device_type, torch.bfloat16)
                 ac_model.load_state_dict(baseline.state_dict())
+                reference = None
+                if isinstance(dispatcher_config, DeepEPTokenDispatcher.Config):
+                    reference = _Model(
+                        _PostW2(
+                            num_experts,
+                            dispatcher_config,
+                            grouped_linear_cls=grouped_linear_cls,
+                            activation_fn=activation_fn,
+                            output_postprocess=output_postprocess,
+                        )
+                    ).to(self.device_type, torch.bfloat16)
+                    reference.load_state_dict(baseline.state_dict())
                 activation_remat.apply(ac_model)
-                # As in training, the buffer is created after AC is applied. Both
+                # As in training, the buffer is created after AC is applied. All
                 # models share it, so the baseline also runs deterministic when
                 # the AC model replays.
                 baseline.layers["0"].routed_experts.token_dispatcher.init_buffer()
                 ac_model.layers["0"].routed_experts.token_dispatcher.init_buffer()
+                if reference is not None:
+                    reference.layers["0"].routed_experts.token_dispatcher.init_buffer()
 
                 num_calls = {"dispatch": 0, "combine": 0}
                 original = {
@@ -220,11 +311,34 @@ class _EPActivationCheckpointing(DTensorTestBase):
                     else:
                         actual = _run_forward_backward(ac_model, x_TD)
 
+                if reference is not None:
+                    reference_values = _run_forward_backward(reference, x_TD)
+                    # Compare pre-W2 absorption with the previous post-W2 scoring.
+                    bf16_rtol = 2 * torch.finfo(torch.bfloat16).eps
+                    for value, reference_value in zip(expected, reference_values):
+                        if output_postprocess is not None and exact:
+                            torch.testing.assert_close(
+                                value, reference_value, rtol=0, atol=0
+                            )
+                            continue
+                        error_norm = torch.linalg.vector_norm(
+                            value.float() - reference_value.float()
+                        )
+                        reference_norm = torch.linalg.vector_norm(
+                            reference_value.float()
+                        )
+                        self.assertLessEqual(
+                            error_norm.item(), bf16_rtol * reference_norm.item()
+                        )
+
                 # Forward dispatch and combine, plus their backward passes.
                 self.assertEqual(baseline_calls, {"dispatch": 2, "combine": 2})
                 self.assertEqual(
                     num_calls,
-                    {"dispatch": 2 + num_replays, "combine": 2 + num_replays},
+                    {
+                        "dispatch": 2 + num_dispatch_replays,
+                        "combine": 2 + num_combine_replays,
+                    },
                     msg=f"unexpected EP communication replays: {num_calls}",
                 )
                 if exact:
@@ -248,12 +362,27 @@ class TestDeepEPActivationCheckpointing(_EPActivationCheckpointing):
     def _check_deepep_activation_checkpointing(self, ac_configs, *, num_replays):
         self._check_ep_activation_checkpointing(
             ac_configs,
-            num_replays=num_replays,
+            num_dispatch_replays=num_replays,
+            num_combine_replays=0,
             dispatcher_config=DeepEPTokenDispatcher.Config(
                 num_experts=4 * self.world_size,
                 top_k=_TOP_K,
                 hidden_dim=_MODEL_DIM,
                 num_max_tokens_per_rank=_NUM_TOKENS,
+            ),
+            expert_configs=(
+                (GroupedLinear, SwiGLU.Config(), None),
+                (GptOssGroupedLinear, ClampedSwiGLU.Config(), None),
+                (
+                    GroupedLinear,
+                    SwiGLU.Config(),
+                    RMSNorm.Config(normalized_shape=_MODEL_DIM),
+                ),
+                (
+                    GptOssGroupedLinear,
+                    ClampedSwiGLU.Config(),
+                    RMSNorm.Config(normalized_shape=_MODEL_DIM),
+                ),
             ),
             buffer_type=deep_ep.ElasticBuffer,
             dispatch_method="dispatch",
@@ -310,7 +439,8 @@ class TestHybridEPActivationCheckpointing(_EPActivationCheckpointing):
             with self.subTest(capacity_factor=capacity_factor):
                 self._check_ep_activation_checkpointing(
                     ac_configs,
-                    num_replays=num_replays,
+                    num_dispatch_replays=num_replays,
+                    num_combine_replays=num_replays,
                     dispatcher_config=HybridEPTokenDispatcher.Config(
                         num_experts=4 * self.world_size,
                         top_k=_TOP_K,
@@ -318,6 +448,7 @@ class TestHybridEPActivationCheckpointing(_EPActivationCheckpointing):
                         num_max_tokens_per_rank=_NUM_TOKENS,
                         non_blocking_capacity_factor=capacity_factor,
                     ),
+                    expert_configs=((GroupedLinear, SwiGLU.Config(), None),),
                     buffer_type=deep_ep.HybridEPBuffer,
                     dispatch_method="dispatch_with_permute",
                     combine_method="combine_with_unpermute",

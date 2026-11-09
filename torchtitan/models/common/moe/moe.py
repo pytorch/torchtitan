@@ -42,7 +42,7 @@ from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 
-from .token_dispatcher import LocalTokenDispatcher
+from .token_dispatcher import DeepEPDispatchMetadata, LocalTokenDispatcher
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
@@ -155,7 +155,15 @@ class RoutedExperts(Module):
             gate_up_R2F = self.w13(routed_input_RD.bfloat16(), offsets_E)
             remat.recompute_needs_tensor(gate_up_R2F)
             hidden_RF = self.activation_fn(gate_up_R2F, offsets=offsets_E)
-            routed_output_RD = self.w2(hidden_RF, offsets_E)
+            if (
+                isinstance(metadata, DeepEPDispatchMetadata)
+                and self.output_postprocess is None
+            ):
+                routed_output_RD = self.w2(
+                    hidden_RF, offsets_E, scores_R=metadata.scores_R
+                )
+            else:
+                routed_output_RD = self.w2(hidden_RF, offsets_E)
             # A real dtype cast and the output postprocess read the w2 output with
             # bare ops, so pin it only then. In the common bf16 case without a
             # postprocess, type_as is a no-op and the w2 output goes straight to
@@ -169,6 +177,14 @@ class RoutedExperts(Module):
             routed_output_RD = routed_output_RD.type_as(routed_input_RD)
             if self.output_postprocess is not None:
                 routed_output_RD = self.output_postprocess(routed_output_RD)
+                if isinstance(metadata, DeepEPDispatchMetadata):
+                    # A nonlinear postprocess must run before score multiplication.
+                    remat.recompute_needs_tensor(routed_output_RD, metadata.scores_R)
+                    # Promote the product without saving a float32 output copy.
+                    routed_output_RD = (
+                        routed_output_RD
+                        * metadata.scores_R.reshape(-1, 1).to(torch.float32)
+                    ).to(routed_output_RD.dtype)
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
@@ -829,28 +845,34 @@ class MoE(FeedForward):
             **router_kwargs,
         )
 
-        shared_TD = None
-        dispatch_callback = None
+        routed_args = (
+            routed_x_TD,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            routing_map_TE,
+        )
         if self.overlap_shared_experts:
+            shared_TD = None
 
             def compute_shared_experts() -> None:
                 nonlocal shared_TD
                 assert self.shared_experts is not None
                 shared_TD = self.shared_experts(x_TD)
 
-            dispatch_callback = compute_shared_experts
+            out_TD = self.routed_experts(
+                *routed_args,
+                padding_mask_T=routed_padding_mask_T,
+                dispatch_callback=compute_shared_experts,
+            )
+            return self._add_shared_experts_and_reduce_across_tp(
+                out_TD, x_TD, shared_TD=shared_TD
+            )
 
         out_TD = self.routed_experts(
-            routed_x_TD,
-            topk_scores_TK,
-            topk_expert_ids_TK,
-            routing_map_TE,
+            *routed_args,
             padding_mask_T=routed_padding_mask_T,
-            dispatch_callback=dispatch_callback,
         )
-        return self._add_shared_experts_and_reduce_across_tp(
-            out_TD, x_TD, shared_TD=shared_TD
-        )
+        return self._add_shared_experts_and_reduce_across_tp(out_TD, x_TD)
 
     def _add_shared_experts_and_reduce_across_tp(
         self,
