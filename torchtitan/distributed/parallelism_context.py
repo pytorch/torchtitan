@@ -63,6 +63,7 @@ class MeshAxisName(StrEnum):
     CP = "cp"
     PP = "pp"
     EP = "ep"
+    EDP_REPLICATE = "edp_replicate"
     EDP_SHARD = "edp_shard"
 
 
@@ -108,6 +109,9 @@ class ParallelismContext:
     ep: int
     world_size: int
     enable_sequence_parallel: bool
+    # Replicate degree of routed experts under EP. ``None`` resolves to
+    # ``dp_replicate`` in ``_validate``.
+    edp_replicate: int | None = None
     _real_pp_group_for_fake_spmd: dist.ProcessGroup | None = None
     # Cache by axis name(s); DeviceMesh equality is by identity, so reuse the
     # same object instead of re-slicing a submesh on every lookup.
@@ -140,6 +144,7 @@ class ParallelismContext:
             ep=parallelism_config.expert_parallel_degree,
             world_size=topology.world_size,
             enable_sequence_parallel=parallelism_config.enable_sequence_parallel,
+            edp_replicate=parallelism_config.expert_data_parallel_replicate_degree,
             _real_pp_group_for_fake_spmd=topology.real_pp_group_for_fake_spmd,
         )
         if parallelism_config.save_parallelism_folder is not None:
@@ -171,6 +176,7 @@ class ParallelismContext:
                 "cp": self.cp,
                 "tp": self.tp,
                 "ep": self.ep,
+                "edp_replicate": self.edp_replicate,
             },
             "meshes": {
                 name: {"axis_names": mesh.mesh_dim_names, "mesh": mesh.mesh.tolist()}
@@ -229,6 +235,23 @@ class ParallelismContext:
                 f"dp_shard * cp * tp ({sparse_region})"
             )
 
+        if self.edp_replicate is None:
+            self.edp_replicate = dp_replicate
+        edp_replicate = self.edp_replicate
+        if edp_replicate < 1 or dp_replicate % edp_replicate != 0:
+            raise ValueError(
+                "expert_data_parallel_replicate_degree "
+                f"({edp_replicate}) must divide data_parallel_replicate_degree "
+                f"({dp_replicate})"
+            )
+        if edp_replicate != dp_replicate and ep == 1:
+            raise ValueError(
+                "expert_data_parallel_replicate_degree "
+                f"({edp_replicate}) differs from data_parallel_replicate_degree "
+                f"({dp_replicate}), which requires expert_parallel_degree > 1: "
+                "without EP, routed experts use the dense FSDP mesh"
+            )
+
     def _axis_is_active(self, axis: str, degree: int) -> bool:
         if axis == "dp_shard":
             # Keep the DP storage axis alive at size 1 so ``fully_shard`` can
@@ -239,6 +262,9 @@ class ParallelismContext:
             # Keep the expert DP shard axis alive whenever EP is enabled so FSDP
             # can apply mixed precision to routed experts, including at size 1.
             return self.ep > 1
+        if axis == "edp_replicate":
+            # The sparse mesh only carries routed experts when EP is enabled.
+            return self.ep > 1 and degree > 1
         return degree > 1
 
     def build_mesh(self) -> DeviceMesh:
@@ -258,6 +284,7 @@ class ParallelismContext:
             cp:      Context Parallelism (CP).
             tp:      Tensor Parallelism (TP).
             ep:      Expert Parallelism (EP).
+            edp_replicate: HSDP replicate axis in the expert-parallel region.
             edp_shard: FSDP shard axis in the expert-parallel region.
 
         Note: Most axes above are created by unflattening the world mesh, except for loss,
@@ -266,7 +293,13 @@ class ParallelismContext:
 
             ["pp", "dp_replicate", "dp_shard", "cp", "tp"]  # storage mesh
             ["pp", "dp", "cp", "tp"]  # fwd/bwd dense mesh
-            ["pp", "dp_replicate", "edp_shard", "ep"]  # sparse_mesh
+            ["pp", "edp_replicate", "edp_shard", "ep"]  # sparse_mesh
+
+        All three are row-major views of the same ranks. With
+        ``edp_replicate < dp_replicate``, ``K = dp_replicate // edp_replicate``
+        consecutive dense replicas hold one copy of the routed experts:
+        ``edp_shard`` spans those K replicas while each EP group stays inside
+        one dense replica.
 
         Note: DeviceMesh currently recreates the process group for each axis.
         It should share the process group for the same axis group to avoid unnecessary
@@ -301,11 +334,14 @@ class ParallelismContext:
         logger.info(
             f"Building device mesh with parallelism: "
             f"pp={self.pp}, dp_replicate={self.dp_replicate}, dp_shard={self.dp_shard}, "
-            f"cp={self.cp}, tp={self.tp}, ep={self.ep}"
+            f"cp={self.cp}, tp={self.tp}, ep={self.ep}, "
+            f"edp_replicate={self.edp_replicate}"
         )
 
         batch = self.dp_replicate * self.dp_shard
-        edp_shard = self.dp_shard * self.cp * self.tp // self.ep
+        edp_replicate = self.edp_replicate
+        assert edp_replicate is not None
+        edp_shard = self.edp_shard
 
         self._world_mesh = init_device_mesh(
             device_type, (self.world_size,), mesh_dim_names=("world",)
@@ -331,8 +367,8 @@ class ParallelismContext:
 
         full_sparse_mesh = unflatten_mesh(
             self._world_mesh,
-            ("pp", "dp_replicate", "edp_shard", "ep"),
-            (self.pp, self.dp_replicate, edp_shard, self.ep),
+            ("pp", "edp_replicate", "edp_shard", "ep"),
+            (self.pp, edp_replicate, edp_shard, self.ep),
         )
 
         self._global_meshes = {
@@ -343,7 +379,7 @@ class ParallelismContext:
         self._global_meshes["spmd_dense_for_fwdbwd"] = spmd_dense_mesh_for_fwdbwd
         if self.ep > 1:
             self._global_meshes["spmd_sparse_for_fwdbwd"] = full_sparse_mesh[
-                "dp_replicate", "edp_shard", "ep"
+                "edp_replicate", "edp_shard", "ep"
             ]
         pp_mesh = full_dense_mesh_for_fwdbwd["pp"]
         pp_group = self._real_pp_group_for_fake_spmd
@@ -366,6 +402,7 @@ class ParallelismContext:
             "cp": full_dense_mesh_for_fwdbwd["cp"],
             "tp": full_dense_mesh_for_fwdbwd["tp"],
             "ep": full_sparse_mesh["ep"],
+            "edp_replicate": full_sparse_mesh["edp_replicate"],
             "edp_shard": full_sparse_mesh["edp_shard"],
         }
         self._single_axis_meshes["dp"] = spmd_dense_mesh_for_fwdbwd["dp"]
@@ -389,7 +426,8 @@ class ParallelismContext:
             "cp": self.cp,
             "tp": self.tp,
             "ep": self.ep,
-            "edp_shard": self.dp_shard * self.cp * self.tp // self.ep,
+            "edp_replicate": self.edp_replicate,
+            "edp_shard": self.edp_shard,
         }
         expected_sizes["dp"] = self.dp_replicate * self.dp_shard
         expected_sizes["dp_shard"] = self.dp_shard
@@ -412,7 +450,7 @@ class ParallelismContext:
         Args:
             axes: Names of the mesh axes. Valid options include:
                  'pp', 'loss', 'dp_replicate', 'dp', 'dp_shard',
-                 'cp', 'tp', 'ep', 'edp_shard'.
+                 'cp', 'tp', 'ep', 'edp_replicate', 'edp_shard'.
             include_singleton_axes: Include axes with size 1 in the returned
                  submesh. This is used for distributed parameter and buffer
                  registration so spmd_types can handle size-1 axis filtering.
@@ -473,7 +511,7 @@ class ParallelismContext:
         Args:
             axes: Names of the mesh axes. Valid options include:
                  'pp', 'loss', 'dp_replicate', 'dp', 'dp_shard',
-                 'cp', 'tp', 'ep', 'edp_shard'.
+                 'cp', 'tp', 'ep', 'edp_replicate', 'edp_shard'.
 
         Returns:
             DeviceMesh for the requested axes.
@@ -648,6 +686,29 @@ class ParallelismContext:
     @property
     def ep_enabled(self):
         return self.ep > 1
+
+    @property
+    def edp_replicate_enabled(self) -> bool:
+        assert self.edp_replicate is not None
+        return self.ep_enabled and self.edp_replicate > 1
+
+    @property
+    def edp_shard(self) -> int:
+        """FSDP degree of routed experts under EP.
+
+        ``K = dp_replicate // edp_replicate`` dense replicas share one copy of
+        the routed experts, so expert FSDP spans ``K * dp_shard * cp * tp // ep``
+        ranks.
+        """
+        assert self.edp_replicate is not None
+        num_dense_replicas_per_expert_copy = self.dp_replicate // self.edp_replicate
+        return (
+            num_dense_replicas_per_expert_copy
+            * self.dp_shard
+            * self.cp
+            * self.tp
+            // self.ep
+        )
 
     @property
     def non_data_parallel_size(self):

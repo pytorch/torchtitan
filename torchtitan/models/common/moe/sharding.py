@@ -22,10 +22,10 @@ from torchtitan.models.common.decoder_sharding import (
 
 
 DP = MeshAxisName.DP
-DP_REPLICATE = MeshAxisName.DP_REPLICATE
 CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 EP = MeshAxisName.EP
+EDP_REPLICATE = MeshAxisName.EDP_REPLICATE
 EDP_SHARD = MeshAxisName.EDP_SHARD
 
 
@@ -33,7 +33,7 @@ def replicated_param_placement_sparse() -> SpmdType:
     """Sparse-family placement for state shared across routed experts."""
     return SpmdType(
         {
-            DP_REPLICATE: spmd.R,
+            EDP_REPLICATE: spmd.R,
             EDP_SHARD: spmd.R,
             EP: spmd.R,
         }
@@ -43,18 +43,18 @@ def replicated_param_placement_sparse() -> SpmdType:
 def expert_param_placement_sparse() -> SpmdType:
     """Sparse-family placement for routed-expert weights (EP enabled).
 
-    Insertion order matches canonical mesh order ``dp_replicate -> edp_shard ->
+    Insertion order matches canonical mesh order ``edp_replicate -> edp_shard ->
     ep`` so ``_needed_axes``'s first-insertion axis order resolves
     to the sparse_mesh.
 
-    ``dp_replicate`` and ``edp_shard`` are FSDP storage axes: ``Replicate`` at
+    ``edp_replicate`` and ``edp_shard`` are FSDP storage axes: ``Replicate`` at
     ``distribute_tensor`` time, FSDP reshards ``edp_shard`` post-parallelize.
     EP always shards on dim 0 (the expert dim of ``(num_experts, *, *)``
     weights).
     """
     return SpmdType(
         {
-            DP_REPLICATE: spmd.R,
+            EDP_REPLICATE: spmd.R,
             EDP_SHARD: spmd.R,
             EP: spmd.S(0),
         }

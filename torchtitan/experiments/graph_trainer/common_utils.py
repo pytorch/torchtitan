@@ -598,11 +598,18 @@ def apply_simple_fsdp(
     )
 
     if parallelism_context.ep_enabled and isinstance(model, Decoder):
-        edp_mesh_names = (
-            ["dp_replicate", "edp_shard"]
-            if parallelism_context.dp_replicate_enabled
-            else ["edp_shard"]
-        )
+        if not parallelism_context.edp_replicate_enabled:
+            edp_mesh_names = ["edp_shard"]
+            edp_mode = "fully_shard"
+        else:
+            edp_mesh_names = ["edp_replicate", "edp_shard"]
+            # With fewer expert replicas than dense replicas, edp_shard spans
+            # several dense replicas and is always a real shard axis.
+            edp_mode = (
+                dp_mode
+                if parallelism_context.edp_replicate == parallelism_context.dp_replicate
+                else "hybrid_shard"
+            )
         edp_mesh = parallelism_context.get_optional_mesh(edp_mesh_names)
         assert edp_mesh is not None
 
@@ -624,7 +631,7 @@ def apply_simple_fsdp(
                 data_parallel(
                     routed_experts,
                     edp_mesh,
-                    dp_mode,
+                    edp_mode,
                     mp_policy=mp_policy,
                     shard_dim=0,
                     non_dp_mesh=parallelism_context.get_optional_mesh("ep"),
@@ -636,7 +643,7 @@ def apply_simple_fsdp(
                 data_parallel(
                     routed_experts.w13,
                     edp_mesh,
-                    dp_mode,
+                    edp_mode,
                     mp_policy=mp_policy,
                     shard_dim=2,
                     non_dp_mesh=parallelism_context.get_optional_mesh("ep"),
@@ -644,7 +651,7 @@ def apply_simple_fsdp(
                 data_parallel(
                     routed_experts.w2,
                     edp_mesh,
-                    dp_mode,
+                    edp_mode,
                     mp_policy=mp_policy,
                     shard_dim=1,
                     non_dp_mesh=parallelism_context.get_optional_mesh("ep"),
