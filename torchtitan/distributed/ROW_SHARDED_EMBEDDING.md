@@ -1,22 +1,14 @@
 # Row-sharded embedding lookup
 
-`row_sharded_embedding.py` routes embedding requests to persistent row owners
-using PyTorch functional collectives and `F.embedding`. Qwen3.8-Flash-Next uses
-it for PLE.
+`row_sharded_embedding.py` routes individual embedding requests to persistent
+row owners using PyTorch functional collectives and `F.embedding`.
 
-## Why this implementation fits PLE
+## Routing and Shapes
 
-PLE needs one table with fixed row ownership and individual vector lookups.
-All-to-all routing and local `F.embedding` cover these needs while reusing
-TorchTitan's DTensor, optimizer, clipping and checkpointing, with less
-integration work than adopting TorchRec's broader embedding stack.
-
-## Routing and shapes
-
-The caller supplies a named one-dimensional `DeviceMesh`. Rows use contiguous
-`torch.chunk` boundaries, including empty owners. Each row group has the same
-global row count, weight dtype and local feature width. Separate row groups can
-own different feature columns. Input IDs can be int32 or int64.
+The caller supplies a named one-dimensional `DeviceMesh` with contiguous
+`torch.chunk` row ownership. Every rank uses the same global row count,
+weight dtype and local feature width. Separate row groups may own different
+feature columns. Input IDs can be int32 or int64 and have any shape.
 
 ```python
 from torchtitan.distributed.row_sharded_embedding import (
@@ -24,127 +16,64 @@ from torchtitan.distributed.row_sharded_embedding import (
     row_sharded_embedding,
 )
 
-# Once per microbatch, in preprocessing:
+# Once per microbatch, before model forward:
 routing = prepare_row_sharded_embedding(
-    hash_ids_TN, num_embeddings=num_global_rows, row_mesh=row_mesh
+    input_ids, num_embeddings=num_global_rows, row_mesh=row_mesh
 )
 
-# Forward: FP32 local master rows, BF16 returned vectors.
-embedding_TND = row_sharded_embedding(weight_RD, routing, dtype=torch.bfloat16)
+# Forward: local master rows, selected vectors returned in the compute dtype.
+embeddings = row_sharded_embedding(weight_RD, routing, dtype=torch.bfloat16)
 ```
 
-For an eight-row table on two owners, owner 0 stores rows 0-3 and owner 1 stores
-rows 4-7. Requests `[6, 1, 6]` are deduplicated to `[1, 6]`. Owner 0 looks up row
-1 and owner 1 looks up its local row 2. The response restores `[E[6], E[1], E[6]]`.
-No rank gathers the table.
+For an eight-row table on two owners, owner 0 stores rows 0-3 and owner 1
+stores rows 4-7. Requests `[6,1,6]` become sorted unique IDs `[1,6]`, which
+are already grouped by owner. Owner 0 reads local row 1; owner 1 reads local
+row 2. Returned vectors expand to `[E6,E1,E6]` in the original request order.
 
 | Phase | Tensors and communication |
 | --- | --- |
-| Prepare | Deduplicate local IDs, sort by owner, exchange counts and unique IDs. Owners receive `[M]` local row indices. |
-| Forward | Read `[M,D]` vectors from local `[R,D]` weights, cast selected vectors, return with all-to-all, expand duplicates in original order. |
-| Backward | Accumulate duplicates on requesters, reverse the vector exchange, sum requester gradients into local master-row gradients. |
-| Optimizer | Accumulate microbatches, clip globally, then update local rows with the configured optimizer. |
+| Prepare | Deduplicate IDs, exchange counts and unique IDs. Owners receive local row indices `[M]`. |
+| Forward | Read `[M,D]` vectors from local weights, cast selected vectors, return with all-to-all, expand duplicates. |
+| Backward | Sum duplicate gradients on requesters, reverse the vector exchange, accumulate into owner-local row gradients. |
 
-Qwen uses `[T,16]` global hash IDs and receives `[T,16,160]` vectors at released
-geometry. Hash head offsets are already included in the IDs; the helper knows
-nothing about token history or model layers.
+The result has shape `[*input_ids.shape, D]`, where `D` is the local feature
+width. Only requested vectors and their gradients cross the row mesh.
 
-Preparation performs one count-dependent CPU synchronization outside forward.
-Reuse the metadata during recomputation. Every owner participates even with
-empty inputs or empty table shards. All owners must replay response collectives
-together; nonreentrant PyTorch checkpointing must disable early stopping.
-Qwen's full `torch_remat` policy is tested with the actual model.
+## Precision and Optimizer Semantics
 
-## Precision and optimizer semantics
+Only selected vectors are cast to the requested compute dtype. With FP32
+masters and BF16 compute, duplicate gradients accumulate in BF16 on each
+requester, then sum in FP32 on the owner. This matches a mixed-precision
+embedding's local accumulation: `[256,1]` rounds to 256 before another
+requester's -256 is added, producing zero.
 
-Only selected vectors are cast to the requested compute dtype. With FP32 masters
-and BF16 compute, duplicate gradients accumulate in BF16 on each requester, then
-sum in FP32 on the owner. This matches an ordinary BF16 FSDP embedding's local
-accumulation. For example, local contributions `[256,1]` round to 256 before a
-second requester's -256 is added; the result is zero, rather than one.
+Collectives sum gradients without mesh-size division. The caller normalizes
+the loss and keeps weights fixed through accumulated microbatches. The helper
+uses ordinary autograd; optimizer updates happen after backward. Gradients
+and optimizer moments remain dense local shards.
 
-There is no mesh-size division: TorchTitan already normalizes its loss by the
-global valid-token count. Weights stay fixed through accumulated microbatches.
-Gradients and optimizer moments are dense local shards. Existing momentum can
-update unvisited rows; weight decay follows the table's optimizer configuration.
+## Parameter and Recompute Contracts
 
-Qwen's debug recipes use a separate Adam optimizer for the lookup table with
-weight decay disabled, as specified in the report. The lookup weight, its
-gradient and Adam moments retain their DTensor placements.
+The caller allocates local rows, owns the storage mesh, and excludes the
+parameter from FSDP gathers. The helper accepts a local tensor or a DTensor
+with the corresponding row/feature ownership. DTensor gradients retain their
+placements; existing clipping, optimizers and native DCP can consume them.
 
-## Parameter lifecycle, clipping and checkpoints
+Preparation performs one count-dependent device-to-host synchronization
+before forward. The prepared metadata can be reused during recomputation.
+Every owner participates, including ranks with empty inputs or row shards.
+Invalid IDs fail on every owner before request/response exchanges begin.
 
-The model allocates local rows from its declarative SPMD sharding, then wraps
-them in a DTensor parameter on the backbone's dense storage mesh. DP storage
-axes use `Shard(0)`. An ignored-only `fully_shard` child excludes the table from
-ancestor FSDP gathers. The lookup uses
-`weight.to_local(grad_placements=weight.placements)` so backward returns a
-DTensor gradient with the same placements. `to_empty()`, optimizer moments,
-dtype conversion and native DCP retain the DTensor's global layout.
-
-The existing clipper combines the table gradient with the other DTensor
-gradients. Using the backbone's storage mesh preserves the norm grouping and
-reduction order. Only scalar norms communicate; the trainer uses L2 clipping.
-Native DCP saves weights and optimizer moments by global coordinates and supports
-resume with a changed owner count.
-
-Qwen's HF adapter uses the public DTensor chunk metadata to intersect local
-rows with global numbered HF parts. Each local fragment carries the public
-`CheckpointableTensor` coordinate fields for the HF storage format. Loading
-concatenates only the local fragments and reconstructs the destination DTensor.
-Splitting the global DTensor directly would gather its row shards.
-
-Fresh initialization writes through the local view using owner-seeded normal
-streams; it depends on owner count. Common-checkpoint comparisons qualify
-training numerics. Qwen's SPMD meta allocation requires table rows divisible by
-the DP degree, checked once the owner mesh is known. The generic lookup accepts
-uneven and empty shards when the supplied weight has the correct local shape.
-Qwen rejects CPU offload, deferred FSDP gradient reduction, and a reduction dtype
-different from the master dtype.
-
-## Capacity
-
-The released table is `320,001,536 x 160`: 51,200,245,760 parameters.
-Ownership removes the 95.37 GiB BF16 full-table gather. It retains dense Adam
-state and updates every local row at each optimizer step.
-
-| Table storage | Global GiB |
-| --- | ---: |
-| FP32 parameters | 190.74 |
-| FP32 gradients | 190.74 |
-| Two FP32 Adam moments | 381.47 |
-| Total | 762.94 |
-
-At eight owners the table alone costs 95.37 GiB per owner; at four it costs
-190.74 GiB. Other model state and activations are additional.
-Released-model capacity and throughput are unqualified.
-
-Current Qwen support uses DP owners. A PP stage without PLE should own no table
-and join no lookup collectives; PP ranks on other stages do not add capacity to
-the table's owner mesh. Separate feature-column owners are supported by the
-helper, while their model integration belongs to the TP/PP stack increments.
+All owners must replay response collectives together. Nonreentrant PyTorch
+checkpointing must disable early stopping so one rank cannot skip a
+collective that another rank replays.
 
 ## Validation
 
-Four-rank CPU Gloo and two-GB300 NCCL tests compare lookup values, accumulated
-gradients, weights and AdamW moments exactly with a dense reference. Cases
-include duplicate IDs and BF16 cancellation, uneven shards, empty requesters,
-empty owners, all-empty inputs, mixed integer dtypes, non-contiguous/scalar
-inputs, and PyTorch/`torch_remat` recomputation. Invalid IDs fail on every owner
-before request routing. Active L2 clipping and synchronous/asynchronous
-native checkpoints cover resume with fewer owners.
+Four-rank CPU/Gloo tests compare values, accumulated gradients and optimizer
+updates with a dense reference. Cases include duplicate IDs, BF16
+cancellation, uneven/empty shards, integer dtypes and recomputation.
 
-CPU adapter tests exercise real DTensors, HF parts crossing row and feature
-owners, empty owners, dtype conversion, and distributed safetensors save,
-consolidation and load. Communication instrumentation verifies that HF format
-conversion does not gather the table.
-
-Whole-model two-GB300 comparisons use seed 42, strict determinism, a common
-checkpoint, two accumulated microbatches and fused AdamW. Native DTensor storage
-and the plain owned-row baseline match first-step logits and 190 gradient shards,
-ten-step loss/norm, and all 763 final checkpoint tensors bitwise. Full remat and
-resume after five updates, including loading a plain-row checkpoint, preserve
-the same result. Both sources use the same committed deterministic GDN policy.
-The owned lookup also has reduced-model parity with a full-table FSDP embedding.
-Changing ownership or collective reduction trees can change floating-point
-summation order; these checks qualify the tested layouts.
+```bash
+pytest tests/unit_tests/cpu/distributed/test_row_sharded_embedding.py -q
+```

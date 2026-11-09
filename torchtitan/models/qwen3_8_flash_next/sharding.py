@@ -35,7 +35,7 @@ def unsharded_linear_sharding(layout: SpmdType) -> ShardingConfig:
 def grouped_norm_sharding(layout: SpmdType) -> ShardingConfig:
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-        in_src_shardings={"x_TC": layout},
+        in_src_shardings={"input": layout},
         out_src_shardings=layout,
         local_spmd=True,
     )
