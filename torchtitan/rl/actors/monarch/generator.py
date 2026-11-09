@@ -63,7 +63,6 @@ class _GeneratorActorEndpoints:
         group_id: int,
         routing_session_id: str,
         sampling_config: SamplingConfig | None = None,
-        metrics_prefix: str = "generator",
     ) -> Completion:
         return await super().generate(
             prompt_token_ids,
@@ -71,7 +70,6 @@ class _GeneratorActorEndpoints:
             group_id=group_id,
             routing_session_id=routing_session_id,
             sampling_config=sampling_config,
-            metrics_prefix=metrics_prefix,
         )
 
     @concurrent_endpoint

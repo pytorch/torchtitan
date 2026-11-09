@@ -373,7 +373,6 @@ class Generator(Configurable):
         group_id: int,
         routing_session_id: str,
         sampling_config: SamplingConfig | None = None,
-        metrics_prefix: str = "generator",
     ) -> Completion:
         """Generates one completion for one prompt.
 
@@ -394,9 +393,6 @@ class Generator(Configurable):
             routing_session_id: Stable session key for in-mesh DP routing.
             sampling_config: Optional per-call override for the generator's
                 default SamplingConfig.
-            metrics_prefix: Namespace prepended to every metric key on the returned
-                `Completion` (default ``"generator"``). Callers that need to keep streams
-                separate, e.g. ``"validation/generator"``, can override it.
 
         Example:
 
@@ -421,8 +417,7 @@ class Generator(Configurable):
                 group_id=group_id,
                 routing_session_id=routing_session_id,
                 arrival_time=time.time(),
-            ),
-            metrics_prefix=metrics_prefix,
+            )
         )
 
     async def release_groups(self, group_ids: list[int]) -> None:

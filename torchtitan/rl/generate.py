@@ -173,6 +173,7 @@ def generate() -> None:
         max_model_len=model_config.max_context_length,
     )
     engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
+    engine_kwargs["watermark"] = engine_config.watermark
     if not has_cuda_capability(9, 0):
         engine_kwargs["block_size"] = 256
     expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size

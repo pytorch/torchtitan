@@ -53,7 +53,7 @@ jobs:
 
         python -m pip install --force-reinstall --pre \
           torch torchvision --index-url ${{ matrix.index-url }}
-        USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
+        USE_CPP=0 python -m pip install --pre -r .github/requirements-torchao.txt --index-url ${{ matrix.index-url }}
 
         pytest tests/unit_tests/gpu -m "not multi_gpu" --strict-markers --durations=20 -vv
 
@@ -90,6 +90,6 @@ jobs:
 
         python -m pip install --force-reinstall --pre \
           torch torchvision --index-url ${{ matrix.index-url }}
-        USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
+        USE_CPP=0 python -m pip install --pre -r .github/requirements-torchao.txt --index-url ${{ matrix.index-url }}
 
         pytest tests/unit_tests/gpu -m multi_gpu --strict-markers --durations=20 -vv

@@ -246,16 +246,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
     engine_kwargs["max_model_len"] = gen_config.model.max_context_length
-    # Mirror Controller.setup_async for a single engine: derive from active rollout concurrency
-    # (the active-buffer capacity num_group_workers, or the validation pass).
-    async_loop = config.async_loop
-    gen_dp = max(gen_config.parallelism.data_parallel_degree, 1)
-    num_group_workers = async_loop.max_active_rollout_groups
-    rollout_concurrency = max(
-        num_group_workers * async_loop.num_samples_per_prompt,
-        async_loop.validation.steps,
-    )
-    max_num_seqs = min((rollout_concurrency + gen_dp - 1) // gen_dp, 512)
+    max_num_seqs = config.max_num_seqs_per_generator_dp_rank
     engine_kwargs["max_num_seqs"] = max_num_seqs
     max_num_batched_tokens = resolve_max_num_batched_tokens(
         gen_config.max_num_batched_tokens,
@@ -285,7 +276,7 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
     wrapper = engine.model_executor.driver_worker.get_model()
     trainer_sd = trainer_model.state_dict()
     # As a model state dict load: fill the pinned CPU copy, then load from it.
-    vllm_sd = wrapper._prefetched_model_state_dict
+    vllm_sd = wrapper.model_state_dict_loader.prefetched_model_state_dict
 
     trainer_buffers = {name for name, _ in trainer_model.named_buffers()}
     trainer_preserve_dtype_params = {
@@ -320,7 +311,7 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
                 tensor.copy_(vllm_sd[key])
         return list(state_dict)
 
-    wrapper.load_model_state_dict(fetch)
+    wrapper.model_state_dict_loader.load(fetch)
 
     if dist.get_rank() == 0 and missing:
         logger.warning("vLLM params not present in trainer state_dict: %s", missing)
