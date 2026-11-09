@@ -36,10 +36,9 @@ class VerifiersMathTask(vf.Task[VerifiersMathData]):
 
     @vf.reward(weight=1.0)
     async def math_verify(self, trace: vf.Trace) -> float:
-        result = await _MATH_VERIFY_POOL.score(
+        return await _MATH_VERIFY_POOL.score(
             response=trace.last_reply or "", ground_truth=self.data.ground_truth
         )
-        return result.score
 
 
 class VerifiersMathTasksetConfig(vf.TasksetConfig):

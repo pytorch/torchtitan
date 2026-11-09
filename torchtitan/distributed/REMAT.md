@@ -303,8 +303,7 @@ communication regions:
   `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled;
   save it together with `w2.linear`.
 - `tp_output_reduction`, which controls the final TP all-reduce when sequence
-  parallelism is disabled. In batch-invariant mode with shared experts, the routed
-  output has its own TP all-reduce, `tp_routed_reduction`.
+  parallelism is disabled.
 
 For a common MoE module named `moe`, the corresponding policy is:
 
@@ -317,7 +316,6 @@ ActivationRematConfig(
         "moe.routed_experts.token_dispatcher.combine",
         "moe.shared_experts.*",
         "moe.tp_output_reduction",
-        "moe.tp_routed_reduction",
     ]
 )
 ```

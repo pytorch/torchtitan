@@ -379,19 +379,6 @@ def _run_qwen3_moe_loss_compare() -> bool:
     )
 
 
-def _run_gpt_oss_loss_compare() -> bool:
-    """Compare GPT-OSS eager and GraphTrainer with FSDP+TP+EP on four GPUs."""
-    return run_loss_compare(
-        baseline_module=NUMERICS_CONFIG_MODULE,
-        baseline_config="gpt_oss_eager_numerics",
-        test_module=NUMERICS_CONFIG_MODULE,
-        test_config="gpt_oss_graph_numerics",
-        baseline_ngpus=4,
-        test_ngpus=4,
-        metrics=("loss", "grad_norm"),
-    )
-
-
 def _run_autoparallel_llama3_loss_compare() -> bool:
     """Compare manual and AutoParallel Llama3 using Varlen attention."""
     return run_loss_compare_close(
@@ -456,9 +443,6 @@ class TestGraphTrainerNumerics(unittest.TestCase):
 
     def test_moe_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_qwen3_moe_loss_compare())
-
-    def test_moe_gpt_oss_aot_fx_trace_vs_eager(self):
-        self.assertTrue(_run_gpt_oss_loss_compare())
 
 
 def _run_dist_moe_pp_loss_compare(

@@ -65,9 +65,12 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
         resolve_fsdp_mesh.return_value = (dp_mesh, dp_mesh_dims)
         resolve_sparse_fsdp_mesh.return_value = (edp_mesh, edp_mesh_dims)
         parallelism_context = SimpleNamespace(pp_enabled=False, ep=2)
-        precision = SimpleNamespace(param_dtype="bfloat16", reduce_dtype="float32")
+        training = SimpleNamespace(
+            mixed_precision_param="bfloat16",
+            mixed_precision_reduce="float32",
+            enable_cpu_offload=False,
+        )
         parallelism = SimpleNamespace(
-            fsdp_enable_cpu_offloading=False,
             fsdp_reshard_after_forward="default",
             fsdp_symm_mem_scope=None,
         )
@@ -75,7 +78,7 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
         DeepSeekV4Model._apply_fsdp(
             model,
             parallelism_context=parallelism_context,
-            precision=precision,
+            training=training,
             parallelism=parallelism,
         )
 

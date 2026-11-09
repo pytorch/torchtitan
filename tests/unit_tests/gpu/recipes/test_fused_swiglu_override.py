@@ -11,6 +11,7 @@ import torch
 from torchtitan.models.common.activation import SwiGLU
 from torchtitan.tools.utils import device_type
 from torchtitan_recipes.overrides.fused_swiglu import (
+    fused_swiglu,
     FusedSwiGLU,
     silu_and_mul_backward_kernel,
     silu_and_mul_forward_kernel,
@@ -22,6 +23,15 @@ _DEVICE = torch.accelerator.current_accelerator()
 # The ops register for torchtitan's detected device type, which can differ from
 # torch.accelerator (e.g. MPS), so skip unless the two agree.
 _HAS_OP_DEVICE = _DEVICE is not None and _DEVICE.type == device_type
+
+
+class TestFusedSwiGLUOverride(unittest.TestCase):
+    def test_swiglu_config_is_replaced(self):
+        cfg = SwiGLU.Config()
+
+        replacement = fused_swiglu(cfg)
+
+        self.assertIsInstance(replacement, FusedSwiGLU.Config)
 
 
 @unittest.skipUnless(_HAS_OP_DEVICE, f"requires a {device_type} accelerator")

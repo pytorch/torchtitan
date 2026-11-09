@@ -23,7 +23,6 @@ from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     spmd_local_context,
 )
-from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
     AttentionMetadataMap,
@@ -35,6 +34,10 @@ from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common.flops import (
+    get_nparams_and_active_nparams,
+    quadratic_attention_flops_per_token,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import MoE
@@ -413,7 +416,6 @@ class MuseSparkTransformerBlock(TransformerBlock):
 class MuseSparkModel(MultimodalModel):
     state_dict_adapter_cls = MuseSparkStateDictAdapter
     multimodal_encoder_fqns = ("vision_encoder", "audio_encoder")
-
     pipeline_first_stage_module_fqns = (
         "vision_encoder",
         "vision_adapter",
@@ -491,54 +493,40 @@ class MuseSparkModel(MultimodalModel):
                         f"dataset_modalities requires a configured {modality}_encoder"
                     )
 
-        def build_flops_estimator(
+        def get_nparams_and_flops(
             self,
-            model: Module,
-            *,
+            model: nn.Module,
             seq_len: int,
-            excluded_submodules: tuple[Module | None, ...] = (),
-        ) -> FlopsEstimator:
-            from torchtitan.models.common.flops import active_parameter_flops_per_token
-
-            model = cast(MuseSparkModel, model)
-            vision_outputs = (
-                model.vision_adapter,
-                model.vision_projection,
-                model.perception_emb_norm,
-            )
-            base_estimate = super(MuseSparkModel.Config, self).build_flops_estimator(
+        ) -> tuple[int, int]:
+            # Perception modules run per image or audio clip rather than per
+            # text token, so this remains a decoder-only MFU estimate.
+            muse_model = cast("MuseSparkModel", model)
+            nparams, active_nparams = get_nparams_and_active_nparams(
                 model,
-                seq_len=seq_len,
-                excluded_submodules=(*vision_outputs, *excluded_submodules),
+                modules_excluded_from_active_params=(
+                    muse_model.vision_encoder,
+                    muse_model.vision_adapter,
+                    muse_model.vision_projection,
+                    muse_model.perception_emb_norm,
+                    muse_model.audio_encoder,
+                ),
             )
-            vision_config = self.vision_encoder
-            vision_output_flops = sum(
-                active_parameter_flops_per_token(module)
-                for module in vision_outputs
-                if module is not None
-            )
-            audio_config = self.audio_encoder
-            audio_output_flops = (
-                active_parameter_flops_per_token(model.perception_emb_norm)
-                if model.perception_emb_norm is not None
-                else 0
-            )
-
-            def estimate(input_dict) -> int:
-                flops = base_estimate(input_dict)
-                if vision_config is not None:
-                    flops += (
-                        vision_config.get_num_output_tokens(input_dict)
-                        * vision_output_flops
-                    )
-                if audio_config is not None:
-                    flops += (
-                        audio_config.get_num_output_tokens(input_dict)
-                        * audio_output_flops
-                    )
-                return flops
-
-            return estimate
+            attention_op_flops = 0
+            for layer in self.layers:
+                attention = layer.attention
+                head_dim = (
+                    attention.head_dim
+                    if attention.head_dim is not None
+                    else attention.dim // attention.n_heads
+                )
+                attention_op_flops += quadratic_attention_flops_per_token(
+                    num_heads=attention.n_heads,
+                    qk_head_dim=head_dim,
+                    v_head_dim=head_dim,
+                    seq_len=seq_len,
+                    sliding_window_size=attention.window_size,
+                )
+            return nparams, 6 * active_nparams + attention_op_flops
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
@@ -571,6 +559,7 @@ class MuseSparkModel(MultimodalModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
+        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
@@ -608,6 +597,7 @@ class MuseSparkModel(MultimodalModel):
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
             )
 
         perception_input_sharding = multimodal_input_sharding()

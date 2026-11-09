@@ -35,7 +35,7 @@ from vllm.utils import torch_utils as _torch_utils
 # model config, whose local_compile.regions may name it, but never builds a loss.
 from torchtitan.components import loss as _loss  # noqa: F401
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
+from torchtitan.config import TrainingConfig
 from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import ParallelismContext
@@ -55,7 +55,6 @@ from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.vllm.registry import uses_compressed_mla_cache
-from torchtitan.tools.utils import set_default_dtype
 
 
 logger = init_logger(__name__)
@@ -427,7 +426,6 @@ class VLLMModelWrapper(Module):
         *,
         model_config: Decoder.Config,
         parallelism: InferenceParallelismConfig,
-        precision: PrecisionConfig,
         checkpointer_config: CheckpointManager.Config | None,
         vllm_config: VllmConfig,
         prefix: str = "",
@@ -460,48 +458,26 @@ class VLLMModelWrapper(Module):
 
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
-        param_dtype = TORCH_DTYPE_MAP[precision.param_dtype]
-        if vllm_config.model_config.dtype != param_dtype:
-            raise ValueError(
-                f"vLLM computes in {vllm_config.model_config.dtype}, but the trainer computes "
-                f"in precision.param_dtype={precision.param_dtype!r}. Pass "
-                "precision.param_dtype as the engine dtype."
-            )
-        # Build model on meta device to avoid allocating full model on every GPU.
-        # Build in the trainer's master dtype (`precision.dtype`), so buffers and
-        # `preserve_dtype_params` get the dtypes the trainer has and sends.
-        with (
-            self.parallelism_context.activate_spmd(),
-            torch.device("meta"),
-            set_default_dtype(TORCH_DTYPE_MAP[precision.dtype]),
-        ):
+        # Build model on meta device to avoid allocating full model on every GPU
+        with self.parallelism_context.activate_spmd(), torch.device("meta"):
             self.model = self.config.build()
-        # The generator never computes gradients. Frozen parameters also let FSDP
-        # hold mixed dtypes, and Dist-MoE's inference context rejects any operand
-        # with requires_grad.
-        self.model.requires_grad_(False)
-        # Hold the other parameters in `precision.param_dtype`, the dtype the trainer
-        # computes with and sends, so the FSDP below casts none of them. Swap each
-        # parameter's tensor rather than assigning `param.data`, which keeps a
-        # quantized tensor subclass's inner tensor in the old dtype; keep the
-        # parameter's attributes (e.g. its SPMD type).
-        preserved = {param for _, param in self.model.named_preserve_dtype_params()}
-        for param in self.model.parameters():
-            if param in preserved or param.dtype == param_dtype:
-                continue
-            new_param = nn.Parameter(
-                param.detach().to(param_dtype), requires_grad=False
-            )
-            for name, value in param.__dict__.items():
-                new_param.__dict__.setdefault(name, value)
-            torch.utils.swap_tensors(param, new_param)
+        # The GDN kernels read A_log and dt_bias in float32. Keeping them in float32
+        # casts them once per weight load instead of in every step. Frozen: FSDP needs
+        # one dtype among parameters with grad.
+        for module in self.model.modules():
+            if isinstance(module, GDN):
+                for param in (module.A_log, module.dt_bias):
+                    param.data = param.data.float()
+                    param.requires_grad_(False)
+        # FSDP keeps each parameter in its own dtype: the rest are already the model dtype.
+        self.model._fsdp_param_dtype_override_fn = lambda param: param.dtype
         self.model._skip_lm_head = True
         if getattr(self.model, "vision_encoder", None) is not None:
             self.model.vision_encoder = None
 
         self.model = self.model.parallelize(
             parallelism_context=self.parallelism_context,
-            precision=precision,
+            training=TrainingConfig(),
             parallelism=training_parallelism,
             local_compile=self.config.local_compile,
             activation_remat=None,
@@ -546,6 +522,7 @@ class VLLMModelWrapper(Module):
         if self.parallelism_context.tp_enabled and not is_in_batch_invariant_mode():
             _patch_vllm_all_reduce()
 
+        self._model_dtype = vllm_config.model_config.dtype
         self._fsdp_load_groups, self._buffer_keys = _fsdp_load_groups(self.model)
         if model_state_dict_load_mode == "gpu_fetch":
             # gpu_fetch writes into the sharded parameter itself, not a quantized
@@ -564,12 +541,17 @@ class VLLMModelWrapper(Module):
         maybe_apply_numa_binding(torch.cuda.current_device(), "cuda")
         self._prefetched_model_state_dict: dict[str, torch.Tensor] | None = None
         if model_state_dict_load_mode == "cpu_prefetch":
-            # The sharded state dict has the dtypes the trainer sends (see
-            # `Trainer._put_model_state_dict`); torchstore's RDMA transport copies
-            # bytes and asserts matching dtypes.
+            # Receive what the trainer sends: parameters in the model dtype, buffers in their own.
+            # torchstore's RDMA transport copies bytes and asserts matching dtypes.
+            # The load casts the float32 GDN parameters.
+            buffer_keys = set(self._buffer_keys)
+            model_state_dict = {
+                key: (tensor if key in buffer_keys else tensor.to(self._model_dtype))
+                for key, tensor in self.model.state_dict().items()
+            }
             with torch.device("cpu"):
                 self._prefetched_model_state_dict = _create_cpu_state_dict(
-                    self.model.state_dict(), pin_memory=True
+                    model_state_dict, pin_memory=True
                 )
 
         # Unshard the model here so vLLM performs its GPU memory profiling
@@ -599,9 +581,9 @@ class VLLMModelWrapper(Module):
             after `norm` would all-gather `lm_head` before it loads.
 
         Args:
-            fetch: Fills each tensor of the given subset of `self.model.state_dict()`
-                (each in its own dtype, as the trainer sends it) in place with the
-                new weights and returns the keys it filled, e.g. a
+            fetch: Fills each tensor of the given subset of `self.model.state_dict()`,
+                with parameters in the model dtype as the trainer sends them, in place
+                with the new weights and returns the keys it filled, e.g. a
                 copy from the generator's pinned CPU buffers or a TorchStore read. Each
                 group's sharded storage is reallocated just before its fetch, so a
                 fetch writing outside the current stream (e.g. RDMA) must first wait
@@ -617,20 +599,32 @@ class VLLMModelWrapper(Module):
             # all-gathers across the FSDP group and the other ranks are still loading.
             if error is None:
                 try:
-                    # The trainer sends each parameter in the dtype the generator
-                    # holds it in, so fetch fills the sharded parameters in place.
                     params = {
                         key: fsdp_param.sharded_param
                         for key, fsdp_param in keyed_params
                     }
+                    # The trainer sends parameters in the model dtype. Fetch the
+                    # float32 GDN parameters into staging tensors, then cast.
+                    received = {
+                        key: (
+                            param
+                            if param.dtype == self._model_dtype
+                            else torch.empty_like(param, dtype=self._model_dtype)
+                        )
+                        for key, param in params.items()
+                    }
                     # An unfilled parameter would load its just-reallocated,
                     # uninitialized storage.
-                    missing = params.keys() - fetch(params)
+                    missing = params.keys() - fetch(received)
                     if missing:
                         raise RuntimeError(
                             f"fetch did not fill {len(missing)} weights, e.g. "
                             f"{sorted(missing)[:5]}"
                         )
+                    with torch.no_grad():
+                        for key, param in params.items():
+                            if received[key] is not param:
+                                param.copy_(received[key])
                 except Exception as e:
                     error = e
             _unshard_and_free_sharded_params(module)
@@ -714,6 +708,11 @@ class VLLMModelWrapper(Module):
                 "backward, so a training context's activation slots would reserve "
                 "memory it can never use."
             )
+        # An inference context rejects any operand carrying requires_grad, and
+        # it tests the attribute rather than whether grad is enabled.
+        for module in self.model.modules():
+            if isinstance(module, DistMoeRoutedExperts):
+                module.requires_grad_(False)
         self._dist_moe_runtime = runtime_config.build(
             model_parts=[self.model],
             parallelism_context=self.parallelism_context,

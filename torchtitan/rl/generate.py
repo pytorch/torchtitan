@@ -120,7 +120,6 @@ def generate() -> None:
     register_to_vllm(
         model_config,
         parallelism=gen_config.parallelism,
-        precision=config.precision,
         checkpointer_config=CheckpointManager.Config(
             initial_load_in_hf=True,
             initial_load_path=model_path,
@@ -147,7 +146,7 @@ def generate() -> None:
         model=model_path,
         trust_remote_code=True,
         config_format=TORCHTITAN_CONFIG_FORMAT,
-        dtype=config.precision.param_dtype,
+        dtype=gen_config.model_dtype,
         # Parallelism configuration
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
         data_parallel_size=gen_config.parallelism.data_parallel_degree,

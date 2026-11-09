@@ -32,6 +32,10 @@ def test_cp_import_before_parallelism_config() -> None:
     )
 
 
+def test_parallelism_config_default_load_balancer() -> None:
+    assert ParallelismConfig().context_parallel_load_balancer is None
+
+
 def test_parallelism_config_accepts_ptrr_when_cp_disabled() -> None:
     config = ParallelismConfig(
         context_parallel_degree=1,
@@ -41,6 +45,10 @@ def test_parallelism_config_accepts_ptrr_when_cp_disabled() -> None:
         config.context_parallel_load_balancer,
         PTRRFlexAttentionCPLoadBalancer.Config,
     )
+
+
+def test_parallelism_config_default_schedule() -> None:
+    assert ParallelismConfig().pipeline_parallel_schedule == "1F1B"
 
 
 def test_parallelism_config_accepts_interleaved_1f1b() -> None:
@@ -62,6 +70,14 @@ def test_parallelism_config_rejects_invalid_schedule(schedule: str) -> None:
         ParallelismConfig(pipeline_parallel_schedule=schedule)
 
 
+def test_parallelism_config_rejects_unknown_schedule_when_pp_disabled() -> None:
+    with pytest.raises(ValueError, match=r"pipeline_parallel_schedule 'foo'"):
+        ParallelismConfig(
+            pipeline_parallel_degree=1,
+            pipeline_parallel_schedule="foo",
+        )
+
+
 def test_parallelism_config_accepts_unset_layers_per_stage() -> None:
     assert ParallelismConfig().pipeline_parallel_layers_per_stage is None
 
@@ -80,6 +96,10 @@ def test_parallelism_config_rejects_non_positive_layers_per_stage(
         match=rf"pipeline_parallel_layers_per_stage must be positive.*{layers_per_stage}",
     ):
         ParallelismConfig(pipeline_parallel_layers_per_stage=layers_per_stage)
+
+
+def test_parallelism_config_disables_fsdp_symm_mem_by_default() -> None:
+    assert ParallelismConfig().fsdp_symm_mem_scope is None
 
 
 @pytest.mark.parametrize("scope", ["all", "dense"])

@@ -79,8 +79,6 @@ class HcPre(Module):
         sinkhorn_iters: int = 20
         eps: float = 1e-6
         norm_eps: float = 1e-6
-        # The mixing runs in float32.
-        preserve_dtype_params: tuple[str, ...] = ("hc_fn", "hc_base", "hc_scale")
 
     def __init__(self, config: Config):
         super().__init__()
@@ -159,8 +157,6 @@ class HcHead(Module):
         dim: int
         norm_eps: float = 1e-6
         eps: float = 1e-6
-        # The mixing runs in float32.
-        preserve_dtype_params: tuple[str, ...] = ("hc_fn", "hc_base", "hc_scale")
 
     def __init__(self, config: Config):
         super().__init__()

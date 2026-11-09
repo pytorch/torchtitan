@@ -15,6 +15,7 @@ import math
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -397,6 +398,18 @@ class TestProcessMmSampleTemporalPatchSize(unittest.TestCase):
             self.assertIsNotNone(sample)
             counts.append(int((sample["input_ids"] == _FakeMMTokenizer.image_id).sum()))
         self.assertTrue(all(count == expected_tokens for count in counts))
+
+    def test_process_mm_sample_forwards_configured_temporal_patch_size(self):
+        for tps in (2, 7):
+            with patch(
+                "torchtitan.components.data.multimodal.mm_datasets.calculate_vision_tokens",
+                wraps=calculate_vision_tokens,
+            ) as mock_calc:
+                sample = _process_synthetic_image(temporal_patch_size=tps)
+            self.assertIsNotNone(sample)
+            mock_calc.assert_called_once()
+            self.assertEqual(mock_calc.call_args.kwargs["temporal_patch_size"], tps)
+            self.assertEqual(mock_calc.call_args.kwargs["num_frames"], 1)
 
 
 if __name__ == "__main__":

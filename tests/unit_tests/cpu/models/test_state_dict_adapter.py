@@ -291,7 +291,7 @@ class UnsupportedQuantizedKeysTest(unittest.TestCase):
     def test_adapters_without_quantized_loads_reject_quantized_layout(self) -> None:
         adapters = [
             FluxStateDictAdapter(
-                FLUX_MODEL_FLAVORS["flux-debug"][0](seq_len=512), hf_assets_path=None
+                FLUX_MODEL_FLAVORS["flux-debug"](), hf_assets_path=None
             )
         ]
         for flavors, adapter_cls in (

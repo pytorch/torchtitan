@@ -359,7 +359,7 @@ def qwen35_debugmodel_moe_fsdp4_tp2_ep4() -> Trainer.Config:
     config.parallelism.expert_parallel_degree = 4
     config.parallelism.pipeline_parallel_degree = 1
     config.training.num_tokens_per_microbatch_per_dp_rank = (
-        config.model.max_context_length
+        config.training.max_context_length
     )
     config.training.steps = 10
     config.training.disable_accelerator_graphs = True
@@ -522,7 +522,7 @@ def muse_glimmer_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = (
-        config.model.max_context_length
+        config.training.max_context_length
     )
     config.training.steps = 10
     config.training.disable_accelerator_graphs = True

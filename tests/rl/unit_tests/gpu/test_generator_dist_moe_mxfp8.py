@@ -124,16 +124,6 @@ def _state_dict_with_random_experts(wrapper, experts, *, seed: int) -> dict:
     }
 
 
-def _trainer_model(wrapper, state_dict: dict[str, torch.Tensor]) -> SimpleNamespace:
-    """Stand in for the trainer model: ``state_dict`` under the generator model's
-    buffer and ``preserve_dtype_params`` names, which match the trainer's."""
-    return SimpleNamespace(
-        state_dict=lambda: state_dict,
-        named_buffers=wrapper.model.named_buffers,
-        named_preserve_dtype_params=wrapper.model.named_preserve_dtype_params,
-    )
-
-
 def _operands(experts) -> list[tuple[torch.Tensor, torch.Tensor]]:
     """Return each expert weight's FSDP-managed qdata and FPROP scale."""
     return [
@@ -207,17 +197,17 @@ def _check_inference_operands(engine) -> None:
 
     # Reuse the trainer weight sync, which loads through the generator's
     # weight-load path.
-    _sync_trainer_weights_to_vllm(_trainer_model(wrapper, weights_a), engine)
+    _sync_trainer_weights_to_vllm(SimpleNamespace(state_dict=lambda: weights_a), engine)
     contents_a = [(q.clone(), s.clone()) for q, s in _operands(experts)]
     logprobs_a = _generate(engine, prompt_ids, "weights_a")
 
-    _sync_trainer_weights_to_vllm(_trainer_model(wrapper, weights_b), engine)
+    _sync_trainer_weights_to_vllm(SimpleNamespace(state_dict=lambda: weights_b), engine)
     for (q, s), (q_a, s_a) in zip(_operands(experts), contents_a, strict=True):
         assert not torch.equal(q, q_a)
         assert not torch.equal(s, s_a)
     logprobs_b = _generate(engine, prompt_ids, "weights_b")
 
-    _sync_trainer_weights_to_vllm(_trainer_model(wrapper, weights_a), engine)
+    _sync_trainer_weights_to_vllm(SimpleNamespace(state_dict=lambda: weights_a), engine)
     logprobs_a_again = _generate(engine, prompt_ids, "weights_a_again")
 
     for (q, s), (q_0, s_0), ptrs in zip(
@@ -261,7 +251,6 @@ def test_vllm_generator_enables_mxfp8_mega_inference_weights():
         register_to_vllm(
             config.generator.model,
             parallelism=config.generator.parallelism,
-            precision=config.precision,
             checkpointer_config=None,
             dist_moe_runtime=config.generator.dist_moe_runtime,
             model_state_dict_load_mode="cpu_prefetch",

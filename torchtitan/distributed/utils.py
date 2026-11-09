@@ -383,7 +383,7 @@ def configure_nccl_for_ulysses(
     if device_type != "cuda" or comm_backend in {"fake", "real_pp_fake_spmd"}:
         return
 
-    from torchtitan.models.common.attention.cp_attention import Ulysses
+    from torchtitan.models.common.attention.cp_attention import UlyssesInnerAttention
 
     # TODO: Remove this workaround once supported PyTorch builds ship
     # NCCL >= 2.32.3.
@@ -392,7 +392,7 @@ def configure_nccl_for_ulysses(
 
     # We could only reproduce this issue with Ulysses. Always turning on
     # this flag may have performance regressions.
-    if not any(model.traverse(Ulysses.Config)):
+    if not any(model.traverse(UlyssesInnerAttention.Config)):
         return
 
     _warn_overwrite_env("NCCL_GRAPH_REGISTER", "0")

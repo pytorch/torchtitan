@@ -16,9 +16,9 @@
 
 
 # Graph trainer: core owners or graph trainer owners.
-/torchtitan/experiments/graph_trainer/ @tianyu-l @fegin @wwwjn @shuhuayu @acisseJZhong @felipemello1 @SherlockNoMad @aditvenk @sanketpurandare @ydwu4 @IvanKobzarev
-/torchtitan_recipes/graph_trainer/ @tianyu-l @fegin @wwwjn @shuhuayu @acisseJZhong @felipemello1 @SherlockNoMad @aditvenk @sanketpurandare @ydwu4 @IvanKobzarev
-/torchtitan_recipes/tests/graph_trainer/ @tianyu-l @fegin @wwwjn @shuhuayu @acisseJZhong @felipemello1 @SherlockNoMad @aditvenk @sanketpurandare @ydwu4 @IvanKobzarev
+/torchtitan/experiments/graph_trainer/ @tianyu-l @fegin @wwwjn @shuhuayu @acisseJZhong @felipemello1 @SherlockNoMad @aditvenk @sanketpurandare
+/torchtitan_recipes/graph_trainer/ @tianyu-l @fegin @wwwjn @shuhuayu @acisseJZhong @felipemello1 @SherlockNoMad @aditvenk @sanketpurandare
+/torchtitan_recipes/tests/graph_trainer/ @tianyu-l @fegin @wwwjn @shuhuayu @acisseJZhong @felipemello1 @SherlockNoMad @aditvenk @sanketpurandare
 
 
 # TorchFT: core owners or the TorchFT owner.

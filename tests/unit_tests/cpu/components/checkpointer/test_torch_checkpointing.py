@@ -41,11 +41,11 @@ from torch_checkpointing.logging_utils import checkpoint_logging_context
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.storage.filesystem import LocalFileSystemStorageConfig
 from torchtitan.components.checkpointer import (
+    BaseCheckpointManager,
     CheckpointManager,
     CheckpointStorage,
     EMA,
     MODEL,
-    ModelWrapper,
     OPTIMIZER,
 )
 from torchtitan.components.checkpointer.torch_checkpointing import (
@@ -55,8 +55,6 @@ from torchtitan.components.checkpointer.torch_checkpointing import (
     TorchCheckpointingManager,
 )
 from torchtitan.config import CallableFunction
-from torchtitan.models.base.module import Module
-from torchtitan.models.common.nn_modules import RMSNorm
 
 
 class _BackendManager:
@@ -177,6 +175,16 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         manager.close()
         self.assertTrue(backend_manager.closed)
 
+    def test_config_adds_no_checkpoint_options(self) -> None:
+        field_names = {
+            field.name for field in dataclasses.fields(TorchCheckpointingManager.Config)
+        }
+        base_field_names = {
+            field.name for field in dataclasses.fields(BaseCheckpointManager.Config)
+        }
+
+        self.assertEqual(field_names, base_field_names)
+
     def test_config_to_dict_is_json_serializable(self) -> None:
         config_dict = TorchCheckpointingManager.Config().to_dict()
 
@@ -253,6 +261,12 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         storage.isdir.assert_called_once_with(Path("/somewhere"))
         self.assertIs(storage_config, manager._manager_config.storage_config)
         manager.close()
+
+    def test_legacy_config_has_no_backend_selector(self) -> None:
+        config = CheckpointManager.Config()
+
+        self.assertFalse(hasattr(config, "save_backend"))
+        self.assertFalse(hasattr(config, "load_backend"))
 
     def test_save_obeys_cadence_and_tracks_backend_future(self) -> None:
         config = TorchCheckpointingManager.Config(
@@ -519,8 +533,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
     def test_last_step_export_converts_only_mismatched_float_tensors(self) -> None:
         # Regression for the two defects #4166 fixed on the DCP side: gating on
         # export_dtype != float32 skipped BF16-to-FP32 exports entirely, and the
-        # blanket cast turned integer and boolean buffers into floats. Parameters
-        # in preserve_dtype_params keep their dtype.
+        # blanket cast turned integer and boolean buffers into floats.
         cases = (("float32", torch.float32), ("bfloat16", torch.bfloat16))
         for export_dtype, expected in cases:
             with self.subTest(export_dtype=export_dtype):
@@ -533,14 +546,13 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 manager, _ = self._build_manager(config)
                 sync_manager = _BackendManager()
                 sync_manager.save_result = None
-                model = Module()
-                model.weight = nn.Parameter(torch.ones(2, dtype=torch.bfloat16))
-                model.register_buffer("step_count", torch.ones(2, dtype=torch.int64))
-                model.register_buffer("mask", torch.ones(2, dtype=torch.bool))
-                model.norm = RMSNorm.Config(
-                    normalized_shape=2, preserve_dtype_params=("weight",)
-                ).build()
-                manager.states[MODEL] = ModelWrapper(model)
+                model = _Stateful(None)
+                model.state_dict = lambda: {
+                    "weight": torch.ones(2, dtype=torch.bfloat16),
+                    "step_count": torch.ones(2, dtype=torch.int64),
+                    "mask": torch.ones(2, dtype=torch.bool),
+                }
+                manager.states[MODEL] = model
 
                 with mock.patch.object(
                     BackendCheckpointManager.Config,
@@ -553,7 +565,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 self.assertEqual(expected, saved["weight"].dtype)
                 self.assertEqual(torch.int64, saved["step_count"].dtype)
                 self.assertEqual(torch.bool, saved["mask"].dtype)
-                self.assertEqual(torch.float32, saved["norm.weight"].dtype)
                 manager.close()
 
     def test_last_step_uses_synchronous_manager_and_model_only_payload(self) -> None:

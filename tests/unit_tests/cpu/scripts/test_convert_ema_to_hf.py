@@ -194,8 +194,8 @@ class TestConvertEmaToHf(unittest.TestCase):
         self.assertTrue(averaged, "no EMA weights on disk")
 
     def test_export_dtype_is_applied_without_losing_the_ema(self):
-        """--export_dtype is applied to what the script writes, so it is
-        checked against the written file, not the in-memory dict."""
+        """--export_dtype casts after the tt->hf conversion, so it has to be
+        checked against the written file, not the dict."""
         from safetensors.torch import load_file
 
         ckpt, _ = self._write_checkpoint()

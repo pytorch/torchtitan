@@ -95,6 +95,7 @@ def deepseek_v3_debugmodel(
         training=TrainingConfig(
             disable_accelerator_graphs=disable_accelerator_graphs,
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
+            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=parallelism,
@@ -219,6 +220,7 @@ def deepseek_v3_16b(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
+            max_context_length=model_config.max_context_length,
             steps=1000,
             disable_accelerator_graphs=True,
         ),
@@ -274,7 +276,7 @@ def deepseek_v3_debugmodel_dist_moe_bf16(
         parallelism=config.parallelism,
     )
     config.dataloader.max_num_documents = 512
-    config.precision.reduce_dtype = "bfloat16"
+    config.training.mixed_precision_reduce = "bfloat16"
     config.dist_moe_runtime = _dist_moe_runtime_config(
         scratch_capacity_factor=scratch_capacity_factor
     )
@@ -303,7 +305,7 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8(
         ],
     )
     config.dataloader.max_num_documents = 512
-    config.precision.reduce_dtype = "bfloat16"
+    config.training.mixed_precision_reduce = "bfloat16"
     config.dist_moe_runtime = _dist_moe_runtime_config(
         scratch_capacity_factor=scratch_capacity_factor
     )
@@ -334,6 +336,7 @@ def configure_dist_moe_fsdp2_ep2(config: Trainer.Config) -> Trainer.Config:
     assert isinstance(runtime_config, DistMoeRuntime.Config)
     runtime_config.scratch_capacity_factor = 2.0
     config.training.num_tokens_per_microbatch_per_dp_rank = 128
+    config.training.max_context_length = 128
     config.training.steps = 4
     config.checkpointer = None
     return config
@@ -369,7 +372,7 @@ def deepseek_v3_16b_dist_moe_bf16(seq_len: int | None = None) -> Trainer.Config:
         parallelism=config.parallelism,
     )
     config.dataloader.max_num_documents = 512
-    config.precision.reduce_dtype = "bfloat16"
+    config.training.mixed_precision_reduce = "bfloat16"
     config.dist_moe_runtime = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
     return apply_transforms(config, [DistMoeTransform()])
 
@@ -389,7 +392,7 @@ def deepseek_v3_16b_dist_moe_mxfp8(seq_len: int | None = None) -> Trainer.Config
         ],
     )
     config.dataloader.max_num_documents = 512
-    config.precision.reduce_dtype = "bfloat16"
+    config.training.mixed_precision_reduce = "bfloat16"
     config.dist_moe_runtime = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
     return apply_transforms(
         config,
@@ -440,6 +443,7 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
+            max_context_length=model_config.max_context_length,
             steps=10000,
             disable_accelerator_graphs=True,
         ),

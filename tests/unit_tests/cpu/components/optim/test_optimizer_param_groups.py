@@ -570,6 +570,16 @@ class TestOptimizersContainerWithParamGroups(unittest.TestCase):
             all(len(optimizer.param_groups) == 1 for optimizer in container.optimizers)
         )
 
+    def test_build_optimizer_default_groups(self):
+        """A catch-all AdamW config produces standard single-group behavior."""
+        model = SimpleModel()
+        config = OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3, fused=False)]
+        )
+        container = config.build(model_parts=[model])
+        opt = container.optimizers[0]
+        self.assertEqual(len(opt.param_groups), 1)
+
 
 class TestDistMuonRedistributionMeshes(unittest.TestCase):
     def test_builds_one_mesh_per_storage_mesh(self):

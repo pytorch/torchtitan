@@ -13,7 +13,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 
-from torchtitan.config.configs import PrecisionConfig
+from torchtitan.config.configs import TrainingConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import apply_simple_fsdp
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
@@ -92,12 +92,15 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
             world_size=1,
             enable_sequence_parallel=False,
         )
-        precision = PrecisionConfig(param_dtype="bfloat16", reduce_dtype="float32")
+        training = TrainingConfig(
+            mixed_precision_param="bfloat16",
+            mixed_precision_reduce="float32",
+        )
 
         model = apply_simple_fsdp(
             nn.Linear(8, 8),
             parallelism_context=parallelism_context,
-            precision=precision,
+            training=training,
         )
 
         self.assertIsInstance(
@@ -122,13 +125,16 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
             world_size=1,
             enable_sequence_parallel=False,
         )
-        precision = PrecisionConfig(param_dtype="bfloat16", reduce_dtype="float32")
+        training = TrainingConfig(
+            mixed_precision_param="bfloat16",
+            mixed_precision_reduce="float32",
+        )
         inner_attention = VarlenInnerAttention(VarlenInnerAttention.Config())
 
         model = apply_simple_fsdp(
             inner_attention,
             parallelism_context=parallelism_context,
-            precision=precision,
+            training=training,
         )
 
         self.assertIs(type(model), VarlenInnerAttention)
@@ -169,7 +175,10 @@ class TestApplySimpleFSDPExpertTraversal(unittest.TestCase):
             raise AssertionError(f"Unexpected mesh axes: {mesh_axis_names}")
 
         parallelism_context.get_optional_mesh = get_optional_mesh
-        precision = PrecisionConfig(param_dtype="bfloat16", reduce_dtype="float32")
+        training = TrainingConfig(
+            mixed_precision_param="bfloat16",
+            mixed_precision_reduce="float32",
+        )
 
         for with_auxiliary_moe, num_expert_calls in ((False, 1), (True, 2)):
             with self.subTest(with_auxiliary_moe=with_auxiliary_moe):
@@ -196,7 +205,7 @@ class TestApplySimpleFSDPExpertTraversal(unittest.TestCase):
                     apply_simple_fsdp(
                         model,
                         parallelism_context=parallelism_context,
-                        precision=precision,
+                        training=training,
                     )
 
                 expert_calls = data_parallel.call_args_list[:num_expert_calls]

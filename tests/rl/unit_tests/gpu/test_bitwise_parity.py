@@ -134,13 +134,13 @@ def build_trainer_model(
     with (
         parallelism_context.activate_spmd(),
         torch.device("meta"),
-        utils.set_default_dtype(TORCH_DTYPE_MAP[config.precision.dtype]),
+        utils.set_default_dtype(TORCH_DTYPE_MAP[trainer_config.training.dtype]),
     ):
         model = model_config.build()
 
     model = model.parallelize(
         parallelism_context=parallelism_context,
-        precision=config.precision,
+        training=trainer_config.training,
         parallelism=parallelism,
         local_compile=model_config.local_compile,
         activation_remat=trainer_config.activation_remat,
@@ -226,7 +226,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         # Build the model config from torchtitan's model config via the custom
         # parser registered by register_to_vllm, instead of reading config.json.
         config_format=TORCHTITAN_CONFIG_FORMAT,
-        dtype=config.precision.param_dtype,
+        dtype=gen_config.model_dtype,
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
         data_parallel_size=gen_config.parallelism.data_parallel_degree,
         enable_expert_parallel=enable_ep,
@@ -279,9 +279,6 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
     vllm_sd = wrapper._prefetched_model_state_dict
 
     trainer_buffers = {name for name, _ in trainer_model.named_buffers()}
-    trainer_preserve_dtype_params = {
-        name for name, _ in trainer_model.named_preserve_dtype_params()
-    }
     missing = []
     for name, vparam in vllm_sd.items():
         tparam = trainer_sd.get(name)
@@ -290,12 +287,10 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
             continue
         full = tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
         # Weight sync over RDMA copies bytes, so the receive dtype is what the trainer sends:
-        # parameters in the generator dtype (precision.param_dtype), buffers and
-        # preserve_dtype_params in their own.
-        if name in trainer_buffers or name in trainer_preserve_dtype_params:
-            sent_dtype = full.dtype
-        else:
-            sent_dtype = engine.model_config.dtype
+        # parameters in the generator dtype, buffers in their own.
+        sent_dtype = (
+            full.dtype if name in trainer_buffers else engine.model_config.dtype
+        )
         assert vparam.dtype == sent_dtype, (name, vparam.dtype, sent_dtype)
         with torch.inference_mode():
             if isinstance(vparam, DTensor):
@@ -668,7 +663,6 @@ class BitwiseParityTestBase(unittest.TestCase):
         register_to_vllm(
             config.generator.model,
             parallelism=config.generator.parallelism,
-            precision=config.precision,
             checkpointer_config=generator_checkpointer,
             model_state_dict_load_mode="cpu_prefetch",
         )

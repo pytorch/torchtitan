@@ -14,6 +14,12 @@ exists::
       pat_<l1>/    # level 1: the submodule's structure (see pattern_key)
         <l2>.py    # level 2: one specialization (spec, reference, kernel)
 
+``cache_dir`` is a local directory or ``manifold://<bucket>[/<path>]`` (e.g.
+``manifold://torchtitan_kernel_cache``). Manifold requires an internal build of
+PyTorch; objects get a 7-day TTL that is renewed whenever they are read, so
+files used by live jobs never expire. Other schemes can be added with
+``register_kernel_store``.
+
 The level-1 key ignores literal values and view ops, so submodules that only
 differ in values baked into op arguments (shapes, scalars, dtypes) or in the
 position of views share a pattern. The level-2 key is the AOTAutograd cache
@@ -71,19 +77,19 @@ import operator
 import os
 import re
 import sys
-import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, Protocol
 
 import sympy
 import torch
 import torch._guards
 from torch._functorch._aot_autograd.autograd_cache import autograd_cache_key
 from torch._functorch._aot_autograd.schemas import AOTConfig
+from torch._inductor.codecache import PyCodeCache
+from torch._inductor.remote_cache import LocalCacheBackend
 from torch._inductor.runtime.cache_dir_utils import cache_dir as inductor_cache_dir
-from torch._library import simple_registry
 from torch._library.custom_ops import OPDEFS
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
@@ -127,11 +133,88 @@ _OPTIONAL_FX_BUILTINS = frozenset({"inf", "nan", "device"})
 OpDeps = tuple[tuple[str, str, tuple[str, ...]], ...]
 
 
-def default_cache_dir() -> Path:
-    return Path(
-        os.environ.get("TORCHTITAN_SUBSTITUTE_KERNELS_DIR")
-        or os.path.join(inductor_cache_dir(), "substitute_kernels")
+def default_cache_dir() -> str:
+    return os.environ.get("TORCHTITAN_SUBSTITUTE_KERNELS_DIR") or os.path.join(
+        inductor_cache_dir(), "substitute_kernels"
     )
+
+
+class KernelStore(Protocol):
+    """Files of a ``cache_dir``, addressed as ``pat_<l1>/<file name>``."""
+
+    def get(self, path: str) -> bytes | None:
+        ...
+
+    def put(self, path: str, data: bytes) -> None:
+        ...
+
+
+class _LocalKernelStore:
+    def __init__(self, root: str) -> None:
+        self._root = Path(root)
+        self._backend = LocalCacheBackend()
+
+    def get(self, path: str) -> bytes | None:
+        return self._backend.get(str(self._root / path))
+
+    def put(self, path: str, data: bytes) -> None:
+        self._backend.put(str(self._root / path), data)
+
+
+class _ManifoldKernelStore:
+    """``manifold://<bucket>[/<path>]`` via PyTorch's internal Manifold backend.
+
+    ``AsyncManifoldCache`` writes with a 7-day TTL and renews it on every read;
+    writes and renewals run on a background thread.
+    """
+
+    def __init__(self, location: str) -> None:
+        try:
+            from torch._inductor.fb.remote_cache import AsyncManifoldCache
+        except ImportError as e:
+            raise ImportError(
+                "manifold:// cache_dir requires an internal build of PyTorch"
+            ) from e
+        bucket, _, prefix = location.partition("/")
+        self._cache_cls = AsyncManifoldCache
+        self._bucket = bucket
+        self._prefix = prefix.strip("/")
+        self._backends: dict[str, Any] = {}
+
+    def _backend(self, directory: str) -> Any:
+        if directory not in self._backends:
+            path = f"{self._prefix}/{directory}" if self._prefix else directory
+            backend = self._cache_cls(self._bucket, path)
+            backend._mkdir()
+            self._backends[directory] = backend
+        return self._backends[directory]
+
+    def get(self, path: str) -> bytes | None:
+        directory, name = path.rsplit("/", 1)
+        return self._backend(directory).get(name)
+
+    def put(self, path: str, data: bytes) -> None:
+        directory, name = path.rsplit("/", 1)
+        self._backend(directory).put(name, data)
+
+
+_KERNEL_STORES: dict[str, Callable[[str], KernelStore]] = {
+    "manifold": _ManifoldKernelStore,
+}
+
+
+def register_kernel_store(scheme: str, factory: Callable[[str], KernelStore]) -> None:
+    """Serve ``<scheme>://<location>`` cache_dirs with ``factory(location)``."""
+    _KERNEL_STORES[scheme] = factory
+
+
+def open_kernel_store(cache_dir: str | os.PathLike) -> KernelStore:
+    scheme, sep, location = str(cache_dir).partition("://")
+    if not sep:
+        return _LocalKernelStore(str(cache_dir))
+    if scheme not in _KERNEL_STORES:
+        raise ValueError(f"no kernel store registered for {scheme}://")
+    return _KERNEL_STORES[scheme](location)
 
 
 def normalize_names(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
@@ -142,7 +225,7 @@ def normalize_names(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
     enclosing graph (``mm`` vs. ``mm_17``) would otherwise get different keys.
     Likewise for device literals: every rank traces the same region on its own
     device (``device=cuda:3``), and all ranks must find the same kernels. Without
-    the index (``device=cuda``), ``reference.py`` runs on the current device.
+    the index (``device=cuda``), ``reference`` runs on the current device.
     """
     graph = torch.fx.Graph()
     env: dict[torch.fx.Node, torch.fx.Node] = {}
@@ -180,33 +263,15 @@ def normalize_names(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
     return torch.fx.GraphModule(torch.nn.Module(), graph)
 
 
-def _module_of_file(path: str) -> str | None:
-    for name, module in list(sys.modules.items()):
-        if getattr(module, "__file__", None) == path:
-            return name
-    return None
-
-
 def _op_modules(op: torch._ops.OpOverload) -> set[str]:
-    """Modules to import so that ``op`` and its fake kernel are registered."""
+    """Non-torch modules defining ``op``'s implementation and fake kernel."""
     opdef = OPDEFS.get(op._schema.name)
-    if opdef is not None:
-        fns = [opdef._init_fn, opdef._abstract_fn, *opdef._backend_fns.values()]
-        modules = {inspect.unwrap(fn).__module__ for fn in fns if fn is not None}
-    else:
-        # An op defined with torch.library.Library (e.g. a C++ kernel plus a Python
-        # fake kernel): the module that registers the fake kernel defines the op.
-        kernel = simple_registry.singleton.find(op._schema.name).fake_impl.kernel
-        module = kernel and _module_of_file(kernel.source.rsplit(":", 1)[0])
-        modules = {module} if module else set()
-    # custom_op / triton_op wrap the user function in torch.library helpers.
-    modules = {
-        m for m in modules if not m.startswith(("torch.library", "torch._library"))
-    }
-    # Ops defined inside torch (e.g. Inductor's bucketing ops) keep their torch module.
-    modules = {
-        m for m in modules if m != "torch" and not m.startswith("torch.")
-    } or modules
+    if opdef is None:
+        raise ValueError(f"{op} is not a torch.library.custom_op / triton_op")
+    fns = [opdef._init_fn, opdef._abstract_fn, *opdef._backend_fns.values()]
+    modules = {inspect.unwrap(fn).__module__ for fn in fns if fn is not None}
+    # triton_op wraps the user function in a torch-internal backend function.
+    modules = {m for m in modules if m != "torch" and not m.startswith("torch.")}
     if not modules or "__main__" in modules:
         raise ValueError(f"{op} is not defined in an importable module")
     return modules
@@ -416,37 +481,15 @@ def _describe(val: Any, names: dict[sympy.Symbol, str] | None = None) -> Any:
     return {"value": repr(val)}
 
 
-def _atomic_write(path: Path, text: str) -> None:
-    with tempfile.NamedTemporaryFile(
-        "w", dir=path.parent, delete=False, suffix=".tmp"
-    ) as f:
-        f.write(text)
-    os.replace(f.name, path)
-
-
 def _spec_json(spec: dict[str, Any]) -> str:
     """``json.dumps(spec, indent=2)`` with lists of numbers on one line."""
     text = json.dumps(spec, indent=2)
     return re.sub(r"\[[\d\s,.-]*\]", lambda m: json.dumps(json.loads(m.group())), text)
 
 
-def _load_module(path: Path) -> ModuleType:
-    # One module per file content: every call site of a specialization shares
-    # it, and a replaced file is loaded anew. Executed without the import
-    # system, which would write __pycache__ into the cache directory.
-    text = path.read_text()
-    digest = hashlib.sha256(text.encode()).hexdigest()[:16]
-    name = f"_substitute_kernels_{path.parent.name}_{path.stem}_{digest}"
-    if name not in sys.modules:
-        module = ModuleType(name)
-        module.__file__ = str(path)
-        sys.modules[name] = module
-        try:
-            exec(compile(text, path, "exec"), module.__dict__)
-        except BaseException:
-            del sys.modules[name]
-            raise
-    return sys.modules[name]
+def load_module(source: str) -> ModuleType:
+    """A specialization module, cached by content outside the kernel store."""
+    return PyCodeCache.load(source)
 
 
 def cache_keys(
@@ -461,7 +504,7 @@ def cache_keys(
 def lookup(
     submod: torch.fx.GraphModule,
     example_inputs: list[Any],
-    cache_dir: Path,
+    store: KernelStore,
     example_output: Any = None,
 ) -> Callable[..., Any] | None:
     """Return the cached kernel for ``submod``, or None to keep the reference.
@@ -474,8 +517,9 @@ def lookup(
         logger.warning("substitute_kernels: submodule is not cacheable", exc_info=True)
         return None
 
-    path = cache_dir / l1 / f"{l2}.py"
-    if not path.exists():
+    path = f"{l1}/{l2}.py"
+    source = store.get(path)
+    if source is None:
         params = [n.name for n in gm.graph.find_nodes(op="placeholder")]
         # Output-only symbols (sizes computed inside the region) continue the numbering.
         names = _symbol_names([*example_inputs, example_output])
@@ -484,9 +528,9 @@ def lookup(
             "inputs": [_describe(v, names) for v in example_inputs],
             "outputs": _describe(example_output, names),
         }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write(path, kernel_source(gm, op_deps, spec))
-    module = _load_module(path)
+        source = kernel_source(gm, op_deps, spec).encode()
+        store.put(path, source)
+    module = load_module(source.decode())
     if module.run is getattr(module, "reference", None):
         logger.info("substitute_kernels miss: %s", path)
         return None
@@ -520,7 +564,9 @@ def substitute_with_kernels_pass(
     Arguments must be positional and carry ``meta["val"]`` (fake or real
     tensors); other ``call_module`` nodes are skipped.
     """
-    root = Path(cache_dir) if cache_dir is not None else default_cache_dir()
+    store = open_kernel_store(
+        cache_dir if cache_dir is not None else default_cache_dir()
+    )
     replaced: set[str] = set()
     for node in list(gm.graph.find_nodes(op="call_module")):
         submod = gm.get_submodule(node.target)
@@ -530,7 +576,7 @@ def substitute_with_kernels_pass(
         if inputs is None:
             logger.info("substitute_kernels: skipping %s (no example inputs)", node)
             continue
-        impl = lookup(submod, inputs, root, node.meta.get("val"))
+        impl = lookup(submod, inputs, store, node.meta.get("val"))
         if impl is None:
             continue
         with gm.graph.inserting_after(node):

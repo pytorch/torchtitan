@@ -568,8 +568,6 @@ class GDN(LinearAttention):
         # Query/key heads; n_heads counts value heads.
         n_key_heads: int
         conv_kernel_size: int = 4
-        # The gate reads A_log and dt_bias in float32.
-        preserve_dtype_params: tuple[str, ...] = ("A_log", "dt_bias")
 
         # Sub-module configs
         # One projection for q, k, v, z, a and b, with rows grouped by key head
@@ -610,15 +608,6 @@ class GDN(LinearAttention):
                     f"in_proj.out_features ({self.in_proj.out_features}) must be "
                     f"n_key_heads * sum(in_proj_split_sizes) ({in_proj_rows})"
                 )
-
-        def flops_per_token(self, seq_len: int) -> int:
-            from torchtitan.models.common.flops import delta_rule_flops_per_token
-
-            return delta_rule_flops_per_token(
-                num_heads=self.n_heads,
-                key_head_dim=self.key_head_dim,
-                v_head_dim=self.value_head_dim,
-            )
 
     def __init__(self, config: Config):
         super().__init__()

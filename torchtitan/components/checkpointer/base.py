@@ -23,10 +23,8 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
-from torchtitan.components.checkpointer.utils import canonical_fqn
 
 from torchtitan.config import CallableFunction, Configurable
-from torchtitan.models.base.module import Module
 from torchtitan.models.base.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools import filesystem
@@ -155,32 +153,6 @@ class ModelWrapper(Stateful):
             model.load_state_dict(state_dict, strict=False)
         # Refresh the cache so state_dict() reflects the freshly loaded values.
         self.cached_state_dict = self._get_state_dict()
-
-
-def export_state_dict(
-    state_dict: dict[str, Any], *, dtype: torch.dtype, model_parts: list[nn.Module]
-) -> dict[str, Any]:
-    """Cast the floating-point tensors of a model state dict to ``dtype``.
-
-    Parameters of ``model_parts`` listed in ``preserve_dtype_params`` are never
-    cast to a lower precision. Model parts that are not a ``Module`` list none.
-    """
-    preserve_dtype_keys = {
-        canonical_fqn(key)
-        for model in model_parts
-        if isinstance(model, Module)
-        for key, _ in model.named_preserve_dtype_params()
-    }
-    exported = {}
-    for key, value in state_dict.items():
-        if isinstance(value, torch.Tensor) and value.is_floating_point():
-            value = value.to(
-                torch.promote_types(value.dtype, dtype)
-                if key in preserve_dtype_keys
-                else dtype
-            )
-        exported[key] = value
-    return exported
 
 
 @runtime_checkable

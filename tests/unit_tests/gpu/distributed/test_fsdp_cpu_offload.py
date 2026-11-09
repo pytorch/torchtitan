@@ -18,7 +18,6 @@ from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_multimodal_encoder,
 )
-from torchtitan.models.base.module import Module
 from torchtitan.models.muse_spark.flavors import muse_spark_navit_encoder_config
 from torchtitan.models.muse_spark.vision_encoder import NaViTEncoder
 
@@ -26,7 +25,7 @@ from torchtitan.models.muse_spark.vision_encoder import NaViTEncoder
 pytestmark = pytest.mark.multi_gpu
 
 
-class _VisionEncoder(Module):
+class _VisionEncoder(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
         self.proj = nn.Linear(dim, dim, bias=False)
@@ -35,7 +34,7 @@ class _VisionEncoder(Module):
         return self.proj(x)
 
 
-class _Block(Module):
+class _Block(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
         self.feed_forward = nn.Linear(dim, dim, bias=False)
@@ -44,7 +43,7 @@ class _Block(Module):
         return self.feed_forward(x)
 
 
-class _TinyVLM(Module):
+class _TinyVLM(nn.Module):
     """The module shape ``apply_fsdp_to_decoder`` reads, plus a vision encoder.
 
     Mirrors how the VLMs (qwen3_5, kimi_k2_7, kimi_k3, muse_glimmer) compose the

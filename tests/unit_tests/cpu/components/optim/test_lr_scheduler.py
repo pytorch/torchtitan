@@ -16,6 +16,13 @@ from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
 
 class TestLRScheduler(unittest.TestCase):
+    def test_optimizer_package_import_path(self):
+        from torchtitan.components.optim import (
+            LRSchedulersContainer as PackageLRSchedulersContainer,
+        )
+
+        self.assertIs(PackageLRSchedulersContainer, LRSchedulersContainer)
+
     def setUp(self):
         # Create a simple model with parameters
         self.model = torch.nn.Linear(10, 10)
