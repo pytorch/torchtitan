@@ -81,9 +81,11 @@ def _causal_conv1d_varlen(
 
 
 @torch.library.custom_op(
-    "torchtitan::recurrent_gdn_fwd", mutates_args=(), device_types="cuda"
+    "torchtitan::batch_invariant_recurrent_gdn_fwd",
+    mutates_args=(),
+    device_types="cuda",
 )
-def _recurrent_gdn_fwd(
+def _batch_invariant_recurrent_gdn_fwd(
     q_BTHK: torch.Tensor,
     k_BTHK: torch.Tensor,
     v_BTHV: torch.Tensor,
@@ -133,12 +135,14 @@ def _recurrent_gdn_fwd(
         state_indices=state_indices,
         has_initial_state=has_initial_state,
         autotune=False,
+        # The scan otherwise picks its arithmetic from the batch shape.
+        kernel_options={"batch_invariant": True},
     )
     return out_BTHV.to(q_BTHK.dtype)
 
 
-@_recurrent_gdn_fwd.register_fake
-def _recurrent_gdn_fwd_fake(
+@_batch_invariant_recurrent_gdn_fwd.register_fake
+def _batch_invariant_recurrent_gdn_fwd_fake(
     q_BTHK: torch.Tensor,
     k_BTHK: torch.Tensor,
     v_BTHV: torch.Tensor,
@@ -181,11 +185,11 @@ def _chunk_gdn_gradients(
         return grad_q, grad_k, grad_v, grad_g, grad_beta
 
 
-def _recurrent_gdn_setup_context(ctx, inputs, output) -> None:
+def _batch_invariant_recurrent_gdn_setup_context(ctx, inputs, output) -> None:
     ctx.save_for_backward(*inputs)
 
 
-def _recurrent_gdn_backward(ctx, grad_output):
+def _batch_invariant_recurrent_gdn_backward(ctx, grad_output):
     q, k, v, g, beta, cu_seqlens = ctx.saved_tensors
     grads = _chunk_gdn_gradients(
         grad_output,
@@ -199,8 +203,9 @@ def _recurrent_gdn_backward(ctx, grad_output):
     return (*grads, None)
 
 
-_recurrent_gdn_fwd.register_autograd(
-    _recurrent_gdn_backward, setup_context=_recurrent_gdn_setup_context
+_batch_invariant_recurrent_gdn_fwd.register_autograd(
+    _batch_invariant_recurrent_gdn_backward,
+    setup_context=_batch_invariant_recurrent_gdn_setup_context,
 )
 
 
@@ -324,7 +329,7 @@ class GDNKernel(Module):
         beta_BTH = beta_TH.unsqueeze(0)
 
         if is_in_batch_invariant_mode() and cu_seqlens is not None:
-            return _recurrent_gdn_fwd(
+            return _batch_invariant_recurrent_gdn_fwd(
                 xq_BTHK,
                 xk_BTHK,
                 xv_BTHV,

@@ -389,8 +389,10 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
                 scale=self.head_k_dim**-0.5,
                 state_indices=all_slots,
                 has_initial_state=has_initial_state,
-                # Triton autotuning breaks batch invariance.
+                # Triton autotuning breaks batch invariance, and the scan otherwise
+                # picks its arithmetic from the batch shape.
                 autotune=False,
+                kernel_options={"batch_invariant": True},
             )
         else:
             recurrent_output = paged_chunk_gdn(

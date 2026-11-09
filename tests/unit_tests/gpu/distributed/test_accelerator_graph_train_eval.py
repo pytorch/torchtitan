@@ -67,6 +67,7 @@ def _validator(*, schedule=None, first=True, last=True):
     validator.dp_world_size = 1
     validator.dp_rank = 0
     validator.tokenizer = None
+    validator.vision_processor = None
     validator.seq_len = 8
     validator.num_tokens_per_microbatch = 8
     validator.metrics_processor = SimpleNamespace(

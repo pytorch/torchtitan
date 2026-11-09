@@ -120,7 +120,9 @@ def _state_dict_with_random_experts(wrapper, experts, *, seed: int) -> dict:
             if name in expert_names
             else live[name].detach().cpu()
         )
-        for name, buffer in wrapper._prefetched_model_state_dict.items()
+        for name, buffer in (
+            wrapper.model_state_dict_loader.prefetched_model_state_dict.items()
+        )
     }
 
 

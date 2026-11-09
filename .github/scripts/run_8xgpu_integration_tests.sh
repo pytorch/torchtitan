@@ -55,7 +55,7 @@ if [[ "${GPU_ARCH_TYPE}" == "rocm" ]]; then
   echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
 fi
 
-USE_CPP=0 PIP_EXTRA_INDEX_URL= python -m pip install --pre torchao --index-url "${INDEX_URL}"
+USE_CPP=0 PIP_EXTRA_INDEX_URL= python -m pip install --pre -r .github/requirements-torchao.txt --index-url "${INDEX_URL}"
 # GPT-OSS production configs use PyTorch's FA3 backend.
 python -m pip install flash-attn-3 \
   --extra-index-url https://download.pytorch.org/whl/test/cu130
