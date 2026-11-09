@@ -8,7 +8,7 @@
 """
 Test bitwise parity between vLLM generator and TorchTitan trainer.
 
-Three tests:
+Four tests:
 
   1. test_batch_invariance:
       Trainer prefill(bsz=m) == Trainer prefill(bsz=n, m!=n).
@@ -19,8 +19,9 @@ Three tests:
   3. test_vllm_decode_vs_prefill:
       vLLM decode == vLLM 2nd-pass prefill (generated positions).
       Ensures prefill vs decode (KV-cache) parity.
-
-By transitivity of test 2 and test 3: trainer == vLLM decode.
+  4. test_trainer_vs_vllm_decode:
+      Trainer prefill of prompt + generated == vLLM decode, greedy and sampled at T=0.8.
+      Ensures parity past the prompt, and that both sides divide by the temperature the same way.
 
 Run each backend in a separate torchrun invocation:
     torchrun --nproc_per_node=2 -m pytest \
@@ -198,8 +199,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     attention_backend = gen_config.model.first_full_attention.inner_attention
     use_flex = isinstance(attention_backend, FlexInnerAttention.Config)
 
-    # Mirror the production Generator so the test exercises the same
-    # batch-invariant path (v2 runner is required for the logprob-kernel patch).
+    # Mirror the production Generator, which runs vLLM's V1 model runner.
     os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
     if use_flex:
         os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
@@ -245,6 +245,8 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
     engine_kwargs["max_model_len"] = gen_config.model.max_context_length
+    # Same as the production Generator: return logprobs after the temperature divide.
+    engine_kwargs["logprobs_mode"] = "processed_logprobs"
     # Mirror Controller.setup_async for a single engine: derive from active rollout concurrency
     # (the active-buffer capacity num_group_workers, or the validation pass).
     async_loop = config.async_loop
@@ -328,7 +330,7 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
+def _flex_prefill_logprobs(model, input_tensors, seq_lens, device, temperature):
     """Compute per-sequence logprobs using flex attention with packed sequences.
 
     Mirrors the trainer's flex attention path: pack documents into a single
@@ -379,6 +381,10 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
         labels,
         vocab_parallel_group=spmd_mesh_group("tp"),
         global_vocab_size=model.config.lm_head.out_features,
+        # Per-token fp32, as the batcher builds it.
+        temperature=None
+        if temperature is None
+        else torch.full_like(labels, temperature, dtype=torch.float32),
     )
 
     results = []
@@ -389,7 +395,7 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
     return results
 
 
-def _varlen_prefill_logprobs(model, input_tensors, seq_lens, device):
+def _varlen_prefill_logprobs(model, input_tensors, seq_lens, device, temperature):
     """Compute per-sequence logprobs using packed variable-length segments."""
     packed_ids = torch.cat(input_tensors)
     positions = torch.cat(
@@ -419,6 +425,10 @@ def _varlen_prefill_logprobs(model, input_tensors, seq_lens, device):
         labels,
         vocab_parallel_group=spmd_mesh_group("tp"),
         global_vocab_size=model.config.lm_head.out_features,
+        # Per-token fp32, as the batcher builds it.
+        temperature=None
+        if temperature is None
+        else torch.full_like(labels, temperature, dtype=torch.float32),
     )
 
     results = []
@@ -430,7 +440,9 @@ def _varlen_prefill_logprobs(model, input_tensors, seq_lens, device):
     return results
 
 
-def compute_trainer_prefill_logprobs(model, token_ids, device, attn_backend="varlen"):
+def compute_trainer_prefill_logprobs(
+    model, token_ids, device, attn_backend="varlen", temperature=None
+):
     """Compute next-token logprobs using the trainer model.
 
     Args:
@@ -438,6 +450,8 @@ def compute_trainer_prefill_logprobs(model, token_ids, device, attn_backend="var
             (list[list[int]]). Batched sequences are packed with appropriate
             attention metadata.
         attn_backend: 'varlen' or 'flex'.
+        temperature: If set, score under ``softmax(logits / temperature)``, as the
+            trainer's loss does for tokens sampled at that temperature.
 
     Returns:
         Single sequence: float32 tensor with len = len(token_ids) - 1.
@@ -450,9 +464,13 @@ def compute_trainer_prefill_logprobs(model, token_ids, device, attn_backend="var
     seq_lens = [t.shape[0] for t in input_tensors]
 
     if attn_backend == "flex":
-        results = _flex_prefill_logprobs(model, input_tensors, seq_lens, device)
+        results = _flex_prefill_logprobs(
+            model, input_tensors, seq_lens, device, temperature
+        )
     else:
-        results = _varlen_prefill_logprobs(model, input_tensors, seq_lens, device)
+        results = _varlen_prefill_logprobs(
+            model, input_tensors, seq_lens, device, temperature
+        )
 
     return results if batched else results[0]
 
@@ -508,10 +526,15 @@ def vllm_prefill(engine, all_prompt_ids):
     ]
 
 
-def vllm_generate(engine, all_prompt_ids, max_tokens):
-    """Generate tokens and return (generated_ids, decode_logprobs) per sequence."""
+def vllm_generate(engine, all_prompt_ids, max_tokens, temperature=0.0):
+    """Generate tokens and return (generated_ids, decode_logprobs) per sequence.
+
+    ``temperature=0.0`` decodes greedily. Above 0, vLLM samples with a fixed seed and
+    returns logprobs under ``softmax(logits / temperature)`` (``processed_logprobs``).
+    """
     params = SamplingParams(
-        temperature=0.0,
+        temperature=temperature,
+        seed=0,
         top_p=1.0,
         max_tokens=max_tokens,
         logprobs=1,
@@ -522,7 +545,10 @@ def vllm_generate(engine, all_prompt_ids, max_tokens):
     for out in outputs:
         sample = out.outputs[0]
         all_ids.append(list(sample.token_ids))
-        all_lps.append([list(d.values())[0].logprob for d in sample.logprobs])
+        # Read each step's entry by the sampled token id; vLLM lists it before the top-k.
+        all_lps.append(
+            [d[token].logprob for d, token in zip(sample.logprobs, sample.token_ids)]
+        )
     return all_ids, all_lps
 
 
@@ -834,6 +860,48 @@ class BitwiseParityTestBase(unittest.TestCase):
                     "2ndPrefill",
                 )
 
+    def test_trainer_vs_vllm_decode(self):
+        """Trainer logprobs == vLLM decode logprobs at the generated positions.
+
+        Greedy (T=0.0): neither side divides. Sampled (T=0.8): vLLM returns the sampled
+        token's logprob after its temperature divide, and the trainer's loss divides too.
+        """
+        # Every rank runs both temperatures before rank 0 asserts: the trainer and vLLM run TP
+        # collectives, so a rank that stops early would leave the others waiting.
+        results = []
+        for temperature in (0.0, 0.8):
+            gen_ids, decode_lps = vllm_generate(
+                self.engine,
+                self.prompt_ids,
+                self.MAX_GEN_TOKENS,
+                temperature=temperature,
+            )
+            sequences = [
+                list(prompt) + list(generated)
+                for prompt, generated in zip(self.prompt_ids, gen_ids, strict=True)
+            ]
+            with type(self).parallelism_context.activate_spmd(), torch.no_grad():
+                trainer_lps = compute_trainer_prefill_logprobs(
+                    self.model,
+                    sequences,
+                    self.device,
+                    attn_backend=self.attn_backend,
+                    temperature=None if temperature == 0.0 else temperature,
+                )
+            results.append((temperature, trainer_lps, decode_lps))
+
+        if dist.get_rank() == 0:
+            for temperature, trainer_lps, decode_lps in results:
+                for i, prompt in enumerate(self.prompt_ids):
+                    # Entry j scores token j + 1: generated tokens start at len(prompt) - 1.
+                    self._assert_logprobs_equal(
+                        f"seq {i}: Trainer vs vLLM decode at T={temperature}",
+                        trainer_lps[i][len(prompt) - 1 :],
+                        decode_lps[i],
+                        "Trainer",
+                        "vLLM decode",
+                    )
+
     def _check_vllm_prefill_and_decode_batch_invariance(self):
         """Check that vLLM prefill and decode do not depend on batch composition."""
         single_prompt = self.prompt_ids[:1]
@@ -1025,6 +1093,15 @@ class TestBitwiseParityKimiK3DebugVarlen(KimiK3BitwiseParityTestBase):
     def test_vllm_prefill_and_decode_batch_invariance(self):
         """vLLM prefill and decode must not depend on batch composition."""
         self._check_vllm_prefill_and_decode_batch_invariance()
+
+    # TODO: trainer and vLLM prefill differ on prompt + generated tokens, greedy too (H100, seq 0: the
+    # first 5 generated tokens match, 33 of 128 match). vLLM decode matches its prefill. The first gaps
+    # are inside the second 64-token KDA chunk. Candidates: paged_chunk_kda, or MLA past 64 keys.
+    @unittest.skip(
+        "Kimi K3 trainer and vLLM differ past the prompt; see the TODO above"
+    )
+    def test_trainer_vs_vllm_decode(self):
+        super().test_trainer_vs_vllm_decode()
 
 
 class TestBitwiseParityMoEEP(BitwiseParityTestBase):
