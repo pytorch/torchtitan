@@ -6,180 +6,151 @@
 
 """TorchTitan-owned vLLM worker and model runner customizations."""
 
-from collections.abc import Set
 from contextlib import nullcontext
 
 from vllm.config import CUDAGraphMode
-from vllm.forward_context import BatchDescriptor
-from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
-from vllm.v1.worker import gpu_model_runner as vllm_gpu_model_runner
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu.cudagraph_utils import (
+    BatchExecutionDescriptor,
+    CudaGraphManager,
+    ModelCudaGraphManager,
+)
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker as GPUWorker
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.rl.generator.vllm.attention.linear_attention import (
-    TorchTitanLinearAttentionBackend,
+    TorchTitanHybridModelState,
 )
 
 
-class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
+class TorchTitanCudaGraphManager(ModelCudaGraphManager):
     """Give decode batches their own FULL graphs, apart from prefill and mixed batches.
 
-    vLLM 0.33 keys plain FULL graphs by token count only: four one-token
-    decodes replay the mixed-batch graph captured with ``max_query_len = 4``.
-    Decode needs its own graph:
+    vLLM's FULL mode keys every graph by token count: four one-token decodes replay
+    the mixed graph captured with ``max_query_len = 4``. Decode needs its own graph:
       - Attention Gym linear attention (GDN/KDA) runs different decode kernels.
-        Fresh requests stay on the single-token key and kernels: their zero
-        initial state is a GPU mask.
       - FA4 sizes its grid from ``max_query_len``: decode attention runs 1.3-2.0x
         longer from 32 sequences at head dim 64 and from 64 at head dim 128
         (GB300, 16-token pages).
 
-    Uniform-decode batch in FULL mode:
-      num_tokens <= max_decode_capture_size              -> decode graph
-      larger (DP padding, or a capture-size gap)         -> mixed graph, as in stock FULL
-      larger, batch-invariant, eager allowed             -> eager on the decode kernels
+    Under FULL, this manager also captures FULL_DECODE_ONLY's decode graphs, keyed by
+    request count. vLLM's ``dispatch`` tries them first for uniform decode batches:
 
-    Decode keys come from the native FULL_DECODE_ONLY dispatcher; native capture,
-    replay and graph ownership stay intact.
+      uniform decode, n requests <= largest decode graph    -> decode graph
+      larger (DP padding, or a capture-size gap)            -> mixed graph, as in FULL
+      larger, batch-invariant                               -> eager on the decode kernels
+      any other batch                                       -> mixed graph
 
-    This costs one additional graph capture per decode-specialized batch size
-    (83 at max_num_seqs 1024); ``TorchTitanGPUModelRunner.initialize_kv_cache``
-    keeps them out of vLLM's graph-memory estimate.
+    Native capture, replay and graph ownership stay intact. This costs one more graph
+    capture per decode size (83 at max_num_seqs 1024).
 
-    TODO: drop this class once vLLM captures FULL decode graphs next to FULL mixed
-    graphs without piecewise compilation.
+    TODO: drop this class once vLLM has a CUDA-graph mode with FULL graphs for both
+    mixed and decode batches (FULL has no separate decode routine today), or once
+    FULL_AND_PIECEWISE with breakable graphs is as fast on RL steps.
     """
 
-    def initialize_cudagraph_keys(
-        self, cudagraph_mode: CUDAGraphMode, uniform_decode_query_len: int = 1
-    ) -> None:
-        super().initialize_cudagraph_keys(cudagraph_mode, uniform_decode_query_len)
-        if cudagraph_mode == CUDAGraphMode.FULL:
-            self.decode_dispatcher = CudagraphDispatcher(self.vllm_config)
-            self.decode_dispatcher.initialize_cudagraph_keys(
-                CUDAGraphMode.FULL_DECODE_ONLY, uniform_decode_query_len
-            )
-            self.max_decode_capture_size = 0
-            for mode, descriptors in self.decode_dispatcher.get_capture_descs():
-                for descriptor in descriptors:
-                    self.add_cudagraph_key(mode, descriptor)
-                    self.max_decode_capture_size = max(
-                        self.max_decode_capture_size, descriptor.num_tokens
-                    )
+    # The last ``dispatch`` result, which a FULL step always replays. Eager steps can
+    # skip ``dispatch`` (``dispatch_cg_and_sync_dp``), so read it on FULL steps only.
+    last_dispatched_descriptor: BatchExecutionDescriptor
+
+    def _init_candidates(self) -> None:
+        super()._init_candidates()
+        if self.cudagraph_mode != CUDAGraphMode.FULL:
+            return
+        # vLLM builds decode graphs only for modes with a separate decode routine.
+        decode_graphs = CudaGraphManager(
+            self.vllm_config,
+            self.device,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+            decode_query_lens=self.decode_max_reqs,
+            lora_capture_cases=self.lora_capture_cases,
+            varlen_decode=self.varlen_decode,
+            ubatch_runner=self.ubatch_runner,
+        )
+        self._decode_descs = decode_graphs._decode_descs
+        # Widest first, as vLLM captures: narrower graphs reuse the pool's blocks.
+        self._capture_descs[CUDAGraphMode.FULL] = sorted(
+            decode_graphs._capture_descs.get(CUDAGraphMode.FULL, [])
+            + self._capture_descs.get(CUDAGraphMode.FULL, []),
+            key=lambda descriptor: descriptor.num_tokens,
+            reverse=True,
+        )
 
     def dispatch(
         self,
+        num_reqs: int,
         num_tokens: int,
-        uniform_decode: bool = False,
-        has_lora: bool = False,
-        num_active_loras: int = 0,
-        valid_modes: Set[CUDAGraphMode] | None = None,
-        invalid_modes: Set[CUDAGraphMode] | None = None,
-    ) -> tuple[CUDAGraphMode, BatchDescriptor]:
-        dispatch = super().dispatch
-        if (
-            self.keys_initialized
-            and self.cudagraph_mode == CUDAGraphMode.FULL
-            and uniform_decode
-        ):
-            if num_tokens <= self.max_decode_capture_size:
-                dispatch = self.decode_dispatcher.dispatch
-            elif is_in_batch_invariant_mode() and (
-                not valid_modes or CUDAGraphMode.NONE in valid_modes
-            ):
-                # GDN/KDA's packed kernels in the mixed graph don't match decode bitwise.
-                return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)
-        return dispatch(
+        uniform_token_count: int | None,
+        num_active_loras: int,
+        max_query_len: int | None = None,
+        num_ubatches: int = 1,
+    ) -> BatchExecutionDescriptor:
+        descriptor = super().dispatch(
+            num_reqs,
             num_tokens,
-            uniform_decode,
-            has_lora,
+            uniform_token_count,
             num_active_loras,
-            valid_modes,
-            invalid_modes,
+            max_query_len,
+            num_ubatches,
         )
+        if (
+            uniform_token_count is not None
+            and descriptor.cg_mode == CUDAGraphMode.FULL
+            and descriptor.uniform_token_count is None
+            and is_in_batch_invariant_mode()
+        ):
+            # GDN/KDA's packed kernels in the mixed graph don't match decode bitwise.
+            descriptor = BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=num_tokens,
+                num_reqs=num_reqs,
+                num_active_loras=descriptor.num_active_loras,
+                num_ubatches=num_ubatches,
+            )
+        self.last_dispatched_descriptor = descriptor
+        return descriptor
 
 
 class TorchTitanGPUModelRunner(GPUModelRunner):
-    """V1 runner with FULL-graph decode specialization."""
-
-    def load_model(self, load_dummy_weights: bool = False) -> None:
-        super().load_model(load_dummy_weights)
-        assert not self.cudagraph_dispatcher.keys_initialized
-        self.cudagraph_dispatcher = TorchTitanCudagraphDispatcher(self.vllm_config)
-
-    def _dummy_run(
-        self,
-        num_tokens: int,
-        *args,
-        uniform_decode: bool = False,
-        profile_seq_lens: int | None = None,
-        **kwargs,
-    ):
-        """Keep each request of a mixed capture dummy within ``max_model_len``.
-
-        vLLM gives every request of a mixed dummy batch a sequence length equal to the
-        whole batch. A real step that size packs several requests, each at most
-        ``max_model_len`` long, so the captured graph replays them correctly.
-
-            max_model_len=1024, capture 2048 tokens as 8 requests of 256
-            vLLM: each seq_len 2048 -> reads 128 KV pages from a 64-page row
-            here: each seq_len 1024 -> reads its 64 pages
-        """
-        # TODO: drop once vLLM caps the dummy's seq_lens at max_model_len in _dummy_run.
-        if (
-            profile_seq_lens is None
-            and not uniform_decode
-            and num_tokens > self.max_model_len
-        ):
-            profile_seq_lens = self.max_model_len
-        return super()._dummy_run(
-            num_tokens,
-            *args,
-            uniform_decode=uniform_decode,
-            profile_seq_lens=profile_seq_lens,
-            **kwargs,
-        )
+    """vLLM's V2 runner with FULL decode graphs next to FULL mixed graphs."""
 
     def initialize_kv_cache(
-        self, kv_cache_config, is_profiling: bool = False, **kwargs
-    ):
+        self, kv_cache_config: KVCacheConfig, is_profiling: bool = False, **kwargs
+    ) -> None:
         super().initialize_kv_cache(kv_cache_config, is_profiling, **kwargs)
-        # vLLM's graph-memory estimate, taken out of the KV cache, charges every FULL graph
-        # like the second largest (a mixed graph). Decode graphs take far less (Qwen3-8B TP2:
-        # 11 decode graphs added 0.03 GiB to 1.57), so profile the mixed graphs only. vLLM drops
-        # these profiling keys afterwards; the real call rebuilds them, decode keys included
-        # (test_generator_dp_cudagraph.py checks a decode graph still replays).
-        # TODO: drop once vLLM's estimate charges decode graphs at their own size.
-        dispatcher = self.cudagraph_dispatcher
-        if is_profiling and dispatcher.cudagraph_mode == CUDAGraphMode.FULL:
-            keys = dispatcher.cudagraph_keys
-            keys[CUDAGraphMode.FULL] = {
-                key for key in keys[CUDAGraphMode.FULL] if not key.uniform
-            }
-
-    def _determine_batch_execution_and_padding(self, *args, **kwargs):
-        """Tell the linear attention (GDN/KDA) builders whether the step replays a packed FULL graph.
-
-        vLLM calls this once before every forward, real or dummy, and picks the
-        step's CUDA graph inside it.
-        """
-        result = super()._determine_batch_execution_and_padding(*args, **kwargs)
-        # TODO: drop once vLLM passes the dispatched (cudagraph_mode, batch_descriptor)
-        # to AttentionMetadataBuilder.build.
-        cudagraph_mode, batch_descriptor = result[:2]
-        replays_packed_graph = (
-            cudagraph_mode == CUDAGraphMode.FULL and not batch_descriptor.uniform
+        # With the extensible KV cache off (vLLM's default is on), vLLM sizes the KV
+        # cache after estimating graph memory, charging every FULL graph like the
+        # second widest. Decode graphs take far less (Qwen3-8B TP2: 11 decode graphs
+        # added 0.03 GiB to 1.57), so the estimate runs on vLLM's own manager, which
+        # captures the mixed graphs only.
+        # TODO: install this manager before the estimate (drop the is_profiling return)
+        # once vLLM's _extrapolate_full_graph_memory charges each FULL graph at its own
+        # size instead of the second-largest sample's.
+        if is_profiling:
+            return
+        # vLLM builds its manager here (`ModelCudaGraphManager(...)` in
+        # GPUModelRunner.initialize_kv_cache), with no factory to override. Rebuild it
+        # with the arguments vLLM passed, read off vLLM's manager.
+        # TODO: drop the rebuild once GPUModelRunner builds its manager through a method
+        # a subclass can override.
+        vllm_manager = self.cudagraph_manager
+        self.cudagraph_manager = TorchTitanCudaGraphManager(
+            vllm_manager.vllm_config,
+            vllm_manager.device,
+            vllm_manager.cudagraph_mode,
+            # The decode_query_lens vLLM passed, capped at max_num_seqs (capping again is a no-op).
+            decode_query_lens=vllm_manager.decode_max_reqs,
+            lora_capture_cases=vllm_manager.lora_capture_cases,
+            varlen_decode=vllm_manager.varlen_decode,
+            ubatch_runner=vllm_manager.ubatch_runner,
         )
-        for group in self._attn_group_iterator():
-            if group.backend is TorchTitanLinearAttentionBackend:
-                for builder in group.metadata_builders:
-                    builder.replays_packed_graph = replays_packed_graph
-        return result
+        if isinstance(self.model_state, TorchTitanHybridModelState):
+            self.model_state.cudagraph_manager = self.cudagraph_manager
 
 
 class TorchTitanGPUWorker(GPUWorker):
-    """V1 worker that constructs :class:`TorchTitanGPUModelRunner`."""
+    """vLLM worker that builds :class:`TorchTitanGPUModelRunner`."""
 
     def _maybe_get_memory_pool_context(self, tag: str):
         # vLLM uses CuMem for model weights and the KV cache.
@@ -191,17 +162,5 @@ class TorchTitanGPUWorker(GPUWorker):
             return super()._maybe_get_memory_pool_context(tag)
         return nullcontext()
 
-    def init_device(self):
-        if self.use_v2_model_runner:
-            raise ValueError(
-                "TorchTitan's vLLM integration requires the V1 model runner"
-            )
-
-        # GPUWorker imports its runner class inside init_device and provides no
-        # runner factory. Scope the class substitution to that construction.
-        original_runner_cls = vllm_gpu_model_runner.GPUModelRunner
-        vllm_gpu_model_runner.GPUModelRunner = TorchTitanGPUModelRunner
-        try:
-            super().init_device()
-        finally:
-            vllm_gpu_model_runner.GPUModelRunner = original_runner_cls
+    def _make_model_runner(self) -> TorchTitanGPUModelRunner:
+        return TorchTitanGPUModelRunner(self.vllm_config, self.device)

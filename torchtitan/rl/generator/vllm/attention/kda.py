@@ -219,9 +219,21 @@ class VLLMInnerKDA(InnerAttention, MambaBase):
         output_THK: torch.Tensor,
     ) -> None:
         attn_metadata = get_forward_context().attn_metadata
+        # vLLM's warmup runs build no attention metadata, and its kernel-autotune runs
+        # (`is_profile` dummy runs) build none for any linear-attention layer.
         if attn_metadata is None:
             return
         assert isinstance(attn_metadata, dict)
+        if self.prefix not in attn_metadata:
+            if any(
+                isinstance(metadata, TorchTitanLinearAttentionMetadata)
+                for metadata in attn_metadata.values()
+            ):
+                raise RuntimeError(
+                    f"No attention metadata for {self.prefix}, but other "
+                    "linear-attention layers have it."
+                )
+            return
         metadata = attn_metadata[self.prefix]
         assert isinstance(metadata, TorchTitanLinearAttentionMetadata)
 

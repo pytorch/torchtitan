@@ -19,6 +19,7 @@ import spmd_types as spmd
 
 import torch
 import torch.nn.functional as F
+import vllm.envs as envs
 from torch.distributed.tensor import DTensor, Replicate
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -432,6 +433,13 @@ class VLLMModelWrapper(Module):
                 "Dist-MoE in the generator needs expert_parallel_degree > 1 when "
                 f"tensor_parallel_degree > 1; got tensor_parallel_degree={tp}, "
                 f"expert_parallel_degree={self.parallelism_context.ep}."
+            )
+        if not envs.VLLM_MOE_SKIP_PADDING:
+            raise ValueError(
+                "Dist-MoE in the generator needs VLLM_MOE_SKIP_PADDING=1 (vLLM's "
+                "default); got 0. Only then does vLLM refresh the forward context's "
+                "padding mask every step, and the mask keeps padding rows off "
+                "Dist-MoE's network."
             )
         self._dist_moe_runtime = runtime_config.build(
             model_parts=[self.model],

@@ -37,8 +37,8 @@ class SamplingConfig:
 
     def __post_init__(self) -> None:
         # TODO(mask-replay): to allow top_p < 1, turn on vLLM's `return_sampling_mask` (needs a vLLM
-        # upgrade, the V2 model runner, top_k > 0 and processed logprobs), carry each token's kept
-        # ids next to generator_logprobs, and take the trainer's logsumexp of logits / T over them.
+        # upgrade, top_k > 0 and processed logprobs), carry each token's kept ids next to
+        # generator_logprobs, and take the trainer's logsumexp of logits / T over them.
         if self.top_p < 1.0:
             raise ValueError(
                 f"top_p must be 1.0, got {self.top_p}: the trainer computes logprobs "

@@ -7,22 +7,20 @@
 from dataclasses import fields, replace
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
 
-from torchtitan.rl.generator.vllm.attention import gdn, linear_attention
+from torchtitan.rl.generator.vllm.attention import gdn, kda, linear_attention
 from torchtitan.rl.generator.vllm.attention.linear_attention import (
     LinearAttentionExecutionPath,
+    TorchTitanHybridModelState,
     TorchTitanLinearAttentionBackend,
     TorchTitanLinearAttentionMetadata,
     TorchTitanLinearAttentionMetadataBuilder,
 )
-from torchtitan.rl.generator.vllm.worker import (
-    TorchTitanCudagraphDispatcher,
-    TorchTitanGPUModelRunner,
-)
+from torchtitan.rl.generator.vllm.worker import TorchTitanCudaGraphManager
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
@@ -30,28 +28,45 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
-from vllm.forward_context import (
-    BatchDescriptor,
-    ForwardContext,
-    override_forward_context,
-)
+from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.gpu import cudagraph_utils
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+
+
+def _graph_manager(
+    monkeypatch, config: VllmConfig, graph_mode: CUDAGraphMode
+) -> TorchTitanCudaGraphManager:
+    """A manager on CPU, marked captured so ``dispatch`` returns graphs."""
+    # vLLM's manager reads its pipeline stage; these tests set up no process groups.
+    monkeypatch.setattr(
+        cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    max_num_seqs = config.scheduler_config.max_num_seqs
+    manager = TorchTitanCudaGraphManager(
+        config, torch.device("cpu"), graph_mode, decode_query_lens={1: max_num_seqs}
+    )
+    manager._graphs_captured = True
+    return manager
 
 
 @pytest.mark.parametrize(
     "graph_mode",
     [CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY],
 )
-def test_gdn_supports_eager_and_full_decode_only_modes(graph_mode):
+def test_gdn_supports_eager_and_full_decode_only_modes(monkeypatch, graph_mode):
     config = VllmConfig()
     config.compilation_config = CompilationConfig(
         mode=CompilationMode.NONE,
         cudagraph_mode=graph_mode,
-        cudagraph_capture_sizes=[1, 2],
+        prefill_cudagraph_capture_token_sizes=[1, 2],
+        decode_cudagraph_capture_request_sizes=[1, 2],
         max_cudagraph_capture_size=2,
         cudagraph_num_of_warmups=1,
     )
@@ -70,10 +85,9 @@ def test_gdn_supports_eager_and_full_decode_only_modes(graph_mode):
 
     TorchTitanLinearAttentionMetadataBuilder(spec, [], config, torch.device("cpu"))
 
-    dispatcher = TorchTitanCudagraphDispatcher(config)
-    dispatcher.initialize_cudagraph_keys(graph_mode)
-    decode_mode, _ = dispatcher.dispatch(1, uniform_decode=True)
-    prefill_mode, _ = dispatcher.dispatch(2, uniform_decode=False)
+    manager = _graph_manager(monkeypatch, config, graph_mode)
+    decode_mode = manager.dispatch(1, 1, 1, num_active_loras=0).cg_mode
+    prefill_mode = manager.dispatch(1, 2, None, num_active_loras=0).cg_mode
     expected_decode = (
         CUDAGraphMode.FULL
         if graph_mode == CUDAGraphMode.FULL_DECODE_ONLY
@@ -102,12 +116,13 @@ def test_dp_support_level(monkeypatch, data_parallel_size, batch_invariant, expe
     assert support == expected
 
 
-def test_full_metadata_and_native_dispatch_variants():
+def test_full_metadata_and_native_dispatch_variants(monkeypatch):
     config = VllmConfig()
     config.compilation_config = CompilationConfig(
         mode=CompilationMode.NONE,
         cudagraph_mode=CUDAGraphMode.FULL,
-        cudagraph_capture_sizes=[1, 2, 4, 8],
+        prefill_cudagraph_capture_token_sizes=[1, 2, 4, 8],
+        decode_cudagraph_capture_request_sizes=[1, 2],
         max_cudagraph_capture_size=8,
         cudagraph_num_of_warmups=1,
     )
@@ -118,22 +133,24 @@ def test_full_metadata_and_native_dispatch_variants():
         is_encoder_decoder=False,
     )
     config.cache_config.mamba_cache_mode = "align"
-    dispatcher = TorchTitanCudagraphDispatcher(config)
-    assert dispatcher.dispatch(2, uniform_decode=True)[0] == CUDAGraphMode.NONE
-    dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)
-    decode_mode, decode = dispatcher.dispatch(2, uniform_decode=True)
-    packed_mode, packed = dispatcher.dispatch(2)
-    assert decode_mode == packed_mode == CUDAGraphMode.FULL
-    assert decode != packed and decode.uniform and not packed.uniform
-    for mode, descriptors in dispatcher.get_capture_descs():
-        for descriptor in descriptors:
-            assert dispatcher.dispatch(
-                descriptor.num_tokens, uniform_decode=descriptor.uniform
-            ) == (mode, descriptor)
-    assert dispatcher.dispatch(9)[0] == CUDAGraphMode.NONE
-    assert (
-        dispatcher.dispatch(2, uniform_decode=True, valid_modes={CUDAGraphMode.NONE})[0]
-        == CUDAGraphMode.NONE
+    manager = _graph_manager(monkeypatch, config, CUDAGraphMode.FULL)
+    decode = manager.dispatch(2, 2, 1, num_active_loras=0)
+    packed = manager.dispatch(2, 2, None, num_active_loras=0)
+    assert decode.cg_mode == packed.cg_mode == CUDAGraphMode.FULL
+    assert decode.uniform_token_count == 1 and packed.uniform_token_count is None
+    # Every captured graph is reachable: decode graphs for decodes, mixed for the rest.
+    for descriptor in manager._capture_descs[CUDAGraphMode.FULL]:
+        assert (
+            manager.dispatch(
+                descriptor.num_reqs,
+                descriptor.num_tokens,
+                descriptor.uniform_token_count,
+                num_active_loras=0,
+            )
+            == descriptor
+        )
+    assert manager.dispatch(2, 9, None, num_active_loras=0).cg_mode == (
+        CUDAGraphMode.NONE
     )
 
     spec = MambaSpec(
@@ -241,9 +258,6 @@ def test_full_metadata_and_native_dispatch_variants():
     with pytest.raises(ValueError, match="block-table capacity"):
         builder.build_for_cudagraph_capture(oversized_common)
 
-    dispatcher.initialize_cudagraph_keys(CUDAGraphMode.NONE)
-    assert dispatcher.dispatch(2, uniform_decode=True)[0] == CUDAGraphMode.NONE
-
 
 @pytest.mark.parametrize("mode", ["align", "none"])
 @pytest.mark.parametrize(
@@ -335,17 +349,40 @@ def test_update_block_table_matches_build(step, mode):
 
 
 @pytest.mark.parametrize(
-    "mode, uniform, replays_packed_graph",
+    "cudagraph_mode, replayed_graph, replays_packed_graph",
     [
-        (CUDAGraphMode.FULL, False, True),
-        (CUDAGraphMode.FULL, True, False),
-        (CUDAGraphMode.NONE, False, False),
+        # 3 decodes padded into the 4-token mixed graph replay its packed kernels.
+        (
+            CUDAGraphMode.FULL,
+            BatchExecutionDescriptor(CUDAGraphMode.FULL, num_tokens=4, num_reqs=2),
+            True,
+        ),
+        (
+            CUDAGraphMode.FULL,
+            BatchExecutionDescriptor(
+                CUDAGraphMode.FULL, num_tokens=2, num_reqs=2, uniform_token_count=1
+            ),
+            False,
+        ),
+        # vLLM captures the 1-token mixed graph with max_query_len 1: single-token.
+        (
+            CUDAGraphMode.FULL,
+            BatchExecutionDescriptor(CUDAGraphMode.FULL, num_tokens=1, num_reqs=1),
+            False,
+        ),
+        # An eager step after a mixed-graph step builds from its own batch.
+        (
+            CUDAGraphMode.NONE,
+            BatchExecutionDescriptor(CUDAGraphMode.FULL, num_tokens=4, num_reqs=2),
+            False,
+        ),
     ],
 )
-def test_runner_tells_builders_the_selected_graph(mode, uniform, replays_packed_graph):
+def test_model_state_tells_builders_the_replayed_graph(
+    cudagraph_mode, replayed_graph, replays_packed_graph
+):
     builder, other_builder = SimpleNamespace(), SimpleNamespace()
-    runner = cast(Any, object.__new__(TorchTitanGPUModelRunner))
-    runner.attn_groups = [
+    attn_groups = [
         [
             SimpleNamespace(
                 backend=TorchTitanLinearAttentionBackend, metadata_builders=[builder]
@@ -353,11 +390,13 @@ def test_runner_tells_builders_the_selected_graph(mode, uniform, replays_packed_
             SimpleNamespace(backend=object, metadata_builders=[other_builder]),
         ]
     ]
-    selected = (mode, BatchDescriptor(4, uniform=uniform))
-    with patch.object(
-        GPUModelRunner, "_determine_batch_execution_and_padding", return_value=selected
-    ):
-        runner._determine_batch_execution_and_padding(4, 4)
+    model_state = cast(Any, object.__new__(TorchTitanHybridModelState))
+    model_state.cudagraph_manager = SimpleNamespace(
+        last_dispatched_descriptor=replayed_graph
+    )
+    with patch.object(MambaHybridModelState, "prepare_attn") as parent:
+        model_state.prepare_attn(None, cudagraph_mode, (), None, attn_groups, None)
+    parent.assert_called_once()
     assert builder.replays_packed_graph is replays_packed_graph
     assert not hasattr(other_builder, "replays_packed_graph")
 
@@ -418,8 +457,13 @@ def test_forward_respects_prepared_extent_and_decode_padding(monkeypatch, decode
     value = torch.ones(6, 1)
     with override_forward_context(context):
         output = layer._forward(value, value, value, value, None, value, value)
-        # Profiling and empty-batch early returns reject bias and return zeros.
-        for attn_metadata in (None, {"gdn": replace(metadata, num_actual_tokens=0)}):
+        # Warmup (no metadata), profiling (none for this layer) and empty-batch early
+        # returns reject bias and return zeros.
+        for attn_metadata in (
+            None,
+            {},
+            {"gdn": replace(metadata, num_actual_tokens=0)},
+        ):
             context.attn_metadata = attn_metadata
             with pytest.raises(
                 AssertionError,
@@ -428,8 +472,30 @@ def test_forward_respects_prepared_extent_and_decode_padding(monkeypatch, decode
                 layer._forward(value, value, value, value, value, value, value)
             early = layer._forward(value, value, value, value, None, value, value)
             assert torch.equal(early, torch.zeros(6, 1, 1))
+        # On a real step, a layer missing from metadata that other layers have is a bug.
+        context.attn_metadata = {"other_gdn": metadata}
+        with pytest.raises(RuntimeError, match="No attention metadata for gdn"):
+            layer._forward(value, value, value, value, None, value, value)
     assert metadata.num_actual_tokens == 3
     assert torch.equal(output.flatten(), (torch.arange(6) < extent).float())
+
+
+def test_kda_forward_skips_a_layer_without_metadata():
+    # vLLM's kernel-autotune runs build no metadata for any linear-attention layer.
+    layer = kda.VLLMInnerKDA.__new__(kda.VLLMInnerKDA)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "kda"
+    output = torch.zeros(2, 1, 1)
+    context = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    with override_forward_context(context):
+        layer._forward(*[torch.ones(2, 1)] * 6, output)
+        assert not output.any()
+        # On a real step, a layer missing from metadata that other layers have is a bug.
+        context.attn_metadata = {
+            "other_kda": Mock(spec=TorchTitanLinearAttentionMetadata)
+        }
+        with pytest.raises(RuntimeError, match="No attention metadata for kda"):
+            layer._forward(*[torch.ones(2, 1)] * 6, output)
 
 
 def _packed_metadata(
