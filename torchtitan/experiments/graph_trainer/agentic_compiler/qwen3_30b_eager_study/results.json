@@ -1,0 +1,597 @@
+{
+ "setup": "Qwen3 30B-A3B DistMoE MXFP8, FSDP 8 x EP 8, one 32K-token microbatch per step, FA4 varlen attention, deterministic, seed 42, fake PG (NGPU=8, LOCAL_RANK=0) on one GB300; torch 3c53c6f, CUDA 13.0, cutlass-dsl 4.8.0; 2026-11-09",
+ "metrics": {
+  "gpu_busy_ms_excl_comm": "profiled step 10, accelerator graphs off: union of kernel/memcpy/memset intervals over all streams, without kernels launched under a collective CPU op (busy.py)",
+  "tokens_per_s_step20": "step 20, accelerator graphs as the recipe sets them (on), no profiler",
+  "bitwise_equal_to_reference": "loss and grad_norm (TensorBoard, full precision) equal at every logged step"
+ },
+ "runs": [
+  {
+   "run": "eager_nolc_prof",
+   "trainer": "eager",
+   "gpu": 1,
+   "kernels": "none",
+   "local_compile": "none",
+   "steps": 10,
+   "memory_gib": 250.3,
+   "gpu_busy_ms": 991.3,
+   "gpu_busy_ms_excl_comm": 984.9,
+   "num_kernels": 16597,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.458515167236328,
+     "10": 5.717879295349121
+    },
+    "grad_norm": {
+     "1": 68.36530303955078,
+     "10": 9.814748764038086
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   }
+  },
+  {
+   "run": "eager_lc_prof",
+   "trainer": "eager",
+   "gpu": 0,
+   "kernels": "none",
+   "local_compile": "recipe (loss, fused_binary_activation, rope, fp32_to_bf16_split, moe_aux_loss)",
+   "steps": 10,
+   "memory_gib": 240.25,
+   "gpu_busy_ms": 774.1,
+   "gpu_busy_ms_excl_comm": 768.1,
+   "num_kernels": 14389,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.458473205566406,
+     "10": 5.712982654571533
+    },
+    "grad_norm": {
+     "1": 68.36409759521484,
+     "10": 9.804814338684082
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "reference": "eager_nolc_prof",
+   "bitwise_equal_to_reference": false
+  },
+  {
+   "run": "lc_rope_prof",
+   "trainer": "eager",
+   "gpu": 0,
+   "kernels": "none",
+   "local_compile": "rope",
+   "steps": 10,
+   "memory_gib": 247.2,
+   "gpu_busy_ms": 803.5,
+   "gpu_busy_ms_excl_comm": 797.8,
+   "num_kernels": 14869,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.458473205566406,
+     "10": 5.71207332611084
+    },
+    "grad_norm": {
+     "1": 68.37556457519531,
+     "10": 9.801761627197266
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "reference": "eager_nolc_prof",
+   "bitwise_equal_to_reference": false
+  },
+  {
+   "run": "lc_loss_prof",
+   "trainer": "eager",
+   "gpu": 1,
+   "kernels": "none",
+   "local_compile": "loss",
+   "steps": 10,
+   "memory_gib": 243.35,
+   "gpu_busy_ms": 962.8,
+   "gpu_busy_ms_excl_comm": 957.0,
+   "num_kernels": 16549,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.458515167236328,
+     "10": 5.719554424285889
+    },
+    "grad_norm": {
+     "1": 68.36589813232422,
+     "10": 9.814136505126953
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "reference": "eager_nolc_prof",
+   "bitwise_equal_to_reference": false
+  },
+  {
+   "run": "lc_split_prof",
+   "trainer": "eager",
+   "gpu": 2,
+   "kernels": "none",
+   "local_compile": "fp32_to_bf16_split",
+   "steps": 10,
+   "memory_gib": 250.3,
+   "gpu_busy_ms": 988.3,
+   "gpu_busy_ms_excl_comm": 982.6,
+   "num_kernels": 16165,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.458515167236328,
+     "10": 5.717879295349121
+    },
+    "grad_norm": {
+     "1": 68.36530303955078,
+     "10": 9.814748764038086
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "reference": "eager_nolc_prof",
+   "bitwise_equal_to_reference": true
+  },
+  {
+   "run": "gk_f1_nolc_prof",
+   "trainer": "eager",
+   "gpu": 2,
+   "kernels": "attention_input",
+   "local_compile": "none",
+   "steps": 10,
+   "memory_gib": 249.58,
+   "gpu_busy_ms": 769.8,
+   "gpu_busy_ms_excl_comm": 763.4,
+   "num_kernels": 14101,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.458515167236328,
+     "10": 5.717879295349121
+    },
+    "grad_norm": {
+     "1": 68.36530303955078,
+     "10": 9.814748764038086
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "reference": "eager_nolc_prof",
+   "bitwise_equal_to_reference": true
+  },
+  {
+   "run": "gk_f12_nolc_prof",
+   "trainer": "eager",
+   "gpu": 0,
+   "kernels": "attention_input,attention_output",
+   "local_compile": "none",
+   "steps": 10,
+   "memory_gib": 250.13,
+   "gpu_busy_ms": 765.8,
+   "gpu_busy_ms_excl_comm": 759.8,
+   "num_kernels": 13813,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.458515167236328,
+     "10": 5.717879295349121
+    },
+    "grad_norm": {
+     "1": 68.36530303955078,
+     "10": 9.814748764038086
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "reference": "eager_nolc_prof",
+   "bitwise_equal_to_reference": true
+  },
+  {
+   "run": "gk_f123_nolc_prof",
+   "trainer": "eager",
+   "gpu": 3,
+   "kernels": "attention_input,attention_output,router",
+   "local_compile": "none",
+   "steps": 10,
+   "memory_gib": 250.13,
+   "gpu_busy_ms": 737.1,
+   "gpu_busy_ms_excl_comm": 731.4,
+   "num_kernels": 9733,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.458515167236328,
+     "10": 5.717879295349121
+    },
+    "grad_norm": {
+     "1": 68.36530303955078,
+     "10": 9.814748764038086
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "reference": "eager_nolc_prof",
+   "bitwise_equal_to_reference": true
+  },
+  {
+   "run": "gk_all_nolc_prof",
+   "trainer": "eager",
+   "gpu": 0,
+   "kernels": "attention_input,attention_output,router,loss",
+   "local_compile": "none",
+   "steps": 10,
+   "memory_gib": 245.49,
+   "gpu_busy_ms": 713.2,
+   "gpu_busy_ms_excl_comm": 706.9,
+   "num_kernels": 9669,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.458515167236328,
+     "10": 5.717879295349121
+    },
+    "grad_norm": {
+     "1": 68.36530303955078,
+     "10": 9.814748764038086
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "reference": "eager_nolc_prof",
+   "bitwise_equal_to_reference": true
+  },
+  {
+   "run": "gk_all5_nolc_prof",
+   "trainer": "eager",
+   "gpu": 2,
+   "kernels": "attention_input,attention_output,router,loss,expert_weight_prep",
+   "local_compile": "none",
+   "steps": 10,
+   "memory_gib": 244.82,
+   "gpu_busy_ms": 700.5,
+   "gpu_busy_ms_excl_comm": 694.8,
+   "num_kernels": 8901,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.458515167236328,
+     "10": 5.717879295349121
+    },
+    "grad_norm": {
+     "1": 68.36530303955078,
+     "10": 9.814748764038086
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "reference": "eager_nolc_prof",
+   "bitwise_equal_to_reference": true
+  },
+  {
+   "run": "gk_f123_lcloss_prof",
+   "trainer": "eager",
+   "gpu": 3,
+   "kernels": "attention_input,attention_output,router",
+   "local_compile": "loss",
+   "steps": 10,
+   "memory_gib": 243.17,
+   "gpu_busy_ms": 707.5,
+   "gpu_busy_ms_excl_comm": 701.7,
+   "num_kernels": 9684,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.458515167236328,
+     "10": 5.719554424285889
+    },
+    "grad_norm": {
+     "1": 68.36589813232422,
+     "10": 9.814136505126953
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "reference": "eager_nolc_prof",
+   "bitwise_equal_to_reference": false
+  },
+  {
+   "run": "gk_best_prof",
+   "trainer": "eager",
+   "gpu": 3,
+   "kernels": "attention_input,attention_output,router,expert_weight_prep",
+   "local_compile": "loss",
+   "steps": 10,
+   "memory_gib": 242.5,
+   "gpu_busy_ms": 699.3,
+   "gpu_busy_ms_excl_comm": 693.6,
+   "num_kernels": 8917,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.458515167236328,
+     "10": 5.719554424285889
+    },
+    "grad_norm": {
+     "1": 68.36589813232422,
+     "10": 9.814136505126953
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "reference": "eager_nolc_prof",
+   "bitwise_equal_to_reference": false
+  },
+  {
+   "run": "eager_nolc_tps",
+   "trainer": "eager",
+   "gpu": 1,
+   "kernels": "none",
+   "local_compile": "none",
+   "steps": 20,
+   "memory_gib": 250.3,
+   "tokens_per_s_step20": 33991,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.458515167236328,
+     "10": 5.717879295349121,
+     "20": 5.433826446533203
+    },
+    "grad_norm": {
+     "1": 68.36530303955078,
+     "10": 9.814748764038086,
+     "20": 9.321279525756836
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0,
+     "20": 1.0
+    }
+   }
+  },
+  {
+   "run": "eager_lc_tps",
+   "trainer": "eager",
+   "gpu": 0,
+   "kernels": "none",
+   "local_compile": "recipe",
+   "steps": 20,
+   "memory_gib": 240.25,
+   "tokens_per_s_step20": 43552,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.458473205566406,
+     "10": 5.712982654571533,
+     "20": 5.423264503479004
+    },
+    "grad_norm": {
+     "1": 68.36409759521484,
+     "10": 9.804814338684082,
+     "20": 9.326663970947266
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0,
+     "20": 1.0
+    }
+   },
+   "reference": "eager_nolc_tps",
+   "bitwise_equal_to_reference": false
+  },
+  {
+   "run": "gk_f12_nolc_tps",
+   "trainer": "eager",
+   "gpu": 1,
+   "kernels": "attention_input,attention_output",
+   "local_compile": "none",
+   "steps": 20,
+   "memory_gib": 249.45,
+   "tokens_per_s_step20": 44202,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.458515167236328,
+     "10": 5.717879295349121,
+     "20": 5.433826446533203
+    },
+    "grad_norm": {
+     "1": 68.36530303955078,
+     "10": 9.814748764038086,
+     "20": 9.321279525756836
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0,
+     "20": 1.0
+    }
+   },
+   "reference": "eager_nolc_tps",
+   "bitwise_equal_to_reference": true
+  },
+  {
+   "run": "gk_all_nolc_tps",
+   "trainer": "eager",
+   "gpu": 1,
+   "kernels": "attention_input,attention_output,router,loss",
+   "local_compile": "none",
+   "steps": 20,
+   "memory_gib": 244.8,
+   "tokens_per_s_step20": 47676,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.458515167236328,
+     "10": 5.717879295349121,
+     "20": 5.433826446533203
+    },
+    "grad_norm": {
+     "1": 68.36530303955078,
+     "10": 9.814748764038086,
+     "20": 9.321279525756836
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0,
+     "20": 1.0
+    }
+   },
+   "reference": "eager_nolc_tps",
+   "bitwise_equal_to_reference": true
+  },
+  {
+   "run": "gk_all5_nolc_tps",
+   "trainer": "eager",
+   "gpu": 3,
+   "kernels": "attention_input,attention_output,router,loss,expert_weight_prep",
+   "local_compile": "none",
+   "steps": 20,
+   "memory_gib": 244.82,
+   "tokens_per_s_step20": 48223,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.458515167236328,
+     "10": 5.717879295349121,
+     "20": 5.433826446533203
+    },
+    "grad_norm": {
+     "1": 68.36530303955078,
+     "10": 9.814748764038086,
+     "20": 9.321279525756836
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0,
+     "20": 1.0
+    }
+   },
+   "reference": "eager_nolc_tps",
+   "bitwise_equal_to_reference": true
+  },
+  {
+   "run": "graph_base_prof",
+   "trainer": "graph",
+   "gpu": 1,
+   "kernels": "none",
+   "local_compile": "none",
+   "steps": 10,
+   "memory_gib": 235.99,
+   "gpu_busy_ms": 970.9,
+   "gpu_busy_ms_excl_comm": 965.8,
+   "num_kernels": 14687,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.458515167236328,
+     "10": 5.717247009277344
+    },
+    "grad_norm": {
+     "1": 68.36530303955078,
+     "10": 9.812052726745605
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   }
+  },
+  {
+   "run": "graph_pack_prof",
+   "trainer": "graph",
+   "gpu": 2,
+   "kernels": "30B pack, by region id",
+   "local_compile": "none",
+   "steps": 10,
+   "memory_gib": 231.3,
+   "gpu_busy_ms": 684.3,
+   "gpu_busy_ms_excl_comm": 679.1,
+   "num_kernels": 7566,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.458515167236328,
+     "10": 5.717247009277344
+    },
+    "grad_norm": {
+     "1": 68.36530303955078,
+     "10": 9.812052726745605
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "reference": "graph_base_prof",
+   "bitwise_equal_to_reference": true
+  },
+  {
+   "run": "graph_base_tps",
+   "trainer": "graph",
+   "gpu": 0,
+   "kernels": "none",
+   "local_compile": "none",
+   "steps": 20,
+   "memory_gib": 236.04,
+   "tokens_per_s_step20": 34702,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.458515167236328,
+     "10": 5.717247009277344,
+     "20": 5.424350261688232
+    },
+    "grad_norm": {
+     "1": 68.36530303955078,
+     "10": 9.812052726745605,
+     "20": 9.32946491241455
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0,
+     "20": 1.0
+    }
+   }
+  },
+  {
+   "run": "graph_pack_tps",
+   "trainer": "graph",
+   "gpu": 0,
+   "kernels": "30B pack, by region id",
+   "local_compile": "none",
+   "steps": 20,
+   "memory_gib": 231.31,
+   "tokens_per_s_step20": 49214,
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.458515167236328,
+     "10": 5.717247009277344,
+     "20": 5.424350261688232
+    },
+    "grad_norm": {
+     "1": 68.36530303955078,
+     "10": 9.812052726745605,
+     "20": 9.32946491241455
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0,
+     "20": 1.0
+    }
+   },
+   "reference": "graph_base_tps",
+   "bitwise_equal_to_reference": true
+  }
+ ]
+}
