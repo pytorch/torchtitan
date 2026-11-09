@@ -171,12 +171,14 @@ class Qwen38FlashNextStateDictAdapter(Qwen35StateDictAdapter):
                     shard_ND = torch.narrow(
                         weight_ND, 0, begin - row_start, end - begin
                     )
-                    shard_ND.__dict__.update(
-                        global_shape=(rows_per_part, num_features),
-                        global_offsets=((begin - part_start, feature_start),),
-                        local_offsets=((0, 0),),
-                        local_sizes=(tuple(shard_ND.shape),),
-                    )
+                    # NOTE: DCP's public protocol explicitly supports coordinate
+                    # fields on ordinary tensors; no wrapper is required.
+                    # https://github.com/pytorch/pytorch/blob/1392e1f8e4903657d4391f3bd8fcc9ca8a74b758/torch/distributed/checkpoint/protocol.py
+                    fragment = cast(CheckpointableTensor, shard_ND)
+                    fragment.global_shape = (rows_per_part, num_features)
+                    fragment.global_offsets = ((begin - part_start, feature_start),)
+                    fragment.local_offsets = ((0, 0),)
+                    fragment.local_sizes = (tuple(shard_ND.shape),)
                     result[f"{base}.shard_{part}.weight"] = shard_ND
                 continue
             for part, shard_ND in enumerate(weight_ND.chunk(parts, 0)):

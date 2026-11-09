@@ -14,12 +14,8 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-from torch.distributed._functional_collectives import (
-    all_to_all_single,
-    all_to_all_single_autograd,
-    wait_tensor,
-)
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.functional_collectives import all_to_all_single, wait_tensor
 from torch.distributed.tensor import DTensor
 
 
@@ -31,7 +27,6 @@ class RowShardedEmbeddingMetadata:
     num_local_rows: int
     input_ids: torch.Tensor
     local_row_ids: torch.Tensor
-    restore_indices: torch.Tensor
     inverse_indices: torch.Tensor
     input_splits: list[int]
     output_splits: list[int]
@@ -65,7 +60,7 @@ def prepare_row_sharded_embedding(
     ids_L = input_ids.reshape(-1).to(torch.int64)
     ids_U, inverse_L = torch.unique(ids_L, sorted=True, return_inverse=True)
     owners_U = ids_U.div(rows_per_owner, rounding_mode="floor").clamp(0, num_owners - 1)
-    permutation_U = owners_U.argsort(stable=True)
+    # Sorted unique IDs are already grouped by their contiguous row owner.
     counts_P = torch.bincount(owners_U, minlength=num_owners)
     valid_ids = ((ids_L >= 0) & (ids_L < num_embeddings)).all().to(torch.int64)
     # Include validity in the count exchange so invalid IDs fail on all owners
@@ -81,14 +76,13 @@ def prepare_row_sharded_embedding(
     input_splits = host_splits[:num_owners]
     output_splits = host_splits[num_owners : 2 * num_owners]
     routed_ids_M = wait_tensor(
-        all_to_all_single(ids_U[permutation_U], output_splits, input_splits, row_mesh)
+        all_to_all_single(ids_U, output_splits, input_splits, row_mesh)
     )
     return RowShardedEmbeddingMetadata(
         row_mesh=row_mesh,
         num_local_rows=num_local_rows,
         input_ids=input_ids,
         local_row_ids=routed_ids_M - row_start,
-        restore_indices=permutation_U.argsort(),
         inverse_indices=inverse_L,
         input_splits=input_splits,
         output_splits=output_splits,
@@ -124,14 +118,13 @@ def row_sharded_embedding(
         dtype=dtype or weight_RD.dtype
     )
     returned_vectors_UD = wait_tensor(
-        all_to_all_single_autograd(
+        all_to_all_single(
             local_vectors_MD,
             metadata.input_splits,
             metadata.output_splits,
             metadata.row_mesh,
         )
     )
-    unique_vectors_UD = returned_vectors_UD[metadata.restore_indices]
-    return F.embedding(metadata.inverse_indices, unique_vectors_UD).reshape(
+    return F.embedding(metadata.inverse_indices, returned_vectors_UD).reshape(
         *metadata.input_ids.shape, weight_RD.shape[1]
     )

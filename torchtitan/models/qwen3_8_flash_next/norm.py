@@ -10,35 +10,32 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from torch import nn
 
 from torchtitan.distributed.local_compile import local_compile
-from torchtitan.models.base.module import Module
 from torchtitan.models.common.norm import GatedRMSNorm
+from torchtitan.models.qwen3_5.model import OffsetRMSNorm
 
 # T = tokens, S = residual streams, D = features, C = S * D, H = heads.
 
 
-class GroupedOffsetRMSNorm(Module):
+class GroupedOffsetRMSNorm(OffsetRMSNorm):
     """Apply (1 + weight) RMSNorm independently to each residual stream."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        dim: int
+    class Config(OffsetRMSNorm.Config):
         group_size: int
-        eps: float = 1e-6
 
         def __post_init__(self):
             if self.group_size <= 0 or self.dim % self.group_size:
                 raise ValueError("group_size must be positive and divide dim")
 
     def __init__(self, config: Config):
-        super().__init__()
+        super().__init__(config)
         self.group_size = config.group_size
-        self.eps = config.eps
-        self.weight = nn.Parameter(torch.empty(config.dim))
 
-    def forward(self, x_TC: torch.Tensor) -> torch.Tensor:
+    @local_compile("offset_rmsnorm", batch_invariant=False, recompile_limit=16)
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        x_TC = input
         x_TSD = x_TC.float().unflatten(-1, (-1, self.group_size))
         x_TSD = x_TSD * torch.rsqrt(x_TSD.square().mean(-1, keepdim=True) + self.eps)
         return (x_TSD.flatten(-2) * (1 + self.weight.float())).to(x_TC.dtype)

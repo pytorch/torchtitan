@@ -21,7 +21,7 @@ import json
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -72,26 +72,6 @@ class _Fixture:
     tokens_T: torch.Tensor  # noqa: N815
     positions_T: torch.Tensor  # noqa: N815
     patches_PF: torch.Tensor  # noqa: N815
-
-
-@dataclass
-class _Execution:
-    logits_TV: torch.Tensor  # noqa: N815
-    reference_logits_TV: torch.Tensor  # noqa: N815
-    loss: torch.Tensor
-    reference_loss: torch.Tensor
-    fused_TC: torch.Tensor  # noqa: N815
-    reference_fused_TC: torch.Tensor  # noqa: N815
-    embedding_gradient_TD: torch.Tensor  # noqa: N815
-    reference_embedding_gradient_TD: torch.Tensor  # noqa: N815
-    native_states: dict[int, torch.Tensor]
-    reference_states: dict[int, torch.Tensor]
-    native_routes: dict[int, tuple[torch.Tensor, torch.Tensor]]
-    reference_routes: dict[int, tuple[torch.Tensor, ...]]
-    native_gate_logits: dict[int, torch.Tensor]
-    native_qsa_indices: dict[int, torch.Tensor]
-    reference_qsa_masks: dict[int, torch.Tensor]
-    reference_qsa_margins: dict[int, dict[str, Any]]
 
 
 def _reference_text_config() -> Any:
@@ -264,62 +244,40 @@ def _build_fixture(device: torch.device) -> _Fixture:
     )
 
 
-def _compare_tensor(results, name, actual, expected, *, atol, rtol) -> None:
+def _compare_tensor(name, actual, expected, *, atol, rtol) -> float:
     torch.testing.assert_close(
         actual, expected, atol=atol, rtol=rtol, msg=lambda message: f"{name}: {message}"
     )
-    reference = expected.detach().double()
-    difference = actual.detach().double() - reference
-    results[name] = {
-        "max_abs": float(difference.abs().max()),
-        "rms": float(difference.square().mean().sqrt()),
-        "relative_l2": float(difference.norm() / reference.norm()),
-        "atol": atol,
-        "rtol": rtol,
-    }
+    return float((actual.detach().double() - expected.detach().double()).abs().max())
 
 
-def _compare_gradient(
-    results, name, actual, expected, *, atol, rtol, bfloat16_compute
-) -> None:
+def _compare_gradient(name, actual, expected, *, atol, rtol, bfloat16_compute):
     if not bfloat16_compute:
-        _compare_tensor(results, name, actual, expected, atol=atol, rtol=rtol)
+        _compare_tensor(name, actual, expected, atol=atol, rtol=rtol)
         return
     # BF16 packed and separate projections round gradient sums differently.
-    # Preserve both norm bounds instead of relative elementwise error near zero.
+    # Keep the existing RMS and infinity-norm bounds, including near-zero values.
     reference = expected.detach().double()
     difference = actual.detach().double() - reference
-    error_rms = difference.square().mean().sqrt()
-    reference_rms = reference.square().mean().sqrt()
-    assert error_rms <= atol + rtol * reference_rms, name
+    assert difference.square().mean().sqrt() <= (
+        atol + rtol * reference.square().mean().sqrt()
+    ), name
     assert difference.abs().max() <= atol + rtol * reference.abs().max(), name
-    results[name] = {
-        "max_abs": float(difference.abs().max()),
-        "rms": float(error_rms),
-        "relative_l2": float(difference.norm() / reference.norm()),
-        "atol": atol,
-        "rtol": rtol,
-        "comparison": "RMS and infinity norm",
-    }
 
 
-def _compare_parameter_gradients(
-    results, name, native, expected_gradients, *, atol, rtol, bfloat16_compute
-) -> None:
-    actual_norm_squared = 0.0
-    expected_norm_squared = 0.0
-    gradient_dot = 0.0
+def _compare_parameter_gradients(name, native, expected_gradients, *, bfloat16_compute):
+    atol, rtol = (GRADIENT_ATOL, GRADIENT_RTOL) if bfloat16_compute else (3e-6, 3e-5)
+    actual_norm_squared = expected_norm_squared = gradient_dot = 0.0
     count = 0
     for key, parameter in native.named_parameters():
         actual = parameter.grad
         expected = expected_gradients.pop(key, None)
         assert (actual is None) == (
             expected is None
-        ), f"{name}/{key}: gradient presence differs"
+        ), f"{name}/{key}: gradient presence"
         if actual is None:
             continue
         _compare_gradient(
-            results,
             f"{name}/{key}",
             actual,
             expected,
@@ -327,195 +285,92 @@ def _compare_parameter_gradients(
             rtol=rtol,
             bfloat16_compute=bfloat16_compute,
         )
-        actual_norm = actual.double().norm()
-        expected_norm = expected.double().norm()
-        dot = torch.dot(actual.double().flatten(), expected.double().flatten())
-        results[f"{name}/{key}"].update(
-            norm_ratio=float(actual_norm / expected_norm) if expected_norm else None,
-            cosine=float(dot / (actual_norm * expected_norm))
-            if actual_norm and expected_norm
-            else None,
+        actual_norm_squared += float(actual.double().norm().square())
+        expected_norm_squared += float(expected.double().norm().square())
+        gradient_dot += float(
+            torch.dot(actual.double().flatten(), expected.double().flatten())
         )
-        actual_norm_squared += float(actual_norm.square())
-        expected_norm_squared += float(expected_norm.square())
-        gradient_dot += float(dot)
         count += 1
     assert (
         not expected_gradients
     ), f"{name}: unmapped gradients: {list(expected_gradients)}"
-    actual_global_norm = actual_norm_squared**0.5
-    reference_global_norm = expected_norm_squared**0.5
-    torch.testing.assert_close(
-        actual_global_norm, reference_global_norm, atol=atol, rtol=rtol
+    actual_norm, expected_norm = (
+        actual_norm_squared**0.5,
+        expected_norm_squared**0.5,
     )
-    global_cosine = gradient_dot / (actual_global_norm * reference_global_norm)
-    assert global_cosine >= 1 - rtol**2, name
-    results[name + "/global"] = {
-        "parameter_tensors": count,
-        "actual_grad_norm": actual_global_norm,
-        "reference_grad_norm": reference_global_norm,
-        "norm_ratio": actual_global_norm / reference_global_norm,
-        "cosine": global_cosine,
-    }
-
-
-@torch.no_grad()
-def _qsa_pruning_margin(indexer, inputs) -> dict[str, Any]:
-    """Qualify HF's unspecified top-k ties on the actual no-cache fixture input."""
-    from transformers.models.qwen4_exp.modeling_qwen4_exp import apply_rotary_pos_emb
-
-    # G = blocks, H = heads, K = head width, R = block size, W = rotary width,
-    # U = visible tokens, C = query projection channels.
-    hidden_BTD, (cos_BTW, sin_BTW), visible_B1TT, cache = inputs
-    assert cache is None and hidden_BTD.shape[0] == 1
-    assert visible_B1TT.dtype == torch.bool
-    num_tokens = hidden_BTD.shape[1]
-    width = indexer.index_head_dim
-    query_BTC, raw_key_BTK = indexer.index_qk_proj(hidden_BTD).split(
-        (indexer.index_n_heads * width, width), -1
-    )
-    # HF returns one tensor when k=None, although its inferred type includes tuples.
-    query_BTHK = cast(
-        torch.Tensor,
-        apply_rotary_pos_emb(
-            indexer.q_layernorm(
-                query_BTC.unflatten(-1, (indexer.index_n_heads, width))
-            ),
-            cos=cos_BTW[:, -num_tokens:],
-            sin=sin_BTW[:, -num_tokens:],
-            unsqueeze_dim=2,
-        ),
-    )
-    gaps = []
-    for query in range(num_tokens):
-        visible_U = visible_B1TT[0, 0, query].nonzero().flatten()
-        num_blocks = visible_U.numel() // indexer.compress_ratio
-        if num_blocks <= indexer.block_topk:
-            continue
-        blocks_GR = visible_U[: num_blocks * indexer.compress_ratio].unflatten(
-            -1, (num_blocks, indexer.compress_ratio)
-        )
-        pooled_GK = raw_key_BTK[0, blocks_GR].float().mean(1).to(raw_key_BTK.dtype)
-        key_GK = cast(
-            torch.Tensor,
-            apply_rotary_pos_emb(
-                indexer.k_layernorm(pooled_GK).unsqueeze(1),
-                cos=cos_BTW[0, blocks_GR[:, 0]],
-                sin=sin_BTW[0, blocks_GR[:, 0]],
-            ),
-        ).squeeze(1)
-        # Match the pinned per-query matmul, ReLU, head sum and scale order.
-        scores_GH = (query_BTHK[0, query].float() @ key_GK.float().T).T
-        scores_G = scores_GH.relu().sum(-1) / width**0.5
-        ranked_G = scores_G.sort(descending=True).values
-        gaps.append(ranked_G[indexer.block_topk - 1] - ranked_G[indexer.block_topk])
+    torch.testing.assert_close(actual_norm, expected_norm, atol=atol, rtol=rtol)
+    cosine = gradient_dot / (actual_norm * expected_norm)
+    assert cosine >= 1 - rtol**2, name
     return {
-        "pruned_queries": len(gaps),
-        "minimum_cutoff_gap": float(torch.stack(gaps).min()) if gaps else None,
+        "parameter_tensors": count,
+        "actual_grad_norm": actual_norm,
+        "reference_grad_norm": expected_norm,
+        "cosine": cosine,
     }
 
 
-def _execute(
+def _check_decoder(
+    name,
     native,
     reference,
     reference_decoder,
+    adapter,
     tokens_T,
     labels_T,
     *,
     native_kwargs,
     reference_kwargs,
-) -> _Execution:
-    """Run unmodified model forwards/backwards and observe their inputs and choices."""
-    native.zero_grad(set_to_none=True)
-    reference.zero_grad(set_to_none=True)
-    native_states = {}
-    reference_states = {}
-    native_routes = {}
-    reference_routes = {}
-    native_gate_logits = {}
-    native_qsa_indices = {}
-    reference_qsa_masks = {}
-    reference_qsa_margins = {}
+    placeholder_T=None,
+    patch_pairs=(),
+):
+    native.train().zero_grad(set_to_none=True)
+    reference.train().zero_grad(set_to_none=True)
+    native_routes, reference_routes = {}, {}
+    native_indices, reference_masks = {}, {}
     embedding_gradients = {}
-    fused_inputs = {}
     with ExitStack() as hooks:
-        for slot, embedding, first_block in (
-            (0, native.tok_embeddings, native.layers["0"]),
-            (1, reference_decoder.embed_tokens, reference_decoder.layers[0]),
+        for slot, embedding in enumerate(
+            (native.tok_embeddings, reference_decoder.embed_tokens)
         ):
 
-            def retain_embedding_gradient(module, inputs, output, i=slot):
-                # Capture the original embedding node before visual scatter mutates it.
+            def capture_embedding_gradient(module, inputs, output, i=slot):
+                # Observe the original embedding node before visual scatter mutates it.
                 output.register_hook(
-                    lambda gradient: embedding_gradients.__setitem__(
-                        i, gradient.detach()
-                    )
+                    lambda grad: embedding_gradients.__setitem__(i, grad.detach())
                 )
 
             hooks.callback(
-                embedding.register_forward_hook(retain_embedding_gradient).remove
+                embedding.register_forward_hook(capture_embedding_gradient).remove
             )
-            hooks.callback(
-                first_block.register_forward_pre_hook(
-                    lambda module, inputs, i=slot: fused_inputs.__setitem__(
-                        i, inputs[0].detach()
-                    )
-                ).remove
-            )
-        for layer_id in range(8):
+        for layer_id, reference_layer in enumerate(reference_decoder.layers):
             native_layer = native.layers[str(layer_id)]
-            reference_layer = reference_decoder.layers[layer_id]
-            hooks.callback(
-                native_layer.register_forward_hook(
-                    lambda module, inputs, output, i=layer_id: native_states.__setitem__(
-                        i, output.detach()
-                    )
-                ).remove
-            )
-            hooks.callback(
-                reference_layer.register_forward_hook(
-                    lambda module, inputs, output, i=layer_id: reference_states.__setitem__(
-                        i, output[0].detach()
-                    )
-                ).remove
-            )
             hooks.callback(
                 native_layer.feed_forward.router.register_forward_hook(
                     lambda module, inputs, output, i=layer_id: native_routes.__setitem__(
-                        i, tuple(value.detach() for value in output[:2])
-                    )
-                ).remove
-            )
-            hooks.callback(
-                native_layer.feed_forward.router.gate.register_forward_hook(
-                    lambda module, inputs, output, i=layer_id: native_gate_logits.__setitem__(
-                        i, output.detach()
+                        i, output[:2]
                     )
                 ).remove
             )
             hooks.callback(
                 reference_layer.mlp.gate.register_forward_hook(
                     lambda module, inputs, output, i=layer_id: reference_routes.__setitem__(
-                        i, tuple(value.detach() for value in output)
+                        i, output[1:]
                     )
                 ).remove
             )
             if layer_id in INDEXER_SEEDS:
                 hooks.callback(
                     native_layer.attention.indexer.register_forward_hook(
-                        lambda module, inputs, output, i=layer_id: native_qsa_indices.__setitem__(
-                            i, output[0].detach()
+                        lambda module, inputs, output, i=layer_id: native_indices.__setitem__(
+                            i, output[0]
                         )
                     ).remove
                 )
-
-                def capture_reference_qsa(module, inputs, output, i=layer_id):
-                    reference_qsa_masks[i] = output[0, 0].detach()
-                    reference_qsa_margins[i] = _qsa_pruning_margin(module, inputs)
-
                 hooks.callback(
                     reference_layer.self_attn.indexer.register_forward_hook(
-                        capture_reference_qsa
+                        lambda module, inputs, output, i=layer_id: reference_masks.__setitem__(
+                            i, output[0, 0]
+                        )
                     ).remove
                 )
         logits_TV = native(tokens_T, **native_kwargs)
@@ -525,157 +380,147 @@ def _execute(
         loss = F.cross_entropy(logits_TV[:-1].float(), labels_T[1:], ignore_index=-100)
         loss.backward()
         reference_output.loss.backward()
-    return _Execution(
+
+    max_error = _compare_tensor(
+        f"{name}/logits",
         logits_TV,
         reference_output.logits[0],
-        loss,
-        reference_output.loss,
-        fused_inputs[0],
-        fused_inputs[1][0],
+        atol=FORWARD_ATOL,
+        rtol=FORWARD_RTOL,
+    )
+    _compare_tensor(f"{name}/loss", loss, reference_output.loss, atol=2e-4, rtol=2e-4)
+    _compare_gradient(
+        f"{name}/embedding_gradient",
         embedding_gradients[0],
         embedding_gradients[1][0],
-        native_states,
-        reference_states,
-        native_routes,
-        reference_routes,
-        native_gate_logits,
-        native_qsa_indices,
-        reference_qsa_masks,
-        reference_qsa_margins,
-    )
-
-
-def _compare_execution(results, name, execution: _Execution, *, multimodal) -> None:
-    _compare_tensor(
-        results,
-        f"{name}/logits",
-        execution.logits_TV,
-        execution.reference_logits_TV,
-        atol=FORWARD_ATOL,
-        rtol=FORWARD_RTOL,
-    )
-    _compare_tensor(
-        results,
-        f"{name}/ce_loss",
-        execution.loss,
-        execution.reference_loss,
-        atol=2e-4,
-        rtol=2e-4,
-    )
-    _compare_tensor(
-        results,
-        f"{name}/fused_input",
-        execution.fused_TC,
-        execution.reference_fused_TC,
-        atol=FORWARD_ATOL,
-        rtol=FORWARD_RTOL,
-    )
-    _compare_gradient(
-        results,
-        f"{name}/embedding_input_gradient",
-        execution.embedding_gradient_TD,
-        execution.reference_embedding_gradient_TD,
         atol=GRADIENT_ATOL,
         rtol=GRADIENT_RTOL,
         bfloat16_compute=True,
     )
-    num_tokens = execution.logits_TV.shape[0]
-    for layer_id in INDEXER_SEEDS:
-        indices_TJ = execution.native_qsa_indices[layer_id]
-        mask_TT = torch.zeros(
-            num_tokens, num_tokens + 1, dtype=torch.bool, device=indices_TJ.device
-        ).scatter(-1, indices_TJ.long().masked_fill(indices_TJ < 0, num_tokens), True)
+    for layer_id, (scores_TK, ids_TK) in native_routes.items():
+        reference_scores_TK, reference_ids_TK = reference_routes[layer_id]
         assert torch.equal(
-            mask_TT[:, :num_tokens], execution.reference_qsa_masks[layer_id]
-        ), f"{name}: layer {layer_id} QSA selected-token masks differ"
-        margin = execution.reference_qsa_margins[layer_id]
-        if margin["pruned_queries"]:
-            assert (
-                margin["minimum_cutoff_gap"] > 0
-            ), f"{name}: layer {layer_id} QSA pruning cutoff ties"
-        results[f"{name}/qsa_selection_{layer_id}"] = {
-            "selected_token_mask": "exact",
-            **margin,
-        }
-    for layer_id in range(8):
-        if not multimodal:
-            _compare_tensor(
-                results,
-                f"{name}/block_{layer_id}",
-                execution.native_states[layer_id],
-                execution.reference_states[layer_id],
-                atol=FORWARD_ATOL,
-                rtol=FORWARD_RTOL,
-            )
-        native_scores_TK, native_ids_TK = execution.native_routes[layer_id]
-        (
-            reference_logits_TE,
-            reference_scores_TK,
-            reference_ids_TK,
-        ) = execution.reference_routes[layer_id]
-        assert torch.equal(
-            native_ids_TK.sort(-1).values, reference_ids_TK.sort(-1).values
-        ), f"{name}: layer {layer_id} router IDs differ"
+            ids_TK.sort(-1).values, reference_ids_TK.sort(-1).values
+        ), f"{name}/router_{layer_id}"
         _compare_tensor(
-            results,
             f"{name}/router_{layer_id}",
-            native_scores_TK.gather(-1, native_ids_TK.argsort(-1)),
+            scores_TK.gather(-1, ids_TK.argsort(-1)),
             reference_scores_TK.gather(-1, reference_ids_TK.argsort(-1)),
             atol=FORWARD_ATOL,
             rtol=FORWARD_RTOL,
         )
-        if multimodal:
-            native_logits_TE = execution.native_gate_logits[layer_id].float()
-            reference_logits_TE = reference_logits_TE.float()
-            native_sorted_TE = native_logits_TE.sort(-1, descending=True).values
-            reference_sorted_TE = reference_logits_TE.sort(-1, descending=True).values
-            gap_T = torch.minimum(
-                native_sorted_TE[:, 1] - native_sorted_TE[:, 2],
-                reference_sorted_TE[:, 1] - reference_sorted_TE[:, 2],
-            )
-            drift_T = (native_logits_TE - reference_logits_TE).abs().amax(-1)
-            scale_T = torch.maximum(
-                native_logits_TE.abs().amax(-1), reference_logits_TE.abs().amax(-1)
-            )
-            # Retain four measured drifts/dtype epsilons and the original 0.002 floor.
-            limit_T = torch.maximum(4 * drift_T, 4 * BF16_EPS * scale_T).clamp_min(
-                0.002
-            )
-            assert bool(
-                (gap_T > limit_T).all()
-            ), f"{name}: layer {layer_id} weak router margin"
-            results[f"{name}/router_margin_{layer_id}"] = {
-                "minimum_cutoff_gap": float(gap_T.min()),
-                "maximum_logit_drift": float(drift_T.max()),
-                "minimum_gap_over_limit": float((gap_T / limit_T).min()),
-            }
-        else:
-            sorted_TE = reference_logits_TE.float().sort(-1, descending=True).values
-            results[f"{name}/router_margin_{layer_id}"] = float(
-                (sorted_TE[:, 1] - sorted_TE[:, 2]).min()
-            )
+    for layer_id, indices_TJ in native_indices.items():
+        num_tokens = tokens_T.numel()
+        mask_TT = torch.zeros(
+            num_tokens, num_tokens + 1, dtype=torch.bool, device=tokens_T.device
+        )
+        mask_TT.scatter_(
+            -1, indices_TJ.long().masked_fill(indices_TJ < 0, num_tokens), True
+        )
+        assert torch.equal(
+            mask_TT[:, :num_tokens], reference_masks[layer_id]
+        ), f"{name}/qsa_{layer_id}"
+    if placeholder_T is not None:
+        assert not torch.count_nonzero(embedding_gradients[0][placeholder_T])
+        assert not torch.count_nonzero(embedding_gradients[1][0, placeholder_T])
+    for field, actual, expected in patch_pairs:
+        assert actual.grad is not None and actual.grad.norm() > 0, field
+        _compare_gradient(
+            f"{name}/{field}",
+            actual.grad,
+            expected.grad,
+            atol=GRADIENT_ATOL,
+            rtol=GRADIENT_RTOL,
+            bfloat16_compute=True,
+        )
+    expected_gradients = adapter.from_hf(
+        {
+            key: parameter.grad
+            for key, parameter in reference.named_parameters()
+            if parameter.grad is not None
+        }
+    )
+    return {
+        "native_ce": float(loss.detach()),
+        "reference_ce": float(reference_output.loss.detach()),
+        "max_logit_error": max_error,
+        "gradients": _compare_parameter_gradients(
+            name,
+            native,
+            expected_gradients,
+            bfloat16_compute=True,
+        ),
+        "routing": "expert IDs and selected-token masks match exactly",
+    }
+
+
+def _check_vision(fixture, device):
+    fixture.vision.train().zero_grad(set_to_none=True)
+    fixture.reference_vision.train().zero_grad(set_to_none=True)
+    patches_PF = fixture.patches_PF.clone().requires_grad_()
+    reference_PF = fixture.patches_PF.clone().requires_grad_()
+    grid_NA = torch.tensor([[1, 4, 4], [2, 2, 2]], device=device)
+    output_TD = fixture.vision(patches_PF, grid_thw=grid_NA)
+    reference_TD = fixture.reference_vision(
+        reference_PF, grid_thw=grid_NA
+    ).pooler_output
+    output_TD.square().mean().backward()
+    reference_TD.square().mean().backward()
+    max_error = _compare_tensor(
+        "vision/output", output_TD, reference_TD, atol=2e-5, rtol=2e-5
+    )
+    _compare_gradient(
+        "vision/input_gradient",
+        patches_PF.grad,
+        reference_PF.grad,
+        atol=3e-6,
+        rtol=3e-5,
+        bfloat16_compute=False,
+    )
+    source = {
+        "model.visual." + key: parameter.grad
+        for key, parameter in fixture.reference_vision.named_parameters()
+        if parameter.grad is not None
+    }
+    # The adapter requires an LM-head entry when mapping a partial vision state.
+    source["lm_head.weight"] = fixture.reference.lm_head.weight.grad
+    expected = fixture.vision_adapter.from_hf(source)
+    expected.pop("lm_head.weight")
+    return {
+        "max_output_error": max_error,
+        "gradients": _compare_parameter_gradients(
+            "vision",
+            fixture.vision,
+            {
+                key.removeprefix("vision_encoder."): value
+                for key, value in expected.items()
+            },
+            bfloat16_compute=False,
+        ),
+    }
 
 
 def run(*, device: str = "cuda") -> dict[str, Any]:
+    from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpConfig
+    from transformers.models.qwen4_exp.modeling_qwen4_exp import (
+        Qwen4ExpForConditionalGeneration,
+    )
+
     target_device = torch.device(device)
     if target_device.type != "cuda":
-        raise ValueError(
-            "The HF comparison requires production CUDA GDN/grouped experts. "
-            "Run independent CPU feature equations with pytest instead."
-        )
+        raise ValueError("HF parity requires the production CUDA GDN/grouped experts")
     torch.use_deterministic_algorithms(True)
     torch.set_float32_matmul_precision("highest")
     torch.backends.cudnn.allow_tf32 = False
-    results: dict[str, Any] = {}
     with sdpa_kernel(SDPBackend.MATH):
         fixture = _build_fixture(target_device)
-        for training in (False, True):
-            fixture.native.train(training)
-            fixture.reference.train(training)
-            execution = _execute(
+        results = {
+            "text": _check_decoder(
+                "text",
                 fixture.native,
                 fixture.reference,
                 fixture.reference.model,
+                fixture.adapter,
                 fixture.tokens_T,
                 fixture.tokens_T,
                 native_kwargs={
@@ -684,88 +529,11 @@ def run(*, device: str = "cuda") -> dict[str, Any]:
                     "ple_input_ids": fixture.tokens_T,
                 },
                 reference_kwargs={"use_cache": False},
-            )
-            mode = "train" if training else "eval"
-            _compare_execution(results, mode, execution, multimodal=False)
-            expected_gradients = fixture.adapter.from_hf(
-                {
-                    key: value.grad
-                    for key, value in fixture.reference.named_parameters()
-                    if value.grad is not None
-                }
-            )
-            _compare_parameter_gradients(
-                results,
-                f"{mode}/parameter_gradient",
-                fixture.native,
-                expected_gradients,
-                atol=GRADIENT_ATOL,
-                rtol=GRADIENT_RTOL,
-                bfloat16_compute=True,
-            )
-
-        grid_NA = torch.tensor([[1, 4, 4], [2, 2, 2]], device=target_device)
-        for training in (False, True):
-            fixture.vision.train(training)
-            fixture.reference_vision.train(training)
-            fixture.vision.zero_grad(set_to_none=True)
-            fixture.reference_vision.zero_grad(set_to_none=True)
-            patches_PF = fixture.patches_PF.clone().requires_grad_()
-            reference_patches_PF = fixture.patches_PF.clone().requires_grad_()
-            output_TD = fixture.vision(patches_PF, grid_thw=grid_NA)
-            reference_TD = fixture.reference_vision(
-                reference_patches_PF, grid_thw=grid_NA
-            ).pooler_output
-            output_TD.square().mean().backward()
-            reference_TD.square().mean().backward()
-            mode = "train" if training else "eval"
-            _compare_tensor(
-                results,
-                f"vision/{mode}/output",
-                output_TD,
-                reference_TD,
-                atol=2e-5,
-                rtol=2e-5,
-            )
-            _compare_gradient(
-                results,
-                f"vision/{mode}/input_gradient",
-                patches_PF.grad,
-                reference_patches_PF.grad,
-                atol=3e-6,
-                rtol=3e-5,
-                bfloat16_compute=False,
-            )
-            # The full-model adapter requires an LM-head entry for partial vision maps.
-            vision_source = {
-                "model.visual." + key: value.grad
-                for key, value in fixture.reference_vision.named_parameters()
-                if value.grad is not None
-            }
-            vision_source["lm_head.weight"] = fixture.reference.lm_head.weight.grad
-            expected_gradients = fixture.vision_adapter.from_hf(vision_source)
-            expected_gradients.pop("lm_head.weight")
-            expected_gradients = {
-                key.removeprefix("vision_encoder."): value
-                for key, value in expected_gradients.items()
-            }
-            _compare_parameter_gradients(
-                results,
-                f"vision/{mode}/parameter_gradient",
-                fixture.vision,
-                expected_gradients,
-                atol=3e-6,
-                rtol=3e-5,
-                bfloat16_compute=False,
-            )
-
-        from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpConfig
-        from transformers.models.qwen4_exp.modeling_qwen4_exp import (
-            Qwen4ExpForConditionalGeneration,
-        )
-
+            ),
+            "vision": _check_vision(fixture, target_device),
+        }
         fixture.native.vision_encoder = fixture.vision
-        mm_config = Qwen4ExpConfig(
+        config = Qwen4ExpConfig(
             text_config=fixture.reference.config,
             vision_config=fixture.reference_vision.config,
             image_token_id=61,
@@ -774,13 +542,13 @@ def run(*, device: str = "cuda") -> dict[str, Any]:
             vision_end_token_id=59,
         )
         torch.manual_seed(VISION_SEED)
-        reference_mm = Qwen4ExpForConditionalGeneration(mm_config)
-        reference_mm.model.language_model = fixture.reference.model
-        reference_mm.model.visual = fixture.reference_vision
-        reference_mm.lm_head = fixture.reference.lm_head
+        reference = Qwen4ExpForConditionalGeneration(config)
+        reference.model.language_model = fixture.reference.model
+        reference.model.visual = fixture.reference_vision
+        reference.lm_head = fixture.reference.lm_head
         with torch.no_grad():
             for layer_id, seed in MM_ROUTER_SEEDS.items():
-                weight_ED = reference_mm.model.language_model.layers[
+                weight_ED = reference.model.language_model.layers[
                     layer_id
                 ].mlp.gate.weight
                 generator = torch.Generator(device="cpu").manual_seed(seed)
@@ -792,13 +560,10 @@ def run(*, device: str = "cuda") -> dict[str, Any]:
                 fixture.native.layers[
                     str(layer_id)
                 ].feed_forward.router.gate.weight.copy_(weight_ED)
-        mapped_state = fixture.vision_adapter.from_hf(reference_mm.state_dict())
+        mapped = fixture.vision_adapter.from_hf(reference.state_dict())
         native_state = fixture.native.state_dict()
-        assert native_state.keys() == mapped_state.keys()
-        assert all(
-            torch.equal(native_state[key], mapped_state[key]) for key in native_state
-        )
-
+        assert native_state.keys() == mapped.keys()
+        assert all(torch.equal(native_state[key], mapped[key]) for key in native_state)
         tokens_T = torch.tensor(
             [3, 60, 61, 61, 61, 61, 59, 4, 60, 62, 59, 5, 6, 7, 8, 9],
             device=target_device,
@@ -808,132 +573,62 @@ def run(*, device: str = "cuda") -> dict[str, Any]:
         mm_types_T = torch.zeros_like(tokens_T)
         mm_types_T[tokens_T == 61] = 1
         mm_types_T[tokens_T == 62] = 2
-        rope_ABT, _ = reference_mm.model.get_rope_index(
+        positions_ABT, _ = reference.model.get_rope_index(
             tokens_T[None], mm_types_T[None], image_grid_NA, video_grid_NA
         )
-        positions_TA = rope_ABT[:, 0].transpose(0, 1).contiguous()
         document_positions_T = torch.arange(tokens_T.numel(), device=target_device)
+        positions_TA = positions_ABT[:, 0].transpose(0, 1).contiguous()
         assert not torch.equal(positions_TA[:, 0], document_positions_T)
         placeholder_T = (tokens_T == 61) | (tokens_T == 62)
-        labels_T = tokens_T.masked_fill(placeholder_T, -100)
         generator = torch.Generator(device="cpu").manual_seed(45)
         image_PF = torch.randn((16, 1536), generator=generator).to(target_device)
         video_PF = torch.randn((4, 1536), generator=generator).to(target_device)
-        for training in (False, True):
-            fixture.native.train(training)
-            reference_mm.train(training)
-            native_image_PF = image_PF.clone().requires_grad_()
-            reference_image_PF = image_PF.clone().requires_grad_()
-            native_video_PF = video_PF.clone().requires_grad_()
-            reference_video_PF = video_PF.clone().requires_grad_()
-            execution = _execute(
-                fixture.native,
-                reference_mm,
-                reference_mm.model.language_model,
-                tokens_T,
-                labels_T,
-                native_kwargs={
-                    "positions": positions_TA,
-                    "document_positions": document_positions_T,
-                    "ple_input_ids": tokens_T,
-                    "pixel_values": native_image_PF,
-                    "pixel_values_videos": native_video_PF,
-                    "grid_thw": image_grid_NA,
-                    "grid_thw_videos": video_grid_NA,
-                    "special_tokens": {"image_id": 61, "video_id": 62},
-                },
-                reference_kwargs={
-                    "position_ids": rope_ABT,
-                    "pixel_values": reference_image_PF,
-                    "pixel_values_videos": reference_video_PF,
-                    "image_grid_thw": image_grid_NA,
-                    "video_grid_thw": video_grid_NA,
-                    "mm_token_type_ids": mm_types_T[None],
-                    "use_cache": False,
-                },
-            )
-            mode = "train" if training else "eval"
-            name = f"multimodal/{mode}"
-            _compare_execution(results, name, execution, multimodal=True)
-            assert native_image_PF.grad is not None and native_video_PF.grad is not None
-            assert native_image_PF.grad.norm() > 0 and native_video_PF.grad.norm() > 0
-            for field, actual, expected in (
-                ("image_patch_gradient", native_image_PF.grad, reference_image_PF.grad),
-                ("video_patch_gradient", native_video_PF.grad, reference_video_PF.grad),
-            ):
-                _compare_gradient(
-                    results,
-                    f"{name}/{field}",
-                    actual,
-                    expected,
-                    atol=GRADIENT_ATOL,
-                    rtol=GRADIENT_RTOL,
-                    bfloat16_compute=True,
-                )
-            assert (
-                torch.count_nonzero(execution.embedding_gradient_TD[placeholder_T]) == 0
-            )
-            assert (
-                torch.count_nonzero(
-                    execution.reference_embedding_gradient_TD[placeholder_T]
-                )
-                == 0
-            )
-            expected_gradients = fixture.vision_adapter.from_hf(
-                {
-                    key: value.grad
-                    for key, value in reference_mm.named_parameters()
-                    if value.grad is not None
-                }
-            )
-            _compare_parameter_gradients(
-                results,
-                f"{name}/parameter_gradient",
-                fixture.native,
-                expected_gradients,
-                atol=GRADIENT_ATOL,
-                rtol=GRADIENT_RTOL,
-                bfloat16_compute=True,
-            )
-            results[f"{name}/loss_values"] = {
-                "native_ce": float(execution.loss.detach()),
-                "reference_ce": float(execution.reference_loss.detach()),
-                "native_image_gradient_norm": float(
-                    native_image_PF.grad.double().norm()
-                ),
-                "native_video_gradient_norm": float(
-                    native_video_PF.grad.double().norm()
-                ),
-            }
-
-    import transformers
-
+        native_image_PF, reference_image_PF = (
+            image_PF.clone().requires_grad_() for _ in range(2)
+        )
+        native_video_PF, reference_video_PF = (
+            video_PF.clone().requires_grad_() for _ in range(2)
+        )
+        results["multimodal"] = _check_decoder(
+            "multimodal",
+            fixture.native,
+            reference,
+            reference.model.language_model,
+            fixture.vision_adapter,
+            tokens_T,
+            tokens_T.masked_fill(placeholder_T, -100),
+            native_kwargs={
+                "positions": positions_TA,
+                "document_positions": document_positions_T,
+                "ple_input_ids": tokens_T,
+                "pixel_values": native_image_PF,
+                "pixel_values_videos": native_video_PF,
+                "grid_thw": image_grid_NA,
+                "grid_thw_videos": video_grid_NA,
+                "special_tokens": {"image_id": 61, "video_id": 62},
+            },
+            reference_kwargs={
+                "position_ids": positions_ABT,
+                "pixel_values": reference_image_PF,
+                "pixel_values_videos": reference_video_PF,
+                "image_grid_thw": image_grid_NA,
+                "video_grid_thw": video_grid_NA,
+                "mm_token_type_ids": mm_types_T[None],
+                "use_cache": False,
+            },
+            placeholder_T=placeholder_T,
+            patch_pairs=(
+                ("image", native_image_PF, reference_image_PF),
+                ("video", native_video_PF, reference_video_PF),
+            ),
+        )
     return {
         "reference_revision": REFERENCE_REVISION,
         "checkpoint_revision": CHECKPOINT_REVISION,
-        "device": device,
         "torch": torch.__version__,
         "torch_revision": torch.version.git_version,
-        "transformers": transformers.__version__,
-        "gpu": torch.cuda.get_device_name(target_device),
-        "cuda": torch.version.cuda,
-        "component_dtype": "float32 (standalone vision)",
-        "backbone_dtype": "torch.bfloat16",
-        "full_token_count": 39,
-        "full_model_indexer_seeds": INDEXER_SEEDS,
-        "input_fixture_seed": FIXTURE_SEED,
-        "vision_weight_seed": VISION_SEED,
-        "multimodal_router_seeds": MM_ROUTER_SEEDS,
-        "expert_compute": "shared BF16 grouped GEMM",
-        "gdn_path": "production GPU kernel",
+        "device": torch.cuda.get_device_name(target_device),
         "seed": 42,
-        "attention_backend": "SDPA MATH",
-        "tolerance_rationale": (
-            "BF16 half-epsilon absolute plus one epsilon relative forward bounds; "
-            "unchanged RMS/infinity and global norm/cosine gradient bounds. "
-            "All routing is observed from unmodified forwards."
-        ),
-        "tokens": fixture.tokens_T.tolist(),
         "results": results,
     }
 

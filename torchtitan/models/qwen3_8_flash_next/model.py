@@ -149,6 +149,11 @@ class Qwen38FlashNextModel(Qwen35Model):
         hyper_connection_mixer: GatedResidual.Config
         norm: Identity.Config  # pyrefly: ignore [bad-override]
 
+        def __post_init__(self) -> None:
+            Qwen35Model.Config.__post_init__(self)
+            if sum(layer.ple is not None for layer in self.layers) != 1:
+                raise ValueError("Flash-Next requires exactly one PLE layer")
+
     state_dict_adapter_cls = Qwen38FlashNextStateDictAdapter
 
     def __init__(self, config: Config):
@@ -167,10 +172,6 @@ class Qwen38FlashNextModel(Qwen35Model):
 
         for table in self.modules():
             if isinstance(table, NGramTable) and table.row_mesh is not None:
-                if precision.reduce_dtype != precision.dtype:
-                    raise ValueError(
-                        "Row-owned PLE requires reduce_dtype to match the master parameter dtype"
-                    )
                 # An ignored-only FSDP child keeps ancestor FSDP units from
                 # gathering this parameter, while retaining their lifecycle.
                 fully_shard(
@@ -236,7 +237,6 @@ class Qwen38FlashNextModel(Qwen35Model):
                     )
                     for tensor in (
                         routing.local_row_ids,
-                        routing.restore_indices,
                         routing.inverse_indices,
                     ):
                         spmd.assert_type(
