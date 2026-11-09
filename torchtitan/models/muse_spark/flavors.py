@@ -627,7 +627,7 @@ def muse_spark_navit_encoder_config(
     pos_emb_grid_w: int = 32,
     use_rope: bool = True,
     rope_theta: float = 10000.0,
-    max_rope_positions: int = 513,
+    max_rope_positions: int = 8193,
     grid_sample_mode: str = "bilinear",
 ) -> NaViTEncoder.Config:
     head_dim = latent_dim // num_heads
