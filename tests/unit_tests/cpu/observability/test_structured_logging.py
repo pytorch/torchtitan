@@ -23,6 +23,7 @@ from unittest import mock
 
 import pytest
 from torchtitan.observability.structured_logger import (
+    gantt_generator,
     step_state,
     structured_logging as sl_mod,
 )
@@ -1802,17 +1803,22 @@ class TestGenerateGanttTrace:
         self._write_jsonl(
             os.path.join(log_dir, "a.jsonl"),
             [
-                {**self._start_rec("work", 1000, "Task-1"), "step": 1},
-                {**self._end_rec("work", 2000, 1.0, "Task-1"), "step": 1},
+                # Step 1 starts the run, so last_steps=1 reads only step 2's part.
+                {"log_type_name": "marker", "time_us": 500, "step": 1},
+                {**self._start_rec("work", 1000, "Task-1"), "step": 2},
+                {**self._end_rec("work", 2000, 1.0, "Task-1"), "step": 2},
             ],
         )
         with open(os.path.join(log_dir, "a.jsonl"), "a") as f:
             f.write('{"log_type_name": "work_start", "time_us": 30')
 
-        trace = generate_gantt_trace(log_dir, os.path.join(str(tmp_path), "g.json"))
-        assert [e["name"] for e in trace["traceEvents"] if e.get("ph") == "X"] == [
-            "work"
-        ]
+        for last_steps in (None, 1):
+            trace = generate_gantt_trace(
+                log_dir, os.path.join(str(tmp_path), "g.json"), last_steps=last_steps
+            )
+            assert [e["name"] for e in trace["traceEvents"] if e.get("ph") == "X"] == [
+                "work"
+            ]
 
     def test_lost_start_record_keeps_the_outer_span(self, tmp_path):
         """An _end whose _start was not read (e.g. the span started before the part
@@ -1863,6 +1869,115 @@ class TestGenerateGanttTrace:
             if e.get("ph") == "X" or e["name"] == "thread_name"
         )
 
+    # ------------------------------------------------------------------
+    # The step window (last_steps) and older runs' files.
+    # ------------------------------------------------------------------
+
+    def test_last_steps_renders_from_the_first_record_of_the_window(
+        self, tmp_path, monkeypatch
+    ):
+        """last_steps=2 of steps 1..3 starts at step 2's first record; a span that
+        started earlier is cut there and keeps its full duration_ms."""
+        # Small enough for this tiny file that both binary searches run: the tail read
+        # sees only the last records, and the read starts past byte 0.
+        monkeypatch.setattr(gantt_generator, "_TAIL_BYTES", 300)
+        monkeypatch.setattr(gantt_generator, "_WINDOW_MARGIN_US", 100)
+        records = [
+            self._start_rec("engine_loop", 0, "Task-9"),
+            # Starts just before the window; its end record was stamped 300 us late,
+            # so end - duration_ms (2250) would put it after its child.
+            {**self._start_rec("prefetch", 1950, "Task-7"), "step": 1},
+            {**self._start_rec("fetch", 2050, "Task-7"), "step": 2},
+            {**self._end_rec("fetch", 2100, 0.05, "Task-7"), "step": 2},
+            {**self._end_rec("prefetch", 2700, 0.45, "Task-7"), "step": 2},
+        ]
+        for step in (1, 2, 3):
+            start = step * 1000
+            records += [
+                {**self._start_rec("train_step", start, "trainer"), "step": step},
+                {
+                    "log_type_name": f"marker_{step}",
+                    "time_us": start + 200,
+                    "step": step,
+                },
+                {
+                    **self._end_rec("train_step", start + 500, 0.5, "trainer"),
+                    "step": step,
+                },
+            ]
+        records.append({**self._end_rec("engine_loop", 3600, 3.6, "Task-9"), "step": 3})
+        records.sort(key=lambda record: record["time_us"])  # files are in time order
+        log_dir = os.path.join(str(tmp_path), "structured_logs")
+        self._write_jsonl(os.path.join(log_dir, "a.jsonl"), records)
+
+        trace = generate_gantt_trace(
+            log_dir, os.path.join(str(tmp_path), "g.json"), last_steps=2
+        )
+
+        spans = {
+            (e["name"], e["ts"], e["dur"], e["args"]["duration_ms"])
+            for e in trace["traceEvents"]
+            if e.get("ph") == "X"
+        }
+        assert spans == {
+            ("train_step", 2000, 500, "0.50"),
+            ("train_step", 3000, 500, "0.50"),
+            ("engine_loop", 2000, 1600, "3.60"),
+            ("prefetch", 2000, 700, "0.45"),
+            ("fetch", 2050, 50, "0.05"),
+        }
+        instants = {e["name"] for e in trace["traceEvents"] if e.get("ph") == "i"}
+        assert instants == {"marker_2", "marker_3"}
+
+        # last_steps=3 covers the whole run: render everything, setup included.
+        trace = generate_gantt_trace(
+            log_dir, os.path.join(str(tmp_path), "g.json"), last_steps=3
+        )
+        spans = {
+            (e["name"], e["ts"], e["dur"])
+            for e in trace["traceEvents"]
+            if e.get("ph") == "X"
+        }
+        assert ("engine_loop", 0, 3600) in spans
+
+        # A run resumed at step 101 that stopped at 103 also renders whole.
+        resumed_dir = os.path.join(str(tmp_path), "resumed")
+        resumed_records = [
+            self._start_rec("checkpoint_load", 0, "Task-1"),
+            self._end_rec("checkpoint_load", 500, 0.5, "Task-1"),
+        ]
+        for step in (101, 102, 103):
+            resumed_records += [
+                {**self._start_rec("train_step", step * 1000, "trainer"), "step": step},
+                {
+                    **self._end_rec("train_step", step * 1000 + 500, 0.5, "trainer"),
+                    "step": step,
+                },
+            ]
+        self._write_jsonl(os.path.join(resumed_dir, "a.jsonl"), resumed_records)
+        trace = generate_gantt_trace(
+            resumed_dir, os.path.join(str(tmp_path), "r.json"), last_steps=10
+        )
+        assert "checkpoint_load" in {
+            e["name"] for e in trace["traceEvents"] if e.get("ph") == "X"
+        }
+
+        # Logs without any step (a run that stopped before step 1) render everything.
+        unstepped_dir = os.path.join(str(tmp_path), "unstepped")
+        self._write_jsonl(
+            os.path.join(unstepped_dir, "a.jsonl"),
+            [
+                self._start_rec("setup", 0, "Task-1"),
+                self._end_rec("setup", 500, 0.5, "Task-1"),
+            ],
+        )
+        trace = generate_gantt_trace(
+            unstepped_dir, os.path.join(str(tmp_path), "u.json"), last_steps=2
+        )
+        assert [e["name"] for e in trace["traceEvents"] if e.get("ph") == "X"] == [
+            "setup"
+        ]
+
     def test_processes_sort_numbers_as_numbers(self, tmp_path):
         """Processes sort by name with numbers as numbers: rank 2 before rank 10."""
         log_dir = os.path.join(str(tmp_path), "structured_logs")
@@ -1892,6 +2007,46 @@ class TestGenerateGanttTrace:
         assert [
             name_by_pid[pid] for pid in sorted(name_by_pid, key=sort_index_by_pid.get)
         ] == ["trainer rank 1", "trainer rank 2", "trainer rank 10"]
+
+    def test_files_modified_after_us_skips_older_runs(self, tmp_path):
+        """Two runs in one dump folder: both files would be named
+        "rl_generator rank 0", so each keeps its file suffix; skipping the older
+        file leaves the plain name."""
+        log_dir = os.path.join(str(tmp_path), "structured_logs")
+        old_path = os.path.join(
+            log_dir, "rl_generator.global_rank_0.20261101-080000-AAAAAA.jsonl"
+        )
+        new_path = os.path.join(
+            log_dir, "rl_generator.global_rank_0.20261108-111545-BBBBBB.jsonl"
+        )
+        for path in (old_path, new_path):
+            self._write_jsonl(
+                path,
+                [
+                    self._start_rec("generate", 1000, "Task-1"),
+                    self._end_rec("generate", 2000, 1.0, "Task-1"),
+                ],
+            )
+        # The older run last wrote its file 1e6 s after the epoch; the newer one, now.
+        os.utime(old_path, (1_000_000, 1_000_000))
+        process_names = lambda trace: sorted(
+            e["args"]["name"]
+            for e in trace["traceEvents"]
+            if e["name"] == "process_name"
+        )
+
+        trace = generate_gantt_trace(log_dir, os.path.join(str(tmp_path), "g.json"))
+        assert process_names(trace) == [
+            "rl_generator rank 0 (AAAAAA)",
+            "rl_generator rank 0 (BBBBBB)",
+        ]
+
+        trace = generate_gantt_trace(
+            log_dir,
+            os.path.join(str(tmp_path), "g.json"),
+            files_modified_after_us=2_000_000 * 1_000_000,
+        )
+        assert process_names(trace) == ["rl_generator rank 0"]
 
 
 # ---------------------------------------------------------------------------

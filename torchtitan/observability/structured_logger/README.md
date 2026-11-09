@@ -170,9 +170,11 @@ from torchtitan.observability.structured_logger.gantt_generator import (
 )
 
 generate_gantt_trace("outputs/structured_logs/", "outputs/analysis/gantt.json")
+# Only the last 10 steps of a long run:
+generate_gantt_trace("outputs/structured_logs/", "outputs/analysis/gantt.json", last_steps=10)
 ```
 
-Reads every rank's JSONL, pairs `_start` / `_end`, and writes a Chrome Trace JSON. Open in [Perfetto](https://ui.perfetto.dev).
+Reads every rank's JSONL (with `last_steps`, only the end of each file), pairs `_start` / `_end`, and writes a Chrome Trace JSON. Open in [Perfetto](https://ui.perfetto.dev).
 
 Example dummy ASCII sketch:
 ```

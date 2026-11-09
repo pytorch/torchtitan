@@ -6,19 +6,20 @@
 
 """Merge per-rank trace JSONL into a Chrome Trace JSON for Perfetto.
 
-TODO: not tuned for thousands of ranks or long runs. If that starts
-to hurt, cap record count with a CLI arg, lower peak memory, or
-assign tids online in the formatter.
+TODO: not tuned for thousands of ranks, or for long runs rendered without
+``last_steps``.
 """
 
 import heapq
 import json
 
 import logging
+import math
 import os
 import re
+import time
 from collections import Counter, defaultdict
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from glob import glob
 from typing import Any, BinaryIO
 
@@ -33,12 +34,18 @@ _UNNAMED_TASK_RE = re.compile(r"^Task-\d+$")
 _FILE_NAME_RE = re.compile(
     r"^(?P<logger_source>.+)\.global_rank_(?P<rank>\d+)\.\d{8}-\d{6}-\w+$"
 )
+# Each file's last step is read from its last 64 KiB (about 80 records).
+_TAIL_BYTES = 64 * 1024
+# With a window, each file is read from 1 s before it (see _read_records).
+_WINDOW_MARGIN_US = 1_000_000
 
 
 def generate_gantt_trace(
     log_dir: str,
     output_path: str,
     *,
+    last_steps: int | None = None,
+    files_modified_after_us: int | None = None,
     max_rows_per_label: int | None = 8,
 ) -> dict:
     """Merge per-rank JSONL into a Chrome Trace JSON for Perfetto.
@@ -70,8 +77,10 @@ def generate_gantt_trace(
 
     Example::
 
-        # An RL run's controller process in Perfetto:
-        generate_gantt_trace("outputs/rl/structured_logs", "outputs/rl/gantt.json")
+        # The last 10 steps of a 1000-step RL run, the controller process in Perfetto:
+        generate_gantt_trace(
+            "outputs/rl/structured_logs", "outputs/rl/gantt.json", last_steps=10
+        )
         #   rl_controller rank 0
         #     batcher             take_finalized | batcher_add_group | ...
         #     trainer             sync_log_step | train_step | metrics_log | ...
@@ -81,6 +90,14 @@ def generate_gantt_trace(
     Args:
         log_dir: Directory containing per-rank ``*.jsonl`` trace files.
         output_path: Path to write the merged Chrome Trace JSON.
+        last_steps: Render from the first record of step ``max_step - last_steps + 1`` to
+            the end. A span that started earlier is cut at that time; its ``duration_ms``
+            keeps the full length. Only that part of each file is read, so the cost
+            does not grow with the run. None, logs without any step, or a run with at
+            most ``last_steps`` steps (a resumed run too) render everything, setup
+            included.
+        files_modified_after_us: Skip files last written before this time, in epoch
+            microseconds, e.g. an earlier run's files in a reused dump folder.
         max_rows_per_label: Rows to show per label; the spans of tasks on other rows are
             left out and counted in the log. 8 shows how busy a label is and keeps a
             generator with 768 requests in flight on one screen. None shows every row.
@@ -89,12 +106,27 @@ def generate_gantt_trace(
         The Chrome Trace dict (``{"traceEvents": [...]}``). Also
         written to ``output_path``.
     """
+    start_time = time.perf_counter()
+    if last_steps is not None and last_steps < 1:
+        raise ValueError(f"last_steps must be None or >= 1, got {last_steps}")
     if max_rows_per_label is not None and max_rows_per_label < 1:
         raise ValueError(
             f"max_rows_per_label must be None or >= 1, got {max_rows_per_label}"
         )
     paths = sorted(glob(os.path.join(log_dir, "*.jsonl")))
-    paired, instants = _collect_paired_and_instants(_read_records(paths))
+    if files_modified_after_us is not None:
+        paths = [
+            path
+            for path in paths
+            if os.stat(path).st_mtime_ns // 1000 >= files_modified_after_us
+        ]
+    window_start_us = (
+        None if last_steps is None else _find_window_start_us(paths, last_steps)
+    )
+    paired, instants = _collect_paired_and_instants(
+        _read_records(paths, window_start_us=window_start_us),
+        window_start_us=window_start_us,
+    )
 
     process_names = _process_names({event["source"] for event in [*paired, *instants]})
     sources = sorted(
@@ -122,7 +154,10 @@ def generate_gantt_trace(
         json.dump(trace, f)
 
     logger.info(f"Chrome Trace: {output_path}")
-    logger.info(f"  {len(events)} events from {len(sources)} sources")
+    logger.info(
+        f"  {len(events)} events from {len(sources)} sources, "
+        f"{time.perf_counter() - start_time:.1f} s"
+    )
     logger.info("  View in: chrome://tracing or https://ui.perfetto.dev")
     return trace
 
@@ -314,8 +349,9 @@ def _process_names(sources: set[str]) -> dict[str, str]:
     }
 
 
-def _read_records(paths: list[str]) -> Iterator[dict]:
-    """Yield every record of ``paths``, one file after another.
+def _read_records(paths: list[str], *, window_start_us: int | None) -> Iterator[dict]:
+    """Yield the records of ``paths``, one file after another, from just before
+    ``window_start_us`` (None: from the start).
 
     Each record gets a ``"_source_file"`` key (the filename minus ``.jsonl``), so the
     caller can group records by process. An unfinished last line (a process killed
@@ -325,11 +361,115 @@ def _read_records(paths: list[str]) -> Iterator[dict]:
         source = os.path.basename(path).removesuffix(".jsonl")
         with open(path, "rb") as file:
             size = os.fstat(file.fileno()).st_size
+            if window_start_us is not None:
+                # Start 1 s early: a span that started just before the window then pairs
+                # with its start record. Without it, its start is end - duration_ms,
+                # which lands after its own child when the end record was stamped late.
+                _seek_first_line(
+                    file,
+                    lambda record: record["time_us"],
+                    window_start_us - _WINDOW_MARGIN_US,
+                )
             while (record := _next_record(file)) is not None:
                 record["_source_file"] = source
                 yield record
             if file.tell() < size:
                 logger.warning(f"Gantt skipped the unfinished last line of {path}")
+
+
+def _find_window_start_us(paths: list[str], last_steps: int) -> int | None:
+    """Return when the last ``last_steps`` steps start: the earliest first record of
+    those steps over all files. None (render everything) if no file ends with a stepped
+    record, or if the run has at most ``last_steps`` steps, counted from its first step
+    (a run resumed from a checkpoint starts after step 1).
+
+    The last step comes from the end of each file. The run's first step and each file's
+    first record of the window come from binary searches, so a 1000-step run costs the
+    same as a 10-step one.
+
+    Example::
+
+        # steps by line (from line 0)   file A: [None, 1, 1, 2, 2, 3]   file B: [1, 2, 3, 3]
+        _find_window_start_us([A, B], last_steps=2)
+        # -> last step 3, window from step 2: min(time_us of A line 3, B line 1)
+    """
+    tail_records = []
+    for path in paths:
+        with open(path, "rb") as file:
+            _seek_line(file, os.fstat(file.fileno()).st_size - _TAIL_BYTES)
+            while (record := _next_record(file)) is not None:
+                if record.get("step") is not None:
+                    tail_records.append(record)
+    if not tail_records:
+        return None
+
+    first_step = max(record["step"] for record in tail_records) - last_steps + 1
+    # The run's first step over all files; the tails' steps count too, so the min
+    # always has one.
+    run_first_steps = [record["step"] for record in tail_records]
+    for path in paths:
+        with open(path, "rb") as file:
+            # Steps are >= 0, so this finds the file's first stepped record.
+            _seek_first_line(file, lambda record: record.get("step"), 0)
+            if (record := _next_record(file)) is not None:
+                run_first_steps.append(record["step"])
+    if first_step <= min(run_first_steps):
+        return None
+    # The tails' records of the window count too, so the min below always has one.
+    first_times_us = [
+        record["time_us"] for record in tail_records if record["step"] >= first_step
+    ]
+    for path in paths:
+        with open(path, "rb") as file:
+            _seek_first_line(file, lambda record: record.get("step"), first_step)
+            record = _next_record(file)
+            if record is not None:
+                first_times_us.append(record["time_us"])
+    return min(first_times_us)
+
+
+def _seek_first_line(
+    file: BinaryIO, key: Callable[[dict], int | None], target: int
+) -> None:
+    """Move ``file`` to its first line whose ``key`` is >= ``target``, by binary search.
+
+    Keys must rise through the file, as ``time_us`` does. ``step`` does too, with two
+    exceptions:
+    - A record without a step counts as below ``target``. A process logs those only
+      before its first ``set_step``; after it, ``get_step`` falls back to that step.
+    - A task keeps the step it was created in (asyncio copies the step ContextVar), so
+      an older step can follow a newer one. Such a record can only move the result
+      later, and the caller takes the earliest result over all files.
+
+    Example::
+
+        # steps by line (from line 0): [None, 1, 1, 2, 2, 3]
+        _seek_first_line(file, lambda record: record.get("step"), 2)  # -> at line 3
+    """
+    # TODO: probe the largest step in a block of records, so that a file with many
+    # records of older tasks can't hide the newer ones.
+    low, high = 0, os.fstat(file.fileno()).st_size
+    while low < high:
+        middle = (low + high) // 2
+        _seek_line(file, middle)
+        record = _next_record(file)
+        value = None if record is None else key(record)
+        # The end of the file counts as >= target; a record without the key, as below.
+        if record is None or (value is not None and value >= target):
+            high = middle
+        else:
+            low = middle + 1
+    _seek_line(file, low)
+
+
+def _seek_line(file: BinaryIO, offset: int) -> None:
+    """Move ``file`` to the first line that starts at or after byte ``offset``."""
+    if offset <= 0:
+        file.seek(0)
+    else:
+        # Byte offset - 1 is a newline when a line starts at offset.
+        file.seek(offset - 1)
+        file.readline()
 
 
 def _next_record(file: BinaryIO) -> dict | None:
@@ -345,7 +485,7 @@ def _next_record(file: BinaryIO) -> dict | None:
 
 
 def _collect_paired_and_instants(
-    records: Iterator[dict],
+    records: Iterator[dict], *, window_start_us: int | None
 ) -> tuple[list[dict], list[dict]]:
     """Pair ``_start`` / ``_end`` via a per-(source, task_name, span type) LIFO stack.
 
@@ -354,8 +494,8 @@ def _collect_paired_and_instants(
     process are doing. Records outside any asyncio task (SPMD code, plain
     threads) pair on stacks per native thread, as task ``"thread {tid}"``.
     A span runs from its ``_start`` record's ``time_us`` to its ``_end``
-    record's; an ``_end`` without a ``_start`` starts ``duration_ms``
-    before its end.
+    record's; an ``_end`` without a ``_start`` (cut off by the window)
+    starts ``duration_ms`` before its end.
 
     Instants include ``log_trace_instant`` markers, ``log_trace_scalar``
     metric values, and ``_error`` records.
@@ -378,29 +518,37 @@ def _collect_paired_and_instants(
             {"name": "loss=2.5000", "time_us": 520, ...},
         ]
 
+        # window_start_us=510: fwd_bwd is dropped (it ended at 500); step is
+        # kept with start_ts=510 and duration_ms=0.5; the loss instant is kept.
+
     ``paired`` is in ``_end``-record order: ``fwd_bwd`` ends first.
 
     Args:
         records: All JSONL records across all sources, in the order
             produced by ``_read_records``.
+        window_start_us: Drop spans that end before this time and instants
+            before it; a span that starts before it starts at it. None keeps
+            everything.
 
     Returns:
         ``(paired, instants)`` -- paired spans in ``_end``-record order and
         instant events in record order.
     """
+    # -inf keeps every record.
+    min_time_us = -math.inf if window_start_us is None else window_start_us
     paired: list[dict[str, Any]] = []
     instants: list[dict[str, Any]] = []
     # LIFO stack per (source, task_name, span type).
     pending: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
 
-    for r in records:
-        event_type = r.get("log_type_name", "")
-        log_type = r.get("log_type", "")
-        time_us = r["time_us"]
-        step = r.get("step")
-        task_name = r.get("task_name") or f"thread {r.get('tid')}"
-        source = r["_source_file"]
-        caller = r.get("caller")
+    for record in records:
+        event_type = record.get("log_type_name", "")
+        log_type = record.get("log_type", "")
+        time_us = record["time_us"]
+        step = record.get("step")
+        task_name = record.get("task_name") or f"thread {record.get('tid')}"
+        source = record["_source_file"]
+        caller = record.get("caller")
 
         # Point-in-time records (log_trace_instant, log_trace_scalar) carry
         # log_type=instant. Branch on intent before suffix matching so that
@@ -408,8 +556,8 @@ def _collect_paired_and_instants(
         # training_start) don't get wrongly routed to the span-pair stack.
         if log_type == str(LogType.INSTANT):
             if event_type == "metric_value":
-                event_name = r.get("event_name", "metric")
-                value = r.get("value") or 0
+                event_name = record.get("event_name", "metric")
+                value = record.get("value") or 0
                 display_name = f"{event_name}={value:.4f}"
             else:
                 display_name = event_type
@@ -425,21 +573,14 @@ def _collect_paired_and_instants(
             )
         elif event_type.endswith("_start"):
             type_name = event_type.removesuffix("_start")
-            display_name = r.get("event_name") or type_name
+            display_name = record.get("event_name") or type_name
             pending[(source, task_name, type_name)].append(
-                {
-                    "ts": time_us,
-                    "step": step,
-                    "display_name": display_name,
-                    "task_name": task_name,
-                    "source": source,
-                    "caller": caller,
-                }
+                {"ts": time_us, "display_name": display_name, "caller": caller}
             )
 
         elif event_type.endswith("_end"):
             type_name = event_type.removesuffix("_end")
-            duration_ms = r.get("value", 0)
+            duration_ms = record.get("value", 0)
             stack = pending.get((source, task_name, type_name))
             start = stack.pop() if stack else None
             # The end record's own time, not start + duration_ms: a record is stamped a
@@ -450,18 +591,19 @@ def _collect_paired_and_instants(
                 start_ts = start["ts"]
             else:
                 start_ts = end_ts - (duration_ms or 0) * 1000
-            paired.append(
-                {
-                    "task_name": (start or {}).get("task_name", task_name),
-                    "source": (start or {}).get("source", source),
-                    "start_ts": start_ts,
-                    "end_ts": end_ts,
-                    "display_name": (start or {}).get("display_name", type_name),
-                    "step": step,
-                    "duration_ms": duration_ms,
-                    "caller": (start or {}).get("caller", caller),
-                }
-            )
+            if end_ts >= min_time_us:
+                paired.append(
+                    {
+                        "task_name": task_name,
+                        "source": source,
+                        "start_ts": max(start_ts, min_time_us),
+                        "end_ts": end_ts,
+                        "display_name": (start or {}).get("display_name", type_name),
+                        "step": step,
+                        "duration_ms": duration_ms,
+                        "caller": (start or {}).get("caller", caller),
+                    }
+                )
 
         elif event_type.endswith("_error"):
             type_name = event_type.removesuffix("_error")
@@ -490,6 +632,7 @@ def _collect_paired_and_instants(
                 }
             )
 
+    instants = [instant for instant in instants if instant["time_us"] >= min_time_us]
     return paired, instants
 
 
