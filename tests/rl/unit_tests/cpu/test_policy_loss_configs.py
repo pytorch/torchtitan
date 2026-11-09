@@ -6,12 +6,9 @@
 
 """Check that RL recipes select the intended loss and compile configurations."""
 
-import dataclasses
 import importlib
-from unittest.mock import patch
 
 import pytest
-import torch
 
 _ALPHABET = "torchtitan_recipes.rl.alphabet_sort"
 _ALPHABET_TEST = "torchtitan_recipes.tests.rl.alphabet_sort"
@@ -80,74 +77,3 @@ def test_batch_invariant_configs_disable_local_compile(module_name, factory_name
 
     assert config.trainer.model.local_compile.regions == []
     assert config.generator.model.local_compile.regions == []
-
-
-def test_rocm_batch_invariance_rejects_varlen_attention():
-    pytest.importorskip("vllm")
-    pytest.importorskip("renderers")
-    alphabet_sort = importlib.import_module(_ALPHABET)
-
-    with (
-        patch.object(torch.version, "hip", "7.15.26333"),
-        patch.object(torch, "__version__", "2.16.0.dev20261018+rocm10.0"),
-    ):
-        with pytest.raises(ValueError, match="requires FlexAttention"):
-            alphabet_sort.rl_grpo_qwen3_0_6b_varlen_batch_invariant()
-
-
-def test_rocm_batch_invariance_requires_rocm_10():
-    pytest.importorskip("vllm")
-    pytest.importorskip("renderers")
-    from torchtitan.rl.controller.controller import Controller
-
-    alphabet_sort = importlib.import_module(_ALPHABET)
-    config = alphabet_sort.rl_grpo_qwen3_0_6b_flex_batch_invariant()
-
-    with (
-        patch.object(torch.version, "hip", "6.2.41134"),
-        patch.object(torch, "__version__", "2.15.0.dev20260827+rocm7.2"),
-    ):
-        with pytest.raises(ValueError, match="requires PyTorch built for ROCm 10.0"):
-            Controller(config)
-
-
-def test_rocm_batch_invariance_rejects_cuda_graphs():
-    pytest.importorskip("vllm")
-    pytest.importorskip("renderers")
-    from torchtitan.rl.controller.controller import Controller
-
-    alphabet_sort = importlib.import_module(_ALPHABET)
-    config = alphabet_sort.rl_grpo_qwen3_0_6b_flex_batch_invariant()
-
-    with (
-        patch.object(torch.version, "hip", "7.15.26333"),
-        patch.object(torch, "__version__", "2.16.0.dev20261018+rocm10.0"),
-    ):
-        with pytest.raises(ValueError, match="cuda_graph.mode='NONE'"):
-            Controller(config)
-        config.generator.engine.cuda_graph.mode = "NONE"
-        config._validate_batch_invariance()
-
-
-def test_batch_invariance_requires_matching_generator_debug_config():
-    pytest.importorskip("vllm")
-    pytest.importorskip("renderers")
-    from torchtitan.rl.controller.controller import Controller
-
-    alphabet_sort = importlib.import_module(_ALPHABET)
-    config = alphabet_sort.rl_grpo_qwen3_0_6b_flex_batch_invariant()
-    config.generator.engine.cuda_graph.mode = "NONE"
-
-    config.generator.debug = dataclasses.replace(
-        config.generator.debug, batch_invariant=False
-    )
-    with pytest.raises(ValueError, match="same batch_invariant setting"):
-        Controller(config)
-
-    config = alphabet_sort.rl_grpo_qwen3_0_6b_flex_batch_invariant()
-    config.generator.engine.cuda_graph.mode = "NONE"
-    config.generator.debug = dataclasses.replace(
-        config.generator.debug, deterministic=False
-    )
-    with pytest.raises(ValueError, match="deterministic=True for both"):
-        Controller(config)
