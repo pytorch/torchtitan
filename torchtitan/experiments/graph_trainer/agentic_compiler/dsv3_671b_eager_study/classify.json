@@ -1,0 +1,557 @@
+{
+ "G-006": {
+  "pass": "lift_fusion_region_g006",
+  "sites": 58,
+  "layers_per_site": {
+   "1": 58
+  },
+  "phase": {
+   "backward": 3422
+  },
+  "module": {
+   "layers.*.feed_forward.router.gate": 1450,
+   "layers.*.feed_forward.router.aux_loss": 1044,
+   "layers.*.feed_forward.router": 696,
+   "<none>": 174,
+   "layers.*.feed_forward.routed_experts": 58
+  },
+  "torchtitan_line": {
+   "models/common/linear/hi_mid_lo_linear.py:117 forward": 1450,
+   "distributed/local_compile.py:96 wrapped": 812,
+   "models/common/moe/moe.py:291 forward": 348,
+   "models/common/moe/moe.py:607 forward": 116,
+   "models/common/moe/moe.py:606 forward": 116,
+   "models/common/moe/moe.py:285 forward": 116,
+   "models/common/moe/moe.py:257 forward": 116,
+   "models/common/dist_moe/routed_experts.py:196 forward": 58,
+   "models/common/moe/moe.py:292 forward": 58,
+   "models/common/moe/moe.py:289 forward": 58
+  },
+  "input_from": {
+   "glue | layers.*.feed_forward.router.aux_loss | rec": 464,
+   "glue | layers.*.feed_forward.router | rec": 406,
+   "glue | layers.*.feed_forward.routed_experts | bac": 58,
+   "glue | layers.*.feed_forward.routed_experts | rec": 58,
+   "glue | layers.*.feed_forward.router | for": 58
+  },
+  "output_to": {
+   "GEMM | layers.*.feed_forward.router.gate | bac": 232
+  }
+ },
+ "G-020": {
+  "pass": "lift_fusion_region_g020",
+  "sites": 58,
+  "layers_per_site": {
+   "1": 58
+  },
+  "phase": {
+   "recompute": 1740
+  },
+  "module": {
+   "layers.*.feed_forward.router.aux_loss": 1276,
+   "layers.*.feed_forward.router": 406,
+   "layers.*.feed_forward.routed_experts": 58
+  },
+  "torchtitan_line": {
+   "distributed/local_compile.py:96 wrapped": 580,
+   "models/common/moe/moe.py:598 forward": 290,
+   "models/common/moe/moe.py:607 forward": 290,
+   "models/common/moe/moe.py:257 forward": 116,
+   "models/common/moe/moe.py:289 forward": 116,
+   "models/common/moe/moe.py:606 forward": 116,
+   "models/common/moe/moe.py:285 forward": 58,
+   "models/common/moe/moe.py:291 forward": 58,
+   "models/common/moe/moe.py:292 forward": 58,
+   "models/common/dist_moe/routed_experts.py:196 forward": 58
+  },
+  "input_from": {
+   "glue | layers.*.feed_forward.router | for": 116,
+   "GEMM | layers.*.feed_forward.router.gate | for": 58,
+   "glue | layers.*.feed_forward.routed_experts | rec": 58,
+   "graph input | <none> | for": 58,
+   "glue | <none> | for": 58
+  },
+  "output_to": {
+   "glue | layers.*.feed_forward.router.aux_loss | bac": 580,
+   "glue | layers.*.feed_forward.router | bac": 290,
+   "glue | layers.*.feed_forward.routed_experts | bac": 58
+  }
+ },
+ "G-001": {
+  "pass": "lift_fusion_region_g001",
+  "sites": 58,
+  "layers_per_site": {
+   "1": 58
+  },
+  "phase": {
+   "forward": 2900
+  },
+  "module": {
+   "layers.*.feed_forward.router": 1508,
+   "layers.*.feed_forward.router.aux_loss": 1218,
+   "layers.*.feed_forward.routed_experts": 174
+  },
+  "torchtitan_line": {
+   "models/common/moe/moe.py:272 forward": 812,
+   "distributed/local_compile.py:96 wrapped": 580,
+   "models/common/moe/moe.py:598 forward": 290,
+   "models/common/moe/moe.py:607 forward": 232,
+   "models/common/moe/moe.py:310 forward": 174,
+   "models/common/moe/moe.py:289 forward": 116,
+   "models/common/moe/moe.py:298 forward": 116,
+   "models/common/moe/moe.py:606 forward": 116,
+   "models/common/moe/moe.py:257 forward": 58,
+   "models/common/moe/moe.py:285 forward": 58,
+   "models/common/moe/moe.py:291 forward": 58,
+   "models/common/moe/moe.py:292 forward": 58,
+   "models/common/moe/moe.py:314 forward": 58,
+   "models/common/dist_moe/routed_experts.py:194 forward": 58,
+   "models/common/dist_moe/routed_experts.py:195 forward": 58,
+   "models/common/dist_moe/routed_experts.py:196 forward": 58
+  },
+  "input_from": {
+   "graph input | <none> | for": 232,
+   "GEMM | layers.*.feed_forward.router.gate | for": 58,
+   "glue | <none> | for": 58
+  },
+  "output_to": {
+   "glue | layers.*.feed_forward.routed_experts | for": 116,
+   "glue | layers.*.feed_forward.router | bac": 58,
+   "glue | layers.*.feed_forward.router | rec": 58,
+   "glue | layers.*.feed_forward.routed_experts | rec": 58,
+   "glue | layers.*.feed_forward.router.aux_loss | rec": 58,
+   "glue | layers.*.feed_forward.router | for": 58,
+   "glue | layers.*.feed_forward.router.aux_loss | for": 58
+  }
+ },
+ "G-047": {
+  "pass": "lift_fusion_region_g047",
+  "sites": 122,
+  "layers_per_site": {
+   "1": 122
+  },
+  "phase": {
+   "forward": 671,
+   "recompute": 671
+  },
+  "module": {
+   "layers.*.attention.wq_a": 549,
+   "layers.*.attention.wkv_a": 488,
+   "layers.*.attention_norm": 305
+  },
+  "torchtitan_line": {
+   "quantization/mxfp8/linear.py:162 forward": 732,
+   "models/common/nn_modules.py:155 forward": 305,
+   "quantization/mxfp8/linear.py:168 forward": 244,
+   "experiments/graph_trainer/simple_fsdp.py:366 forward": 61
+  },
+  "innermost_line": {
+   "torch/nn/modules/normalization.py:427 forward": 305,
+   "torch/distributed/tensor/_redistribute.py:1993 forward": 61
+  },
+  "input_from": {
+   "glue | layers.* | for": 120,
+   "glue | layers.*.attention.wq_a | for": 61,
+   "glue | layers.*.attention.wq_a | bac": 61,
+   "glue | tok_embeddings | for": 2
+  },
+  "output_to": {
+   "GEMM | layers.*.attention.wkv_a | for": 122,
+   "GEMM | layers.*.attention.wq_a | for": 122,
+   "GEMM | layers.*.attention.wkv_a | rec": 122,
+   "GEMM | layers.*.attention.wq_a | rec": 122,
+   "glue | layers.*.attention.wq_a | bac": 61,
+   "glue | layers.*.attention.wkv_a | bac": 61,
+   "glue | layers.*.attention_norm | rec": 61
+  }
+ },
+ "G-082": {
+  "pass": "lift_fusion_region_g082",
+  "sites": 122,
+  "layers_per_site": {
+   "1": 122
+  },
+  "phase": {
+   "forward": 488,
+   "recompute": 488
+  },
+  "module": {
+   "layers.*.feed_forward.shared_experts.w13": 464,
+   "layers.*.ffn_norm": 305,
+   "layers.*": 122,
+   "layers.*.attention.wq_a": 61,
+   "layers.*.feed_forward.w13": 24
+  },
+  "torchtitan_line": {
+   "quantization/mxfp8/linear.py:162 forward": 366,
+   "models/common/nn_modules.py:155 forward": 305,
+   "models/deepseek_v3/model.py:53 forward": 122,
+   "quantization/mxfp8/linear.py:168 forward": 122,
+   "experiments/graph_trainer/simple_fsdp.py:366 forward": 61
+  },
+  "innermost_line": {
+   "torch/nn/modules/normalization.py:427 forward": 305,
+   "torch/distributed/tensor/_redistribute.py:1993 forward": 61
+  },
+  "input_from": {
+   "glue | layers.* | for": 120,
+   "glue | layers.*.attention.wq_a | for": 61,
+   "GEMM | layers.*.attention.wo | for": 61,
+   "GEMM | layers.*.attention.wo | rec": 61,
+   "glue | layers.*.attention.wq_a | bac": 61,
+   "glue | tok_embeddings | for": 2
+  },
+  "output_to": {
+   "GEMM | layers.*.feed_forward.router.gate | bac": 174,
+   "GEMM | layers.*.feed_forward.shared_experts.w13 | for": 116,
+   "GEMM | layers.*.feed_forward.shared_experts.w13 | rec": 116,
+   "glue | layers.* | for": 61,
+   "glue | layers.*.ffn_norm | bac": 61,
+   "glue | layers.*.ffn_norm | rec": 61,
+   "glue | layers.*.feed_forward.routed_experts | for": 58,
+   "GEMM | layers.*.feed_forward.router.gate | for": 58,
+   "glue | layers.*.feed_forward.shared_experts.w13 | bac": 58,
+   "GEMM | layers.*.feed_forward.w13 | for": 6,
+   "GEMM | layers.*.feed_forward.w13 | rec": 6,
+   "glue | layers.*.feed_forward.w13 | bac": 3
+  }
+ },
+ "G-049": {
+  "pass": "lift_fusion_region_g049",
+  "sites": 121,
+  "layers_per_site": {
+   "1": 61,
+   "2": 60
+  },
+  "phase": {
+   "backward": 1573
+  },
+  "module": {
+   "layers.*.attention.wo": 488,
+   "layers.*.feed_forward.shared_experts.w2": 456,
+   "layers.*.ffn_norm": 244,
+   "layers.*.attention_norm": 240,
+   "<none>": 121,
+   "layers.*.feed_forward.w2": 24
+  },
+  "torchtitan_line": {
+   "quantization/mxfp8/linear.py:129 forward": 968,
+   "models/common/nn_modules.py:155 forward": 484
+  },
+  "innermost_line": {
+   "torch/nn/modules/normalization.py:427 forward": 484
+  },
+  "input_from": {
+   "glue | <none> | bac": 238,
+   "glue | layers.*.attention.wq_a | bac": 121,
+   "glue | layers.*.ffn_norm | rec": 61,
+   "glue | layers.* | rec": 61,
+   "glue | layers.*.attention_norm | rec": 60,
+   "glue | layers.* | for": 60,
+   "GEMM | layers.*.feed_forward.w13 | bac": 3,
+   "glue | norm | bac": 1
+  },
+  "output_to": {
+   "GEMM | layers.*.attention.wo | bac": 244,
+   "GEMM | layers.*.feed_forward.shared_experts.w2 | bac": 228,
+   "glue | <none> | bac": 121,
+   "collective | layers.*.attention.wq_a | bac": 121,
+   "glue | layers.*.feed_forward.routed_experts | bac": 57,
+   "GEMM | layers.*.feed_forward.w2 | bac": 12
+  }
+ },
+ "G-035": {
+  "pass": "lift_fusion_region_g035",
+  "sites": 61,
+  "layers_per_site": {
+   "1": 61
+  },
+  "phase": {
+   "backward": 976
+  },
+  "module": {
+   "layers.*.attention.inner_attention": 488,
+   "layers.*.attention.inner_attention.wkv_b": 488
+  },
+  "torchtitan_line": {
+   "quantization/mxfp8/linear.py:129 forward": 488,
+   "models/common/attention/mla.py:119 forward": 427,
+   "models/common/attention/mla.py:116 forward": 61
+  },
+  "input_from": {
+   "glue | layers.*.attention.inner_attention.inner_attention | bac": 122,
+   "glue | layers.*.attention.inner_attention | rec": 122
+  },
+  "innermost_line": {
+   "/home/bahuang/local/torchtitan/torchtitan_recipes/overrides/fused_mla.py:903 forward": 183
+  },
+  "output_to": {
+   "GEMM | layers.*.attention.inner_attention.wkv_b | bac": 244,
+   "glue | layers.*.attention | bac": 61
+  }
+ },
+ "G-007": {
+  "pass": "lift_fusion_region_g007",
+  "sites": 61,
+  "layers_per_site": {
+   "1": 61
+  },
+  "phase": {
+   "backward": 15860
+  },
+  "module": {
+   "layers.*.feed_forward.shared_experts.w13": 15080,
+   "layers.*.feed_forward.w13": 780
+  },
+  "torchtitan_line": {
+   "quantization/mxfp8/linear.py:129 forward": 122
+  },
+  "input_from": {
+   "glue | layers.*.feed_forward.shared_experts.w13 | bac": 232,
+   "glue | layers.*.feed_forward.w13 | bac": 12
+  },
+  "innermost_line": {
+   "torch/distributed/tensor/_redistribute.py:1993 forward": 15738
+  },
+  "output_to": {
+   "collective | layers.*.attention.wq_a | bac": 61
+  }
+ },
+ "G-003": {
+  "pass": "lift_fusion_region_g003",
+  "sites": 58,
+  "layers_per_site": {
+   "1": 58
+  },
+  "phase": {
+   "backward": 116
+  },
+  "module": {
+   "layers.*.attention.wo": 58,
+   "layers.*.attention.wq_a": 58
+  },
+  "torchtitan_line": {
+   "quantization/mxfp8/linear.py:129 forward": 58
+  },
+  "input_from": {
+   "glue | layers.*.attention.wo | bac": 232,
+   "GEMM | layers.*.attention.wq_a | bac": 58,
+   "glue | layers.*.attention.q_norm | bac": 58,
+   "GEMM | layers.*.attention.wq_b | bac": 58,
+   "GEMM | layers.*.attention.wkv_a | bac": 58,
+   "glue | layers.*.attention.kv_norm | bac": 58,
+   "GEMM | layers.*.attention.inner_attention.wkv_b | bac": 58,
+   "glue | layers.*.attention_norm | bac": 58,
+   "glue | layers.*.ffn_norm | bac": 58,
+   "glue | layers.*.feed_forward.router.gate | bac": 58,
+   "glue | layers.*.feed_forward.shared_experts.w13 | bac": 58,
+   "GEMM | layers.*.feed_forward.shared_experts.w2 | bac": 58
+  },
+  "innermost_line": {
+   "torch/distributed/tensor/_redistribute.py:1993 forward": 58
+  },
+  "output_to": {
+   "collective | layers.*.attention.wq_a | bac": 58
+  }
+ },
+ "G-015": {
+  "pass": "lift_fusion_region_g015",
+  "sites": 245,
+  "layers_per_site": {
+   "0": 1,
+   "1": 244
+  },
+  "phase": {
+   "backward": 2205
+  },
+  "module": {
+   "layers.*.attention.wkv_a": 549,
+   "layers.*.attention.wq_b": 549,
+   "layers.*.attention.wq_a": 549,
+   "layers.*.feed_forward.shared_experts.w13": 522,
+   "layers.*.feed_forward.w13": 27,
+   "lm_head": 9
+  },
+  "torchtitan_line": {
+   "quantization/mxfp8/linear.py:129 forward": 2205
+  },
+  "input_from": {
+   "glue | layers.*.attention | bac": 122,
+   "glue | layers.*.attention.wkv_a | rec": 122,
+   "glue | layers.*.attention.wq_b | rec": 122,
+   "glue | layers.*.attention.wq_a | rec": 122,
+   "glue | layers.*.feed_forward.shared_experts.w13 | rec": 116,
+   "glue | layers.*.attention.q_norm | bac": 61,
+   "glue | layers.*.feed_forward.shared_experts.w13 | bac": 58,
+   "glue | layers.*.feed_forward.w13 | rec": 6,
+   "glue | layers.*.feed_forward.w13 | bac": 3,
+   "glue | lm_head | for": 2,
+   "glue | loss | bac": 1
+  },
+  "output_to": {
+   "glue | <none> | bac": 180,
+   "GEMM | layers.*.attention.wkv_a | bac": 122,
+   "GEMM | layers.*.attention.wq_b | bac": 122,
+   "GEMM | layers.*.attention.wq_a | bac": 122,
+   "GEMM | layers.*.feed_forward.shared_experts.w13 | bac": 116,
+   "glue | layers.*.attention.q_norm | bac": 61,
+   "GEMM | layers.*.feed_forward.w13 | bac": 6,
+   "glue | layers.*.ffn_norm | bac": 3,
+   "GEMM | lm_head | bac": 2,
+   "glue | norm | bac": 1
+  }
+ },
+ "G-031": {
+  "pass": "lift_fusion_region_g031",
+  "sites": 187,
+  "layers_per_site": {
+   "0": 1,
+   "1": 186
+  },
+  "phase": {
+   "backward": 935
+  },
+  "module": {
+   "layers.*.attention.wkv_a": 305,
+   "layers.*.attention.wq_b": 305,
+   "layers.*.attention.wq_a": 305,
+   "layers.*.attention.wo": 15,
+   "lm_head": 5
+  },
+  "torchtitan_line": {
+   "quantization/mxfp8/linear.py:129 forward": 935
+  },
+  "input_from": {
+   "glue | layers.*.attention_norm | rec": 122,
+   "glue | layers.*.attention.wkv_a | bac": 122,
+   "glue | layers.*.attention.wq_b | bac": 122,
+   "glue | layers.*.attention.wq_a | bac": 122,
+   "glue | layers.*.attention.q_norm | rec": 61,
+   "glue | layers.*.attention.wo | bac": 6,
+   "glue | layers.*.attention | rec": 3,
+   "glue | lm_head | bac": 2,
+   "glue | norm | for": 1
+  },
+  "output_to": {
+   "collective | layers.*.attention.wq_a | bac": 186,
+   "collective | norm | bac": 1
+  }
+ },
+ "G-073": {
+  "pass": "lift_fusion_region_g073",
+  "sites": 116,
+  "layers_per_site": {
+   "1": 116
+  },
+  "phase": {
+   "forward": 232,
+   "recompute": 116,
+   "backward": 116
+  },
+  "module": {
+   "layers.*.attention.wkv_a": 232,
+   "layers.*.attention.wq_a": 232
+  },
+  "torchtitan_line": {
+   "experiments/graph_trainer/simple_fsdp.py:366 forward": 464
+  },
+  "innermost_line": {
+   "torch/distributed/tensor/_redistribute.py:1993 forward": 348,
+   "torch/distributed/tensor/_redistribute.py:1971 forward": 116
+  },
+  "input_from": {
+   "graph input | <none> | for": 1392
+  },
+  "output_to": {
+   "collective | layers.*.attention.wq_a | for": 116,
+   "collective | layers.*.attention.wq_a | bac": 116
+  }
+ },
+ "G-028": {
+  "pass": "lift_fusion_region_g028",
+  "sites": 58,
+  "layers_per_site": {
+   "1": 58
+  },
+  "phase": {
+   "backward": 116
+  },
+  "module": {
+   "layers.*.feed_forward.routed_experts": 116
+  },
+  "torchtitan_line": {
+   "models/common/dist_moe/routed_experts.py:215 forward": 58
+  },
+  "input_from": {
+   "glue | layers.*.feed_forward.routed_experts | bac": 116
+  },
+  "innermost_line": {
+   "torch/distributed/tensor/_redistribute.py:1993 forward": 58
+  },
+  "output_to": {
+   "collective | layers.*.feed_forward.routed_experts | bac": 58
+  }
+ },
+ "G-021": {
+  "pass": "lift_fusion_region_g021",
+  "sites": 116,
+  "layers_per_site": {
+   "1": 116
+  },
+  "phase": {
+   "forward": 348,
+   "recompute": 290,
+   "backward": 58
+  },
+  "module": {
+   "layers.*.feed_forward.routed_experts": 696
+  },
+  "torchtitan_line": {
+   "experiments/graph_trainer/simple_fsdp.py:268 forward": 580,
+   "experiments/graph_trainer/simple_fsdp.py:366 forward": 116
+  },
+  "innermost_line": {
+   "torch/distributed/tensor/_redistribute.py:1993 forward": 116
+  },
+  "input_from": {
+   "glue | layers.*.feed_forward.routed_experts | for": 58,
+   "glue | layers.*.feed_forward.routed_experts | bac": 58
+  },
+  "output_to": {
+   "glue | layers.*.feed_forward.routed_experts | for": 174,
+   "glue | layers.*.feed_forward.routed_experts | bac": 174,
+   "glue | layers.*.feed_forward.routed_experts | rec": 58
+  }
+ },
+ "G-061": {
+  "pass": "lift_fusion_region_g061",
+  "sites": 116,
+  "layers_per_site": {
+   "1": 116
+  },
+  "phase": {
+   "forward": 290,
+   "recompute": 232,
+   "backward": 58
+  },
+  "module": {
+   "layers.*.feed_forward.routed_experts": 580
+  },
+  "torchtitan_line": {
+   "experiments/graph_trainer/simple_fsdp.py:268 forward": 464,
+   "experiments/graph_trainer/simple_fsdp.py:366 forward": 116
+  },
+  "innermost_line": {
+   "torch/distributed/tensor/_redistribute.py:1993 forward": 116
+  },
+  "input_from": {
+   "glue | layers.*.feed_forward.routed_experts | for": 58,
+   "glue | layers.*.feed_forward.routed_experts | bac": 58
+  },
+  "output_to": {
+   "glue | layers.*.feed_forward.routed_experts | for": 174,
+   "glue | layers.*.feed_forward.routed_experts | bac": 174,
+   "glue | layers.*.feed_forward.routed_experts | rec": 58
+  }
+ }
+}
