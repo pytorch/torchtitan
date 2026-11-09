@@ -322,9 +322,10 @@ TorchTitan owns one optional Dist-MoE runtime through forward/backward setup:
 The RL vLLM generator owns an inference runtime
 (`DistMoeRuntime.Config(inference=True)`, passed as
 `Generator.Config.dist_moe_runtime`): scratch-only planning, sized for
-vLLM's per-step token budget. vLLM pads every step at the end (TP rounding,
-CUDA-graph size, DP maximum); the runner publishes the unpadded count and the
-model passes a `padding_mask` down to the routed experts.
+vLLM's per-step token budget. vLLM pads every step at the end (CUDA-graph
+size, DP maximum) and marks those rows in `ForwardContext.is_padding`. The model
+wrapper rounds the step up to a multiple of TP, marks those rows too, and passes
+the mask down to the routed experts as `padding_mask`.
 
 ## Padding Rows
 
