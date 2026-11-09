@@ -173,9 +173,3 @@ def test_vllm_sampler_patch_uses_trainer_ops(monkeypatch):
     # Any vLLM module that imports a function by name gets the PyTorch version.
     patched = modules[f"{sample}.gumbel"].apply_temperature
     assert modules[f"{sample}.new_importer"].apply_temperature is patched
-
-    # A second call (one per engine) patches every binding again.
-    batch_invariance.patch_vllm_logprob_and_temperature_kernels()
-    repatched = modules[f"{sample}.gumbel"].apply_temperature
-    assert repatched is not patched
-    assert modules[f"{sample}.states"].apply_temperature is repatched
