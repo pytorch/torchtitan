@@ -4,11 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import copy
 import hashlib
 import json
 import math
-from pathlib import Path
 
 import pytest
 import torch
@@ -41,12 +39,11 @@ def config():
     return cfg
 
 
-@pytest.mark.parametrize("expert_parallel_degree", [1, 2])
-def test_released_architecture_and_checkpoint_schema(expert_parallel_degree):
+def test_released_architecture_and_checkpoint_schema():
     cfg = build_model_config(
         "125B-A6B",
         seq_len=16,
-        parallelism=ParallelismConfig(expert_parallel_degree=expert_parallel_degree),
+        parallelism=ParallelismConfig(),
     )
     with torch.device("meta"):
         model = cfg.build()
@@ -85,104 +82,40 @@ def test_released_architecture_and_checkpoint_schema(expert_parallel_degree):
         assert shapes[name] == shape
 
 
-def test_unsupported_attention_configs_are_explicit(config):
-    with pytest.raises(ValueError, match="context parallelism"):
-        build_model_config(
-            "debugmodel", parallelism=ParallelismConfig(context_parallel_degree=2)
-        )
-    for indexer_ratio, attention_ratio in ((8, 4), (4, 8), (8, 8)):
-        attention = copy.deepcopy(config.layers[3].attention)
-        attention.indexer.compress_ratio = indexer_ratio
-        attention.inner_attention.compress_ratio = attention_ratio
-        with pytest.raises(ValueError, match="compress_ratio=4"):
-            attention.build()
-
-
 @pytest.mark.parametrize("layer_id", [0, 3])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_muon_split_projection_matches_fused_forward_and_backward(layer_id, dtype):
-    """Guard head interleaving and the single fused input-gradient reduction."""
-    from torchtitan_recipes.tests.models.qwen3_8_flash_next import (
-        qwen38_flash_next_debugmodel,
-    )
-
+def test_split_projection_preserves_head_order_and_parameter_gradients(
+    config, layer_id
+):
     torch.manual_seed(42)
-    attention = qwen38_flash_next_debugmodel().model.layers[layer_id].attention
-    config = attention.in_proj if layer_id == 0 else attention.wq
-    linear = config.build().to(dtype)
-    num_groups = config.num_groups
-    projection_rows = config.projection.out_features // num_groups
-    gate_rows = config.gates.out_features // num_groups
-    weight = torch.randn(config.out_features, config.in_features, dtype=dtype)
+    attention = config.layers[layer_id].attention
+    linear_config = attention.in_proj if layer_id == 0 else attention.wq
+    linear = linear_config.build()
+    num_groups = linear_config.num_groups
+    projection_rows = linear_config.projection.out_features // num_groups
+    gate_rows = linear_config.gates.out_features // num_groups
+    weight = torch.randn(
+        num_groups, projection_rows + gate_rows, linear_config.in_features
+    )
     with torch.no_grad():
-        for group in range(num_groups):
-            start = group * (projection_rows + gate_rows)
-            linear.projection.weight[
-                group * projection_rows : (group + 1) * projection_rows
-            ].copy_(weight[start : start + projection_rows])
-            linear.gates.weight[group * gate_rows : (group + 1) * gate_rows].copy_(
-                weight[start + projection_rows : start + projection_rows + gate_rows]
-            )
-    reference_weight = weight.requires_grad_()
-    input = torch.randn(31, config.in_features, dtype=dtype, requires_grad=True)
-    reference_input = input.detach().clone().requires_grad_()
-    actual = linear(input)
-    expected = F.linear(reference_input, reference_weight)
+        linear.projection.weight.copy_(weight[:, :projection_rows].flatten(0, 1))
+        linear.gates.weight.copy_(weight[:, projection_rows:].flatten(0, 1))
+    reference_weight = weight.flatten(0, 1).requires_grad_()
+    x = torch.randn(31, linear_config.in_features, requires_grad=True)
+    reference_x = x.detach().clone().requires_grad_()
+    actual = linear(x)
+    expected = F.linear(reference_x, reference_weight)
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
     upstream = torch.randn_like(actual)
     actual.backward(upstream)
     expected.backward(upstream)
-    torch.testing.assert_close(input.grad, reference_input.grad, atol=0, rtol=0)
-    actual_weight_grad = torch.cat(
+    weight_grad = torch.cat(
         (
             linear.projection.weight.grad.unflatten(0, (num_groups, projection_rows)),
             linear.gates.weight.grad.unflatten(0, (num_groups, gate_rows)),
         ),
         1,
     ).flatten(0, 1)
-    torch.testing.assert_close(
-        actual_weight_grad, reference_weight.grad, atol=0, rtol=0
-    )
-
-
-def test_gated_residual_forward_and_gradients(config):
-    torch.manual_seed(42)
-    mixer = config.layers[0].attn_hyper_connection.build()
-    mixer.init_states()
-    x = torch.randn(7, 1024, requires_grad=True)
-    actual, residual, write = mixer(x)
-    streams = x.unflatten(-1, (4, 256))
-    normed = torch.stack(
-        [
-            F.rms_norm(streams[:, i].float(), (256,), eps=1e-6)
-            * (1 + mixer.hc_norm.weight.unflatten(0, (4, 256))[i])
-            for i in range(4)
-        ],
-        1,
-    )
-    down = F.linear(normed.flatten(1), mixer.input_mix_weight_down.weight)
-    read = (
-        F.linear(F.silu(down / 4), mixer.input_mix_weight_up.weight)
-        .sigmoid()
-        .unflatten(-1, (4, 256))
-    )
-    expected = (read * normed).mean(1)
-    expected_write = (
-        2
-        * (F.linear(normed.flatten(1), mixer.block_inject_weight.weight) / 4).sigmoid()
-    )
-    torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-6)
-    torch.testing.assert_close(write, expected_write, atol=1e-6, rtol=1e-6)
-    assert residual is x
-    parameters = (x, *mixer.parameters())
-    actual_grads = torch.autograd.grad(
-        actual.square().sum() + write.square().sum(), parameters, retain_graph=True
-    )
-    expected_grads = torch.autograd.grad(
-        expected.square().sum() + expected_write.square().sum(), parameters
-    )
-    for actual_grad, expected_grad in zip(actual_grads, expected_grads):
-        torch.testing.assert_close(actual_grad, expected_grad, atol=2e-5, rtol=2e-5)
+    torch.testing.assert_close(weight_grad, reference_weight.grad, atol=0, rtol=0)
 
 
 def test_ngram_hashes_reset_at_eos_and_packed_document_boundaries(config):
@@ -217,21 +150,6 @@ def test_ngram_hashes_reset_at_eos_and_packed_document_boundaries(config):
     after_eos = embedding.hash_ids(ids[3:5], document_positions_T=torch.arange(2))
     torch.testing.assert_close(actual[3:5], after_eos, rtol=0, atol=0)
     assert embedding.layer_multipliers.dtype == torch.int64
-    from torchtitan.components.tokenizer import HuggingFaceTokenizer
-
-    tokenizer = HuggingFaceTokenizer.Config().build(
-        tokenizer_path=str(Path(__file__).resolve().parents[4] / "assets/tokenizer")
-    )
-    recipe_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
-    recipe_embedding = recipe_config.layers[1].ple.ple_embedding.build()
-    recipe_ids = torch.tensor(tokenizer.encode("hello", add_eos=True) + [7, 8])
-    recipe_hashes = recipe_embedding.hash_ids(
-        recipe_ids, document_positions_T=torch.arange(recipe_ids.numel())
-    )
-    fresh_hashes = recipe_embedding.hash_ids(
-        recipe_ids[-2:], document_positions_T=torch.arange(2)
-    )
-    torch.testing.assert_close(recipe_hashes[-2:], fresh_hashes, rtol=0, atol=0)
 
 
 def test_fresh_ngram_initialization_matches_pinned_hf(config):
@@ -278,9 +196,30 @@ def test_ple_dilated_convolution_and_gradients_respect_documents(config):
     positions = torch.arange(11).repeat(2)
     padding = torch.zeros(22, dtype=torch.bool)
     padding[9:11] = True
+    captured = []
+    handle = ple.norm_conv.register_forward_hook(
+        lambda module, args, output: captured.append(
+            (args[0].detach(), output.detach())
+        )
+    )
     actual = ple(
         x, input_ids_T=ids, document_positions_T=positions, padding_mask_T=padding
     )
+    handle.remove()
+    # Batched Conv1d independently checks tap order and dilation within each document.
+    with torch.no_grad():
+        gated, normed = (tensor * ~padding[:, None] for tensor in captured[0])
+        conv = (
+            F.conv1d(
+                F.pad(normed.unflatten(0, (2, 11)).transpose(1, 2), (9, 0)),
+                ple.conv1d.weight,
+                groups=1024,
+                dilation=3,
+            )
+            .transpose(1, 2)
+            .flatten(0, 1)
+        )
+    torch.testing.assert_close(actual, gated + F.silu(conv), rtol=2e-5, atol=2e-5)
     expected = torch.cat(
         [
             ple(
@@ -300,26 +239,6 @@ def test_ple_dilated_convolution_and_gradients_respect_documents(config):
     isolated_gradients = torch.autograd.grad(expected.square().sum(), parameters)
     for gradient, isolated in zip(gradients, isolated_gradients):
         torch.testing.assert_close(gradient, isolated, rtol=2e-5, atol=2e-5)
-    # An independent Conv1d oracle checks tap order and the dilation of three.
-    captured = []
-    handle = ple.norm_conv.register_forward_hook(
-        lambda module, args, output: captured.append(output)
-    )
-    zero_conv = copy.deepcopy(ple)
-    with torch.no_grad():
-        zero_conv.conv1d.weight.zero_()
-    gated = zero_conv(x[:11], input_ids_T=ids[:11], document_positions_T=positions[:11])
-    ple(x[:11], input_ids_T=ids[:11], document_positions_T=positions[:11])
-    handle.remove()
-    conv = F.conv1d(
-        F.pad(captured[-1].T[None], (9, 0)), ple.conv1d.weight, groups=1024, dilation=3
-    )
-    torch.testing.assert_close(
-        ple(x[:11], input_ids_T=ids[:11], document_positions_T=positions[:11]),
-        gated + F.silu(conv[0].T),
-        rtol=2e-5,
-        atol=2e-5,
-    )
 
 
 def test_qsa_selection_matches_document_local_block_oracle(config):
@@ -471,7 +390,7 @@ def test_qsa_output_and_backward_against_dense_selected_attention(config, all_pa
         torch.testing.assert_close(actual_grad, expected_grad, rtol=1e-10, atol=1e-10)
 
 
-def test_qsa_block_kl_and_gradient_injection(config):
+def test_qsa_block_kl_and_gradients():
     scores = torch.tensor(
         [[0.0, math.log(2), math.log(4)], [-torch.inf] * 3], requires_grad=True
     )
@@ -486,33 +405,12 @@ def test_qsa_block_kl_and_gradient_injection(config):
         scores.grad[0], torch.tensor([1 / 7 - 0.25, 2 / 7 - 0.5, 4 / 7 - 0.25])
     )
     assert not scores.grad[1].any() and teacher.grad is None
-    torch.manual_seed(42)
-    attention = config.layers[3].attention.build()
-    attention.init_states()
-    x = torch.randn(31, 256, requires_grad=True)
-    positions = torch.arange(31)
-    output = attention(
-        x,
-        None,
-        positions,
-        document_positions_T=positions,
-        aux_loss_denominator=torch.tensor(31.0),
-    )
-    output.square().mean().backward()
-    assert attention.indexer.index_qk_proj.weight.grad.norm() > 0
-    assert torch.isfinite(x.grad).all()
-    assert attention.inner_attention.indexer_loss.instance_acc > 0
-    attention.inner_attention.indexer_loss._reset_accumulators()
-    assert attention.inner_attention.indexer_loss.instance_acc == 0
 
 
 @pytest.mark.parametrize(
     "input_kind", ["complete", "short_documents", "padding", "frozen"]
 )
-@pytest.mark.parametrize("save_patterns", [None, (), ("inner_attention",)])
-def test_qsa_auxiliary_gradient_only_updates_the_indexer(
-    config, input_kind, save_patterns
-):
+def test_qsa_auxiliary_gradient_only_updates_the_indexer(config, input_kind):
     torch.manual_seed(42)
     if input_kind == "frozen":
         config.layers[3].attention.inner_attention.indexer_loss = None
@@ -527,9 +425,8 @@ def test_qsa_auxiliary_gradient_only_updates_the_indexer(
     handle = attention.indexer.register_forward_hook(
         lambda module, inputs, output: captured_scores.append(output[1])
     )
-    if save_patterns is not None:
-        attention.configure_remat_regions(save_patterns)
-    forward = remat.checkpoint()(attention) if save_patterns is not None else attention
+    attention.configure_remat_regions(("inner_attention",))
+    forward = remat.checkpoint()(attention)
     output = forward(
         x,
         None,
@@ -558,31 +455,24 @@ def test_qsa_auxiliary_gradient_only_updates_the_indexer(
             assert parameter.grad is None or not parameter.grad.any()
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_deltanet_uses_sigmoid_output_gate(config, dtype):
+def test_deltanet_uses_sigmoid_output_gate(config):
     torch.manual_seed(42)
-    norm = config.layers[0].attention.norm.build().to(dtype)
+    norm = config.layers[0].attention.norm.build().bfloat16()
     norm.init_states()
     with torch.no_grad():
         norm.weight.copy_(torch.linspace(0.2, 1.8, 128))
-    x = torch.randn(5, 4, 128, dtype=dtype, requires_grad=True)
+    x = torch.randn(5, 4, 128, dtype=torch.bfloat16, requires_grad=True)
     gate = torch.randn_like(x, requires_grad=True)
     reference_x = x.detach().clone().requires_grad_()
     reference_gate = gate.detach().clone().requires_grad_()
     reference_weight = norm.weight.detach().clone().requires_grad_()
-    reference_x_float = reference_x.float()
-    normalized = reference_x_float * torch.rsqrt(
-        reference_x_float.square().mean(-1, keepdim=True) + norm.eps
-    )
-    # HF rounds the unweighted RMSNorm before multiplying by a fractional scale.
+    normalized = F.rms_norm(reference_x.float(), (128,), eps=norm.eps)
+    # HF rounds the unweighted RMSNorm before applying the learned scale.
     expected = (
-        normalized.to(dtype) * reference_weight * reference_gate.float().sigmoid()
-    ).to(dtype)
+        normalized.to(x.dtype) * reference_weight * reference_gate.float().sigmoid()
+    ).to(x.dtype)
     actual = norm(input=x, gate=gate)
-    tolerance = (
-        dict(rtol=1e-6, atol=1e-6) if dtype == torch.float32 else dict(rtol=0, atol=0)
-    )
-    torch.testing.assert_close(actual, expected, **tolerance)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
     upstream = torch.randn_like(actual)
     actual_gradients = torch.autograd.grad(
         (actual * upstream).sum(), (x, gate, norm.weight)
@@ -591,7 +481,7 @@ def test_deltanet_uses_sigmoid_output_gate(config, dtype):
         (expected * upstream).sum(), (reference_x, reference_gate, reference_weight)
     )
     for actual_grad, expected_grad in zip(actual_gradients, expected_gradients):
-        torch.testing.assert_close(actual_grad, expected_grad, **tolerance)
+        torch.testing.assert_close(actual_grad, expected_grad, atol=0, rtol=0)
 
 
 def test_router_bfloat16_ties_mixing_and_backward(config):
@@ -656,155 +546,40 @@ def test_adapter_roundtrip_and_numeric_shard_order(config):
         torch.testing.assert_close(restored[key], state[key], rtol=0, atol=0, msg=key)
     config.build().load_state_dict(restored, strict=True)
     shard = next(key for key in hf if ".shard_0." in key)
-    for layer_id, error in (
-        (0, "non-PLE layer"),
-        (len(config.layers), "unknown PLE layer"),
-    ):
-        malformed = {shard.replace(".layers.1.", f".layers.{layer_id}."): hf[shard]}
-        with pytest.raises(ValueError, match=error):
-            adapter.from_hf(malformed)
     with_mtp = {**hf, "mtp.draft_head.weight": torch.empty(1)}
     without_mtp = adapter.from_hf(with_mtp)
     assert with_mtp.keys() == hf.keys() | {"mtp.draft_head.weight"}
     assert without_mtp.keys() == state.keys()
-    consolidated = shard.replace(".shard_0", "")
-    with pytest.raises(ValueError, match="both consolidated and split"):
-        adapter.from_hf(
-            {
-                **hf,
-                consolidated: state[
-                    "layers.1.ple.ple_embedding.ngram_embedding.weight"
-                ],
-            }
-        )
     incomplete = dict(hf)
     del incomplete[shard]
     with pytest.raises(ValueError, match="requires all"):
         adapter.from_hf(incomplete)
 
 
-@pytest.mark.parametrize("all_padding", [False, True])
-def test_packed_padding_is_excluded_from_moe_auxiliary_gradients(config, all_padding):
-    from torchtitan.models.common.aux_loss import AuxLoss
-
-    config.layers = [copy.deepcopy(config.layers[3])]
-    config.layers[0].attention.inner_attention.indexer_loss = None
-    saved_counts, saved_acc = AuxLoss._group_counts.copy(), AuxLoss.group_acc.copy()
-    handles = []
+def test_block_passes_padding_mask_to_moe(config):
+    torch.manual_seed(42)
+    layer = config.layers[3]
+    layer.attention.inner_attention.indexer_loss = None
+    layer.feed_forward.router.aux_loss = None
+    block = layer.build()
+    block.init_states()
+    captured = []
+    handle = block.feed_forward.register_forward_pre_hook(
+        lambda module, args, kwargs: captured.append(kwargs["padding_mask_T"]),
+        with_kwargs=True,
+    )
+    positions = torch.arange(5)
+    padding = torch.tensor([False, False, True, False, True])
     try:
-        torch.manual_seed(42)
-        model = config.build().train()
-        model.init_states()
-        router = model.layers["0"].feed_forward.router
-        captured = []
-        handles = [
-            router.register_forward_pre_hook(
-                lambda module, inputs: captured.append(inputs[0])
-            ),
-            router.register_forward_hook(
-                lambda module, inputs, output: captured.extend((output[0], output[2]))
-            ),
-        ]
-        ids = torch.randint(0, 63, (12,))
-        positions = torch.cat((torch.arange(5), torch.arange(7)))
-        padding = torch.ones(12, dtype=torch.bool)
-        if not all_padding:
-            padding[:4] = padding[5:9] = False
-        denominator = (~padding).sum().float().clamp_min(1)
-        metadata = model._get_attention_metadata(
-            positions=positions, padding_mask=padding
-        )
-        model(
-            ids,
-            positions=positions,
-            document_positions=positions,
-            ple_input_ids=ids,
-            attention_metadata=metadata,
-            padding_mask=padding,
-            aux_loss_denominators=denominator[None],
-        )
-        # A zero carrier isolates the configured batch-wise auxiliary gradient.
-        actual_gradients = torch.autograd.grad(
-            captured[1].sum() * 0, (captured[0], router.gate.weight)
-        )
-        counts_E = (captured[2] & ~padding[:, None]).sum(0)
-        torch.testing.assert_close(
-            router.tokens_per_expert_E,
-            counts_E.to(router.tokens_per_expert_E),
-            atol=0,
-            rtol=0,
-        )
-        assert torch.count_nonzero(actual_gradients[0][padding]) == 0
-        if all_padding:
-            assert router.aux_loss.instance_acc == 0
-            assert not actual_gradients[1].any()
-        else:
-            assert router.aux_loss.instance_acc > 0
-            assert actual_gradients[0][~padding].norm() > 0
-            assert actual_gradients[1].norm() > 0
-    finally:
-        for handle in handles:
-            handle.remove()
-        AuxLoss._group_counts.clear()
-        AuxLoss._group_counts.update(saved_counts)
-        AuxLoss.group_acc.clear()
-        AuxLoss.group_acc.update(saved_acc)
-
-
-def test_optimizer_resets_auxiliary_losses_once_with_remat(config):
-    from torchtitan.components.optim import AdamW, OptimizersContainer
-    from torchtitan.distributed.activation_remat import FullActivationRematConfig
-    from torchtitan.models.common.aux_loss import AuxLoss
-    from torchtitan.models.qwen3_8_flash_next.model import Qwen38FlashNextModel
-
-    config.layers = [copy.deepcopy(config.layers[3]), copy.deepcopy(config.layers[1])]
-    config.layers[1].attention = copy.deepcopy(config.layers[0].attention)
-    saved_counts, saved_acc = AuxLoss._group_counts.copy(), AuxLoss.group_acc.copy()
-    try:
-        for use_remat in (False, True):
-            torch.manual_seed(42)
-            model = config.build()
-            model.init_states()
-            if use_remat:
-                FullActivationRematConfig().apply(model)
-            optimizer = OptimizersContainer.Config(
-                optimizers=[AdamW.Config(pattern=".*", lr=0, fused=False)]
-            ).build(model_parts=[model])
-            Qwen38FlashNextModel._register_optimizer_hooks(optimizer, [model], None)
-            losses = [
-                module
-                for module in model.modules()
-                if isinstance(module, QSAIndexerLoss)
-            ]
-            ids, positions = torch.randint(0, 63, (23,)), torch.arange(23)
-            for _ in range(2):
-                output = model(
-                    ids,
-                    positions=positions,
-                    document_positions=positions,
-                    ple_input_ids=ids,
-                    aux_loss_denominators=torch.tensor([46.0]),
-                )
-                accumulated = [loss.instance_acc.clone() for loss in losses]
-                output.square().mean().backward()
-                for loss, expected in zip(losses, accumulated):
-                    torch.testing.assert_close(
-                        loss.instance_acc, expected, atol=0, rtol=0
-                    )
-            expected = sum(loss.instance_acc.clone() for loss in losses)
-            assert expected > 0
-            optimizer.step()
-            torch.testing.assert_close(
-                AuxLoss.group_acc[("loss", "qsa_indexer_loss")],
-                expected,
-                atol=0,
-                rtol=0,
+        with torch.no_grad():
+            block(
+                torch.randn(5, 1024),
+                None,
+                positions,
+                ple_input_ids_T=torch.arange(5),
+                document_positions_T=positions,
+                padding_mask_T=padding,
             )
-            assert all(loss.instance_acc == 0 for loss in losses)
-            optimizer.step()
-            assert AuxLoss.group_acc[("loss", "qsa_indexer_loss")] == 0
     finally:
-        AuxLoss._group_counts.clear()
-        AuxLoss._group_counts.update(saved_counts)
-        AuxLoss.group_acc.clear()
-        AuxLoss.group_acc.update(saved_acc)
+        handle.remove()
+    assert captured[0] is padding

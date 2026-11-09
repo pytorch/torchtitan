@@ -29,9 +29,6 @@ from torchtitan.models.common.aux_loss import AuxLoss
 
 from torchtitan.models.common.decoder_sharding import token_id_placement
 from torchtitan.models.common.linear import maybe_gather_tp_input
-from torchtitan.models.common.linear.inplace_wgrad_accum import (
-    reject_inplace_wgrad_accum,
-)
 from torchtitan.models.qwen3_5.model import OffsetRMSNorm, Qwen35Attention
 from torchtitan.models.qwen3_5.rope import MRoPE as Qwen35MRoPE
 
@@ -41,7 +38,7 @@ from .embedding import document_starts
 # B = selected blocks, J = selected tokens including the incomplete tail,
 # H = query or KV heads, K = head dimension, V = value dimension,
 # D = model dimension, Q = query chunk, C = projection channels.
-# F = rotary features, M = flattened input rows.
+# F = rotary features.
 
 
 class SplitLinear(Linear):
@@ -55,9 +52,6 @@ class SplitLinear(Linear):
         param_init: dict[str, Callable] | None = field(default_factory=dict)
 
         def __post_init__(self) -> None:
-            reject_inplace_wgrad_accum(
-                self, "projection and gate gradients are computed together"
-            )
             if any(
                 linear.bias or linear.num_linears != 1
                 for linear in (self, self.projection, self.gates)
@@ -86,106 +80,12 @@ class SplitLinear(Linear):
         )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        input_TD = input
-        projection_CD, gates_CD = self.projection.weight, self.gates.weight
-        return remat.region(
-            _SplitLinearFunction.apply,
-            self.remat_region_name("linear"),
-            recompute=self.remat_should_recompute("linear"),
-        )(
-            input_TD,
-            projection_CD,
-            gates_CD,
-            projection_CD.shape[0] // self.projection_channels_per_group,
+        projection_THC = self.projection(input).unflatten(
+            -1, (-1, self.projection_channels_per_group)
         )
-
-
-@spmd.register_autograd_function
-class _SplitLinearFunction(torch.autograd.Function):
-    """Use one fused GEMM while exposing separate Muon and AdamW parameters."""
-
-    @staticmethod
-    def spmd_typecheck(
-        *,
-        input_TD: torch.Tensor,
-        projection_CD: torch.Tensor,
-        gates_CD: torch.Tensor,
-        num_groups: int,
-    ) -> torch.Tensor | spmd.rules.NdimWithSpmdType:
-        output_TC = spmd.rules.einsum(
-            "...d,cd->...c", input_TD, projection_CD, linear_in=(0, 1)
-        )
-        gates_TC = spmd.rules.einsum(
-            "...d,cd->...c", input_TD, gates_CD, linear_in=(0, 1)
-        )
-        # Joining channels within each head is linear in both outputs and
-        # retains their shared token/head layout.
-        return spmd.rules.einsum(
-            "...c,...c->...c", output_TC, gates_TC, linear_in=((0, 1),)
-        )
-
-    @staticmethod
-    def forward(  # pyrefly: ignore[bad-override]
-        ctx,
-        input_TD: torch.Tensor,
-        projection_CD: torch.Tensor,
-        gates_CD: torch.Tensor,
-        num_groups: int,
-    ) -> torch.Tensor:
-        weight_HCD = torch.cat(
-            (
-                projection_CD.unflatten(0, (num_groups, -1)),
-                gates_CD.unflatten(0, (num_groups, -1)),
-            ),
-            1,
-        )
-        weight_CD = weight_HCD.flatten(0, 1)
-        output_TC = F.linear(input_TD, weight_CD)
-        ctx.save_for_backward(
-            input_TD.to(output_TC.dtype), weight_CD.to(output_TC.dtype)
-        )
-        ctx.projection_param, ctx.gates_param = projection_CD, gates_CD
-        ctx.num_groups = num_groups
-        ctx.input_dtype = input_TD.dtype
-        return output_TC
-
-    @staticmethod
-    @torch.autograd.function.once_differentiable
-    def backward(  # pyrefly: ignore[bad-override]
-        ctx, grad_TC: torch.Tensor
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, None]:
-        input_TD, weight_CD = ctx.saved_tensors
-        grad_TC = grad_TC.reshape(-1, grad_TC.shape[-1])
-        input_MD = input_TD.reshape(-1, input_TD.shape[-1])
-        grad_input_TD = grad_projection_CD = grad_gates_CD = None
-        if ctx.needs_input_grad[0]:
-            grad_input_TD = (
-                grad_TC.mm(weight_CD).view(input_TD.shape).to(ctx.input_dtype)
-            )
-        if ctx.needs_input_grad[1] or ctx.needs_input_grad[2]:
-            # Preserve FSDP's FP32 WGRAD instead of rounding it to BF16 before
-            # splitting. Two input-gradient GEMMs would also change rounding.
-            grad_dtype = ctx.projection_param.grad_dtype
-            assert grad_dtype == ctx.gates_param.grad_dtype
-            grad_CD = (
-                grad_TC.t().mm(input_MD)
-                if grad_dtype is None or grad_dtype == input_MD.dtype
-                else torch.mm(grad_TC.t(), input_MD, out_dtype=grad_dtype)
-            )
-            grad_projection_HCD, grad_gates_HCD = grad_CD.unflatten(
-                0, (ctx.num_groups, -1)
-            ).split(
-                (
-                    ctx.projection_param.shape[0] // ctx.num_groups,
-                    ctx.gates_param.shape[0] // ctx.num_groups,
-                ),
-                1,
-            )
-            if ctx.needs_input_grad[1]:
-                grad_projection_CD = grad_projection_HCD.flatten(0, 1)
-            if ctx.needs_input_grad[2]:
-                grad_gates_CD = grad_gates_HCD.flatten(0, 1)
-        return grad_input_TD, grad_projection_CD, grad_gates_CD, None
+        gates_THC = self.gates(input).unflatten(-1, (projection_THC.shape[-2], -1))
+        remat.recompute_needs_tensor(projection_THC, gates_THC)
+        return torch.cat((projection_THC, gates_THC), -1).flatten(-2)
 
 
 class MRoPE(Qwen35MRoPE):

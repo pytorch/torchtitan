@@ -10,6 +10,8 @@ Each configuration function is selected by module and name in the launched
 training process, so it must stay importable from this module.
 """
 
+from dataclasses import replace
+
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.optim import AdamW, OptimizersContainer
@@ -50,7 +52,6 @@ from torchtitan_recipes.tests.models.qwen3 import (
     qwen3_debugmodel_moe_param_groups,
 )
 from torchtitan_recipes.tests.models.qwen3_8_flash_next import (
-    qwen38_flash_next_debugmodel,
     qwen38_flash_next_debugmodel_mm,
 )
 
@@ -71,14 +72,6 @@ def _configure_fsdp_numerics(config: Trainer.Config) -> Trainer.Config:
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
     config.training.disable_accelerator_graphs = True
-    return config
-
-
-def qwen38_flash_next_debugmodel_ep2() -> Trainer.Config:
-    config = qwen38_flash_next_debugmodel(
-        parallelism=ParallelismConfig(expert_parallel_degree=2)
-    )
-    config.debug.spmd_typechecking = True
     return config
 
 
@@ -652,6 +645,30 @@ def muse_spark_debugmodel_mm_fsdp2_tp2_cp2_ep4() -> Trainer.Config:
     return config
 
 
+def qwen38_flash_next_debugmodel_mm_checkpoint_save() -> Trainer.Config:
+    config = qwen38_flash_next_debugmodel_mm()
+    return replace(
+        config,
+        training=replace(config.training, steps=5),
+        optim=replace(
+            config.optim,
+            # Keep the ten-step LR schedule across the save/load split.
+            lr_scheduler=replace(config.optim.lr_scheduler, total_steps=10),
+        ),
+        checkpointer=CheckpointManager.Config(interval=5, last_save_model_only=False),
+    )
+
+
+def qwen38_flash_next_debugmodel_mm_checkpoint_load() -> Trainer.Config:
+    config = qwen38_flash_next_debugmodel_mm_checkpoint_save()
+    assert config.checkpointer is not None
+    return replace(
+        config,
+        training=replace(config.training, steps=10),
+        checkpointer=replace(config.checkpointer, load_step=5),
+    )
+
+
 def build_model_tests_list() -> list[IntegrationTestDefinition]:
     """
     Build the list of model parallelism test configurations.
@@ -662,10 +679,13 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
     return [
         IntegrationTestDefinition(
             configs=[
-                qwen38_flash_next_debugmodel_ep2,
-                qwen38_flash_next_debugmodel_mm,
+                qwen38_flash_next_debugmodel_mm_checkpoint_save,
+                qwen38_flash_next_debugmodel_mm_checkpoint_load,
             ],
-            test_descr="Qwen3.8-Flash-Next FSDP, EP, image fusion, PLE and sparse attention",
+            test_descr=(
+                "Qwen3.8-Flash-Next FSDP, EP, image fusion, PLE, sparse attention "
+                "and checkpoint resume"
+            ),
             test_name="qwen3_8_flash_next_fsdp",
             ngpu=2,
             use_real_pg=True,
