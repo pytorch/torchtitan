@@ -542,11 +542,15 @@ class Controller(Configurable):
         self.rollout_recorder = config.rollout_recorder.build(
             dump_dir=config.dump_folder
         )
-        # TODO: move validation (its schedule, passes and logging) into an Evaluator class.
+        # TODO: move validation (its schedule, passes and logging) into a Validator class, like
+        # pretraining's (torchtitan/components/validator.py).
         # Validation passes still running.
         self._validation_tasks: list[asyncio.Task[list[m.Metric]]] = []
         # A due pass that waits for the running one (`defer_new_if_not_finished`).
         self._is_validation_due = False
+        # Count down from -1, since training group ids count up from 0. A shared id would give two requests
+        # the same id (`group=5/rollout=0/turn=0`), which crashes the generator's engine loop, and would give
+        # two groups one pinned policy version (their prefix-cache salt). Negative ids also get vLLM priority -1.
         self._validation_group_ids = itertools.count(start=-1, step=-1)
 
     async def close(self):
@@ -772,7 +776,6 @@ class Controller(Configurable):
         # TODO: group_size=1 (best-of-1) only. Support best-of-N.
         generate = self._make_generate_fn()
         release_session_fn = self._make_release_session_fn()
-        # Negative ids keep validation's request ids apart from training's in the shared engine.
         # Each id is used once, so passes that run at the same time never share one.
         group_ids = [next(self._validation_group_ids) for _ in samples]
         # TODO(naming): reserve "sample" for TrainingSample; rename the rollouter's raw-prompt "sample" -> "prompt"/"data_input".
