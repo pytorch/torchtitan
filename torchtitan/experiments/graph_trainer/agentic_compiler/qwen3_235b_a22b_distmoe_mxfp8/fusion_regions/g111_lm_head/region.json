@@ -1,0 +1,58 @@
+{
+ "id": "G-111",
+ "title": "Intra-module (backward): lm_head: constant_pad_nd + cat",
+ "phases": [
+  "backward"
+ ],
+ "scope": [
+  "intra-module"
+ ],
+ "fusion_kind": "copy/concat + cast",
+ "location": {
+  "module_fqn_pattern": "lm_head",
+  "graph_nodes_example": [
+   "constant_pad_nd_284",
+   "constant_pad_nd_285",
+   "constant_pad_nd_286",
+   "constant_pad_nd_287",
+   "constant_pad_nd_288",
+   "constant_pad_nd_289",
+   "constant_pad_nd_290",
+   "constant_pad_nd_291",
+   "constant_pad_nd_292",
+   "constant_pad_nd_293",
+   "constant_pad_nd_294",
+   "constant_pad_nd_295"
+  ],
+  "source": "(no torchtitan frame in stack_trace)"
+ },
+ "ops": [
+  "aten.cat.default",
+  "aten.constant_pad_nd.default"
+ ],
+ "kernels_per_instance": 259.0,
+ "instances_per_step": 8,
+ "shapes_dtypes": "bfloat16[594, 4096], bfloat16[152064, 4096]",
+ "external_bytes_per_instance": 2490368000,
+ "measured_us_per_instance": 1211.79,
+ "measured_ms_total": 9.694,
+ "ideal_us_per_instance": 359.32,
+ "ideal_ms_total": 2.875,
+ "gap_ms_total": 6.82,
+ "gap_pct_of_step": 0.14,
+ "bitwise_tier": "T0",
+ "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+ "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+ "evidence": "measured",
+ "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #17, L1)",
+ "overlaps_with": [
+  "G-08"
+ ],
+ "notes": " Renamed from the 235B baseline finder's G-11.",
+ "lift": {
+  "pass_name": "lift_fusion_region_g111",
+  "num_sites": 8,
+  "in_default_selection": false,
+  "not_liftable_reason": ""
+ }
+}

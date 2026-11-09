@@ -1,0 +1,264 @@
+{
+ "setup": "Qwen3 235B-A22B DistMoE MXFP8 (graph_trainer_qwen3_235b_a22b_dist_moe_mxfp8_256gpu), FSDP 256 x EP 32, one 8192-token microbatch per step, FA4 varlen attention, debug.deterministic, seed 42, fake PG NGPU=256 on one GB300",
+ "metrics": {
+  "gpu_busy_ms": "union of kernel intervals over all streams in the profiled step (tools/busy_time.py)",
+  "gpu_busy_ms_excl_fake_comm": "the same without kernels of fake_comm nodes (copies that only emulate collectives)",
+  "tps": "tokens/s logged by torchtitan at that step (step 20 averages the steps since the previous log)"
+ },
+ "runs": [
+  {
+   "run": "baseline",
+   "pipeline": "fusion_finder",
+   "plan": null,
+   "kernels": "none",
+   "cache": null,
+   "note": "fusion_finder pipeline, profiled step 10, CUDA graphs off, GPU 0",
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.65354061126709,
+     "10": 9.582934379577637
+    },
+    "loss_metrics/global_max_loss": {
+     "1": 12.65354061126709,
+     "10": 9.582934379577637
+    },
+    "grad_norm": {
+     "1": 204.34934997558594,
+     "10": 14.810263633728027
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "bitwise_equal_to_baseline": true,
+   "gpu_busy_ms": 1082.2,
+   "gpu_busy_ms_excl_fake_comm": 1036.4
+  },
+  {
+   "run": "iter1",
+   "pipeline": "fusion_finder",
+   "plan": "plans/plan_iter2.txt",
+   "kernels": "none (20 regions lifted, all cache misses)",
+   "cache": null,
+   "note": "same setup as baseline, GPU 0",
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.65354061126709,
+     "10": 9.582934379577637
+    },
+    "loss_metrics/global_max_loss": {
+     "1": 12.65354061126709,
+     "10": 9.582934379577637
+    },
+    "grad_norm": {
+     "1": 204.34934997558594,
+     "10": 14.810263633728027
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "bitwise_equal_to_baseline": true,
+   "gpu_busy_ms": 1081.8,
+   "gpu_busy_ms_excl_fake_comm": 1036.1
+  },
+  {
+   "run": "iter2",
+   "pipeline": "fusion_finder",
+   "plan": "plans/plan_iter2.txt",
+   "kernels": "7 (G111 G115 G129 G47 G91 G41 G133)",
+   "cache": "snapshot iter2",
+   "note": "interim bitwise check; GPU 0 shared with verifier processes, so its profile is not a timing result",
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.65354061126709,
+     "10": 9.582934379577637
+    },
+    "loss_metrics/global_max_loss": {
+     "1": 12.65354061126709,
+     "10": 9.582934379577637
+    },
+    "grad_norm": {
+     "1": 204.34934997558594,
+     "10": 14.810263633728027
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "bitwise_equal_to_baseline": true
+  },
+  {
+   "run": "iter_final",
+   "pipeline": "fusion_finder",
+   "plan": "plans/plan_iter2.txt",
+   "kernels": "19 (all promoted)",
+   "cache": "snapshot final",
+   "note": "same setup as baseline, GPU 0",
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.65354061126709,
+     "10": 9.582934379577637
+    },
+    "loss_metrics/global_max_loss": {
+     "1": 12.65354061126709,
+     "10": 9.582934379577637
+    },
+    "grad_norm": {
+     "1": 204.34934997558594,
+     "10": 14.810263633728027
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0
+    }
+   },
+   "bitwise_equal_to_baseline": true,
+   "gpu_busy_ms": 783.5,
+   "gpu_busy_ms_excl_fake_comm": 737.7
+  },
+  {
+   "run": "timed_baseline_run1",
+   "pipeline": "default (production recipe, CUDA graphs on), 20 unprofiled steps",
+   "plan": null,
+   "kernels": "none",
+   "note": "GPU 3, first run",
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.65354061126709,
+     "10": 9.582934379577637,
+     "20": 9.238986015319824
+    },
+    "loss_metrics/global_max_loss": {
+     "1": 12.65354061126709,
+     "10": 9.582934379577637,
+     "20": 9.238986015319824
+    },
+    "grad_norm": {
+     "1": 204.34934997558594,
+     "10": 14.810263633728027,
+     "20": 14.770392417907715
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0,
+     "20": 1.0
+    }
+   },
+   "tps": {
+    "1": 35,
+    "10": 4574,
+    "20": 7698
+   },
+   "bitwise_equal_to_timed_baseline": true
+  },
+  {
+   "run": "timed_baseline",
+   "pipeline": "default (production recipe, CUDA graphs on), 20 unprofiled steps",
+   "plan": null,
+   "kernels": "none",
+   "note": "GPU 3, rerun right after timed_final",
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.65354061126709,
+     "10": 9.582934379577637,
+     "20": 9.238986015319824
+    },
+    "loss_metrics/global_max_loss": {
+     "1": 12.65354061126709,
+     "10": 9.582934379577637,
+     "20": 9.238986015319824
+    },
+    "grad_norm": {
+     "1": 204.34934997558594,
+     "10": 14.810263633728027,
+     "20": 14.770392417907715
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0,
+     "20": 1.0
+    }
+   },
+   "tps": {
+    "1": 36,
+    "10": 4581,
+    "20": 7698
+   },
+   "bitwise_equal_to_timed_baseline": true
+  },
+  {
+   "run": "timed_iter3",
+   "pipeline": "default (production recipe, CUDA graphs on), 20 unprofiled steps",
+   "plan": "plans/plan_iter2.txt",
+   "kernels": "17 (all but G01, G06; snapshot iter3)",
+   "note": "GPU 3",
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.65354061126709,
+     "10": 9.582934379577637,
+     "20": 9.238986015319824
+    },
+    "loss_metrics/global_max_loss": {
+     "1": 12.65354061126709,
+     "10": 9.582934379577637,
+     "20": 9.238986015319824
+    },
+    "grad_norm": {
+     "1": 204.34934997558594,
+     "10": 14.810263633728027,
+     "20": 14.770392417907715
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0,
+     "20": 1.0
+    }
+   },
+   "tps": {
+    "1": 28,
+    "10": 5200,
+    "20": 9204
+   },
+   "bitwise_equal_to_timed_baseline": true
+  },
+  {
+   "run": "timed_final",
+   "pipeline": "default (production recipe, CUDA graphs on), 20 unprofiled steps",
+   "plan": "plans/plan_iter2.txt",
+   "kernels": "19 (snapshot final)",
+   "note": "GPU 3",
+   "tensorboard": {
+    "loss_metrics/global_avg_loss": {
+     "1": 12.65354061126709,
+     "10": 9.582934379577637,
+     "20": 9.238986015319824
+    },
+    "loss_metrics/global_max_loss": {
+     "1": 12.65354061126709,
+     "10": 9.582934379577637,
+     "20": 9.238986015319824
+    },
+    "grad_norm": {
+     "1": 204.34934997558594,
+     "10": 14.810263633728027,
+     "20": 14.770392417907715
+    },
+    "batch_wise_load_balance_loss/mean": {
+     "1": 1.0,
+     "10": 1.0,
+     "20": 1.0
+    }
+   },
+   "tps": {
+    "1": 27,
+    "10": 5220,
+    "20": 10631
+   },
+   "bitwise_equal_to_timed_baseline": true
+  }
+ ]
+}

@@ -1,0 +1,93 @@
+{
+  "kernel_name": "azk7g7u2zm36o7vvoqxbxqkktfrp3jlxo6rny4qkohrq2rhspdh5.py",
+  "reference": "reference.py",
+  "signature": "def run(in0, in1, in2, in3, in4)",
+  "inputs": [
+    {
+      "shape": [256],
+      "stride": [1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [256],
+      "stride": [1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192, 9216],
+      "stride": [9216, 1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192, 1, 128],
+      "stride": [256, 256, 1],
+      "dtype": "float32",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192, 1, 128],
+      "stride": [256, 256, 1],
+      "dtype": "float32",
+      "device": "cuda:0"
+    }
+  ],
+  "outputs": [
+    {
+      "shape": [128],
+      "stride": [1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [128],
+      "stride": [1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192, 64, 128],
+      "stride": [8192, 128, 1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192, 64, 128],
+      "stride": [8192, 128, 1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192, 64, 1],
+      "stride": [64, 1, 1],
+      "dtype": "float32",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192, 4, 128],
+      "stride": [512, 128, 1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192, 4, 128],
+      "stride": [512, 128, 1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192, 4, 1],
+      "stride": [4, 1, 1],
+      "dtype": "float32",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192, 4, 128],
+      "stride": [512, 128, 1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    }
+  ]
+}

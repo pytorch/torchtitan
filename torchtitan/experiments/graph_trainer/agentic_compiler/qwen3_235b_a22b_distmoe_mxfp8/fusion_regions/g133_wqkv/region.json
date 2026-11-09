@@ -1,0 +1,57 @@
+{
+ "id": "G-133",
+ "title": "Cross-module (forward): attention.k_norm, attention.q_norm, attention.qkv_linear.wqkv, feed_forward.rout: _to_copy + constant_pad_nd + bkt._pre_bucket_all_gather",
+ "phases": [
+  "forward"
+ ],
+ "scope": [
+  "cross-module"
+ ],
+ "fusion_kind": "dtype cast + FSDP bucket pack",
+ "location": {
+  "module_fqn_pattern": "layers.*.attention.k_norm, layers.*.attention.q_norm, layers.*.attention.qkv_linear.wqkv, layers.*.feed_forward.router.gate",
+  "graph_nodes_example": [
+   "_to_copy_3",
+   "constant_pad_nd_1",
+   "_to_copy_4",
+   "constant_pad_nd_2",
+   "_to_copy_11",
+   "constant_pad_nd_3",
+   "_pre_bucket_all_gather_1"
+  ],
+  "source": "torchtitan/torchtitan/experiments/graph_trainer/simple_fsdp.py:366"
+ },
+ "ops": [
+  "aten._to_copy.default",
+  "aten.constant_pad_nd.default",
+  "bucketing._pre_bucket_all_gather.default"
+ ],
+ "kernels_per_instance": 8.0,
+ "instances_per_step": 94,
+ "shapes_dtypes": "bfloat16[1], bfloat16[1, 4096], bfloat16[72360448]",
+ "external_bytes_per_instance": 2253068,
+ "measured_us_per_instance": 29.18,
+ "measured_ms_total": 2.743,
+ "ideal_us_per_instance": 0.33,
+ "ideal_ms_total": 0.031,
+ "gap_ms_total": 2.712,
+ "gap_pct_of_step": 0.056,
+ "bitwise_tier": "T0",
+ "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+ "blockers": "the FSDP pack is a custom bucketing op; casts must fold into it or into the producer.",
+ "evidence": "measured",
+ "how_found": "XM-max component: L1 components of one phase/layer/stage joined across module FQNs (barrier-free edges) (candidate #57, XM-max)",
+ "overlaps_with": [
+  "G-41",
+  "G-66",
+  "G-67",
+  "G-68"
+ ],
+ "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.0 ms Renamed from the 235B baseline finder's G-33.",
+ "lift": {
+  "pass_name": "lift_fusion_region_g133",
+  "num_sites": 94,
+  "in_default_selection": true,
+  "not_liftable_reason": ""
+ }
+}

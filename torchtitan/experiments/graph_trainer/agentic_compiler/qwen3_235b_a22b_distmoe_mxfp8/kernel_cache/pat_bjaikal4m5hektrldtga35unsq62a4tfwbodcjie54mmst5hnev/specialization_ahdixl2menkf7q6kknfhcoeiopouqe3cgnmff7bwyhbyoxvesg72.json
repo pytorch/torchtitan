@@ -1,0 +1,111 @@
+{
+  "kernel_name": "ahdixl2menkf7q6kknfhcoeiopouqe3cgnmff7bwyhbyoxvesg72.py",
+  "reference": "reference.py",
+  "signature": "def run(in0, in1, in2, in3, in4, in5, in6, in7, in8, in9, in10)",
+  "inputs": [
+    {
+      "shape": [8192, 4, 128],
+      "stride": [512, 128, 1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192, 64, 128],
+      "stride": [8192, 128, 1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192, 1, 128],
+      "stride": [256, 256, 1],
+      "dtype": "float32",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192, 1, 128],
+      "stride": [256, 256, 1],
+      "dtype": "float32",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192, 4, 1],
+      "stride": [4, 1, 1],
+      "dtype": "float32",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192, 4, 128],
+      "stride": [512, 128, 1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [128],
+      "stride": [1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192, 64, 1],
+      "stride": [64, 1, 1],
+      "dtype": "float32",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192, 64, 128],
+      "stride": [8192, 128, 1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [128],
+      "stride": [1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192, 4, 128],
+      "stride": [512, 128, 1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    }
+  ],
+  "outputs": [
+    {
+      "shape": [128],
+      "stride": [1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [128],
+      "stride": [1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192, 9216],
+      "stride": [9216, 1],
+      "dtype": "float8_e4m3fn",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192, 288],
+      "stride": [288, 1],
+      "dtype": "float8_e8m0fnu",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [9216, 256],
+      "stride": [256, 1],
+      "dtype": "float8_e8m0fnu",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [9216, 8192],
+      "stride": [8192, 1],
+      "dtype": "float8_e4m3fn",
+      "device": "cuda:0"
+    }
+  ]
+}

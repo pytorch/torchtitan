@@ -1,0 +1,46 @@
+{
+ "id": "G-115",
+ "title": "Intra-module (forward): feed_forward.routed_experts: cat + dist_moe.prepare_mxfp8_weight",
+ "phases": [
+  "forward"
+ ],
+ "scope": [
+  "intra-module"
+ ],
+ "fusion_kind": "pointwise chain",
+ "location": {
+  "module_fqn_pattern": "layers.*.feed_forward.routed_experts",
+  "graph_nodes_example": [
+   "cat_2",
+   "prepare_mxfp8_weight"
+  ],
+  "source": "torchtitan/torchtitan/experiments/graph_trainer/simple_fsdp.py:268-366"
+ },
+ "ops": [
+  "aten.cat.default",
+  "dist_moe.prepare_mxfp8_weight.default"
+ ],
+ "kernels_per_instance": 2.0,
+ "instances_per_step": 94,
+ "shapes_dtypes": "bfloat16[4, 2, 1536, 4096], float8_e4m3fn[4, 3072, 4096], float8_e8m0fnu[12288, 128], float8_e8m0fnu[16384, 96]",
+ "external_bytes_per_instance": 62914560,
+ "measured_us_per_instance": 71.63,
+ "measured_ms_total": 6.733,
+ "ideal_us_per_instance": 9.08,
+ "ideal_ms_total": 0.853,
+ "gap_ms_total": 5.88,
+ "gap_pct_of_step": 0.121,
+ "bitwise_tier": "T0",
+ "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+ "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+ "evidence": "measured",
+ "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #22, L1)",
+ "overlaps_with": [],
+ "notes": " Renamed from the 235B baseline finder's G-15.",
+ "lift": {
+  "pass_name": "lift_fusion_region_g115",
+  "num_sites": 94,
+  "in_default_selection": true,
+  "not_liftable_reason": ""
+ }
+}

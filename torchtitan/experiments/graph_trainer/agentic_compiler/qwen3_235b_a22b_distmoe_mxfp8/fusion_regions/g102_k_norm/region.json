@@ -1,0 +1,66 @@
+{
+ "id": "G-102",
+ "title": "Cross-module (forward): attention.k_norm, attention.q_norm, attention.qkv_linear, attention.rope: clone + _fused_rms_norm + _to_copy + mul + neg + cat + add",
+ "phases": [
+  "forward"
+ ],
+ "scope": [
+  "cross-module"
+ ],
+ "fusion_kind": "normalization + pointwise",
+ "location": {
+  "module_fqn_pattern": "layers.*.attention.k_norm, layers.*.attention.q_norm, layers.*.attention.qkv_linear, layers.*.attention.rope",
+  "graph_nodes_example": [
+   "clone",
+   "_fused_rms_norm_1",
+   "_to_copy_5",
+   "mul",
+   "neg",
+   "cat",
+   "mul_1",
+   "add",
+   "_to_copy_7",
+   "clone_1",
+   "_fused_rms_norm_2",
+   "_to_copy_6"
+  ],
+  "source": "torchtitan/torchtitan/models/common/attention/attention.py:194-196; torchtitan/torchtitan/models/common/nn_modules.py:155; torchtitan/torchtitan/models/common/rope.py:171"
+ },
+ "ops": [
+  "aten._fused_rms_norm.default",
+  "aten._to_copy.default",
+  "aten.add.Tensor",
+  "aten.cat.default",
+  "aten.clone.default",
+  "aten.mul.Tensor",
+  "aten.neg.default"
+ ],
+ "kernels_per_instance": 19.0,
+ "instances_per_step": 94,
+ "shapes_dtypes": "float32[8192, 64, 128], float32[8192, 4, 128], bfloat16[8192, 4, 128], bfloat16[8192, 64, 128]",
+ "external_bytes_per_instance": 597819392,
+ "measured_us_per_instance": 1086.5,
+ "measured_ms_total": 102.131,
+ "ideal_us_per_instance": 86.26,
+ "ideal_ms_total": 8.108,
+ "gap_ms_total": 94.023,
+ "gap_pct_of_step": 1.933,
+ "bitwise_tier": "T1",
+ "bitwise_notes": "contains reductions (_fused_rms_norm): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+ "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+ "evidence": "measured",
+ "how_found": "XM-max component: L1 components of one phase/layer/stage joined across module FQNs (barrier-free edges) (candidate #1, XM-max)",
+ "overlaps_with": [
+  "G-04",
+  "G-19",
+  "G-57",
+  "G-91"
+ ],
+ "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 4.0 ms Renamed from the 235B baseline finder's G-02.",
+ "lift": {
+  "pass_name": "lift_fusion_region_g102",
+  "num_sites": 94,
+  "in_default_selection": true,
+  "not_liftable_reason": ""
+ }
+}

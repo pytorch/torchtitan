@@ -1,0 +1,19 @@
+{
+  "kernel_name": "av3635djbfamwjggbkympcqmenrs4jraq3mjsrirozsywsua2a6p.py",
+  "reference": "reference.py",
+  "signature": "def run(in0)",
+  "inputs": [
+    {
+      "shape": [151936, 4096],
+      "stride": [4096, 1],
+      "dtype": "bfloat16",
+      "device": "cuda:0"
+    }
+  ],
+  "outputs": {
+    "shape": [152064, 4096],
+    "stride": [4096, 1],
+    "dtype": "bfloat16",
+    "device": "cuda:0"
+  }
+}

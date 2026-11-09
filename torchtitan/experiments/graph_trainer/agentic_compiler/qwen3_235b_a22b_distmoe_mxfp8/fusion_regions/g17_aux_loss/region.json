@@ -1,0 +1,62 @@
+{
+ "id": "G-17",
+ "title": "Cross-module (forward): feed_forward.router, feed_forward.router.aux_loss: zeros_like + scatter_.value + bitwise_not + bitwise_and + sum + add_ + _to_copy + cat",
+ "phases": [
+  "forward"
+ ],
+ "scope": [
+  "cross-module"
+ ],
+ "fusion_kind": "reduction + pointwise",
+ "location": {
+  "module_fqn_pattern": "layers.*.feed_forward.router, layers.*.feed_forward.router.aux_loss",
+  "graph_nodes_example": [
+   "zeros_like",
+   "scatter_",
+   "bitwise_not",
+   "bitwise_and",
+   "sum_2",
+   "add_",
+   "_to_copy_12",
+   "sum_3",
+   "cat_240"
+  ],
+  "source": "torchtitan/torchtitan/models/common/moe/moe.py:298-683"
+ },
+ "ops": [
+  "aten._to_copy.default",
+  "aten.add_.Tensor",
+  "aten.bitwise_and.Tensor",
+  "aten.bitwise_not.default",
+  "aten.cat.default",
+  "aten.scatter_.value",
+  "aten.sum.dim_IntList",
+  "aten.zeros_like.default"
+ ],
+ "kernels_per_instance": 12.0,
+ "instances_per_step": 48,
+ "shapes_dtypes": "bool[32768, 128], float32[128], bool[32768, 1], int64[128]",
+ "external_bytes_per_instance": 18908672,
+ "measured_us_per_instance": 122.16,
+ "measured_ms_total": 5.864,
+ "ideal_us_per_instance": 2.73,
+ "ideal_ms_total": 0.131,
+ "gap_ms_total": 5.733,
+ "gap_pct_of_step": 0.302,
+ "bitwise_tier": "T2",
+ "bitwise_notes": "order-sensitive data movement (scatter_.value): accumulation / selection order must match eager exactly.",
+ "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+ "evidence": "measured",
+ "how_found": "XM-max component: L1 components of one phase/layer/stage joined across module FQNs (barrier-free edges) (candidate #35, XM-max)",
+ "overlaps_with": [
+  "G-27",
+  "G-29"
+ ],
+ "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.1 ms",
+ "lift": {
+  "pass_name": "lift_fusion_region_g17",
+  "num_sites": 48,
+  "in_default_selection": true,
+  "not_liftable_reason": ""
+ }
+}

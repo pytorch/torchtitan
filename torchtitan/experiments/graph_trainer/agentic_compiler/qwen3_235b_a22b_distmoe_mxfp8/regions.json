@@ -1,0 +1,4585 @@
+{
+ "substrate": "graph",
+ "setup": {
+  "git_commit": "e96fc894af3d18ee549f6f8ea044729841b80d14",
+  "command": "",
+  "config_deltas": {
+   "pass_pipeline": "fusion_finder",
+   "memory_policy": "none",
+   "inductor_compilation": "regional",
+   "parallelism": {
+    "data_parallel_shard_degree": 256,
+    "data_parallel_replicate_degree": 1,
+    "tensor_parallel_degree": 1,
+    "context_parallel_degree": 1,
+    "pipeline_parallel_degree": 1,
+    "expert_parallel_degree": 32
+   },
+   "num_tokens_per_microbatch_per_dp_rank": 8192,
+   "num_tokens_per_train_step": -1,
+   "steps": 10,
+   "profiled_step": 10,
+   "model_config": "GraphTrainerQwen3Model.Config",
+   "world_size": 256
+  },
+  "gpu": "NVIDIA GB300",
+  "gpu_busy_during_timing": true,
+  "hbm_gbps": 6930.8,
+  "bf16_gemm_tflops": 2071.1
+ },
+ "step_budget": {
+  "step_gpu_busy_ms": 1082.19,
+  "step_gpu_idle_ms": 3783.1,
+  "attributed_pct": 100.0,
+  "by_category_ms": {
+   "gemm": 106.8,
+   "attention": 171.92,
+   "fused_moe": 356.58,
+   "fake_comm": 45.8,
+   "memory_bound_glue": 391.52,
+   "optimizer": 6.0,
+   "other": 3.6
+  }
+ },
+ "regions": [
+  {
+   "id": "G-01",
+   "title": "Cross-module (backward): attention.k_norm, attention.q_norm, attention.qkv_linear, attention.qkv_linear.w: _to_copy + mul + neg + slice_backward + add + _fused_rms_norm_backward + cat + torchao.mxf",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "normalization + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.k_norm, layers.*.attention.q_norm, layers.*.attention.qkv_linear, layers.*.attention.qkv_linear.wqkv, layers.*.attention.rope",
+    "graph_nodes_example": [
+     "_to_copy_1362",
+     "_to_copy_1363",
+     "mul_1135",
+     "neg_190",
+     "slice_backward",
+     "slice_backward_1",
+     "add_483",
+     "mul_1136",
+     "add_484",
+     "_to_copy_1364",
+     "mul_1137",
+     "neg_191"
+    ],
+    "source": "torchtitan/torchtitan/models/common/rope.py:171; torchtitan/torchtitan/models/common/nn_modules.py:155; torchtitan/torchtitan/models/common/attention/attention.py:189; torchtitan/torchtitan/quantization/mxfp8/linear.py:129"
+   },
+   "ops": [
+    "aten._fused_rms_norm_backward.default",
+    "aten._to_copy.default",
+    "aten.add.Tensor",
+    "aten.cat.default",
+    "aten.mul.Tensor",
+    "aten.neg.default",
+    "aten.slice_backward.default",
+    "torchao.mxfp8_quantize.default",
+    "torchao.triton_mx_block_rearrange.default"
+   ],
+   "kernels_per_instance": 30.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float32[8192, 4, 128], float32[8192, 64, 128], bfloat16[8192, 4, 128], bfloat16[8192, 64, 128]",
+   "external_bytes_per_instance": 635569152,
+   "measured_us_per_instance": 1232.23,
+   "measured_ms_total": 115.83,
+   "ideal_us_per_instance": 91.7,
+   "ideal_ms_total": 8.62,
+   "gap_ms_total": 107.21,
+   "gap_pct_of_step": 2.204,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (_fused_rms_norm_backward): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "XM-max component: L1 components of one phase/layer/stage joined across module FQNs (barrier-free edges) (candidate #0, XM-max)",
+   "overlaps_with": [
+    "G-03",
+    "G-14",
+    "G-34",
+    "G-37",
+    "G-45",
+    "G-49"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 10.0 ms"
+  },
+  {
+   "id": "G-02",
+   "title": "Cross-module (forward): attention.k_norm, attention.q_norm, attention.qkv_linear, attention.rope: clone + _fused_rms_norm + _to_copy + mul + neg + cat + add",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "normalization + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.k_norm, layers.*.attention.q_norm, layers.*.attention.qkv_linear, layers.*.attention.rope",
+    "graph_nodes_example": [
+     "clone",
+     "_fused_rms_norm_1",
+     "_to_copy_5",
+     "mul",
+     "neg",
+     "cat",
+     "mul_1",
+     "add",
+     "_to_copy_7",
+     "clone_1",
+     "_fused_rms_norm_2",
+     "_to_copy_6"
+    ],
+    "source": "torchtitan/torchtitan/models/common/attention/attention.py:194-196; torchtitan/torchtitan/models/common/nn_modules.py:155; torchtitan/torchtitan/models/common/rope.py:171"
+   },
+   "ops": [
+    "aten._fused_rms_norm.default",
+    "aten._to_copy.default",
+    "aten.add.Tensor",
+    "aten.cat.default",
+    "aten.clone.default",
+    "aten.mul.Tensor",
+    "aten.neg.default"
+   ],
+   "kernels_per_instance": 19.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float32[8192, 64, 128], float32[8192, 4, 128], bfloat16[8192, 4, 128], bfloat16[8192, 64, 128]",
+   "external_bytes_per_instance": 597819392,
+   "measured_us_per_instance": 1086.5,
+   "measured_ms_total": 102.131,
+   "ideal_us_per_instance": 86.26,
+   "ideal_ms_total": 8.108,
+   "gap_ms_total": 94.023,
+   "gap_pct_of_step": 1.933,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (_fused_rms_norm): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "XM-max component: L1 components of one phase/layer/stage joined across module FQNs (barrier-free edges) (candidate #1, XM-max)",
+   "overlaps_with": [
+    "G-04",
+    "G-19",
+    "G-57",
+    "G-91"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 4.0 ms"
+  },
+  {
+   "id": "G-03",
+   "title": "Intra-module (backward): attention.rope: _to_copy + mul + neg + slice_backward + add",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "pointwise chain",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.rope",
+    "graph_nodes_example": [
+     "_to_copy_1363",
+     "mul_1137",
+     "neg_191",
+     "slice_backward_2",
+     "slice_backward_3",
+     "add_485",
+     "mul_1138",
+     "add_486",
+     "_to_copy_1365"
+    ],
+    "source": "torchtitan/torchtitan/models/common/rope.py:171"
+   },
+   "ops": [
+    "aten._to_copy.default",
+    "aten.add.Tensor",
+    "aten.mul.Tensor",
+    "aten.neg.default",
+    "aten.slice_backward.default"
+   ],
+   "kernels_per_instance": 11.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float32[8192, 64, 128], float32[8192, 64, 64], bfloat16[8192, 64, 128]",
+   "external_bytes_per_instance": 276824064,
+   "measured_us_per_instance": 965.22,
+   "measured_ms_total": 90.731,
+   "ideal_us_per_instance": 39.94,
+   "ideal_ms_total": 3.754,
+   "gap_ms_total": 86.976,
+   "gap_pct_of_step": 1.788,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #3, L1)",
+   "overlaps_with": [
+    "G-01"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-04",
+   "title": "Intra-module (forward): attention.rope: _to_copy + mul + neg + cat + add",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "pointwise chain",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.rope",
+    "graph_nodes_example": [
+     "_to_copy_5",
+     "mul",
+     "neg",
+     "cat",
+     "mul_1",
+     "add",
+     "_to_copy_7"
+    ],
+    "source": "torchtitan/torchtitan/models/common/rope.py:171"
+   },
+   "ops": [
+    "aten._to_copy.default",
+    "aten.add.Tensor",
+    "aten.cat.default",
+    "aten.mul.Tensor",
+    "aten.neg.default"
+   ],
+   "kernels_per_instance": 7.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float32[8192, 64, 128], float32[8192, 64, 64], bfloat16[8192, 64, 128]",
+   "external_bytes_per_instance": 276824064,
+   "measured_us_per_instance": 930.19,
+   "measured_ms_total": 87.438,
+   "ideal_us_per_instance": 39.94,
+   "ideal_ms_total": 3.754,
+   "gap_ms_total": 83.683,
+   "gap_pct_of_step": 1.72,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #6, L1)",
+   "overlaps_with": [
+    "G-02"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-05",
+   "title": "Intra-module (backward): feed_forward.routed_experts: cat + bkt._pre_bucket_reduce_scatter",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "dtype cast + FSDP bucket pack",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.routed_experts",
+    "graph_nodes_example": [
+     "cat_384",
+     "cat_385",
+     "_pre_bucket_reduce_scatter_188"
+    ],
+    "source": "(no torchtitan frame in stack_trace)"
+   },
+   "ops": [
+    "aten.cat.default",
+    "bucketing._pre_bucket_reduce_scatter.default"
+   ],
+   "kernels_per_instance": 4.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[32, 512, 1536], bfloat16[32, 2, 192, 4096], bfloat16[75497472]",
+   "external_bytes_per_instance": 301989888,
+   "measured_us_per_instance": 376.49,
+   "measured_ms_total": 35.39,
+   "ideal_us_per_instance": 43.57,
+   "ideal_ms_total": 4.096,
+   "gap_ms_total": 31.295,
+   "gap_pct_of_step": 0.643,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "the FSDP pack is a custom bucketing op; casts must fold into it or into the producer.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #7, L1)",
+   "overlaps_with": [],
+   "notes": ""
+  },
+  {
+   "id": "G-06",
+   "title": "Cross-module (backward): feed_forward.routed_experts, feed_forward.router, feed_forward.router.aux_loss, : masked_fill.Scalar + ones_like + mul + neg + div + sum + gt.Scalar + scalar_tensor + where",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "gather/scatter + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.routed_experts, layers.*.feed_forward.router, layers.*.feed_forward.router.aux_loss, layers.*.feed_forward.router.gate",
+    "graph_nodes_example": [
+     "masked_fill_188",
+     "ones_like_9",
+     "mul_1128",
+     "mul_1129",
+     "mul_1130",
+     "neg_188",
+     "div_298",
+     "div_299",
+     "mul_1131",
+     "div_300",
+     "sum_471",
+     "gt"
+    ],
+    "source": "torchtitan/torchtitan/models/common/dist_moe/routed_experts.py:196; torchtitan/torchtitan/models/common/moe/moe.py:257-705; torchtitan/torchtitan/models/common/linear/hi_mid_lo_linear.py:117"
+   },
+   "ops": [
+    "aten.__lshift__.Scalar",
+    "aten._softmax_backward_data.default",
+    "aten._to_copy.default",
+    "aten.add.Tensor",
+    "aten.cat.default",
+    "aten.div.Tensor",
+    "aten.gt.Scalar",
+    "aten.masked_fill.Scalar",
+    "aten.mul.Tensor",
+    "aten.neg.default",
+    "aten.new_zeros.default",
+    "aten.ones_like.default",
+    "aten.scalar_tensor.default",
+    "aten.scatter_add.default",
+    "aten.sgn.default",
+    "aten.sub.Tensor",
+    "aten.sum.dim_IntList",
+    "aten.where.self"
+   ],
+   "kernels_per_instance": 71.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float32[8192, 128], float32[8192, 8], int32[8192, 128], float32[]",
+   "external_bytes_per_instance": 15843848,
+   "measured_us_per_instance": 232.7,
+   "measured_ms_total": 21.874,
+   "ideal_us_per_instance": 2.29,
+   "ideal_ms_total": 0.215,
+   "gap_ms_total": 21.659,
+   "gap_pct_of_step": 0.445,
+   "bitwise_tier": "T2",
+   "bitwise_notes": "order-sensitive data movement (scatter_add): accumulation / selection order must match eager exactly.",
+   "blockers": "scatter_add/index_add accumulation order (atomics) must be fixed for bitwise results.",
+   "evidence": "measured",
+   "how_found": "XM-max component: L1 components of one phase/layer/stage joined across module FQNs (barrier-free edges) (candidate #8, XM-max)",
+   "overlaps_with": [
+    "G-07",
+    "G-09",
+    "G-24",
+    "G-36",
+    "G-59"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.2 ms"
+  },
+  {
+   "id": "G-07",
+   "title": "Intra-module (backward): feed_forward.router: mul + neg + div + sum + add + new_zeros + scatter_add + _softmax_backward_data",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "gather/scatter + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.router",
+    "graph_nodes_example": [
+     "mul_1133",
+     "neg_189",
+     "div_301",
+     "div_302",
+     "mul_1134",
+     "div_303",
+     "sum_472",
+     "add_479",
+     "new_zeros_1",
+     "scatter_add",
+     "add_480",
+     "_softmax_backward_data"
+    ],
+    "source": "torchtitan/torchtitan/models/common/moe/moe.py:257-292"
+   },
+   "ops": [
+    "aten._softmax_backward_data.default",
+    "aten.add.Tensor",
+    "aten.div.Tensor",
+    "aten.mul.Tensor",
+    "aten.neg.default",
+    "aten.new_zeros.default",
+    "aten.scatter_add.default",
+    "aten.sum.dim_IntList"
+   ],
+   "kernels_per_instance": 43.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float32[8192, 8], float32[8192, 128], float32[8192, 1]",
+   "external_bytes_per_instance": 13664256,
+   "measured_us_per_instance": 157.09,
+   "measured_ms_total": 14.766,
+   "ideal_us_per_instance": 1.97,
+   "ideal_ms_total": 0.185,
+   "gap_ms_total": 14.581,
+   "gap_pct_of_step": 0.3,
+   "bitwise_tier": "T2",
+   "bitwise_notes": "order-sensitive data movement (scatter_add): accumulation / selection order must match eager exactly.",
+   "blockers": "scatter_add/index_add accumulation order (atomics) must be fixed for bitwise results.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #11, L1)",
+   "overlaps_with": [
+    "G-06"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-08",
+   "title": "T3 GEMM epilogue (backward): lm_head: mm + constant_pad_nd + cat",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "GEMM epilogue",
+   "location": {
+    "module_fqn_pattern": "lm_head",
+    "graph_nodes_example": [
+     "mm_95",
+     "constant_pad_nd_284",
+     "constant_pad_nd_285",
+     "constant_pad_nd_286",
+     "constant_pad_nd_287",
+     "constant_pad_nd_288",
+     "constant_pad_nd_289",
+     "constant_pad_nd_290",
+     "constant_pad_nd_291",
+     "constant_pad_nd_292",
+     "constant_pad_nd_293",
+     "constant_pad_nd_294"
+    ],
+    "source": "torchtitan/torchtitan/models/common/linear/linear.py:115"
+   },
+   "ops": [
+    "aten.cat.default",
+    "aten.constant_pad_nd.default",
+    "aten.mm.default"
+   ],
+   "kernels_per_instance": 260.0,
+   "instances_per_step": 8,
+   "shapes_dtypes": "bfloat16[594, 4096], bfloat16[151936, 4096], bfloat16[152064, 4096]",
+   "external_bytes_per_instance": 1565261824,
+   "measured_us_per_instance": 1897.8,
+   "measured_ms_total": 15.182,
+   "ideal_us_per_instance": 615.39,
+   "ideal_ms_total": 4.923,
+   "gap_ms_total": 10.259,
+   "gap_pct_of_step": 0.211,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+   "blockers": "needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue).",
+   "evidence": "measured",
+   "how_found": "T3 epilogue: L1 component consuming a GEMM output (candidate #12, T3-epi)",
+   "overlaps_with": [
+    "G-11"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 2.9 ms | GEMM mm_95: 686.0 us measured vs 615.4 us flops-ideal (GEMM-own gap 0.6 ms of this region's gap); glue part 1211.8 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 9.7 ms. | estimated: ideal uses flops/peak for the GEMM"
+  },
+  {
+   "id": "G-09",
+   "title": "T3 GEMM prologue (backward): feed_forward.router.gate: _to_copy + __lshift__.Scalar + sub + cat + mm.dtype",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "GEMM prologue",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.router.gate",
+    "graph_nodes_example": [
+     "_to_copy_1353",
+     "_to_copy_1354",
+     "lshift",
+     "sub",
+     "_to_copy_1355",
+     "_to_copy_1356",
+     "lshift_1",
+     "sub_1",
+     "_to_copy_1357",
+     "cat_386",
+     "mm_119"
+    ],
+    "source": "torchtitan/torchtitan/models/common/linear/hi_mid_lo_linear.py:117"
+   },
+   "ops": [
+    "aten.__lshift__.Scalar",
+    "aten._to_copy.default",
+    "aten.cat.default",
+    "aten.mm.dtype",
+    "aten.sub.Tensor"
+   ],
+   "kernels_per_instance": 11.0,
+   "instances_per_step": 282,
+   "shapes_dtypes": "int32[8192, 128], bfloat16[8192, 128], float32[8192, 128], bfloat16[8192, 384]",
+   "external_bytes_per_instance": 79691776,
+   "measured_us_per_instance": 38.88,
+   "measured_ms_total": 10.965,
+   "ideal_us_per_instance": 11.5,
+   "ideal_ms_total": 3.242,
+   "gap_ms_total": 7.722,
+   "gap_pct_of_step": 0.159,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+   "blockers": "needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue).",
+   "evidence": "measured",
+   "how_found": "T3 prologue: L1 component whose outputs feed only GEMMs (candidate #13, T3-pro)",
+   "overlaps_with": [
+    "G-06",
+    "G-36",
+    "G-39"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.0 ms | GEMM mm_119: 14.2 us measured vs 4.1 us flops-ideal (GEMM-own gap 2.8 ms of this region's gap); glue part 24.7 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 7.0 ms. | identical kernel set as candidate(s) [55] | estimated: ideal uses flops/peak for the GEMM"
+  },
+  {
+   "id": "G-10",
+   "title": "Cross-module (forward): feed_forward.routed_experts, feed_forward.router, feed_forward.router.aux_loss: _softmax + gather + sum + add + div + mul + add_ + clone + linalg_vector_norm + clamp_min ",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "normalization + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.routed_experts, layers.*.feed_forward.router, layers.*.feed_forward.router.aux_loss",
+    "graph_nodes_example": [
+     "_softmax_1",
+     "gather_1",
+     "sum_6",
+     "add_8",
+     "div_3",
+     "mul_16",
+     "add__4",
+     "clone_7",
+     "linalg_vector_norm_2",
+     "clamp_min_3",
+     "div_4",
+     "mul_17"
+    ],
+    "source": "torchtitan/torchtitan/models/common/moe/moe.py:257-705; torchtitan/torchtitan/models/common/dist_moe/routed_experts.py:196"
+   },
+   "ops": [
+    "aten._softmax.default",
+    "aten.add.Tensor",
+    "aten.add_.Tensor",
+    "aten.bitwise_not.default",
+    "aten.clamp_min.default",
+    "aten.clone.default",
+    "aten.div.Tensor",
+    "aten.gather.default",
+    "aten.linalg_vector_norm.default",
+    "aten.masked_fill.Scalar",
+    "aten.mul.Tensor",
+    "aten.reciprocal.default",
+    "aten.sum.default",
+    "aten.sum.dim_IntList"
+   ],
+   "kernels_per_instance": 30.0,
+   "instances_per_step": 93,
+   "shapes_dtypes": "float32[], float32[128], float32[8192, 8], float32[8192, 1]",
+   "external_bytes_per_instance": 9562136,
+   "measured_us_per_instance": 81.89,
+   "measured_ms_total": 7.616,
+   "ideal_us_per_instance": 1.38,
+   "ideal_ms_total": 0.128,
+   "gap_ms_total": 7.488,
+   "gap_pct_of_step": 0.154,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (_softmax, linalg_vector_norm, sum, sum.dim_IntList): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "NOT FUSABLE AS FOUND: not one kernel: _c10d_functional.all_reduce (all_reduce_95) runs between region members (path out and back in: zeros_like -> scatter_.value -> bitwise_and.Tensor -> _to_copy -> sum.dim_IntList -> view -> cat -> _c10d_functional.all_reduce -> _c10d_functional.wait_tensor). none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "XM-max component: L1 components of one phase/layer/stage joined across module FQNs (barrier-free edges) (candidate #14, XM-max)",
+   "overlaps_with": [
+    "G-13",
+    "G-17",
+    "G-40",
+    "G-43",
+    "G-53"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.1 ms"
+  },
+  {
+   "id": "G-11",
+   "title": "Intra-module (backward): lm_head: constant_pad_nd + cat",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "copy/concat + cast",
+   "location": {
+    "module_fqn_pattern": "lm_head",
+    "graph_nodes_example": [
+     "constant_pad_nd_284",
+     "constant_pad_nd_285",
+     "constant_pad_nd_286",
+     "constant_pad_nd_287",
+     "constant_pad_nd_288",
+     "constant_pad_nd_289",
+     "constant_pad_nd_290",
+     "constant_pad_nd_291",
+     "constant_pad_nd_292",
+     "constant_pad_nd_293",
+     "constant_pad_nd_294",
+     "constant_pad_nd_295"
+    ],
+    "source": "(no torchtitan frame in stack_trace)"
+   },
+   "ops": [
+    "aten.cat.default",
+    "aten.constant_pad_nd.default"
+   ],
+   "kernels_per_instance": 259.0,
+   "instances_per_step": 8,
+   "shapes_dtypes": "bfloat16[594, 4096], bfloat16[152064, 4096]",
+   "external_bytes_per_instance": 2490368000,
+   "measured_us_per_instance": 1211.79,
+   "measured_ms_total": 9.694,
+   "ideal_us_per_instance": 359.32,
+   "ideal_ms_total": 2.875,
+   "gap_ms_total": 6.82,
+   "gap_pct_of_step": 0.14,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #17, L1)",
+   "overlaps_with": [
+    "G-08"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-12",
+   "title": "Cross-module (backward): attention.wo, feed_forward.routed_experts, ffn_norm: add + _fused_rms_norm_backward + torchao.mxfp8_quantize + torchao.triton_mx_block_rearrang",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "normalization + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.wo, layers.*.feed_forward.routed_experts, layers.*.ffn_norm",
+    "graph_nodes_example": [
+     "add_491",
+     "_fused_rms_norm_backward_5",
+     "add_492",
+     "mxfp8_quantize_192",
+     "triton_mx_block_rearrange_194",
+     "triton_mx_block_rearrange_196"
+    ],
+    "source": "torchtitan/torchtitan/models/common/nn_modules.py:155; torchtitan/torchtitan/quantization/mxfp8/linear.py:129"
+   },
+   "ops": [
+    "aten._fused_rms_norm_backward.default",
+    "aten.add.Tensor",
+    "torchao.mxfp8_quantize.default",
+    "torchao.triton_mx_block_rearrange.default"
+   ],
+   "kernels_per_instance": 7.0,
+   "instances_per_step": 93,
+   "shapes_dtypes": "bfloat16[8192, 4096], float8_e4m3fn[8192, 4096], float8_e8m0fnu[8192, 128], float8_e8m0fnu[4096, 256]",
+   "external_bytes_per_instance": 486588416,
+   "measured_us_per_instance": 141.35,
+   "measured_ms_total": 13.146,
+   "ideal_us_per_instance": 70.21,
+   "ideal_ms_total": 6.529,
+   "gap_ms_total": 6.617,
+   "gap_pct_of_step": 0.136,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (_fused_rms_norm_backward): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "XM-max component: L1 components of one phase/layer/stage joined across module FQNs (barrier-free edges) (candidate #18, XM-max)",
+   "overlaps_with": [
+    "G-32",
+    "G-35",
+    "G-50",
+    "G-65"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 2.7 ms"
+  },
+  {
+   "id": "G-13",
+   "title": "Cross-layer (forward): feed_forward.router.aux_loss, feed_forward.router.aux_loss: clamp_min + reciprocal + mul + add_ + clone + linalg_vector_norm + div + bitwise_not + sum",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-layer"
+   ],
+   "fusion_kind": "normalization + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.router.aux_loss",
+    "graph_nodes_example": [
+     "clamp_min_2",
+     "reciprocal",
+     "mul_8",
+     "mul_9",
+     "add__4",
+     "clone_7",
+     "linalg_vector_norm_2",
+     "clamp_min_3",
+     "div_4",
+     "mul_17",
+     "linalg_vector_norm_3",
+     "clamp_min_4"
+    ],
+    "source": "torchtitan/torchtitan/models/common/moe/moe.py:683-705"
+   },
+   "ops": [
+    "aten.add_.Tensor",
+    "aten.bitwise_not.default",
+    "aten.clamp_min.default",
+    "aten.clone.default",
+    "aten.div.Tensor",
+    "aten.linalg_vector_norm.default",
+    "aten.mul.Tensor",
+    "aten.reciprocal.default",
+    "aten.sum.default",
+    "aten.sum.dim_IntList"
+   ],
+   "kernels_per_instance": 26.0,
+   "instances_per_step": 93,
+   "shapes_dtypes": "float32[], float32[128], int64[], float32[1]",
+   "external_bytes_per_instance": 4278304,
+   "measured_us_per_instance": 69.61,
+   "measured_ms_total": 6.474,
+   "ideal_us_per_instance": 0.62,
+   "ideal_ms_total": 0.057,
+   "gap_ms_total": 6.416,
+   "gap_pct_of_step": 0.132,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (linalg_vector_norm, sum, sum.dim_IntList): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "crosses a decoder-layer boundary: the value handed between layers is also read elsewhere (saved for backward, or the other residual branch), so the fused kernel must still write it; graph passes treat layers as units (per-layer FSDP buckets and reordering).",
+   "evidence": "measured",
+   "how_found": "XL pair: two L1 components of one phase and stage joined by an edge across a layer/root-module boundary (candidate #19, XL)",
+   "overlaps_with": [
+    "G-10",
+    "G-17",
+    "G-85"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.0 ms"
+  },
+  {
+   "id": "G-14",
+   "title": "Intra-module (backward): attention.rope: _to_copy + mul + neg + slice_backward + add",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "pointwise chain",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.rope",
+    "graph_nodes_example": [
+     "_to_copy_1362",
+     "mul_1135",
+     "neg_190",
+     "slice_backward",
+     "slice_backward_1",
+     "add_483",
+     "mul_1136",
+     "add_484",
+     "_to_copy_1364"
+    ],
+    "source": "torchtitan/torchtitan/models/common/rope.py:171"
+   },
+   "ops": [
+    "aten._to_copy.default",
+    "aten.add.Tensor",
+    "aten.mul.Tensor",
+    "aten.neg.default",
+    "aten.slice_backward.default"
+   ],
+   "kernels_per_instance": 11.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float32[8192, 4, 128], float32[8192, 4, 64], bfloat16[8192, 4, 128]",
+   "external_bytes_per_instance": 25165824,
+   "measured_us_per_instance": 66.68,
+   "measured_ms_total": 6.268,
+   "ideal_us_per_instance": 3.63,
+   "ideal_ms_total": 0.341,
+   "gap_ms_total": 5.927,
+   "gap_pct_of_step": 0.122,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #20, L1)",
+   "overlaps_with": [
+    "G-01"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-15",
+   "title": "Intra-module (forward): feed_forward.routed_experts: cat + dist_moe.prepare_mxfp8_weight",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "pointwise chain",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.routed_experts",
+    "graph_nodes_example": [
+     "cat_2",
+     "prepare_mxfp8_weight"
+    ],
+    "source": "torchtitan/torchtitan/experiments/graph_trainer/simple_fsdp.py:268-366"
+   },
+   "ops": [
+    "aten.cat.default",
+    "dist_moe.prepare_mxfp8_weight.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[4, 2, 1536, 4096], float8_e4m3fn[4, 3072, 4096], float8_e8m0fnu[12288, 128], float8_e8m0fnu[16384, 96]",
+   "external_bytes_per_instance": 62914560,
+   "measured_us_per_instance": 71.63,
+   "measured_ms_total": 6.733,
+   "ideal_us_per_instance": 9.08,
+   "ideal_ms_total": 0.853,
+   "gap_ms_total": 5.88,
+   "gap_pct_of_step": 0.121,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #22, L1)",
+   "overlaps_with": [],
+   "notes": ""
+  },
+  {
+   "id": "G-16",
+   "title": "T3 GEMM prologue (backward): lm_head, loss: div + nll_loss_backward + _log_softmax_backward_data + _to_copy + mm",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "GEMM prologue",
+   "location": {
+    "module_fqn_pattern": "lm_head, loss",
+    "graph_nodes_example": [
+     "div_283",
+     "nll_loss_backward",
+     "_log_softmax_backward_data",
+     "_to_copy_1320",
+     "mm_96"
+    ],
+    "source": "torchtitan/torchtitan/distributed/local_compile.py:96; torchtitan/torchtitan/models/common/linear/linear.py:115"
+   },
+   "ops": [
+    "aten._log_softmax_backward_data.default",
+    "aten._to_copy.default",
+    "aten.div.Tensor",
+    "aten.mm.default",
+    "aten.nll_loss_backward.default"
+   ],
+   "kernels_per_instance": 6.0,
+   "instances_per_step": 8,
+   "shapes_dtypes": "float32[1024, 151936], float32[], bfloat16[1024, 151936], bfloat16[1024, 4096]",
+   "external_bytes_per_instance": 2808881168,
+   "measured_us_per_instance": 1334.62,
+   "measured_ms_total": 10.677,
+   "ideal_us_per_instance": 615.39,
+   "ideal_ms_total": 4.923,
+   "gap_ms_total": 5.754,
+   "gap_pct_of_step": 0.118,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+   "blockers": "needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue).",
+   "evidence": "measured",
+   "how_found": "T3 prologue: L1 component whose outputs feed only GEMMs (candidate #23, T3-pro)",
+   "overlaps_with": [
+    "G-27"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 1.8 ms | GEMM mm_96: 679.8 us measured vs 615.4 us flops-ideal (GEMM-own gap 0.5 ms of this region's gap); glue part 654.8 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 5.2 ms. | estimated: ideal uses flops/peak for the GEMM"
+  },
+  {
+   "id": "G-17",
+   "title": "Intra-module (forward): feed_forward.router.aux_loss: add_ + clone + linalg_vector_norm + clamp_min + div + mul + bitwise_not + sum + reciprocal",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "normalization + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.router.aux_loss",
+    "graph_nodes_example": [
+     "add__4",
+     "clone_7",
+     "linalg_vector_norm_2",
+     "clamp_min_3",
+     "div_4",
+     "mul_17",
+     "linalg_vector_norm_3",
+     "clamp_min_4",
+     "div_5",
+     "bitwise_not_3",
+     "mul_18",
+     "sum_9"
+    ],
+    "source": "torchtitan/torchtitan/models/common/moe/moe.py:683-705"
+   },
+   "ops": [
+    "aten.add_.Tensor",
+    "aten.bitwise_not.default",
+    "aten.clamp_min.default",
+    "aten.clone.default",
+    "aten.div.Tensor",
+    "aten.linalg_vector_norm.default",
+    "aten.mul.Tensor",
+    "aten.reciprocal.default",
+    "aten.sum.default",
+    "aten.sum.dim_IntList"
+   ],
+   "kernels_per_instance": 22.0,
+   "instances_per_step": 93,
+   "shapes_dtypes": "float32[], float32[128], float32[1], float32[8192, 1]",
+   "external_bytes_per_instance": 4278296,
+   "measured_us_per_instance": 60.33,
+   "measured_ms_total": 5.611,
+   "ideal_us_per_instance": 0.62,
+   "ideal_ms_total": 0.057,
+   "gap_ms_total": 5.553,
+   "gap_pct_of_step": 0.114,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (linalg_vector_norm, sum, sum.dim_IntList): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #24, L1)",
+   "overlaps_with": [
+    "G-10",
+    "G-13"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-18",
+   "title": "Cross-module (forward): feed_forward.router, feed_forward.router.aux_loss: zeros_like + scatter_.value + bitwise_not + bitwise_and + sum + add_ + _to_copy + cat",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "reduction + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.router, layers.*.feed_forward.router.aux_loss",
+    "graph_nodes_example": [
+     "zeros_like",
+     "scatter_",
+     "bitwise_not",
+     "bitwise_and",
+     "sum_2",
+     "add_",
+     "_to_copy_12",
+     "sum_3",
+     "cat_1137"
+    ],
+    "source": "torchtitan/torchtitan/models/common/moe/moe.py:298-683"
+   },
+   "ops": [
+    "aten._to_copy.default",
+    "aten.add_.Tensor",
+    "aten.bitwise_and.Tensor",
+    "aten.bitwise_not.default",
+    "aten.cat.default",
+    "aten.scatter_.value",
+    "aten.sum.dim_IntList",
+    "aten.zeros_like.default"
+   ],
+   "kernels_per_instance": 12.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bool[8192, 128], float32[128], bool[8192, 1], int64[128]",
+   "external_bytes_per_instance": 4728320,
+   "measured_us_per_instance": 58.25,
+   "measured_ms_total": 5.476,
+   "ideal_us_per_instance": 0.68,
+   "ideal_ms_total": 0.064,
+   "gap_ms_total": 5.412,
+   "gap_pct_of_step": 0.111,
+   "bitwise_tier": "T2",
+   "bitwise_notes": "order-sensitive data movement (scatter_.value): accumulation / selection order must match eager exactly.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "XM-max component: L1 components of one phase/layer/stage joined across module FQNs (barrier-free edges) (candidate #27, XM-max)",
+   "overlaps_with": [
+    "G-30",
+    "G-38"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.0 ms"
+  },
+  {
+   "id": "G-19",
+   "title": "Intra-module (forward): attention.rope: _to_copy + mul + neg + cat + add",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "pointwise chain",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.rope",
+    "graph_nodes_example": [
+     "_to_copy_6",
+     "mul_2",
+     "neg_1",
+     "cat_1",
+     "mul_3",
+     "add_1",
+     "_to_copy_8"
+    ],
+    "source": "torchtitan/torchtitan/models/common/rope.py:171"
+   },
+   "ops": [
+    "aten._to_copy.default",
+    "aten.add.Tensor",
+    "aten.cat.default",
+    "aten.mul.Tensor",
+    "aten.neg.default"
+   ],
+   "kernels_per_instance": 7.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float32[8192, 4, 128], float32[8192, 4, 64], bfloat16[8192, 4, 128]",
+   "external_bytes_per_instance": 25165824,
+   "measured_us_per_instance": 59.08,
+   "measured_ms_total": 5.553,
+   "ideal_us_per_instance": 3.63,
+   "ideal_ms_total": 0.341,
+   "gap_ms_total": 5.212,
+   "gap_pct_of_step": 0.107,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #29, L1)",
+   "overlaps_with": [
+    "G-02"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-20",
+   "title": "T3 GEMM epilogue (backward): attention.qkv_linear.wqkv, attention.wo: _scaled_mm_v2 + bkt._pre_bucket_reduce_scatter",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "GEMM epilogue",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.qkv_linear.wqkv, layers.*.attention.wo",
+    "graph_nodes_example": [
+     "_scaled_mm_v2_189",
+     "_pre_bucket_reduce_scatter_187"
+    ],
+    "source": "torchtitan/torchtitan/quantization/mxfp8/linear.py:129"
+   },
+   "ops": [
+    "aten._scaled_mm_v2.default",
+    "bucketing._pre_bucket_reduce_scatter.default"
+   ],
+   "kernels_per_instance": 3.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[4096, 8192], bfloat16[72360448]",
+   "external_bytes_per_instance": 334530048,
+   "measured_us_per_instance": 227.66,
+   "measured_ms_total": 21.4,
+   "ideal_us_per_instance": 178.2,
+   "ideal_ms_total": 16.751,
+   "gap_ms_total": 4.649,
+   "gap_pct_of_step": 0.096,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+   "blockers": "needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue). the FSDP pack is a custom bucketing op; casts must fold into it or into the producer.",
+   "evidence": "measured",
+   "how_found": "T3 epilogue: L1 component consuming a GEMM output (candidate #32, T3-epi)",
+   "overlaps_with": [
+    "G-21",
+    "G-22",
+    "G-25",
+    "G-70"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 3.9 ms | GEMM _scaled_mm_v2_189: 144.8 us measured vs 178.2 us flops-ideal (GEMM-own gap -3.1 ms of this region's gap); glue part 82.8 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 4.6 ms. | estimated: ideal uses flops/peak for the GEMM"
+  },
+  {
+   "id": "G-21",
+   "title": "T3 GEMM epilogue (backward): attention.qkv_linear.wqkv: _scaled_mm_v2 + bkt._pre_bucket_reduce_scatter",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "GEMM epilogue",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.qkv_linear.wqkv",
+    "graph_nodes_example": [
+     "_scaled_mm_v2_191",
+     "_pre_bucket_reduce_scatter_187"
+    ],
+    "source": "torchtitan/torchtitan/quantization/mxfp8/linear.py:129"
+   },
+   "ops": [
+    "aten._scaled_mm_v2.default",
+    "bucketing._pre_bucket_reduce_scatter.default"
+   ],
+   "kernels_per_instance": 3.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[9216, 4096], bfloat16[72360448]",
+   "external_bytes_per_instance": 335578624,
+   "measured_us_per_instance": 247.6,
+   "measured_ms_total": 23.274,
+   "ideal_us_per_instance": 200.48,
+   "ideal_ms_total": 18.845,
+   "gap_ms_total": 4.429,
+   "gap_pct_of_step": 0.091,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+   "blockers": "needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue). the FSDP pack is a custom bucketing op; casts must fold into it or into the producer.",
+   "evidence": "measured",
+   "how_found": "T3 epilogue: L1 component consuming a GEMM output (candidate #33, T3-epi)",
+   "overlaps_with": [
+    "G-20",
+    "G-22",
+    "G-25",
+    "G-34",
+    "G-94"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 3.9 ms | GEMM _scaled_mm_v2_191: 164.8 us measured vs 200.5 us flops-ideal (GEMM-own gap -3.4 ms of this region's gap); glue part 82.8 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 4.4 ms. | estimated: ideal uses flops/peak for the GEMM"
+  },
+  {
+   "id": "G-22",
+   "title": "Cross-module (backward): attention.qkv_linear.wqkv, feed_forward.router.gate: add_ + _to_copy + bkt._pre_bucket_reduce_scatter",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "dtype cast + FSDP bucket pack",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.qkv_linear.wqkv, layers.*.feed_forward.router.gate",
+    "graph_nodes_example": [
+     "add__289",
+     "add__290",
+     "_to_copy_1358",
+     "_pre_bucket_reduce_scatter_187"
+    ],
+    "source": "torchtitan/torchtitan/models/common/linear/hi_mid_lo_linear.py:117"
+   },
+   "ops": [
+    "aten._to_copy.default",
+    "aten.add_.Tensor",
+    "bucketing._pre_bucket_reduce_scatter.default"
+   ],
+   "kernels_per_instance": 5.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float32[128, 4096], bfloat16[128, 4096], bfloat16[72360448]",
+   "external_bytes_per_instance": 297829888,
+   "measured_us_per_instance": 88.68,
+   "measured_ms_total": 8.336,
+   "ideal_us_per_instance": 42.97,
+   "ideal_ms_total": 4.039,
+   "gap_ms_total": 4.297,
+   "gap_pct_of_step": 0.088,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "the FSDP pack is a custom bucketing op; casts must fold into it or into the producer.",
+   "evidence": "measured",
+   "how_found": "XM-max component: L1 components of one phase/layer/stage joined across module FQNs (barrier-free edges) (candidate #34, XM-max)",
+   "overlaps_with": [
+    "G-20",
+    "G-21",
+    "G-25",
+    "G-39",
+    "G-62"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.0 ms"
+  },
+  {
+   "id": "G-23",
+   "title": "T3 GEMM epilogue (backward): attention.qkv_linear.wqkv, attention_norm: _scaled_mm_v2 + _fused_rms_norm_backward + add",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "GEMM epilogue",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.qkv_linear.wqkv, layers.*.attention_norm",
+    "graph_nodes_example": [
+     "_scaled_mm_v2_190",
+     "_fused_rms_norm_backward_4",
+     "add_487"
+    ],
+    "source": "torchtitan/torchtitan/quantization/mxfp8/linear.py:129; torchtitan/torchtitan/models/common/nn_modules.py:155"
+   },
+   "ops": [
+    "aten._fused_rms_norm_backward.default",
+    "aten._scaled_mm_v2.default",
+    "aten.add.Tensor"
+   ],
+   "kernels_per_instance": 4.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[8192, 4096], bfloat16[4096]",
+   "external_bytes_per_instance": 395886592,
+   "measured_us_per_instance": 245.99,
+   "measured_ms_total": 23.123,
+   "ideal_us_per_instance": 200.48,
+   "ideal_ms_total": 18.845,
+   "gap_ms_total": 4.278,
+   "gap_pct_of_step": 0.088,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+   "blockers": "needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue).",
+   "evidence": "measured",
+   "how_found": "T3 epilogue: L1 component consuming a GEMM output (candidate #35, T3-epi)",
+   "overlaps_with": [
+    "G-31",
+    "G-95"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 4.6 ms | GEMM _scaled_mm_v2_190: 164.0 us measured vs 200.5 us flops-ideal (GEMM-own gap -3.4 ms of this region's gap); glue part 82.0 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 4.3 ms. | estimated: ideal uses flops/peak for the GEMM"
+  },
+  {
+   "id": "G-24",
+   "title": "Intra-module (backward): feed_forward.router.aux_loss: ones_like + mul + neg + div + sum + gt.Scalar + scalar_tensor + where.self + sgn + add",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "reduction + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.router.aux_loss",
+    "graph_nodes_example": [
+     "ones_like_9",
+     "mul_1128",
+     "mul_1129",
+     "mul_1130",
+     "neg_188",
+     "div_298",
+     "div_299",
+     "mul_1131",
+     "div_300",
+     "sum_471",
+     "gt",
+     "scalar_tensor"
+    ],
+    "source": "torchtitan/torchtitan/models/common/moe/moe.py:702-705"
+   },
+   "ops": [
+    "aten.add.Tensor",
+    "aten.div.Tensor",
+    "aten.gt.Scalar",
+    "aten.mul.Tensor",
+    "aten.neg.default",
+    "aten.ones_like.default",
+    "aten.scalar_tensor.default",
+    "aten.sgn.default",
+    "aten.sum.dim_IntList",
+    "aten.where.self"
+   ],
+   "kernels_per_instance": 16.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float32[8192, 128], float32[], float32[8192, 1], float32[128]",
+   "external_bytes_per_instance": 8462856,
+   "measured_us_per_instance": 46.56,
+   "measured_ms_total": 4.377,
+   "ideal_us_per_instance": 1.22,
+   "ideal_ms_total": 0.115,
+   "gap_ms_total": 4.262,
+   "gap_pct_of_step": 0.088,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (sum.dim_IntList): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #36, L1)",
+   "overlaps_with": [
+    "G-06"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-25",
+   "title": "Single op (backward): attention.qkv_linear.wqkv: bkt._pre_bucket_reduce_scatter",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "single-op rewrite",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.qkv_linear.wqkv",
+    "graph_nodes_example": [
+     "_pre_bucket_reduce_scatter_187"
+    ],
+    "source": "(no torchtitan frame in stack_trace)"
+   },
+   "ops": [
+    "bucketing._pre_bucket_reduce_scatter.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[72360448]",
+   "external_bytes_per_instance": 288392704,
+   "measured_us_per_instance": 82.82,
+   "measured_ms_total": 7.785,
+   "ideal_us_per_instance": 41.61,
+   "ideal_ms_total": 3.911,
+   "gap_ms_total": 3.874,
+   "gap_pct_of_step": 0.08,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "the FSDP pack is a custom bucketing op; casts must fold into it or into the producer.",
+   "evidence": "measured",
+   "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #37, L1)",
+   "overlaps_with": [
+    "G-20",
+    "G-21",
+    "G-22"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-26",
+   "title": "T3 GEMM epilogue (forward): lm_head, loss: new_zeros + mm + _to_copy + _log_softmax + nll_loss_forward + div + add + clone",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "GEMM epilogue",
+   "location": {
+    "module_fqn_pattern": "lm_head, loss",
+    "graph_nodes_example": [
+     "new_zeros",
+     "mm_94",
+     "_to_copy_1319",
+     "_log_softmax",
+     "nll_loss_forward",
+     "div_282",
+     "add_470",
+     "_to_copy_1323",
+     "_log_softmax_1",
+     "nll_loss_forward_1",
+     "div_284",
+     "add_471"
+    ],
+    "source": "torchtitan/torchtitan/models/common/linear/linear.py:115; torchtitan/torchtitan/distributed/local_compile.py:96; torchtitan/torchtitan/experiments/graph_trainer/chunked_loss.py:107"
+   },
+   "ops": [
+    "aten._log_softmax.default",
+    "aten._to_copy.default",
+    "aten.add.Tensor",
+    "aten.clone.default",
+    "aten.div.Tensor",
+    "aten.mm.default",
+    "aten.new_zeros.default",
+    "aten.nll_loss_forward.default"
+   ],
+   "kernels_per_instance": 43.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "float32[], float32[1024, 151936], bfloat16[1024, 151936]",
+   "external_bytes_per_instance": 8477016172,
+   "measured_us_per_instance": 4999.23,
+   "measured_ms_total": 4.999,
+   "ideal_us_per_instance": 1223.09,
+   "ideal_ms_total": 1.223,
+   "gap_ms_total": 3.776,
+   "gap_pct_of_step": 0.078,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+   "blockers": "needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue).",
+   "evidence": "measured",
+   "how_found": "T3 epilogue: L1 component consuming a GEMM output (candidate #40, T3-epi)",
+   "overlaps_with": [
+    "G-28"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.5 ms | GEMM mm_94: 560.5 us measured vs 615.4 us flops-ideal (GEMM-own gap -0.1 ms of this region's gap); glue part 4438.7 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 3.8 ms. | identical kernel set as candidate(s) [41, 42, 43, 44, 45, 46, 47] | estimated: ideal uses flops/peak for the GEMM"
+  },
+  {
+   "id": "G-27",
+   "title": "Intra-module (backward): loss: div + nll_loss_backward + _log_softmax_backward_data + _to_copy",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "cross-entropy (log_softmax + nll)",
+   "location": {
+    "module_fqn_pattern": "loss",
+    "graph_nodes_example": [
+     "div_283",
+     "nll_loss_backward",
+     "_log_softmax_backward_data",
+     "_to_copy_1320"
+    ],
+    "source": "torchtitan/torchtitan/distributed/local_compile.py:96"
+   },
+   "ops": [
+    "aten._log_softmax_backward_data.default",
+    "aten._to_copy.default",
+    "aten.div.Tensor",
+    "aten.nll_loss_backward.default"
+   ],
+   "kernels_per_instance": 5.0,
+   "instances_per_step": 8,
+   "shapes_dtypes": "float32[1024, 151936], float32[], bfloat16[1024, 151936]",
+   "external_bytes_per_instance": 1555832848,
+   "measured_us_per_instance": 654.8,
+   "measured_ms_total": 5.238,
+   "ideal_us_per_instance": 224.48,
+   "ideal_ms_total": 1.796,
+   "gap_ms_total": 3.443,
+   "gap_pct_of_step": 0.071,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (_log_softmax_backward_data, nll_loss_backward): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #48, L1)",
+   "overlaps_with": [
+    "G-16"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-28",
+   "title": "Intra-module (forward): loss: new_zeros + _to_copy + _log_softmax + nll_loss_forward + div + add + clone",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "cross-entropy (log_softmax + nll)",
+   "location": {
+    "module_fqn_pattern": "loss",
+    "graph_nodes_example": [
+     "new_zeros",
+     "_to_copy_1319",
+     "_log_softmax",
+     "nll_loss_forward",
+     "div_282",
+     "add_470",
+     "_to_copy_1323",
+     "_log_softmax_1",
+     "nll_loss_forward_1",
+     "div_284",
+     "add_471",
+     "_to_copy_1327"
+    ],
+    "source": "torchtitan/torchtitan/distributed/local_compile.py:96; torchtitan/torchtitan/experiments/graph_trainer/chunked_loss.py:107"
+   },
+   "ops": [
+    "aten._log_softmax.default",
+    "aten._to_copy.default",
+    "aten.add.Tensor",
+    "aten.clone.default",
+    "aten.div.Tensor",
+    "aten.new_zeros.default",
+    "aten.nll_loss_forward.default"
+   ],
+   "kernels_per_instance": 42.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "float32[], float32[1024, 151936]",
+   "external_bytes_per_instance": 7535132780,
+   "measured_us_per_instance": 4438.68,
+   "measured_ms_total": 4.439,
+   "ideal_us_per_instance": 1087.2,
+   "ideal_ms_total": 1.087,
+   "gap_ms_total": 3.351,
+   "gap_pct_of_step": 0.069,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (_log_softmax, nll_loss_forward): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #50, L1)",
+   "overlaps_with": [
+    "G-26"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-29",
+   "title": "Intra-module (forward): feed_forward.routed_experts: cat + dist_moe.prepare_mxfp8_weight",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "pointwise chain",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.routed_experts",
+    "graph_nodes_example": [
+     "cat_3",
+     "prepare_mxfp8_weight_1"
+    ],
+    "source": "torchtitan/torchtitan/experiments/graph_trainer/simple_fsdp.py:268-366"
+   },
+   "ops": [
+    "aten.cat.default",
+    "dist_moe.prepare_mxfp8_weight.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[4, 4096, 1536], float8_e4m3fn[4, 4096, 1536], float8_e8m0fnu[16384, 48], float8_e8m0fnu[6144, 128]",
+   "external_bytes_per_instance": 31457280,
+   "measured_us_per_instance": 39.79,
+   "measured_ms_total": 3.741,
+   "ideal_us_per_instance": 4.54,
+   "ideal_ms_total": 0.427,
+   "gap_ms_total": 3.314,
+   "gap_pct_of_step": 0.068,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #51, L1)",
+   "overlaps_with": [],
+   "notes": ""
+  },
+  {
+   "id": "G-30",
+   "title": "Intra-module (forward): feed_forward.router: zeros_like + scatter_.value + bitwise_not + bitwise_and + sum + add_",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "reduction + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.router",
+    "graph_nodes_example": [
+     "zeros_like",
+     "scatter_",
+     "bitwise_not",
+     "bitwise_and",
+     "sum_2",
+     "add_"
+    ],
+    "source": "torchtitan/torchtitan/models/common/moe/moe.py:298-314"
+   },
+   "ops": [
+    "aten.add_.Tensor",
+    "aten.bitwise_and.Tensor",
+    "aten.bitwise_not.default",
+    "aten.scatter_.value",
+    "aten.sum.dim_IntList",
+    "aten.zeros_like.default"
+   ],
+   "kernels_per_instance": 8.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bool[8192, 128], bool[8192, 1], int64[128], float32[128]",
+   "external_bytes_per_instance": 5776384,
+   "measured_us_per_instance": 35.8,
+   "measured_ms_total": 3.365,
+   "ideal_us_per_instance": 0.83,
+   "ideal_ms_total": 0.078,
+   "gap_ms_total": 3.287,
+   "gap_pct_of_step": 0.068,
+   "bitwise_tier": "T2",
+   "bitwise_notes": "order-sensitive data movement (scatter_.value): accumulation / selection order must match eager exactly.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #52, L1)",
+   "overlaps_with": [
+    "G-18"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-31",
+   "title": "Intra-module (backward): attention_norm: _fused_rms_norm_backward + add",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "normalization + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention_norm",
+    "graph_nodes_example": [
+     "_fused_rms_norm_backward_4",
+     "add_487"
+    ],
+    "source": "torchtitan/torchtitan/models/common/nn_modules.py:155"
+   },
+   "ops": [
+    "aten._fused_rms_norm_backward.default",
+    "aten.add.Tensor"
+   ],
+   "kernels_per_instance": 3.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[8192, 4096], bfloat16[4096]",
+   "external_bytes_per_instance": 335593472,
+   "measured_us_per_instance": 81.99,
+   "measured_ms_total": 7.707,
+   "ideal_us_per_instance": 48.42,
+   "ideal_ms_total": 4.552,
+   "gap_ms_total": 3.155,
+   "gap_pct_of_step": 0.065,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (_fused_rms_norm_backward): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #53, L1)",
+   "overlaps_with": [
+    "G-23"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-32",
+   "title": "Intra-module (backward): ffn_norm: _fused_rms_norm_backward + add",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "normalization + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*.ffn_norm",
+    "graph_nodes_example": [
+     "_fused_rms_norm_backward_5",
+     "add_492"
+    ],
+    "source": "torchtitan/torchtitan/models/common/nn_modules.py:155"
+   },
+   "ops": [
+    "aten._fused_rms_norm_backward.default",
+    "aten.add.Tensor"
+   ],
+   "kernels_per_instance": 3.0,
+   "instances_per_step": 93,
+   "shapes_dtypes": "bfloat16[8192, 4096], bfloat16[4096]",
+   "external_bytes_per_instance": 335593472,
+   "measured_us_per_instance": 80.59,
+   "measured_ms_total": 7.495,
+   "ideal_us_per_instance": 48.42,
+   "ideal_ms_total": 4.503,
+   "gap_ms_total": 2.992,
+   "gap_pct_of_step": 0.061,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (_fused_rms_norm_backward): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #54, L1)",
+   "overlaps_with": [
+    "G-12"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-33",
+   "title": "Cross-module (forward): attention.k_norm, attention.q_norm, attention.qkv_linear.wqkv, feed_forward.rout: _to_copy + constant_pad_nd + bkt._pre_bucket_all_gather",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "dtype cast + FSDP bucket pack",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.k_norm, layers.*.attention.q_norm, layers.*.attention.qkv_linear.wqkv, layers.*.feed_forward.router.gate",
+    "graph_nodes_example": [
+     "_to_copy_3",
+     "constant_pad_nd_1",
+     "_to_copy_4",
+     "constant_pad_nd_2",
+     "_to_copy_11",
+     "constant_pad_nd_3",
+     "_pre_bucket_all_gather_1"
+    ],
+    "source": "torchtitan/torchtitan/experiments/graph_trainer/simple_fsdp.py:366"
+   },
+   "ops": [
+    "aten._to_copy.default",
+    "aten.constant_pad_nd.default",
+    "bucketing._pre_bucket_all_gather.default"
+   ],
+   "kernels_per_instance": 8.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[1], bfloat16[1, 4096], bfloat16[72360448]",
+   "external_bytes_per_instance": 2253068,
+   "measured_us_per_instance": 29.18,
+   "measured_ms_total": 2.743,
+   "ideal_us_per_instance": 0.33,
+   "ideal_ms_total": 0.031,
+   "gap_ms_total": 2.712,
+   "gap_pct_of_step": 0.056,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "the FSDP pack is a custom bucketing op; casts must fold into it or into the producer.",
+   "evidence": "measured",
+   "how_found": "XM-max component: L1 components of one phase/layer/stage joined across module FQNs (barrier-free edges) (candidate #57, XM-max)",
+   "overlaps_with": [
+    "G-41",
+    "G-66",
+    "G-67",
+    "G-68"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.0 ms"
+  },
+  {
+   "id": "G-34",
+   "title": "T3 GEMM prologue (backward): attention.qkv_linear.wqkv: torchao.mxfp8_quantize + torchao.triton_mx_block_rearrange + _scaled_mm_v2",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "GEMM prologue",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.qkv_linear.wqkv",
+    "graph_nodes_example": [
+     "mxfp8_quantize_190",
+     "triton_mx_block_rearrange_191",
+     "triton_mx_block_rearrange_193",
+     "_scaled_mm_v2_191"
+    ],
+    "source": "torchtitan/torchtitan/quantization/mxfp8/linear.py:129"
+   },
+   "ops": [
+    "aten._scaled_mm_v2.default",
+    "torchao.mxfp8_quantize.default",
+    "torchao.triton_mx_block_rearrange.default"
+   ],
+   "kernels_per_instance": 4.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float8_e4m3fn[8192, 9216], float8_e8m0fnu[8192, 288], float8_e8m0fnu[9216, 256], bfloat16[9216, 4096]",
+   "external_bytes_per_instance": 443547648,
+   "measured_us_per_instance": 227.93,
+   "measured_ms_total": 21.425,
+   "ideal_us_per_instance": 200.48,
+   "ideal_ms_total": 18.845,
+   "gap_ms_total": 2.58,
+   "gap_pct_of_step": 0.053,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+   "blockers": "needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue).",
+   "evidence": "measured",
+   "how_found": "T3 prologue: L1 component whose outputs feed only GEMMs (candidate #58, T3-pro)",
+   "overlaps_with": [
+    "G-01",
+    "G-21",
+    "G-45",
+    "G-94"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 4.6 ms | GEMM _scaled_mm_v2_191: 164.8 us measured vs 200.5 us flops-ideal (GEMM-own gap -3.4 ms of this region's gap); glue part 63.2 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 2.6 ms. | identical kernel set as candidate(s) [59] | estimated: ideal uses flops/peak for the GEMM"
+  },
+  {
+   "id": "G-35",
+   "title": "T3 GEMM epilogue (backward): feed_forward.routed_experts, feed_forward.router.gate: mm + add",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "GEMM epilogue",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.routed_experts, layers.*.feed_forward.router.gate",
+    "graph_nodes_example": [
+     "mm_118",
+     "add_481"
+    ],
+    "source": "torchtitan/torchtitan/models/common/linear/hi_mid_lo_linear.py:117"
+   },
+   "ops": [
+    "aten.add.Tensor",
+    "aten.mm.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[8192, 4096]",
+   "external_bytes_per_instance": 143654912,
+   "measured_us_per_instance": 46.2,
+   "measured_ms_total": 4.343,
+   "ideal_us_per_instance": 20.73,
+   "ideal_ms_total": 1.948,
+   "gap_ms_total": 2.395,
+   "gap_pct_of_step": 0.049,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+   "blockers": "needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue).",
+   "evidence": "measured",
+   "how_found": "T3 epilogue: L1 component consuming a GEMM output (candidate #60, T3-epi)",
+   "overlaps_with": [
+    "G-12",
+    "G-52",
+    "G-75"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 2.0 ms | GEMM mm_118: 17.7 us measured vs 12.4 us flops-ideal (GEMM-own gap 0.5 ms of this region's gap); glue part 28.5 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 2.4 ms. | estimated: ideal uses flops/peak for the GEMM"
+  },
+  {
+   "id": "G-36",
+   "title": "Intra-module (backward): feed_forward.router.gate: _to_copy + __lshift__.Scalar + sub + cat",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "pointwise chain",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.router.gate",
+    "graph_nodes_example": [
+     "_to_copy_1353",
+     "_to_copy_1354",
+     "lshift",
+     "sub",
+     "_to_copy_1355",
+     "_to_copy_1356",
+     "lshift_1",
+     "sub_1",
+     "_to_copy_1357",
+     "cat_386"
+    ],
+    "source": "torchtitan/torchtitan/models/common/linear/hi_mid_lo_linear.py:117"
+   },
+   "ops": [
+    "aten.__lshift__.Scalar",
+    "aten._to_copy.default",
+    "aten.cat.default",
+    "aten.sub.Tensor"
+   ],
+   "kernels_per_instance": 10.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "int32[8192, 128], bfloat16[8192, 128], float32[8192, 128], bfloat16[8192, 384]",
+   "external_bytes_per_instance": 10485760,
+   "measured_us_per_instance": 24.66,
+   "measured_ms_total": 2.318,
+   "ideal_us_per_instance": 1.51,
+   "ideal_ms_total": 0.142,
+   "gap_ms_total": 2.176,
+   "gap_pct_of_step": 0.045,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #61, L1)",
+   "overlaps_with": [
+    "G-06",
+    "G-09"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-37",
+   "title": "Single op (backward): attention.q_norm: _fused_rms_norm_backward",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "single-op rewrite",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.q_norm",
+    "graph_nodes_example": [
+     "_fused_rms_norm_backward_3"
+    ],
+    "source": "torchtitan/torchtitan/models/common/nn_modules.py:155"
+   },
+   "ops": [
+    "aten._fused_rms_norm_backward.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[8192, 64, 128], bfloat16[128]",
+   "external_bytes_per_instance": 404750848,
+   "measured_us_per_instance": 81.13,
+   "measured_ms_total": 7.626,
+   "ideal_us_per_instance": 58.4,
+   "ideal_ms_total": 5.489,
+   "gap_ms_total": 2.136,
+   "gap_pct_of_step": 0.044,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (_fused_rms_norm_backward): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #62, L1)",
+   "overlaps_with": [
+    "G-01"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-38",
+   "title": "Intra-module (forward): feed_forward.router.aux_loss: _to_copy + sum + cat",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "reduction + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.router.aux_loss",
+    "graph_nodes_example": [
+     "_to_copy_12",
+     "sum_3",
+     "cat_1137"
+    ],
+    "source": "torchtitan/torchtitan/models/common/moe/moe.py:675-683"
+   },
+   "ops": [
+    "aten._to_copy.default",
+    "aten.cat.default",
+    "aten.sum.dim_IntList"
+   ],
+   "kernels_per_instance": 4.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float32[128], float32[8192, 128]",
+   "external_bytes_per_instance": 1049088,
+   "measured_us_per_instance": 22.45,
+   "measured_ms_total": 2.111,
+   "ideal_us_per_instance": 0.15,
+   "ideal_ms_total": 0.014,
+   "gap_ms_total": 2.096,
+   "gap_pct_of_step": 0.043,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (sum.dim_IntList): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #63, L1)",
+   "overlaps_with": [
+    "G-18"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-39",
+   "title": "T3 GEMM epilogue (backward): feed_forward.router.gate: mm.dtype + add_ + _to_copy",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "GEMM epilogue",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.router.gate",
+    "graph_nodes_example": [
+     "mm_119",
+     "add__289",
+     "add__290",
+     "_to_copy_1358"
+    ],
+    "source": "torchtitan/torchtitan/models/common/linear/hi_mid_lo_linear.py:117"
+   },
+   "ops": [
+    "aten._to_copy.default",
+    "aten.add_.Tensor",
+    "aten.mm.dtype"
+   ],
+   "kernels_per_instance": 4.0,
+   "instances_per_step": 188,
+   "shapes_dtypes": "float32[128, 4096], bfloat16[128, 4096]",
+   "external_bytes_per_instance": 78643200,
+   "measured_us_per_instance": 21.77,
+   "measured_ms_total": 4.093,
+   "ideal_us_per_instance": 11.35,
+   "ideal_ms_total": 2.133,
+   "gap_ms_total": 1.96,
+   "gap_pct_of_step": 0.04,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+   "blockers": "needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue).",
+   "evidence": "measured",
+   "how_found": "T3 epilogue: L1 component consuming a GEMM output (candidate #67, T3-epi)",
+   "overlaps_with": [
+    "G-09",
+    "G-22",
+    "G-62"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.0 ms | GEMM mm_119: 15.9 us measured vs 4.1 us flops-ideal (GEMM-own gap 2.2 ms of this region's gap); glue part 5.9 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 1.1 ms. | identical kernel set as candidate(s) [95] | estimated: ideal uses flops/peak for the GEMM"
+  },
+  {
+   "id": "G-40",
+   "title": "T3 GEMM epilogue (forward): feed_forward.router, feed_forward.router.gate: mm.dtype + _softmax + gather + sum + add + div + mul",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "GEMM epilogue",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.router, layers.*.feed_forward.router.gate",
+    "graph_nodes_example": [
+     "mm",
+     "_softmax",
+     "gather",
+     "sum_1",
+     "add_3",
+     "div",
+     "mul_4"
+    ],
+    "source": "torchtitan/torchtitan/models/common/linear/hi_mid_lo_linear.py:117; torchtitan/torchtitan/models/common/moe/moe.py:257-292"
+   },
+   "ops": [
+    "aten._softmax.default",
+    "aten.add.Tensor",
+    "aten.div.Tensor",
+    "aten.gather.default",
+    "aten.mm.dtype",
+    "aten.mul.Tensor",
+    "aten.sum.dim_IntList"
+   ],
+   "kernels_per_instance": 7.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float32[8192, 8], float32[8192, 128], float32[8192, 1]",
+   "external_bytes_per_instance": 73433088,
+   "measured_us_per_instance": 29.25,
+   "measured_ms_total": 2.749,
+   "ideal_us_per_instance": 10.6,
+   "ideal_ms_total": 0.996,
+   "gap_ms_total": 1.753,
+   "gap_pct_of_step": 0.036,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+   "blockers": "needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue).",
+   "evidence": "measured",
+   "how_found": "T3 epilogue: L1 component consuming a GEMM output (candidate #69, T3-epi)",
+   "overlaps_with": [
+    "G-10",
+    "G-43",
+    "G-72"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.0 ms | GEMM mm: 11.4 us measured vs 4.1 us flops-ideal (GEMM-own gap 0.7 ms of this region's gap); glue part 17.9 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 1.7 ms. | estimated: ideal uses flops/peak for the GEMM"
+  },
+  {
+   "id": "G-41",
+   "title": "Single op (forward): attention.qkv_linear.wqkv: bkt._pre_bucket_all_gather",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "single-op rewrite",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.qkv_linear.wqkv",
+    "graph_nodes_example": [
+     "_pre_bucket_all_gather_1"
+    ],
+    "source": "torchtitan/torchtitan/experiments/graph_trainer/simple_fsdp.py:366"
+   },
+   "ops": [
+    "bucketing._pre_bucket_all_gather.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[72360448]",
+   "external_bytes_per_instance": 2244872,
+   "measured_us_per_instance": 18.9,
+   "measured_ms_total": 1.777,
+   "ideal_us_per_instance": 0.32,
+   "ideal_ms_total": 0.03,
+   "gap_ms_total": 1.746,
+   "gap_pct_of_step": 0.036,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "the FSDP pack is a custom bucketing op; casts must fold into it or into the producer.",
+   "evidence": "measured",
+   "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #70, L1)",
+   "overlaps_with": [
+    "G-33"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-42",
+   "title": "Cross-module (forward): attention.qkv_linear.wqkv, attention_norm: _fused_rms_norm + torchao.mxfp8_quantize + torchao.triton_mx_block_rearrange",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "normalization + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.qkv_linear.wqkv, layers.*.attention_norm",
+    "graph_nodes_example": [
+     "_fused_rms_norm",
+     "mxfp8_quantize",
+     "triton_mx_block_rearrange"
+    ],
+    "source": "torchtitan/torchtitan/models/common/nn_modules.py:155; torchtitan/torchtitan/quantization/mxfp8/linear.py:162-168"
+   },
+   "ops": [
+    "aten._fused_rms_norm.default",
+    "torchao.mxfp8_quantize.default",
+    "torchao.triton_mx_block_rearrange.default"
+   ],
+   "kernels_per_instance": 3.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float8_e8m0fnu[8192, 128], bfloat16[8192, 4096], float32[8192, 1], float8_e4m3fn[8192, 4096]",
+   "external_bytes_per_instance": 176193536,
+   "measured_us_per_instance": 43.43,
+   "measured_ms_total": 4.083,
+   "ideal_us_per_instance": 25.42,
+   "ideal_ms_total": 2.39,
+   "gap_ms_total": 1.693,
+   "gap_pct_of_step": 0.035,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (_fused_rms_norm): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "XM-max component: L1 components of one phase/layer/stage joined across module FQNs (barrier-free edges) (candidate #71, XM-max)",
+   "overlaps_with": [
+    "G-44",
+    "G-58",
+    "G-90",
+    "G-97"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.9 ms"
+  },
+  {
+   "id": "G-43",
+   "title": "Intra-module (forward): feed_forward.router: _softmax + gather + sum + add + div + mul",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "reduction + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.router",
+    "graph_nodes_example": [
+     "_softmax",
+     "gather",
+     "sum_1",
+     "add_3",
+     "div",
+     "mul_4"
+    ],
+    "source": "torchtitan/torchtitan/models/common/moe/moe.py:257-292"
+   },
+   "ops": [
+    "aten._softmax.default",
+    "aten.add.Tensor",
+    "aten.div.Tensor",
+    "aten.gather.default",
+    "aten.mul.Tensor",
+    "aten.sum.dim_IntList"
+   ],
+   "kernels_per_instance": 6.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float32[8192, 8], float32[8192, 1], float32[8192, 128]",
+   "external_bytes_per_instance": 9469952,
+   "measured_us_per_instance": 17.89,
+   "measured_ms_total": 1.682,
+   "ideal_us_per_instance": 1.37,
+   "ideal_ms_total": 0.128,
+   "gap_ms_total": 1.553,
+   "gap_pct_of_step": 0.032,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (_softmax, sum.dim_IntList): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #73, L1)",
+   "overlaps_with": [
+    "G-10",
+    "G-40",
+    "G-72"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-44",
+   "title": "Cross-layer (forward): layers.*, attention_norm: add + _fused_rms_norm",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-layer"
+   ],
+   "fusion_kind": "normalization + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*, layers.*.attention_norm",
+    "graph_nodes_example": [
+     "add_4",
+     "_fused_rms_norm_4"
+    ],
+    "source": "torchtitan/torchtitan/models/qwen3/model.py:73; torchtitan/torchtitan/models/common/nn_modules.py:155"
+   },
+   "ops": [
+    "aten._fused_rms_norm.default",
+    "aten.add.Tensor"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 93,
+   "shapes_dtypes": "bfloat16[8192, 4096], float32[8192, 1]",
+   "external_bytes_per_instance": 268476416,
+   "measured_us_per_instance": 54.88,
+   "measured_ms_total": 5.104,
+   "ideal_us_per_instance": 38.74,
+   "ideal_ms_total": 3.603,
+   "gap_ms_total": 1.502,
+   "gap_pct_of_step": 0.031,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (_fused_rms_norm): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "crosses a decoder-layer boundary: the value handed between layers is also read elsewhere (saved for backward, or the other residual branch), so the fused kernel must still write it; graph passes treat layers as units (per-layer FSDP buckets and reordering).",
+   "evidence": "measured",
+   "how_found": "XL pair: two L1 components of one phase and stage joined by an edge across a layer/root-module boundary (candidate #74, XL)",
+   "overlaps_with": [
+    "G-42"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.9 ms"
+  },
+  {
+   "id": "G-45",
+   "title": "Intra-module (backward): attention.qkv_linear.wqkv: torchao.mxfp8_quantize + torchao.triton_mx_block_rearrange",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "pointwise chain",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.qkv_linear.wqkv",
+    "graph_nodes_example": [
+     "mxfp8_quantize_190",
+     "triton_mx_block_rearrange_191",
+     "triton_mx_block_rearrange_193"
+    ],
+    "source": "torchtitan/torchtitan/quantization/mxfp8/linear.py:129"
+   },
+   "ops": [
+    "torchao.mxfp8_quantize.default",
+    "torchao.triton_mx_block_rearrange.default"
+   ],
+   "kernels_per_instance": 3.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float8_e4m3fn[8192, 9216], float8_e8m0fnu[8192, 288], float8_e8m0fnu[9216, 256]",
+   "external_bytes_per_instance": 339738624,
+   "measured_us_per_instance": 63.15,
+   "measured_ms_total": 5.936,
+   "ideal_us_per_instance": 49.02,
+   "ideal_ms_total": 4.608,
+   "gap_ms_total": 1.329,
+   "gap_pct_of_step": 0.027,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #75, L1)",
+   "overlaps_with": [
+    "G-01",
+    "G-34"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-46",
+   "title": "Single op (forward): attention.qkv_linear.wqkv: torchao.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "single-op rewrite",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.qkv_linear.wqkv",
+    "graph_nodes_example": [
+     "triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale"
+    ],
+    "source": "torchtitan/torchtitan/experiments/graph_trainer/simple_fsdp.py:268"
+   },
+   "ops": [
+    "torchao.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale.default"
+   ],
+   "kernels_per_instance": 1.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float8_e4m3fn[9216, 4096], float8_e8m0fnu[72, 32, 32, 16], float8_e8m0fnu[32, 72, 32, 16]",
+   "external_bytes_per_instance": 47185920,
+   "measured_us_per_instance": 19.68,
+   "measured_ms_total": 1.849,
+   "ideal_us_per_instance": 6.81,
+   "ideal_ms_total": 0.64,
+   "gap_ms_total": 1.209,
+   "gap_pct_of_step": 0.025,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #77, L1)",
+   "overlaps_with": [
+    "G-95"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-47",
+   "title": "Intra-module (backward): attention.qkv_linear.wqkv: _to_copy",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "copy/concat + cast",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.qkv_linear.wqkv",
+    "graph_nodes_example": [
+     "_to_copy_1368",
+     "_to_copy_1361",
+     "_to_copy_1367",
+     "_to_copy_1366",
+     "_to_copy_1359",
+     "_to_copy_1369",
+     "_to_copy_1360"
+    ],
+    "source": "(no torchtitan frame in stack_trace)"
+   },
+   "ops": [
+    "aten._to_copy.default"
+   ],
+   "kernels_per_instance": 7.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float32[1], float32[16], float32[36, 4096], float32[16, 8192]",
+   "external_bytes_per_instance": 1695948,
+   "measured_us_per_instance": 12.41,
+   "measured_ms_total": 1.167,
+   "ideal_us_per_instance": 0.24,
+   "ideal_ms_total": 0.023,
+   "gap_ms_total": 1.144,
+   "gap_pct_of_step": 0.024,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #78, L1)",
+   "overlaps_with": [],
+   "notes": ""
+  },
+  {
+   "id": "G-48",
+   "title": "Cross-module (forward): layers.*, ffn_norm: add + _fused_rms_norm",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "normalization + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*, layers.*.ffn_norm",
+    "graph_nodes_example": [
+     "add_2",
+     "_fused_rms_norm_3"
+    ],
+    "source": "torchtitan/torchtitan/models/qwen3/model.py:61; torchtitan/torchtitan/models/common/nn_modules.py:155"
+   },
+   "ops": [
+    "aten._fused_rms_norm.default",
+    "aten.add.Tensor"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[8192, 4096], float32[8192, 1]",
+   "external_bytes_per_instance": 268468224,
+   "measured_us_per_instance": 50.52,
+   "measured_ms_total": 4.749,
+   "ideal_us_per_instance": 38.74,
+   "ideal_ms_total": 3.641,
+   "gap_ms_total": 1.108,
+   "gap_pct_of_step": 0.023,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (_fused_rms_norm): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "XM-max component: L1 components of one phase/layer/stage joined across module FQNs (barrier-free edges) (candidate #79, XM-max)",
+   "overlaps_with": [
+    "G-96"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.9 ms"
+  },
+  {
+   "id": "G-49",
+   "title": "Single op (backward): attention.k_norm: _fused_rms_norm_backward",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "single-op rewrite",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.k_norm",
+    "graph_nodes_example": [
+     "_fused_rms_norm_backward_2"
+    ],
+    "source": "torchtitan/torchtitan/models/common/nn_modules.py:155"
+   },
+   "ops": [
+    "aten._fused_rms_norm_backward.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[8192, 4, 128], bfloat16[128]",
+   "external_bytes_per_instance": 25297408,
+   "measured_us_per_instance": 14.09,
+   "measured_ms_total": 1.325,
+   "ideal_us_per_instance": 3.65,
+   "ideal_ms_total": 0.343,
+   "gap_ms_total": 0.982,
+   "gap_pct_of_step": 0.02,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (_fused_rms_norm_backward): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #81, L1)",
+   "overlaps_with": [
+    "G-01"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-50",
+   "title": "Intra-module (backward): attention.wo: torchao.mxfp8_quantize + torchao.triton_mx_block_rearrange",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "pointwise chain",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.wo",
+    "graph_nodes_example": [
+     "mxfp8_quantize_188",
+     "triton_mx_block_rearrange_188",
+     "triton_mx_block_rearrange_190"
+    ],
+    "source": "torchtitan/torchtitan/quantization/mxfp8/linear.py:129"
+   },
+   "ops": [
+    "torchao.mxfp8_quantize.default",
+    "torchao.triton_mx_block_rearrange.default"
+   ],
+   "kernels_per_instance": 3.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float8_e4m3fn[8192, 4096], float8_e8m0fnu[8192, 128], float8_e8m0fnu[4096, 256]",
+   "external_bytes_per_instance": 150994944,
+   "measured_us_per_instance": 32.23,
+   "measured_ms_total": 3.029,
+   "ideal_us_per_instance": 21.79,
+   "ideal_ms_total": 2.048,
+   "gap_ms_total": 0.982,
+   "gap_pct_of_step": 0.02,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #82, L1)",
+   "overlaps_with": [
+    "G-12",
+    "G-65",
+    "G-78"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-51",
+   "title": "Intra-module (backward): tok_embeddings: embedding_dense_backward + bkt._pre_bucket_reduce_scatter",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "dtype cast + FSDP bucket pack",
+   "location": {
+    "module_fqn_pattern": "tok_embeddings",
+    "graph_nodes_example": [
+     "embedding_dense_backward",
+     "_pre_bucket_reduce_scatter"
+    ],
+    "source": "torchtitan/torchtitan/models/common/embedding.py:41"
+   },
+   "ops": [
+    "aten.embedding_dense_backward.default",
+    "bucketing._pre_bucket_reduce_scatter.default"
+   ],
+   "kernels_per_instance": 23.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "bfloat16[151936, 4096], bfloat16[622854144]",
+   "external_bytes_per_instance": 1312882688,
+   "measured_us_per_instance": 1004.45,
+   "measured_ms_total": 1.004,
+   "ideal_us_per_instance": 189.43,
+   "ideal_ms_total": 0.189,
+   "gap_ms_total": 0.815,
+   "gap_pct_of_step": 0.017,
+   "bitwise_tier": "T2",
+   "bitwise_notes": "order-sensitive data movement (embedding_dense_backward): accumulation / selection order must match eager exactly.",
+   "blockers": "the FSDP pack is a custom bucketing op; casts must fold into it or into the producer.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #85, L1)",
+   "overlaps_with": [],
+   "notes": ""
+  },
+  {
+   "id": "G-52",
+   "title": "T3 GEMM prologue (backward): feed_forward.router.gate: cat + mm",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "GEMM prologue",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.router.gate",
+    "graph_nodes_example": [
+     "cat_387",
+     "mm_118"
+    ],
+    "source": "torchtitan/torchtitan/models/common/linear/hi_mid_lo_linear.py:117"
+   },
+   "ops": [
+    "aten.cat.default",
+    "aten.mm.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[384, 4096], bfloat16[8192, 4096]",
+   "external_bytes_per_instance": 74448896,
+   "measured_us_per_instance": 20.24,
+   "measured_ms_total": 1.903,
+   "ideal_us_per_instance": 12.44,
+   "ideal_ms_total": 1.17,
+   "gap_ms_total": 0.733,
+   "gap_pct_of_step": 0.015,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+   "blockers": "needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue).",
+   "evidence": "measured",
+   "how_found": "T3 prologue: L1 component whose outputs feed only GEMMs (candidate #87, T3-pro)",
+   "overlaps_with": [
+    "G-35",
+    "G-71"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.1 ms | GEMM mm_118: 17.7 us measured vs 12.4 us flops-ideal (GEMM-own gap 0.5 ms of this region's gap); glue part 2.6 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 0.2 ms. | estimated: ideal uses flops/peak for the GEMM"
+  },
+  {
+   "id": "G-53",
+   "title": "Single op (forward): feed_forward.routed_experts: masked_fill.Scalar",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "single-op rewrite",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.routed_experts",
+    "graph_nodes_example": [
+     "masked_fill"
+    ],
+    "source": "torchtitan/torchtitan/models/common/dist_moe/routed_experts.py:195"
+   },
+   "ops": [
+    "aten.masked_fill.Scalar"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 188,
+   "shapes_dtypes": "int64[8192, 8]",
+   "external_bytes_per_instance": 794624,
+   "measured_us_per_instance": 3.86,
+   "measured_ms_total": 0.726,
+   "ideal_us_per_instance": 0.11,
+   "ideal_ms_total": 0.022,
+   "gap_ms_total": 0.705,
+   "gap_pct_of_step": 0.014,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #88, L1)",
+   "overlaps_with": [
+    "G-10",
+    "G-72"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-54",
+   "title": "Intra-module (forward): attention.wo: torchao.mxfp8_quantize + torchao.triton_mx_block_rearrange",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "pointwise chain",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.wo",
+    "graph_nodes_example": [
+     "mxfp8_quantize_1",
+     "triton_mx_block_rearrange_1"
+    ],
+    "source": "torchtitan/torchtitan/quantization/mxfp8/linear.py:162-168"
+   },
+   "ops": [
+    "torchao.mxfp8_quantize.default",
+    "torchao.triton_mx_block_rearrange.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float8_e8m0fnu[8192, 256], float8_e4m3fn[8192, 8192], float8_e4m3fn[0], float8_e8m0fnu[0]",
+   "external_bytes_per_instance": 218103808,
+   "measured_us_per_instance": 38.71,
+   "measured_ms_total": 3.639,
+   "ideal_us_per_instance": 31.47,
+   "ideal_ms_total": 2.958,
+   "gap_ms_total": 0.681,
+   "gap_pct_of_step": 0.014,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #89, L1)",
+   "overlaps_with": [
+    "G-93"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-55",
+   "title": "Single op (forward): feed_forward.routed_experts: split_with_sizes_copy.out",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "single-op rewrite",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.routed_experts",
+    "graph_nodes_example": [
+     "split_with_sizes_copy_1"
+    ],
+    "source": "torchtitan/torchtitan/experiments/graph_trainer/simple_fsdp.py:366"
+   },
+   "ops": [
+    "aten.split_with_sizes_copy.out"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "",
+   "external_bytes_per_instance": 301989888,
+   "measured_us_per_instance": 50.75,
+   "measured_ms_total": 4.771,
+   "ideal_us_per_instance": 43.57,
+   "ideal_ms_total": 4.096,
+   "gap_ms_total": 0.675,
+   "gap_pct_of_step": 0.014,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #91, L1)",
+   "overlaps_with": [],
+   "notes": ""
+  },
+  {
+   "id": "G-56",
+   "title": "Single op (forward): attention.qkv_linear.wqkv: split_with_sizes_copy.out",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "single-op rewrite",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.qkv_linear.wqkv",
+    "graph_nodes_example": [
+     "split_with_sizes_copy"
+    ],
+    "source": "torchtitan/torchtitan/experiments/graph_trainer/simple_fsdp.py:366"
+   },
+   "ops": [
+    "aten.split_with_sizes_copy.out"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "",
+   "external_bytes_per_instance": 289441792,
+   "measured_us_per_instance": 48.93,
+   "measured_ms_total": 4.6,
+   "ideal_us_per_instance": 41.76,
+   "ideal_ms_total": 3.926,
+   "gap_ms_total": 0.674,
+   "gap_pct_of_step": 0.014,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #92, L1)",
+   "overlaps_with": [],
+   "notes": ""
+  },
+  {
+   "id": "G-57",
+   "title": "Intra-module (forward): attention.qkv_linear: clone",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "copy/concat + cast",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.qkv_linear",
+    "graph_nodes_example": [
+     "clone",
+     "clone_1",
+     "clone_2"
+    ],
+    "source": "torchtitan/torchtitan/models/common/attention/attention.py:194-196"
+   },
+   "ops": [
+    "aten.clone.default"
+   ],
+   "kernels_per_instance": 3.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[8192, 4, 128], bfloat16[8192, 4, 16, 128]",
+   "external_bytes_per_instance": 301989888,
+   "measured_us_per_instance": 49.32,
+   "measured_ms_total": 4.636,
+   "ideal_us_per_instance": 43.57,
+   "ideal_ms_total": 4.096,
+   "gap_ms_total": 0.54,
+   "gap_pct_of_step": 0.011,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #93, L1)",
+   "overlaps_with": [
+    "G-02",
+    "G-91"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-58",
+   "title": "Intra-module (forward): attention.qkv_linear.wqkv: torchao.mxfp8_quantize + torchao.triton_mx_block_rearrange",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "pointwise chain",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.qkv_linear.wqkv",
+    "graph_nodes_example": [
+     "mxfp8_quantize",
+     "triton_mx_block_rearrange"
+    ],
+    "source": "torchtitan/torchtitan/quantization/mxfp8/linear.py:162-168"
+   },
+   "ops": [
+    "torchao.mxfp8_quantize.default",
+    "torchao.triton_mx_block_rearrange.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float8_e8m0fnu[8192, 128], float8_e4m3fn[8192, 4096], float8_e4m3fn[0], float8_e8m0fnu[0]",
+   "external_bytes_per_instance": 109051904,
+   "measured_us_per_instance": 21.46,
+   "measured_ms_total": 2.017,
+   "ideal_us_per_instance": 15.73,
+   "ideal_ms_total": 1.479,
+   "gap_ms_total": 0.538,
+   "gap_pct_of_step": 0.011,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #94, L1)",
+   "overlaps_with": [
+    "G-42",
+    "G-97"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-59",
+   "title": "Single op (backward): feed_forward.routed_experts: masked_fill.Scalar",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "single-op rewrite",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.routed_experts",
+    "graph_nodes_example": [
+     "masked_fill_188"
+    ],
+    "source": "torchtitan/torchtitan/models/common/dist_moe/routed_experts.py:196"
+   },
+   "ops": [
+    "aten.masked_fill.Scalar"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float32[8192, 8]",
+   "external_bytes_per_instance": 532480,
+   "measured_us_per_instance": 4.39,
+   "measured_ms_total": 0.413,
+   "ideal_us_per_instance": 0.08,
+   "ideal_ms_total": 0.007,
+   "gap_ms_total": 0.405,
+   "gap_pct_of_step": 0.008,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #98, L1)",
+   "overlaps_with": [
+    "G-06"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-60",
+   "title": "Single op (forward): attention.rope: index",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "single-op rewrite",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.rope",
+    "graph_nodes_example": [
+     "index"
+    ],
+    "source": "torchtitan/torchtitan/models/common/rope.py:170"
+   },
+   "ops": [
+    "aten.index.Tensor"
+   ],
+   "kernels_per_instance": 1.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float32[8192, 256]",
+   "external_bytes_per_instance": 12648448,
+   "measured_us_per_instance": 6.11,
+   "measured_ms_total": 0.574,
+   "ideal_us_per_instance": 1.82,
+   "ideal_ms_total": 0.172,
+   "gap_ms_total": 0.403,
+   "gap_pct_of_step": 0.008,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #99, L1)",
+   "overlaps_with": [],
+   "notes": ""
+  },
+  {
+   "id": "G-61",
+   "title": "Intra-module (forward): feed_forward.router: arange + remainder.Scalar",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "pointwise chain",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.router",
+    "graph_nodes_example": [
+     "arange",
+     "remainder"
+    ],
+    "source": "torchtitan/torchtitan/models/common/moe/moe.py:272"
+   },
+   "ops": [
+    "aten.arange.default",
+    "aten.remainder.Scalar"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "int64[65536], int64[8192, 8]",
+   "external_bytes_per_instance": 524288,
+   "measured_us_per_instance": 4.31,
+   "measured_ms_total": 0.405,
+   "ideal_us_per_instance": 0.08,
+   "ideal_ms_total": 0.007,
+   "gap_ms_total": 0.398,
+   "gap_pct_of_step": 0.008,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #100, L1)",
+   "overlaps_with": [],
+   "notes": ""
+  },
+  {
+   "id": "G-62",
+   "title": "Intra-module (backward): feed_forward.router.gate: add_ + _to_copy",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "pointwise chain",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.router.gate",
+    "graph_nodes_example": [
+     "add__289",
+     "add__290",
+     "_to_copy_1358"
+    ],
+    "source": "torchtitan/torchtitan/models/common/linear/hi_mid_lo_linear.py:117"
+   },
+   "ops": [
+    "aten._to_copy.default",
+    "aten.add_.Tensor"
+   ],
+   "kernels_per_instance": 3.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float32[128, 4096], bfloat16[128, 4096]",
+   "external_bytes_per_instance": 11534336,
+   "measured_us_per_instance": 5.86,
+   "measured_ms_total": 0.551,
+   "ideal_us_per_instance": 1.66,
+   "ideal_ms_total": 0.156,
+   "gap_ms_total": 0.395,
+   "gap_pct_of_step": 0.008,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #101, L1)",
+   "overlaps_with": [
+    "G-22",
+    "G-39"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-63",
+   "title": "Intra-module (backward): attention.qkv_linear.wqkv: torchao.mxfp8_quantize + torchao.triton_mx_block_rearrange",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "pointwise chain",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.qkv_linear.wqkv",
+    "graph_nodes_example": [
+     "mxfp8_quantize_191",
+     "triton_mx_block_rearrange_192"
+    ],
+    "source": "torchtitan/torchtitan/quantization/mxfp8/linear.py:129"
+   },
+   "ops": [
+    "torchao.mxfp8_quantize.default",
+    "torchao.triton_mx_block_rearrange.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float8_e8m0fnu[4096, 256], float8_e4m3fn[0], float8_e4m3fn[8192, 4096], float8_e8m0fnu[0]",
+   "external_bytes_per_instance": 109051904,
+   "measured_us_per_instance": 19.7,
+   "measured_ms_total": 1.852,
+   "ideal_us_per_instance": 15.73,
+   "ideal_ms_total": 1.479,
+   "gap_ms_total": 0.373,
+   "gap_pct_of_step": 0.008,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #103, L1)",
+   "overlaps_with": [
+    "G-94"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-64",
+   "title": "Intra-module (backward): attention.wo: torchao.mxfp8_quantize + torchao.triton_mx_block_rearrange",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "pointwise chain",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.wo",
+    "graph_nodes_example": [
+     "mxfp8_quantize_189",
+     "triton_mx_block_rearrange_189"
+    ],
+    "source": "torchtitan/torchtitan/quantization/mxfp8/linear.py:129"
+   },
+   "ops": [
+    "torchao.mxfp8_quantize.default",
+    "torchao.triton_mx_block_rearrange.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float8_e8m0fnu[8192, 256], float8_e4m3fn[0], float8_e4m3fn[8192, 8192], float8_e8m0fnu[0]",
+   "external_bytes_per_instance": 218103808,
+   "measured_us_per_instance": 35.43,
+   "measured_ms_total": 3.33,
+   "ideal_us_per_instance": 31.47,
+   "ideal_ms_total": 2.958,
+   "gap_ms_total": 0.372,
+   "gap_pct_of_step": 0.008,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #104, L1)",
+   "overlaps_with": [
+    "G-70"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-65",
+   "title": "T3 GEMM prologue (backward): attention.wo: torchao.mxfp8_quantize + torchao.triton_mx_block_rearrange + _scaled_mm_v2",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "GEMM prologue",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.wo",
+    "graph_nodes_example": [
+     "mxfp8_quantize_188",
+     "triton_mx_block_rearrange_188",
+     "_scaled_mm_v2_188",
+     "triton_mx_block_rearrange_190"
+    ],
+    "source": "torchtitan/torchtitan/quantization/mxfp8/linear.py:129"
+   },
+   "ops": [
+    "aten._scaled_mm_v2.default",
+    "torchao.mxfp8_quantize.default",
+    "torchao.triton_mx_block_rearrange.default"
+   ],
+   "kernels_per_instance": 4.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float8_e4m3fn[8192, 4096], float8_e8m0fnu[8192, 128], float8_e8m0fnu[4096, 256], bfloat16[8192, 8192]",
+   "external_bytes_per_instance": 318767104,
+   "measured_us_per_instance": 181.8,
+   "measured_ms_total": 17.089,
+   "ideal_us_per_instance": 178.2,
+   "ideal_ms_total": 16.751,
+   "gap_ms_total": 0.338,
+   "gap_pct_of_step": 0.007,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+   "blockers": "needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue).",
+   "evidence": "measured",
+   "how_found": "T3 prologue: L1 component whose outputs feed only GEMMs (candidate #107, T3-pro)",
+   "overlaps_with": [
+    "G-12",
+    "G-50",
+    "G-78",
+    "G-92"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 2.0 ms | GEMM _scaled_mm_v2_188: 149.6 us measured vs 178.2 us flops-ideal (GEMM-own gap -2.7 ms of this region's gap); glue part 32.2 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 0.3 ms. | identical kernel set as candidate(s) [146] | estimated: ideal uses flops/peak for the GEMM"
+  },
+  {
+   "id": "G-66",
+   "title": "Intra-module (forward): attention.q_norm: _to_copy + constant_pad_nd",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "copy/concat + cast",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.q_norm",
+    "graph_nodes_example": [
+     "_to_copy_3",
+     "constant_pad_nd_1"
+    ],
+    "source": "torchtitan/torchtitan/experiments/graph_trainer/simple_fsdp.py:366"
+   },
+   "ops": [
+    "aten._to_copy.default",
+    "aten.constant_pad_nd.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[1]",
+   "external_bytes_per_instance": 6,
+   "measured_us_per_instance": 3.43,
+   "measured_ms_total": 0.323,
+   "ideal_us_per_instance": 0.0,
+   "ideal_ms_total": 0.0,
+   "gap_ms_total": 0.323,
+   "gap_pct_of_step": 0.007,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #108, L1)",
+   "overlaps_with": [
+    "G-33"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-67",
+   "title": "Intra-module (forward): attention.k_norm: _to_copy + constant_pad_nd",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "copy/concat + cast",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.k_norm",
+    "graph_nodes_example": [
+     "_to_copy_4",
+     "constant_pad_nd_2"
+    ],
+    "source": "torchtitan/torchtitan/experiments/graph_trainer/simple_fsdp.py:366"
+   },
+   "ops": [
+    "aten._to_copy.default",
+    "aten.constant_pad_nd.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[1]",
+   "external_bytes_per_instance": 6,
+   "measured_us_per_instance": 3.43,
+   "measured_ms_total": 0.323,
+   "ideal_us_per_instance": 0.0,
+   "ideal_ms_total": 0.0,
+   "gap_ms_total": 0.323,
+   "gap_pct_of_step": 0.007,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #109, L1)",
+   "overlaps_with": [
+    "G-33"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-68",
+   "title": "Intra-module (forward): feed_forward.router.gate: _to_copy + constant_pad_nd",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "copy/concat + cast",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.router.gate",
+    "graph_nodes_example": [
+     "_to_copy_11",
+     "constant_pad_nd_3"
+    ],
+    "source": "torchtitan/torchtitan/experiments/graph_trainer/simple_fsdp.py:366"
+   },
+   "ops": [
+    "aten._to_copy.default",
+    "aten.constant_pad_nd.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[1, 4096]",
+   "external_bytes_per_instance": 24576,
+   "measured_us_per_instance": 3.41,
+   "measured_ms_total": 0.321,
+   "ideal_us_per_instance": 0.0,
+   "ideal_ms_total": 0.0,
+   "gap_ms_total": 0.32,
+   "gap_pct_of_step": 0.007,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #110, L1)",
+   "overlaps_with": [
+    "G-33"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-69",
+   "title": "Intra-module (backward): feed_forward.routed_experts: _to_copy",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "copy/concat + cast",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.routed_experts",
+    "graph_nodes_example": [
+     "_to_copy_1351",
+     "_to_copy_1352"
+    ],
+    "source": "(no torchtitan frame in stack_trace)"
+   },
+   "ops": [
+    "aten._to_copy.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float32[4, 512, 1536], float32[4, 2, 192, 4096]",
+   "external_bytes_per_instance": 56623104,
+   "measured_us_per_instance": 11.24,
+   "measured_ms_total": 1.057,
+   "ideal_us_per_instance": 8.17,
+   "ideal_ms_total": 0.768,
+   "gap_ms_total": 0.289,
+   "gap_pct_of_step": 0.006,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #111, L1)",
+   "overlaps_with": [],
+   "notes": ""
+  },
+  {
+   "id": "G-70",
+   "title": "T3 GEMM prologue (backward): attention.wo: torchao.mxfp8_quantize + torchao.triton_mx_block_rearrange + _scaled_mm_v2",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "GEMM prologue",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.wo",
+    "graph_nodes_example": [
+     "mxfp8_quantize_189",
+     "triton_mx_block_rearrange_189",
+     "_scaled_mm_v2_189"
+    ],
+    "source": "torchtitan/torchtitan/quantization/mxfp8/linear.py:129"
+   },
+   "ops": [
+    "aten._scaled_mm_v2.default",
+    "torchao.mxfp8_quantize.default",
+    "torchao.triton_mx_block_rearrange.default"
+   ],
+   "kernels_per_instance": 3.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float8_e8m0fnu[8192, 256], float8_e4m3fn[0], float8_e4m3fn[8192, 8192], float8_e8m0fnu[0]",
+   "external_bytes_per_instance": 239075328,
+   "measured_us_per_instance": 180.27,
+   "measured_ms_total": 16.945,
+   "ideal_us_per_instance": 178.2,
+   "ideal_ms_total": 16.751,
+   "gap_ms_total": 0.194,
+   "gap_pct_of_step": 0.004,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+   "blockers": "needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue).",
+   "evidence": "measured",
+   "how_found": "T3 prologue: L1 component whose outputs feed only GEMMs (candidate #114, T3-pro)",
+   "overlaps_with": [
+    "G-20",
+    "G-64"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 3.0 ms | GEMM _scaled_mm_v2_189: 144.8 us measured vs 178.2 us flops-ideal (GEMM-own gap -3.1 ms of this region's gap); glue part 35.4 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 0.2 ms. | estimated: ideal uses flops/peak for the GEMM"
+  },
+  {
+   "id": "G-71",
+   "title": "Single op (backward): feed_forward.router.gate: cat",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "single-op rewrite",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.router.gate",
+    "graph_nodes_example": [
+     "cat_387"
+    ],
+    "source": "torchtitan/torchtitan/models/common/linear/hi_mid_lo_linear.py:117"
+   },
+   "ops": [
+    "aten.cat.default"
+   ],
+   "kernels_per_instance": 1.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[384, 4096]",
+   "external_bytes_per_instance": 4194304,
+   "measured_us_per_instance": 2.57,
+   "measured_ms_total": 0.242,
+   "ideal_us_per_instance": 0.61,
+   "ideal_ms_total": 0.057,
+   "gap_ms_total": 0.185,
+   "gap_pct_of_step": 0.004,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #116, L1)",
+   "overlaps_with": [
+    "G-52"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-72",
+   "title": "Cross-module (forward): feed_forward.routed_experts, feed_forward.router, feed_forward.router.aux_loss: _softmax + gather + sum + add + div + mul + add_ + clone + linalg_vector_norm + clamp_min ",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "normalization + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.routed_experts, layers.*.feed_forward.router, layers.*.feed_forward.router.aux_loss",
+    "graph_nodes_example": [
+     "_softmax",
+     "gather",
+     "sum_1",
+     "add_3",
+     "div",
+     "mul_4",
+     "add__1",
+     "clone_3",
+     "linalg_vector_norm",
+     "clamp_min",
+     "div_1",
+     "mul_5"
+    ],
+    "source": "torchtitan/torchtitan/models/common/moe/moe.py:257-705; torchtitan/torchtitan/models/common/dist_moe/routed_experts.py:196"
+   },
+   "ops": [
+    "aten._softmax.default",
+    "aten.add.Tensor",
+    "aten.add_.Tensor",
+    "aten.bitwise_not.default",
+    "aten.clamp_min.default",
+    "aten.clone.default",
+    "aten.div.Tensor",
+    "aten.gather.default",
+    "aten.linalg_vector_norm.default",
+    "aten.masked_fill.Scalar",
+    "aten.mul.Tensor",
+    "aten.sum.default",
+    "aten.sum.dim_IntList"
+   ],
+   "kernels_per_instance": 26.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "float32[128], float32[8192, 8], float32[8192, 1], float32[]",
+   "external_bytes_per_instance": 9562132,
+   "measured_us_per_instance": 73.09,
+   "measured_ms_total": 0.073,
+   "ideal_us_per_instance": 1.38,
+   "ideal_ms_total": 0.001,
+   "gap_ms_total": 0.072,
+   "gap_pct_of_step": 0.001,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (_softmax, linalg_vector_norm, sum, sum.dim_IntList): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "NOT FUSABLE AS FOUND: not one kernel: _c10d_functional.all_reduce (all_reduce_94) runs between region members (path out and back in: zeros_like -> scatter_.value -> bitwise_and.Tensor -> _to_copy -> sum.dim_IntList -> view -> cat -> _c10d_functional.all_reduce -> _c10d_functional.wait_tensor). none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "XM-max component: L1 components of one phase/layer/stage joined across module FQNs (barrier-free edges) (candidate #119, XM-max)",
+   "overlaps_with": [
+    "G-40",
+    "G-43",
+    "G-53",
+    "G-73"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.0 ms"
+  },
+  {
+   "id": "G-73",
+   "title": "Intra-module (forward): feed_forward.router.aux_loss: add_ + clone + linalg_vector_norm + clamp_min + div + mul + bitwise_not + sum",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "normalization + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.router.aux_loss",
+    "graph_nodes_example": [
+     "add__1",
+     "clone_3",
+     "linalg_vector_norm",
+     "clamp_min",
+     "div_1",
+     "mul_5",
+     "linalg_vector_norm_1",
+     "clamp_min_1",
+     "div_2",
+     "bitwise_not_1",
+     "mul_6",
+     "sum_4"
+    ],
+    "source": "torchtitan/torchtitan/models/common/moe/moe.py:683-705"
+   },
+   "ops": [
+    "aten.add_.Tensor",
+    "aten.bitwise_not.default",
+    "aten.clamp_min.default",
+    "aten.clone.default",
+    "aten.div.Tensor",
+    "aten.linalg_vector_norm.default",
+    "aten.mul.Tensor",
+    "aten.sum.default",
+    "aten.sum.dim_IntList"
+   ],
+   "kernels_per_instance": 18.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "float32[128], float32[], float32[1], float32[8192, 1]",
+   "external_bytes_per_instance": 4278292,
+   "measured_us_per_instance": 51.87,
+   "measured_ms_total": 0.052,
+   "ideal_us_per_instance": 0.62,
+   "ideal_ms_total": 0.001,
+   "gap_ms_total": 0.051,
+   "gap_pct_of_step": 0.001,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (linalg_vector_norm, sum, sum.dim_IntList): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #121, L1)",
+   "overlaps_with": [
+    "G-72"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-74",
+   "title": "Intra-module (backward): loss: _to_copy + add_",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "pointwise chain",
+   "location": {
+    "module_fqn_pattern": "loss",
+    "graph_nodes_example": [
+     "_to_copy_1321",
+     "_to_copy_1325",
+     "add__282",
+     "_to_copy_1329",
+     "add__283",
+     "_to_copy_1333",
+     "add__284",
+     "_to_copy_1337",
+     "add__285",
+     "_to_copy_1341",
+     "add__286",
+     "_to_copy_1345"
+    ],
+    "source": "(no torchtitan frame in stack_trace)"
+   },
+   "ops": [
+    "aten._to_copy.default",
+    "aten.add_.Tensor"
+   ],
+   "kernels_per_instance": 15.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "float32[594, 4096]",
+   "external_bytes_per_instance": 107053056,
+   "measured_us_per_instance": 56.22,
+   "measured_ms_total": 0.056,
+   "ideal_us_per_instance": 15.45,
+   "ideal_ms_total": 0.015,
+   "gap_ms_total": 0.041,
+   "gap_pct_of_step": 0.001,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #122, L1)",
+   "overlaps_with": [],
+   "notes": ""
+  },
+  {
+   "id": "G-75",
+   "title": "Cross-module (backward): feed_forward.routed_experts, ffn_norm: add + _fused_rms_norm_backward",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "normalization + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.routed_experts, layers.*.ffn_norm",
+    "graph_nodes_example": [
+     "add_481",
+     "_fused_rms_norm_backward_1"
+    ],
+    "source": "torchtitan/torchtitan/models/common/nn_modules.py:155"
+   },
+   "ops": [
+    "aten._fused_rms_norm_backward.default",
+    "aten.add.Tensor"
+   ],
+   "kernels_per_instance": 3.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "bfloat16[8192, 4096], bfloat16[4096]",
+   "external_bytes_per_instance": 268484608,
+   "measured_us_per_instance": 79.1,
+   "measured_ms_total": 0.079,
+   "ideal_us_per_instance": 38.74,
+   "ideal_ms_total": 0.039,
+   "gap_ms_total": 0.04,
+   "gap_pct_of_step": 0.001,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (_fused_rms_norm_backward): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "XM-max component: L1 components of one phase/layer/stage joined across module FQNs (barrier-free edges) (candidate #124, XM-max)",
+   "overlaps_with": [
+    "G-35",
+    "G-76",
+    "G-79"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.0 ms"
+  },
+  {
+   "id": "G-76",
+   "title": "Cross-layer (backward): ffn_norm, norm: _fused_rms_norm_backward + add",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "cross-layer"
+   ],
+   "fusion_kind": "normalization + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*.ffn_norm, norm",
+    "graph_nodes_example": [
+     "_fused_rms_norm_backward_1",
+     "add_482"
+    ],
+    "source": "torchtitan/torchtitan/models/common/nn_modules.py:155"
+   },
+   "ops": [
+    "aten._fused_rms_norm_backward.default",
+    "aten.add.Tensor"
+   ],
+   "kernels_per_instance": 3.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "bfloat16[8192, 4096], bfloat16[4096]",
+   "external_bytes_per_instance": 335593472,
+   "measured_us_per_instance": 81.54,
+   "measured_ms_total": 0.082,
+   "ideal_us_per_instance": 48.42,
+   "ideal_ms_total": 0.048,
+   "gap_ms_total": 0.033,
+   "gap_pct_of_step": 0.001,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (_fused_rms_norm_backward): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "crosses a decoder-layer boundary: the value handed between layers is also read elsewhere (saved for backward, or the other residual branch), so the fused kernel must still write it; graph passes treat layers as units (per-layer FSDP buckets and reordering).",
+   "evidence": "measured",
+   "how_found": "XL pair: two L1 components of one phase and stage joined by an edge across a layer/root-module boundary (candidate #125, XL)",
+   "overlaps_with": [
+    "G-75",
+    "G-78",
+    "G-79"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.0 ms"
+  },
+  {
+   "id": "G-77",
+   "title": "Single op (backward): norm: _fused_rms_norm_backward",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "single-op rewrite",
+   "location": {
+    "module_fqn_pattern": "norm",
+    "graph_nodes_example": [
+     "_fused_rms_norm_backward"
+    ],
+    "source": "torchtitan/torchtitan/models/common/nn_modules.py:155"
+   },
+   "ops": [
+    "aten._fused_rms_norm_backward.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "bfloat16[8192, 4096], bfloat16[4096]",
+   "external_bytes_per_instance": 201375744,
+   "measured_us_per_instance": 53.34,
+   "measured_ms_total": 0.053,
+   "ideal_us_per_instance": 29.06,
+   "ideal_ms_total": 0.029,
+   "gap_ms_total": 0.024,
+   "gap_pct_of_step": 0.0,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (_fused_rms_norm_backward): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #126, L1)",
+   "overlaps_with": [],
+   "notes": ""
+  },
+  {
+   "id": "G-78",
+   "title": "Cross-layer (backward): attention.wo, norm: add + torchao.mxfp8_quantize + torchao.triton_mx_block_rearrange",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "cross-layer"
+   ],
+   "fusion_kind": "pointwise chain",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.wo, norm",
+    "graph_nodes_example": [
+     "add_482",
+     "mxfp8_quantize_188",
+     "triton_mx_block_rearrange_188",
+     "triton_mx_block_rearrange_190"
+    ],
+    "source": "torchtitan/torchtitan/quantization/mxfp8/linear.py:129"
+   },
+   "ops": [
+    "aten.add.Tensor",
+    "torchao.mxfp8_quantize.default",
+    "torchao.triton_mx_block_rearrange.default"
+   ],
+   "kernels_per_instance": 4.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "float8_e4m3fn[8192, 4096], float8_e8m0fnu[8192, 128], float8_e8m0fnu[4096, 256], bfloat16[8192, 4096]",
+   "external_bytes_per_instance": 285212672,
+   "measured_us_per_instance": 62.94,
+   "measured_ms_total": 0.063,
+   "ideal_us_per_instance": 41.15,
+   "ideal_ms_total": 0.041,
+   "gap_ms_total": 0.022,
+   "gap_pct_of_step": 0.0,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "crosses a decoder-layer boundary: the value handed between layers is also read elsewhere (saved for backward, or the other residual branch), so the fused kernel must still write it; graph passes treat layers as units (per-layer FSDP buckets and reordering).",
+   "evidence": "measured",
+   "how_found": "XL pair: two L1 components of one phase and stage joined by an edge across a layer/root-module boundary (candidate #127, XL)",
+   "overlaps_with": [
+    "G-50",
+    "G-65",
+    "G-76"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.0 ms"
+  },
+  {
+   "id": "G-79",
+   "title": "Single op (backward): ffn_norm: _fused_rms_norm_backward",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "single-op rewrite",
+   "location": {
+    "module_fqn_pattern": "layers.*.ffn_norm",
+    "graph_nodes_example": [
+     "_fused_rms_norm_backward_1"
+    ],
+    "source": "torchtitan/torchtitan/models/common/nn_modules.py:155"
+   },
+   "ops": [
+    "aten._fused_rms_norm_backward.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "bfloat16[8192, 4096], bfloat16[4096]",
+   "external_bytes_per_instance": 201375744,
+   "measured_us_per_instance": 50.66,
+   "measured_ms_total": 0.051,
+   "ideal_us_per_instance": 29.06,
+   "ideal_ms_total": 0.029,
+   "gap_ms_total": 0.022,
+   "gap_pct_of_step": 0.0,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (_fused_rms_norm_backward): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #128, L1)",
+   "overlaps_with": [
+    "G-75",
+    "G-76"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-80",
+   "title": "Cross-layer (forward): lm_head, norm: _to_copy + constant_pad_nd + bkt._pre_bucket_all_gather",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "dtype cast + FSDP bucket pack",
+   "location": {
+    "module_fqn_pattern": "lm_head, norm",
+    "graph_nodes_example": [
+     "_to_copy_1318",
+     "constant_pad_nd_283",
+     "_pre_bucket_all_gather_189"
+    ],
+    "source": "torchtitan/torchtitan/experiments/graph_trainer/simple_fsdp.py:366"
+   },
+   "ops": [
+    "aten._to_copy.default",
+    "aten.constant_pad_nd.default",
+    "bucketing._pre_bucket_all_gather.default"
+   ],
+   "kernels_per_instance": 4.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "bfloat16[594, 4096], bfloat16[622858240]",
+   "external_bytes_per_instance": 14598272,
+   "measured_us_per_instance": 18.91,
+   "measured_ms_total": 0.019,
+   "ideal_us_per_instance": 2.11,
+   "ideal_ms_total": 0.002,
+   "gap_ms_total": 0.017,
+   "gap_pct_of_step": 0.0,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "the FSDP pack is a custom bucketing op; casts must fold into it or into the producer.",
+   "evidence": "measured",
+   "how_found": "XL pair: two L1 components of one phase and stage joined by an edge across a layer/root-module boundary (candidate #129, XL)",
+   "overlaps_with": [
+    "G-84",
+    "G-87"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.0 ms"
+  },
+  {
+   "id": "G-81",
+   "title": "Intra-module (forward): tok_embeddings: _to_copy + constant_pad_nd + bkt._pre_bucket_all_gather",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "dtype cast + FSDP bucket pack",
+   "location": {
+    "module_fqn_pattern": "tok_embeddings",
+    "graph_nodes_example": [
+     "_to_copy",
+     "constant_pad_nd",
+     "_pre_bucket_all_gather"
+    ],
+    "source": "torchtitan/torchtitan/experiments/graph_trainer/simple_fsdp.py:366"
+   },
+   "ops": [
+    "aten._to_copy.default",
+    "aten.constant_pad_nd.default",
+    "bucketing._pre_bucket_all_gather.default"
+   ],
+   "kernels_per_instance": 3.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "bfloat16[594, 4096], bfloat16[622854144]",
+   "external_bytes_per_instance": 14598144,
+   "measured_us_per_instance": 18.3,
+   "measured_ms_total": 0.018,
+   "ideal_us_per_instance": 2.11,
+   "ideal_ms_total": 0.002,
+   "gap_ms_total": 0.016,
+   "gap_pct_of_step": 0.0,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "the FSDP pack is a custom bucketing op; casts must fold into it or into the producer.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #130, L1)",
+   "overlaps_with": [],
+   "notes": ""
+  },
+  {
+   "id": "G-82",
+   "title": "Cross-layer (forward): layers.*, norm: add + _fused_rms_norm",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-layer"
+   ],
+   "fusion_kind": "normalization + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*, norm",
+    "graph_nodes_example": [
+     "add_469",
+     "_fused_rms_norm_376"
+    ],
+    "source": "torchtitan/torchtitan/models/qwen3/model.py:73; torchtitan/torchtitan/models/common/nn_modules.py:155"
+   },
+   "ops": [
+    "aten._fused_rms_norm.default",
+    "aten.add.Tensor"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "bfloat16[8192, 4096], float32[8192, 1]",
+   "external_bytes_per_instance": 268468224,
+   "measured_us_per_instance": 54.75,
+   "measured_ms_total": 0.055,
+   "ideal_us_per_instance": 38.74,
+   "ideal_ms_total": 0.039,
+   "gap_ms_total": 0.016,
+   "gap_pct_of_step": 0.0,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (_fused_rms_norm): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "crosses a decoder-layer boundary: the value handed between layers is also read elsewhere (saved for backward, or the other residual branch), so the fused kernel must still write it; graph passes treat layers as units (per-layer FSDP buckets and reordering).",
+   "evidence": "measured",
+   "how_found": "XL pair: two L1 components of one phase and stage joined by an edge across a layer/root-module boundary (candidate #131, XL)",
+   "overlaps_with": [],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.0 ms"
+  },
+  {
+   "id": "G-83",
+   "title": "Single op (forward): loss: ones_like",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "single-op rewrite",
+   "location": {
+    "module_fqn_pattern": "loss",
+    "graph_nodes_example": [
+     "ones_like"
+    ],
+    "source": "(no torchtitan frame in stack_trace)"
+   },
+   "ops": [
+    "aten.ones_like.default"
+   ],
+   "kernels_per_instance": 1.0,
+   "instances_per_step": 8,
+   "shapes_dtypes": "float32[]",
+   "external_bytes_per_instance": 8,
+   "measured_us_per_instance": 1.42,
+   "measured_ms_total": 0.011,
+   "ideal_us_per_instance": 0.0,
+   "ideal_ms_total": 0.0,
+   "gap_ms_total": 0.011,
+   "gap_pct_of_step": 0.0,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #132, L1)",
+   "overlaps_with": [],
+   "notes": ""
+  },
+  {
+   "id": "G-84",
+   "title": "Single op (forward): norm: bkt._pre_bucket_all_gather",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "single-op rewrite",
+   "location": {
+    "module_fqn_pattern": "norm",
+    "graph_nodes_example": [
+     "_pre_bucket_all_gather_189"
+    ],
+    "source": "torchtitan/torchtitan/experiments/graph_trainer/simple_fsdp.py:366"
+   },
+   "ops": [
+    "bucketing._pre_bucket_all_gather.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "bfloat16[622858240]",
+   "external_bytes_per_instance": 9732224,
+   "measured_us_per_instance": 12.45,
+   "measured_ms_total": 0.012,
+   "ideal_us_per_instance": 1.4,
+   "ideal_ms_total": 0.001,
+   "gap_ms_total": 0.011,
+   "gap_pct_of_step": 0.0,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "the FSDP pack is a custom bucketing op; casts must fold into it or into the producer.",
+   "evidence": "measured",
+   "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #133, L1)",
+   "overlaps_with": [
+    "G-80"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-85",
+   "title": "Intra-module (forward): feed_forward.router.aux_loss: clamp_min + reciprocal + mul",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "pointwise chain",
+   "location": {
+    "module_fqn_pattern": "layers.*.feed_forward.router.aux_loss",
+    "graph_nodes_example": [
+     "clamp_min_2",
+     "reciprocal",
+     "mul_8",
+     "mul_9"
+    ],
+    "source": "torchtitan/torchtitan/models/common/moe/moe.py:705"
+   },
+   "ops": [
+    "aten.clamp_min.default",
+    "aten.mul.Tensor",
+    "aten.reciprocal.default"
+   ],
+   "kernels_per_instance": 4.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "float32[], int64[]",
+   "external_bytes_per_instance": 16,
+   "measured_us_per_instance": 9.28,
+   "measured_ms_total": 0.009,
+   "ideal_us_per_instance": 0.0,
+   "ideal_ms_total": 0.0,
+   "gap_ms_total": 0.009,
+   "gap_pct_of_step": 0.0,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #134, L1)",
+   "overlaps_with": [
+    "G-13"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-86",
+   "title": "Single op (forward): norm: split_with_sizes_copy.out",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "single-op rewrite",
+   "location": {
+    "module_fqn_pattern": "norm",
+    "graph_nodes_example": [
+     "split_with_sizes_copy_188"
+    ],
+    "source": "torchtitan/torchtitan/experiments/graph_trainer/simple_fsdp.py:366"
+   },
+   "ops": [
+    "aten.split_with_sizes_copy.out"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "",
+   "external_bytes_per_instance": 2491432960,
+   "measured_us_per_instance": 365.73,
+   "measured_ms_total": 0.366,
+   "ideal_us_per_instance": 359.47,
+   "ideal_ms_total": 0.359,
+   "gap_ms_total": 0.006,
+   "gap_pct_of_step": 0.0,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #135, L1)",
+   "overlaps_with": [],
+   "notes": ""
+  },
+  {
+   "id": "G-87",
+   "title": "Intra-module (forward): lm_head: _to_copy + constant_pad_nd",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "copy/concat + cast",
+   "location": {
+    "module_fqn_pattern": "lm_head",
+    "graph_nodes_example": [
+     "_to_copy_1318",
+     "constant_pad_nd_283"
+    ],
+    "source": "torchtitan/torchtitan/experiments/graph_trainer/simple_fsdp.py:366"
+   },
+   "ops": [
+    "aten._to_copy.default",
+    "aten.constant_pad_nd.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "bfloat16[594, 4096]",
+   "external_bytes_per_instance": 14598144,
+   "measured_us_per_instance": 6.46,
+   "measured_ms_total": 0.006,
+   "ideal_us_per_instance": 2.11,
+   "ideal_ms_total": 0.002,
+   "gap_ms_total": 0.004,
+   "gap_pct_of_step": 0.0,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component: glue nodes joined by tensor edges within one phase, layer, module FQN and fusion stage (candidate #137, L1)",
+   "overlaps_with": [
+    "G-80"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "G-88",
+   "title": "Single op (backward): norm: bkt._pre_bucket_reduce_scatter",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "single-op rewrite",
+   "location": {
+    "module_fqn_pattern": "norm",
+    "graph_nodes_example": [
+     "_pre_bucket_reduce_scatter_189"
+    ],
+    "source": "(no torchtitan frame in stack_trace)"
+   },
+   "ops": [
+    "bucketing._pre_bucket_reduce_scatter.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "bfloat16[4096]",
+   "external_bytes_per_instance": 16384,
+   "measured_us_per_instance": 3.2,
+   "measured_ms_total": 0.003,
+   "ideal_us_per_instance": 0.0,
+   "ideal_ms_total": 0.0,
+   "gap_ms_total": 0.003,
+   "gap_pct_of_step": 0.0,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "the FSDP pack is a custom bucketing op; casts must fold into it or into the producer.",
+   "evidence": "measured",
+   "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #138, L1)",
+   "overlaps_with": [],
+   "notes": ""
+  },
+  {
+   "id": "G-89",
+   "title": "Single op (backward): norm: _to_copy",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "single-op rewrite",
+   "location": {
+    "module_fqn_pattern": "norm",
+    "graph_nodes_example": [
+     "_to_copy_1350"
+    ],
+    "source": "(no torchtitan frame in stack_trace)"
+   },
+   "ops": [
+    "aten._to_copy.default"
+   ],
+   "kernels_per_instance": 1.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "float32[16]",
+   "external_bytes_per_instance": 96,
+   "measured_us_per_instance": 1.95,
+   "measured_ms_total": 0.002,
+   "ideal_us_per_instance": 0.0,
+   "ideal_ms_total": 0.0,
+   "gap_ms_total": 0.002,
+   "gap_pct_of_step": 0.0,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+   "blockers": "none structural: same phase, same fusion stage, no barrier op.",
+   "evidence": "measured",
+   "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #141, L1)",
+   "overlaps_with": [],
+   "notes": ""
+  },
+  {
+   "id": "G-90",
+   "title": "Cross-layer (forward): attention_norm, tok_embeddings: embedding + _fused_rms_norm",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-layer"
+   ],
+   "fusion_kind": "normalization + pointwise",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention_norm, tok_embeddings",
+    "graph_nodes_example": [
+     "embedding",
+     "_fused_rms_norm"
+    ],
+    "source": "torchtitan/torchtitan/models/common/embedding.py:41; torchtitan/torchtitan/models/common/nn_modules.py:155"
+   },
+   "ops": [
+    "aten._fused_rms_norm.default",
+    "aten.embedding.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "bfloat16[8192, 4096], float32[8192, 1]",
+   "external_bytes_per_instance": 1378983936,
+   "measured_us_per_instance": 38.59,
+   "measured_ms_total": 0.039,
+   "ideal_us_per_instance": 198.96,
+   "ideal_ms_total": 0.199,
+   "gap_ms_total": -0.16,
+   "gap_pct_of_step": -0.003,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "contains reductions (_fused_rms_norm): the fused kernel must keep eager's reduction order/tree to be bitwise identical.",
+   "blockers": "crosses a decoder-layer boundary: the value handed between layers is also read elsewhere (saved for backward, or the other residual branch), so the fused kernel must still write it; graph passes treat layers as units (per-layer FSDP buckets and reordering).",
+   "evidence": "measured",
+   "how_found": "XL pair: two L1 components of one phase and stage joined by an edge across a layer/root-module boundary (candidate #149, XL)",
+   "overlaps_with": [
+    "G-42"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.0 ms"
+  },
+  {
+   "id": "G-91",
+   "title": "T3 GEMM epilogue (forward): attention.qkv_linear, attention.qkv_linear.wqkv: _scaled_mm_v2 + clone",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "GEMM epilogue",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.qkv_linear, layers.*.attention.qkv_linear.wqkv",
+    "graph_nodes_example": [
+     "_scaled_mm_v2",
+     "clone",
+     "clone_1",
+     "clone_2"
+    ],
+    "source": "torchtitan/torchtitan/quantization/mxfp8/linear.py:174; torchtitan/torchtitan/models/common/attention/attention.py:194-196"
+   },
+   "ops": [
+    "aten._scaled_mm_v2.default",
+    "aten.clone.default"
+   ],
+   "kernels_per_instance": 4.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[8192, 4, 128], bfloat16[8192, 9216], bfloat16[8192, 4, 16, 128]",
+   "external_bytes_per_instance": 231211008,
+   "measured_us_per_instance": 198.76,
+   "measured_ms_total": 18.683,
+   "ideal_us_per_instance": 200.48,
+   "ideal_ms_total": 18.845,
+   "gap_ms_total": -0.162,
+   "gap_pct_of_step": -0.003,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+   "blockers": "needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue).",
+   "evidence": "measured",
+   "how_found": "T3 epilogue: L1 component consuming a GEMM output (candidate #150, T3-epi)",
+   "overlaps_with": [
+    "G-02",
+    "G-57",
+    "G-97"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 4.1 ms | GEMM _scaled_mm_v2: 149.4 us measured vs 200.5 us flops-ideal (GEMM-own gap -4.8 ms of this region's gap); glue part 49.3 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 0.0 ms. | estimated: ideal uses flops/peak for the GEMM"
+  },
+  {
+   "id": "G-92",
+   "title": "T3 GEMM prologue (backward/forward): attention.wo: torchao.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale + _scaled_mm_v2",
+   "phases": [
+    "backward",
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "GEMM prologue",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.wo",
+    "graph_nodes_example": [
+     "triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale_1",
+     "_scaled_mm_v2_560"
+    ],
+    "source": "torchtitan/torchtitan/experiments/graph_trainer/simple_fsdp.py:268; torchtitan/torchtitan/quantization/mxfp8/linear.py:129"
+   },
+   "ops": [
+    "aten._scaled_mm_v2.default",
+    "torchao.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float8_e4m3fn[4096, 8192], float8_e8m0fnu[32, 64, 32, 16], float8_e8m0fnu[64, 32, 32, 16], bfloat16[8192, 8192]",
+   "external_bytes_per_instance": 281018368,
+   "measured_us_per_instance": 169.0,
+   "measured_ms_total": 15.886,
+   "ideal_us_per_instance": 178.2,
+   "ideal_ms_total": 16.751,
+   "gap_ms_total": -0.865,
+   "gap_pct_of_step": -0.018,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+   "blockers": "NOT FUSABLE AS FOUND: not one kernel: _scaled_mm_v2 (_scaled_mm_v2_1) runs between region members (path out and back in: _scaled_mm_v2 -> add.Tensor -> _fused_rms_norm_backward -> _operator.getitem -> torchao.mxfp8_quantize -> torchao.triton_mx_block_rearrange). needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue).",
+   "evidence": "measured",
+   "how_found": "T3 prologue: L1 component whose outputs feed only GEMMs (candidate #152, T3-pro)",
+   "overlaps_with": [
+    "G-65"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 1.5 ms | GEMM _scaled_mm_v2_560: 149.6 us measured vs 178.2 us flops-ideal (GEMM-own gap -2.7 ms of this region's gap); glue part 19.4 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 0.0 ms. | identical kernel set as candidate(s) [158] | estimated: ideal uses flops/peak for the GEMM"
+  },
+  {
+   "id": "G-93",
+   "title": "T3 GEMM prologue (forward): attention.wo: torchao.mxfp8_quantize + torchao.triton_mx_block_rearrange + _scaled_mm_v2",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "GEMM prologue",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.wo",
+    "graph_nodes_example": [
+     "mxfp8_quantize_1",
+     "triton_mx_block_rearrange_1",
+     "_scaled_mm_v2_1"
+    ],
+    "source": "torchtitan/torchtitan/quantization/mxfp8/linear.py:162-174"
+   },
+   "ops": [
+    "aten._scaled_mm_v2.default",
+    "torchao.mxfp8_quantize.default",
+    "torchao.triton_mx_block_rearrange.default"
+   ],
+   "kernels_per_instance": 3.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float8_e8m0fnu[8192, 256], float8_e4m3fn[8192, 8192], float8_e4m3fn[0], float8_e8m0fnu[0]",
+   "external_bytes_per_instance": 239075328,
+   "measured_us_per_instance": 166.8,
+   "measured_ms_total": 15.679,
+   "ideal_us_per_instance": 178.2,
+   "ideal_ms_total": 16.751,
+   "gap_ms_total": -1.072,
+   "gap_pct_of_step": -0.022,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+   "blockers": "needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue).",
+   "evidence": "measured",
+   "how_found": "T3 prologue: L1 component whose outputs feed only GEMMs (candidate #153, T3-pro)",
+   "overlaps_with": [
+    "G-54",
+    "G-96"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 3.0 ms | GEMM _scaled_mm_v2_1: 128.1 us measured vs 178.2 us flops-ideal (GEMM-own gap -4.7 ms of this region's gap); glue part 38.7 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 0.0 ms. | estimated: ideal uses flops/peak for the GEMM"
+  },
+  {
+   "id": "G-94",
+   "title": "T3 GEMM prologue (backward): attention.qkv_linear.wqkv: torchao.mxfp8_quantize + torchao.triton_mx_block_rearrange + _scaled_mm_v2",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "GEMM prologue",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.qkv_linear.wqkv",
+    "graph_nodes_example": [
+     "mxfp8_quantize_191",
+     "triton_mx_block_rearrange_192",
+     "_scaled_mm_v2_191"
+    ],
+    "source": "torchtitan/torchtitan/quantization/mxfp8/linear.py:129"
+   },
+   "ops": [
+    "aten._scaled_mm_v2.default",
+    "torchao.mxfp8_quantize.default",
+    "torchao.triton_mx_block_rearrange.default"
+   ],
+   "kernels_per_instance": 3.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float8_e8m0fnu[4096, 256], float8_e4m3fn[0], float8_e4m3fn[8192, 4096], float8_e8m0fnu[0]",
+   "external_bytes_per_instance": 227540992,
+   "measured_us_per_instance": 184.47,
+   "measured_ms_total": 17.341,
+   "ideal_us_per_instance": 200.48,
+   "ideal_ms_total": 18.845,
+   "gap_ms_total": -1.504,
+   "gap_pct_of_step": -0.031,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+   "blockers": "needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue).",
+   "evidence": "measured",
+   "how_found": "T3 prologue: L1 component whose outputs feed only GEMMs (candidate #154, T3-pro)",
+   "overlaps_with": [
+    "G-21",
+    "G-34",
+    "G-63"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 1.5 ms | GEMM _scaled_mm_v2_191: 164.8 us measured vs 200.5 us flops-ideal (GEMM-own gap -3.4 ms of this region's gap); glue part 19.7 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 0.0 ms. | estimated: ideal uses flops/peak for the GEMM"
+  },
+  {
+   "id": "G-95",
+   "title": "T3 GEMM prologue (backward/forward): attention.qkv_linear.wqkv: torchao.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale + _scaled_mm_v2",
+   "phases": [
+    "backward",
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "GEMM prologue",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.qkv_linear.wqkv",
+    "graph_nodes_example": [
+     "triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale",
+     "_scaled_mm_v2_562"
+    ],
+    "source": "torchtitan/torchtitan/experiments/graph_trainer/simple_fsdp.py:268; torchtitan/torchtitan/quantization/mxfp8/linear.py:129"
+   },
+   "ops": [
+    "aten._scaled_mm_v2.default",
+    "torchao.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale.default"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float8_e4m3fn[9216, 4096], float8_e8m0fnu[72, 32, 32, 16], float8_e8m0fnu[32, 72, 32, 16], bfloat16[8192, 4096]",
+   "external_bytes_per_instance": 199229440,
+   "measured_us_per_instance": 183.68,
+   "measured_ms_total": 17.266,
+   "ideal_us_per_instance": 200.48,
+   "ideal_ms_total": 18.845,
+   "gap_ms_total": -1.579,
+   "gap_pct_of_step": -0.032,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+   "blockers": "NOT FUSABLE AS FOUND: not one kernel: _scaled_mm_v2 (_scaled_mm_v2) runs between region members (path out and back in: _scaled_mm_v2 -> reshape -> split_with_sizes -> _operator.getitem -> clone -> torch_attn._varlen_attn_backward -> cat -> torchao.mxfp8_quantize -> torchao.triton_mx_block_rearrange). needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue).",
+   "evidence": "measured",
+   "how_found": "T3 prologue: L1 component whose outputs feed only GEMMs (candidate #155, T3-pro)",
+   "overlaps_with": [
+    "G-23",
+    "G-46"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 0.6 ms | GEMM _scaled_mm_v2_562: 164.0 us measured vs 200.5 us flops-ideal (GEMM-own gap -3.4 ms of this region's gap); glue part 19.7 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 0.0 ms. | identical kernel set as candidate(s) [159] | estimated: ideal uses flops/peak for the GEMM"
+  },
+  {
+   "id": "G-96",
+   "title": "T3 GEMM epilogue (forward): layers.*, attention.wo: _scaled_mm_v2 + add",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "GEMM epilogue",
+   "location": {
+    "module_fqn_pattern": "layers.*, layers.*.attention.wo",
+    "graph_nodes_example": [
+     "_scaled_mm_v2_1",
+     "add_2"
+    ],
+    "source": "torchtitan/torchtitan/quantization/mxfp8/linear.py:174; torchtitan/torchtitan/models/qwen3/model.py:61"
+   },
+   "ops": [
+    "aten._scaled_mm_v2.default",
+    "aten.add.Tensor"
+   ],
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "bfloat16[8192, 4096]",
+   "external_bytes_per_instance": 247463936,
+   "measured_us_per_instance": 157.22,
+   "measured_ms_total": 14.779,
+   "ideal_us_per_instance": 178.2,
+   "ideal_ms_total": 16.751,
+   "gap_ms_total": -1.972,
+   "gap_pct_of_step": -0.041,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+   "blockers": "needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue).",
+   "evidence": "measured",
+   "how_found": "T3 epilogue: L1 component consuming a GEMM output (candidate #156, T3-epi)",
+   "overlaps_with": [
+    "G-48",
+    "G-93"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 2.7 ms | GEMM _scaled_mm_v2_1: 128.1 us measured vs 178.2 us flops-ideal (GEMM-own gap -4.7 ms of this region's gap); glue part 29.1 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 0.0 ms. | estimated: ideal uses flops/peak for the GEMM"
+  },
+  {
+   "id": "G-97",
+   "title": "T3 GEMM prologue (forward): attention.qkv_linear.wqkv: torchao.mxfp8_quantize + torchao.triton_mx_block_rearrange + _scaled_mm_v2",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "GEMM prologue",
+   "location": {
+    "module_fqn_pattern": "layers.*.attention.qkv_linear.wqkv",
+    "graph_nodes_example": [
+     "mxfp8_quantize",
+     "triton_mx_block_rearrange",
+     "_scaled_mm_v2"
+    ],
+    "source": "torchtitan/torchtitan/quantization/mxfp8/linear.py:162-174"
+   },
+   "ops": [
+    "aten._scaled_mm_v2.default",
+    "torchao.mxfp8_quantize.default",
+    "torchao.triton_mx_block_rearrange.default"
+   ],
+   "kernels_per_instance": 3.0,
+   "instances_per_step": 94,
+   "shapes_dtypes": "float8_e8m0fnu[8192, 128], float8_e4m3fn[8192, 4096], float8_e4m3fn[0], float8_e8m0fnu[0]",
+   "external_bytes_per_instance": 260571136,
+   "measured_us_per_instance": 170.9,
+   "measured_ms_total": 16.065,
+   "ideal_us_per_instance": 200.48,
+   "ideal_ms_total": 18.845,
+   "gap_ms_total": -2.78,
+   "gap_pct_of_step": -0.057,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "contains a GEMM/attention kernel: bitwise identity requires the same GEMM algorithm/split-K as eager plus an epilogue that rounds at the same points.",
+   "blockers": "needs a GEMM with a custom prologue/epilogue (CUTLASS/Triton template or cuBLASLt epilogue).",
+   "evidence": "measured",
+   "how_found": "T3 prologue: L1 component whose outputs feed only GEMMs (candidate #157, T3-pro)",
+   "overlaps_with": [
+    "G-42",
+    "G-58",
+    "G-91"
+   ],
+   "notes": "incremental gap over its parts (bytes of intermediates no longer materialized, at HBM roofline) = 1.5 ms | GEMM _scaled_mm_v2: 149.4 us measured vs 200.5 us flops-ideal (GEMM-own gap -4.8 ms of this region's gap); glue part 21.5 us/instance. Fusion-attributable gap (glue time not hidden behind the GEMM's measured time) = 0.0 ms. | estimated: ideal uses flops/peak for the GEMM"
+  }
+ ],
+ "no_opportunity": [
+  {
+   "what": "optimizer step + grad-norm clipping (eager, outside the traced graph)",
+   "time_ms": 6.003,
+   "reason": "runs outside the FX graph; invisible to the graph substrate."
+  },
+  {
+   "what": "other kernels outside the graph",
+   "time_ms": 3.597,
+   "reason": "outside the traced graph; not attributable to FX nodes."
+  },
+  {
+   "what": "bkt._pre_bucket_all_gather [forward] layers.*.feed_forward.routed_experts (x94)",
+   "time_ms": 1.963,
+   "reason": "FSDP all-gather pack of parameter shards (one copy kernel feeding the all_gather)."
+  },
+  {
+   "what": "copy_ [forward] loss (x8)",
+   "time_ms": 0.034,
+   "reason": "single kernel (1.17x of its roofline) with no same-stage glue neighbour (neighbours are GEMM/attention/collective); listed as T3 prologue/epilogue where one applies."
+  },
+  {
+   "what": "zeros_like [forward] loss (x1)",
+   "time_ms": 0.011,
+   "reason": "single kernel (0.59x of its roofline) with no same-stage glue neighbour (neighbours are GEMM/attention/collective); listed as T3 prologue/epilogue where one applies."
+  },
+  {
+   "what": "_to_copy [backward]  (x1)",
+   "time_ms": 0.003,
+   "reason": "single kernel (1.41x of its roofline) with no same-stage glue neighbour (neighbours are GEMM/attention/collective); listed as T3 prologue/epilogue where one applies."
+  }
+ ]
+}

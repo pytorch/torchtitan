@@ -1,0 +1,39 @@
+{
+  "kernel_name": "aek4creykzwjkg3hb3reuewjqeu5pw5kwilodcleax2kguxrbox2.py",
+  "reference": "reference.py",
+  "signature": "def run(in0, in1, in2)",
+  "inputs": [
+    {
+      "shape": [8192, 128],
+      "stride": [128, 1],
+      "dtype": "float32",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192, 8],
+      "stride": [8, 1],
+      "dtype": "int64",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [8192],
+      "stride": [1],
+      "dtype": "bool",
+      "device": "cuda:0"
+    }
+  ],
+  "outputs": [
+    {
+      "shape": [128],
+      "stride": [1],
+      "dtype": "int64",
+      "device": "cuda:0"
+    },
+    {
+      "shape": [128],
+      "stride": [1],
+      "dtype": "float32",
+      "device": "cuda:0"
+    }
+  ]
+}

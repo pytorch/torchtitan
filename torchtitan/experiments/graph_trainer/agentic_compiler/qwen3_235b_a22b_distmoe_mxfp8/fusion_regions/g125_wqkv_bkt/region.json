@@ -1,0 +1,48 @@
+{
+ "id": "G-125",
+ "title": "Single op (backward): attention.qkv_linear.wqkv: bkt._pre_bucket_reduce_scatter",
+ "phases": [
+  "backward"
+ ],
+ "scope": [
+  "intra-module"
+ ],
+ "fusion_kind": "single-op rewrite",
+ "location": {
+  "module_fqn_pattern": "layers.*.attention.qkv_linear.wqkv",
+  "graph_nodes_example": [
+   "_pre_bucket_reduce_scatter_187"
+  ],
+  "source": "(no torchtitan frame in stack_trace)"
+ },
+ "ops": [
+  "bucketing._pre_bucket_reduce_scatter.default"
+ ],
+ "kernels_per_instance": 2.0,
+ "instances_per_step": 94,
+ "shapes_dtypes": "bfloat16[72360448]",
+ "external_bytes_per_instance": 288392704,
+ "measured_us_per_instance": 82.82,
+ "measured_ms_total": 7.785,
+ "ideal_us_per_instance": 41.61,
+ "ideal_ms_total": 3.911,
+ "gap_ms_total": 3.874,
+ "gap_pct_of_step": 0.08,
+ "bitwise_tier": "T0",
+ "bitwise_notes": "pointwise/views/casts only: elementwise results are bitwise reproducible if the same fp32 math and rounding points are kept.",
+ "blockers": "the FSDP pack is a custom bucketing op; casts must fold into it or into the producer.",
+ "evidence": "measured",
+ "how_found": "L1 component with one kernel node that launches several kernels or runs far from its roofline (candidate #37, L1)",
+ "overlaps_with": [
+  "G-20",
+  "G-21",
+  "G-22"
+ ],
+ "notes": " Renamed from the 235B baseline finder's G-25.",
+ "lift": {
+  "pass_name": "lift_fusion_region_g125",
+  "num_sites": 94,
+  "in_default_selection": false,
+  "not_liftable_reason": ""
+ }
+}
