@@ -119,9 +119,9 @@ def _load() -> None:
     global _loaded, _loading
     if _loaded or _loading:
         return
-    # ``_loading`` covers re-entry (an entry point may call register_skip_cases);
-    # ``_loaded`` is only set once everything was read, so a malformed file
-    # leaves the state empty instead of half-filled.
+    # ``_loading`` covers re-entry (an entry point may call register_skip_cases).
+    # ``_loaded`` is only set after every source has been read successfully; a
+    # failure propagates and leaves the sections read so far in ``_SECTIONS``.
     _loading = True
     try:
         _SECTIONS.extend(
