@@ -403,7 +403,7 @@ def test_muse_glimmer_terminal_bench_recipe_uses_worker_loadable_renderer() -> N
     ("name", "trainer_gpus", "num_generators", "gpus_per_generator"),
     [
         ("rl_grpo_qwen35_9b_terminal_bench", 8, 8, 1),
-        ("rl_dapo_qwen35_35b_a3b_terminal_bench_dist_moe", 4, 16, 1),
+        ("rl_dapo_qwen35_35b_a3b_terminal_bench_dist_moe", 4, 4, 4),
     ],
 )
 def test_recipe_layouts_fit_the_model(

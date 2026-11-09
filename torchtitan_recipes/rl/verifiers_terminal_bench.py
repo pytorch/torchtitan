@@ -287,17 +287,23 @@ def rl_dapo_qwen35_35b_a3b_terminal_bench_dist_moe() -> Controller.Config:
     for activations. There, set the trainer's ``data_parallel_shard_degree=4`` (8 GPUs, EP 4
     and the scratch factor unchanged).
 
-    20 GPUs on GB300 (4 GPUs per host): 5 GPU hosts plus a controller.
+    20 GPUs on GB300 (4 GPUs per host): 5 hosts. SlurmLauncher runs the controller on the
+    trainer's host.
         trainer:     4 GPUs, FSDP 2 x TP 2 x EP 4. Model state is 35.1B x 16 B (fp32
                      weights, gradients, AdamW m and v) / 4 = 140 GB per GPU.
-        generators:  16 one-GPU engines, each with all 256 experts. Weights are
-                     35.1B x 2 B (bf16) = 70 GB per GPU. The rest holds the KV cache.
+        generators:  4 engines, one 4-GPU host each, DP 4 x EP 4. Each GPU holds 64 of
+                     the 256 experts: (2.9B non-routed + 32.2B routed / 4) x 2 B (bf16)
+                     = 22 GB of weights per GPU. The rest holds the KV cache.
 
     Terminal-Bench is generation-bound: a rollout makes up to 120 model calls in a row,
-    with a sandbox command between each, while the trainer runs one forward and backward
-    pass per token. The trainer state fits one 4-GPU host, so the other 16 GPUs generate.
-    A one-GPU engine needs no expert all-to-all or TP all-reduce, and Dist-MoE lets it
-    capture FULL CUDA graphs.
+    with a sandbox command between each, while the trainer processes all of a rollout's
+    tokens in parallel. The trainer state fits one 4-GPU host, so the other 16 GPUs
+    generate.
+
+    With EP 4 a decode step reads at most 64 experts' weights per GPU and MoE layer,
+    not up to 256. The cost: an expert all-to-all in every MoE layer, and the 4 DP
+    ranks step together, each padded to the largest rank's tokens. Dist-MoE's
+    all-to-all keeps split sizes on the GPU, so the engines still run FULL CUDA graphs.
 
     The model has 2 KV heads, so TP is at most 2. Trainer EP must be at least TP and
     divide both the 256 experts and FSDP x TP.
@@ -318,8 +324,9 @@ def rl_dapo_qwen35_35b_a3b_terminal_bench_dist_moe() -> Controller.Config:
         expert_parallel_degree=4,
     )
     generator_parallelism = InferenceParallelismConfig(
-        data_parallel_degree=1,
+        data_parallel_degree=4,
         tensor_parallel_degree=1,
+        expert_parallel_degree=4,
     )
     trainer_model, generator_model = build_rl_model_configs(
         build_model_config,
@@ -348,7 +355,7 @@ def rl_dapo_qwen35_35b_a3b_terminal_bench_dist_moe() -> Controller.Config:
                 thinking_retention="all",
             )
         ),
-        num_generators=16,
+        num_generators=4,
         generator_router=InterGeneratorRouter.Config(
             strategy=StickySessionRoutingStrategy.Config(
                 fallback_strategy=LeastLoadedRoutingStrategy.Config()
@@ -385,7 +392,9 @@ def rl_dapo_qwen35_35b_a3b_terminal_bench_dist_moe() -> Controller.Config:
                 num_tokens_per_microbatch_per_dp_rank=max_context_length,
             ),
             parallelism=trainer_parallelism,
-            # Factor EP=4 keeps the worst case (every token routed to one rank) in device scratch.
+            # 4.0 = EP x min(top-k, local experts) / top-k = 4 x 8 / 8: the most one rank
+            # can receive, as a multiple of balanced routing. A rank that receives more
+            # rows than planned raises an error.
             dist_moe_runtime=DistMoeRuntime.Config(scratch_capacity_factor=4.0),
             activation_remat=FullActivationRematConfig(),
             checkpointer=CheckpointManager.Config(
@@ -407,8 +416,13 @@ def rl_dapo_qwen35_35b_a3b_terminal_bench_dist_moe() -> Controller.Config:
             model=generator_model,
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             parallelism=generator_parallelism,
-            # At EP 1 every routed token stays on this GPU: the default factor 1.0 is the worst case.
-            dist_moe_runtime=DistMoeRuntime.Config(inference=True),
+            # 4.0 = EP x min(top-k, local experts) / top-k = 4 x 8 / 8: the most one rank
+            # can receive, as a multiple of balanced routing. A rank that receives more
+            # rows than planned raises an error, and vLLM's profiling dummy batch can
+            # route every token to one expert.
+            dist_moe_runtime=DistMoeRuntime.Config(
+                scratch_capacity_factor=4.0, inference=True
+            ),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,
