@@ -23,6 +23,16 @@ W2's output. This allows a remat policy to save W2 without retaining its full
 routed output: its input can be rebuilt with elementwise operations. It removes
 the need to choose between keeping the output and replaying that GEMM.
 
+The schematic compares post-W2 scoring (top) with absorption (bottom):
+
+![Post-W2 scoring retains the routed output for backward; absorption moves scoring before W2.](https://github.com/user-attachments/assets/6f4e5155-6cfb-455f-925f-8d9165899666)
+
+Illustration from [#5543](https://github.com/pytorch/torchtitan/pull/5543), showing
+the bias-free case. `Gelu` represents the configured gated activation; `[R,F]`
+is smaller than `[R,D]` when `F < D`. Avoiding W2 forward replay requires saving
+W2 and combine; FullAC still replays W2. Bias, postprocessing, and precision
+caveats are described below.
+
 For one bias-free routed row, write W2 as a matrix `W`, its input as `h`, its
 score as `s`, and the gradient of the weighted output as `g`:
 
