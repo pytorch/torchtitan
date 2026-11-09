@@ -51,15 +51,20 @@ class TestOwnedTable(DTensorTestBase):
         path = [tempfile.mkdtemp() if self.rank == 0 else None]
         dist.broadcast_object_list(path, src=0)
         try:
-            for column_shards, num_rows, num_parts in (
-                (1, 60, 5),
-                (2, 60, 5),
-                (1, 3, 3),
+            for column_shards, num_rows, num_parts, hsdp in (
+                (1, 60, 5, False),
+                (2, 60, 5, False),
+                (1, 3, 3, False),
+                (1, 60, 5, True),
             ):
                 mesh = init_device_mesh(
                     "cpu",
-                    (self.world_size // column_shards, column_shards),
-                    mesh_dim_names=("dp_shard", "tp"),
+                    (2, 2)
+                    if hsdp
+                    else (self.world_size // column_shards, column_shards),
+                    mesh_dim_names=("dp_replicate", "dp_shard")
+                    if hsdp
+                    else ("dp_shard", "tp"),
                 )
                 config = build_model_config(
                     "debugmodel", parallelism=ParallelismConfig()
@@ -69,10 +74,13 @@ class TestOwnedTable(DTensorTestBase):
                 embedding.split_ngram_parts = num_parts
                 adapter = Qwen38FlashNextStateDictAdapter(config, None)
                 full = torch.arange(num_rows * 6).reshape(num_rows, 6).float()
-                placements = (Shard(0), Shard(1))
+                placements = (Shard(0), Shard(0) if hsdp else Shard(1))
                 weight = distribute_tensor(full, mesh, placements)
-                row_owner, feature_owner = mesh.get_coordinate()
-                rows_per_owner = (num_rows + mesh.size(0) - 1) // mesh.size(0)
+                row_owner, feature_owner = (
+                    (self.rank, 0) if hsdp else mesh.get_coordinate()
+                )
+                num_owners = self.world_size if hsdp else mesh.size(0)
+                rows_per_owner = (num_rows + num_owners - 1) // num_owners
                 begin = min(row_owner * rows_per_owner, num_rows)
                 end = min(begin + rows_per_owner, num_rows)
                 feature_begin = feature_owner * (6 // column_shards)
@@ -87,6 +95,9 @@ class TestOwnedTable(DTensorTestBase):
                     hf = adapter.to_hf(exported)
                     restored = adapter.from_hf(dict(reversed(list(hf.items()))))
                 self.assertEqual(communication.get_total_counts(), 0)
+                if begin != end:
+                    with self.assertRaisesRegex(ValueError, "Rank-local HF"):
+                        Qwen38FlashNextStateDictAdapter(config, None).from_hf(hf)
                 self.assertIsInstance(restored[key], DTensor)
                 self.assertEqual(restored[key].device_mesh, mesh)
                 self.assertEqual(restored[key].placements, placements)
@@ -125,7 +136,7 @@ class TestOwnedTable(DTensorTestBase):
                         atol=0,
                         rtol=0,
                     )
-                checkpoint = f"{path[0]}/{column_shards}-{num_rows}"
+                checkpoint = f"{path[0]}/{column_shards}-{num_rows}-{hsdp}"
                 dcp.save(
                     hf,
                     storage_writer=dcp.HuggingFaceStorageWriter(

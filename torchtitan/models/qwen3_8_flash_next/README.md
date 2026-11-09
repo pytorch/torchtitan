@@ -87,13 +87,13 @@ NGPU=2 MODULE=torchtitan_recipes.tests.models.qwen3_8_flash_next \
 
 python -m tests.integration_tests.run_tests outputs/flash_next_mm \
   --test_suite models --execution_mode real_pg --ngpu 2 \
-  --test_name qwen3_8_flash_next_mm_fsdp
+  --test_name qwen3_8_flash_next_fsdp
 ```
 
-The multimodal integration entry consumes `qwen38_flash_next_debugmodel_mm` with
-image fusion, PLE and QSA at 1,024 tokens. The text fixture uses 64 tokens and ten
-training steps. Reduced fixtures retain both attention types and routed/shared
-experts.
+The two-GPU integration entry runs `qwen38_flash_next_debugmodel_ep2` and
+`qwen38_flash_next_debugmodel_mm`. The multimodal fixture covers image fusion,
+PLE and QSA at 1,024 tokens. The text fixture uses 64 tokens and ten training
+steps. Reduced fixtures retain both attention types and routed/shared experts.
 
 EP uses the shared all-to-all dispatcher and expert sharding. Attention, shared
 experts and PLE remain on the dense mesh; PLE rows belong to DP owners. Routed
@@ -115,9 +115,21 @@ storage axes using `Shard(0)`. The lookup computes through its local view;
 the gradient and ordinary AdamW moments retain the same DTensor placements.
 The existing clipper and native DCP handle this layout directly. The recipes
 apply existing optimizer configurations for `r"\.ngram_embedding\.weight$"`
-and `r".*"`, with identical hyperparameters. Native checkpoints can reshard on
-resume. The HF adapter maps local slices to global numbered parts without
-gathering the table.
+and `r".*"`, with identical hyperparameters. The qualification recipes deliberately
+retain the backbone's `weight_decay=0.1` on the table to preserve bitwise parity
+with the gathered-table and plain-owned-row baselines. Dense AdamW therefore
+decays untouched rows on every update. Setting `weight_decay=0` in the existing
+table optimizer configuration changes this training policy without changing
+the lookup or sharding.
+The separate optimizer configuration retains the table-specific checkpoint group
+used in those comparisons; combining it with the backbone's fused AdamW group
+has not been qualified.
+
+Native checkpoints can reshard on resume. The HF adapter derives global offsets
+from mesh coordinates and maps local slices to global numbered parts without
+gathering the table. Rank-local HF loading uses the target layout from the same
+adapter's `to_hf` placeholders, as both checkpointers do. This is a meta template
+for reconstructing the DTensor after loading, not a retained table buffer.
 
 Fresh initialization uses owner-seeded normal streams and depends on owner count.
 Same-checkpoint comparisons qualify training numerics. Table rows must divide

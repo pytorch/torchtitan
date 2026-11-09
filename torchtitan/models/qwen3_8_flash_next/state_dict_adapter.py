@@ -15,7 +15,7 @@ from typing import Any, cast, TYPE_CHECKING
 
 import torch
 from torch.distributed.checkpoint.protocol import CheckpointableTensor
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Shard
 
 from torchtitan.models.qwen3_5.state_dict_adapter import Qwen35StateDictAdapter
 
@@ -94,8 +94,24 @@ class Qwen38FlashNextStateDictAdapter(Qwen35StateDictAdapter):
                     weight_ND.device,
                 )
                 num_rows, num_features = weight_ND.shape
-                (chunk,) = weight_ND.__create_chunk_list__()
-                row_start, feature_start = chunk.offsets
+                mesh = weight_ND.device_mesh
+                coordinate = mesh.get_coordinate()
+                assert coordinate is not None
+                local_shape = list(weight_ND.shape)
+                offsets = [0, 0]
+                # Apply shards in mesh-axis order; HSDP shards the rows twice.
+                for mesh_axis, placement in enumerate(weight_ND.placements):
+                    if isinstance(placement, Shard):
+                        dim = placement.dim
+                        shard_size = (
+                            local_shape[dim] + mesh.size(mesh_axis) - 1
+                        ) // mesh.size(mesh_axis)
+                        start = min(
+                            coordinate[mesh_axis] * shard_size, local_shape[dim]
+                        )
+                        offsets[dim] += start
+                        local_shape[dim] = min(shard_size, local_shape[dim] - start)
+                row_start, feature_start = offsets
                 weight_ND = weight_ND.to_local(
                     grad_placements=weight_ND.placements
                 ).detach()
@@ -158,6 +174,12 @@ class Qwen38FlashNextStateDictAdapter(Qwen35StateDictAdapter):
             owned = all(
                 isinstance(value, CheckpointableTensor) for value in shards.values()
             )
+            # DCP fills rank-local placeholders made by to_hf on this adapter.
+            if owned and layer_id not in self._ngram_weight_layouts:
+                raise ValueError(
+                    "Rank-local HF n-gram fragments require to_hf placeholders "
+                    "from the same adapter"
+                )
             if not owned and set(shards) != set(range(parts)):
                 raise ValueError(
                     f"PLE layer {layer_id} requires all {parts} n-gram shards"
