@@ -1203,8 +1203,11 @@ class TestGenerateGanttTrace:
     def test_empty_dir(self, tmp_path):
         empty_dir = str(tmp_path / "empty")
         os.makedirs(empty_dir)
+        # A trace left by an earlier render is replaced, not kept.
+        (tmp_path / "out.json").write_text('{"traceEvents": [{"name": "old"}]}')
         trace = generate_gantt_trace(empty_dir, str(tmp_path / "out.json"))
         assert trace["traceEvents"] == []
+        assert json.loads((tmp_path / "out.json").read_text()) == trace
 
     def test_metric_events(self, tmp_path):
         """metric_value events become instant events."""
@@ -1455,7 +1458,7 @@ class TestGenerateGanttTrace:
         assert by_name["A"]["tid"] != by_name["B"]["tid"]
 
     def test_spmd_pairing_with_null_task_name(self, tmp_path):
-        """SPMD code has task_name=None on every record; LIFO-per-source pairs
+        """SPMD code has task_name=None on every record; LIFO-per-thread pairs
         nested spans correctly."""
         records = [
             self._start_rec("step", 1000, task_name=None),
@@ -1541,8 +1544,8 @@ class TestGenerateGanttTrace:
         x_events = [e for e in trace["traceEvents"] if e.get("ph") == "X"]
         assert len(x_events) == 3
         tids = {e["tid"] for e in x_events}
-        assert tids == {0}, (
-            f"Three nested spans in one task should share tid 0, "
+        assert len(tids) == 1, (
+            f"Three nested spans in one task should share one tid, "
             f"got tids={sorted(tids)}"
         )
 
@@ -1564,7 +1567,7 @@ class TestGenerateGanttTrace:
             os.path.join(str(tmp_path), "gantt.json"),
         )
         tids = {e["tid"] for e in trace["traceEvents"] if e.get("ph") == "X"}
-        assert tids == {0}
+        assert len(tids) == 1
 
     def test_two_concurrent_tasks_each_with_nested_spans(self, tmp_path):
         """Two tasks running in parallel, each with a nested inner span.
@@ -1641,7 +1644,7 @@ class TestGenerateGanttTrace:
 
     def test_instant_uses_task_name_not_span_id_for_tid(self, tmp_path):
         """Instants (error, metric) with an explicit task_name land on that
-        task's track; without one, they fall back to tid 0."""
+        task's track; without one, they go on the process's own track."""
         records = [
             # Named task "train_loop" has a real span so it gets a tid.
             self._start_rec("work", 1000, "train_loop"),
@@ -1653,7 +1656,7 @@ class TestGenerateGanttTrace:
                 "rank": 0,
                 "task_name": "train_loop",
             },
-            # Metric with no task -> falls back to tid 0.
+            # Metric with no task -> the process's own track.
             {
                 "log_type_name": "metric_value",
                 "log_type": "instant",
@@ -1682,9 +1685,81 @@ class TestGenerateGanttTrace:
             for e in trace["traceEvents"]
             if e.get("ph") == "i" and "loss" in e["name"]
         )
-        # Error on explicit task's track, metric on main track.
+        # Error on explicit task's track, metric on the process track.
         assert error["tid"] == span["tid"]
-        assert metric["tid"] == 0
+        assert metric["s"] == "p"
+
+    # ------------------------------------------------------------------
+    # Reading and pairing records.
+    # ------------------------------------------------------------------
+
+    def test_unfinished_last_line_is_skipped(self, tmp_path):
+        """A process killed mid-write leaves a last line without a newline; the
+        render skips it."""
+        log_dir = os.path.join(str(tmp_path), "structured_logs")
+        self._write_jsonl(
+            os.path.join(log_dir, "a.jsonl"),
+            [
+                {**self._start_rec("work", 1000, "Task-1"), "step": 1},
+                {**self._end_rec("work", 2000, 1.0, "Task-1"), "step": 1},
+            ],
+        )
+        with open(os.path.join(log_dir, "a.jsonl"), "a") as f:
+            f.write('{"log_type_name": "work_start", "time_us": 30')
+
+        trace = generate_gantt_trace(log_dir, os.path.join(str(tmp_path), "g.json"))
+        assert [e["name"] for e in trace["traceEvents"] if e.get("ph") == "X"] == [
+            "work"
+        ]
+
+    def test_lost_start_record_keeps_the_outer_span(self, tmp_path):
+        """An _end whose _start was not read (e.g. the span started before the part
+        of the file that was read) does not take the start of the span around it."""
+        records = [
+            self._start_rec("outer", 1000, "Task-1"),
+            self._end_rec("inner", 1500, 0.2, "Task-1"),  # its start was lost
+            self._end_rec("outer", 2000, 1.0, "Task-1"),
+        ]
+        log_dir = os.path.join(str(tmp_path), "structured_logs")
+        self._write_jsonl(os.path.join(log_dir, "a.jsonl"), records)
+
+        trace = generate_gantt_trace(log_dir, os.path.join(str(tmp_path), "g.json"))
+
+        spans = {
+            (e["name"], e["ts"], e["dur"])
+            for e in trace["traceEvents"]
+            if e.get("ph") == "X"
+        }
+        # inner starts duration_ms before its end record.
+        assert spans == {("outer", 1000, 1000), ("inner", 1300, 200)}
+
+    def test_spans_outside_tasks_pair_per_thread(self, tmp_path):
+        """Two threads without an asyncio task interleave their spans; each thread
+        pairs on its own stack and gets its own row. A span ends at its end
+        record's time, not at start + duration_ms."""
+        records = [
+            {**self._start_rec("A", 1000, task_name=None), "tid": 7},
+            {**self._start_rec("B", 1100, task_name=None), "tid": 8},
+            # The timer read 0.7 ms, but the start record was stamped late.
+            {**self._end_rec("A", 1500, 0.7, task_name=None), "tid": 7},
+            {**self._end_rec("B", 2000, 0.9, task_name=None), "tid": 8},
+        ]
+        log_dir = os.path.join(str(tmp_path), "structured_logs")
+        self._write_jsonl(os.path.join(log_dir, "a.jsonl"), records)
+
+        trace = generate_gantt_trace(log_dir, os.path.join(str(tmp_path), "g.json"))
+
+        by_name = {e["name"]: e for e in trace["traceEvents"] if e.get("ph") == "X"}
+        assert (by_name["A"]["ts"], by_name["A"]["dur"]) == (1000, 500)
+        assert by_name["A"]["args"]["duration_ms"] == "0.70"
+        assert (by_name["B"]["ts"], by_name["B"]["dur"]) == (1100, 900)
+        assert by_name["A"]["tid"] != by_name["B"]["tid"]
+        # Perfetto merges tid 0 into the row whose tid equals the pid: no row uses either.
+        assert all(
+            e["tid"] not in (0, e["pid"])
+            for e in trace["traceEvents"]
+            if e.get("ph") == "X" or e["name"] == "thread_name"
+        )
 
 
 # ---------------------------------------------------------------------------

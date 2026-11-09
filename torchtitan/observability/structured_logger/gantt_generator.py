@@ -67,10 +67,6 @@ def generate_gantt_trace(log_dir: str, output_path: str) -> dict:
         written to ``output_path``.
     """
     records = load_all_records(log_dir)
-    if not records:
-        logger.info(f"No records found in {log_dir}")
-        return {"traceEvents": []}
-
     sources = sorted({r["_source_file"] for r in records})
     source_to_pid = {s: i for i, s in enumerate(sources)}
 
@@ -102,7 +98,7 @@ def _assign_tids_per_source(
     Task-level interval scheduling:
 
     1. Group spans by ``(source, task_name)``. Each asyncio task has
-       one group; SPMD code groups under ``task_name=None``.
+       one group; SPMD code groups per native thread (``"thread {tid}"``).
     2. Compute each group's time range ``[min(start_ts), max(end_ts)]``.
     3. Slot-pack the task ranges within each source via min-heap
        interval scheduling. Non-overlapping task ranges reuse a slot.
@@ -191,12 +187,12 @@ def _resolve_instant_tid(
     source: str,
     task_name: str | None,
     tid_by_source_and_task: dict[tuple[str, str | None], int],
-) -> int:
+) -> int | None:
     """Pick the Perfetto tid for an instant event (no paired span).
 
     An instant lands on the same track as its enclosing task if that
-    task has paired spans. Otherwise it falls back to tid 0 (the
-    per-process main track).
+    task has paired spans. Otherwise None: it goes on the process's own
+    track.
 
     Args:
         source: The instant's source (one JSONL file = one source).
@@ -205,11 +201,9 @@ def _resolve_instant_tid(
         tid_by_source_and_task: Map produced by ``_assign_tids_per_source``.
 
     Returns:
-        The Perfetto ``tid`` for the instant.
+        The task's slot from ``_assign_tids_per_source``, or None.
     """
-    if (source, task_name) in tid_by_source_and_task:
-        return tid_by_source_and_task[(source, task_name)]
-    return 0
+    return tid_by_source_and_task.get((source, task_name))
 
 
 def load_all_records(log_dir: str) -> list[dict]:
@@ -222,7 +216,8 @@ def load_all_records(log_dir: str) -> list[dict]:
         All records across all files, each annotated with a
         ``"_source_file"`` key (the filename minus ``.jsonl``) so the
         caller can group records by process. Files are loaded in sorted
-        name order; records within a file keep file order.
+        name order; records within a file keep file order. An unfinished
+        last line (a process killed mid-write) is skipped with a warning.
     """
     records = []
     for path in sorted(glob(os.path.join(log_dir, "*.jsonl"))):
@@ -231,6 +226,9 @@ def load_all_records(log_dir: str) -> list[dict]:
         source_name = source.rsplit(".", 1)[0] if "." in source else source
         with open(path) as f:
             for line in f:
+                if not line.endswith("\n"):
+                    logger.warning(f"Gantt skipped the unfinished last line of {path}")
+                    break
                 line = line.strip()
                 if line:
                     r = json.loads(line)
@@ -242,12 +240,15 @@ def load_all_records(log_dir: str) -> list[dict]:
 def _collect_paired_and_instants(
     records: list[dict], source_to_pid: dict[str, int]
 ) -> tuple[list[dict], list[dict]]:
-    """Pair ``_start`` / ``_end`` via a per-(source, task_name) LIFO stack.
+    """Pair ``_start`` / ``_end`` via a per-(source, task_name, span type) LIFO stack.
 
-    Each asyncio task name gets its own stack, so nested spans within a
+    Each asyncio task name gets its own stacks, so nested spans within a
     task pair correctly regardless of what other tasks on the same
-    process are doing. SPMD code has ``task_name=None`` throughout and
-    pairs on a single stack per source.
+    process are doing. Records outside any asyncio task (SPMD code, plain
+    threads) pair on stacks per native thread, as task ``"thread {tid}"``.
+    A span runs from its ``_start`` record's ``time_us`` to its ``_end``
+    record's; an ``_end`` without a ``_start`` starts ``duration_ms``
+    before its end.
 
     Instants include ``log_trace_instant`` markers, ``log_trace_scalar``
     metric values, and ``_error`` records.
@@ -270,9 +271,7 @@ def _collect_paired_and_instants(
             {"name": "loss=2.5000", "time_us": 520, ...},
         ]
 
-    ``fwd_bwd`` appears first in ``paired`` because LIFO pops the inner
-    span (``fwd_bwd``) when ``fwd_bwd_end`` arrives; ``step`` pops later
-    when ``step_end`` arrives.
+    ``paired`` is in ``_end``-record order: ``fwd_bwd`` ends first.
 
     Args:
         records: All JSONL records across all sources, in the order
@@ -281,26 +280,24 @@ def _collect_paired_and_instants(
             pid assigned to that source.
 
     Returns:
-        ``(paired, instants)`` -- paired spans in end-order (inner first,
-        outer last) and instant events preserving record order.
+        ``(paired, instants)`` -- paired spans in ``_end``-record order and
+        instant events in record order.
     """
     paired: list[dict[str, Any]] = []
     instants: list[dict[str, Any]] = []
-    # LIFO stack per (source, task_name). None task_name maps to one
-    # stack per source (the SPMD path).
-    pending: dict[tuple[str, str | None], list[dict]] = defaultdict(list)
+    # LIFO stack per (source, task_name, span type).
+    pending: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
 
     for r in records:
         event_type = r.get("log_type_name", "")
         log_type = r.get("log_type", "")
-        time_us = r.get("time_us") or (r.get("time_ms") or 0) * 1000
+        time_us = r["time_us"]
         pid = source_to_pid[r["_source_file"]]
         rank = r.get("rank", 0)
         step = r.get("step")
-        task_name = r.get("task_name")
+        task_name = r.get("task_name") or f"thread {r.get('tid')}"
         source = r["_source_file"]
         caller = r.get("caller")
-        key = (source, task_name)
 
         # Point-in-time records (log_trace_instant, log_trace_scalar) carry
         # log_type=instant. Branch on intent before suffix matching so that
@@ -327,7 +324,7 @@ def _collect_paired_and_instants(
         elif event_type.endswith("_start"):
             type_name = event_type.removesuffix("_start")
             display_name = r.get("event_name") or type_name
-            pending[key].append(
+            pending[(source, task_name, type_name)].append(
                 {
                     "ts": time_us,
                     "step": step,
@@ -343,18 +340,16 @@ def _collect_paired_and_instants(
         elif event_type.endswith("_end"):
             type_name = event_type.removesuffix("_end")
             duration_ms = r.get("value", 0)
-            duration_us = (duration_ms or 0) * 1000
-            stack = pending.get(key)
+            stack = pending.get((source, task_name, type_name))
             start = stack.pop() if stack else None
+            # The end record's own time, not start + duration_ms: a record is stamped a
+            # moment after its span's timer reads, so start + duration_ms can overrun the
+            # parent span. Records of one task are stamped in order, so children nest.
+            end_ts = time_us
             if start is not None:
                 start_ts = start["ts"]
-                end_ts = start_ts + duration_us
             else:
-                # Orphan _end (e.g. truncated JSONL). Derive start from the
-                # _end's own timestamp and the recorded duration so the span
-                # renders in its real time window instead of after its end.
-                end_ts = time_us
-                start_ts = end_ts - duration_us
+                start_ts = end_ts - (duration_ms or 0) * 1000
             paired.append(
                 {
                     "pid": pid,
@@ -418,7 +413,14 @@ def _emit_chrome_events(
     - ``"X"`` (complete) -- one per paired span, with ``ts`` / ``dur``
       for rendering as a bar.
     - ``"i"`` (instant) -- one per instant event, rendered as a
-      vertical marker on its track.
+      vertical marker on its task's track, or on the process's own track
+      if its task has no span.
+
+    Slot ``s`` gets tid ``len(source_to_pid) + s``, above every pid. Perfetto
+    merges tid 0 into the track whose tid equals the pid, so two tracks would
+    share one row.
+
+        3 processes (pids 0, 1, 2), each with slots 0, 1 -> tids 3, 4 in each
 
     Args:
         paired: Spans from ``_collect_paired_and_instants`` with ``tid``
@@ -432,6 +434,7 @@ def _emit_chrome_events(
         A flat list of Chrome Trace event dicts ready to serialize.
     """
     events: list[dict[str, Any]] = []
+    first_tid = len(source_to_pid)
 
     for source, pid in source_to_pid.items():
         events.append(
@@ -439,7 +442,7 @@ def _emit_chrome_events(
                 "name": "process_name",
                 "ph": "M",
                 "pid": pid,
-                "tid": 0,
+                "tid": pid,
                 "args": {"name": source},
             }
         )
@@ -459,7 +462,7 @@ def _emit_chrome_events(
                 "ts": p["start_ts"],
                 "dur": p["end_ts"] - p["start_ts"],
                 "pid": p["pid"],
-                "tid": p.get("tid", 0),
+                "tid": first_tid + p["tid"],
                 "args": args,
             }
         )
@@ -473,16 +476,21 @@ def _emit_chrome_events(
         args = {**({"step": i["step"]} if i["step"] is not None else {})}
         if i.get("caller"):
             args["caller"] = i["caller"]
-        events.append(
-            {
-                "name": i["name"],
-                "ph": "i",
-                "ts": i["time_us"],
-                "pid": i["pid"],
-                "tid": tid,
-                "s": "t",
-                "args": args,
-            }
-        )
+        event = {
+            "name": i["name"],
+            "ph": "i",
+            "ts": i["time_us"],
+            "pid": i["pid"],
+            "args": args,
+        }
+        if tid is None:
+            # The process's own track; no track uses tid == pid.
+            # TODO: a named row for instants with no task: Perfetto names this track
+            # after the process. Not done: it needs a check in the Perfetto UI, and the
+            # README explains the track meanwhile.
+            event.update(s="p", tid=i["pid"])
+        else:
+            event.update(s="t", tid=first_tid + tid)
+        events.append(event)
 
     return events
