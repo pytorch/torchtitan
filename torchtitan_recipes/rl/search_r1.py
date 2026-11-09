@@ -125,7 +125,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
             num_training_steps=500,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=8,
-            validation=ValidationConfig(steps=500),
+            validation=ValidationConfig(steps=500, freq=50),
         ),
         rollouter=_search_r1_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
@@ -396,7 +396,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
             num_training_steps=500,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=8,
-            validation=ValidationConfig(steps=500),
+            validation=ValidationConfig(steps=500, freq=50),
         ),
         rollouter=_search_r1_rollouter_config(),
         renderer=from_renderers(

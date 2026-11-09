@@ -294,7 +294,8 @@ class VLLMEngine(GenerationEngine):
         engine_kwargs["watermark"] = self.config.watermark
         # Smaller `priority` runs first and is preempted last; we pass `EngineRequest.group_id`
         # (-1 for all validation), so older groups have higher priority (see its docstring).
-        # TODO: validation (priority -1) runs before training. Revisit once validation overlaps training.
+        # TODO: validation (priority -1) is admitted before training, also while a pass runs beside
+        # training. Measure the step-time cost of a pass; consider a priority between training groups.
         engine_kwargs["scheduling_policy"] = "priority"
         # Which sliding-window / Mamba (GDN) state blocks are hashed into the prefix
         # cache; full-attention groups hash every block regardless.

@@ -8,15 +8,16 @@
 the consume-time staleness invariant, the metrics timer drain, and RolloutTurnID."""
 
 import asyncio
+import itertools
 import json
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
 import pytest
 import torch
-from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.controller.controller import Controller, ValidationConfig
 from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
@@ -799,7 +800,9 @@ async def _block_forever(*args, **kwargs) -> None:
     await asyncio.Event().wait()
 
 
-def _run_with_generator_watcher(watcher) -> None:
+def _run_with_generator_watcher(
+    watcher, *, trainer_loop=_block_forever, validate=None, validation=None
+) -> Controller:
     """Run Controller.run with every stage but the engine-loop watcher stubbed to block."""
     controller = object.__new__(Controller)
     controller.config = SimpleNamespace(
@@ -814,12 +817,16 @@ def _run_with_generator_watcher(watcher) -> None:
             group_buffer=SimpleNamespace(
                 build=lambda **kwargs: SimpleNamespace(close=AsyncMock())
             ),
+            validation=validation or ValidationConfig(),
         ),
         trainer=SimpleNamespace(
             training=SimpleNamespace(num_tokens_per_microbatch_per_dp_rank=8)
         ),
     )
     controller.start_step = 0
+    controller._validation_tasks = []
+    controller._is_validation_due = False
+    controller.metrics_processor = Mock()
     controller.trainer = None
     controller.trainer_dp_degree = 1
     controller.tokenizer = SimpleNamespace(eos_id=0)
@@ -830,15 +837,16 @@ def _run_with_generator_watcher(watcher) -> None:
     with (
         patch.multiple(
             Controller,
-            _validate_and_log=AsyncMock(return_value={}),
+            validate=validate or AsyncMock(return_value=[]),
             _make_generate_fn=lambda self: None,
             _data_input_loop=_block_forever,
             _rollout_loop=_block_forever,
             _batcher_loop=_block_forever,
-            _trainer_loop=_block_forever,
+            _trainer_loop=trainer_loop,
         ),
     ):
         asyncio.run(asyncio.wait_for(controller.run(), timeout=10))
+    return controller
 
 
 def test_run_fails_when_an_engine_loop_crashes() -> None:
@@ -859,8 +867,106 @@ def test_run_fails_when_the_engine_loops_exit_mid_run() -> None:
         _run_with_generator_watcher(exited)
 
 
-def test_validation_renames_generator_metrics() -> None:
-    """The generators name every request's metrics `generator/*`; validation logs `validation_generator/*`."""
+@pytest.mark.parametrize(
+    "start_pass_ends, validate_after_training, started_steps, logged_steps",
+    [
+        # Ends during the last step: run()'s last check logs it at step 1.
+        (True, False, [0], [1]),
+        # Still running: run() cancels it (else run() hangs) and logs nothing.
+        (False, False, [0], []),
+        # Cancelled, then the pass after training runs and is logged at step 1.
+        (False, True, [0, 1], [1]),
+    ],
+)
+def test_run_ends_validation(
+    start_pass_ends, validate_after_training, started_steps, logged_steps
+) -> None:
+    """1 training step: what run() does with the start pass and the pass after training."""
+    started = []
+
+    async def validate(self, *, step: int) -> list[m.Metric]:
+        started.append(step)
+        if step == 0 and not start_pass_ends:
+            await asyncio.Event().wait()
+        return [m.Metric(f"pass_{step}", m.Mean(1.0))]
+
+    async def train(*args, **kwargs) -> None:
+        await asyncio.sleep(0)
+
+    controller = _run_with_generator_watcher(
+        _block_forever,
+        trainer_loop=train,
+        validate=validate,
+        validation=ValidationConfig(validate_after_training=validate_after_training),
+    )
+    assert started == started_steps
+    assert [
+        call.kwargs["step"] for call in controller.metrics_processor.log.call_args_list
+    ] == logged_steps
+
+
+@pytest.mark.parametrize(
+    "start_step, validate_at_start, defer_new_if_not_finished, started_steps, logged",
+    [
+        # The pass started at 3 came due at 2; the one started at 6 covers steps 4 and 6.
+        (0, True, True, [0, 3, 6], [(3, "pass_0"), (6, "pass_3")]),
+        (0, True, False, [0, 2, 4, 6], [(3, "pass_0"), (5, "pass_2"), (7, "pass_4")]),
+        (0, False, True, [2, 5], [(5, "pass_2"), (8, "pass_5")]),
+        # A run resumed at step 3: its start step is due.
+        (3, True, True, [3, 6], [(6, "pass_3")]),
+    ],
+)
+def test_validation_schedule(
+    start_step, validate_at_start, defer_new_if_not_finished, started_steps, logged
+) -> None:
+    """freq=2, 8 steps, each pass ends 3 steps after it starts and is logged at that step.
+
+    No pass starts at step 8, the last step.
+    """
+    end_events: dict[int, asyncio.Event] = {}
+
+    async def validate(*, step: int) -> list[m.Metric]:
+        end_events[step] = asyncio.Event()
+        await end_events[step].wait()
+        return [m.Metric(f"pass_{step}", m.Mean(1.0))]
+
+    controller = object.__new__(Controller)
+    controller.config = SimpleNamespace(
+        async_loop=SimpleNamespace(
+            num_training_steps=8,
+            validation=ValidationConfig(
+                freq=2,
+                validate_at_start=validate_at_start,
+                defer_new_if_not_finished=defer_new_if_not_finished,
+            ),
+        )
+    )
+    controller.start_step = start_step
+    controller._validation_tasks = []
+    controller._is_validation_due = False
+    controller.validate = validate
+    controller.metrics_processor = Mock()
+
+    async def run_steps() -> None:
+        for step in range(start_step, 9):
+            if step - 3 in end_events:
+                end_events[step - 3].set()
+                await asyncio.sleep(0)  # the pass returns
+            controller._maybe_run_validation(step=step)
+            await asyncio.sleep(0)  # a new pass starts
+
+    asyncio.run(run_steps())
+
+    assert list(end_events) == started_steps
+    assert [
+        (call.kwargs["step"], call.kwargs["metrics"][0].key)
+        for call in controller.metrics_processor.log.call_args_list
+    ] == logged
+
+
+def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
+    """Validation renames its turns' metrics: `generator/*` -> `validation_generator/*`, a rubric's key ->
+    `validation/<key>`. Two passes never share a group id."""
 
     async def run_group_rollouts(*, group_id: int, **kwargs) -> RolloutGroup:
         turn = RolloutTurn(
@@ -871,7 +977,10 @@ def test_validation_renames_generator_metrics() -> None:
             completion_logprobs=np.array([-0.1], dtype=np.float32),
             min_policy_version=0,
             max_policy_version=0,
-            metrics=[m.Metric("generator/queue_time_ms", m.Mean(2.0))],
+            metrics=[
+                m.Metric("generator/queue_time_ms", m.Mean(2.0)),
+                m.Metric("math_verify/timeouts", m.Sum(1.0)),
+            ],
         )
         rollout = Rollout(
             group_id=group_id,
@@ -883,18 +992,28 @@ def test_validation_renames_generator_metrics() -> None:
         return RolloutGroup(group_id=group_id, rollouts=[rollout])
 
     controller = object.__new__(Controller)
+    controller._validation_group_ids = itertools.count(start=-1, step=-1)
     controller._make_generate_fn = lambda: None
     controller._make_release_session_fn = lambda: None
     controller._rollouter = SimpleNamespace(run_group_rollouts=run_group_rollouts)
+    release_groups = AsyncMock()
     controller.generator_router = SimpleNamespace(
-        release_groups=SimpleNamespace(call_one=AsyncMock())
+        release_groups=SimpleNamespace(call_one=release_groups)
     )
 
-    _, metrics = asyncio.run(
-        controller._collect_validation_rollouts(
-            samples=["prompt"], sampling=SamplingConfig(), step=0
-        )
-    )
-    keys = m.MetricsProcessor._aggregate_metrics(metrics)
+    async def run_two_passes() -> list[m.Metric]:
+        for step in (0, 2):
+            _, metrics = await controller._collect_validation_rollouts(
+                samples=["prompt 1", "prompt 2"], sampling=SamplingConfig(), step=step
+            )
+        return metrics
+
+    keys = m.MetricsProcessor._aggregate_metrics(asyncio.run(run_two_passes()))
+    assert [call.args[0] for call in release_groups.call_args_list] == [
+        [-1, -2],
+        [-3, -4],
+    ]
     assert keys["validation_generator/queue_time_ms/mean"] == 2.0
+    assert keys["validation/math_verify/timeouts/sum"] == 2.0
     assert "generator/queue_time_ms/mean" not in keys
+    assert "math_verify/timeouts/sum" not in keys
