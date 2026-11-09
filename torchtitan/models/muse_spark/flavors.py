@@ -8,12 +8,15 @@ import dataclasses
 import math
 from collections.abc import Callable
 from functools import partial
-from typing import cast, Literal
+from typing import Any, cast, Literal
 
 import spmd_types as spmd
 import torch
 import torch.nn as nn
 
+from torchtitan.components.data.multimodal.vision_processor import (
+    MuseGlimmerPatchGridResize,
+)
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
@@ -116,6 +119,54 @@ from .vision_encoder_sharding import (
     navit_encoder_sharding_config,
     vision_rope_freq_sharding_config,
 )
+
+
+# Muse Spark Open encodes images as <|image_start|> + repeated <|patch|> +
+# <|image_end|>; videos as <|vid_start|> + timestamped runs of <|video|>, separated
+# by <|vid_frame_separator|>, then <|vid_end|>; and audio as <|soft_audio_start|> +
+# repeated <|audio|> + <|soft_audio_end|>.
+MUSE_SPARK_SPECIAL_TOKENS = {
+    "image_token": "<|patch|>",
+    "video_token": "<|video|>",
+    "vision_start_token": "<|image_start|>",
+    "vision_end_token": "<|image_end|>",
+    "audio_token": "<|audio|>",
+    "audio_start_token": "<|soft_audio_start|>",
+    "audio_end_token": "<|soft_audio_end|>",
+    "pad_token": "<|finetune_right_pad|>",
+}
+
+
+# TODO: Add the Muse Spark Open tokens to tests/assets/tokenizer and remove
+# this debug-only mapping.
+MUSE_SPARK_DEBUG_SPECIAL_TOKENS = {
+    "image_token": "<|image_pad|>",
+    "video_token": "<|video_pad|>",
+    "vision_start_token": "<|vision_start|>",
+    "vision_end_token": "<|vision_end|>",
+    "audio_token": "<|media_pad|>",
+    "audio_start_token": "<|media_begin|>",
+    "audio_end_token": "<|media_end|>",
+    "pad_token": "<|endoftext|>",
+}
+
+
+# ``VisionProcessor.Config`` fields, used like the special tokens:
+# ``VisionProcessor.Config(**MUSE_SPARK_VISION_PROCESSOR_KWARGS)``. The patch
+# sizes match the NaViT encoder (``patch_size``, ``patch_temporal``,
+# ``downsample_factor``). Video applies the image settings to every frame.
+MUSE_SPARK_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
+    "patch_size": 14,
+    "temporal_patch_size": 2,
+    "spatial_merge_size": 2,
+    "image_mean": (0.5, 0.5, 0.5),
+    "image_std": (0.5, 0.5, 0.5),
+    "resize": MuseGlimmerPatchGridResize.Config(max_image_tokens=4096),
+    "patch_order": "raster",
+    "video_resize": MuseGlimmerPatchGridResize.Config(max_image_tokens=4096),
+    # The released processor_config.json resamples with LANCZOS.
+    "image_interpolation_mode": "lanczos",
+}
 
 
 # The query is scaled by this tuned constant divided by sqrt(head_dim) after
