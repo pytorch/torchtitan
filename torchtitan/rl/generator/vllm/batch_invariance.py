@@ -40,16 +40,7 @@ def enable_rocm_batch_invariant_page_mapping() -> None:
 
     # TODO: Replace this internal-method override with a supported vLLM page mapping
     # after https://github.com/vllm-project/vllm/issues/66460 is resolved.
-    if getattr(
-        FlexAttentionMetadata,
-        "_torchtitan_rocm_batch_invariant_page_mapping",
-        False,
-    ):
-        return
-
     def get_paged_mask_mod(self):
-        validate_flex_page_mapping_request_limit(self.num_reqs)
-
         active_mapping = self.physical_to_logical[: self.num_reqs]
         valid_mapping = active_mapping >= 0
         # A physical page is either exclusive to one request or shared as the
@@ -105,7 +96,6 @@ def enable_rocm_batch_invariant_page_mapping() -> None:
         return global_page_mask_mod
 
     FlexAttentionMetadata.get_paged_mask_mod = get_paged_mask_mod
-    FlexAttentionMetadata._torchtitan_rocm_batch_invariant_page_mapping = True
     logger.info("Enabled ROCm batch-invariant page mapping for vLLM FlexAttention")
 
 
@@ -123,9 +113,6 @@ def force_logprobs_fn_for_batch_invariance() -> None:
     import vllm.v1.worker.gpu.sample.logprob as vllm_logprob
 
     from torchtitan.components.loss import compute_logprobs
-
-    if getattr(vllm_logprob, "_torchtitan_batch_invariant", False):
-        return
 
     def generator_compute_token_logprobs(
         logits: torch.Tensor, token_ids: torch.Tensor
@@ -162,7 +149,6 @@ def force_logprobs_fn_for_batch_invariance() -> None:
         return torch.stack(per_column, dim=-1)  # [N, K]
 
     vllm_logprob.compute_token_logprobs = generator_compute_token_logprobs
-    vllm_logprob._torchtitan_batch_invariant = True
     logger.info(
         "Patched vLLM compute_token_logprobs with trainer's implementation "
         "so generator and trainer share one logprob code path"

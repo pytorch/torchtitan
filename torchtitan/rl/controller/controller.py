@@ -534,7 +534,7 @@ class Controller(Configurable):
         self.config = config
         config.resolve_overrides()
         # Recipes and overrides may mutate an already-constructed config.
-        config._validate_batch_invariance()
+        config.__post_init__()
         config.maybe_log()
         self.actor_system: ActorSystem | None = None
         self.trainer: TrainerHandle | None = None

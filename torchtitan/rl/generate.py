@@ -127,7 +127,7 @@ def generate() -> None:
         dist_moe_runtime=gen_config.dist_moe_runtime,
         model_state_dict_load_mode="cpu_prefetch",
         batch_invariant=gen_config.debug.batch_invariant,
-        cuda_graph_mode=engine_config.cuda_graph.mode,
+        cuda_graph=engine_config.cuda_graph,
         max_num_seqs=max_num_seqs,
     )
     logger.info("Configured vLLM runtime for the TorchTitan model")

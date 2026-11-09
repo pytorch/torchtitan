@@ -174,7 +174,7 @@ def set_determinism(
 
         # Keep the conservative eager fallback for normal deterministic ROCm
         # runs. Batch-invariant mode requires compiled FlexAttention to match
-        # vLLM's compiled Flex path.
+        # vLLM's compiled Flex path; Controller.Config validates its ROCm version.
         if torch.version.hip is not None and not debug_config.batch_invariant:
             logger.info(
                 "Using eager (non-compiled) flex_attention for determinism on ROCm."

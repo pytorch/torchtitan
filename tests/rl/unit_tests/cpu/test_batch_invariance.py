@@ -123,9 +123,6 @@ def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
 
     monkeypatch.setattr(loss_module, "compute_logprobs", recording_compute_logprobs)
     batch_invariance.force_logprobs_fn_for_batch_invariance()
-    patched_logprobs = modules[module_names[-1]].compute_token_logprobs
-    batch_invariance.force_logprobs_fn_for_batch_invariance()
-    assert modules[module_names[-1]].compute_token_logprobs is patched_logprobs
 
     logits = torch.tensor(
         [[1.0, -0.5, 0.25, 2.0], [-1.0, 0.0, 1.5, 0.5]],

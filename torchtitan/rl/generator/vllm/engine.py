@@ -95,20 +95,20 @@ def _configure_rocm_flex_batch_invariance(
     model: Decoder.Config,
     *,
     batch_invariant: bool,
-    cuda_graph_mode: str,
+    cuda_graph: VLLMCudaGraphConfig,
     max_num_seqs: int,
 ) -> None:
-    attention = model.first_full_attention
-    if (
-        not batch_invariant
-        or torch.version.hip is None
-        or attention is None
-        or not isinstance(attention.inner_attention, FlexInnerAttention.Config)
-    ):
+    if not batch_invariant or torch.version.hip is None:
         return
 
+    attention = model.first_full_attention
+    if attention is None or not isinstance(
+        attention.inner_attention, FlexInnerAttention.Config
+    ):
+        raise ValueError("batch_invariant mode on ROCm requires FlexAttention")
+
     validate_flex_page_mapping_request_limit(max_num_seqs)
-    if cuda_graph_mode != "NONE":
+    if cuda_graph.mode != "NONE":
         # TODO: Support graph replay after
         # https://github.com/pytorch/torchtitan/issues/5725 is resolved.
         raise ValueError(
@@ -200,7 +200,7 @@ class VLLMEngine(GenerationEngine):
             dist_moe_runtime=dist_moe_runtime,
             batch_invariant=debug.batch_invariant,
             model_state_dict_load_mode=model_state_dict_load_mode,
-            cuda_graph_mode=config.cuda_graph.mode,
+            cuda_graph=config.cuda_graph,
             max_num_seqs=max_num_seqs,
         )
         engine_args = self._build_engine_args(
@@ -247,14 +247,14 @@ class VLLMEngine(GenerationEngine):
         dist_moe_runtime: DistMoeRuntime.Config | None,
         batch_invariant: bool,
         model_state_dict_load_mode: ModelStateDictLoadMode,
-        cuda_graph_mode: str,
+        cuda_graph: VLLMCudaGraphConfig,
         max_num_seqs: int,
     ) -> None:
         """Configure process-wide vLLM state before building an engine."""
         _configure_rocm_flex_batch_invariance(
             model,
             batch_invariant=batch_invariant,
-            cuda_graph_mode=cuda_graph_mode,
+            cuda_graph=cuda_graph,
             max_num_seqs=max_num_seqs,
         )
 
@@ -295,8 +295,8 @@ class VLLMEngine(GenerationEngine):
             model=model_path,
             trust_remote_code=True,
             # Use the torchtitan custom config parser (registered by
-            # register_to_vllm in _setup). It builds PretrainedConfig from
-            # model config instead of reading config.json from disk.
+            # register_to_vllm in configure_runtime). It builds PretrainedConfig
+            # from model config instead of reading config.json from disk.
             config_format=TORCHTITAN_CONFIG_FORMAT,
             dtype=param_dtype,
             tensor_parallel_size=parallelism.tensor_parallel_degree,

@@ -8,6 +8,8 @@
 the consume-time staleness invariant, the metrics timer drain, and RolloutTurnID."""
 
 import asyncio
+import dataclasses
+import importlib
 import json
 import logging
 from types import SimpleNamespace
@@ -59,6 +61,59 @@ def test_controller_config_maybe_log(tmp_path, caplog) -> None:
     with open(tmp_path / "config.json") as file:
         saved_config = json.load(file)
     assert saved_config["trainer"]["model"]["max_context_length"] == 128
+
+
+def test_rocm_batch_invariance_config_validation():
+    pytest.importorskip("vllm")
+    pytest.importorskip("renderers")
+    alphabet_sort = importlib.import_module("torchtitan_recipes.rl.alphabet_sort")
+
+    config = alphabet_sort.rl_grpo_qwen3_0_6b_flex_batch_invariant()
+    with (
+        patch.object(torch.version, "hip", "7.2.53211"),
+        patch.object(torch, "__version__", "2.15.0.dev20260827+rocm7.2"),
+    ):
+        with pytest.raises(ValueError, match="requires PyTorch built for ROCm 10.0"):
+            Controller(config)
+
+    with (
+        patch.object(torch.version, "hip", "7.15.26333"),
+        patch.object(torch, "__version__", "2.16.0.dev20261018+rocm10.0"),
+    ):
+        with pytest.raises(ValueError, match="requires FlexAttention"):
+            alphabet_sort.rl_grpo_qwen3_0_6b_varlen_batch_invariant()
+
+        config = alphabet_sort.rl_grpo_qwen3_0_6b_flex_batch_invariant()
+        with pytest.raises(ValueError, match="cuda_graph.mode='NONE'"):
+            Controller(config)
+        config.generator.engine.cuda_graph.mode = "NONE"
+        config.__post_init__()
+
+
+def test_batch_invariance_requires_matching_generator_debug_config():
+    pytest.importorskip("vllm")
+    pytest.importorskip("renderers")
+    alphabet_sort = importlib.import_module("torchtitan_recipes.rl.alphabet_sort")
+
+    config = alphabet_sort.rl_grpo_qwen3_0_6b_flex_batch_invariant()
+    config.generator.debug = dataclasses.replace(
+        config.generator.debug, batch_invariant=False
+    )
+    with (
+        patch.object(torch.version, "hip", None),
+        pytest.raises(ValueError, match="same batch_invariant setting"),
+    ):
+        Controller(config)
+
+    config = alphabet_sort.rl_grpo_qwen3_0_6b_flex_batch_invariant()
+    config.generator.debug = dataclasses.replace(
+        config.generator.debug, deterministic=False
+    )
+    with (
+        patch.object(torch.version, "hip", None),
+        pytest.raises(ValueError, match="deterministic=True for both"),
+    ):
+        Controller(config)
 
 
 def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:
