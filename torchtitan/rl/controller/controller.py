@@ -965,6 +965,8 @@ class Controller(Configurable):
             generator_task,
         ]
         try:
+            # TODO: on resume, restart the validation pass that was still running when the previous run
+            # stopped. The checkpoint doesn't record it, so it is lost unless the start step is due.
             await self._maybe_run_validation(step=self.start_step)
             done, _ = await asyncio.wait(
                 [trainer_task, *background_tasks], return_when=asyncio.FIRST_COMPLETED
