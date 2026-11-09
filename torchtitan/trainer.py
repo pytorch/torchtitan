@@ -267,10 +267,11 @@ class Trainer(Configurable):
         self.metrics_processor.optimizers = engine.optim.optimizers
         self.metrics_processor.model_parts = engine.model_parts
 
-        logger.info(
-            "Peak FLOPS used for computing MFU: "
-            f"{self.metrics_processor.gpu_peak_flops:.3e}"
-        )
+        if self.metrics_processor.gpu_peak_flops is not None:
+            logger.info(
+                "Peak FLOPS used for computing MFU: "
+                f"{self.metrics_processor.gpu_peak_flops:.3e}"
+            )
         logger.info(
             f"{engine.device.type.upper()} memory usage for model: "
             f"{engine.model_device_mem_stats.max_reserved_gib:.2f}GiB"
@@ -484,17 +485,11 @@ class Trainer(Configurable):
                     ),
                 )
                 if parallelism_context.dp_enabled:
-                    dp_mesh = parallelism_context.get_mesh("dp")
-                    mean_num_flops = (
-                        dist_utils.dist_sum(
-                            torch.tensor(
-                                mean_num_flops,
-                                dtype=torch.float64,
-                                device=engine.device,
-                            ),
-                            dp_mesh,
-                        )
-                        / dp_mesh.size()
+                    mean_num_flops = dist_utils.dist_mean(
+                        torch.tensor(
+                            mean_num_flops, dtype=torch.float64, device=engine.device
+                        ),
+                        parallelism_context.get_mesh("dp"),
                     )
             else:
                 global_avg_loss = global_max_loss = float(accumulated_loss.item())

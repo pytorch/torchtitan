@@ -768,7 +768,9 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         if not torch.cuda.is_available():
             raise unittest.SkipTest("CUDA is unavailable")
 
-        from torchtitan.models.common.attention.gdn import _recurrent_gdn_fwd
+        from torchtitan.models.common.attention.gdn import (
+            _batch_invariant_recurrent_gdn_fwd,
+        )
 
         torch.manual_seed(42)
         num_tokens, num_key_heads, num_value_heads, key_dim, value_dim = (
@@ -813,7 +815,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             tensor.requires_grad_()
         cu_seqlens = torch.tensor([0, 5, 12], device="cuda", dtype=torch.int32)
 
-        actual = torch.compile(_recurrent_gdn_fwd, fullgraph=True)(
+        actual = torch.compile(_batch_invariant_recurrent_gdn_fwd, fullgraph=True)(
             q,
             k,
             v,
@@ -848,6 +850,8 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
                 scale=key_dim**-0.5,
                 state_indices=torch.tensor([3], device="cuda", dtype=torch.int32),
                 has_initial_state=torch.tensor([False], device="cuda"),
+                autotune=False,
+                kernel_options={"batch_invariant": True},
             )
 
         state_indices = torch.tensor([3, 1], device="cuda", dtype=torch.int32)
@@ -869,6 +873,8 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
                 scale=key_dim**-0.5,
                 state_indices=state_indices,
                 has_initial_state=has_initial_state,
+                autotune=False,
+                kernel_options={"batch_invariant": True},
             )
         expected = torch.cat(
             (prefix_output, remaining_output),
