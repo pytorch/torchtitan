@@ -192,6 +192,22 @@ def _set_generator_determinism(debug) -> None:
         torch.manual_seed(debug.seed)
 
 
+def _clear_dtensor_sharding_caches() -> None:
+    """Clear DTensor's sharding-propagation caches before building a generator.
+
+    The caches match meshes by equality, not identity. A process that already built
+    other meshes (the trainer here, or an earlier test's engine) holds equal but
+    separate mesh objects, and the generator's params can pick them up:
+      trainer mesh in this test      -> fully_shard fails its mesh identity check
+      an earlier test's engine mesh  -> its process groups are gone after vLLM's
+                                        shutdown, so DTensor collectives fail
+    No production impact: production builds one generator per process.
+    """
+    # TODO: Revisit DTensor sharding-propagation cache semantics on pytorch side
+    torch._C._clear_DTensor_sharding_propagator_cache()
+    DTensor._op_dispatcher.sharding_propagator.propagate_op_sharding.cache_clear()
+
+
 def build_inference_engine(config: Controller.Config) -> LLMEngine:
     """Create a vLLM LLMEngine with torchtitan model from the RL config."""
     gen_config = config.generator
@@ -670,17 +686,7 @@ class BitwiseParityTestBase(unittest.TestCase):
 
         cls.model, cls.device, cls.parallelism_context = build_trainer_model(config)
 
-        # Workaround: Clear the DTensor sharding-propagation caches here since
-        # this test puts both the trainer and the generator in the same process
-        # and builds equal but separate meshes for them. Without this workaround,
-        # the generator's FSDP params pick up the trainer's mesh objects and
-        # fail fully_shard's mesh identity check. This error happens only in
-        # this specific test setup, no production impact.
-        #
-        # TODO: Revisit DTensor sharding-propagation cache semantics on pytorch side
-        torch._C._clear_DTensor_sharding_propagator_cache()
-        DTensor._op_dispatcher.sharding_propagator.propagate_op_sharding.cache_clear()
-
+        _clear_dtensor_sharding_caches()
         cls.engine = build_inference_engine(config)
         if cls.sync_weights_from_trainer:
             _sync_trainer_weights_to_vllm(cls.model, cls.engine)

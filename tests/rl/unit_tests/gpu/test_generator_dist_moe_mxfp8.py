@@ -45,6 +45,7 @@ from vllm.model_executor.model_loader import utils as model_loader_utils
 from vllm.sampling_params import RequestOutputKind
 
 from tests.rl.unit_tests.gpu.test_bitwise_parity import (
+    _clear_dtensor_sharding_caches,
     _make_prompt_tokens,
     _run_engine,
     _sync_trainer_weights_to_vllm,
@@ -268,6 +269,8 @@ def test_vllm_generator_enables_mxfp8_mega_inference_weights():
             dist_moe_runtime=config.generator.dist_moe_runtime,
             model_state_dict_load_mode="cpu_prefetch",
         )
+        # CI runs this test in the same process after the Kimi K3 parity test.
+        _clear_dtensor_sharding_caches()
         engine = build_inference_engine(config)
         _check_inference_operands(engine)
     finally:
