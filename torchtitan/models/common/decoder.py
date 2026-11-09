@@ -328,7 +328,26 @@ class Decoder(BaseModel):
         # attention_metadata slot and break the maskless SDPA backend).
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
+        return self.forward_embeddings(
+            h,
+            positions,
+            attention_metadata,
+            padding_mask=padding_mask,
+            aux_loss_denominators=aux_loss_denominators,
+        )
 
+    def forward_embeddings(
+        self,
+        h: torch.Tensor,
+        positions: torch.Tensor | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """`forward` after the token embedding: the layers, the final norm and the LM head
+        (unless ``_skip_lm_head``). For callers that build the input embeddings
+        themselves, e.g. the RL generator merging image embeddings into a prompt."""
         with spmd.no_typecheck():
             aux_loss_denominator = (
                 None if aux_loss_denominators is None else aux_loss_denominators[0]

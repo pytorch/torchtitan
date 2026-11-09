@@ -32,17 +32,16 @@ there is no salt; the engine resets both caches on every weight load instead:
       -> embed_multimodal: the vision encoder, once per mm hash while cached
                            (vLLM copies pixel_values to the GPU)
       -> embed_input_ids: token embeddings with image embeddings at the placeholders
-      -> forward(inputs_embeds, 3D M-RoPE positions)
+      -> forward(inputs_embeds, positions: 3D M-RoPE for Qwen3.5, 1D for Muse Spark)
 
 vLLM requires a registered processor for a multimodal model (`register_multimodal_processor`);
 it serves only vLLM's startup: the vision processor's largest image (`_largest_patch_grid`)
 sizes the encoder budget, and a dummy image of that size profiles the encoder's memory.
 
-Supported models: Qwen3.5-style (``Qwen35Model``): a ``vision_encoder`` behind
-``get_vision_embeds``, merged patches as placeholder tokens, and ``MRoPE.Config``
-attention. Before the engine is built, the controller checks that the model is a
-`MultimodalModel` with a vision encoder, and `model_config_to_hf_config_dict` checks the
-attention.
+Supported models: a ``vision_encoder`` behind ``get_vision_embeds`` and merged patches as
+placeholder tokens; image tokens take 3D positions with ``MRoPE.Config`` attention
+(Qwen3.5) and 1D positions otherwise (Muse Spark). Before the engine is built, the
+controller checks that the model is a `MultimodalModel` with a vision encoder.
 """
 
 from __future__ import annotations
@@ -318,10 +317,12 @@ class VLLMMultimodalModelWrapper(VLLMModelWrapper, SupportsMultiModal, SupportsM
     """`VLLMModelWrapper` that keeps the vision encoder and serves image prompts.
 
     Implements vLLM's multimodal (`embed_multimodal`, `embed_input_ids`) and M-RoPE
-    (`get_mrope_input_positions`) interfaces for Qwen3.5-style models: a
-    ``vision_encoder`` reached through the model's ``get_vision_embeds``, merged
-    patches as placeholder tokens, and 3D M-RoPE positions. vLLM feeds multimodal
-    models embeddings, also for text-only steps, and 3D positions ``(3, num_tokens)``.
+    (`get_mrope_input_positions`) interfaces for models with a ``vision_encoder`` reached
+    through the model's ``get_vision_embeds`` and merged patches as placeholder tokens:
+    Qwen3.5, whose image tokens take 3D M-RoPE positions, and Muse Spark, whose take 1D
+    positions like text (vLLM then never calls `get_mrope_input_positions`). vLLM feeds
+    multimodal models embeddings, also for text-only steps.
+
     """
 
     def __init__(self, *, vision_processor: VisionProcessor, **kwargs: Any) -> None:
@@ -391,20 +392,20 @@ class VLLMMultimodalModelWrapper(VLLMModelWrapper, SupportsMultiModal, SupportsM
 
         Args:
             input_ids: Unused; vLLM passes embeddings to multimodal models.
-            positions: ``(3, num_tokens)`` M-RoPE positions.
+            positions: ``(3, num_tokens)`` M-RoPE positions (Qwen3.5), or ``(num_tokens,)``
+                for a model whose image tokens take 1D positions (Muse Spark).
             inputs_embeds: ``(num_tokens, dim)`` from `embed_input_ids`.
         """
         assert inputs_embeds is not None and positions is not None
-        # TorchTitan's MRoPE takes (num_tokens, 3).
-        positions = positions.transpose(0, 1)
+        if positions.ndim == 2:
+            # TorchTitan's MRoPE takes (num_tokens, 3).
+            positions = positions.transpose(0, 1)
         with self.parallelism_context.activate_spmd():
-            # Mirrors the model's forward after embedding (layers, then the final norm).
-            # TODO: share this loop with Decoder.forward / Qwen35Model.forward.
-            h = inputs_embeds
-            layer_kwargs = self._prepare_step_kwargs(h.shape[0])
-            for layer in self.model.layers.values():
-                h = layer(h, None, positions, **layer_kwargs)
-            h = self.model.norm(h)
+            h = self.model.forward_embeddings(
+                inputs_embeds,
+                positions,
+                **self._prepare_step_kwargs(inputs_embeds.shape[0]),
+            )
         return h
 
     def get_mrope_input_positions(

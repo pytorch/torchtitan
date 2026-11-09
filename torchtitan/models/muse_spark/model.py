@@ -656,11 +656,13 @@ class MuseSparkModel(MultimodalModel):
         loss_kwargs = batch.pop("loss_kwargs", {})
         special_tokens = batch.get("special_tokens")
         for input_name, placeholder_key, bank_indices_name in (
-            ("pixel_values", "image_id", "image_bank_indices_T"),
-            ("pixel_values_videos", "video_id", "video_bank_indices_T"),
+            ("pixel_values", "image_id", "image_vision_bank_indices_T"),
+            ("pixel_values_videos", "video_id", "video_vision_bank_indices_T"),
             ("waveforms", "audio_id", "audio_bank_indices_T"),
         ):
-            if batch.get(input_name) is None:
+            # RL microbatches provide the bank rows: several placeholder runs (the
+            # samples of a GRPO group) can share one encoded image.
+            if batch.get(input_name) is None or bank_indices_name in batch:
                 continue
             if special_tokens is None or placeholder_key not in special_tokens:
                 raise ValueError(
@@ -696,8 +698,8 @@ class MuseSparkModel(MultimodalModel):
             enable_sp=parallelism.enable_sequence_parallel
         )
         for bank_indices_name in (
-            "image_bank_indices_T",
-            "video_bank_indices_T",
+            "image_vision_bank_indices_T",
+            "video_vision_bank_indices_T",
             "audio_bank_indices_T",
         ):
             input_sharding[bank_indices_name] = bank_indices_placement
@@ -713,8 +715,8 @@ class MuseSparkModel(MultimodalModel):
         if parallelism.enable_sequence_parallel and parallelism_context.tp_enabled:
             tp_group = parallelism_context.get_dense_tp_mesh().get_group()
             for bank_indices_name in (
-                "image_bank_indices_T",
-                "video_bank_indices_T",
+                "image_vision_bank_indices_T",
+                "video_vision_bank_indices_T",
                 "audio_bank_indices_T",
             ):
                 if bank_indices_name in batch:
@@ -760,6 +762,32 @@ class MuseSparkModel(MultimodalModel):
         )
         return vision_embeds_TD
 
+    def get_vision_embeds(
+        self,
+        pixel_values: torch.Tensor,
+        *,
+        grid_thw: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the vision tower, adapter and projection; return packed embeddings with
+        token counts.
+
+        Args:
+            pixel_values: Packed patches ``(total_num_patches, patch_dim)``.
+            grid_thw: Grid dimensions ``(num_items, 3)`` for ``[t, h, w]``.
+
+        Returns:
+            vision_embeds: Packed vision embeddings ``(total_tokens, dim)``.
+            num_tokens_per_item: ``(num_items,)`` token count per item.
+        """
+        vision_encoder = self.vision_encoder
+        if vision_encoder is None:
+            raise ValueError("Vision inputs were provided without a vision encoder.")
+        vision_embeds = self._get_visual_bank(
+            pixel_values_TP=pixel_values, grid_thw_I3=grid_thw
+        )
+        num_tokens_per_item = grid_thw.prod(-1) // vision_encoder.downsample_factor**2
+        return vision_embeds, num_tokens_per_item
+
     def _get_audio_bank(
         self,
         *,
@@ -789,8 +817,8 @@ class MuseSparkModel(MultimodalModel):
         grid_thw: torch.Tensor | None,
         pixel_values_videos: torch.Tensor | None,
         grid_thw_videos: torch.Tensor | None,
-        image_bank_indices_T: torch.Tensor | None,
-        video_bank_indices_T: torch.Tensor | None,
+        image_vision_bank_indices_T: torch.Tensor | None,
+        video_vision_bank_indices_T: torch.Tensor | None,
     ) -> torch.Tensor:
         """Pack images and videos into one forward and fuse their output banks."""
         vision_encoder = self.vision_encoder
@@ -798,8 +826,8 @@ class MuseSparkModel(MultimodalModel):
         # Each set of indices refers to its own image or video bank.
         vision_inputs: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
         for pixels_TP, grid_I3, indices_T in (
-            (pixel_values, grid_thw, image_bank_indices_T),
-            (pixel_values_videos, grid_thw_videos, video_bank_indices_T),
+            (pixel_values, grid_thw, image_vision_bank_indices_T),
+            (pixel_values_videos, grid_thw_videos, video_vision_bank_indices_T),
         ):
             if pixels_TP is not None:
                 assert grid_I3 is not None and indices_T is not None
@@ -884,8 +912,8 @@ class MuseSparkModel(MultimodalModel):
         grid_thw_videos: torch.Tensor | None,
         waveforms: torch.Tensor | None,
         waveform_padded_lengths: torch.Tensor | None,
-        image_bank_indices_T: torch.Tensor | None,
-        video_bank_indices_T: torch.Tensor | None,
+        image_vision_bank_indices_T: torch.Tensor | None,
+        video_vision_bank_indices_T: torch.Tensor | None,
         audio_bank_indices_T: torch.Tensor | None,
     ) -> torch.Tensor:
         """Fuse active perception banks, using dummies for absent local inputs."""
@@ -907,8 +935,8 @@ class MuseSparkModel(MultimodalModel):
                 grid_thw=grid_thw,
                 pixel_values_videos=pixel_values_videos,
                 grid_thw_videos=grid_thw_videos,
-                image_bank_indices_T=image_bank_indices_T,
-                video_bank_indices_T=video_bank_indices_T,
+                image_vision_bank_indices_T=image_vision_bank_indices_T,
+                video_vision_bank_indices_T=video_vision_bank_indices_T,
             )
 
         if "audio" in dataset_modalities:
@@ -936,8 +964,8 @@ class MuseSparkModel(MultimodalModel):
         waveforms: torch.Tensor | None = None,
         waveform_lengths: torch.Tensor | None = None,
         waveform_padded_lengths: torch.Tensor | None = None,
-        image_bank_indices_T: torch.Tensor | None = None,
-        video_bank_indices_T: torch.Tensor | None = None,
+        image_vision_bank_indices_T: torch.Tensor | None = None,
+        video_vision_bank_indices_T: torch.Tensor | None = None,
         audio_bank_indices_T: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del waveform_lengths
@@ -952,13 +980,30 @@ class MuseSparkModel(MultimodalModel):
                     grid_thw_videos=grid_thw_videos,
                     waveforms=waveforms,
                     waveform_padded_lengths=waveform_padded_lengths,
-                    image_bank_indices_T=image_bank_indices_T,
-                    video_bank_indices_T=video_bank_indices_T,
+                    image_vision_bank_indices_T=image_vision_bank_indices_T,
+                    video_vision_bank_indices_T=video_vision_bank_indices_T,
                     audio_bank_indices_T=audio_bank_indices_T,
                 )
         else:
             hidden_TD = tokens
+        return self.forward_embeddings(
+            hidden_TD,
+            positions,
+            attention_metadata,
+            padding_mask=padding_mask,
+            aux_loss_denominators=aux_loss_denominators,
+        )
 
+    def forward_embeddings(
+        self,
+        hidden_TD: torch.Tensor,
+        positions: torch.Tensor | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """`Decoder.forward_embeddings` with Muse Spark's residual and final-norm dtypes."""
         hidden_TD = hidden_TD.to(self.residual_dtype)
 
         with spmd.no_typecheck():

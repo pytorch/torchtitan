@@ -43,7 +43,7 @@ from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
-from torchtitan.models.qwen3_5.rope import MRoPE
+from torchtitan.models.qwen3_5.rope import get_mrope_config
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.model import get_attention_dimensions
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
@@ -129,8 +129,9 @@ def model_config_to_hf_config_dict(
          consumed in our flow (V1 engine, ``TorchTitanCausalLM`` model
          class, no KV transfer, no MFU metrics, no multimodal).
 
-    ``serves_images``: the generator serves image prompts (see ``vllm/multimodal_wrapper.py``), which
-    needs M-RoPE attention (`MRoPE.Config`, e.g. Qwen3.5); raises ValueError without it.
+    ``serves_images``: the generator serves image prompts (see ``vllm/multimodal_wrapper.py``).
+    With M-RoPE attention (`MRoPE.Config`, e.g. Qwen3.5) image tokens take 3D positions;
+    other models' (e.g. Muse Spark's) take 1D positions like text.
     """
     if not cfg.layers:
         raise ValueError(f"Model config {type(cfg).__qualname__} has no layers")
@@ -195,19 +196,15 @@ def model_config_to_hf_config_dict(
         hf["decoder_sparse_step"] = 1
         hf.setdefault("norm_topk_prob", True)
 
-    if serves_images:
-        if not isinstance(rope, MRoPE.Config):
-            raise ValueError(
-                "Image prompts need a generator model whose attention uses MRoPE.Config "
-                f"(Qwen3.5); got {type(rope).__qualname__}."
-            )
+    mrope = get_mrope_config(cfg)
+    if serves_images and mrope is not None:
         # Presence required: an mrope_section switches vLLM to 3D M-RoPE positions, which it
         # gets from the model's get_mrope_input_positions. Text-only generators keep 1D
         # positions, even for M-RoPE models: text tokens have equal positions on all 3 axes.
         hf["rope_parameters"] = {
             "rope_type": "default",
-            "rope_theta": rope.theta,
-            "mrope_section": list(rope.mrope_section),
+            "rope_theta": mrope.theta,
+            "mrope_section": list(mrope.mrope_section),
         }
 
     return hf

@@ -245,6 +245,23 @@ def test_hf_config_declares_mrope_only_for_image_prompts():
     )
 
 
+def test_hf_config_keeps_1d_positions_for_images_without_mrope():
+    from torchtitan.models.muse_spark import (
+        build_model_config as build_muse_spark_model_config,
+    )
+
+    config = build_muse_spark_model_config(
+        "debugmodel_mm", seq_len=256, attn_backend="varlen"
+    )
+
+    image = PretrainedConfig.from_dict(
+        model_config_to_hf_config_dict(config, serves_images=True)
+    )
+
+    # Muse Spark's image tokens take 1D positions like text: vLLM keeps 1D positions.
+    assert not uses_mrope(image)
+
+
 def test_controller_rejects_a_vision_processor_without_a_vision_encoder():
     from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_5_debug_varlen
 
