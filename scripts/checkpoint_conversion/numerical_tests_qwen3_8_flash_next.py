@@ -28,6 +28,7 @@ import torch.nn.functional as F
 from torch.nn.attention import sdpa_kernel, SDPBackend
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.qwen3_8_flash_next import build_model_config
 from torchtitan.models.qwen3_8_flash_next.state_dict_adapter import (
     Qwen38FlashNextStateDictAdapter,
@@ -151,6 +152,7 @@ def _build_fixture(device: torch.device) -> _Fixture:
         "debugmodel_mm", seq_len=64, parallelism=ParallelismConfig()
     )
     for layer in config.layers:
+        assert isinstance(layer.feed_forward, MoE.Config)
         layer.feed_forward.router.aux_loss = None
     vision_config = config.vision_encoder
     assert vision_config is not None
@@ -158,8 +160,10 @@ def _build_fixture(device: torch.device) -> _Fixture:
     config.vocab_size = (
         config.tok_embeddings.num_embeddings
     ) = config.lm_head.out_features = 64
-    config.layers[1].ple.ple_embedding.vocab_size = 64
-    config.layers[1].ple.ple_embedding.eos_token_id = 63
+    ple = config.layers[1].ple
+    assert ple is not None
+    ple.ple_embedding.vocab_size = 64
+    ple.ple_embedding.eos_token_id = 63
     hf_config = _reference_text_config()
     hf_config._attn_implementation = "sdpa"
     reference = Qwen4ExpForCausalLM(hf_config).to(device).eval()
