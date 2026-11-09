@@ -26,9 +26,15 @@ from torchtitan.rl.controller.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
 )
+from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
-from torchtitan.rl.rollout.types import RolloutTurnID
+from torchtitan.rl.rollout.types import (
+    Rollout,
+    RolloutStatus,
+    RolloutTurn,
+    RolloutTurnID,
+)
 
 from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.training_sample_builder import (
@@ -825,7 +831,7 @@ def _run_with_generator_watcher(watcher) -> None:
         patch.multiple(
             Controller,
             _validate_and_log=AsyncMock(return_value={}),
-            _make_generate_fn=lambda self, metrics_prefix: None,
+            _make_generate_fn=lambda self: None,
             _data_input_loop=_block_forever,
             _rollout_loop=_block_forever,
             _batcher_loop=_block_forever,
@@ -851,3 +857,44 @@ def test_run_fails_when_the_engine_loops_exit_mid_run() -> None:
         RuntimeError, match="generator_wait_engine_loop exited unexpectedly"
     ):
         _run_with_generator_watcher(exited)
+
+
+def test_validation_renames_generator_metrics() -> None:
+    """The generators name every request's metrics `generator/*`; validation logs `validation_generator/*`."""
+
+    async def run_group_rollouts(*, group_id: int, **kwargs) -> RolloutGroup:
+        turn = RolloutTurn(
+            rollout_id=RolloutTurnID(group_id=group_id, rollout_id=0, turn_id=0),
+            prompt_prefix_len=0,
+            prompt_delta_token_ids=np.array([1], dtype=np.int32),
+            completion_token_ids=np.array([2], dtype=np.int32),
+            completion_logprobs=np.array([-0.1], dtype=np.float32),
+            min_policy_version=0,
+            max_policy_version=0,
+            metrics=[m.Metric("generator/queue_time_ms", m.Mean(2.0))],
+        )
+        rollout = Rollout(
+            group_id=group_id,
+            rollout_id=0,
+            status=RolloutStatus.COMPLETED,
+            reward=0.0,
+            turns=[turn],
+        )
+        return RolloutGroup(group_id=group_id, rollouts=[rollout])
+
+    controller = object.__new__(Controller)
+    controller._make_generate_fn = lambda: None
+    controller._make_release_session_fn = lambda: None
+    controller._rollouter = SimpleNamespace(run_group_rollouts=run_group_rollouts)
+    controller.generator_router = SimpleNamespace(
+        release_groups=SimpleNamespace(call_one=AsyncMock())
+    )
+
+    _, metrics = asyncio.run(
+        controller._collect_validation_rollouts(
+            samples=["prompt"], sampling=SamplingConfig(), step=0
+        )
+    )
+    keys = m.MetricsProcessor._aggregate_metrics(metrics)
+    assert keys["validation_generator/queue_time_ms/mean"] == 2.0
+    assert "generator/queue_time_ms/mean" not in keys

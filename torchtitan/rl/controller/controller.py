@@ -566,10 +566,9 @@ class Controller(Configurable):
         """
         return result.get(0)
 
-    def _make_generate_fn(self, metrics_prefix: str) -> GenerateFn:
-        """Build the rollouter's `GenerateFn`: route a completion via the generator router, namespacing
-        generation metrics with `metrics_prefix` and pinning sticky routing on `routing_session_id` (a sample's
-        turns reuse one generator's prefix KV)."""
+    def _make_generate_fn(self) -> GenerateFn:
+        """Build the rollouter's `GenerateFn`: route a completion via the generator router, pinning sticky
+        routing on `routing_session_id` (a sample's turns reuse one generator's prefix KV)."""
         # TODO: make this a pluggable config (a GenerateFn factory) so non-router generate backends can be swapped in.
         # Bind the router handle to a local so the closure captures it instead of
         # `self`. A GenerateFn may be shipped to another process, where an actor
@@ -591,7 +590,6 @@ class Controller(Configurable):
                 group_id=group_id,
                 routing_session_id=routing_session_id,
                 sampling_config=sampling_config,
-                metrics_prefix=metrics_prefix,
             )
 
         return generate
@@ -734,7 +732,7 @@ class Controller(Configurable):
     ) -> tuple[list[RolloutGroup], list[m.Metric]]:
         """Sample held-out prompts, run each greedily (n=1) concurrently, and emit validation metrics."""
         # TODO: group_size=1 (best-of-1) only. Support best-of-N.
-        generate = self._make_generate_fn(metrics_prefix="validation_generator")
+        generate = self._make_generate_fn()
         release_session_fn = self._make_release_session_fn()
         # TODO(naming): reserve "sample" for TrainingSample; rename the rollouter's raw-prompt "sample" -> "prompt"/"data_input".
         group_results = await asyncio.gather(
@@ -777,6 +775,12 @@ class Controller(Configurable):
                 rollout for group in rollout_groups for rollout in group.rollouts
             ],
         )
+        # The generators name every request's metrics `generator/*`. Rename validation's so W&B keeps them
+        # apart from training's.
+        for index, metric in enumerate(metrics):
+            # generator/queue_time_ms -> validation_generator/queue_time_ms
+            if metric.key.startswith("generator/"):
+                metrics[index] = m.Metric(f"validation_{metric.key}", metric.value)
         metrics.append(
             m.Metric("validation/group_failures", m.Sum(float(num_failed_groups)))
         )
@@ -867,7 +871,7 @@ class Controller(Configurable):
         )
 
         # rollout_loop
-        generate_fn = self._make_generate_fn(metrics_prefix="generator")
+        generate_fn = self._make_generate_fn()
         release_session_fn = self._make_release_session_fn()
 
         # One rollout worker per active buffer slot: lets generation fill every active slot,

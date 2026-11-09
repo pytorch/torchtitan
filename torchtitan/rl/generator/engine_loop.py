@@ -195,21 +195,13 @@ class EngineLoop:
             )
         await asyncio.wrap_future(self._future)
 
-    async def generate(
-        self, engine_request: EngineRequest, *, metrics_prefix: str
-    ) -> Completion:
+    async def generate(self, engine_request: EngineRequest) -> Completion:
         """RANK 0: queue `engine_request` and wait for its `Completion`. If the engine rejects the
         request at admission, only this call raises the engine's error."""
         self._rank0_check_running("generate")
         # Put the call on the queue; the loop will admit + process it, then resolve `reply`.
         reply: concurrent.futures.Future[Completion] = concurrent.futures.Future()
-        self._queue.put(
-            GenerationMessage(
-                engine_request=engine_request,
-                metrics_prefix=metrics_prefix,
-                reply=reply,
-            )
-        )
+        self._queue.put(GenerationMessage(engine_request=engine_request, reply=reply))
         return await asyncio.wrap_future(reply)
 
     async def load_model_state_dict(self, version: int, *, drain: bool) -> None:
@@ -482,9 +474,7 @@ class EngineLoop:
                 pending_load_messages.append(message)
             else:
                 self._request_dispatcher.rank0_register_generation(
-                    message.engine_request.request_id,
-                    message.metrics_prefix,
-                    message.reply,
+                    message.engine_request.request_id, message.reply
                 )
                 pending_engine_requests.append(message.engine_request)
 
@@ -590,7 +580,6 @@ class GenerationMessage:
     Never broadcast; a `LoopDecision` carries just the `engine_request`."""
 
     engine_request: EngineRequest
-    metrics_prefix: str
     reply: concurrent.futures.Future[Completion]
 
 

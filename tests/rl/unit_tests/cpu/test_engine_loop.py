@@ -144,9 +144,7 @@ def _request(
 
 def _message(engine_request: EngineRequest) -> GenerationMessage:
     return GenerationMessage(
-        engine_request=engine_request,
-        metrics_prefix="generator",
-        reply=concurrent.futures.Future(),
+        engine_request=engine_request, reply=concurrent.futures.Future()
     )
 
 
@@ -740,9 +738,7 @@ def _loading_engine(monkeypatch, load_pre_hook=None) -> _FakeEngine:
 
 
 def _generate(engine_loop: EngineLoop, request_id: str, **kwargs: Any) -> asyncio.Task:
-    return asyncio.create_task(
-        engine_loop.generate(_request(request_id, **kwargs), metrics_prefix="generator")
-    )
+    return asyncio.create_task(engine_loop.generate(_request(request_id, **kwargs)))
 
 
 async def _on_engine_loop(engine_loop: EngineLoop, fn: Callable[[], Any]) -> Any:
@@ -1494,7 +1490,7 @@ def test_drain_task_handles_peer_results_on_the_engine_thread(
             with pytest.raises(
                 RuntimeError, match="generator is closed; cannot call generate"
             ):
-                await engine_loop.generate(_request("r1"), metrics_prefix="generator")
+                await engine_loop.generate(_request("r1"))
         else:
             completion = await asyncio.wait_for(
                 _generate(engine_loop, "r0"), _TIMEOUT_S

@@ -229,7 +229,6 @@ class InterGeneratorRouter(Configurable):
         group_id: int,
         routing_session_id: str | None,
         sampling_config: Any | None,
-        metrics_prefix: str,
     ) -> Any:
         """Route one generation call to a generator and return its completion."""
         return await self._route(
@@ -241,7 +240,6 @@ class InterGeneratorRouter(Configurable):
             # intra-mesh DP routing.
             routing_session_id=routing_session_id,
             sampling_config=sampling_config,
-            metrics_prefix=metrics_prefix,
             # Load is measured as in-flight request count (one unit per call).
             routing_ctx=RoutingContext(
                 estimated_cost=1,
