@@ -21,6 +21,7 @@ from torchtitan.components.data.balancing import (
     document_attention_cost,
     MicrobatchBalancer,
     plan_balanced_assignment,
+    VisionEncoderCost,
 )
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 
@@ -59,6 +60,38 @@ class TestDocumentAttentionCost(unittest.TestCase):
 
     def test_full_length_document(self):
         self.assertEqual(document_attention_cost(_microbatch([SEQ], 0)), SEQ * SEQ)
+
+
+class TestVisionEncoderCost(unittest.TestCase):
+    def _cost(self, **weights):
+        return VisionEncoderCost.Config(**weights).build()
+
+    def test_images_and_videos(self):
+        mb = _microbatch([4, 4], 0)
+        mb.model_kwargs = {
+            # Two images: 1x2x3 and 1x4x4 patches.
+            "grid_thw": torch.tensor([[1, 2, 3], [1, 4, 4]]),
+            # One video: 3 temporal patches of 2x2, attended per frame.
+            "grid_thw_videos": torch.tensor([[3, 2, 2]]),
+        }
+        patches = 6 + 16 + 12
+        segments_sq = 36 + 256 + 3 * 16
+        cost = self._cost(patch_weight=1.0, patch_attention_weight=0.0)
+        self.assertEqual(cost(mb), patches)
+        cost = self._cost(patch_weight=0.0, patch_attention_weight=1.0)
+        self.assertEqual(cost(mb), segments_sq)
+        cost = self._cost(
+            patch_weight=2.0, patch_attention_weight=0.5, document_attention_weight=3.0
+        )
+        self.assertEqual(cost(mb), 2.0 * patches + 0.5 * segments_sq + 3.0 * 32)
+
+    def test_text_only_microbatch(self):
+        cost = self._cost(patch_weight=1.0, patch_attention_weight=1.0)
+        self.assertEqual(cost(_microbatch([SEQ], 0)), 0.0)
+
+    def test_rejects_negative_weights(self):
+        with self.assertRaises(ValueError):
+            VisionEncoderCost.Config(patch_weight=-1.0, patch_attention_weight=0.0)
 
 
 class TestPlanBalancedAssignment(unittest.TestCase):
@@ -161,7 +194,18 @@ def _worker(rank, world_size, port, mesh_shape, group_size, num_slots, result_di
             for step in range(2)
             for i in range(num_slots)
         )
-        out = list(balanced_step_iterator(iter(source), balancer))
+
+        def with_pixels(mb):
+            # A per-microbatch image so the exchange must carry model_kwargs.
+            tag = int(mb.input[0])
+            mb.model_kwargs = {
+                "pixel_values": torch.full((4, 6), float(tag)),
+                "grid_thw": torch.tensor([[1, 2, 2]]),
+                "special_tokens": {"image_id": 7},
+            }
+            return mb
+
+        out = list(balanced_step_iterator(map(with_pixels, source), balancer))
         tags = [int(mb.input[0]) for mb in out]
         costs = [document_attention_cost(mb) for mb in out]
         # The exchanged microbatch keeps every field.
@@ -169,6 +213,10 @@ def _worker(rank, world_size, port, mesh_shape, group_size, num_slots, result_di
             tag = int(mb.input[0])
             assert torch.equal(mb.labels, torch.full((SEQ,), tag))
             assert int(mb.loss_token_counts) == int((~mb.padding_mask).sum())
+            assert torch.equal(
+                mb.model_kwargs["pixel_values"], torch.full((4, 6), float(tag))
+            )
+            assert mb.model_kwargs["special_tokens"] == {"image_id": 7}
         torch.save(
             {"dp_rank": dp_rank, "tags": tags, "costs": costs},
             os.path.join(result_dir, f"rank{rank}.pt"),

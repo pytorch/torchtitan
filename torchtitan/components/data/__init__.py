@@ -10,6 +10,7 @@ from torchtitan.components.data.balancing import (
     MicrobatchBalancer,
     MicrobatchCost,
     plan_balanced_assignment,
+    VisionEncoderCost,
 )
 from torchtitan.components.data.collators import Collator, TextCollator
 from torchtitan.components.data.dataset import (
@@ -66,5 +67,6 @@ __all__ = [
     "TextSequence",
     "TokenizedTrainingMicrobatch",
     "TrainingMicrobatch",
+    "VisionEncoderCost",
     "WeightedDataset",
 ]

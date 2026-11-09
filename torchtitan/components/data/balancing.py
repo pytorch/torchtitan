@@ -105,6 +105,66 @@ class DocumentAttentionCost(MicrobatchCost):
         return document_attention_cost(microbatch)
 
 
+class VisionEncoderCost(MicrobatchCost):
+    """Vision-encoder plus document-attention cost of a multimodal microbatch.
+
+    ``cost = patch_weight * num_patches
+           + patch_attention_weight * sum(segment_patches ** 2)
+           + document_attention_weight * sum(document_length ** 2)``
+
+    Patches come from ``grid_thw`` / ``grid_thw_videos`` in ``model_kwargs``
+    (rows of [T, H, W] in patches). Encoders that attend within each temporal
+    frame of an item (Qwen3.5) use one attention segment of H * W patches per
+    frame, so video cost is linear in duration. With block-diagonal attention
+    the quadratic term dominates for large images: with the Qwen3.5-9B weights
+    below, one 4096x4096 image (65,536 16-px patches) costs about as much as
+    900 images of 1,024 patches.
+
+    The weights are relative and depend on the model and hardware; fit them from
+    a profile (encoder time per microbatch against patches and sum of squared
+    segments). Qwen3.5-9B on GB300, in seconds: ``patch_weight=8.6e-6``,
+    ``patch_attention_weight=2.2e-9``, encoder fit R^2 = 0.9998.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(MicrobatchCost.Config):
+        patch_weight: float
+        """Cost per vision patch (encoder linear layers)."""
+        patch_attention_weight: float
+        """Cost per squared attention-segment length in patches."""
+        document_attention_weight: float = 0.0
+        """Cost per squared document length in tokens (LLM attention)."""
+
+        def __post_init__(self) -> None:
+            if min(self.patch_weight, self.patch_attention_weight) < 0:
+                raise ValueError("vision cost weights must be non-negative")
+            if self.document_attention_weight < 0:
+                raise ValueError("document_attention_weight must be non-negative")
+
+    def __init__(self, config: Config) -> None:
+        self._config = config
+
+    def __call__(self, microbatch: TrainingMicrobatch) -> float:
+        if not isinstance(microbatch, TokenizedTrainingMicrobatch):
+            raise ValueError(
+                "VisionEncoderCost requires TokenizedTrainingMicrobatch, got "
+                f"{type(microbatch).__name__}"
+            )
+        c = self._config
+        cost = 0.0
+        if c.document_attention_weight:
+            cost += c.document_attention_weight * document_attention_cost(microbatch)
+        for key in ("grid_thw", "grid_thw_videos"):
+            grid = microbatch.model_kwargs.get(key)
+            if grid is None:
+                continue
+            grid = grid.to(torch.float64).reshape(-1, 3)
+            frame = grid[:, 1] * grid[:, 2]
+            cost += c.patch_weight * float((grid[:, 0] * frame).sum())
+            cost += c.patch_attention_weight * float((grid[:, 0] * frame * frame).sum())
+        return cost
+
+
 def plan_balanced_assignment(costs: Sequence[Sequence[float]]) -> BalancePlan:
     """Assign a step's microbatches to (slot, rank) pairs.
 

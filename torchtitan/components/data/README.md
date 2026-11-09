@@ -510,6 +510,19 @@ group_size      -> consecutive data-parallel ranks; with HSDP, <= dp_shard stays
 PP              -> not supported (pipeline schedules need per-replica totals balanced instead)
 ```
 
+For multimodal data the vision encoder usually dominates the imbalance: encoder attention within each image grows with its patch count squared, so two rows with the same token count can differ several times in encoder time. `VisionEncoderCost` adds a fitted encoder term to the document-attention cost:
+
+```python
+from torchtitan.components.data import MicrobatchBalancer, VisionEncoderCost
+
+balancer = MicrobatchBalancer.Config(
+    # Seconds per patch and per squared attention segment, fitted on Qwen3.5-9B / GB300.
+    cost=VisionEncoderCost.Config(patch_weight=8.6e-6, patch_attention_weight=2.2e-9),
+)
+```
+
+Moved multimodal microbatches carry their collated patches (float32), which is about 4x the bytes of the resized uint8 images: tens of MB per row for image-dense data.
+
 Balancing runs when the trainer requests a step's first microbatch, so dataloader checkpoints stay exact. The exchange costs are a few floats per rank for costs plus the moved microbatches (about 0.5 MB per 64K-token text row).
 
 # Distributed and checkpoint behavior
