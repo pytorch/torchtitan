@@ -38,7 +38,9 @@ from torchtitan.rl.examples.verifiers.rollouter import (
 )
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.rollout.types import Completion, RolloutStatus
+from torchtitan.rl.rollout.advantage import AdvantageEstimator
+from torchtitan.rl.rollout.rubric import RubricOutput
+from torchtitan.rl.rollout.types import Completion, Rollout, RolloutStatus
 
 
 def test_train_client_config_carries_an_in_tree_renderer() -> None:
@@ -1065,33 +1067,53 @@ def test_rollout_releases_every_trace_session_even_if_one_release_fails(caplog) 
     assert rollout.group_id == 1
 
 
-def test_a_failing_rollout_fails_its_group_only_after_every_sibling_finished() -> None:
-    """The caller releases the group once this raises; no sibling may still be generating."""
+@pytest.mark.parametrize(
+    "num_raised, advantages",
+    [
+        # Centered on the mean of the two scored rollouts (rewards 1 and 2).
+        (1, [-0.5, 0.5]),
+        (3, []),
+    ],
+)
+def test_a_rollout_that_raises_is_kept_but_left_out_of_the_advantage(
+    num_raised, advantages
+) -> None:
+    async def run_single_rollout(*, group_id, rollout_id, **kwargs):
+        if rollout_id < num_raised:
+            raise RuntimeError("env server request failed")
+        return Rollout(
+            group_id=group_id, rollout_id=rollout_id, status=RolloutStatus.COMPLETED
+        )
 
-    async def run_test() -> list[int]:
-        finished = []
+    async def score_group(rollouts, sample):
+        return [
+            RubricOutput(reward=float(rollout.rollout_id), reward_breakdown={})
+            for rollout in rollouts
+        ]
 
-        async def run_single_rollout(*, rollout_id: int, **kwargs) -> None:
-            if rollout_id == 0:
-                raise RuntimeError("rollout 0 failed")
-            await asyncio.sleep(0.01)
-            finished.append(rollout_id)
+    worker = object.__new__(VerifiersRolloutWorker)
+    worker._generation_server = SimpleNamespace(set_generate_fn=lambda fn: None)
+    worker._run_single_rollout = run_single_rollout
+    worker.score_group = score_group
+    worker.advantage_estimator = AdvantageEstimator.Config().build()
 
-        worker = object.__new__(VerifiersRolloutWorker)
-        worker._generation_server = SimpleNamespace(set_generate_fn=lambda fn: None)
-        worker._run_single_rollout = run_single_rollout
-        with pytest.raises(RuntimeError, match="rollout 0 failed"):
-            await worker.run_group(
-                generate_fn=AsyncMock(),
-                release_session_fn=AsyncMock(),
-                sample=None,
-                group_id=1,
-                group_size=2,
-                sampling=SamplingConfig(),
-            )
-        return finished
+    group = asyncio.run(
+        worker.run_group(
+            generate_fn=AsyncMock(),
+            release_session_fn=AsyncMock(),
+            sample=None,
+            group_id=1,
+            group_size=3,
+            sampling=SamplingConfig(),
+        )
+    )
 
-    assert asyncio.run(run_test()) == [1]
+    failed, scored = group.rollouts[:num_raised], group.rollouts[num_raised:]
+    for rollout in failed:
+        assert rollout.status is RolloutStatus.ERROR_INFRA
+        assert "env server request failed" in rollout.logs["error"]
+        assert (rollout.reward, rollout.advantage) == (None, None)
+    assert [rollout.advantage for rollout in scored] == advantages
 
 
 def test_parse_sampling_config_requires_temperature_top_p_max_tokens() -> None:

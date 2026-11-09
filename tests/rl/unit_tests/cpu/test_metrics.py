@@ -421,6 +421,38 @@ class TestFold:
         }
 
 
+def test_compute_rollout_metrics_records_a_rate_per_status() -> None:
+    statuses = [
+        RolloutStatus.COMPLETED,
+        RolloutStatus.ERROR,
+        RolloutStatus.ERROR_INFRA,
+        RolloutStatus.ERROR_INFRA,
+    ]
+    rollouts = [
+        Rollout(
+            group_id=0,
+            rollout_id=rollout_id,
+            status=status,
+            reward=1.0 if status.is_trainable() else None,
+        )
+        for rollout_id, status in enumerate(statuses)
+    ]
+    metrics = m.MetricsProcessor._aggregate_metrics(
+        compute_rollout_metrics("rollout", rollouts)
+    )
+    assert metrics["rollout/unscored_rate/mean"] == 0.5
+    rates = {
+        key: value
+        for key, value in metrics.items()
+        if key.startswith("rollout/status_rate/")
+    }
+    assert rates["rollout/status_rate/error_infra/mean"] == 0.5
+    assert rates["rollout/status_rate/completed/mean"] == 0.25
+    assert rates["rollout/status_rate/truncated_length/mean"] == 0.0
+    # One per status but ONGOING, so a new status is recorded too.
+    assert len(rates) == len(RolloutStatus) - 1
+
+
 # ---------------------------------------------------------------------------
 # log_to_console (stateless utility)
 # ---------------------------------------------------------------------------
