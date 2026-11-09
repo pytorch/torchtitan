@@ -6,7 +6,8 @@ optimizations the agentic compiler found in the graph can eager mode achieve?
 Subject: the Qwen3 30B-A3B DistMoE MXFP8 loop (`../qwen3_30b_a3b_distmoe_mxfp8/`): 15 verified CuTe DSL
 kernels for 15 lifted regions (G-24 was lifted but got no kernel). In that loop's measurement setup (fake PG, one 32K-token microbatch per step, FA4,
 deterministic), GPU time per step excluding emulated collectives went 967.9 -> 679.5 ms (-288.4 ms). The
-per-kernel savings add up to 281.8 ms/step.
+per-kernel savings add up to 281.8 ms/step. Step 5 asks whether the eager port carries over to Qwen3
+235B-A22B.
 
 ## Step 1: classification of the patterns
 
@@ -324,7 +325,77 @@ What eager makes harder:
 - A real top-k router computes the expert ids from the scores, so G-47, which takes the ids as input, would
   need a different region.
 
-### This directory
+## Step 5: does the port carry over to Qwen3 235B-A22B?
+
+The question: for a sibling model, does the eager implementation still hold, so that only a different set of
+kernels must be supplied? `compare_contracts.py` compares each kernel the Functions call with the 235B
+loop's kernel for the same region (`../qwen3_235b_a22b_distmoe_mxfp8/`). It checks the inputs' and outputs'
+dtypes and ranks, and whether `reference.py` (op order and argument wiring) is identical once numeric
+literals are replaced. This is a contract analysis; eager 235B was not run.
+
+**Layout.** The 235B recipe, `graph_trainer_qwen3_235b_a22b_dist_moe_mxfp8_256gpu`, is built from the same
+eager benchmark config as the 30B recipe and then converted with `_to_graph_trainer`. So an eager twin needs
+no new settings, and every assumption of the block override holds:
+- FSDP 256 x EP 32, no TP/CP;
+- no shared experts;
+- round-robin routing and a padding mask;
+- no activation remat.
+
+**Contracts**, weighted by the 235B loop's per-kernel savings (its README section 6; 292.0 ms/step in total,
+G15 counted as 3.8 ms):
+
+| What eager needs | 235B regions | Saving | Share |
+|---|---|---:|---:|
+| Nothing but the kernel files: contract identical to 30B modulo size literals | G01, G15 (attention input); G28, G45, G19 (attention output); G47, G17, G91, G06 (router); G90, G07 (loss) | 148.0 | 51% |
+| An adapted Function | G-102 (replaces G02), G41 | 94.1 | 32% |
+| New kernels for eager's layout | G-115, G-129 (expert weight prep) | 6.6 | 2% |
+| No eager home in torchtitan | G-105, G-125, G-133, G-111 | 43.3 | 15% |
+
+What changed in each case:
+
+- **G41** returns the same four outputs in a different order. The lifted contract's output order comes from
+  the graph, so it can change between models even when the matcher is unchanged.
+- **G-102 has new boundaries.** In 30B, the attention forward region G-02 starts at the wqkv output and
+  includes the gather of cos/sin by position. G-102 differs in three ways:
+  - it takes cos/sin already gathered;
+  - it reads the q/k norm weights as the 256-element buffers that 256-way FSDP all-gathers, and slices off
+    the padding itself;
+  - its nine outputs are in a different order.
+
+  The attention-input Function would do the gather itself (as eager's RoPE does), pass the norm weights in
+  padded buffers (about 1 KB per layer) or use a regenerated kernel, and rewire the outputs: about 15
+  changed lines.
+- **Expert weight prep (G-115 / G-129).** The 30B shortcut needed experts that FSDP does not really shard;
+  235B shards them 8 ways. The 235B kernels read GraphTrainer's flat all-gather buffer and include its
+  unshard permutation (`view` / `split` / `cat`). Eager FSDP2 hands the extension hook a differently laid-out
+  gathered tensor (shard axis moved to dim 0). So the hook still exists, but the kernels must be written
+  against eager's layout.
+- **G-105, G-125, G-133, G-111** pack and pad the FSDP gradient and all-gather buckets: the expert-gradient
+  reduce-scatter bucket (31.7 ms), the dense-gradient bucket, the all-gather bucket prep and the LM-head
+  gradient padding. They exist because of GraphTrainer's bucketing. In eager, the equivalent copies are
+  FSDP2's own copy-in/copy-out inside PyTorch, which torchtitan cannot override.
+
+**Why the contracts moved.** A graph region's boundaries follow the parallel layout, because the finder
+absorbs parameter-producer chains and bucket packing (R1 and R2 in item 1 of `../TODO.md`). An eager
+Function's boundaries follow the model code, which does not change with the layout. With R1 fixed, G-102
+would most likely have kept G02's contract, and the attention-input Function would carry over unchanged.
+
+**What in this code is 30B-specific:**
+- The kernel pattern prefixes and the kernel-cache path are hard-coded in `graph_kernels.py`. A per-model
+  table from role to pattern would replace them.
+- Outputs are unpacked by position. G41 shows that this breaks between models, so they should be mapped by
+  role.
+- The Functions follow the Qwen3 block: fused QKV, q/k norm, RoPE, and an MoE with a HiMidLo gate and
+  Dist-MoE. They fit the Qwen3 family. Another architecture, e.g. DeepSeek-V3's MLA attention or GPT-OSS,
+  needs its own Functions.
+
+**Estimate for 235B:**
+- About 83% of the graph's saving is reachable with the existing Functions: 51% unchanged, 32% after
+  adapting the attention-input Function.
+- The expert weight prep needs kernels written for eager's layout (2%).
+- The remaining 15% is FSDP bucket glue that only a change to FSDP2 could address in eager.
+
+## This directory
 
 | File | Content |
 |---|---|
@@ -337,10 +408,11 @@ What eager makes harder:
 | `graph_recipe.py`, `run_graph.sh` | GraphTrainer runs with the 30B pack's kernels on this host |
 | `busy.py`, `tbdump.py` | GPU time from a profiler trace; TensorBoard scalars |
 | `classify.py`, `sites.py`, `classify.json` | step 1 |
+| `compare_contracts.py` | step 5: 30B vs 235B kernel contracts |
 
 The run directories (logs, TensorBoard, traces) are not committed (`runs/` is git-ignored).
 
-### Reproduce
+## Reproduce
 
 From the repo root, with the 30B loop's kernel cache in place (`graph_kernels.py` loads the kernels from
 `../qwen3_30b_a3b_distmoe_mxfp8/kernel_cache/`):
@@ -360,4 +432,6 @@ PACKS=<graph-trainer-kernel-packs checkout> ./run_graph.sh 0 graph_pack_prof run
 # GPU time and scalars
 python busy.py runs/gk_all5_nolc_prof/profile/iteration_10/rank0_trace.json.gz
 python tbdump.py runs/eager_nolc_prof runs/gk_all5_nolc_prof
+# Step 5: 30B vs 235B kernel contracts (CPU)
+python compare_contracts.py
 ```
