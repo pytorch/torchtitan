@@ -513,6 +513,11 @@ class VLLMModelWrapper(Module):
             model_kwargs = {}
             if self._dist_moe_runtime is not None:
                 padding_mask = get_forward_context().is_padding
+                if padding_mask is None:
+                    raise RuntimeError(
+                        "vLLM set no ForwardContext.is_padding for this forward, so "
+                        "Dist-MoE can't tell padding rows from real ones."
+                    )
                 if num_padding_rows:
                     padding_mask = F.pad(
                         padding_mask, (0, num_padding_rows), value=True
