@@ -61,12 +61,13 @@ def add_extra_vllm_engine_args(
     Raises ``ValueError`` for keys TorchTitan already set in ``engine_kwargs`` or
     derives from a config field, so they cannot silently diverge from it.
     """
-    # EngineArgs that TorchTitan sets only when the mapped config field is set (or
-    # derives from it), so they may be absent from engine_kwargs.
+    # Keys TorchTitan derives from a config field: the error names that field. Keys set
+    # only when their field is set must be listed, since engine_kwargs may lack them.
     config_field_by_engine_arg = {
         "max_num_batched_tokens": "Generator.Config.max_num_batched_tokens",
         "compilation_config": "VLLMEngine.Config.cuda_graph",
         "seed": "Generator.Config.debug.seed",
+        "watermark": "VLLMEngine.Config.watermark",
     }
     owned_keys = sorted(
         extra_engine_args.keys()
@@ -99,10 +100,27 @@ class VLLMEngine(GenerationEngine):
         cuda_graph: VLLMCudaGraphConfig = field(default_factory=VLLMCudaGraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
 
+        watermark: float = 0.1
+        """vLLM's ``EngineArgs.watermark``: the fraction of KV cache blocks that must stay
+        free after admitting a waiting or preempted request. vLLM's default is 0.0.
+
+        0.1 admits only while KV usage stays <= 90%, so running requests have 10% of the
+        blocks to grow into before vLLM preempts one. Raise it when
+        ``generator/num_preemptions`` is high.
+        Lower it when KV usage sits near ``1 - watermark`` while requests wait.
+
+        Example, 10,000 blocks, 500 free, a waiting request needs 100 (400 free after):
+
+            watermark=0.0    admitted
+            watermark=0.03   admitted (400 >= 300)
+            watermark=0.1    waits (400 < 1,000)
+            no request running: admitted at any watermark
+        """
+
         extra_engine_args: dict[str, Any] = field(default_factory=dict)
         """Additional keyword arguments passed to vLLM's ``EngineArgs``, for engine
-        options without a dedicated field (e.g. ``{"watermark": 0.03}``). vLLM
-        validates them. Keys that TorchTitan sets itself, or derives from a config
+        options without a dedicated field (e.g. ``{"long_prefill_token_threshold": 4096}``).
+        vLLM validates them. Keys that TorchTitan sets itself, or derives from a config
         field (e.g. ``max_num_batched_tokens``), raise a ``ValueError``; see
         ``add_extra_vllm_engine_args``."""
 
@@ -273,6 +291,7 @@ class VLLMEngine(GenerationEngine):
         engine_kwargs["max_num_seqs"] = max_num_seqs
         if max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
+        engine_kwargs["watermark"] = self.config.watermark
         # Smaller `priority` runs first and is preempted last; we pass `EngineRequest.group_id`
         # (-1 for all validation), so older groups have higher priority (see its docstring).
         # TODO: validation (priority -1) runs before training. Revisit once validation overlaps training.
