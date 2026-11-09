@@ -225,14 +225,15 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
         if gen_config.debug.batch_invariant:
             set_batch_invariance(True)
-            # The v2 logprob Triton kernel bypasses the aten overrides. Apply the
-            # same generator-side patch the production Generator does.
-            from torchtitan.rl.generator.vllm.batch_invariance import (
-                force_logprobs_fn_for_batch_invariance,
-            )
-
-            force_logprobs_fn_for_batch_invariance()
         backend_enum = AttentionBackendEnum.CUSTOM
+    if gen_config.debug.batch_invariant:
+        # The v2 logprob and temperature Triton kernels bypass the aten overrides.
+        # Apply the same generator-side patch the production Generator does.
+        from torchtitan.rl.generator.vllm.batch_invariance import (
+            patch_vllm_logprob_and_temperature_kernels,
+        )
+
+        patch_vllm_logprob_and_temperature_kernels()
 
     _set_generator_determinism(gen_config.debug)
 

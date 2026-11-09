@@ -78,10 +78,12 @@ back to the trainer's ops:
     (`apply_attention_sink_rescale`, `sigmoid(lse - sinks)`); the vLLM wrapper's
     `_inject_attention_sinks` installs that same rescale as the generator
     attention's `out_transform`, so the sink math matches the trainer.
-- **`force_logprobs_fn_for_batch_invariance`:** vLLM's v2 GPU sampler computes
+- **`patch_vllm_logprob_and_temperature_kernels`:** vLLM's v2 GPU sampler computes
   per-token logprobs with a fused Triton kernel that inlines
   `log(softmax(logits))` and never calls PyTorch ops. Replaced with the trainer's
-  `compute_logprobs`, so both share one logprob code path.
+  `compute_logprobs`, so both share one logprob code path. Its Triton
+  temperature kernel (`apply_temperature`) is replaced too: its fp32 division
+  differs from PyTorch's by up to 1 ulp.
 
 **RoPE cache dtype (`freqs_cis`):** `freqs_cis` is stored in fp32 and passed as a
 forward input to each `TransformerBlock`. FSDP2's

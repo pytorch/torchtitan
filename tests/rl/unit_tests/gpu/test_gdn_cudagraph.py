@@ -31,7 +31,7 @@ from torchtitan.rl.generator.vllm.attention.linear_attention import (
     TorchTitanLinearAttentionMetadata,
 )
 from torchtitan.rl.generator.vllm.batch_invariance import (
-    force_logprobs_fn_for_batch_invariance,
+    patch_vllm_logprob_and_temperature_kernels,
 )
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.forward_context import (
@@ -280,7 +280,7 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
     enable_batch_invariant_mode()
     set_batch_invariance(batch_invariant)
     if batch_invariant:
-        force_logprobs_fn_for_batch_invariance()
+        patch_vllm_logprob_and_temperature_kernels()
         torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
