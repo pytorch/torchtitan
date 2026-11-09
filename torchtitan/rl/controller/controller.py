@@ -815,15 +815,13 @@ class Controller(Configurable):
                 rollout for group in rollout_groups for rollout in group.rollouts
             ],
         )
-        # Turn metrics keep their own keys, and training logs the same ones. Rename validation's so W&B
-        # keeps them apart from training's; keys that start with "validation" stay.
+        # Training logs the same turn metrics, so prefix validation's to keep them apart in W&B:
+        #   generator/queue_time_ms -> validation_generator/queue_time_ms
+        #   math_verify/timeouts    -> validation_math_verify/timeouts
+        # compute_rollout_metrics already names every other key validation/* or validation_reward*.
         for index, metric in enumerate(metrics):
-            # generator/queue_time_ms -> validation_generator/queue_time_ms
-            if metric.key.startswith("generator/"):
+            if not metric.key.startswith("validation"):
                 metrics[index] = m.Metric(f"validation_{metric.key}", metric.value)
-            # math_verify/timeouts -> validation/math_verify/timeouts
-            elif not metric.key.startswith("validation"):
-                metrics[index] = m.Metric(f"validation/{metric.key}", metric.value)
         metrics.append(
             m.Metric("validation/group_failures", m.Sum(float(num_failed_groups)))
         )

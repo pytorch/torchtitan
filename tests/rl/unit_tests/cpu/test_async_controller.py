@@ -965,8 +965,8 @@ def test_validation_schedule(
 
 
 def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
-    """Validation renames its turns' metrics: `generator/*` -> `validation_generator/*`, a rubric's key ->
-    `validation/<key>`. Two passes never share a group id."""
+    """Validation prefixes its turns' metrics with `validation_` (`generator/x` -> `validation_generator/x`,
+    `math_verify/x` -> `validation_math_verify/x`). Two passes never share a group id."""
 
     async def run_group_rollouts(*, group_id: int, **kwargs) -> RolloutGroup:
         turn = RolloutTurn(
@@ -1014,6 +1014,6 @@ def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
         [-3, -4],
     ]
     assert keys["validation_generator/queue_time_ms/mean"] == 2.0
-    assert keys["validation/math_verify/timeouts/sum"] == 2.0
+    assert keys["validation_math_verify/timeouts/sum"] == 2.0
     assert "generator/queue_time_ms/mean" not in keys
     assert "math_verify/timeouts/sum" not in keys
