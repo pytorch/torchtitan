@@ -24,7 +24,7 @@ Example of `compile_friendly()`: MoE dispatch/combine as a gather-sum costs +3.8
 | `max_pointwise_cat_inputs=0`, `max_complex_pointwise_cat_inputs=0` | per-input cat copies (ConcatKernel) | wins on some shapes, loses on others (patterns.md 2) |
 | `unroll_reductions_threshold=K+1` | unrolls a static small reduction | no effect on symbolic sizes |
 | `triton.mix_order_reduction_non_strict_mode=True` | no guards from the mix-order heuristic | time-neutral in our cases |
-| `coordinate_descent_tuning=True` | autotunes reductions (HcPost backward 739 -> 594 µs) | doubles cold compile, can slow decode shapes; turn off when `torch.are_deterministic_algorithms_enabled()` (Inductor only skips it on its own `config.deterministic`) |
+| `coordinate_descent_tuning=True` | autotunes reductions (HcPost backward 739 -> 594 µs) | doubles cold compile, can slow decode shapes; `local_compile` turns it off when `torch.are_deterministic_algorithms_enabled()` (or `TORCHINDUCTOR_DETERMINISTIC=1`) or in batch-invariant mode (the size-1 matmul rewrite stays without the tuning: Kimi `attention_residual` 5.7x slower) |
 | `triton.prefer_nd_tiling=True` | tiles `[T, N, D]` as rows x D so a symbolic small N isn't divided into every index | Kimi dynamic-width backward 1409 -> 571 µs |
 | `assume_32bit_indexing=True` | int32 index math | hard compile failure once T*N*D > int32; we rejected it |
 
