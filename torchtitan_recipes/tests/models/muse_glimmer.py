@@ -40,12 +40,13 @@ from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
 from torchtitan_recipes.data import c4_document_capacity
+from torchtitan_recipes.models.muse_spark import MuseGlimmerPatchGridResize
 
 
 # Multimodal special tokens for the Muse Glimmer debug flavor. The debug tokenizer asset
 # (``./tests/assets/tokenizer``) already defines these (IDs 2004-2008, all <
 # debugmodel_mm's vocab_size=2048), so no asset change is needed.
-MUSE_GLIMMER_SPECIAL_TOKENS = {
+MUSE_GLIMMER_DEBUG_SPECIAL_TOKENS = {
     "image_token": "<|image_pad|>",
     "video_token": "<|video_pad|>",
     "vision_start_token": "<|vision_start|>",
@@ -54,10 +55,10 @@ MUSE_GLIMMER_SPECIAL_TOKENS = {
 }
 
 # ``VisionProcessor.Config`` fields, used like the special tokens:
-# ``VisionProcessor.Config(**MUSE_GLIMMER_VISION_PROCESSOR_KWARGS)``. The patch sizes match
-# the NaViT encoder (``patch_size``, ``patch_temporal``, ``downsample_factor``),
-# and raster order matches its row-major patch layout.
-MUSE_GLIMMER_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
+# ``VisionProcessor.Config(**MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS)``. The patch
+# sizes match the NaViT encoder (``patch_size``, ``patch_temporal``,
+# ``downsample_factor``), and raster order matches its row-major patch layout.
+MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
     "patch_size": 14,
     "temporal_patch_size": 2,
     "spatial_merge_size": 2,
@@ -67,10 +68,33 @@ MUSE_GLIMMER_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
     "patch_order": "raster",
 }
 
+# Multimodal special tokens of the released Muse Glimmer 30B tokenizer.
+MUSE_GLIMMER_30B_SPECIAL_TOKENS = {
+    "image_token": "<|patch|>",
+    "video_token": "<|video|>",
+    "vision_start_token": "<|image_start|>",
+    "vision_end_token": "<|image_end|>",
+    "pad_token": "<|finetune_right_pad|>",
+}
+
+# The released Muse Glimmer 30B image processor: closest-aspect patch grid up to
+# 4096 merged tokens, LANCZOS. Images only.
+MUSE_GLIMMER_30B_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
+    "patch_size": 14,
+    "temporal_patch_size": 2,
+    "spatial_merge_size": 2,
+    "image_mean": (0.5, 0.5, 0.5),
+    "image_std": (0.5, 0.5, 0.5),
+    "resize": MuseGlimmerPatchGridResize.Config(max_image_tokens=4096),
+    "patch_order": "raster",
+    "image_interpolation_mode": "lanczos",
+}
+
 
 def _muse_glimmer_mm_dataloader(dataset_name: str) -> GrainDataLoader.Config:
     """Build the shared multimodal dataloader config. The trainer config also
-    needs ``vision_processor`` built from ``MUSE_GLIMMER_VISION_PROCESSOR_KWARGS``.
+    needs a ``vision_processor``, e.g. built from
+    ``MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS``.
 
     ``build_mrope_positions=False`` since Muse Glimmer uses 1D ComplexRoPE on
     the LLM side, not MRoPE.
@@ -170,10 +194,12 @@ def muse_glimmer_debugmodel_mm(
             ),
         ),
         hf_assets_path="./tests/assets/tokenizer",
-        tokenizer=MultiModalTokenizer.Config(**MUSE_GLIMMER_SPECIAL_TOKENS),
+        tokenizer=MultiModalTokenizer.Config(**MUSE_GLIMMER_DEBUG_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=mm_model_spec,
-        vision_processor=VisionProcessor.Config(**MUSE_GLIMMER_VISION_PROCESSOR_KWARGS),
+        vision_processor=VisionProcessor.Config(
+            **MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS
+        ),
         dataloader=_muse_glimmer_mm_dataloader("cc12m-test"),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
@@ -259,9 +285,12 @@ def muse_glimmer_30b_mm(seq_len: int | None = None) -> Trainer.Config:
             ),
         ),
         hf_assets_path="./assets/hf/Muse-Glimmer-30B",
-        tokenizer=MultiModalTokenizer.Config(**MUSE_GLIMMER_SPECIAL_TOKENS),
+        tokenizer=MultiModalTokenizer.Config(**MUSE_GLIMMER_30B_SPECIAL_TOKENS),
         model=model_config,
-        vision_processor=VisionProcessor.Config(**MUSE_GLIMMER_VISION_PROCESSOR_KWARGS),
+        # The released image processor, not the debug pixel budget.
+        vision_processor=VisionProcessor.Config(
+            **MUSE_GLIMMER_30B_VISION_PROCESSOR_KWARGS
+        ),
         dataloader=_muse_glimmer_mm_dataloader("cc12m"),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
