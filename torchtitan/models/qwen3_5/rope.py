@@ -15,7 +15,7 @@ class MRoPE(CosSinRoPE):
     """Multi-dimensional RoPE for Qwen3.5 temporal/height/width positions.
 
     Standard per-layer RoPE: each full-attention layer owns an ``MRoPE`` and
-    applies it through ``RoPE.forward`` -> ``_reshape_cache`` -> ``apply_rotary_emb``.
+    applies it through ``CosSinRoPE.forward`` -> ``_reshape_cache`` -> ``apply_rotary_emb``.
     The only override is ``_reshape_cache``: for 2D ``(num_tokens, 3)`` MRoPE
     positions it builds an interleaved cos/sin cache; for 1D
     ``(num_tokens,)`` text
@@ -41,6 +41,7 @@ class MRoPE(CosSinRoPE):
                 f"got {config.mrope_section}."
             )
         super().__init__(config)
+        self.mrope_section = config.mrope_section
 
     def _reshape_cache(
         self,
@@ -75,9 +76,6 @@ class MRoPE(CosSinRoPE):
 
         The scatter runs on plain local tensors carrying SPMD annotations.
         """
-        cfg = self.config
-        assert isinstance(cfg, MRoPE.Config)
-
         rope_cache = self.cache
         pos = position_ids
 
@@ -96,7 +94,7 @@ class MRoPE(CosSinRoPE):
 
         half = head_dim // 2
         for dim, offset in enumerate((1, 2), start=1):
-            length = cfg.mrope_section[dim] * 3
+            length = self.mrope_section[dim] * 3
             low = torch.arange(offset, length, 3, device=rope_cache.device)
             col_indices = torch.cat([low, low + half])
             dim_pos = pos[..., dim].long()

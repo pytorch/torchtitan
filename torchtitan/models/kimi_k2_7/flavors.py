@@ -49,6 +49,7 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_colwise_sharding_config,
     vision_inner_attention_sharding_config,
     vision_invariant_linear_sharding_config,
+    vision_rope_sharding_config,
     vision_rowwise_sharding_config,
 )
 from torchtitan.models.deepseek_v3.flavors import build_mla_moe_layers
@@ -57,7 +58,6 @@ from .qk_clip import QKClipFlexInnerAttention
 from .sharding import (
     moonvit_encoder_sharding_config,
     moonvit_projector_sharding_config,
-    moonvit_rotary_sharding_config,
     sequence_parallel_first_layer_sharding_config,
 )
 
@@ -176,6 +176,7 @@ def _vision_encoder_config(
     init_pos_emb_height: int = 64,
     init_pos_emb_width: int = 64,
     rope_theta: float = 10000.0,
+    max_rope_positions: int = 512,
     merge_kernel_size: list[int] | None = None,
     text_hidden_size: int = 7168,
 ) -> KimiK25VisionEncoder.Config:
@@ -192,6 +193,12 @@ def _vision_encoder_config(
         attn=VisionAttention.Config(
             dim=dim,
             num_heads=num_heads,
+            rope=VisionRotaryEmbedding2D.Config(
+                dim=head_dim,
+                max_context_length=max_rope_positions,
+                theta=rope_theta,
+                sharding_config=vision_rope_sharding_config(),
+            ),
             wq=_vl_linear(
                 dim,
                 dim,
@@ -211,7 +218,7 @@ def _vision_encoder_config(
             inner_attention=FlexInnerAttention.Config(
                 sharding_config=vision_inner_attention_sharding_config()
             ),
-            sharding_config=vision_attention_sharding_config(rope_cache_dp=spmd.V),
+            sharding_config=vision_attention_sharding_config(positions_dp=spmd.V),
         ),
         mlp=VisionMLP.Config(
             fc1=_vl_linear(
@@ -235,13 +242,6 @@ def _vision_encoder_config(
         patch_embed_proj=_vl_linear(
             patch_dim, dim, sharding_config=vision_invariant_linear_sharding_config()
         ),
-        rotary_pos_emb=VisionRotaryEmbedding2D.Config(
-            head_dim=head_dim,
-            theta=rope_theta,
-            sharding_config=moonvit_rotary_sharding_config(),
-        ),
-        # The encoder supplies the 2D cache, so no internal positions are needed.
-        rope_apply=ComplexRoPE.Config(dim=head_dim, max_context_length=0),
         block=block,
         final_norm=_vl_layernorm(dim),
         projector=VisionProjector.Config(

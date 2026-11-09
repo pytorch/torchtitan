@@ -26,7 +26,41 @@ from torchtitan.models.common.rope import (
     RoPE,
     YaRNScalingConfig,
 )
+from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
+from torchtitan.models.muse_spark.vision_encoder import VisionRopeFreq
 from torchtitan.models.qwen3_5.rope import MRoPE
+from torchtitan.models.qwen3_5.vision_encoder import VisionRotaryEmbedding
+
+
+def test_vision_rope_matches_prepared_cache():
+    torch.manual_seed(42)
+    positions = torch.tensor([[1, 2], [3, 4], [7, 1]])
+    query = torch.randn(3, 2, 16, requires_grad=True)
+    key = torch.randn_like(query, requires_grad=True)
+    grad_outputs = (torch.randn_like(query), torch.randn_like(key))
+    inv_freq = 1.0 / (10000.0 ** (torch.arange(0, 8, 2).float() / 8))
+    row, col = positions[:, :1] * inv_freq, positions[:, 1:] * inv_freq
+    interleaved = torch.stack((col, row), dim=-1).flatten(-2)
+    contiguous = torch.cat((col, row), dim=-1)
+    rotate_half = torch.cat((row, col, row, col), dim=-1)
+    for rope_cls, cache in (
+        (
+            VisionRotaryEmbedding2D,
+            torch.polar(torch.ones_like(interleaved), interleaved),
+        ),
+        (VisionRopeFreq, torch.complex(contiguous.cos(), contiguous.sin())),
+        (VisionRotaryEmbedding, torch.cat((rotate_half.cos(), rotate_half.sin()), -1)),
+    ):
+        rope = rope_cls.Config(dim=16, max_context_length=8).build()
+        expected = rope.apply_rotary_emb(query, key, cache.unsqueeze(1))
+        actual = rope(query, key, positions)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(
+            torch.autograd.grad(actual, (query, key), grad_outputs),
+            torch.autograd.grad(expected, (query, key), grad_outputs),
+            rtol=0,
+            atol=0,
+        )
 
 
 class TestApplyRotaryEmbCosSin(unittest.TestCase):
@@ -129,31 +163,10 @@ class TestRoPEPositionBoundsComplex(unittest.TestCase):
 
     def test_valid_positions(self):
         num_tokens = 16
-        xq = torch.randn(num_tokens, 4, self.head_dim, requires_grad=True)
-        xk = torch.randn(num_tokens, 4, self.head_dim, requires_grad=True)
+        xq = torch.randn(num_tokens, 4, self.head_dim)
+        xk = torch.randn(num_tokens, 4, self.head_dim)
         positions = torch.arange(num_tokens) % 8
-        with torch.device("meta"):
-            rope_apply = ComplexRoPE.Config(
-                dim=self.head_dim, max_context_length=0
-            ).build()
-        rope_apply.to_empty(device="cpu")
-        rope_apply.init_states()
-        self.assertEqual(rope_apply.cache.shape, (0, self.head_dim // 2))
-        self.assertFalse(rope_apply.state_dict())
-        cache = self.rope._reshape_cache(xq, positions)
-        grad_outputs = (torch.randn_like(xq), torch.randn_like(xk))
-        for inverse in (False, True):
-            expected = self.rope(xq, xk, positions, inverse=inverse)
-            actual = rope_apply(query=xq, key=xk, rope_cache=cache, inverse=inverse)
-            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-            torch.testing.assert_close(
-                torch.autograd.grad(actual, (xq, xk), grad_outputs),
-                torch.autograd.grad(expected, (xq, xk), grad_outputs),
-                rtol=0,
-                atol=0,
-            )
-        with self.assertRaisesRegex(ValueError, "cannot be supplied together"):
-            rope_apply(xq, xk, positions, rope_cache=cache)
+        self.rope(xq, xk, positions)
 
     def test_out_of_range_positions_raises(self):
         num_tokens = 4
@@ -181,21 +194,10 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
 
     def test_valid_positions(self):
         num_tokens = 16
-        xq = torch.randn(num_tokens, 4, self.head_dim, requires_grad=True)
-        xk = torch.randn(num_tokens, 4, self.head_dim, requires_grad=True)
+        xq = torch.randn(num_tokens, 4, self.head_dim)
+        xk = torch.randn(num_tokens, 4, self.head_dim)
         positions = torch.arange(num_tokens) % 8
-        rope_apply = CosSinRoPE.Config(dim=self.head_dim, max_context_length=0).build()
-        cache = self.rope._reshape_cache(xq, positions)
-        grad_outputs = (torch.randn_like(xq), torch.randn_like(xk))
-        expected = self.rope(xq, xk, positions)
-        actual = rope_apply(xq, xk, rope_cache=cache)
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-        torch.testing.assert_close(
-            torch.autograd.grad(actual, (xq, xk), grad_outputs),
-            torch.autograd.grad(expected, (xq, xk), grad_outputs),
-            rtol=0,
-            atol=0,
-        )
+        self.rope(xq, xk, positions)
 
     def test_out_of_range_positions_raises(self):
         num_tokens = 4
