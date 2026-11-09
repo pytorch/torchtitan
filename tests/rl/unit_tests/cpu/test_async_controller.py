@@ -800,10 +800,19 @@ async def _block_forever(*args, **kwargs) -> None:
     await asyncio.Event().wait()
 
 
+async def _train_one_step(*args, **kwargs) -> None:
+    await asyncio.sleep(0)
+
+
 def _run_with_generator_watcher(
-    watcher, *, trainer_loop=_block_forever, validate=None, validation=None
+    watcher,
+    *,
+    trainer_loop=_block_forever,
+    validate=None,
+    validation=None,
+    on_close=None,
 ) -> Controller:
-    """Run Controller.run with every stage but the engine-loop watcher stubbed to block."""
+    """Run Controller.run with stub loops: `watcher` waits on the engine loops, `trainer_loop` trains, the rest block."""
     controller = object.__new__(Controller)
     controller.config = SimpleNamespace(
         async_loop=SimpleNamespace(
@@ -815,7 +824,9 @@ def _run_with_generator_watcher(
             max_offpolicy_steps=None,
             num_prompts_per_train_step=1,
             group_buffer=SimpleNamespace(
-                build=lambda **kwargs: SimpleNamespace(close=AsyncMock())
+                build=lambda **kwargs: SimpleNamespace(
+                    close=AsyncMock(side_effect=on_close)
+                )
             ),
             validation=validation or ValidationConfig(),
         ),
@@ -868,41 +879,62 @@ def test_run_fails_when_the_engine_loops_exit_mid_run() -> None:
 
 
 @pytest.mark.parametrize(
-    "start_pass_ends, validate_after_training, started_steps, logged_steps",
+    "start_pass, validate_after_training, started_steps, logged_steps",
     [
-        # Ends during the last step: run()'s last check logs it at step 1.
-        (True, False, [0], [1]),
+        # Ends before training does: the call after training logs it at step 1.
+        ("ends", False, [0], [1]),
+        # Ends while run()'s finally awaits group_buffer.close(): also logged at step 1.
+        ("ends_during_close", False, [0], [1]),
         # Still running: run() cancels it (else run() hangs) and logs nothing.
-        (False, False, [0], []),
+        ("runs", False, [0], []),
         # Cancelled, then the pass after training runs and is logged at step 1.
-        (False, True, [0, 1], [1]),
+        ("runs", True, [0, 1], [1]),
+        # Failed: the call after training raises its error.
+        ("fails", False, [0], None),
     ],
 )
 def test_run_ends_validation(
-    start_pass_ends, validate_after_training, started_steps, logged_steps
+    start_pass, validate_after_training, started_steps, logged_steps
 ) -> None:
     """1 training step: what run() does with the start pass and the pass after training."""
     started = []
+    close_started = asyncio.Event()
 
     async def validate(self, *, step: int) -> list[m.Metric]:
         started.append(step)
-        if step == 0 and not start_pass_ends:
+        if step == 0 and start_pass == "ends_during_close":
+            await close_started.wait()
+        if step == 0 and start_pass == "runs":
             await asyncio.Event().wait()
+        if step == 0 and start_pass == "fails":
+            raise RuntimeError("validation failed")
         return [m.Metric(f"pass_{step}", m.Mean(1.0))]
 
-    async def train(*args, **kwargs) -> None:
-        await asyncio.sleep(0)
+    async def close() -> None:
+        close_started.set()
+        await asyncio.sleep(0)  # the pass returns
 
-    controller = _run_with_generator_watcher(
-        _block_forever,
-        trainer_loop=train,
-        validate=validate,
-        validation=ValidationConfig(validate_after_training=validate_after_training),
-    )
+    def run() -> Controller:
+        return _run_with_generator_watcher(
+            _block_forever,
+            trainer_loop=_train_one_step,
+            validate=validate,
+            validation=ValidationConfig(
+                validate_after_training=validate_after_training
+            ),
+            on_close=close,
+        )
+
+    if start_pass == "fails":
+        with pytest.raises(RuntimeError, match="validation failed"):
+            run()
+    else:
+        controller = run()
+        assert [
+            call.kwargs["step"]
+            for call in controller.metrics_processor.log.call_args_list
+        ] == logged_steps
     assert started == started_steps
-    assert [
-        call.kwargs["step"] for call in controller.metrics_processor.log.call_args_list
-    ] == logged_steps
 
 
 @pytest.mark.parametrize(
@@ -953,7 +985,7 @@ def test_validation_schedule(
             if step - 3 in end_events:
                 end_events[step - 3].set()
                 await asyncio.sleep(0)  # the pass returns
-            controller._maybe_run_validation(step=step)
+            await controller._maybe_run_validation(step=step)
             await asyncio.sleep(0)  # a new pass starts
 
     asyncio.run(run_steps())
