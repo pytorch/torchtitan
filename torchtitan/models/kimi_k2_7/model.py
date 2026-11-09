@@ -286,25 +286,10 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
             # resumes as global batch sharding after the multimodal region.
             spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
 
-        with spmd.no_typecheck():
-            aux_loss_denominator = (
-                None if aux_loss_denominators is None else aux_loss_denominators[0]
-            )
-        for layer in self.layers.values():
-            layer_attention_metadata = (
-                None
-                if attention_metadata is None
-                else attention_metadata.get(type(layer.attention.inner_attention))
-            )
-            x = layer(
-                x,
-                layer_attention_metadata,
-                positions,
-                padding_mask=padding_mask,
-                aux_loss_denominator=aux_loss_denominator,
-            )
-
-        x = self.norm(x) if self.norm is not None else x
-        if self._skip_lm_head:
-            return x
-        return self.lm_head(x) if self.lm_head is not None else x
+        return self.forward_embeddings(
+            x,
+            positions,
+            attention_metadata,
+            padding_mask=padding_mask,
+            aux_loss_denominators=aux_loss_denominators,
+        )

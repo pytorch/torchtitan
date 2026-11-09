@@ -703,24 +703,10 @@ class Qwen35Model(MultimodalModel):
         # ``positions`` is 3D MRoPE (batch, seq, 3) for multimodal batches and
         # 2D (batch, seq) for text; ``preprocess_inputs`` resolved which one to
         # forward. The per-layer MRoPE dispatches on rank.
-        with spmd.no_typecheck():
-            aux_loss_denominator = (
-                None if aux_loss_denominators is None else aux_loss_denominators[0]
-            )
-        for layer in self.layers.values():
-            x = layer(
-                x,
-                (
-                    attention_metadata.get(type(layer.attention.inner_attention))
-                    if attention_metadata is not None
-                    else None
-                ),
-                positions,
-                padding_mask=padding_mask,
-                aux_loss_denominator=aux_loss_denominator,
-            )
-
-        x = self.norm(x) if self.norm is not None else x
-        if self._skip_lm_head:
-            return x
-        return self.lm_head(x) if self.lm_head is not None else x
+        return self.forward_embeddings(
+            x,
+            positions,
+            attention_metadata,
+            padding_mask=padding_mask,
+            aux_loss_denominators=aux_loss_denominators,
+        )
