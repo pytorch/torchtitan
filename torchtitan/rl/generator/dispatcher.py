@@ -114,7 +114,6 @@ class RequestDispatcher:
     def rank0_register_generation(
         self,
         request_id: str,
-        metrics_prefix: str,
         reply: concurrent.futures.Future[Completion],
     ) -> None:
         """RANK 0: register a generation taken off the queue, whose ``reply`` is resolved with
@@ -122,7 +121,7 @@ class RequestDispatcher:
         if request_id in self._rank0_outstanding_generations:
             raise AssertionError(f"request_id {request_id!r} is already in flight")
         self._rank0_outstanding_generations[request_id] = OutstandingGeneration(
-            reply=reply, metrics_prefix=metrics_prefix
+            reply=reply
         )
 
     def rank0_num_outstanding_generations(self) -> int:
@@ -257,23 +256,19 @@ class RequestDispatcher:
         self, finished_requests: list[FinishedRequest], policy_version: int
     ) -> None:
         """RANK 0: build each finished request's ``Completion``, including its metrics (rank 0
-        is the only place that knows the request's ``metrics_prefix`` and admitted version), then
-        resolve its reply."""
+        is the only place that knows the request's admitted version), then resolve its reply."""
         for finished in finished_requests:
             # in flight when this one finished (includes itself; counted before the pop)
             inflight_requests_at_completion = float(
                 len(self._rank0_outstanding_generations)
             )
             generation = self._rank0_outstanding_generations.pop(finished.request_id)
-            metrics_prefix = generation.metrics_prefix
 
-            metrics = _prepare_generation_request_metrics(
-                finished.metrics_inputs, prefix=metrics_prefix
-            )
+            metrics = _prepare_generation_request_metrics(finished.metrics_inputs)
             for metric_type in [m.Max, m.Mean]:
                 metrics.append(
                     m.Metric(
-                        f"{metrics_prefix}/inflight_requests_at_completion",
+                        "generator/inflight_requests_at_completion",
                         metric_type(inflight_requests_at_completion),
                     )
                 )
@@ -349,8 +344,6 @@ class OutstandingGeneration:
     the `Completion`, and what it needs to build that `Completion`."""
 
     reply: concurrent.futures.Future[Completion]
-    metrics_prefix: str
-    """Namespaces this generation's metrics (e.g. `generator` vs `validation_generator`)."""
     min_policy_version: int = field(init=False)
     """Policy version the request was admitted (sampled) under; the max is read at finish (see `Completion`)."""
 
@@ -371,9 +364,7 @@ class _RejectedRequests:
     requests: list[tuple[str, Exception]]
 
 
-def _prepare_generation_request_metrics(
-    inputs: RequestMetricsInputs, *, prefix: str
-) -> list[m.Metric]:
+def _prepare_generation_request_metrics(inputs: RequestMetricsInputs) -> list[m.Metric]:
     """Prepare per-request generation metrics from the raw inputs.
 
     Caveat for vLLM under `SamplingParams.n > 1`: vLLM stores one `RequestStateStats`
@@ -395,19 +386,19 @@ def _prepare_generation_request_metrics(
 
     metric_values: dict[str, float] = {}
     if inputs.num_cached_tokens is not None:
-        metric_values[f"{prefix}/num_cached_tokens"] = inputs.num_cached_tokens
+        metric_values["generator/num_cached_tokens"] = inputs.num_cached_tokens
 
     if inputs.has_stats:
-        metric_values[f"{prefix}/queue_time_ms"] = (
+        metric_values["generator/queue_time_ms"] = (
             inputs.scheduled_ts - inputs.queued_ts
         ) * 1000
-        metric_values[f"{prefix}/num_preemptions"] = inputs.num_preemptions
+        metric_values["generator/num_preemptions"] = inputs.num_preemptions
 
         if inputs.num_generation_tokens > 0:
-            metric_values[f"{prefix}/time_to_first_token_ms"] = (
+            metric_values["generator/time_to_first_token_ms"] = (
                 inputs.first_token_latency * 1000
             )
-            metric_values[f"{prefix}/prefill_time_ms"] = (
+            metric_values["generator/prefill_time_ms"] = (
                 inputs.first_token_ts - inputs.scheduled_ts
             ) * 1000
 
@@ -415,9 +406,9 @@ def _prepare_generation_request_metrics(
             first_to_last_token_ms = (
                 inputs.last_token_ts - inputs.first_token_ts
             ) * 1000
-            metric_values[f"{prefix}/decode_time_ms"] = first_to_last_token_ms
+            metric_values["generator/decode_time_ms"] = first_to_last_token_ms
             metric_values[
-                f"{prefix}/inter_token_latency_ms"
+                "generator/inter_token_latency_ms"
             ] = first_to_last_token_ms / (inputs.num_generation_tokens - 1)
 
     # Emit each value with both Mean and Max aggregators.

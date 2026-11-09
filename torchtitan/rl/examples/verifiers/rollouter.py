@@ -251,6 +251,7 @@ class VerifiersRollouter(Rollouter):
         """Run sibling rollouts through Verifiers, then compute advantages."""
         if self._generation_server is None:
             raise RuntimeError("Verifiers rollouter is not initialized")
+        # One slot serves every group: no generate_fn carries a label (the controller renames validation's metrics).
         self._generation_server.set_generate_fn(generate_fn)
         results = await asyncio.gather(
             *(
