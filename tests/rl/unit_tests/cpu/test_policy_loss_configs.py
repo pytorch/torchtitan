@@ -111,6 +111,24 @@ def test_rocm_batch_invariance_requires_rocm_10():
             Controller(config)
 
 
+def test_rocm_batch_invariance_rejects_cuda_graphs():
+    pytest.importorskip("vllm")
+    pytest.importorskip("renderers")
+    from torchtitan.rl.controller.controller import Controller
+
+    alphabet_sort = importlib.import_module(_ALPHABET)
+    config = alphabet_sort.rl_grpo_qwen3_0_6b_flex_batch_invariant()
+
+    with (
+        patch.object(torch.version, "hip", "7.15.26333"),
+        patch.object(torch, "__version__", "2.16.0.dev20261018+rocm10.0"),
+    ):
+        with pytest.raises(ValueError, match="cuda_graph.mode='NONE'"):
+            Controller(config)
+        config.generator.engine.cuda_graph.mode = "NONE"
+        config._validate_batch_invariance()
+
+
 def test_batch_invariance_requires_matching_generator_debug_config():
     pytest.importorskip("vllm")
     pytest.importorskip("renderers")
@@ -118,6 +136,7 @@ def test_batch_invariance_requires_matching_generator_debug_config():
 
     alphabet_sort = importlib.import_module(_ALPHABET)
     config = alphabet_sort.rl_grpo_qwen3_0_6b_flex_batch_invariant()
+    config.generator.engine.cuda_graph.mode = "NONE"
 
     config.generator.debug = dataclasses.replace(
         config.generator.debug, batch_invariant=False
@@ -126,6 +145,7 @@ def test_batch_invariance_requires_matching_generator_debug_config():
         Controller(config)
 
     config = alphabet_sort.rl_grpo_qwen3_0_6b_flex_batch_invariant()
+    config.generator.engine.cuda_graph.mode = "NONE"
     config.generator.debug = dataclasses.replace(
         config.generator.debug, deterministic=False
     )
