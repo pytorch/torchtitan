@@ -72,7 +72,7 @@ def fsdp_partial_backwards(
     from ``fsdp_root`` (see ``flex_shard_partial_backwards``).
     """
     if is_flex_shard_module(fsdp_root):
-        return flex_shard_partial_backwards(
+        return _flex_shard_partial_backwards(
             module,
             flex_shard_module=fsdp_root,
             run_backward=run_backward,
@@ -81,6 +81,25 @@ def fsdp_partial_backwards(
     return _fsdp2_partial_backwards(
         module, run_backward=run_backward, outer_backward_follows=outer_backward_follows
     )
+
+
+@contextmanager
+def _flex_shard_partial_backwards(
+    module: nn.Module,
+    *,
+    flex_shard_module: nn.Module,
+    run_backward: bool,
+    outer_backward_follows: bool,
+) -> Iterator[_PartialBackwardHooks]:
+    """``fsdp_partial_backwards`` for FlexShard."""
+    with flex_shard_partial_backwards(
+        module,
+        flex_shard_module=flex_shard_module,
+        run_backward=run_backward,
+        outer_backward_follows=outer_backward_follows,
+    ) as before_last_forward:
+        # Nothing to do after each call: the bucket's forward stays open.
+        yield _PartialBackwardHooks(before_last_forward, lambda output: output)
 
 
 @contextmanager
