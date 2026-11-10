@@ -100,6 +100,7 @@ def _get_attention_metadata(
 class FluxModel(BaseModel):
     state_dict_adapter_cls = FluxStateDictAdapter
     supports_pipeline_parallel = False
+    supports_tensor_parallel = False
 
     """
     Transformer model for flow matching on sequences.
