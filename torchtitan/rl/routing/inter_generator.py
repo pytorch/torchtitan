@@ -110,6 +110,11 @@ class InterGeneratorRouter(Configurable):
             raise ValueError("InterGeneratorRouter requires at least one generator")
 
         self._strategy = config.strategy.build()
+        # The generators each live session's calls went to, so its release reaches only them; and
+        # each group's sessions, to forget a session that never gets a release (a retried Verifiers
+        # attempt) when its group ends.
+        self._session_generators: dict[str, list[_GeneratorHandle]] = {}
+        self._group_session_ids: dict[int, set[str]] = {}
 
     def _reserve(self, h: _GeneratorHandle, cost: int) -> None:
         """Reserve estimated generation work on a handle before dispatch."""
@@ -145,6 +150,10 @@ class InterGeneratorRouter(Configurable):
             # together at the start of a load, so then use any.
             candidates = [g for g in self._generators if not g.draining]
             h = self._strategy.choose(routing_ctx, candidates or self._generators)
+        if routing_ctx.session_id is not None:
+            served = self._session_generators.setdefault(routing_ctx.session_id, [])
+            if all(generator is not h for generator in served):
+                served.append(h)
         self._reserve(h, routing_ctx.estimated_cost)
         try:
             return await getattr(h.rank0_actor, method).call_one(*args, **kwargs)
@@ -227,10 +236,11 @@ class InterGeneratorRouter(Configurable):
         *,
         request_id: str,
         group_id: int,
-        routing_session_id: str | None,
+        routing_session_id: str,
         sampling_config: Any | None,
     ) -> Any:
         """Route one generation call to a generator and return its completion."""
+        self._group_session_ids.setdefault(group_id, set()).add(routing_session_id)
         return await self._route(
             "generate",
             prompt_token_ids,
@@ -257,18 +267,22 @@ class InterGeneratorRouter(Configurable):
         await self._fanout("sync_log_step", step)
 
     async def release_session(self, routing_session_id: str) -> None:
-        """Forget a routing session after its rollout's last generation call, and tell its
-        generator to release the session's held KV."""
-        pinned = self._strategy.pinned_candidate(
-            RoutingContext(session_id=routing_session_id)
-        )
+        """Forget a routing session after its rollout's last generation call, and ask every
+        generator that served its calls to evict its cached KV."""
         self._strategy.release_session(routing_session_id)
-        # Without a pin (non-sticky routing), `release_groups` frees the held KV at group end.
-        if pinned is not None:
-            await pinned.rank0_actor.release_sessions.call_one([routing_session_id])
+        await asyncio.gather(
+            *(
+                h.rank0_actor.release_sessions.call_one([routing_session_id])
+                for h in self._session_generators.pop(routing_session_id, [])
+            )
+        )
 
     async def release_groups(self, group_ids: list[int]) -> None:
-        """Tell every generator that these rollout groups are finished."""
+        """Tell every generator that these rollout groups are finished, so it evicts their KV,
+        and forget their sessions."""
+        for group_id in group_ids:
+            for session_id in self._group_session_ids.pop(group_id, ()):
+                self._session_generators.pop(session_id, None)
         await self._fanout("release_groups", group_ids)
 
     async def close_generators(self) -> list[Any | BaseException]:

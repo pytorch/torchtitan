@@ -326,7 +326,7 @@ class VerifiersRollouter(Rollouter):
         # `run` returned, so this rollout starts no new calls. For each trace, release its routing
         # session (Verifiers sends the trace id as X-Session-ID) and take its generation metadata,
         # so another agent's trace (a judge, a simulated user) leaves nothing on the server.
-        # TODO: an attempt Verifiers retried has no trace here, so its held KV waits for the
+        # TODO: an attempt Verifiers retried has no trace here, so its cached KV waits for the
         # group's release and its routing pin for the router's `max_sessions` LRU. The generation
         # server could record each rollout's session ids and release those too.
         generation_metadata_by_session = {
