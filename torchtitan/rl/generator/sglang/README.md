@@ -147,6 +147,33 @@ state entries of each slot (`TorchTitanKDAConfig`), so its radix cache snapshots
 them with the state; at head dim 128, they take 1.25x the memory of the
 recurrent states.
 
+### The state pool caps running requests
+
+SGLang splits an engine's memory between the KV pool and a fixed state pool,
+by `mamba_full_memory_ratio` (default 0.9: the state pool gets 0.9 / 1.9 of
+it). With the radix cache, a running request needs 3 state slots, so SGLang
+runs at most `state slots // 3` requests and queues the rest, even when the KV
+pool has room. vLLM keeps KV and states in one pool and needs no split.
+
+Size the state pool for the requests an engine runs at once: its share of the
+rollouts in flight, `max_active_rollout_groups x num_samples_per_prompt /
+number of generators` (`max_num_seqs` is about 2x that, as headroom). Pass
+`max_mamba_cache_size` (3 x those requests) or `mamba_full_memory_ratio` in
+`extra_server_args`; the rest goes to KV. SGLang logs `max_running_requests`
+and `max_total_num_tokens` when it builds.
+
+Qwen3.5-9B at TP 1, `gpu_memory_limit=0.86`, on GB300 (~48 MiB per state slot):
+
+| Setting | State slots | Max running | KV tokens | Fits |
+|---|---|---|---|---|
+| default (ratio 0.9) | ~2,200 | ~730 | 3.77M | -- |
+| ratio 0.25 | 910 | 303 | 5.73M | Terminal-Bench: 131K-token contexts, ~70-110 running, KV-bound |
+| `max_mamba_cache_size=1536` | 1,536 | 512 | 4.75M | DAPO-Math: 8K-token answers, 512 running |
+
+Terminal-Bench at the default ratio filled the KV pool with 7% of the state
+slots in use and 29-46 requests queued per engine; DAPO-Math at ratio 0.25
+queued requests 4-8 s each with 12% of the KV pool in use.
+
 ## Multi-turn sessions
 
 Each request carries its rollout's `routing_session_id` as an SGLang session.
