@@ -70,7 +70,6 @@ def test_base_model_pipeline_derives_the_split_only_when_none_is_configured(
     from torchtitan.models.base.model import BaseModel
 
     model = nn.Module()
-    model.supports_pipeline_parallel = True
     model.pipeline_first_stage_module_fqns = ("vision_encoder",)
     model.pipeline_last_stage_module_fqns = ()
     model.vision_encoder = nn.Linear(2, 2)

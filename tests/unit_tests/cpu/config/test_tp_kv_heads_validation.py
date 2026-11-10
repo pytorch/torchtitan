@@ -10,6 +10,10 @@ Unit tests for TP-degree / n_kv_heads divisibility validation.
 Covers Issue #2574: models with GQA (n_kv_heads < n_heads) would crash deep in
 the forward pass when tensor_parallel_degree > n_kv_heads. The fix adds an
 early ValueError while validating the complete trainer config.
+
+Also covers Issue #5854: Flux declares no TP/EP sharding, so
+tensor_parallel_degree / expert_parallel_degree above 1 must raise at config
+time instead of being silently ignored.
 """
 
 import unittest
@@ -34,6 +38,7 @@ try:
         Linear,
         RMSNorm,
     )
+    from torchtitan.models.flux.flavors import _flux_debug
     from torchtitan.models.llama3 import Llama3Model
     from torchtitan.models.llama3.model import Llama3TransformerBlock
 
@@ -171,6 +176,42 @@ class TestTPKVHeadsValidation(unittest.TestCase):
         with patch("torchtitan.distributed.spmd_types.spmd_mesh_size", return_value=2):
             with self.assertRaisesRegex(ValueError, r"n_heads \(3\)"):
                 cfg.build()
+
+
+def _validate_flux(
+    *,
+    tensor_parallel_degree: int = 1,
+    expert_parallel_degree: int = 1,
+) -> None:
+    seq_len = 256
+    config = _flux_debug(seq_len=seq_len)
+    validate_model_training_config(
+        config,
+        parallelism=ParallelismConfig(
+            tensor_parallel_degree=tensor_parallel_degree,
+            expert_parallel_degree=expert_parallel_degree,
+        ),
+        training=TrainingConfig(disable_accelerator_graphs=True),
+        debug=DebugConfig(),
+        activation_remat=None,
+        max_num_documents=None,
+    )
+
+
+@unittest.skipUnless(_IMPORTS_OK, "torchtitan model imports not available")
+class TestFluxParallelismValidation(unittest.TestCase):
+    """Flux declares no TP/EP sharding, so TP/EP degrees above 1 must raise."""
+
+    def test_flux_tp1_ep1_does_not_raise(self):
+        _validate_flux()
+
+    def test_flux_tensor_parallel_degree_gt1_raises(self):
+        with self.assertRaisesRegex(ValueError, r"declares no 'tp' sharding"):
+            _validate_flux(tensor_parallel_degree=2)
+
+    def test_flux_expert_parallel_degree_gt1_raises(self):
+        with self.assertRaisesRegex(ValueError, r"declares no 'ep' sharding"):
+            _validate_flux(expert_parallel_degree=2)
 
 
 if __name__ == "__main__":

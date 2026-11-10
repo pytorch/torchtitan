@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from torchtitan.config import DebugConfig, TrainingConfig
     from torchtitan.config.parallelism import ParallelismConfig
     from torchtitan.distributed.activation_remat import ActivationRematConfig
+    from torchtitan.distributed.parallelism_context import MeshAxisName
     from torchtitan.models.base.model import BaseModel
     from torchtitan.models.base.module import Module
 
@@ -23,6 +24,74 @@ __all__ = [
     "validate_context_parallel",
     "validate_model_training_config",
 ]
+
+
+def _declared_spmd_axes(model: Module.Config) -> set[MeshAxisName]:
+    """Collect the mesh axes declared by the model's sharding configs.
+
+    Each module declares the mesh axes it shards over in its
+    ``sharding_config``; a model that never mentions an axis does not
+    implement that form of parallelism.
+    """
+    from torchtitan.distributed.spmd_types import spmd_axes
+    from torchtitan.models.base.module import Module
+
+    declared = set()
+    for _, cfg, _, _ in model.traverse(Module.Config):
+        sharding = cfg.sharding_config
+        if sharding is None:
+            continue
+        layouts = list(sharding.state_shardings.values())
+        if sharding.in_src_shardings is not None:
+            layouts.extend(sharding.in_src_shardings.values())
+        if sharding.in_dst_shardings is not None:
+            layouts.extend(sharding.in_dst_shardings.values())
+        out_src = sharding.out_src_shardings
+        if out_src is not None:
+            layouts.extend(out_src if isinstance(out_src, tuple) else (out_src,))
+        if sharding.out_dst_shardings is not None:
+            layouts.append(sharding.out_dst_shardings)
+        for layout in layouts:
+            declared.update(spmd_axes(layout))
+    return declared
+
+
+def _validate_declared_parallel_axes(
+    model: Module.Config, parallelism: ParallelismConfig
+) -> None:
+    """Reject parallelism degrees whose mesh axis the model never declares.
+
+    A model that shards no tensor over TP cannot run with
+    ``tensor_parallel_degree > 1`` (the degree would be silently ignored),
+    and likewise for EP. The declared axes come from the sharding configs
+    themselves, so no per-model capability flag is needed: e.g. Flux only
+    declares DP/CP, while llama3 always declares TP placements.
+    """
+    from torchtitan.distributed.parallelism_context import MeshAxisName
+
+    model_cls = type(model)._owner
+    model_name = (
+        model_cls.__name__ if model_cls is not None else type(model).__qualname__
+    )
+    declared = _declared_spmd_axes(model)
+    for axis, degree, field in (
+        (
+            MeshAxisName.TP,
+            parallelism.tensor_parallel_degree,
+            "tensor_parallel_degree",
+        ),
+        (
+            MeshAxisName.EP,
+            parallelism.expert_parallel_degree,
+            "expert_parallel_degree",
+        ),
+    ):
+        if degree > 1 and axis not in declared:
+            raise ValueError(
+                f"{model_name} declares no {axis.value!r} sharding, but "
+                f"parallelism.{field} is {degree}. Set {field} to 1, or use "
+                f"a model that shards over {axis.value!r}."
+            )
 
 
 def validate_model_training_config(
@@ -45,28 +114,7 @@ def validate_model_training_config(
         LocalTokenDispatcher,
     )
 
-    model_cls = type(model)._owner
-    if model_cls is not None:
-        model_name = model_cls.__name__
-        if (
-            not getattr(model_cls, "supports_tensor_parallel", True)
-            and parallelism.tensor_parallel_degree > 1
-        ):
-            raise ValueError(
-                f"{model_name} does not support tensor parallelism; set "
-                f"parallelism.tensor_parallel_degree to 1 (got "
-                f"{parallelism.tensor_parallel_degree})."
-            )
-
-        if (
-            not list(model.traverse(MoE.Config))
-            and parallelism.expert_parallel_degree > 1
-        ):
-            raise ValueError(
-                f"{model_name} has no MoE layers; set "
-                f"parallelism.expert_parallel_degree to 1 (got "
-                f"{parallelism.expert_parallel_degree})."
-            )
+    _validate_declared_parallel_axes(model, parallelism)
 
     if isinstance(model, Decoder.Config):
         if model.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
