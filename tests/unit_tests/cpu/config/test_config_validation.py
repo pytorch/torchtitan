@@ -232,14 +232,14 @@ def test_microbatch_tokens_match_activation_sharding() -> None:
         (CheckpointManager.Config(async_mode="async"), None),
         (CheckpointManager.Config(export_dtype="bfloat16"), None),
         (
-            CheckpointManager.Config(async_mode="async_with_pinned_mem"),
-            "checkpointer.async_mode='async_with_pinned_mem'",
-        ),
-        (
             CheckpointManager.Config(
                 initial_load_in_hf=True, initial_load_path="/checkpoint"
             ),
-            "checkpointer.initial_load_in_hf=True",
+            None,
+        ),
+        (
+            CheckpointManager.Config(async_mode="async_with_pinned_mem"),
+            "checkpointer.async_mode='async_with_pinned_mem'",
         ),
         (
             CheckpointManager.Config(last_save_in_hf=True),
@@ -254,7 +254,7 @@ def test_microbatch_tokens_match_activation_sharding() -> None:
 def test_flex_shard_checkpointer(checkpointer, unsupported: str | None) -> None:
     # FlexShard's shard layouts reach DCP only through CheckpointManager, and
     # neither through the save process of async_with_pinned_mem nor through
-    # Hugging Face conversion.
+    # Hugging Face saves.
     config = llama3_debugmodel()
     config.training.disable_accelerator_graphs = True
     config.parallelism.fsdp_backend = FlexShardConfig()
