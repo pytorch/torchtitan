@@ -13,13 +13,10 @@ gathered backend; Attention Gym owns the weighted-ReLU top-k selection.
 """
 
 from dataclasses import dataclass
-from typing import Literal
 
 import spmd_types as spmd
 import torch
 import torch_remat as remat
-
-from torchtitan.config import TORCH_DTYPE_MAP
 
 from torchtitan.distributed.context_parallel import cp_all_gather_tensors
 
@@ -27,8 +24,8 @@ from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.base.module import Module
 from torchtitan.models.common import ComplexRoPE, LayerNorm, Linear
-from torchtitan.models.common.attention import InnerAttention, MLAAttention
-from torchtitan.models.common.attention.cp_attention import CPInnerAttention
+from torchtitan.models.common.attention import InnerAttention
+from torchtitan.models.common.attention.cp_mla import AllGatherKVMLAFlexAttention
 from torchtitan.models.common.attn_gym import (
     gather_attn,
     lightning_indexer,
@@ -58,24 +55,15 @@ class DsaMetadata:
         return cls(positions, (positions == 0).cumsum(0), valid, order, order)
 
 
-class Glm5CPMLAAttention(CPInnerAttention[DsaMetadata, DsaMetadata], MLAAttention):
+class Glm5CPMLAAttention(AllGatherKVMLAFlexAttention):
     """Reuse upstream compact KV communication with GLM document metadata."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(CPInnerAttention.Config, MLAAttention.Config):
-        reduce_dtype: Literal["float32", "bfloat16"] = "float32"
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
-
-    def forward(self, q_THK, kv_c_normed_TL, k_shared_TR, **kwargs):
-        kv_c_normed_TL, k_shared_TR = remat.region(
-            cp_all_gather_tensors,
-            self.remat_region_name("cp_all_gather"),
-            recompute=self.remat_should_recompute("inner_attention"),
-        )((kv_c_normed_TL, k_shared_TR), reduce_dtype=self.reduce_dtype)
-        return MLAAttention.forward(self, q_THK, kv_c_normed_TL, k_shared_TR, **kwargs)
+    class Config(AllGatherKVMLAFlexAttention.Config):
+        def __post_init__(self) -> None:
+            # Communication is shared; only the leaf attention/metadata differ.
+            if not isinstance(self.inner_attention, Glm5SparseAttention.Config):
+                raise ValueError("GLM CP MLA requires Glm5SparseAttention.Config")
 
     @staticmethod
     def prepare_cp_metadata(  # pyrefly: ignore[bad-override]

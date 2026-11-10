@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -12,6 +13,7 @@ import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import MLAAttention
+from torchtitan.models.common.attention.cp_mla import AllGatherKVMLAFlexAttention
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
@@ -269,6 +271,39 @@ class TestGlm5Config(unittest.TestCase):
                 "k_shared_TR",
                 "topk_indices_QS",
             },
+        )
+
+    def test_cp_transform_covers_mtp_and_preserves_checkpoint_layout(self) -> None:
+        import spmd_types as spmd
+
+        from torchtitan.models.common.decoder_sharding import (
+            mla_kv_projection_sharding_config,
+        )
+
+        eager = build_model_config(
+            "glm5_2_debugmodel_mtp", parallelism=ParallelismConfig(), seq_len=128
+        )
+        config = build_model_config(
+            "glm5_2_debugmodel_mtp",
+            parallelism=ParallelismConfig(context_parallel_degree=2),
+            seq_len=128,
+        )
+        for layer in config.layers + list(config.mtp_layers or ()):
+            inner = layer.attention.inner_attention
+            assert isinstance(inner, Glm5CPMLAAttention.Config)
+            self.assertIsInstance(inner, AllGatherKVMLAFlexAttention.Config)
+            self.assertEqual(
+                inner.wkv_b.sharding_config,
+                mla_kv_projection_sharding_config(cp=spmd.R),
+            )
+            with self.assertRaisesRegex(ValueError, "Glm5SparseAttention"):
+                replace(inner, inner_attention=inner)
+        with torch.device("meta"):
+            expected = eager.build().state_dict()
+            actual = config.build().state_dict()
+        self.assertEqual(
+            {name: tuple(value.shape) for name, value in actual.items()},
+            {name: tuple(value.shape) for name, value in expected.items()},
         )
 
     def test_shared_indexer_layers_do_not_own_redundant_parameters(self) -> None:

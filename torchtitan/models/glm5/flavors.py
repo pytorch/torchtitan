@@ -19,6 +19,7 @@ import torch.nn as nn
 
 from torchtitan.config import derive
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform.context_parallel import ContextParallelTransform
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
@@ -28,6 +29,7 @@ from torchtitan.models.common import (
     Sigmoid,
 )
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
+from torchtitan.models.common.attention import MLAAttention
 from torchtitan.models.common.decoder_sharding import (
     lm_head_sharding_config,
     pre_lm_head_norm_sharding_config,
@@ -139,7 +141,6 @@ def make_glm5_attention_config(
     mla_norm_eps: float,
     rope: ComplexRoPE.Config,
     enable_sp: bool,
-    enable_cp: bool,
 ) -> Glm5Attention.Config:
     """Build a fully specified GLM-5 MLA plus DSA attention config.
 
@@ -168,20 +169,6 @@ def make_glm5_attention_config(
     base.kv_norm.eps = mla_norm_eps
     mla = base.inner_attention
     mla.sharding_config = glm5_inner_attention_sharding_config()
-    if enable_cp:
-        import spmd_types as spmd
-
-        from torchtitan.models.common.decoder_sharding import (
-            mla_kv_projection_sharding_config,
-        )
-
-        mla = Glm5CPMLAAttention.Config(
-            **{
-                field.name: getattr(mla, field.name)
-                for field in dataclasses.fields(mla)
-            }
-        )
-        mla.wkv_b.sharding_config = mla_kv_projection_sharding_config(cp=spmd.R)
     base.inner_attention = mla
     base.sharding_config = glm5_attention_sharding_config(enable_sp=enable_sp)
     return Glm5Attention.Config(
@@ -256,7 +243,6 @@ def build_glm5_layers(
     norm_eps: float = 1e-5,
     rope: ComplexRoPE.Config,
     enable_sp: bool = False,
-    enable_cp: bool = False,
     enable_ep: bool = False,
 ) -> list[Glm5TransformerBlock.Config]:
     """Build GLM-5 dense and MoE block configurations for every layer."""
@@ -331,7 +317,6 @@ def build_glm5_layers(
             mla_norm_eps=mla_norm_eps,
             rope=rope,
             enable_sp=enable_sp,
-            enable_cp=enable_cp,
         )
         if index_sources[layer_id] != layer_id:
             base.attention.indexer = None
@@ -413,7 +398,6 @@ def _debugmodel(
             mla_norm_eps=1e-5,
             rope=rope,
             enable_sp=bool(parallelism and parallelism.enable_sequence_parallel),
-            enable_cp=bool(parallelism and parallelism.context_parallel_degree > 1),
             enable_ep=bool(parallelism and parallelism.expert_parallel_degree > 1),
         ),
     )
@@ -559,7 +543,6 @@ def _glm5_2_scaled_debugmodel(
             norm_eps=1e-5,
             rope=rope,
             enable_sp=bool(parallelism and parallelism.enable_sequence_parallel),
-            enable_cp=bool(parallelism and parallelism.context_parallel_degree > 1),
             enable_ep=bool(parallelism and parallelism.expert_parallel_degree > 1),
         ),
     )
@@ -621,7 +604,6 @@ def _glm5_2_744b_a40b(
         norm_eps=1e-5,
         rope=rope,
         enable_sp=bool(parallelism and parallelism.enable_sequence_parallel),
-        enable_cp=bool(parallelism and parallelism.context_parallel_degree > 1),
         enable_ep=bool(parallelism and parallelism.expert_parallel_degree > 1),
     )
     layers: list[Glm5TransformerBlock.Config] = [
@@ -707,6 +689,10 @@ def build_model_config(
             "GLM DSA currently requires contiguous context parallel shards"
         )
     config = get_config(seq_len=context_len, parallelism=parallelism)
+    if parallelism.context_parallel_degree > 1:
+        ContextParallelTransform(
+            inner_attention_map={MLAAttention: Glm5CPMLAAttention}
+        ).transform(config)
     if config.mtp_layers and parallelism.pipeline_parallel_degree > 1:
         raise ValueError("GLM MTP does not support pipeline parallelism")
     return config
