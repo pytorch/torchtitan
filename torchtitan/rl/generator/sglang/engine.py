@@ -66,7 +66,8 @@ from torchtitan.rl.generator.types import (
 
 logger = logging.getLogger(__name__)
 
-# The ServerArgs SGLangEngine sets itself, which extra_server_args cannot set.
+# The ServerArgs SGLangEngine sets itself, which extra_server_args cannot set. Every
+# key naming CUDA graphs is the engine's too (see Config.__post_init__).
 _TORCHTITAN_SERVER_ARGS = frozenset(
     {
         "model_path",
@@ -78,6 +79,7 @@ _TORCHTITAN_SERVER_ARGS = frozenset(
         "max_running_requests",
         "context_length",
         "attention_backend",
+        "page_size",
         "enable_priority_scheduling",
         "schedule_low_priority_values_first",
         "enable_session_radix_cache",
@@ -125,10 +127,18 @@ class SGLangEngine(GenerationEngine):
         extra_server_args: dict[str, Any] = field(default_factory=dict)
         """Additional keyword arguments passed to SGLang's ``ServerArgs``, for options
         without a dedicated field (e.g. SGLang's hierarchical cache). Keys that
-        TorchTitan sets itself raise a ``ValueError``."""
+        TorchTitan sets itself, CUDA-graph keys included, raise a ``ValueError``."""
 
         def __post_init__(self) -> None:
-            owned_keys = sorted(self.extra_server_args.keys() & _TORCHTITAN_SERVER_ARGS)
+            # cuda_graph owns SGLang's CUDA-graph settings: SGLang applies its
+            # per-phase graph keys (e.g. cuda_graph_backend_decode) over
+            # disable_cuda_graph, so one would capture graphs that the engine's
+            # checks of cuda_graph assume are off.
+            owned_keys = sorted(
+                key
+                for key in self.extra_server_args
+                if key in _TORCHTITAN_SERVER_ARGS or "cuda_graph" in key
+            )
             if owned_keys:
                 raise ValueError(
                     "extra_server_args cannot set ServerArgs that TorchTitan controls: "
@@ -233,10 +243,10 @@ class SGLangEngine(GenerationEngine):
         # TODO(https://github.com/sgl-project/sglang/issues/48473): SGLang has no
         # in-process output sink; stand in for the sockets to its detokenizer and
         # tokenizer processes, so results and aborts come here.
-        self._outputs = _OutputCollector()
-        self._scheduler.output_streamer.send_to_detokenizer = self._outputs
+        self._output_collector = _OutputCollector()
+        self._scheduler.output_streamer.send_to_detokenizer = self._output_collector
         self._scheduler.ipc_channels = dataclasses.replace(
-            self._scheduler.ipc_channels, send_to_tokenizer=self._outputs
+            self._scheduler.ipc_channels, send_to_tokenizer=self._output_collector
         )
         # Requests that finished outside `step()` (e.g. retracted during a model state
         # dict load), returned by the next `step()`.
@@ -280,6 +290,11 @@ class SGLangEngine(GenerationEngine):
             max_running_requests=max_num_seqs,
             context_length=model.max_context_length + CONTEXT_LENGTH_MARGIN,
             attention_backend=TORCHTITAN_VARLEN_ATTENTION_BACKEND,
+            # SGLang's default for this backend (its 128-token pages are for its own
+            # FA4 backend). 128-token pages would put batch-invariant decode on FA4's
+            # SwapAB kernel, which does not match prefill bitwise (see vLLM's
+            # _FA4PageSize).
+            page_size=1,
             # Smaller `priority` runs first and is preempted last; EngineRequest.group_id
             # (-1 for all validation) puts older groups first (see its docstring).
             # SGLang breaks ties by when a request entered its waiting queue, and
@@ -353,14 +368,27 @@ class SGLangEngine(GenerationEngine):
         """Admit ``requests`` in order and return the ``(request_id, error)`` of each request
         SGLang rejected.
 
-        A request with invalid sampling parameters is rejected before SGLang sees it.
+        A request with invalid sampling parameters or prompt token ids is rejected
+        before SGLang sees it.
         SGLang validates the rest as it admits a request and aborts an invalid one
         instead of raising, so that rejection is the abort, before SGLang schedules it.
         The checks are deterministic, so every TP rank rejects the same requests.
         """
         sglang_requests = []
         rejected: list[tuple[str, Exception]] = []
+        vocab_size = self._scheduler.model_config.vocab_size
         for request in requests:
+            prompt = request.prompt_token_ids
+            # SGLang checks only the prompt's length. At TP > 1, the vocab-parallel
+            # embedding would embed an out-of-range id as zeros, without an error.
+            if not prompt or min(prompt) < 0 or max(prompt) >= vocab_size:
+                message = (
+                    f"prompt token ids must be non-empty and in [0, {vocab_size}), got "
+                    f"{len(prompt)} ids in [{min(prompt, default=None)}, "
+                    f"{max(prompt, default=None)}]"
+                )
+                rejected.append((request.request_id, ValueError(message)))
+                continue
             try:
                 sampling_params = self._build_sampling_params(
                     request.sampling, prompt_length=len(request.prompt_token_ids)
@@ -368,8 +396,9 @@ class SGLangEngine(GenerationEngine):
             except ValueError as error:
                 rejected.append((request.request_id, error))
                 continue
-            # Without a reset on model state dict load, salt by the pinned version so
-            # a request only reuses KV computed under that version.
+            # With a reset on model state dict load, the cache only ever holds KV of
+            # the current weights, which every request can share. Without one, salt
+            # by the pinned version, so a request only reuses KV computed under it.
             cache_salt = (
                 None
                 if self._reset_kv_cache_on_model_state_dict_load
@@ -414,9 +443,9 @@ class SGLangEngine(GenerationEngine):
         queued = set()
         for req in self._scheduler.waiting_queue:
             if req.rid in admitted:
-                self._outputs.admit(req, arrival_times[req.rid])
+                self._output_collector.admit(req, arrival_times[req.rid])
                 queued.add(req.rid)
-        for finished, abort_message in self._outputs.take():
+        for finished, abort_message in self._output_collector.take():
             if finished.request_id in admitted:
                 assert (
                     abort_message is not None
@@ -467,10 +496,14 @@ class SGLangEngine(GenerationEngine):
         """Run one iteration of SGLang's overlap event loop, a TP collective, and return
         the requests whose results it processed."""
         scheduler = self._scheduler
-        with scheduler.device_module.StreamContext(scheduler.schedule_stream):
+        # As SGLang's own event loops; the model's TP all-reduces take their fast
+        # path only with grad mode off.
+        with torch.no_grad(), scheduler.device_module.StreamContext(
+            scheduler.schedule_stream
+        ):
             _overlap_event_loop_iteration(scheduler)
         finished, self._finished = self._finished, []
-        finished.extend(request for request, _ in self._outputs.take())
+        finished.extend(request for request, _ in self._output_collector.take())
         return finished
 
     def load_model_state_dict(
@@ -492,10 +525,16 @@ class SGLangEngine(GenerationEngine):
                 scheduler.pause_generation(PauseGenerationReqInput(mode="retract"))
             # The overlap loop may have a forward in flight, which reads the weights.
             scheduler.schedule_stream.wait_stream(scheduler.forward_stream)
+            # SGLang's watchdog signals the parent process when the batch it last saw
+            # scheduled makes no progress for watchdog_timeout, and a load takes as
+            # long as its fetch. pause_generation clears the batch in the reset path.
+            scheduler.cur_batch_for_debug = None
             self._get_model().model_state_dict_loader.load(fetch)
             scheduler.forward_stream.wait_stream(scheduler.schedule_stream)
             if self._reset_kv_cache_on_model_state_dict_load:
-                self._finished.extend(request for request, _ in self._outputs.take())
+                self._finished.extend(
+                    request for request, _ in self._output_collector.take()
+                )
                 if not scheduler.flush_cache(empty_cache=False):
                     raise RuntimeError("SGLang did not flush its KV cache")
                 scheduler.continue_generation(
@@ -527,6 +566,10 @@ class SGLangEngine(GenerationEngine):
 class _OutputCollector:
     """Stands in for the scheduler's sockets to the tokenizer and detokenizer processes.
 
+    No tokenization or detokenization runs (``skip_tokenizer_init``): the scheduler
+    still sends its token ids and aborts to those processes, and this object receives
+    them instead.
+
     SGLang sends a request's tokens and logprobs in increments: every
     ``SGLANG_FORCE_STREAM_INTERVAL`` tokens even without streaming, and the rest when it
     finishes. The collector concatenates them and keeps each finished request with its
@@ -544,6 +587,7 @@ class _OutputCollector:
         self._admitted: dict[str, tuple[Req, float, float]] = {}
 
     def admit(self, req: Req, arrival_time: float) -> None:
+        """Record an admitted request, for its metrics inputs when it finishes."""
         self._admitted[req.rid] = (
             req,
             arrival_time,
@@ -551,6 +595,7 @@ class _OutputCollector:
         )
 
     def send_output(self, output: Any, recv_obj: Any = None) -> None:
+        """The sockets' send: token increments (``BatchTokenIDOutput``) and aborts."""
         if isinstance(output, BatchTokenIDOutput):
             self._receive_tokens(output)
         elif isinstance(output, AbortReq):
@@ -573,10 +618,14 @@ class _OutputCollector:
             )
 
     def take(self) -> list[tuple[FinishedRequest, str | None]]:
+        """Return the requests finished since the last call, each with its abort
+        message (None unless SGLang aborted it)."""
         finished, self._finished = self._finished, []
         return finished
 
     def _receive_tokens(self, output: BatchTokenIDOutput) -> None:
+        """Append each request's token and logprob increment, and finish the requests
+        whose increment is their last."""
         offsets = output.output_ids_offsets
         for i, (request_id, reason) in enumerate(
             zip(output.rids, output.finished_reasons, strict=True)

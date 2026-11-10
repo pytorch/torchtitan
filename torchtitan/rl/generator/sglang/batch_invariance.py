@@ -6,6 +6,7 @@
 
 """Generator-side patches that make SGLang's logprobs match the trainer's bitwise."""
 
+import functools
 import logging
 
 import torch
@@ -13,47 +14,25 @@ import torch
 logger = logging.getLogger(__name__)
 
 
+@functools.cache
 def force_trainer_logprobs_for_batch_invariance() -> None:
-    """Compute the sampled tokens' logprobs with the trainer's ``compute_logprobs``.
+    """Return the sampled tokens' logprobs from the trainer's ``compute_logprobs``.
 
-    SGLang's sampler fuses temperature and softmax into one kernel and returns
-    ``log(probs)``, which differs from the trainer's ``compute_logprobs(logits / T)``
-    in the last bits. This wraps ``Sampler.forward`` to recompute the returned logprobs
-    from ``logits / T``, the trainer's operation on the same full-vocabulary logits.
-    Sampling itself is unchanged. Idempotent; process-wide.
+    SGLang's sampler returns ``log(probs)`` from its fused temperature-softmax kernel
+    or, in its deterministic mode (on with ``DebugConfig.seed``), ``log_softmax`` of
+    ``logits / T`` with its own ops. Either differs from the trainer's
+    ``compute_logprobs(logits / T)`` in the last bits. This registers a sampler, for
+    every built-in sampling backend, that recomputes the returned logprobs with the
+    trainer's operation on the same full-vocabulary logits. Sampling itself is
+    unchanged. Process-wide; runs once.
     """
-    from sglang.srt.layers.sampler import Sampler
+    from sglang.srt.arg_groups.choices import BUILT_IN_SAMPLING_BACKENDS
+    from sglang.srt.layers.sampler import register_sampler_backend, Sampler
 
     from torchtitan.components.loss import compute_logprobs
 
-    sample = Sampler.forward
-    if getattr(sample, "_trainer_logprobs", False):
-        return
-
-    def forward(
-        self,
-        logits_output,
-        sampling_info,
-        return_logprob,
-        top_logprobs_nums,
-        token_ids_logprobs,
-        positions,
-        **kwargs,
-    ) -> torch.Tensor:
-        if not return_logprob or sampling_info.is_all_greedy:
-            return sample(
-                self,
-                logits_output,
-                sampling_info,
-                return_logprob,
-                top_logprobs_nums,
-                token_ids_logprobs,
-                positions,
-                **kwargs,
-            )
-        # A copy: the sampler overwrites the logits with probabilities in place.
-        logits = logits_output.next_token_logits / sampling_info.temperatures
-        next_token_ids = sample(
+    class TrainerLogprobsSampler(Sampler):
+        def forward(
             self,
             logits_output,
             sampling_info,
@@ -62,17 +41,28 @@ def force_trainer_logprobs_for_batch_invariance() -> None:
             token_ids_logprobs,
             positions,
             **kwargs,
-        )
-        logits_output.next_token_logprobs = compute_logprobs(
-            logits, next_token_ids.long(), vocab_parallel_group=None
-        )
-        return next_token_ids
+        ) -> torch.Tensor:
+            args = (
+                logits_output,
+                sampling_info,
+                return_logprob,
+                top_logprobs_nums,
+                token_ids_logprobs,
+                positions,
+            )
+            if not return_logprob or sampling_info.is_all_greedy:
+                return super().forward(*args, **kwargs)
+            # A copy: the sampler overwrites the logits with probabilities in place.
+            logits = logits_output.next_token_logits / sampling_info.temperatures
+            next_token_ids = super().forward(*args, **kwargs)
+            logits_output.next_token_logprobs = compute_logprobs(
+                logits, next_token_ids.long(), vocab_parallel_group=None
+            )
+            return next_token_ids
 
-    forward._trainer_logprobs = True
-    # TODO(https://github.com/sgl-project/sglang/issues/48475): SGLang has no hook for
-    # the logprobs its sampler returns; patch its forward.
-    Sampler.forward = forward
+    for backend in BUILT_IN_SAMPLING_BACKENDS:
+        register_sampler_backend(backend, TrainerLogprobsSampler)
     logger.info(
-        "Patched SGLang's Sampler.forward to return the trainer's compute_logprobs, "
-        "so generator and trainer share one logprob code path"
+        "Registered a sampler that returns the trainer's compute_logprobs, so "
+        "generator and trainer share one logprob code path"
     )

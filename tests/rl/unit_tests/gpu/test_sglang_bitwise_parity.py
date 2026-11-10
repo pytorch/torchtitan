@@ -17,7 +17,10 @@ Test bitwise parity between the SGLang generator and the TorchTitan trainer.
   3. test_trainer_vs_sglang_decode_after_model_state_dict_load:
       Test 1 after perturbed trainer weights are loaded into SGLang in place (CUDA
       graphs kept) and requests move to the next policy version's cache salt.
-  4. test_context_length_limits:
+  4. test_sglang_decode_across_model_state_dict_load:
+      Loading the same weights while requests decode leaves their tokens and
+      logprobs unchanged.
+  5. test_context_length_limits:
       As in vLLM, a prompt of max_context_length - 1 tokens runs and stops at
       max_context_length tokens in total, and a prompt of max_context_length
       tokens is rejected.
@@ -71,6 +74,8 @@ class TestSGLangBitwiseParityVarlen(unittest.TestCase):
     MAX_GEN_TOKENS = 50
     # The policy version of the engine's weights, which salts the requests' KV.
     policy_version = 0
+    # Off here, so test 3 covers the cache salt.
+    reset_kv_cache_on_model_state_dict_load = False
 
     @classmethod
     def setUpClass(cls):
@@ -113,7 +118,9 @@ class TestSGLangBitwiseParityVarlen(unittest.TestCase):
             dist_moe_runtime=None,
             # SGLang samples with the requests' seeds only with DebugConfig.seed.
             debug=dataclasses.replace(config.generator.debug, seed=0),
-            reset_kv_cache_on_model_state_dict_load=False,
+            reset_kv_cache_on_model_state_dict_load=(
+                cls.reset_kv_cache_on_model_state_dict_load
+            ),
             model_state_dict_load_mode="gpu_fetch",
             rank=dist.get_rank(),
             generator_name="generator",
@@ -129,9 +136,10 @@ class TestSGLangBitwiseParityVarlen(unittest.TestCase):
         if dist.is_initialized():
             dist.barrier()
 
-    def _generate(self, prompt_ids: list[list[int]]):
+    def _generate(self, prompt_ids: list[list[int]], *, load_at_step: int = -1):
         """Sample a completion of each prompt at temperature 1, each with its own seed.
 
+        With ``load_at_step`` >= 0, load the trainer's weights before that step.
         Returns ``(token_ids, logprobs)`` per prompt, in prompt order.
         """
         requests = []
@@ -153,9 +161,14 @@ class TestSGLangBitwiseParityVarlen(unittest.TestCase):
             requests.append(request)
         self.assertEqual(self.engine.add_requests(requests), [])
         finished = {}
+        num_steps = 0
         while self.engine.has_unfinished_requests():
+            if num_steps == load_at_step:
+                _load_trainer_weights(self.engine, self.model, self.precision)
             for result in self.engine.step():
                 finished[result.request_id] = result
+            num_steps += 1
+        self.assertGreater(num_steps, load_at_step)
         results = [finished[request.request_id] for request in requests]
         return (
             [result.token_ids for result in results],
@@ -227,6 +240,20 @@ class TestSGLangBitwiseParityVarlen(unittest.TestCase):
                 batched_lps[0],
             )
 
+    def test_sglang_decode_across_model_state_dict_load(self):
+        # The trainer's weights are still the ones the generator loaded, and step 10
+        # is mid-decode: prefill takes a step or two of the 50 tokens.
+        expected_ids, expected_lps = self._generate(self.prompt_ids)
+        ids, lps = self._generate(self.prompt_ids, load_at_step=10)
+        if dist.get_rank() == 0:
+            for i in range(len(self.prompt_ids)):
+                self.assertEqual(ids[i], expected_ids[i])
+                self._assert_bitwise_equal(
+                    f"seq {i}: decode with vs without a load",
+                    lps[i],
+                    expected_lps[i],
+                )
+
     def test_trainer_vs_sglang_decode_after_model_state_dict_load(self):
         # Runs last (unittest orders tests by name): it changes both models' weights.
         def trainer_logprobs() -> torch.Tensor:
@@ -240,30 +267,35 @@ class TestSGLangBitwiseParityVarlen(unittest.TestCase):
             for param in self.model.parameters():
                 param.mul_(1.01)
         self.assertFalse(torch.equal(trainer_logprobs(), logprobs_before))
-        trainer_state_dict = self.model.state_dict()
-        # The trainer sends parameters in the generator's compute dtype, and buffers
-        # and preserve_dtype_params in their own.
-        own_dtype_keys = {name for name, _ in self.model.named_buffers()} | {
-            name for name, _ in self.model.named_preserve_dtype_params()
-        }
-        param_dtype = TORCH_DTYPE_MAP[self.precision.param_dtype]
-
-        def fetch(state_dict: dict[str, torch.Tensor]) -> list[str]:
-            with torch.no_grad():
-                for key, tensor in state_dict.items():
-                    value = trainer_state_dict[key]
-                    if isinstance(value, DTensor):
-                        value = value.full_tensor()
-                    sent_dtype = value.dtype if key in own_dtype_keys else param_dtype
-                    self.assertEqual(tensor.dtype, sent_dtype, key)
-                    value = value.to(sent_dtype)
-                    if isinstance(tensor, DTensor):
-                        value = distribute_tensor(
-                            value, tensor.device_mesh, tensor.placements
-                        )
-                    tensor.copy_(value)
-            return list(state_dict)
-
-        self.engine.load_model_state_dict(fetch)
+        _load_trainer_weights(self.engine, self.model, self.precision)
         type(self).policy_version += 1
         self.test_trainer_vs_sglang_decode()
+
+
+def _load_trainer_weights(engine, model, precision) -> None:
+    """Load the trainer model's weights into the engine, as a model state dict load."""
+    trainer_state_dict = model.state_dict()
+    # The trainer sends parameters in the generator's compute dtype, and buffers and
+    # preserve_dtype_params in their own.
+    own_dtype_keys = {name for name, _ in model.named_buffers()} | {
+        name for name, _ in model.named_preserve_dtype_params()
+    }
+    param_dtype = TORCH_DTYPE_MAP[precision.param_dtype]
+
+    def fetch(state_dict: dict[str, torch.Tensor]) -> list[str]:
+        with torch.no_grad():
+            for key, tensor in state_dict.items():
+                value = trainer_state_dict[key]
+                if isinstance(value, DTensor):
+                    value = value.full_tensor()
+                sent_dtype = value.dtype if key in own_dtype_keys else param_dtype
+                assert tensor.dtype == sent_dtype, (key, tensor.dtype, sent_dtype)
+                value = value.to(sent_dtype)
+                if isinstance(tensor, DTensor):
+                    value = distribute_tensor(
+                        value, tensor.device_mesh, tensor.placements
+                    )
+                tensor.copy_(value)
+        return list(state_dict)
+
+    engine.load_model_state_dict(fetch)

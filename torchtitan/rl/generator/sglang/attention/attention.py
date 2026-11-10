@@ -220,7 +220,9 @@ class SGLangInnerAttention(InnerAttention):
             name for name, value in kwargs.items() if value is not None
         )
         if unsupported:
-            raise ValueError(f"SGLangInnerAttention does not support {unsupported}")
+            raise NotImplementedError(
+                f"SGLangInnerAttention does not support {unsupported}"
+            )
         num_tokens = q_THK.shape[0]
         # RadixAttention returns (T, H * V).
         out = self.radix_attention(q_THK, k_THK, v_THV, get_forward_batch())

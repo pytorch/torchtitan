@@ -1,9 +1,10 @@
 # SGLang generator engine
 
-**Status: experimental.** Verified only at SGLang `851642ade`, which
-`scripts/install_sglang.sh` installs; CI runs `test_sglang_bitwise_parity.py` on B200
-(`integration_test_rl_b200.yaml`). It relies on private SGLang APIs (see the TODOs
-linking sgl-project/sglang issues), so other SGLang versions may break it.
+**Status:** an alternative to the vLLM engine. Verified only at SGLang
+`851642ade`, which `scripts/install_rl_env.sh --sglang` installs; CI runs
+`test_sglang_bitwise_parity.py` on B200 (`integration_test_rl_b200.yaml`). It
+relies on private SGLang APIs (see the TODOs linking sgl-project/sglang issues),
+so other SGLang versions may break it.
 
 `SGLangEngine` runs the generator's TorchTitan model inside
 [SGLang](https://github.com/sgl-project/sglang), as `VLLMEngine` does inside
@@ -51,16 +52,10 @@ own environment on top of the RL environment, without replacing PyTorch:
 ```bash
 uv venv --python 3.12 .venv-sglang && source .venv-sglang/bin/activate
 # The RL environment: PyTorch and vLLM nightlies (batch-invariant mode uses vLLM's
-# batch-invariant bmm), TorchStore and FlashAttention.
-scripts/install_rl_env.sh
-# SGLang at the verified commit, cloned to ../sglang and installed editable,
-# keeping the RL environment's PyTorch.
-scripts/install_sglang.sh ../sglang
+# batch-invariant bmm), TorchStore and FlashAttention; then SGLang at the verified
+# commit, keeping the RL environment's PyTorch.
+scripts/install_rl_env.sh --sglang
 ```
-
-The prebuilt `sglang-kernel` wheel loads under the PyTorch nightly. The engine
-does not use SGLang's Rust extensions (`SGLANG_BUILD_RUST_EXTS=none`): the radix
-tree falls back to its Python implementation.
 
 ## Supported
 

@@ -109,7 +109,7 @@ jobs:
           source .venv/bin/activate
           export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 
-          bash scripts/install_sglang.sh "$RUNNER_TEMP/sglang"
+          bash scripts/install_rl_env.sh --skip-base --flash-attn none --sglang
           MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
 
           HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
