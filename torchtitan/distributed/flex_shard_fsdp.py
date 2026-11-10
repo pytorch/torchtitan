@@ -95,6 +95,11 @@ def apply_flex_shard_to_decoder(
     rest of the block on ``dp_mesh``. The block then gets a bucket for each, and
     the buckets prefetch as ``apply_fsdp_to_decoder`` sets FSDP2 to.
 
+    FlexShard stores parameters as plain local shards, which DCP would save as
+    whole tensors. The model's ``state_dict()`` declares where each local shard
+    sits in the full parameter (DCP's ``CheckpointableTensor``), as FSDP2's
+    DTensors do, so FSDP2 and FlexShard save the same checkpoints.
+
     Args:
         model: The decoder to shard.
         dp_mesh: The 1D ``dp_shard`` mesh to shard over.
@@ -134,18 +139,25 @@ def apply_flex_shard_to_decoder(
 
     # flex_shard is an optional dependency, needed only for this backend.
     # pyrefly: ignore [missing-import]
-    from flex_shard import BucketSpec, flex_shard, MixedPrecisionPolicy
+    from flex_shard import (
+        BucketSpec,
+        flex_shard,
+        GlobalLayout,
+        MixedPrecisionPolicy,
+        set_global_layout,
+        set_state_dict_global_layouts,
+    )
 
     # pyrefly: ignore [missing-import]
     from flex_shard.custom_placements.shard import Shard as FlexShardShard
 
     # validate_flex_shard_training allows only dp_shard and ep.
     assert dp_mesh.mesh_dim_names == ("dp_shard",), dp_mesh.mesh_dim_names
-    expert_mesh = None
+    expert_mesh = ep_mesh = None
     if ep_degree > 1:
         assert edp_mesh is not None
         assert edp_mesh.mesh_dim_names == ("edp_shard", "ep"), edp_mesh.mesh_dim_names
-        expert_mesh = edp_mesh["edp_shard"]
+        expert_mesh, ep_mesh = edp_mesh["edp_shard"], edp_mesh["ep"]
         _EXPERT_STORAGE_MESHES[expert_mesh] = edp_mesh
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     embedding, head, blocks = decoder_fsdp_groups(
@@ -228,6 +240,30 @@ def apply_flex_shard_to_decoder(
     if root_fqns:
         buckets.append(bucket(root_fqns, reshard_after_forward=False))
 
+    if ep_mesh is not None:
+        # EP leaves each ep rank an even split of the routed experts' dim 0.
+        # Declared before flex_shard(), this layout composes with the expert
+        # bucket's split over edp_shard, so checkpoints place each local shard
+        # in the full experts, as FSDP2's DTensors do.
+        # TODO(<flex_shard issue link>): Drop once FlexShard derives the layout
+        # itself.
+        ep_rank, ep = ep_mesh.get_local_rank(), ep_mesh.size()
+        for group in groups:
+            if group.routed_experts is None:
+                continue
+            for param in group.routed_experts.parameters():
+                num_local_experts, *rest = param.shape
+                zeros = (0,) * len(rest)
+                set_global_layout(
+                    param,
+                    GlobalLayout(
+                        global_shape=(num_local_experts * ep, *rest),
+                        global_offsets=((ep_rank * num_local_experts, *zeros),),
+                        local_offsets=((0, *zeros),),
+                        local_sizes=(tuple(param.shape),),
+                    ),
+                )
+
     flex_shard_module = flex_shard(model, buckets=buckets)
     if expert_mesh is not None:
         # Every bucket holds parameters, so there is one storage per bucket.
@@ -251,6 +287,20 @@ def apply_flex_shard_to_decoder(
             current[0].set_buckets_to_forward_prefetch(following)
             # In backward, FSDP2 prefetches a module's groups in reverse.
             following[0].set_buckets_to_backward_prefetch(current[::-1])
+
+    def declare_global_layouts(module, state_dict, prefix, local_metadata) -> None:
+        # TODO(<flex_shard issue link>): Drop once FlexShard's state_dict()
+        # declares them.
+        set_state_dict_global_layouts(
+            module,
+            {
+                key[len(prefix) :]: value
+                for key, value in state_dict.items()
+                if key.startswith(prefix)
+            },
+        )
+
+    model.register_state_dict_post_hook(declare_global_layouts)
     logger.info("Applied FlexShard to the model")
 
 
@@ -383,6 +433,7 @@ def validate_flex_shard_training(
     config loader runs again after recipes assign fields, rather than from
     ``ParallelismConfig.__post_init__``, which runs only at construction.
     """
+    from torchtitan.components.checkpointer import CheckpointManager
     from torchtitan.components.optim.optimizer import DistMuon
     from torchtitan.distributed.accelerator_graph import accelerator_graphs_supported
 
@@ -410,7 +461,19 @@ def validate_flex_shard_training(
             "accelerator graphs (set training.disable_accelerator_graphs=True)"
         )
     if checkpointer is not None:
-        unsupported.append("checkpointing")
+        if not isinstance(checkpointer, CheckpointManager.Config):
+            # TODO(<torch_checkpointing issue link>): torch_checkpointing's
+            # resharder ignores the shard layouts FlexShard's state dicts declare.
+            unsupported.append("checkpointers other than CheckpointManager")
+        elif checkpointer.async_mode == "async_with_pinned_mem":
+            # TODO(<pytorch issue link>): The save process receives the state
+            # dict through torch.multiprocessing, which drops the shard layouts.
+            unsupported.append("checkpointer.async_mode='async_with_pinned_mem'")
+        # The state dict adapters need DTensor parameters.
+        if checkpointer.initial_load_in_hf:
+            unsupported.append("checkpointer.initial_load_in_hf=True")
+        if checkpointer.last_save_in_hf:
+            unsupported.append("checkpointer.last_save_in_hf=True")
     if optim.ema is not None:
         unsupported.append("optim.ema")
     if any(isinstance(o, DistMuon.Config) for o in optim.optimizer.optimizers):

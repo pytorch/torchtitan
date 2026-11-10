@@ -5,11 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import re
 from unittest import mock
 
 import pytest
 
 from torchtitan.components.checkpointer.dcp import CheckpointManager
+from torchtitan.components.checkpointer.torch_checkpointing import (
+    TorchCheckpointingManager,
+)
 from torchtitan.components.validator import Validator
 from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -219,6 +223,49 @@ def test_microbatch_tokens_match_activation_sharding() -> None:
 
     config.training.num_tokens_per_microbatch_per_dp_rank = 16
     config.__post_init__()
+
+
+@pytest.mark.parametrize(
+    "checkpointer, unsupported",
+    [
+        (CheckpointManager.Config(), None),
+        (CheckpointManager.Config(async_mode="async"), None),
+        (CheckpointManager.Config(export_dtype="bfloat16"), None),
+        (
+            CheckpointManager.Config(async_mode="async_with_pinned_mem"),
+            "checkpointer.async_mode='async_with_pinned_mem'",
+        ),
+        (
+            CheckpointManager.Config(
+                initial_load_in_hf=True, initial_load_path="/checkpoint"
+            ),
+            "checkpointer.initial_load_in_hf=True",
+        ),
+        (
+            CheckpointManager.Config(last_save_in_hf=True),
+            "checkpointer.last_save_in_hf=True",
+        ),
+        (
+            TorchCheckpointingManager.Config(),
+            "checkpointers other than CheckpointManager",
+        ),
+    ],
+)
+def test_flex_shard_checkpointer(checkpointer, unsupported: str | None) -> None:
+    # FlexShard's shard layouts reach DCP only through CheckpointManager, and
+    # neither through the save process of async_with_pinned_mem nor through
+    # Hugging Face conversion.
+    config = llama3_debugmodel()
+    config.training.disable_accelerator_graphs = True
+    config.parallelism.fsdp_backend = FlexShardConfig()
+    config.checkpointer = checkpointer
+    if unsupported is None:
+        TrainingEngine.Config.__post_init__(config)
+        return
+    with pytest.raises(
+        ValueError, match=rf"does not support {re.escape(unsupported)} yet"
+    ):
+        TrainingEngine.Config.__post_init__(config)
 
 
 def test_flex_shard_rejects_unsupported_models() -> None:
