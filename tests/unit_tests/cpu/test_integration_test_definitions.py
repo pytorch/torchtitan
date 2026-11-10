@@ -212,7 +212,7 @@ def test_models_select_fake_and_real_pg_cases() -> None:
     } <= fake_pg_model_tests
     assert {
         "deepseek_v3_fsdp+cp+pp+ep",
-        "deepseek_v4_fsdp+tp+ep",
+        "deepseek_v4_fsdp+tp+ep+pp",
     } <= real_pg_model_tests
 
 

@@ -39,6 +39,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 NGPU=4 \
 ## Status
 
 The AdamW debug model has been smoke-tested with 4 GPUs using FSDP2, TP2, EP2,
-and the `spmd_types` backend. The optional MTP path is available through
+and the `spmd_types` backend. CI trains it on 8 GPUs with FSDP2, TP2, EP2, and
+Interleaved1F1B PP2. Pipeline parallelism requires a real process group and
+does not support MTP layers. The optional MTP path is available through
 `deepseek_v4_mtp_debugmodel`. Checkpoint compatibility and larger-scale
 convergence validation should be completed before adding production recipes.
