@@ -82,6 +82,7 @@ def rl_muse_spark_816b_a42b_slake_lora_gb300(
     *,
     hf_assets_path: str = "./assets/hf/Muse-Spark-1.2-816B-A42B-open",
     slake_data_dir: str = "./assets/datasets/slake",
+    target_offpolicy_steps: int = 7,
 ) -> Controller.Config:
     """LoRA GRPO for Muse Spark Open 816B-A42B on SLAKE, on 32 GB300 GPUs with Dist-MoE.
 
@@ -90,6 +91,12 @@ def rl_muse_spark_816b_a42b_slake_lora_gb300(
     The trainer is the bound side (~21 s per step, ~25 samples/s); two generators keep up
     when every group trains, the third covers the groups that drop_zero_std_reward_groups
     discards (most closed questions are answered right by every sample of a group).
+
+    With those groups dropped, rollout supply is capped by the active groups,
+    ``(target_offpolicy_steps + 1) x num_prompts_per_train_step``, not by generator count:
+    at 3 the trainer waits ~15 s per step (36 s steps), and a fourth and fifth generator
+    only bring it to 29 s. At 7 the trainer never waits (24 s steps); the cost is staler
+    samples (mean policy age ~4 vs ~1.4, at most 7).
 
     LoRA (rank 8, alpha 16) on the attention projections and output gate; the adapters keep
     fp32 master weights and AdamW states and compute in bf16. The frozen base is stored in
@@ -138,6 +145,7 @@ def rl_muse_spark_816b_a42b_slake_lora_gb300(
             num_training_steps=200,
             num_prompts_per_train_step=32,
             num_samples_per_prompt=16,
+            target_offpolicy_steps=target_offpolicy_steps,
             validation=ValidationConfig(steps=_NUM_SLAKE_TEST_QUESTIONS),
             batcher=Batcher.Config(
                 training_sample_builder=TrainingSampleBuilder.Config(
