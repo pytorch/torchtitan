@@ -808,14 +808,18 @@ class ChunkedLossWrapper(Loss[LossInput]):
         ``fsdp_root`` is the module that FSDP sharded and that holds
         ``lm_head``, e.g. the model. FlexShard needs it to find lm_head's bucket.
         """
-        from torchtitan.distributed.flex_shard_fsdp import holds_flex_shard_params
+        from torchtitan.distributed.flex_shard_fsdp import (
+            holds_flex_shard_params,
+            is_flex_shard_module,
+        )
 
         # Without its bucket, FlexShard would reduce-scatter and reshard
         # lm_head's grads at every chunk.
-        if fsdp_root is None and holds_flex_shard_params(lm_head):
+        if holds_flex_shard_params(lm_head) and not is_flex_shard_module(fsdp_root):
             raise ValueError(
-                "lm_head is sharded with FlexShard, so set_lm_head needs fsdp_root "
-                "to find its bucket."
+                "lm_head is sharded with FlexShard, so set_lm_head needs fsdp_root, "
+                "the FlexShard module that holds it, to find its bucket. Got "
+                f"{type(fsdp_root).__name__}."
             )
         self.lm_head = lm_head
         self.fsdp_root = fsdp_root
