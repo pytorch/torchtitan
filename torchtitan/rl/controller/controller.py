@@ -88,6 +88,7 @@ _trainer_loop
 
 import asyncio
 import copy
+import itertools
 import json
 import logging
 import math
@@ -138,16 +139,50 @@ logger = logging.getLogger(__name__)
 
 @dataclass(kw_only=True, slots=True)
 class ValidationConfig:
-    """Held-out validation that runs at the start and end of training"""
+    """Held-out validation: how many prompts each validation has (`steps`) and when validations run.
 
-    # TODO: enable periodic validation with proper overlapping
+    The trainer loop never awaits a validation. The generators serve validation requests first (vLLM
+    priority -1), so steps slow down while a validation runs. The weights change during a validation,
+    so one validation can sample several policies.
+
+    A validation is logged at the step it ends; `validation/started_at_step` holds the step it started
+    at. Example: freq=25, 100 steps, each validation takes 30 steps (1 char = 5 steps; `.` waits for the
+    running validation, `=` runs, `x` cancelled):
+
+        step          0    25   50   75   100
+        training      ====================|
+        due at 0      ======                  logged at 30
+        due at 25          .======            logged at 60
+        due at 50               ..======      logged at 90
+        due at 75                    ...==x   cancelled: training ended
+    """
 
     steps: int = 20
-    """Maximum prompts per pass. -1 consumes one finite source pass; 0 disables."""
+    """Maximum prompts per validation. -1 reads the finite source once; 0 disables."""
+
+    freq: int | None = None
+    """A validation comes due at each multiple of `freq` after step 0; none starts at the last step. None:
+    no periodic validations. A resumed run's start step follows the same rule: freq=25, resumed at 25 -> due at
+    25, 50, ...; resumed at 13 -> due at 25, 50, ..."""
+
+    validate_at_step_0: bool = True
+    """A validation that starts at step 0. Turn it off when you already know that score."""
+
+    validate_after_training: bool = False
+    """After a completed run, one more validation on the final policy. Wasteful: the trainer GPUs sit
+    idle until it ends. A validation that ends at the last step is also logged at that step, just before
+    this one."""
+
+    defer_new_if_not_finished: bool = True
+    """True: a due validation waits for the running one to end, then starts; steps that come due while
+    it waits add no extra validation. False: every due validation starts at once, so validations can
+    pile up and slow training down."""
 
     def __post_init__(self) -> None:
         if self.steps < -1:
             raise ValueError("validation steps must be -1 or non-negative")
+        if self.freq is not None and self.freq < 1:
+            raise ValueError(f"validation freq must be None or >= 1, got {self.freq}")
 
 
 @dataclass(kw_only=True, slots=True)
@@ -509,6 +544,19 @@ class Controller(Configurable):
         self.rollout_recorder = config.rollout_recorder.build(
             dump_dir=config.dump_folder
         )
+        # TODO: move validation (its schedule, tasks and logging) into a Validator class, like
+        # pretraining's (torchtitan/components/validator.py).
+        # One task per validation that runs beside training (all its prompts), from its start until
+        # `_log_ended_validations` logs its metrics once or drops it.
+        self._validation_tasks: list[asyncio.Task[list[m.Metric]]] = []
+        # A validation that came due but hasn't started: it waits for the running one
+        # (`defer_new_if_not_finished`).
+        self._has_pending_validation = False
+        # Count down from -1, since training group ids count up from 0. A shared id would give two requests
+        # the same id (`group=5/rollout=0/turn=0`), which crashes the generator's engine loop, and would give
+        # two groups one pinned policy version (their prefix-cache salt). Negative ids also get vLLM priority
+        # -1, so the generators serve validation requests before training requests.
+        self._validation_group_ids = itertools.count(start=-1, step=-1)
 
     async def close(self):
         """Best-effort: tear down actors, close metric backends, then stop the actor system."""
@@ -725,7 +773,6 @@ class Controller(Configurable):
         with sl.log_trace_span("generator_pull_model_state_dict"):
             await self.generator_router.pull_model_state_dict.call_one(self.start_step)
 
-    # TODO: fold validation into a Validator(Configurable) the controller attaches, instead of 4 methods.
     @sl.log_trace_span("_collect_validation_rollouts")
     async def _collect_validation_rollouts(
         self, *, samples: list[object], sampling: SamplingConfig, step: int
@@ -734,6 +781,8 @@ class Controller(Configurable):
         # TODO: group_size=1 (best-of-1) only. Support best-of-N.
         generate = self._make_generate_fn()
         release_session_fn = self._make_release_session_fn()
+        # Each id is used once, so validations that run at the same time never share one.
+        group_ids = [next(self._validation_group_ids) for _ in samples]
         # TODO(naming): reserve "sample" for TrainingSample; rename the rollouter's raw-prompt "sample" -> "prompt"/"data_input".
         group_results = await asyncio.gather(
             *(
@@ -741,28 +790,24 @@ class Controller(Configurable):
                     generate_fn=generate,
                     release_session_fn=release_session_fn,
                     sample=sample,
-                    # Negative ids keep validation disjoint from training group ids, so their
-                    # request_ids can't collide in the shared engine (e.g. post-validation).
-                    group_id=-(i + 1),
+                    group_id=group_id,
                     group_size=1,
                     sampling=sampling,
                 )
-                for i, sample in enumerate(samples)
+                for group_id, sample in zip(group_ids, samples, strict=True)
             ),
             return_exceptions=True,
         )
-        # Validation group ids are reused every validation, so their cache salts must not outlive it.
-        await self.generator_router.release_groups.call_one(
-            [-(i + 1) for i in range(len(samples))]
-        )
+        # Drop the generators' pinned cache salts and held KV for these groups.
+        await self.generator_router.release_groups.call_one(group_ids)
 
         # Keep the groups that succeeded; log + count the ones that raised.
         rollout_groups: list[RolloutGroup] = []
         num_failed_groups = 0
-        for i, result in enumerate(group_results):
+        for group_id, result in zip(group_ids, group_results, strict=True):
             if isinstance(result, BaseException):
                 logger.error(
-                    f"validation group {-(i + 1)} (step={step}) failed; dropping",
+                    f"validation group {group_id} (step={step}) failed; dropping",
                     exc_info=(type(result), result, result.__traceback__),
                 )
                 num_failed_groups += 1
@@ -775,11 +820,12 @@ class Controller(Configurable):
                 rollout for group in rollout_groups for rollout in group.rollouts
             ],
         )
-        # The generators name every request's metrics `generator/*`. Rename validation's so W&B keeps them
-        # apart from training's.
+        # Training logs the same turn metrics, so prefix validation's to keep them apart in W&B:
+        #   generator/queue_time_ms -> validation_generator/queue_time_ms
+        #   math_verify/timeouts    -> validation_math_verify/timeouts
+        # compute_rollout_metrics already names every other key validation/* or validation_reward*.
         for index, metric in enumerate(metrics):
-            # generator/queue_time_ms -> validation_generator/queue_time_ms
-            if metric.key.startswith("generator/"):
+            if not metric.key.startswith("validation"):
                 metrics[index] = m.Metric(f"validation_{metric.key}", metric.value)
         metrics.append(
             m.Metric("validation/group_failures", m.Sum(float(num_failed_groups)))
@@ -791,19 +837,23 @@ class Controller(Configurable):
         """Run greedy validation on held-out prompts.
 
         Args:
-            step: Training step this validation pass belongs to (0 for the
-                pre-training pass); tagged into logged rollout samples.
+            step: Training step this validation starts at.
 
         Returns:
-            Validation rollout metrics, generation metrics, and validation
-            timing.
+            Validation rollout metrics, generation metrics, validation timing,
+            and the step it started at.
         """
         # TODO: investigate using pass@k for validation.
         t_validate_start = time.perf_counter()
         steps = self.config.async_loop.validation.steps
         if steps == 0:  # skip validation (e.g. loss guard CI)
             return []
-        samples = self._rollouter.get_validation_samples(steps)
+        logger.info(f"Validation started at step {step}")
+        # TODO: read prompts as slots free up and drop each once its metrics are folded, instead of
+        # reading every prompt first. That also bounds the slots a validation takes in the generators and
+        # in a rollouter's own limit. Do it when validation moves out of the controller.
+        # Off the event loop: training runs meanwhile, and building the dataset can take seconds.
+        samples = await asyncio.to_thread(self._rollouter.get_validation_samples, steps)
         greedy = replace(self._sampling, temperature=0.0, top_p=1.0)
 
         rollout_groups, validation_metrics = await self._collect_validation_rollouts(
@@ -814,6 +864,9 @@ class Controller(Configurable):
 
         t_validate_s = time.perf_counter() - t_validate_start
         validation_metrics.append(m.Metric("timing/validate", m.NoReduce(t_validate_s)))
+        validation_metrics.append(
+            m.Metric("validation/started_at_step", m.NoReduce(step))
+        )
         return validation_metrics
 
     async def run(self) -> None:
@@ -822,13 +875,14 @@ class Controller(Configurable):
         Producers (_data_input_loop, _rollout_loop[N], _batcher_loop) loop forever, and
         _generator_loop waits for the generators' engine loops, which run until close; _trainer_loop is
         the only finite loop -- it runs num_training_steps, then returns, which drives shutdown.
-        _generator_loop watches the training loop only: an engine loop that dies during pre- or
-        post-training validation shows up as failed validation rollouts.
+        _generator_loop watches the training loop only: an engine loop that dies during the validation
+        after training shows up as failed validation rollouts.
 
         Shutdown (healthy):  _trainer_loop finishes N steps -> run() finally ->
           group_buffer.close()  (wakes _data_input_loop / _rollout_loop / _batcher_loop blocked on the buffer)
           -> task.cancel()      (wakes anything blocked on training_batch_queue.put/get; close does NOT wake these)
           -> gather(..., return_exceptions=True)
+          -> _maybe_validate_after_training()  (logs ended validations; runs the one after training)
         Shutdown (crash):    any loop raises -> appears in `done` -> run() re-raises -> same finally.
         """
         # Setup objects (modules, configs, dataset, actor handles) live until exit. Freeze them
@@ -839,12 +893,8 @@ class Controller(Configurable):
 
         async_loop = self.config.async_loop
         num_training_steps = async_loop.num_training_steps
-        logger.info(
-            f"Running pre-training validation; then {num_training_steps} steps of async RL training"
-        )
+        logger.info(f"Running {num_training_steps} steps of async RL training")
 
-        sl.log_trace_instant("validation_start")
-        pre_validation = await self._validate_and_log(step=self.start_step)
         sl.log_trace_instant("training_start")
 
         # Trainer policy version, seeded from the resumed step; advances at each optimizer step.
@@ -923,6 +973,9 @@ class Controller(Configurable):
             generator_task,
         ]
         try:
+            # TODO: on resume, restart the validation that was still running when the previous run
+            # stopped. The checkpoint doesn't record it, so it is lost unless the start step is due.
+            self._maybe_start_validation(step=self.start_step)
             done, _ = await asyncio.wait(
                 [trainer_task, *background_tasks], return_when=asyncio.FIRST_COMPLETED
             )
@@ -940,37 +993,84 @@ class Controller(Configurable):
         finally:
             # Graceful first: buffer.close() (awaited) wakes loops blocked on the buffer so they return.
             # Then cancel covers anything blocked on the queue (which close does not wake); gather awaits all.
+            # Cancel the validations too: `_validation_tasks` holds every validation not logged yet. On a
+            # healthy end, a validation that already ended keeps its result for the call after training. A
+            # cancelled validation is never logged, and its groups stay pinned in the generators. Its rollouts
+            # keep running until close() if the rollouter shields them (the base Rollouter does).
+            # TODO: abort a cancelled validation's rollouts and release its groups. The generators have no abort
+            # path yet.
             await self._group_buffer.close()
-            for task in (*background_tasks, trainer_task):
+            for task in (*background_tasks, trainer_task, *self._validation_tasks):
                 task.cancel()
             await asyncio.gather(
-                *background_tasks, trainer_task, return_exceptions=True
+                *background_tasks,
+                trainer_task,
+                *self._validation_tasks,
+                return_exceptions=True,
             )
 
-        # Post-training validation (held-out eval after the final step).
-        post_validation = await self._validate_and_log(step=num_training_steps)
-        self._log_reward_delta(pre_validation, post_validation)
+        await self._maybe_validate_after_training(step=num_training_steps)
 
     async def _generator_loop(self) -> None:
         """Wait until every generator's engine loop exits; raise as soon as one crashes."""
         await self.generator_router.wait_engine_loop.call_one()
 
-    async def _validate_and_log(self, *, step: int) -> dict[str, float]:
-        """Run one validation pass, log it, and return its aggregated values for the pre/post delta."""
-        metrics = await self.validate(step=step)
-        self.metrics_processor.log(step=step, metrics=metrics, is_validation=True)
-        return m.MetricsProcessor._aggregate_metrics(metrics)
+    def _should_validate(self, step: int) -> bool:
+        """Whether a validation comes due at `step`: step 0 if `validate_at_step_0`, else each multiple
+        of `freq`. `_maybe_start_validation` still starts none at the last step."""
+        validation = self.config.async_loop.validation
+        if step == 0:
+            return validation.validate_at_step_0
+        return validation.freq is not None and step % validation.freq == 0
 
-    def _log_reward_delta(self, pre: dict[str, float], post: dict[str, float]) -> None:
-        """Console pre/post reward summary, visible without scrolling back through the loop."""
-        reward_keys = sorted(key for key in set(pre) | set(post) if "reward" in key)
-        logger.info("=" * 60)
-        logger.info("Validation reward (pre / post):")
-        for key in reward_keys:
-            logger.info(
-                f"  {key}:  {pre.get(key, float('nan')):+.3f}  /  {post.get(key, float('nan')):+.3f}"
+    def _log_ended_validations(self, *, step: int) -> None:
+        """Log, at `step`, the validations that ended. A failed one raises here; a cancelled one is never
+        logged."""
+        for task in [task for task in self._validation_tasks if task.done()]:
+            self._validation_tasks.remove(task)
+            if task.cancelled():
+                logger.info(f"{task.get_name()} was cancelled: training ended first")
+                continue
+            self.metrics_processor.log(
+                step=step, metrics=task.result(), is_validation=True
             )
-        logger.info("=" * 60)
+
+    def _maybe_start_validation(self, *, step: int) -> None:
+        """Log the validations that ended, then start the due validation as a task. Never waits.
+
+        Called at the start step and after each training step. A validation that comes due while another
+        runs waits for it if `defer_new_if_not_finished`; steps that come due while it waits add no extra
+        one. No validation starts at the last step: training ends right after.
+        """
+        self._log_ended_validations(step=step)
+        if step >= self.config.async_loop.num_training_steps:
+            return
+        should_validate = self._should_validate(step)
+        must_wait = (
+            self.config.async_loop.validation.defer_new_if_not_finished
+            and bool(self._validation_tasks)
+        )
+        if should_validate and must_wait:
+            logger.info(
+                f"Validation due at step {step} waits for the running one to end"
+            )
+        self._has_pending_validation = self._has_pending_validation or should_validate
+        if self._has_pending_validation and not must_wait:
+            self._validation_tasks.append(
+                asyncio.create_task(
+                    self.validate(step=step),
+                    name=f"validation started at step {step}",
+                )
+            )
+            self._has_pending_validation = False
+
+    async def _maybe_validate_after_training(self, *, step: int) -> None:
+        """Log the validations that ended, then run one more on the final policy if
+        `validate_after_training`, and log it. run() calls it after cancelling the running ones."""
+        self._log_ended_validations(step=step)
+        if self.config.async_loop.validation.validate_after_training:
+            metrics = await self.validate(step=step)
+            self.metrics_processor.log(step=step, metrics=metrics, is_validation=True)
 
     async def _data_input_loop(self, group_buffer: RolloutGroupWorkBuffer) -> None:
         """produces a RolloutGroupWork into group_buffer.
@@ -1288,7 +1388,14 @@ class Controller(Configurable):
                     ],
                 )
 
-        # Finish the last push and pull so generators hold the final weights for post-validation.
+            self._maybe_start_validation(step=step)
+
+        # TODO: if this loop raises (e.g. a failed push, forward/backward, optimizer step or validation),
+        # the push and pull still in flight keep running while run() tears down, and nobody reads the copy of
+        # a failed push's error in the pull task ("Task exception was never retrieved"). Cancel or await both
+        # in a `finally`.
+        # Finish the last push and pull so generators hold the final weights for the validation after
+        # training (`validate_after_training`).
         if push_task is not None:
             await push_task
             await pull_task
