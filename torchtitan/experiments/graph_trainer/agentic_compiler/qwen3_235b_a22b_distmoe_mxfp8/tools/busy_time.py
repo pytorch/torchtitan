@@ -8,7 +8,7 @@
 
     python busy_time.py <run dir> [<run dir> ...]
 
-Reads <run>/analysis/{kernels,node_table}.pkl (fusion_region_finder parse_trace.py + build_node_table.py) and
+Reads <run>/analysis/{kernels,node_table}.pkl (fusion_finder parse_trace.py + build_node_table.py) and
 prints busy ms with and without the kernels of fake_comm nodes (copies that only emulate collectives under the
 fake process group), plus the plain sum of kernel durations, which double-counts PDL overlap.
 """

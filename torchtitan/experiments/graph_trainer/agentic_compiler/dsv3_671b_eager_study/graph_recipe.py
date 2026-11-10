@@ -7,7 +7,7 @@
 """GraphTrainer reference for the eager study: the DSv3 loop's recipe without and with its
 plan and kernel cache (``dsv3_671b_distmoe_mxfp8``), in the eager recipes' measurement setup.
 
-    RUN=<dir> PYTHONPATH=<fusion_region_finder scripts>:<loop dir>:. NGPU=256 LOCAL_RANK=0 \\
+    RUN=<dir> PYTHONPATH=<fusion_finder scripts>:<loop dir>:. NGPU=256 LOCAL_RANK=0 \\
         python -m torchtitan.train --module graph_recipe --config graph_pack_prof --comm-backend fake
 
 Configs: graph_base_* (no plan), graph_pack_* (plan_iter9 lifted, kernels substituted from the

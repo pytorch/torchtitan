@@ -1,6 +1,6 @@
 # Qwen3 235B-A22B DistMoE MXFP8: fusion loop seeded from the Qwen3 30B-A3B results
 
-The fusion_region_finder -> substitute_kernels -> autokernel loop for Qwen3 235B-A22B, started from the regions and
+The fusion_finder -> substitute_kernels -> autokernel loop for Qwen3 235B-A22B, started from the regions and
 kernels of the Qwen3 30B-A3B loop (`../qwen3_30b_a3b_distmoe_mxfp8/`). This is the experiment for item 2 of
 `../TODO.md`. `reuse_report.md` covers what reuse changed; this file is the audit report of the run.
 
@@ -25,7 +25,7 @@ run's working directory (candidates, evidence, captured inputs); they are not co
 ## Run
 
 ```
-S=torchtitan/experiments/graph_trainer/.claude/skills/fusion_region_finder/scripts
+S=torchtitan/experiments/graph_trainer/.claude/skills/fusion_finder/scripts
 D=torchtitan/experiments/graph_trainer/agentic_compiler/qwen3_235b_a22b_distmoe_mxfp8
 ENV="PYTHONPATH=$S:$D:. NGPU=256 LOCAL_RANK=0 CUDA_VISIBLE_DEVICES=0 PYTORCH_ALLOC_CONF=expandable_segments:True"
 

@@ -6,7 +6,7 @@
 
 """Classify the Qwen3 30B-A3B fusion regions from the graph the lift passes see.
 
-    PYTHONPATH=<fusion_region_finder scripts>:. python classify.py <report dir> <plan> <dump> <out.json>
+    PYTHONPATH=<fusion_finder scripts>:. python classify.py <report dir> <plan> <dump> <out.json>
 
 Replays the plan's lift passes in order on the dump (as replay.py does) and records, per site:
 phase of each member (forward, backward, or recompute: a forward op that GraphTrainer's memory
