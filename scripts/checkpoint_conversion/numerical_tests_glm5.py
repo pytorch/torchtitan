@@ -152,6 +152,40 @@ def _print_routing_comparison(
     return match_rate
 
 
+def _record_indexer_choices(model, *, is_hf: bool) -> dict[int, torch.Tensor]:
+    """Capture producer selections, excluding layers that reuse earlier indices."""
+    choices: dict[int, torch.Tensor] = {}
+    layers = model.model.layers if is_hf else model.layers.values()
+    for layer_idx, layer in enumerate(layers):
+        attention = layer.self_attn if is_hf else layer.attention
+        indexer = getattr(attention, "indexer", None)
+        if indexer is None:
+            continue
+
+        def record(_module, _inputs, output, layer_idx=layer_idx):
+            choices[layer_idx] = output.detach().cpu()
+
+        indexer.register_forward_hook(record)
+    return choices
+
+
+def compare_indexer_choices(hf_choices, tt_choices, *, seq_len: int) -> None:
+    """Compare causal selected sets, ignoring ordering and masked filler slots."""
+    if not hf_choices or set(hf_choices) != set(tt_choices):
+        raise ValueError("HF and TorchTitan indexer producer layers differ or are empty")
+    for layer_idx in sorted(hf_choices):
+        selections = []
+        for choices in (hf_choices, tt_choices):
+            indices = choices[layer_idx].reshape(seq_len, -1).long()
+            queries = torch.arange(seq_len)[:, None]
+            valid = (indices >= 0) & (indices <= queries)
+            selected = torch.zeros(seq_len, seq_len, dtype=torch.int64)
+            selected.scatter_add_(1, indices.clamp(0, seq_len - 1), valid.long())
+            selections.append(selected > 0)
+        torch.testing.assert_close(selections[0], selections[1], rtol=0, atol=0)
+    print(f"indexer selected sets: {len(hf_choices)} producer layers match")
+
+
 def _compare_logits(
     hf_logits: torch.Tensor, tt_logits: torch.Tensor
 ) -> tuple[float, float, float]:
@@ -209,6 +243,10 @@ def main() -> None:
     hf_model = _build_hf_model(tt_config, tt_model.state_dict(), device)
     hf_choices = _record_routing(hf_model, is_hf=True)
     tt_choices = _record_routing(tt_model, is_hf=False)
+    hf_indices = _record_indexer_choices(hf_model, is_hf=True)
+    tt_indices = _record_indexer_choices(tt_model, is_hf=False)
+    if args.seq_len <= hf_model.config.index_topk:
+        raise ValueError("Parity requires seq_len > index_topk to exercise sparse selection")
 
     generator = torch.Generator(device="cpu").manual_seed(args.seed + 1)
     tokens = torch.randint(
@@ -230,6 +268,7 @@ def main() -> None:
     tt_logits = tt_model(tokens, positions=positions).unsqueeze(0)
 
     router_match = _print_routing_comparison(hf_choices, tt_choices)
+    compare_indexer_choices(hf_indices, tt_indices, seq_len=args.seq_len)
     kl, cosine, top1 = _compare_logits(hf_logits, tt_logits)
     if router_match < args.min_router_match:
         raise RuntimeError(

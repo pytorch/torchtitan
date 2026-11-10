@@ -33,8 +33,8 @@ Primary references:
 1. left-shift token ids and labels by each prediction depth;
 2. reject shifts that cross packed-document or padding boundaries;
 3. use `IGNORE_INDEX` for invalid auxiliary labels;
-4. build one DSA additive mask per shifted sequence;
-5. declare token, label, validity-mask, and DSA-mask SPMD placements;
+4. build linear-size DSA document and validity metadata per shifted sequence;
+5. declare token, label, validity-mask, and metadata SPMD placements;
 6. return aligned tuples for the main and auxiliary objectives.
 
 The generic rolling and loss semantics are shared with DeepSeek-V3 through
@@ -78,7 +78,7 @@ the real released key shape, including the absence of a duplicated
 ## Parallelism
 
 The implementation reuses the common MTP FSDP lifecycle and MTP TP/SP sharding
-configs. GLM additionally assigns the DSA mask's query-sharded CP placement.
+configs. GLM additionally prepares rank-local DSA query metadata under CP.
 
 Parameter and FLOP accounting includes both the 78 target decoder layers and
 the configured MTP layers.  In particular, the frozen DSA indexer is charged
@@ -89,8 +89,8 @@ or MTP block.  This keeps MTP on/off MFU comparisons internally consistent.
 
 Pipeline parallel MTP currently requires the token embedding, target decoder
 tail, MTP block, final norm, and shared lm_head to be represented coherently at
-the pipeline boundary.  `Glm5Model.forward()` rejects a partition missing the
-embedding or lm_head instead of silently dropping the auxiliary objective.
+the pipeline boundary. Model configuration rejects PP with MTP before training;
+`Glm5Model.forward()` also rejects a partition missing the embedding or lm_head.
 Until a dedicated PP contract and test exist, PP+MTP is unsupported rather
 than a fallback to non-MTP training.
 

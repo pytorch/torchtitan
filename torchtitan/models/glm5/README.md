@@ -133,7 +133,7 @@ reduced deterministic parity test:
 python -m scripts.checkpoint_conversion.numerical_tests_glm5
 ```
 
-Select the versioned GLM-5.3 development flavor with:
+The same development flavor validates the shared GLM-5.2/5.3 architecture:
 
 ```bash
 python -m scripts.checkpoint_conversion.numerical_tests_glm5 \
@@ -151,7 +151,7 @@ second vocabulary projection.
 
 TorchTitan therefore models training-time MTP as a real auxiliary decoder
 depth, not as an inference-only flag.  The dataloader prepares a shifted token
-and label sequence, the GLM block builds the corresponding DSA mask, and
+and label sequence, the GLM block builds the corresponding DSA metadata, and
 ``MTPLoss`` adds the weighted auxiliary cross-entropy objective.  See
 [`MTP.md`](MTP.md) for the data, model, checkpoint, parallelism, and validation
 contracts.
