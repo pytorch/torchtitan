@@ -38,7 +38,7 @@ class TestVisionAttention(unittest.TestCase):
             )
         )
         identity_attention = _IdentityAttention()
-        attention.flex_attention = identity_attention
+        attention.inner_attention = identity_attention
 
         x_TD = torch.randn(num_tokens, dim)
         attention_mask = create_block_mask(
