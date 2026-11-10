@@ -10,11 +10,6 @@ max-line-length = 120
 # N803,N806 allow caps and mixed case in function params. This is to work with Triton kernel coding style.
 ignore =
     E203,E305,E402,E501,E721,E741,F405,F821,F841,F999,W503,W504,C408,E302,W291,E303,N812,N817,E731,N803,N806
-    # E704 flags `def f(...) -> T: ...` (ellipsis-only body). That form is what the
-    # formatter emits -- `ruff format` reports these files as already formatted and
-    # collapses an expanded body back onto one line -- so the violation cannot be
-    # fixed from the source side without fighting the formatter.
-    E704
     # shebang has extra meaning in fbcode lints, so I think it's not worth trying
     # to line this up with executable bit
     EXE001,
