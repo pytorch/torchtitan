@@ -86,14 +86,21 @@ def test_single_turn_packs_one_training_sample() -> None:
     assert training_sample.max_policy_version == 2
 
 
-def test_packs_min_and_max_version_across_turns() -> None:
-    # Two turns sampled at different versions (a model state dict load landed between them); the packed
-    # training_sample records the min (oldest, turn-0) and max (newest, turn-1) version.
+@pytest.mark.parametrize("versions", [(3, 4), (4, 3)])
+def test_packs_min_and_max_version_across_turns(versions: tuple[int, int]) -> None:
+    # Two turns sampled at different versions; the packed training_sample records the oldest and
+    # the newest. (4, 3): the session moved to a generator that had not loaded version 4 yet.
     rollout = _scored_rollout(
         [
-            _turn(prompt_token_ids=[1, 2], completion_token_ids=[4, 5], version=3),
             _turn(
-                prompt_token_ids=[1, 2, 4, 5, 9], completion_token_ids=[7], version=4
+                prompt_token_ids=[1, 2],
+                completion_token_ids=[4, 5],
+                version=versions[0],
+            ),
+            _turn(
+                prompt_token_ids=[1, 2, 4, 5, 9],
+                completion_token_ids=[7],
+                version=versions[1],
             ),
         ],
         reward=1.0,
@@ -101,8 +108,8 @@ def test_packs_min_and_max_version_across_turns() -> None:
     )
     [training_sample] = rollout_to_training_samples(rollout)
     assert training_sample.token_ids.tolist() == [1, 2, 4, 5, 9, 7]
-    assert training_sample.min_policy_version == 3  # oldest (turn 0)
-    assert training_sample.max_policy_version == 4  # newest (turn 1)
+    assert training_sample.min_policy_version == min(versions)
+    assert training_sample.max_policy_version == max(versions)
 
 
 def test_multiturn_with_growing_prefix_packs_into_one_training_sample() -> None:
