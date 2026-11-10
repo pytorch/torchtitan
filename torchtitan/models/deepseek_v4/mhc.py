@@ -59,9 +59,10 @@ class HcSplitSinkhorn(Module):
             *([1] * (comb.ndim - 2)), hc_mult, hc_mult
         )
 
-        row_max = comb.max(dim=-1, keepdim=True).values
-        comb = torch.exp(comb - row_max)
-        comb = comb / (comb.sum(dim=-1, keepdim=True) + self.eps)
+        # Matches the reference kernel: eps is added to every entry after the
+        # first row softmax (not to its denominator), so the Sinkhorn kernel is
+        # strictly positive even when exp underflows.
+        comb = torch.softmax(comb, dim=-1) + self.eps
         comb = comb / (comb.sum(dim=-2, keepdim=True) + self.eps)
         for _ in range(self.sinkhorn_iters - 1):
             comb = comb / (comb.sum(dim=-1, keepdim=True) + self.eps)

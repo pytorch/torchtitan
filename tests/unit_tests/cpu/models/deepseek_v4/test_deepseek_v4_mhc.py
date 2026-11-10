@@ -8,7 +8,7 @@ import unittest
 
 import torch
 
-from torchtitan.models.deepseek_v4.mhc import HcPost
+from torchtitan.models.deepseek_v4.mhc import HcPost, HcSplitSinkhorn
 
 
 def _reference_hc_post(x, residual, post, comb):
@@ -19,6 +19,41 @@ def _reference_hc_post(x, residual, post, comb):
         comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2
     )
     return y.type_as(x)
+
+
+def _reference_sinkhorn_comb(comb, sinkhorn_iters, eps):
+    """Sinkhorn part of ``hc_split_sinkhorn_kernel`` in DeepSeek-V4's reference
+    inference/kernel.py; comb ``[..., hc, hc]`` is the scaled and biased logits."""
+    comb = comb.softmax(-1) + eps
+    comb = comb / (comb.sum(-2, keepdim=True) + eps)
+    for _ in range(sinkhorn_iters - 1):
+        comb = comb / (comb.sum(-1, keepdim=True) + eps)
+        comb = comb / (comb.sum(-2, keepdim=True) + eps)
+    return comb
+
+
+class TestHcSplitSinkhorn(unittest.TestCase):
+    def test_comb_matches_reference(self):
+        gen = torch.Generator().manual_seed(0)
+        num_tokens, hc_mult = 5, 4
+        config = HcSplitSinkhorn.Config(hc_mult=hc_mult)
+        mixes = torch.randn(
+            num_tokens, (2 + hc_mult) * hc_mult, generator=gen, dtype=torch.float64
+        )
+        # Token 0: columns 1.. of every comb row underflow exp. The reference
+        # adds eps after the row softmax, so those columns recover to ~1/hc_mult
+        # instead of staying zero.
+        mixes[0, 2 * hc_mult :].view(hc_mult, hc_mult)[:, 1:] = -1000.0
+        hc_scale = torch.ones(3, dtype=torch.float64)
+        hc_base = torch.zeros((2 + hc_mult) * hc_mult, dtype=torch.float64)
+
+        _, _, comb = config.build()(mixes, hc_scale, hc_base)
+        expected = _reference_sinkhorn_comb(
+            mixes[:, 2 * hc_mult :].unflatten(-1, (hc_mult, hc_mult)),
+            config.sinkhorn_iters,
+            config.eps,
+        )
+        torch.testing.assert_close(comb, expected)
 
 
 class TestHcPost(unittest.TestCase):
