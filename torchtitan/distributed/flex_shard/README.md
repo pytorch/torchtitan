@@ -66,42 +66,27 @@ into one transport group; complete matrices are assigned across that group.
 For example, expert storage `Shard(0), Shard(1)` on DP/TP preserves each DP
 rank's expert range while TP redistributes matrix rows to whole-expert compute.
 
-`redistribution_mesh_axes(fqn, parameter, compute_layout)` queries the exact
-transport axes without communication. The caller creates the transport mesh
-and supplies it through `BucketConfig.mesh`; FlexShard validates its axis names,
-ranks, and logical rank order, then reuses the bound groups for initialization,
-updates, and checkpoint loading. It does not construct communicators or choose
-process-group options. A single-axis bucket with `mesh=None` uses the existing
-storage group. A combined transport requires an explicit 1D mesh with the
-joined name, such as `dp_shard_tp`.
-
-For example, create a whole-matrix DP/TP transport before constructing DistMuon:
+`redistribution_mesh_axes(fqn, parameter, compute_layout)` returns the storage
+axes a parameter's transport spans, without communication. FlexShard does not
+create communicators: a single-axis bucket with `mesh=None` reuses its storage
+group, and a combined transport needs an explicit 1D `BucketConfig.mesh` named
+by joining the axes (e.g. `dp_shard_tp`) with the storage ranks in the same
+order:
 
 ```python
 from torchtitan.distributed.utils import build_transport_mesh
 
 axes = redistribution_mesh_axes("matrix", parameter, compute_layout)
-transport_mesh = build_transport_mesh(parameter.device_mesh, axes)
-bucket = BucketConfig(patterns=("matrix",), mesh=transport_mesh)
+bucket = BucketConfig(
+    patterns=("matrix",), mesh=build_transport_mesh(parameter.device_mesh, axes)
+)
 ```
 
-The TorchTitan DistMuon wrapper builds these meshes before calling FlexShard.
-Its existing `max_nccl_ctas_for_comms` cap applies only to those optimizer
-communicators; FSDP continues to use the original groups. The builder lives in
-`torchtitan/distributed/utils.py` and uses native `DeviceMesh._flatten` caching,
-with a separate resource-independent NCCL communicator for each positive cap.
-Callers may instead supply a precreated mesh with their own process-group
-options; the wrapper requires its automatic cap to be disabled in that case.
-
-First native group creation requires all WORLD ranks to request the same axes
-and cap in the same order. The wrapper calls `precreate_transport_meshes` on a
-common transport union before binding local buckets, so uneven PP buckets do
-not desynchronize group creation. This requires the same wrapper-constructor
-sequence and WORLD-covering roots with the requested storage views on every
-rank. VPP chunks reuse the native cached groups. For unequal optimizer counts,
-missing expert views, partial roots, or unsorted views, the caller must create
-meshes collectively and supply explicit `BucketConfig.mesh` values. Direct
-FlexShard constructors perform no WORLD transport preparation.
+The TorchTitan `DistMuon` wrapper builds these meshes for buckets without one,
+optionally with the `max_nccl_ctas_for_comms` cap. Because native group
+creation is collective over WORLD and pipeline stages own different buckets,
+it first creates the union of all ranks' transports with
+`precreate_transport_meshes`.
 
 Several mesh axes may shard the same tensor dimension. By default they apply
 in storage-mesh order; `shard_order_by_tensor_dim` states a different order,

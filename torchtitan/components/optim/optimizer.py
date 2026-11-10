@@ -202,10 +202,10 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         communicators for optimizer redistribution. Each communicator adds fixed
         memory and may reduce throughput; the cap benefits workloads only when
         the reduction in all-peer connection state outweighs that overhead.
-        This wrapper constructs transport meshes and passes them explicitly to
-        FlexShard through ``BucketConfig.mesh``. Automatic wrapper setup requires
-        the same constructor sequence on every WORLD rank, including PP stages
-        with different local buckets. Direct FlexShard callers own group setup.
+        For buckets without an explicit ``BucketConfig.mesh``, this wrapper
+        builds the transport meshes (see ``precreate_transport_meshes``), which
+        requires every rank to construct the same sequence of DistMuon
+        optimizers.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -266,27 +266,17 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         *,
         params: Iterable[dict[str, Any]] | Iterable[Tensor],
     ) -> None:
-        param_groups = tuple(
-            {
-                **group,
-                "params": (
-                    (group["params"],)
-                    if isinstance(group["params"], Tensor)
-                    else tuple(group["params"])
-                ),
-                "param_names": tuple(group["param_names"]),
-            }
-            for group in cast(Iterable[dict[str, Any]], params)
-        )
-        bucket_configs = config.bucket_configs
+        param_groups = tuple(cast(Iterable[dict[str, Any]], params))
+        bucket_configs = tuple(config.bucket_configs)
         if any(bucket.mesh is None for bucket in bucket_configs):
-            named_parameters = tuple(
-                (fqn, parameter)
+            named_parameters = [
+                (fqn, param)
                 for group in param_groups
-                for fqn, parameter in zip(
+                for fqn, param in zip(
                     group["param_names"], group["params"], strict=True
                 )
-            )
+                if isinstance(param, DTensor)
+            ]
             max_ctas = (
                 config.max_nccl_ctas_for_comms
                 if config.max_nccl_ctas_for_comms > 0
@@ -299,59 +289,41 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
                     stacklevel=2,
                 )
                 max_ctas = None
-            requests_by_bucket = []
-            validation_errors = []
-            for bucket in bucket_configs:
-                requests = []
-                if bucket.mesh is None:
-                    for fqn, parameter in named_parameters:
-                        if not any(
+            # Storage mesh and transport axes of each bucket's first parameter
+            # that needs redistribution; FlexShard rejects mixed transports.
+            transports = [
+                next(
+                    (
+                        (param.device_mesh, axes)
+                        for fqn, param in named_parameters
+                        if bucket.mesh is None
+                        and fqn in config.compute_sharding_by_fqn
+                        and any(
                             fnmatch.fnmatchcase(fqn, pattern)
                             for pattern in bucket.patterns
-                        ):
-                            continue
-                        try:
-                            if not isinstance(parameter, DTensor):
-                                raise ValueError(
-                                    f"Muon parameter {fqn!r} must be a DTensor"
-                                )
-                            axes = redistribution_mesh_axes(
-                                fqn, parameter, config.compute_sharding_by_fqn[fqn]
+                        )
+                        and (
+                            axes := redistribution_mesh_axes(
+                                fqn, param, config.compute_sharding_by_fqn[fqn]
                             )
-                        except (
-                            KeyError,
-                            TypeError,
-                            ValueError,
-                            NotImplementedError,
-                        ) as error:
-                            validation_errors.append(str(error))
-                            continue
-                        if axes:
-                            requests.append((parameter.device_mesh, axes, max_ctas))
-                requests_by_bucket.append(requests)
-            # WORLD agrees on first group creation before stages bind different
-            # buckets. The resulting meshes, including their options, are caller-owned.
+                        )
+                    ),
+                    None,
+                )
+                for bucket in bucket_configs
+            ]
             precreate_transport_meshes(
-                [request for requests in requests_by_bucket for request in requests],
-                storage_meshes=(
-                    parameter.device_mesh
-                    for _fqn, parameter in named_parameters
-                    if isinstance(parameter, DTensor)
-                ),
-                validation_errors=validation_errors,
+                [(mesh, axes, max_ctas) for mesh, axes in filter(None, transports)],
+                storage_meshes=[param.device_mesh for _, param in named_parameters],
             )
-            resolved_buckets = []
-            for bucket, requests in zip(
-                bucket_configs, requests_by_bucket, strict=True
-            ):
-                if requests:
-                    storage_mesh, axes, cap = requests[0]
-                    bucket = replace(
-                        bucket,
-                        mesh=build_transport_mesh(storage_mesh, axes, max_ctas=cap),
-                    )
-                resolved_buckets.append(bucket)
-            bucket_configs = tuple(resolved_buckets)
+            bucket_configs = tuple(
+                bucket
+                if transport is None
+                else replace(
+                    bucket, mesh=build_transport_mesh(*transport, max_ctas=max_ctas)
+                )
+                for bucket, transport in zip(bucket_configs, transports, strict=True)
+            )
         super().__init__(
             param_groups,
             compute_sharding_by_fqn=config.compute_sharding_by_fqn,

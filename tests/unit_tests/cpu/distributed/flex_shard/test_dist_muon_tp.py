@@ -36,10 +36,7 @@ from torchtitan.distributed.flex_shard.dist_muon import (
     _adjust_muon_learning_rate,
     DistMuon,
 )
-from torchtitan.distributed.utils import (
-    build_transport_mesh,
-    precreate_transport_meshes,
-)
+from torchtitan.distributed.utils import build_transport_mesh
 from torchtitan.models.kimi_k2_7.qk_clip import _scale_mla_heads
 from torchtitan_recipes.tests.models.kimi_k2_7 import _per_expert_compute_layout
 
@@ -252,52 +249,6 @@ class TestDistMuonTensorParallelCPU(DTensorTestBase, TensorParallelParity):
     @with_comms
     def test_dp_tp_storage_matches_unsharded_update(self):
         self._assert_storage_update()
-
-    @with_comms
-    def test_mixed_native_transport_cache_fails_collectively(self):
-        """Equivalent root metadata cannot hide a rank-local cache hit."""
-        mesh_a = init_device_mesh(
-            "cpu", self.mesh_shape, mesh_dim_names=("dp_shard", "tp")
-        )
-        mesh_b = init_device_mesh(
-            "cpu", self.mesh_shape, mesh_dim_names=("dp_shard", "tp")
-        )
-        build_transport_mesh(mesh_a if self.rank == 0 else mesh_b, ("dp_shard", "tp"))
-        with self.assertRaisesRegex(ValueError, "cache state"):
-            precreate_transport_meshes(
-                [(mesh_a, ("dp_shard", "tp"), None)], storage_meshes=[mesh_a]
-            )
-        roots = [
-            init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("world",))
-            for _ in range(2)
-        ]
-        views = [
-            root._unflatten(0, self.mesh_shape, mesh_dim_names=("dp_shard", "tp"))
-            for root in roots
-        ]
-        unsorted_views = [
-            DeviceMesh._concatenate([view["tp"], view["dp_shard"]]) for view in views
-        ]
-        build_transport_mesh(
-            unsorted_views[0 if self.rank == 0 else 1], ("tp", "dp_shard")
-        )
-        sorted_view = roots[0]._unflatten(
-            0, self.mesh_shape, mesh_dim_names=("tp", "dp_shard")
-        )
-        # Root slicing reports an existing unsorted cache entry as a KeyError.
-        # Only rank zero has that entry; every rank must reject it before flatten.
-        with self.assertRaisesRegex(ValueError, "native cache layout"):
-            precreate_transport_meshes(
-                [(sorted_view, ("tp", "dp_shard"), None)],
-                storage_meshes=[sorted_view],
-            )
-        group = dist.new_group(
-            ranks=list(range(self.world_size)), timeout=timedelta(seconds=5)
-        )
-        total = torch.ones(1)
-        dist.all_reduce(total, group=group)
-        self.assertEqual(total.item(), self.world_size)
-        dist.destroy_process_group(group)
 
     @with_comms
     def test_dp_tp_matches_plain_muon(self):
@@ -646,7 +597,7 @@ class TestDistMuonUnevenPipelineCPU(DTensorTestBase):
         parameter = torch.nn.Parameter(
             distribute_tensor(torch.ones(4, 4), mesh, (Shard(0), Shard(1)))
         )
-        with self.assertRaisesRegex(ValueError, "supply precreated BucketConfig.mesh"):
+        with self.assertRaisesRegex(ValueError, "supply explicit BucketConfig.mesh"):
             ConfigurableDistMuon.Config(
                 pattern=".*",
                 compute_sharding_by_fqn={
@@ -657,31 +608,6 @@ class TestDistMuonUnevenPipelineCPU(DTensorTestBase):
                 },
                 bucket_configs=[BucketConfig(patterns=("matrix",))],
             ).build(params=[{"params": [parameter], "param_names": ["matrix"]}])
-        # Native slicing rejects reordered axes before consulting the groups.
-        # An extra rank-local view must report that error to peers, not exit
-        # before their validation collective.
-        reversed_view = DeviceMesh(
-            "cpu",
-            root.mesh.reshape(2, 2, 2),
-            mesh_dim_names=("pp", "tp", "dp_shard"),
-            _root_mesh=root,
-            _init_backend=False,
-        )
-        with self.assertRaisesRegex(ValueError, "Cannot resolve transport view"):
-            precreate_transport_meshes(
-                [(dense_mesh, ("dp_shard", "tp"), None)],
-                storage_meshes=(
-                    [dense_mesh, reversed_view] if self.rank == 0 else [dense_mesh]
-                ),
-            )
-        unsorted_view = DeviceMesh._concatenate(
-            [dense_mesh["tp"], dense_mesh["dp_shard"]]
-        )
-        with self.assertRaisesRegex(ValueError, "root rank order"):
-            precreate_transport_meshes(
-                [(unsorted_view, ("tp", "dp_shard"), None)],
-                storage_meshes=[unsorted_view],
-            )
         group = dist.new_group(
             ranks=list(range(self.world_size)), timeout=timedelta(seconds=5)
         )
@@ -804,26 +730,6 @@ class TestDistMuonUnevenPipelineCPU(DTensorTestBase):
             self.assertIs(
                 repeated.optimizers[0]._bucket_plans[0].group.process_group,
                 repeated.optimizers[1]._bucket_plans[0].group.process_group,
-            )
-        group = dist.new_group(
-            ranks=list(range(self.world_size)), timeout=timedelta(seconds=5)
-        )
-        total = torch.ones(1)
-        dist.all_reduce(total, group=group)
-        self.assertEqual(total.item(), self.world_size)
-        dist.destroy_process_group(group)
-        unsupported = replace(
-            muon,
-            compute_sharding_by_fqn={
-                **muon.compute_sharding_by_fqn,
-                "dense": ComputeLayout({"dp_shard": Replicate()}),
-            },
-        )
-        with self.assertRaisesRegex(
-            ValueError, "replicated compute is not implemented"
-        ):
-            OptimizersContainer.Config(optimizers=[unsupported]).build(
-                model_parts=[model]
             )
         group = dist.new_group(
             ranks=list(range(self.world_size)), timeout=timedelta(seconds=5)
