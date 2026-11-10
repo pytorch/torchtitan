@@ -91,8 +91,10 @@ class ParallelismConfig:
     applies PyTorch's FSDP2 ``fully_shard``. ``FlexShardConfig()`` applies
     FlexShard (meta-pytorch/flex_shard), with one ``fsdp2_compatible`` bucket per
     FSDP2 group, so training is bitwise identical to FSDP2. FlexShard does not
-    support HSDP, tensor, context, expert or pipeline parallelism,
-    symmetric-memory communication or CPU offloading yet.
+    support HSDP, tensor, context or pipeline parallelism, symmetric-memory
+    communication or CPU offloading yet. With expert parallelism, it supports
+    only routed experts that use ``AllToAllTokenDispatcher`` and have no
+    ``output_postprocess``.
     """
 
     tensor_parallel_degree: int = 1

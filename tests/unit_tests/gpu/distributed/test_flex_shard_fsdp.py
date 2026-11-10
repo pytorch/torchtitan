@@ -56,6 +56,7 @@ class TestFlexShardDecoder(DTensorTestBase):
     ):
         parallelism = ParallelismConfig(
             data_parallel_shard_degree=self.world_size,
+            expert_parallel_degree=parallelism_context.ep,
             fsdp_backend=fsdp_backend,
             fsdp_reshard_after_forward=reshard_after_forward,
         )
@@ -150,27 +151,19 @@ class TestFlexShardDecoder(DTensorTestBase):
                 torch.equal(expected_tensor, actual[fqn]), msg=f"{context} {fqn}"
             )
 
-    @with_comms
-    def test_matches_fsdp2(self):
-        # One context, as in training: both backends shard over its dp_shard mesh.
+    def _check_matches_fsdp2(self, *, ep: int, cases) -> None:
+        # One context, as in training: both backends shard over its meshes.
         parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=self.world_size,
             cp=1,
             tp=1,
             pp=1,
-            ep=1,
+            ep=ep,
             world_size=self.world_size,
             enable_sequence_parallel=False,
         )
-        for (build_config, flavor), reshard_after_forward, microbatches in product(
-            (
-                (build_llama3_config, "debugmodel"),
-                (build_qwen3_config, "debugmodel_moe"),
-            ),
-            ("default", "always"),
-            (1, 2),
-        ):
+        for (build_config, flavor), reshard_after_forward, microbatches in cases:
             context = (
                 f"{flavor} "
                 f"reshard_after_forward={reshard_after_forward} "
@@ -217,3 +210,28 @@ class TestFlexShardDecoder(DTensorTestBase):
                 self._assert_equal_tensors(
                     expected[3], actual[3], f"{step_context} param"
                 )
+
+    @with_comms
+    def test_matches_fsdp2(self):
+        self._check_matches_fsdp2(
+            ep=1,
+            cases=product(
+                (
+                    (build_llama3_config, "debugmodel"),
+                    (build_qwen3_config, "debugmodel_moe"),
+                ),
+                ("default", "always"),
+                (1, 2),
+            ),
+        )
+
+    @with_comms
+    def test_matches_fsdp2_with_expert_parallelism(self):
+        # Each MoE block's routed experts shard over edp_shard (half of
+        # dp_shard), and the rest of the block over dp_shard.
+        self._check_matches_fsdp2(
+            ep=2,
+            cases=product(
+                [(build_qwen3_config, "debugmodel_moe")], ["default"], (1, 2)
+            ),
+        )
