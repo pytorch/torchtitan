@@ -172,13 +172,16 @@ Run the reduced Hugging Face parity check with the pinned Transformers
 reference documented by the script:
 
 ```bash
-python -m scripts.checkpoint_conversion.numerical_tests_glm5 --device cuda
+python -m scripts.checkpoint_conversion.numerical_tests_glm5 --device cuda --seq_len 128 --seed 61
 ```
 
 The parity check builds equivalent reduced TorchTitan and Hugging Face models,
-strictly loads the converted state dict, compares MoE routing choices, and
+uses sequence length 128 and seed 61 by default, strictly loads the converted
+state dict, compares effective causal indexer selections and MoE routing choices, and
 checks full-sequence logits with KL-divergence, cosine-similarity, and top-1
-agreement thresholds.
+agreement thresholds. The sequence length must exceed the indexer's top-k
+to exercise sparse selection. This forward-only script is distinct from
+external paired forward/backward parity reports.
 
 The integration suite registers an MTP training case, which also exercises the
 base decoder, using an 8-GPU FSDP2+TP2+CP2+EP2 configuration:

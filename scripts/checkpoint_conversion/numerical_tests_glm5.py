@@ -219,8 +219,8 @@ def main() -> None:
         choices=("glm5_2_debugmodel",),
         default=_DEFAULT_FLAVOR,
     )
-    parser.add_argument("--seq_len", type=int, default=16)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seq_len", type=int, default=128)
+    parser.add_argument("--seed", type=int, default=61)
     parser.add_argument(
         "--device",
         default="cuda" if torch.cuda.is_available() else "cpu",
