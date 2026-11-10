@@ -29,7 +29,7 @@ that FSDP2 does, before the reduce-scatter. FlexShard is imported only when
 
 import logging
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, cast, TYPE_CHECKING, TypeGuard
@@ -48,7 +48,6 @@ if TYPE_CHECKING:
     from torchtitan.components.optim import Optim
     from torchtitan.config.configs import DebugConfig, TrainingConfig
     from torchtitan.config.parallelism import ParallelismConfig
-    from torchtitan.distributed.fsdp_lifecycle import _PartialBackwardHooks
     from torchtitan.models.common.decoder import Decoder
 
 __all__ = [
@@ -567,9 +566,9 @@ def flex_shard_partial_backwards(
     flex_shard_module: nn.Module,
     run_backward: bool,
     outer_backward_follows: bool,
-) -> Iterator["_PartialBackwardHooks"]:
+) -> Iterator[Callable[[], None]]:
     """``fsdp_partial_backwards`` for ``module`` of ``flex_shard_module``, with
-    the collectives FSDP2 issues.
+    the collectives FSDP2 issues. Yields ``before_last_forward``.
 
     A call of ``module`` on its own leaves its bucket's forward open, so
     FlexShard runs no post-forward for it and finishes the bucket as soon as
@@ -605,13 +604,10 @@ def flex_shard_partial_backwards(
         if not has_kept_grads:
             storage.set_requires_gradient_sync(requires_gradient_sync)
 
-    # fsdp_lifecycle imports this module.
-    from torchtitan.distributed.fsdp_lifecycle import _PartialBackwardHooks
-
     try:
         storage.set_requires_gradient_sync(False)
         storage.set_reshard_after_backward(False)
-        yield _PartialBackwardHooks(before_last_forward, lambda output: output)
+        yield before_last_forward
     finally:
         storage.set_requires_gradient_sync(requires_gradient_sync)
         storage.set_reshard_after_backward(reshard_after_backward)
