@@ -39,8 +39,9 @@ def validate_model_training_config(
     from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
     from torchtitan.models.common.attention import VarlenInnerAttention
     from torchtitan.models.common.decoder import Decoder
-    from torchtitan.models.common.moe import MoE
+    from torchtitan.models.common.moe import MoE, RoutedExperts
     from torchtitan.models.common.moe.token_dispatcher import (
+        AllToAllTokenDispatcher,
         DeepEPTokenDispatcher,
         HybridEPTokenDispatcher,
         LocalTokenDispatcher,
@@ -65,6 +66,26 @@ def validate_model_training_config(
                 f"parallelism.fsdp_backend={parallelism.fsdp_backend!r} does not "
                 "support enable_weight_tying yet."
             )
+        if parallelism.expert_parallel_degree > 1:
+            # Only RoutedExperts with AllToAllTokenDispatcher has been checked
+            # against FSDP2 under EP. FlexShard's expert bucket treats every
+            # routed-expert parameter as sharded over ep, but output_postprocess
+            # parameters are replicated over ep (models/common/moe/SHARDING.md),
+            # so their grads would never be summed over it.
+            for fqn, moe, _, _ in model.traverse(MoE.Config):
+                routed_experts = moe.routed_experts
+                if (
+                    type(routed_experts) is not RoutedExperts.Config
+                    or type(routed_experts.token_dispatcher)
+                    is not AllToAllTokenDispatcher.Config
+                    or routed_experts.output_postprocess is not None
+                ):
+                    raise ValueError(
+                        f"parallelism.fsdp_backend={parallelism.fsdp_backend!r} "
+                        "with expert_parallel_degree > 1 supports only "
+                        "RoutedExperts with AllToAllTokenDispatcher and no "
+                        f"output_postprocess yet, not {fqn}.routed_experts."
+                    )
 
     if isinstance(model, Decoder.Config):
         if model.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
