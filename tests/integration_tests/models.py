@@ -239,10 +239,10 @@ def deepseek_v4_debugmodel_fsdp2_tp2_ep2_pp2() -> Trainer.Config:
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 1
     config.parallelism.pipeline_parallel_degree = 2
+    # Interleaved1F1B gives four virtual stages over the four debug layers:
+    # one stage holds hash layer 1 without tok_embeddings, and the last holds
+    # only hc_head, norm and lm_head.
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
-    # Four virtual stages over the four debug layers: one stage holds hash
-    # layer 1 without tok_embeddings, and the last holds only hc_head, norm and
-    # lm_head.
     config.parallelism.num_pp_microbatches = 4
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10

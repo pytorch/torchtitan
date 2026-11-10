@@ -12,8 +12,8 @@ import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.pipeline_parallel import (
-    _split_module,
     get_module_fqns_per_model_part,
+    split_module,
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan_recipes.tests.models import deepseek_v4 as config_registry
@@ -54,7 +54,7 @@ def test_stage_outputs_gradients_and_checkpoint_keys(num_stages):
         ),
         model_config=model_config,
     )
-    stages = [_split_module(model, names) for names in module_fqns]
+    stages = [split_module(model, names) for names in module_fqns]
 
     tokens = torch.randint(0, model_config.vocab_size, (num_tokens,))
     positions = torch.arange(num_tokens)
