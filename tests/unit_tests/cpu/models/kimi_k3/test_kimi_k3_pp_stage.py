@@ -8,6 +8,7 @@
 the swap of core's stages for AttnRes ones."""
 
 import unittest
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
@@ -89,14 +90,44 @@ class TestForwardOnly(unittest.TestCase):
     def test_eval_backward_routes_nothing_and_forgets_the_chunk(self):
         stage = AttnResPipelineStage.__new__(AttnResPipelineStage)
         stage._has_backward = False
+        stage._released_startup_cache = False
         stage._forward_chunk_states = {0: object()}
         stage.bwd_cache = {}
         stage._order = {0: [0, 1]}
         stage._delta_in = {0: [1]}
-        AttnResPipelineStage.backward_one_chunk(stage, 0)
+        with patch("torch.accelerator.empty_cache") as empty_cache:
+            AttnResPipelineStage.backward_one_chunk(stage, 0)
+        # Eval leaves the startup cache release for the first training backward.
+        empty_cache.assert_not_called()
+        self.assertFalse(stage._released_startup_cache)
         self.assertEqual(
             (stage._forward_chunk_states, stage._order, stage._delta_in),
             ({}, {}, {}),
+        )
+
+
+class TestStartupCacheRelease(unittest.TestCase):
+    def test_cache_is_released_once_before_the_first_training_backward(self):
+        stage = AttnResPipelineStage.__new__(AttnResPipelineStage)
+        stage._has_backward = True
+        stage._released_startup_cache = False
+        stage.stage_index = 0  # first stage: no residual gradient to route
+        events = []
+        with (
+            patch(
+                "torch.accelerator.empty_cache",
+                side_effect=lambda: events.append("empty_cache"),
+            ),
+            patch.object(
+                PipelineStage,
+                "backward_one_chunk",
+                side_effect=lambda chunk, **kwargs: events.append(f"backward_{chunk}"),
+            ),
+        ):
+            for chunk in range(3):
+                AttnResPipelineStage.backward_one_chunk(stage, chunk)
+        self.assertEqual(
+            events, ["empty_cache", "backward_0", "backward_1", "backward_2"]
         )
 
 

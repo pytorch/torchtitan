@@ -94,6 +94,7 @@ class AttnResPipelineStage(PipelineStage):
         # per micro-batch: the stack's block order and the blocks the delta carried in
         self._order: dict[int, list[int]] = {}
         self._delta_in: dict[int, list[int]] = {}
+        self._released_startup_cache = False
 
     def set_routing(self, layout: BlockLayoutTables, store: PPRankLocalCache) -> None:
         self._layout = layout
@@ -257,6 +258,13 @@ class AttnResPipelineStage(PipelineStage):
         full_backward: bool = True,
         last_backward=False,
     ):
+        if self.has_backward and not self._released_startup_cache:
+            # Once per stage: hand the cache left by startup and the first forwards
+            # back to the driver for buffers allocated outside PyTorch's allocator
+            # (e.g. NCCL and expert dispatch). Runs in an eager step, before any
+            # accelerator graph capture; later backwards pay nothing.
+            torch.accelerator.empty_cache()
+            self._released_startup_cache = True
         super().backward_one_chunk(
             bwd_chunk_id,
             loss=loss,
