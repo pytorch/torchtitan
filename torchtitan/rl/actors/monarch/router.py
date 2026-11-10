@@ -36,8 +36,8 @@ class _InterGeneratorRouterActorEndpoints:
         return super().reserve(request_id, routing_session_id=routing_session_id)
 
     @concurrent_endpoint
-    async def release(self, request_id: str) -> None:
-        super().release(request_id)
+    async def release_reservation(self, request_id: str) -> None:
+        super().release_reservation(request_id)
 
     @concurrent_endpoint
     async def start_engine_loop(self) -> None:

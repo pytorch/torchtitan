@@ -52,7 +52,8 @@ class InterGeneratorRouter(Configurable):
     Look-aside routing:
         The router never sees a generate call's payload. ``reserve`` picks a
         generator, adds one unit of load to it and returns its rank-0 handle; the
-        caller sends the generate call there directly, then calls ``release``.
+        caller sends the generate call there directly, then calls
+        ``release_reservation``.
 
     Singleton:
         Routing decisions read and write mutable states such as
@@ -137,11 +138,17 @@ class InterGeneratorRouter(Configurable):
             # together at the start of a load, so then use any.
             candidates = [g for g in self._generators if not g.draining]
             h = self._strategy.choose(routing_ctx, candidates or self._generators)
+        # TODO: one load unit per call ignores the request's size, the KV that sessions
+        #   hold between turns (vLLM reports only running requests' KV), and tokens
+        #   generated so far. Reserve by a token or KV estimate, ideally refreshed from
+        #   generator-reported KV usage, and stop sending to nearly full generators.
         h.reserved_load += 1
         self._reservations[request_id] = h
+        # Returning the handle keeps callers simple. If router CPU becomes a bottleneck,
+        #   return the generator index and have callers keep the handle list.
         return h.rank0_actor
 
-    def release(self, request_id: str) -> None:
+    def release_reservation(self, request_id: str) -> None:
         """Free the load unit ``reserve`` placed for ``request_id``. Routing
         bookkeeping only; unlike ``release_session``, it doesn't call a generator."""
         self._reservations.pop(request_id).reserved_load -= 1
