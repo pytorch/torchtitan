@@ -7,7 +7,7 @@
 """Runtime FSDP lifecycle helpers that isolate private upstream state."""
 
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from typing import Any, cast, NamedTuple
 
 import spmd_types as spmd
@@ -46,14 +46,13 @@ def complete_fsdp_grouped_forward(module: FSDPModule, output: Any) -> Any:
     return output
 
 
-@contextmanager
 def fsdp_partial_backwards(
     module: nn.Module,
     *,
     fsdp_root: nn.Module | None,
     run_backward: bool,
     outer_backward_follows: bool,
-) -> Iterator[_PartialBackwardHooks]:
+) -> AbstractContextManager[_PartialBackwardHooks]:
     """Keep one module unsharded across partial backwards, preserving policy.
 
     Only ``module`` runs in the inner forwards and backwards. Call
@@ -73,14 +72,22 @@ def fsdp_partial_backwards(
     from ``fsdp_root`` (see ``flex_shard_partial_backwards``).
     """
     if is_flex_shard_module(fsdp_root):
-        with flex_shard_partial_backwards(
+        return flex_shard_partial_backwards(
             module,
             flex_shard_module=fsdp_root,
             run_backward=run_backward,
             outer_backward_follows=outer_backward_follows,
-        ) as before_last_forward:
-            yield _PartialBackwardHooks(before_last_forward, lambda output: output)
-        return
+        )
+    return _fsdp2_partial_backwards(
+        module, run_backward=run_backward, outer_backward_follows=outer_backward_follows
+    )
+
+
+@contextmanager
+def _fsdp2_partial_backwards(
+    module: nn.Module, *, run_backward: bool, outer_backward_follows: bool
+) -> Iterator[_PartialBackwardHooks]:
+    """``fsdp_partial_backwards`` for FSDP2."""
     if not isinstance(module, FSDPModule):
         yield _PartialBackwardHooks(lambda: None, lambda output: output)
         return
