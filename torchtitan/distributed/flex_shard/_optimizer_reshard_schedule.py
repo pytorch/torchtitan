@@ -768,6 +768,12 @@ class _RedistributionBucketPlan(Generic[_ItemT]):
     group: _RedistributionGroup
     storage_to_compute_schedule: _PackedAllToAllSchedule
     compute_to_storage_schedule: _PackedAllToAllSchedule
+    # Where returned fragments start in the compute exchange buffer. Each
+    # parameter's returned fragments overwrite its consumed received fragments
+    # only when both schedules pack it identically. A region with several
+    # storage holders is received once but returned to every holder, so its
+    # returned fragments would overwrite later parameters' unread input.
+    compute_to_storage_offset: int
     dtype: torch.dtype
     compute_dtype: torch.dtype
     device: torch.device
@@ -1307,23 +1313,31 @@ def _build_bucket_plans(
             raise ValueError(f"bucket {context.name!r} mixes compute dtypes")
 
         redistribution_plans_tuple = tuple(redistribution_plans)
+        storage_to_compute_schedule = _build_packed_all_to_all_schedule(
+            redistribution_plans_tuple,
+            direction=_RedistributionDirection.STORAGE_TO_COMPUTE,
+            process_group=group.process_group,
+            local_participant=group.local_participant,
+        )
+        compute_to_storage_schedule = _build_packed_all_to_all_schedule(
+            redistribution_plans_tuple,
+            direction=_RedistributionDirection.COMPUTE_TO_STORAGE,
+            process_group=group.process_group,
+            local_participant=group.local_participant,
+        )
         plans.append(
             _RedistributionBucketPlan(
                 unredistributed_items=unredistributed_items,
                 redistributed_items=redistributed_items,
                 redistribution_plans=redistribution_plans_tuple,
                 group=group,
-                storage_to_compute_schedule=_build_packed_all_to_all_schedule(
-                    redistribution_plans_tuple,
-                    direction=_RedistributionDirection.STORAGE_TO_COMPUTE,
-                    process_group=group.process_group,
-                    local_participant=group.local_participant,
-                ),
-                compute_to_storage_schedule=_build_packed_all_to_all_schedule(
-                    redistribution_plans_tuple,
-                    direction=_RedistributionDirection.COMPUTE_TO_STORAGE,
-                    process_group=group.process_group,
-                    local_participant=group.local_participant,
+                storage_to_compute_schedule=storage_to_compute_schedule,
+                compute_to_storage_schedule=compute_to_storage_schedule,
+                compute_to_storage_offset=(
+                    0
+                    if compute_to_storage_schedule.input_spans_by_parameter
+                    == storage_to_compute_schedule.output_spans_by_parameter
+                    else storage_to_compute_schedule.output_buffer_numel
                 ),
                 dtype=dtype,
                 compute_dtype=next(iter(compute_dtypes)),

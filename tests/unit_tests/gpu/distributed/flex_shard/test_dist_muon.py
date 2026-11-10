@@ -793,6 +793,109 @@ class TestDistMuonTensorParallelTwoRank(DTensorTestBase, TensorParallelParity):
         self._assert_storage_update(capture_graph=True)
 
 
+@unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
+class TestDistMuonTensorParallelMatchesTP1(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 4
+
+    @property
+    def device_type(self):
+        return "cuda"
+
+    @with_comms
+    def test_mixed_tp_replicated_bucket_matches_tp1(self):
+        """TP=2 storage gives bitwise TP=1 updates in one mixed bucket.
+
+        ``a_replicated`` is TP-replicated: each region is received from one
+        holder but returned to both. It sorts first in the bucket, so returned
+        fragments written in place would overwrite the later parameters'
+        unread input.
+        """
+        torch.manual_seed(42)
+        block_rows = 8
+        shapes = {"a_replicated": (8, 16), "b_whole": (16, 32), "c_heads": (32, 16)}
+        values = {
+            fqn: torch.randn(shape, device="cuda") for fqn, shape in shapes.items()
+        }
+        gradients = [
+            {fqn: torch.randn(shape, device="cuda") for fqn, shape in shapes.items()}
+            for _ in range(2)
+        ]
+        owned = ComputeLayout(
+            shardings_by_mesh_axis={"dp_shard": Owned(), "tp": Owned()},
+            compute_dtype=torch.bfloat16,
+        )
+        heads = ComputeLayout(
+            shardings_by_mesh_axis={
+                "dp_shard": BlockShard(0, (block_rows,)),
+                "tp": BlockShard(0, (block_rows,)),
+            },
+            compute_dtype=torch.bfloat16,
+        )
+        layouts = {"a_replicated": owned, "b_whole": owned, "c_heads": heads}
+
+        def run(tp_degree):
+            mesh = init_device_mesh(
+                "cuda",
+                (self.world_size // tp_degree, tp_degree),
+                mesh_dim_names=("dp_shard", "tp"),
+            )
+            placements = {
+                "a_replicated": (Shard(0), Replicate()),
+                "b_whole": (Shard(0), Shard(1)),
+                "c_heads": (_StridedShard(0, split_factor=tp_degree), Shard(0)),
+            }
+            if tp_degree == 1:
+                placements = {fqn: (Shard(0), Replicate()) for fqn in shapes}
+            parameters = {
+                fqn: nn.Parameter(
+                    distribute_tensor(value.clone(), mesh, placements[fqn])
+                )
+                for fqn, value in values.items()
+            }
+            transport_axes = dist_muon_module.redistribution_mesh_axes(
+                "b_whole", parameters["b_whole"], owned
+            )
+            optimizer = DistMuon(
+                [
+                    {
+                        "params": list(parameters.values()),
+                        "param_names": list(parameters),
+                    }
+                ],
+                compute_sharding_by_fqn=layouts,
+                bucket_configs=[
+                    BucketConfig(
+                        patterns=tuple(shapes),
+                        mesh=(
+                            build_transport_mesh(mesh, transport_axes)
+                            if len(transport_axes) > 1
+                            else None
+                        ),
+                    )
+                ],
+                lr=0.02,
+                weight_decay=0.1,
+                momentum=0.95,
+                nesterov=True,
+                adjust_lr_fn="match_rms_adamw",
+            )
+            for step_gradients in gradients:
+                for fqn, parameter in parameters.items():
+                    parameter.grad = distribute_tensor(
+                        step_gradients[fqn].clone(), mesh, placements[fqn]
+                    )
+                optimizer.step()
+            return {
+                fqn: parameter.full_tensor() for fqn, parameter in parameters.items()
+            }
+
+        tp1, tp2 = run(1), run(2)
+        for fqn in shapes:
+            torch.testing.assert_close(tp2[fqn], tp1[fqn], rtol=0, atol=0, msg=fqn)
+
+
 instantiate_parametrized_tests(TestDistMuon)
 
 
