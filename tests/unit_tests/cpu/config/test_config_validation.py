@@ -5,26 +5,36 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import re
 from unittest import mock
 
 import pytest
 
 from torchtitan.components.checkpointer.dcp import CheckpointManager
+from torchtitan.components.checkpointer.torch_checkpointing import (
+    TorchCheckpointingManager,
+)
 from torchtitan.components.validator import Validator
 from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.validation import validate_model_training_config
+from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
+from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.training_engine import TrainingEngine
 from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_hybridep,
 )
+from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_debugmodel
 from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel,
     llama3_debugmodel_varlen_attn,
 )
+from torchtitan_recipes.tests.models.qwen3 import qwen3_moe_debug
 
 
 @contextlib.contextmanager
@@ -213,6 +223,83 @@ def test_microbatch_tokens_match_activation_sharding() -> None:
 
     config.training.num_tokens_per_microbatch_per_dp_rank = 16
     config.__post_init__()
+
+
+@pytest.mark.parametrize(
+    "checkpointer, unsupported",
+    [
+        (CheckpointManager.Config(), None),
+        (CheckpointManager.Config(async_mode="async"), None),
+        (CheckpointManager.Config(export_dtype="bfloat16"), None),
+        (
+            CheckpointManager.Config(
+                initial_load_in_hf=True, initial_load_path="/checkpoint"
+            ),
+            None,
+        ),
+        (
+            CheckpointManager.Config(async_mode="async_with_pinned_mem"),
+            "checkpointer.async_mode='async_with_pinned_mem'",
+        ),
+        (
+            CheckpointManager.Config(last_save_in_hf=True),
+            "checkpointer.last_save_in_hf=True",
+        ),
+        (
+            TorchCheckpointingManager.Config(),
+            "checkpointers other than CheckpointManager",
+        ),
+    ],
+)
+def test_flex_shard_checkpointer(checkpointer, unsupported: str | None) -> None:
+    # FlexShard's shard layouts reach DCP only through CheckpointManager, and
+    # neither through the save process of async_with_pinned_mem nor through
+    # Hugging Face saves.
+    config = llama3_debugmodel()
+    config.training.disable_accelerator_graphs = True
+    config.parallelism.fsdp_backend = FlexShardConfig()
+    config.checkpointer = checkpointer
+    if unsupported is None:
+        TrainingEngine.Config.__post_init__(config)
+        return
+    with pytest.raises(
+        ValueError, match=rf"does not support {re.escape(unsupported)} yet"
+    ):
+        TrainingEngine.Config.__post_init__(config)
+
+
+def test_flex_shard_rejects_unsupported_models() -> None:
+    # Overriding _apply_fsdp bypasses the FlexShard path, so it must raise rather
+    # than silently shard with FSDP2. Under EP, a routed-expert output_postprocess
+    # would silently train wrong: EP replicates its parameters, but FlexShard's
+    # expert bucket treats them as sharded over ep.
+    def validate(config, **parallelism):
+        validate_model_training_config(
+            config.model,
+            parallelism=ParallelismConfig(
+                fsdp_backend=FlexShardConfig(), **parallelism
+            ),
+            training=config.training,
+            debug=config.debug,
+            activation_remat=config.activation_remat,
+            max_num_documents=config.dataloader.max_num_documents,
+        )
+
+    validate(llama3_debugmodel())
+    with pytest.raises(
+        ValueError, match="DeepSeekV4Model does not support parallelism.fsdp_backend"
+    ):
+        validate(deepseek_v4_debugmodel())
+    config = qwen3_moe_debug(parallelism=ParallelismConfig(expert_parallel_degree=2))
+    validate(config, expert_parallel_degree=2)
+    _, moe, _, _ = next(config.model.traverse(MoE.Config))
+    moe.routed_experts.output_postprocess = RMSNorm.Config(
+        normalized_shape=moe.routed_experts.w13.in_features
+    )
+    with pytest.raises(
+        ValueError, match=r"output_postprocess yet, not layers\.0\.feed_forward\."
+    ):
+        validate(config, expert_parallel_degree=2)
 
 
 def test_spmd_typechecking_rejects_pipeline_parallelism() -> None:
