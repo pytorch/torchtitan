@@ -26,7 +26,7 @@ FlexShard is imported only when ``parallelism.fsdp_backend`` is a
 
 import logging
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, cast, TYPE_CHECKING, TypeGuard
@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from torchtitan.components.optim import Optim
     from torchtitan.config.configs import DebugConfig, TrainingConfig
     from torchtitan.config.parallelism import ParallelismConfig
+    from torchtitan.distributed.fsdp_lifecycle import _PartialBackwardHooks
     from torchtitan.models.common.decoder import Decoder
 
 __all__ = [
@@ -51,6 +52,7 @@ __all__ = [
     "as_fsdp2_state_dict",
     "flex_shard_partial_backwards",
     "from_fsdp2_state_dict",
+    "holds_flex_shard_params",
     "is_flex_shard_module",
     "validate_flex_shard_training",
 ]
@@ -411,6 +413,19 @@ def _flex_shard_params(model_parts: list[nn.Module]) -> dict[str, nn.Parameter]:
     }
 
 
+def holds_flex_shard_params(module: nn.Module) -> bool:
+    """Whether ``module`` has FlexShard parameters, while they're sharded.
+
+    Unsharded FlexShard parameters carry no FlexShard metadata.
+    """
+    # FlexShard parameters exist only once flex_shard is imported, which
+    # happens only when it is selected.
+    flex_shard = sys.modules.get("flex_shard")
+    return flex_shard is not None and any(
+        flex_shard.is_flex_shard_param(param) for param in module.parameters()
+    )
+
+
 def is_flex_shard_module(module: nn.Module | None) -> TypeGuard[nn.Module]:
     """Whether ``module`` is a model that ``apply_flex_shard_to_decoder``
     sharded, which holds all its buckets."""
@@ -433,9 +448,9 @@ def flex_shard_partial_backwards(
     flex_shard_module: nn.Module,
     run_backward: bool,
     outer_backward_follows: bool,
-) -> Iterator[Callable[[], None]]:
+) -> Iterator["_PartialBackwardHooks"]:
     """``fsdp_partial_backwards`` for ``module`` of ``flex_shard_module``, with
-    the collectives FSDP2 issues. Yields ``before_last_forward``.
+    the collectives FSDP2 issues.
 
     A call of ``module`` on its own leaves its bucket's forward open, so
     FlexShard runs no post-forward for it and finishes the bucket as soon as
@@ -471,10 +486,13 @@ def flex_shard_partial_backwards(
         if not has_kept_grads:
             storage.set_requires_gradient_sync(requires_gradient_sync)
 
+    # fsdp_lifecycle imports this module.
+    from torchtitan.distributed.fsdp_lifecycle import _PartialBackwardHooks
+
     try:
         storage.set_requires_gradient_sync(False)
         storage.set_reshard_after_backward(False)
-        yield before_last_forward
+        yield _PartialBackwardHooks(before_last_forward, lambda output: output)
     finally:
         storage.set_requires_gradient_sync(requires_gradient_sync)
         storage.set_reshard_after_backward(reshard_after_backward)
