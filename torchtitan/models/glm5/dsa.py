@@ -179,7 +179,7 @@ class DSAIndexerTopK(Module):
         indices_KS = lightning_indexer(
             q_QNH[token_order_K].unsqueeze(0),
             k_KH[token_order_K].unsqueeze(0),
-            weights_QN[token_order_K].float().unsqueeze(0),
+            weights_QN[token_order_K].to(q_QNH.dtype).unsqueeze(0),
             min(self.index_topk, K),
             causal=True,
             cu_seqlens=cu_seqlens,
