@@ -203,6 +203,7 @@ class Decoder(BaseModel):
             apply_flex_shard_to_decoder(
                 self,
                 dp_mesh,
+                dp_mesh_dims=dp_mesh_dims,
                 param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
                 reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
                 reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,

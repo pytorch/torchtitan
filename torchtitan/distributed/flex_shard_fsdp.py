@@ -20,8 +20,11 @@ backward waits for its gradient reductions and releases its prefetch. And an MoE
 block's expert bucket hooks the routed experts, not the block, so FlexShard
 reshards them as soon as the routed experts finish forward or backward, while
 FSDP2 keeps the block's expert group unsharded until the whole block finishes.
-FlexShard is imported only when ``parallelism.fsdp_backend`` is a
-``FlexShardConfig``.
+With context parallelism, the buckets shard over ``dp_shard`` and ``cp``
+flattened into one axis, as ``fully_shard`` does. With tensor parallelism, each
+parameter is its tp rank's shard, and FlexShard all-reduces over tp the grads
+that FSDP2 does, before the reduce-scatter. FlexShard is imported only when
+``parallelism.fsdp_backend`` is a ``FlexShardConfig``.
 """
 
 import logging
@@ -31,13 +34,16 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, cast, TYPE_CHECKING, TypeGuard
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import DTensor, Shard
+from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 
 if TYPE_CHECKING:
+    from torch.distributed.fsdp import DataParallelMeshDims
+
     from torchtitan.components.checkpointer import CheckpointManager
     from torchtitan.components.optim import Optim
     from torchtitan.config.configs import DebugConfig, TrainingConfig
@@ -64,6 +70,10 @@ logger = logging.getLogger(__name__)
 # replaces the parameters before initialization, so this can't be recorded on
 # them. It goes away with the TODO in as_fsdp2_dtensor.
 _EXPERT_STORAGE_MESHES: dict[DeviceMesh, DeviceMesh] = {}
+# Likewise under tensor parallelism: the mesh on which FSDP2 lays out the other
+# parameters, (dp_shard, tp) or with context parallelism (dp_shard_cp, tp),
+# keyed by the mesh of FlexShard's buckets for them.
+_DENSE_STORAGE_MESHES: dict[DeviceMesh, DeviceMesh] = {}
 
 
 @dataclass(kw_only=True, slots=True)
@@ -78,8 +88,9 @@ class FlexShardConfig:
 
 def apply_flex_shard_to_decoder(
     model: "Decoder",
-    dp_mesh: DeviceMesh,
+    storage_mesh: DeviceMesh,
     *,
+    dp_mesh_dims: "DataParallelMeshDims | None",
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
     reshard_after_forward_policy: str,
@@ -90,13 +101,20 @@ def apply_flex_shard_to_decoder(
 
     Each ``fully_shard`` group becomes a bucket naming the same modules: the
     embedding, the norm with the output projection, each transformer block, and
-    the parameters left to the root group. Gradients are summed over ``dp_mesh``
-    without division, as ``disable_fsdp_gradient_division`` makes FSDP2 do.
+    the parameters left to the root group. Gradients are summed without
+    division, as ``disable_fsdp_gradient_division`` makes FSDP2 do.
+
+    The buckets shard over the 1D mesh that ``fully_shard`` shards over:
+    ``dp_shard``, or with context parallelism, ``dp_shard`` and ``cp`` flattened
+    into one axis. With tensor parallelism, each parameter is its tp rank's
+    shard. The parameters TP splits declare their TP layout, and those typed
+    ``R`` on tp declare tp as their partial-grad group (see
+    ``_declare_tensor_parallelism``).
 
     With expert parallelism, ``fully_shard`` splits an MoE block into one group
     per mesh: the routed experts on ``edp_mesh``'s ``edp_shard`` axis, and the
-    rest of the block on ``dp_mesh``. The block then gets a bucket for each, and
-    the buckets prefetch as ``apply_fsdp_to_decoder`` sets FSDP2 to.
+    rest of the block on the dense mesh. The block then gets a bucket for each,
+    and the buckets prefetch as ``apply_fsdp_to_decoder`` sets FSDP2 to.
 
     FlexShard stores parameters as plain local shards, which DCP would save as
     whole tensors. The model's ``state_dict()`` declares where each local shard
@@ -105,7 +123,11 @@ def apply_flex_shard_to_decoder(
 
     Args:
         model: The decoder to shard.
-        dp_mesh: The 1D ``dp_shard`` mesh to shard over.
+        storage_mesh: The dense storage mesh from ``resolve_fsdp_mesh``, with
+            the ``dp_shard`` axis, and ``cp`` and ``tp`` under context and
+            tensor parallelism.
+        dp_mesh_dims: The data-parallel axes of ``storage_mesh``, from
+            ``resolve_fsdp_mesh``. ``None`` when ``storage_mesh`` has one rank.
         param_dtype: The dtype of the unsharded parameters.
         reduce_dtype: The dtype of gradient reduction.
         reshard_after_forward_policy: "default", "always" or "never", as for
@@ -154,8 +176,17 @@ def apply_flex_shard_to_decoder(
     # pyrefly: ignore [missing-import]
     from flex_shard.custom_placements.shard import Shard as FlexShardShard
 
-    # validate_flex_shard_training allows only dp_shard and ep.
-    assert dp_mesh.mesh_dim_names == ("dp_shard",), dp_mesh.mesh_dim_names
+    # validate_flex_shard_training rejects HSDP, so FSDP2 shards over dp_shard,
+    # and cp under context parallelism, and replicates over nothing.
+    assert dp_mesh_dims is None or not dp_mesh_dims.replicate_names, dp_mesh_dims
+    shard_axes = ("dp_shard",) if dp_mesh_dims is None else dp_mesh_dims.shard_names
+    # The mesh fully_shard shards over. It flattens several shard axes into
+    # one, which DeviceMesh caches by name, so both backends share its group.
+    dp_mesh = (
+        storage_mesh[shard_axes[0]]
+        if len(shard_axes) == 1
+        else storage_mesh[shard_axes]._flatten("_".join(shard_axes))
+    )
     expert_mesh = ep_mesh = None
     if ep_degree > 1:
         assert edp_mesh is not None
@@ -165,7 +196,7 @@ def apply_flex_shard_to_decoder(
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     embedding, head, blocks = decoder_fsdp_groups(
         model,
-        dp_mesh,
+        storage_mesh,
         reshard_after_forward_policy=reshard_after_forward_policy,
         # validate_flex_shard_training rejects pipeline parallelism.
         pp_enabled=False,
@@ -243,6 +274,23 @@ def apply_flex_shard_to_decoder(
     if root_fqns:
         buckets.append(bucket(root_fqns, reshard_after_forward=False))
 
+    if "tp" in (storage_mesh.mesh_dim_names or ()):
+        _DENSE_STORAGE_MESHES[dp_mesh] = DeviceMesh._concatenate(
+            [dp_mesh, storage_mesh["tp"]]
+        )
+        # Decoder requires ep >= tp for MoE, so the routed experts are on the
+        # sparse mesh.
+        _declare_tensor_parallelism(
+            model,
+            storage_mesh["tp"],
+            routed_expert_params={
+                param
+                for group in groups
+                if group.routed_experts is not None
+                for param in group.routed_experts.parameters()
+            },
+        )
+
     if ep_mesh is not None:
         # EP leaves each ep rank an even split of the routed experts' dim 0.
         # Declared before flex_shard(), this layout composes with the expert
@@ -307,16 +355,66 @@ def apply_flex_shard_to_decoder(
     logger.info("Applied FlexShard to the model")
 
 
+def _declare_tensor_parallelism(
+    model: nn.Module,
+    tp_mesh: DeviceMesh,
+    *,
+    routed_expert_params: set[nn.Parameter],
+) -> None:
+    """Tell FlexShard how tensor parallelism splits each parameter and its grad.
+
+    Call before ``flex_shard()``. ``Module._parallelize`` leaves each parameter
+    as its tp rank's shard, with the SPMD type that FSDP2 lays it out by:
+
+    - A parameter that TP splits declares its layout, which places its shards
+      in the full parameter for checkpoints and ``as_fsdp2_dtensor``.
+    - A parameter typed ``R`` on tp, e.g. a norm weight under sequence
+      parallelism, has a grad partial over tp. FSDP2 types the grad ``P`` and
+      all-reduces it over tp before its reduce-scatter. FlexShard does the same
+      for a parameter that declares tp as its partial-grad group.
+    - A parameter typed ``I`` on tp declares nothing: each tp rank computes
+      its whole grad.
+
+    Routed experts are skipped. They are typed on the sparse mesh, whose ep
+    axis can span the same ranks as tp.
+    """
+    # TODO(<flex_shard issue link>): Drop once FlexShard derives these from the
+    # SPMD types itself, as for the EP layout. Its spmd_types adapter isn't
+    # exported yet.
+    # pyrefly: ignore [missing-import]
+    from flex_shard import set_partial_grad_group
+
+    # pyrefly: ignore [missing-import]
+    from flex_shard.layout_adapters.spmd_types import spmd_types_to_global_layout
+
+    tp_group = tp_mesh.get_group()
+    tp_axis = spmd.MeshAxis.of(tp_group)
+    layouts = {}
+    for fqn, param in model.named_parameters():
+        if param in routed_expert_params:
+            continue
+        local_type = spmd.get_local_type(param)
+        tp_type = local_type.get(tp_axis)
+        if tp_type is spmd.R:
+            set_partial_grad_group(param, tp_group)
+        elif tp_type is not spmd.I:
+            layouts[fqn] = spmd.SpmdType(
+                dict(local_type), spmd.get_partition_spec(param)
+            )
+    spmd_types_to_global_layout(model, layouts, tp_mesh)
+
+
 def as_fsdp2_dtensor(tensor: torch.Tensor, param: torch.Tensor) -> torch.Tensor:
     """View ``tensor``, laid out as ``param``'s local shard, as the DTensor
     FSDP2 would give it if ``param`` is a FlexShard parameter.
 
     FlexShard stores a parameter, and its grad, as the plain local shard. The
-    returned DTensor views that shard on its bucket's mesh with its ``Shard``
-    placement, or for routed experts under expert parallelism, on the sparse
-    storage mesh as FSDP2 lays them out. Code written for FSDP2's DTensor
-    parameters and grads (e.g. parallelism-agnostic initialization, grad-norm
-    clipping) then behaves the same. Other tensors are returned unchanged.
+    returned DTensor views that shard as FSDP2 lays it out: on its bucket's mesh
+    with its ``Shard`` placement, on that mesh and tp under tensor parallelism,
+    and for routed experts under expert parallelism, on the sparse storage mesh.
+    Code written for FSDP2's DTensor parameters and grads (e.g.
+    parallelism-agnostic initialization, grad-norm clipping) then behaves the
+    same. Other tensors are returned unchanged.
     """
     # TODO(<flex_shard issue link>): Use FlexShard's own DTensor view of a
     # parameter once it has one.
@@ -328,7 +426,28 @@ def as_fsdp2_dtensor(tensor: torch.Tensor, param: torch.Tensor) -> torch.Tensor:
     global_shape = flex_shard.get_global_shape(param)
     mesh = flex_shard.get_mesh(param)
     placements = tuple(Shard(p.dim) for p in flex_shard.get_placements(param))
-    if (storage_mesh := _EXPERT_STORAGE_MESHES.get(mesh)) is not None:
+    if (storage_mesh := _DENSE_STORAGE_MESHES.get(mesh)) is not None:
+        # FlexShard's global shape is the tp rank's shard. As in FSDP2, the
+        # parameter is Shard on tp in the dim its TP layout splits, else
+        # Replicate, and a placement on the same dim shards within each tp
+        # rank's shard.
+        (placement,) = placements
+        tp_placement: Shard | Replicate = Replicate()
+        if (layout := flex_shard.get_outer_layout(param)) is not None:
+            (dim,) = (
+                dim
+                for dim, (size, local_size) in enumerate(
+                    zip(layout.global_shape, global_shape, strict=True)
+                )
+                if size != local_size
+            )
+            tp_placement = Shard(dim)
+            if placement.dim == dim:
+                placement = _StridedShard(dim, split_factor=storage_mesh.shape[-1])
+            global_shape = torch.Size(layout.global_shape)
+        placements = (placement, tp_placement)
+        mesh = storage_mesh
+    elif (storage_mesh := _EXPERT_STORAGE_MESHES.get(mesh)) is not None:
         # EP shards the experts' dim 0, so FlexShard's global shape holds one
         # ep rank's experts. As in FSDP2, an edp_shard placement on dim 0
         # shards within each ep rank's experts.
@@ -522,8 +641,6 @@ def validate_flex_shard_training(
                 "data_parallel_replicate_degree",
                 parallelism.data_parallel_replicate_degree,
             ),
-            ("tensor_parallel_degree", parallelism.tensor_parallel_degree),
-            ("context_parallel_degree", parallelism.context_parallel_degree),
             ("pipeline_parallel_degree", parallelism.pipeline_parallel_degree),
         )
         if degree != 1
