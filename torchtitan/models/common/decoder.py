@@ -198,6 +198,7 @@ class Decoder(BaseModel):
         )
 
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallelism_context)
         if isinstance(parallelism.fsdp_backend, FlexShardConfig):
             apply_flex_shard_to_decoder(
                 self,
@@ -205,9 +206,10 @@ class Decoder(BaseModel):
                 param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
                 reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
                 reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+                ep_degree=parallelism_context.ep,
+                edp_mesh=edp_mesh,
             )
             return
-        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallelism_context)
         apply_fsdp_to_decoder(
             self,
             dp_mesh,
