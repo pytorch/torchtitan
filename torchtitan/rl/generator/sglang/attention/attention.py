@@ -199,8 +199,12 @@ class SGLangInnerAttention(InnerAttention):
             num_kv_heads=config.num_kv_heads // tp_size,
             layer_id=config.layer_id,
             # SGLang's window is FlashAttention's left edge: the keys before the query.
-            # TODO: windowed layers keep every token's KV in the full pool; SGLang's
-            # sliding-window KV pool, which frees KV out of the window, is not used.
+            # TODO: windowed layers keep every token's KV in the full pool. SGLang
+            # builds its sliding-window KV pool, which frees KV out of the window, for
+            # an HF config with `sliding_window` and a `layer_types` list mixing
+            # "sliding_attention" and "full_attention" (mixed_sliding_layer_types in
+            # its model_config.py); set them in _model_config_to_hf_config_dict once
+            # parity is verified with that pool.
             sliding_window_size=(
                 -1
                 if config.sliding_window_size is None
