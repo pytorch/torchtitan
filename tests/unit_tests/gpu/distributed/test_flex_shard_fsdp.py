@@ -117,6 +117,9 @@ class TestFlexShardDecoder(DTensorTestBase):
         if chunked_loss:
             # As the training engine sets it up.
             loss_fn = ChunkedLossWrapper.Config().build()
+            if isinstance(parallelism.fsdp_backend, FlexShardConfig):
+                with pytest.raises(ValueError, match="needs fsdp_root"):
+                    loss_fn.set_lm_head(model.lm_head)
             loss_fn.set_lm_head(model.lm_head, fsdp_root=model)
             model._skip_lm_head = True
         # One packed sequence per microbatch, as the data loader produces.
