@@ -27,6 +27,7 @@ from tests.integration_tests import (
     SELF_LAUNCHING_ENTRYPOINTS,
     validate_fake_pg_compatibility,
 )
+from tests.integration_tests.skips import active_skips, validate_suite
 
 
 logger = logging.getLogger(__name__)
@@ -372,17 +373,33 @@ def run_single_test(
 
 def _filter_tests(
     args, test_list: list[IntegrationTestDefinition]
-) -> tuple[list[IntegrationTestDefinition], list[IntegrationTestDefinition]]:
-    """Filter tests by name, scope, disabled state, architecture, and GPU count.
+) -> tuple[
+    list[IntegrationTestDefinition],
+    list[IntegrationTestDefinition],
+    list[tuple[IntegrationTestDefinition, str]],
+]:
+    """Filter tests by name, scope, skip rules, and GPU count.
 
-    Returns (runnable, skipped_due_to_ngpu).
+    Skip files are only loaded when ``args`` carries a ``test_suite``; a runner
+    without one (an experiment with its own parser) applies no file-based skip.
+
+    Returns (runnable, skipped_due_to_ngpu, skipped_due_to_skip_file).
     """
     exclude_set = set()
     if hasattr(args, "exclude") and args.exclude:
         exclude_set = {name.strip() for name in args.exclude.split(",")}
 
+    suite = getattr(args, "test_suite", None)
+    skips: dict[tuple[str, str], str] = {}
+    if suite is not None:
+        validate_suite(
+            suite, {test.test_name for test in test_list}, set(_TEST_SUITES)
+        )
+        skips = active_skips()
+
     runnable: list[IntegrationTestDefinition] = []
     skipped_ngpu: list[IntegrationTestDefinition] = []
+    skipped_skips: list[tuple[IntegrationTestDefinition, str]] = []
     for test_flavor in test_list:
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
             continue
@@ -396,16 +413,16 @@ def _filter_tests(
             continue
         if test_flavor.disabled or test_flavor.test_name in exclude_set:
             continue
-        if (
-            getattr(args, "gpu_arch_type", "cuda") == "rocm"
-            and test_flavor.skip_rocm_test
-        ):
-            continue
+        if suite is not None:
+            section = skips.get((suite, test_flavor.test_name))
+            if section is not None:
+                skipped_skips.append((test_flavor, section))
+                continue
         if execution_mode != "fake_pg" and args.ngpu < test_flavor.ngpu:
             skipped_ngpu.append(test_flavor)
             continue
         runnable.append(test_flavor)
-    return runnable, skipped_ngpu
+    return runnable, skipped_ngpu, skipped_skips
 
 
 def run_tests(
@@ -414,7 +431,13 @@ def run_tests(
     parallel: bool = True,
 ):
     """Run all integration tests to test the core features of TorchTitan."""
-    runnable, skipped_ngpu = _filter_tests(args, test_list)
+    runnable, skipped_ngpu, skipped_skips = _filter_tests(args, test_list)
+    suite = getattr(args, "test_suite", None)
+    for test_flavor, section in skipped_skips:
+        logger.info(
+            f"Skipping test {suite + '/' if suite else ''}{test_flavor.test_name} "
+            f"(matched skip section: {section})"
+        )
     for test_flavor in skipped_ngpu:
         logger.info(
             f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
