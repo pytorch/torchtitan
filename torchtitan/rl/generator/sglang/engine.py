@@ -74,8 +74,9 @@ from torchtitan.rl.generator.types import (
 
 logger = logging.getLogger(__name__)
 
-# The ServerArgs SGLangEngine sets itself, which extra_server_args cannot set. Every
-# key naming CUDA graphs is the engine's too (see Config.__post_init__).
+# The ServerArgs SGLangEngine sets itself or does not support, which
+# extra_server_args cannot set. Every key naming CUDA graphs is the engine's too
+# (see Config.__post_init__).
 _TORCHTITAN_SERVER_ARGS = frozenset(
     {
         "model_path",
@@ -101,6 +102,9 @@ _TORCHTITAN_SERVER_ARGS = frozenset(
         "random_seed",
         "enable_deterministic_inference",
         "disable_custom_all_reduce",
+        # SGLang's queue limit counts its waiting queue only, which held requests
+        # (see SGLangEngine._awaiting_prefill) are not in.
+        "max_queued_requests",
     }
 )
 
@@ -317,6 +321,8 @@ class SGLangEngine(GenerationEngine):
         # prefill: that request, and the later requests with that key, held out of
         # SGLang's waiting queue until then (see add_requests). The priority keeps a
         # request from waiting on a newer group's request that SGLang runs later.
+        # SGLang's code that walks its request lists does not see held requests:
+        # e.g. its SGLANG_REQ_WAITING_TIMEOUT (off by default) never times them out.
         # TODO(https://github.com/sgl-project/sglang/issues/48963): SGLang could share
         # a prompt's KV among requests in one prefill batch, as vLLM's prefix cache
         # does; then drop the holding.
