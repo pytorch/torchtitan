@@ -1,6 +1,8 @@
 # RL runtime dependencies. Canonical file: torchtitan/rl/requirements.txt and
 # the `rl` extra in pyproject.toml point here.
-torchmonarch>=0.7.0
+# The .dev0 floor lets pip and uv consider torchmonarch pre-releases, so they
+# install the highest version >= 0.8.0.dev0, whether nightly or stable.
+torchmonarch>=0.8.0.dev0
 opentelemetry-sdk
 opentelemetry-exporter-otlp-proto-http
 pygtrie

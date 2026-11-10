@@ -211,11 +211,11 @@ source titan-rl/bin/activate
 scripts/install_rl_env.sh
 ```
 
-The script installs the core and RL requirements (Monarch, OpenTelemetry, ...),
-matching PyTorch, torchvision and vLLM CUDA nightlies, TorchStore and
-batch-invariant ops (git main, without dependencies so they cannot replace the
-nightly torch), and the Flash Attention build for the local GPU: FA4 on
-Blackwell (SM100+), FA3 on Hopper (SM90). TorchTitan uses the FA2
+The script installs the core and RL requirements (Monarch nightly,
+OpenTelemetry, ...), matching PyTorch, torchvision and vLLM CUDA nightlies,
+TorchStore and batch-invariant ops (git main, without dependencies so they
+cannot replace the nightly torch), and the Flash Attention build for the local
+GPU: FA4 on Blackwell (SM100+), FA3 on Hopper (SM90). TorchTitan uses the FA2
 implementation bundled with PyTorch on older GPUs such as A100. Flags
 documented in the script header select another CUDA tag (`--cuda`), force
 Flash Attention versions (`--flash-attn`), or install `nvcc` for FlashInfer's
