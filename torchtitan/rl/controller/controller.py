@@ -1045,16 +1045,16 @@ class Controller(Configurable):
         self._log_ended_validations(step=step)
         if step >= self.config.async_loop.num_training_steps:
             return
-        is_due = self._should_validate(step)
+        should_validate = self._should_validate(step)
         must_wait = (
             self.config.async_loop.validation.defer_new_if_not_finished
             and bool(self._validation_tasks)
         )
-        if is_due and must_wait:
+        if should_validate and must_wait:
             logger.info(
                 f"Validation due at step {step} waits for the running one to end"
             )
-        self._has_pending_validation = self._has_pending_validation or is_due
+        self._has_pending_validation = self._has_pending_validation or should_validate
         if self._has_pending_validation and not must_wait:
             self._validation_tasks.append(
                 asyncio.create_task(
