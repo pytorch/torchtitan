@@ -836,7 +836,7 @@ def _run_with_generator_watcher(
     )
     controller.start_step = 0
     controller._validation_tasks = []
-    controller._is_validation_due = False
+    controller._has_pending_validation = False
     controller.metrics_processor = Mock()
     controller.trainer = None
     controller.trainer_dp_degree = 1
@@ -982,7 +982,7 @@ def test_validation_schedule(
         )
     )
     controller._validation_tasks = []
-    controller._is_validation_due = False
+    controller._has_pending_validation = False
     controller.validate = validate
     controller.metrics_processor = Mock()
 
@@ -991,7 +991,7 @@ def test_validation_schedule(
             if step - 3 in end_events:
                 end_events[step - 3].set()
                 await asyncio.sleep(0)  # the validation returns
-            await controller._maybe_run_validation(step=step)
+            controller._maybe_start_validation(step=step)
             await asyncio.sleep(0)  # a new validation starts
 
     asyncio.run(run_steps())

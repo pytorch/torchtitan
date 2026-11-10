@@ -547,10 +547,11 @@ class Controller(Configurable):
         # TODO: move validation (its schedule, tasks and logging) into a Validator class, like
         # pretraining's (torchtitan/components/validator.py).
         # One task per validation that runs beside training (all its prompts), from its start until
-        # `_maybe_run_validation` logs its metrics once or drops it.
+        # `_log_ended_validations` logs its metrics once or drops it.
         self._validation_tasks: list[asyncio.Task[list[m.Metric]]] = []
-        # A due validation that waits for the running one (`defer_new_if_not_finished`).
-        self._is_validation_due = False
+        # A validation that came due but hasn't started: it waits for the running one
+        # (`defer_new_if_not_finished`).
+        self._has_pending_validation = False
         # Count down from -1, since training group ids count up from 0. A shared id would give two requests
         # the same id (`group=5/rollout=0/turn=0`), which crashes the generator's engine loop, and would give
         # two groups one pinned policy version (their prefix-cache salt). Negative ids also get vLLM priority
@@ -881,7 +882,7 @@ class Controller(Configurable):
           group_buffer.close()  (wakes _data_input_loop / _rollout_loop / _batcher_loop blocked on the buffer)
           -> task.cancel()      (wakes anything blocked on training_batch_queue.put/get; close does NOT wake these)
           -> gather(..., return_exceptions=True)
-          -> _maybe_run_validation(after_training=True)  (logs ended validations; runs the one after training)
+          -> _maybe_validate_after_training()  (logs ended validations; runs the one after training)
         Shutdown (crash):    any loop raises -> appears in `done` -> run() re-raises -> same finally.
         """
         # Setup objects (modules, configs, dataset, actor handles) live until exit. Freeze them
@@ -974,7 +975,7 @@ class Controller(Configurable):
         try:
             # TODO: on resume, restart the validation that was still running when the previous run
             # stopped. The checkpoint doesn't record it, so it is lost unless the start step is due.
-            await self._maybe_run_validation(step=self.start_step)
+            self._maybe_start_validation(step=self.start_step)
             done, _ = await asyncio.wait(
                 [trainer_task, *background_tasks], return_when=asyncio.FIRST_COMPLETED
             )
@@ -1008,26 +1009,23 @@ class Controller(Configurable):
                 return_exceptions=True,
             )
 
-        await self._maybe_run_validation(step=num_training_steps, after_training=True)
+        await self._maybe_validate_after_training(step=num_training_steps)
 
     async def _generator_loop(self) -> None:
         """Wait until every generator's engine loop exits; raise as soon as one crashes."""
         await self.generator_router.wait_engine_loop.call_one()
 
-    async def _maybe_run_validation(
-        self, *, step: int, after_training: bool = False
-    ) -> None:
-        """Log the validations that ended, then run the validation `ValidationConfig` makes due, if any.
+    def _should_validate(self, step: int) -> bool:
+        """Whether a validation comes due at `step`: step 0 if `validate_at_step_0`, else each multiple
+        of `freq`. `_maybe_start_validation` still starts none at the last step."""
+        validation = self.config.async_loop.validation
+        if step == 0:
+            return validation.validate_at_step_0
+        return validation.freq is not None and step % validation.freq == 0
 
-        Called from three places; only the call after training waits for a validation:
-
-            run(), at the start step               may start a validation beside training
-            the trainer loop, after each step      may start a validation beside training
-            run(), after training (after_training) runs the `validate_after_training` validation
-
-        An ended validation is logged at `step`, and a failed one raises here. A validation still running
-        after training was cancelled by run() and is never logged.
-        """
+    def _log_ended_validations(self, *, step: int) -> None:
+        """Log, at `step`, the validations that ended. A failed one raises here; a cancelled one is never
+        logged."""
         for task in [task for task in self._validation_tasks if task.done()]:
             self._validation_tasks.remove(task)
             if task.cancelled():
@@ -1036,42 +1034,43 @@ class Controller(Configurable):
             self.metrics_processor.log(
                 step=step, metrics=task.result(), is_validation=True
             )
-        async_loop = self.config.async_loop
-        validation = async_loop.validation
-        if after_training:
-            if self._is_validation_due:
-                logger.info(
-                    "A validation came due but never started: training ended first"
-                )
-            if validation.validate_after_training:
-                metrics = await self.validate(step=step)
-                self.metrics_processor.log(
-                    step=step, metrics=metrics, is_validation=True
-                )
+
+    def _maybe_start_validation(self, *, step: int) -> None:
+        """Log the validations that ended, then start the due validation as a task. Never waits.
+
+        Called at the start step and after each training step. A validation that comes due while another
+        runs waits for it if `defer_new_if_not_finished`; steps that come due while it waits add no extra
+        one. No validation starts at the last step: training ends right after.
+        """
+        self._log_ended_validations(step=step)
+        if step >= self.config.async_loop.num_training_steps:
             return
-        # No validation starts at the last step: training ends right after.
-        if step >= async_loop.num_training_steps:
-            return
-        if step == 0:
-            is_due = validation.validate_at_step_0
-        else:
-            is_due = validation.freq is not None and step % validation.freq == 0
-        self._is_validation_due = self._is_validation_due or is_due
-        is_deferred = validation.defer_new_if_not_finished and bool(
-            self._validation_tasks
+        is_due = self._should_validate(step)
+        must_wait = (
+            self.config.async_loop.validation.defer_new_if_not_finished
+            and bool(self._validation_tasks)
         )
-        if is_due and is_deferred:
+        if is_due and must_wait:
             logger.info(
                 f"Validation due at step {step} waits for the running one to end"
             )
-        if self._is_validation_due and not is_deferred:
+        self._has_pending_validation = self._has_pending_validation or is_due
+        if self._has_pending_validation and not must_wait:
             self._validation_tasks.append(
                 asyncio.create_task(
                     self.validate(step=step),
                     name=f"validation started at step {step}",
                 )
             )
-            self._is_validation_due = False
+            self._has_pending_validation = False
+
+    async def _maybe_validate_after_training(self, *, step: int) -> None:
+        """Log the validations that ended, then run one more on the final policy if
+        `validate_after_training`, and log it. run() calls it after cancelling the running ones."""
+        self._log_ended_validations(step=step)
+        if self.config.async_loop.validation.validate_after_training:
+            metrics = await self.validate(step=step)
+            self.metrics_processor.log(step=step, metrics=metrics, is_validation=True)
 
     async def _data_input_loop(self, group_buffer: RolloutGroupWorkBuffer) -> None:
         """produces a RolloutGroupWork into group_buffer.
@@ -1389,8 +1388,7 @@ class Controller(Configurable):
                     ],
                 )
 
-            # Starts or logs validations; never waits for one (only after_training does).
-            await self._maybe_run_validation(step=step)
+            self._maybe_start_validation(step=step)
 
         # TODO: if this loop raises (e.g. a failed push, forward/backward, optimizer step or validation),
         # the push and pull still in flight keep running while run() tears down, and nobody reads the copy of

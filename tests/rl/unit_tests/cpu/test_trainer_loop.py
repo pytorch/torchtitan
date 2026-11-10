@@ -91,7 +91,7 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
     controller.start_step = 0
     controller._trainer_policy_version = 0
     controller._validation_tasks = []
-    controller._is_validation_due = False
+    controller._has_pending_validation = False
     trainer = SimpleNamespace(
         sync_log_step=_Endpoint(),
         forward_backward=_Endpoint(forward_backward),
