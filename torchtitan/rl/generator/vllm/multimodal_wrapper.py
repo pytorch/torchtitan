@@ -88,6 +88,38 @@ _IMAGE_FIELDS = {
 }
 
 
+def keep_prefix_cached_image_data() -> None:
+    """Make vLLM's scheduler send every new request's image data to its worker. Idempotent.
+
+    vLLM drops the data of the images a request's prefix-cache hit covers before
+    sending the request to the worker (`strip_covered_mm_data` in
+    ``NewRequestData.from_request``): those images need no encoder run, unless the request
+    is preempted. With the V1 model runner, a preempted request resumes from the worker's
+    copy of its features (``CachedRequestData`` carries none). If its prefix blocks were
+    evicted meanwhile, the scheduler schedules the image's encoder run, the worker
+    skips it for lack of data, and ``_gather_mm_embeddings`` raises "Encoder cache miss",
+    which kills the engine loop. GRPO samples of a group share a prompt, so all but the
+    first hit the prefix cache over their images: any preemption under KV pressure can
+    hit this.
+
+    The engine core and its worker run in this process, so the worker's features are the
+    scheduler's own objects: keeping the data costs no memory.
+
+    TODO: remove once vLLM resends a resumed request's dropped image data.
+    """
+    import vllm.v1.core.sched.output as vllm_scheduler_output
+
+    vllm_scheduler_output.strip_covered_mm_data = _keep_mm_features
+
+
+def _keep_mm_features(
+    mm_features: list[MultiModalFeatureSpec],
+    num_computed_tokens: int,
+    uses_mrope: bool = False,
+) -> list[MultiModalFeatureSpec]:
+    return mm_features
+
+
 def image_prompt_to_engine_input(
     prompt: Prompt,
     pixel_values: Sequence[torch.Tensor],
