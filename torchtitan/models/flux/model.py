@@ -106,9 +106,7 @@ class FluxModel(BaseModel):
 
     def pipeline(self, **kwargs: Any) -> tuple[Any, list[BaseModel], bool, bool]:
         """Flux has no pipeline-parallel plan."""
-        raise NotImplementedError(
-            "FluxModel does not support pipeline parallelism."
-        )
+        raise NotImplementedError("FluxModel does not support pipeline parallelism.")
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config):

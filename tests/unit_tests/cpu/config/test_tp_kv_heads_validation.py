@@ -210,7 +210,7 @@ class TestFluxParallelismValidation(unittest.TestCase):
             _validate_flux(tensor_parallel_degree=2)
 
     def test_flux_expert_parallel_degree_gt1_raises(self):
-        with self.assertRaisesRegex(ValueError, r"declares no 'ep' sharding"):
+        with self.assertRaisesRegex(ValueError, r"has no MoE layers"):
             _validate_flux(expert_parallel_degree=2)
 
 
