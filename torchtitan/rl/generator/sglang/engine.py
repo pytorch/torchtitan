@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import gc
 import logging
 import os
@@ -287,19 +286,18 @@ class SGLangEngine(GenerationEngine):
             ),
         )
         logger.info("Building the SGLang scheduler...")
-        self._scheduler = Scheduler(server_args, PortArgs.init_new(server_args))
+        # SGLang hands the scheduler's results and aborts, which it would send to its
+        # tokenizer and detokenizer processes, to the collector.
+        self._output_collector = _OutputCollector()
+        self._scheduler = Scheduler(
+            server_args,
+            PortArgs.init_new(server_args),
+            output_sink=self._output_collector.receive,
+        )
         # TODO(https://github.com/sgl-project/sglang/issues/48474): SGLang has no option
         # to drop the checkpoint generation config's EOS ids it adds to every request's
         # stops; the renderer's stop tokens (EOS included) are the only stops.
         self._scheduler.model_config.hf_eos_token_id = set()
-        # TODO(https://github.com/sgl-project/sglang/issues/48473): SGLang has no
-        # in-process output sink; stand in for the sockets to its detokenizer and
-        # tokenizer processes, so results and aborts come here.
-        self._output_collector = _OutputCollector()
-        self._scheduler.output_streamer.send_to_detokenizer = self._output_collector
-        self._scheduler.ipc_channels = dataclasses.replace(
-            self._scheduler.ipc_channels, send_to_tokenizer=self._output_collector
-        )
         # Requests that finished outside `step()` (e.g. retracted during a model state
         # dict load), returned by the next `step()`.
         self._finished: list[FinishedRequest] = []
@@ -700,11 +698,8 @@ class SGLangEngine(GenerationEngine):
 
 
 class _OutputCollector:
-    """Stands in for the scheduler's sockets to the tokenizer and detokenizer processes.
-
-    No tokenization or detokenization runs (``skip_tokenizer_init``): the scheduler
-    still sends its token ids and aborts to those processes, and this object receives
-    them instead.
+    """The scheduler's output sink: receives the token ids and aborts it would send to
+    its tokenizer and detokenizer processes (none run, ``skip_tokenizer_init``).
 
     SGLang sends a request's tokens and logprobs in increments: every
     ``SGLANG_FORCE_STREAM_INTERVAL`` tokens even without streaming, and the rest when it
@@ -730,8 +725,9 @@ class _OutputCollector:
             req.time_stats.wait_queue_entry_time,
         )
 
-    def send_output(self, output: Any, recv_obj: Any = None) -> None:
-        """The sockets' send: token increments (``BatchTokenIDOutput``) and aborts."""
+    def receive(self, output: Any) -> None:
+        """Receive a scheduler output: token increments (``BatchTokenIDOutput``) and
+        aborts; ignore the rest."""
         if isinstance(output, BatchTokenIDOutput):
             self._receive_tokens(output)
         elif isinstance(output, AbortReq):

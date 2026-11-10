@@ -130,7 +130,10 @@ fi
 if [[ "$install_sglang" == "1" ]]; then
   # The SGLang engine uses private SGLang APIs and is verified only at this
   # commit, which no SGLang release contains yet.
-  sglang_commit="851642ade7d02002cf6c73a43a22987ba7511a4b"
+  # TODO(https://github.com/sgl-project/sglang/issues/48473): the pinned commit
+  # plus the output_sink API, from a fork; pin the upstream commit once it lands.
+  sglang_repo="https://github.com/acisseJZhong/sglang.git"
+  sglang_commit="e3bd24b53c2759a693bf34891ee6e23174c63f8b"
   overrides="$(mktemp)"
   # Keep this environment's PyTorch, Monarch and openai (vLLM needs a newer one
   # than SGLang pins).
@@ -141,7 +144,7 @@ if [[ "$install_sglang" == "1" ]]; then
   # The engine does not use SGLang's Rust extensions: the radix tree falls back
   # to its Python implementation.
   SGLANG_BUILD_RUST_EXTS=none uv pip install \
-    "sglang @ git+https://github.com/sgl-project/sglang.git@${sglang_commit}#subdirectory=python" \
+    "sglang @ git+${sglang_repo}@${sglang_commit}#subdirectory=python" \
     --override "$overrides" --prerelease allow
   rm "$overrides"
 fi
