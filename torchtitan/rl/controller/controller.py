@@ -1114,6 +1114,9 @@ class Controller(Configurable):
         consumes: a WAITING RolloutGroupWork (group_buffer.claim_next)
             waits for:    a claimable WAITING entry
             unblocked by: _data_input_loop group_buffer.add_work()
+        acquires (with generator_router.admission): a generator for the group (acquire_group)
+            waits for:    KV room on a generator, after older groups
+            unblocked by: other groups' release_groups, or their sessions ending
         produces: RolloutGroup (group_buffer.finalize_work)
             waits for:    nothing (admits its own claimed slot)
             unblocked by: n/a
@@ -1124,6 +1127,14 @@ class Controller(Configurable):
                 logger.info("Buffer closed; rollout worker stopping")
                 return
             try:
+                if self.config.generator_router.admission is not None:
+                    # Wait for a generator before the group builds its envs, so a waiting group
+                    # holds no sandbox or env process.
+                    with sl.log_trace_span("acquire_group"):
+                        await self.generator_router.acquire_group.call_one(
+                            work.group_id,
+                            group_size=self.config.async_loop.num_samples_per_prompt,
+                        )
                 with sl.log_trace_span("rollout_group"):
                     group = await self._rollouter.run_group_rollouts(
                         generate_fn=generate_fn,

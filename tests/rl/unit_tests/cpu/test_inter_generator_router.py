@@ -5,10 +5,18 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
+import torchtitan.rl.routing.inter_generator as inter_generator_module
 from torchtitan.rl.actors.system import ServiceHandle
+from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.controller.work_buffer import RolloutGroupWork
+from torchtitan.rl.generator.engine import KVCacheBudget
+from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.rollout import RolloutGroup
+from torchtitan.rl.routing.admission import KVGrowthEstimateAdmission
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.routing.strategies import (
     LeastLoadedRoutingStrategy,
@@ -600,5 +608,269 @@ def test_wait_engine_loop_returns_once_every_rank_exits():
         router = _router(actors)
 
         await asyncio.wait_for(router.wait_engine_loop(), timeout=5)
+
+    asyncio.run(_run())
+
+
+# Admission. Each generator holds 10 blocks of 10 tokens, a session one block per 10 tokens, and
+# a max-length context (50 tokens) 5 blocks. Groups may charge 9 blocks per generator, and until 50
+# sessions have ended each session counts as a max-length context: one group of one fits per
+# generator.
+_BUDGET = KVCacheBudget(
+    num_blocks=10,
+    block_size=10,
+    num_growing_kv_cache_groups=1,
+    fixed_blocks_per_session=0,
+    max_model_len=50,
+)
+
+
+class _KVActor(_Actor):
+    """A generator fake whose completions have ``completion_tokens`` tokens."""
+
+    def __init__(self, name: str, *, completion_tokens: int = 10, **kwargs):
+        super().__init__(name, **kwargs)
+        self.generate.value = SimpleNamespace(
+            name=name, token_ids=[0] * completion_tokens
+        )
+        self.start_engine_loop = _Endpoint()
+        self.kv_cache_budget = _Endpoint(_BUDGET)
+
+
+async def _admission_router(actors) -> InterGeneratorRouter:
+    router = InterGeneratorRouter(
+        InterGeneratorRouter.Config(
+            strategy=LeastLoadedRoutingStrategy.Config(),
+            admission=KVGrowthEstimateAdmission.Config(limit=0.9),
+        ),
+        generators=[ServiceHandle(all_ranks=actor, rank0=actor) for actor in actors],
+    )
+    await router.start_engine_loop()
+    return router
+
+
+async def _kv_generate(
+    router, *, group_id: int, session_id: str, prompt_tokens: int = 20
+) -> str:
+    completion = await router.generate(
+        [0] * prompt_tokens,
+        request_id=f"{session_id}/turn",
+        group_id=group_id,
+        routing_session_id=session_id,
+        sampling_config=None,
+    )
+    return completion.name
+
+
+async def _until(condition) -> None:
+    async def wait() -> None:
+        while not condition():
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait(), timeout=5.0)
+
+
+def test_admission_places_waiting_groups_oldest_first():
+    async def _run():
+        router = await _admission_router([_KVActor("gen0"), _KVActor("gen1")])
+        await router.acquire_group(0, group_size=1)
+        await router.acquire_group(1, group_size=1)
+        # A placed group's calls stay on its generator, even while it drains.
+        router._generators[1].draining = True
+        assert await _kv_generate(router, group_id=1, session_id="g1/r0") == "gen1"
+        router._generators[1].draining = False
+
+        # Group 5 asks before group 3; both wait, and group 3 goes first.
+        waiting_5 = asyncio.create_task(router.acquire_group(5, group_size=1))
+        waiting_3 = asyncio.create_task(router.acquire_group(3, group_size=1))
+        await _until(lambda: len(router._waiting_groups) == 2)
+        # Calls of placed groups never wait for room.
+        assert await _kv_generate(router, group_id=0, session_id="g0/r0") == "gen0"
+
+        await router.release_groups([1])
+        await waiting_3
+        assert not waiting_5.done()
+        assert await _kv_generate(router, group_id=3, session_id="g3/r0") == "gen1"
+        await router.release_groups([0])
+        await waiting_5
+        assert await _kv_generate(router, group_id=5, session_id="g5/r0") == "gen0"
+
+    asyncio.run(_run())
+
+
+def test_admission_counts_a_session_by_its_calls_context_length():
+    async def _run():
+        actor = _KVActor("gen0", completion_tokens=10)
+        router = await _admission_router([actor])
+        await router.acquire_group(0, group_size=1)
+        # 50 sessions of one call: a 20-token prompt (2 blocks) and a 10-token reply (3 blocks).
+        for i in range(50):
+            await _kv_generate(router, group_id=0, session_id=f"g0/r{i}")
+            await router.release_session(f"g0/r{i}")
+        router._admission.charges()  # recomputes R
+        assert router._admission.growth_per_session == 1.0
+
+        # A call with a 30-token reply: the session charges its 2-block prompt plus R while the
+        # call runs, then its 5 blocks plus max(0, R - 3) once it returns.
+        actor.generate.value = SimpleNamespace(name="gen0", token_ids=[0] * 30)
+        actor.generate.release.clear()
+        call = asyncio.create_task(
+            _kv_generate(router, group_id=0, session_id="g0/long")
+        )
+        await _until(lambda: len(actor.generate.calls) == 51)
+        assert router._admission.charges() == [2 + 1.0]
+        actor.generate.release.set()
+        await call
+        assert router._admission.charges() == [5.0]
+
+    asyncio.run(_run())
+
+
+def test_admission_ended_session_frees_room_for_the_routers_own_retry(monkeypatch):
+    monkeypatch.setattr(inter_generator_module, "_ADMISSION_RETRY_S", 0.01)
+
+    async def _run():
+        router = await _admission_router([_KVActor("gen0")])
+        await router.acquire_group(0, group_size=1)
+        await _kv_generate(router, group_id=0, session_id="g0/r0")
+        waiting = asyncio.create_task(router.acquire_group(1, group_size=1))
+        await asyncio.sleep(0.05)
+        assert not waiting.done()
+
+        # Group 0's only session ends, but the group is not released yet: the router's own
+        # retry places group 1.
+        await router.release_session("g0/r0")
+        await asyncio.wait_for(waiting, timeout=5.0)
+
+    asyncio.run(_run())
+
+
+def test_admission_cancelled_caller_keeps_its_place():
+    async def _run():
+        router = await _admission_router([_KVActor("gen0")])
+        await router.acquire_group(0, group_size=1)
+        cancelled = asyncio.create_task(router.acquire_group(1, group_size=1))
+        await _until(lambda: 1 in router._waiting_groups)
+
+        # The group stays queued, and placing it later does not fail on the cancelled call.
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        await router.release_groups([0])
+        assert list(router._placed_groups) == [1]
+
+    asyncio.run(_run())
+
+
+def test_admission_routes_calls_of_an_unplaced_group_by_strategy():
+    async def _run():
+        router = await _admission_router([_KVActor("gen0")])
+        # Calls of a group not placed, e.g. a validation group, or a training sibling still
+        # running after its group failed: least-loaded routing, never charged.
+        assert await _kv_generate(router, group_id=7, session_id="g7/r0") == "gen0"
+        # Had it been placed, gen0 would charge 5 of 9 blocks and group 1 would wait.
+        await asyncio.wait_for(router.acquire_group(1, group_size=1), timeout=1.0)
+
+    asyncio.run(_run())
+
+
+def test_admission_session_release_reaches_its_groups_generator():
+    async def _run():
+        actors = [_KVActor("gen0"), _KVActor("gen1")]
+        router = await _admission_router(actors)
+        await router.acquire_group(0, group_size=1)
+        await router.acquire_group(1, group_size=1)
+        assert await _kv_generate(router, group_id=1, session_id="g1/r0") == "gen1"
+
+        await router.release_session("g1/r0")
+
+        assert actors[0].release_sessions.calls == []
+        assert actors[1].release_sessions.calls == [((["g1/r0"],), {})]
+
+    asyncio.run(_run())
+
+
+def test_admission_call_outliving_its_group_returns_its_completion():
+    async def _run():
+        actor = _KVActor("gen0", wait_generate=True)
+        router = await _admission_router([actor])
+        await router.acquire_group(0, group_size=1)
+        call = asyncio.create_task(_kv_generate(router, group_id=0, session_id="g0/r0"))
+        await actor.generate.started.wait()
+
+        await router.release_groups([0])
+        actor.generate.release.set()
+        assert await call == "gen0"
+        await asyncio.wait_for(router.acquire_group(1, group_size=1), timeout=1.0)
+
+    asyncio.run(_run())
+
+
+class _RouterHandle:
+    """Stands in for the router's actor handle: each endpoint's ``call_one`` calls the router."""
+
+    def __init__(self, router: InterGeneratorRouter):
+        self.acquire_group = SimpleNamespace(call_one=router.acquire_group)
+        self.release_groups = SimpleNamespace(call_one=router.release_groups)
+
+
+def test_rollout_loop_acquires_a_generator_before_building_envs():
+    """A waiting group holds no env or sandbox; a failed group still frees its generator."""
+
+    async def _run():
+        router = await _admission_router([_KVActor("gen0")])
+        envs_built: list[int] = []
+        finish_group_0 = asyncio.Event()
+
+        async def run_group_rollouts(*, group_id: int, **kwargs) -> RolloutGroup:
+            envs_built.append(group_id)
+            if group_id == 0:
+                await finish_group_0.wait()
+                raise RuntimeError("env crashed")
+            return RolloutGroup(group_id=group_id, rollouts=[])
+
+        works = [
+            RolloutGroupWork(group_id=group_id, sample=None) for group_id in (0, 1)
+        ]
+        finalized: list[RolloutGroup] = []
+
+        async def claim_next() -> RolloutGroupWork | None:
+            return works.pop(0) if works else None
+
+        async def finalize_work(group: RolloutGroup) -> None:
+            finalized.append(group)
+
+        controller = SimpleNamespace(
+            config=SimpleNamespace(
+                async_loop=SimpleNamespace(num_samples_per_prompt=1),
+                generator_router=router._config,
+            ),
+            generator_router=_RouterHandle(router),
+            _rollouter=SimpleNamespace(run_group_rollouts=run_group_rollouts),
+            _sampling=SamplingConfig(),
+            rollout_recorder=SimpleNamespace(record=lambda **kwargs: None),
+        )
+        group_buffer = SimpleNamespace(
+            claim_next=claim_next, finalize_work=finalize_work
+        )
+        rollout_loops = [
+            asyncio.create_task(
+                Controller._rollout_loop(
+                    controller,
+                    group_buffer=group_buffer,
+                    generate_fn=None,
+                    release_session_fn=None,
+                )
+            )
+            for _ in range(2)
+        ]
+        await _until(lambda: 1 in router._waiting_groups)
+        assert envs_built == [0]
+
+        finish_group_0.set()
+        await asyncio.gather(*rollout_loops)
+        assert envs_built == [0, 1]
+        assert [len(group.rollouts) for group in finalized] == [0, 0]
+        assert router._placed_groups == {}
 
     asyncio.run(_run())

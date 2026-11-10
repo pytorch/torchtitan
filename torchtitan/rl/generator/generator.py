@@ -29,7 +29,11 @@ from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.generator.dispatcher import RequestDispatcher
-from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
+from torchtitan.rl.generator.engine import (
+    GenerationEngine,
+    KVCacheBudget,
+    ModelStateDictLoadMode,
+)
 from torchtitan.rl.generator.engine_loop import EngineLoop, EngineLoopThread
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
@@ -362,6 +366,10 @@ class Generator(Configurable):
         generator that fails every call routed to it.
         """
         await self._engine_loop.wait()
+
+    def kv_cache_budget(self) -> KVCacheBudget:
+        """Return the engine's KV cache size, for the router's admission policy (rank 0)."""
+        return self._engine_loop.kv_cache_budget()
 
     @sl.log_trace_span("generate")
     async def generate(

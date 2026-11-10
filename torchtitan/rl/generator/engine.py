@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import abc
+import math
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Literal
@@ -116,6 +117,52 @@ class GenerationEngine(Configurable, abc.ABC):
     def log_stats(self, step: int) -> None:
         """Log the engine's own per-step stats, if any."""
 
+    def kv_cache_budget(self) -> KVCacheBudget:
+        """Return the KV cache size and the blocks one session holds, for the inter-generator
+        router's admission (``InterGeneratorRouter.Config.admission``). Called from the actor's
+        thread, so it reads only what the build fixed."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not report its KV cache size, which admission needs"
+        )
+
     @abc.abstractmethod
     def shutdown(self) -> None:
         """Release engine-local resources; process teardown is the actor framework's."""
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class KVCacheBudget:
+    """A generator's KV cache size and the blocks one session holds in it.
+
+    Example (Qwen3.5-35B-A3B on one GB300: 1 attention group, 3 Gated-DeltaNet groups)::
+
+        budget = KVCacheBudget(
+            num_blocks=8169, block_size=1152, num_growing_kv_cache_groups=1,
+            fixed_blocks_per_session=6, max_model_len=131072,
+        )
+        budget.session_blocks(5000)  # 1 * ceil(5000 / 1152) + 6 = 11
+    """
+
+    num_blocks: int
+    """KV cache blocks on the generator, summed over its data-parallel replicas."""
+
+    block_size: int
+    """Tokens per block."""
+
+    num_growing_kv_cache_groups: int
+    """vLLM KV cache groups where a session holds one block per ``block_size`` tokens of
+    context: full attention, and Mamba in vLLM's "all" mode."""
+
+    fixed_blocks_per_session: int
+    """Blocks a session holds in the other groups whatever its length, e.g. 2 per Mamba group in
+    vLLM's "align" mode, or a sliding window."""
+
+    max_model_len: int
+    """Longest context the engine accepts, in tokens."""
+
+    def session_blocks(self, num_tokens: int) -> int:
+        """Return the blocks one session of ``num_tokens`` tokens holds."""
+        return (
+            self.num_growing_kv_cache_groups * math.ceil(num_tokens / self.block_size)
+            + self.fixed_blocks_per_session
+        )
