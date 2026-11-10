@@ -67,7 +67,7 @@ def _router(actors, *, strategy=None, hot_swap=False) -> InterGeneratorRouter:
 def _route(router, *, session_id: str | None = None) -> str:
     """Route one generate call that finishes at once; return its generator's name."""
     name = router.reserve("probe", routing_session_id=session_id).name
-    router.release("probe")
+    router.release_reservation("probe")
     return name
 
 
@@ -77,13 +77,13 @@ def test_least_loaded_routes_to_lowest_reserved_load():
     assert router.reserve("r1", routing_session_id=None).name == "gen1"
 
     # Releasing r1 frees gen1, the generator it reserved.
-    router.release("r1")
+    router.release_reservation("r1")
     assert [h.reserved_load for h in router._generators] == [1, 0]
     # The tie-break alone would pick gen0 (least recently chosen); load picks idle gen1.
     assert router.reserve("r2", routing_session_id=None).name == "gen1"
 
-    router.release("r0")
-    router.release("r2")
+    router.release_reservation("r0")
+    router.release_reservation("r2")
     assert [h.reserved_load for h in router._generators] == [0, 0]
 
 
