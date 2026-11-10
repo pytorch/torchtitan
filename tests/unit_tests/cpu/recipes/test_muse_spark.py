@@ -69,6 +69,26 @@ def test_cp16_lora_recipe_uses_ulysses_varlen():
         layer.attention.inner_attention.build()
 
 
+def test_dist_moe_64_mxfp8_recipe_quantizes_experts_and_projections():
+    pytest.importorskip("dist_moe")
+    from torchtitan.config.transform.quantization import MXFP8Linear
+    from torchtitan.models.common.dist_moe.mxfp8 import MXFP8DistMoeRoutedExperts
+
+    # The MXFP8 transform checks the local GPU while the config is built.
+    with patch(
+        "torchtitan.config.transform.quantization.has_cuda_capability",
+        return_value=True,
+    ):
+        config = recipes.muse_spark_816b_a42b_dist_moe_mxfp8_spmd_64_fake()
+    for layer in config.model.layers:
+        feed_forward = layer.feed_forward
+        assert isinstance(feed_forward.routed_experts, MXFP8DistMoeRoutedExperts.Config)
+        assert feed_forward.routed_experts.block_scaled_config.fast_math
+        assert isinstance(feed_forward.pooler, MXFP8Linear.Config)
+        assert isinstance(feed_forward.unpooler, MXFP8Linear.Config)
+        assert isinstance(layer.attention.wo, MXFP8Linear.Config)
+
+
 @pytest.mark.parametrize("recipe", [muse_spark_debugmodel, muse_spark_debugmodel_mm])
 def test_debug_recipe_tokenizer(recipe):
     config = recipe()
