@@ -44,7 +44,7 @@ A step pre-hook is registered on each optimizer instance. Before Adam's lazy sta
 ### Interaction with other features
 
 - **`precision.dtype`**: The primary use case is `float32` training with `moment_dtype="bfloat16"` for optimizer-state memory savings. With `bfloat16` training, the default `moment_dtype="parameter"` is usually enough; see the introduction above.
-- **Checkpointing**: Optimizer moments are saved in bfloat16 when this option is enabled. On resume, use the same `moment_dtype`. A load post-hook restores `exp_avg`, `exp_avg_sq`, and optional AMSGrad `max_exp_avg_sq` to bfloat16 after PyTorch's native loader casts them to the parameter dtype. The `step` counter retains PyTorch's dtype and device policy. This preserves bf16 moments for subsequent updates, but the native loader can still temporarily allocate fp32 states during loading. Mixing moment dtypes across save/load remains unsupported.
+- **Checkpointing**: Optimizer moments are saved in bfloat16 when this option is enabled. On resume, use the same `moment_dtype`. Checkpoint load creates the bf16 moments first, and DCP loads into them. `load_flat_optim_state_dict` runs `Optimizer.load_state_dict` under `torch.optim.preserve_state_dtype_on_load()`, so the moments stay bf16 and no fp32 copy is made. The `step` counter retains PyTorch's dtype and device policy. Mixing moment dtypes across save/load remains unsupported.
 - **FSDP**: Compatible with FSDP2. The optimizer sees DTensor parameters; the bf16 state hook operates on the local shards.
 
 ### Limitations

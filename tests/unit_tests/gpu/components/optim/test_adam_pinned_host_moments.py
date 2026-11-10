@@ -197,6 +197,7 @@ class TestAdamPinnedHostMoments(DTensorTestBase):
                     self._states(device_optimizers),
                     strict=True,
                 ):
+                    self.assertEqual(state.dtype, device_state.dtype)
                     self.assertTrue(torch.equal(state.cpu(), device_state.cpu()))
 
                 # Training continues identically from the loaded state.

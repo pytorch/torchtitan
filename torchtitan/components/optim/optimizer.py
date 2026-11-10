@@ -210,7 +210,7 @@ def _init_pinned_host_optim_state(
 
 
 def _register_bfloat16_moment_hooks(optimizer: torch.optim.Optimizer) -> None:
-    """Create and restore Adam moment tensors in bfloat16."""
+    """Create Adam moment tensors in bfloat16."""
 
     def initialize_moments(
         optimizer: torch.optim.Optimizer, args: tuple, kwargs: dict
@@ -240,16 +240,7 @@ def _register_bfloat16_moment_hooks(optimizer: torch.optim.Optimizer) -> None:
                         memory_format=torch.preserve_format,
                     )
 
-    def restore_moment_dtype(optimizer: torch.optim.Optimizer) -> None:
-        for group in optimizer.param_groups:
-            for param in group["params"]:
-                state = optimizer.state.get(param, {})
-                for key in ("exp_avg", "exp_avg_sq", "max_exp_avg_sq"):
-                    if key in state:
-                        state[key] = state[key].to(dtype=torch.bfloat16)
-
     optimizer.register_step_pre_hook(initialize_moments)
-    optimizer.register_load_state_dict_post_hook(restore_moment_dtype)
 
 
 class Adam(torch.optim.Adam, BaseOptimizer):
