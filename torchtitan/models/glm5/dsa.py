@@ -394,10 +394,15 @@ class Glm5SparseAttention(InnerAttention):
     class Config(InnerAttention.Config):
         training_stage: Literal["frozen", "warmup", "sparse"] = "frozen"
         indexer_loss: Glm5IndexerLoss.Config | None = None
+        max_context_length: int | None = None
 
         def __post_init__(self):
             if self.training_stage not in ("frozen", "warmup", "sparse"):
                 raise ValueError("Unknown GLM indexer training stage")
+            if self.training_stage == "warmup" and (
+                self.max_context_length is None or self.max_context_length <= 0
+            ):
+                raise ValueError("GLM warmup requires a positive max_context_length")
 
         @property
         def is_full_attention(self) -> bool:
@@ -408,6 +413,7 @@ class Glm5SparseAttention(InnerAttention):
         require_attn_gym(gather_attn)
         self.training_stage = config.training_stage
         self.indexer_loss = config.indexer_loss.build() if config.indexer_loss else None
+        self.max_context_length = config.max_context_length
 
     def forward(
         self,
@@ -422,25 +428,29 @@ class Glm5SparseAttention(InnerAttention):
         aux_loss_denominator: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.training_stage == "warmup":
-            # Bound dense teacher indices/scores by query chunks, never Q x K.
+            # Packed documents do not attend across boundaries. Allocate one
+            # document's key capacity, not the whole flattened microbatch.
+            assert self.max_context_length is not None
             outputs = []
-            keys_K = torch.arange(k_THK.shape[0], device=q_THK.device)
+            offsets_S = torch.arange(
+                min(self.max_context_length, k_THK.shape[0]), device=q_THK.device
+            )
             for start in range(0, q_THK.shape[0], 128):
                 stop = min(start + 128, q_THK.shape[0])
                 queries_Q = attention_metadata.query_indices_Q[start:stop]
-                valid_QK = (
-                    attention_metadata.valid_T[queries_Q, None]
-                    & attention_metadata.valid_T[None, :]
-                    & (
-                        attention_metadata.documents_T[queries_Q, None]
-                        == attention_metadata.documents_T[None, :]
-                    )
-                    & (
-                        attention_metadata.positions_T[queries_Q, None]
-                        >= attention_metadata.positions_T[None, :]
-                    )
+                document_starts_Q = (
+                    queries_Q - attention_metadata.positions_T[queries_Q]
                 )
-                indices_QK = keys_K.expand(stop - start, -1).masked_fill(~valid_QK, -1)
+                indices_QS = document_starts_Q[:, None] + offsets_S
+                # Reuse the same causal, document and padding contract as top-k.
+                metadata = DsaMetadata(
+                    attention_metadata.positions_T,
+                    attention_metadata.documents_T,
+                    attention_metadata.valid_T,
+                    queries_Q,
+                    attention_metadata.order_T,
+                )
+                indices_QS = filter_dsa_indices(indices_QS, metadata)
                 features = (
                     None
                     if indexer_features is None
@@ -455,7 +465,7 @@ class Glm5SparseAttention(InnerAttention):
                         q_THK[start:stop],
                         k_THK,
                         v_THV,
-                        indices_QK,
+                        indices_QS,
                         scale,
                         features,
                         aux_loss_denominator,

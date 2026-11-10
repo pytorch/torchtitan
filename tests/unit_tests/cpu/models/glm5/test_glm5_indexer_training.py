@@ -160,15 +160,21 @@ def test_warmup_chunk_boundary_matches_packed_dense_attention_and_gradients():
     padding = torch.zeros(129, dtype=torch.bool)
     padding[[79, 128]] = True
     metadata = DsaMetadata.from_positions(positions, padding)
-    attention = Glm5SparseAttention.Config(training_stage="warmup").build()
-    actual = attention(
-        q,
-        k,
-        v,
-        attention_metadata=metadata,
-        topk_indices_QS=torch.full((129, 1), -1, dtype=torch.int32),
-        scale=0.5,
-    )
+    from torchtitan.models.glm5.dsa import gather_attn
+
+    attention = Glm5SparseAttention.Config(
+        training_stage="warmup", max_context_length=80
+    ).build()
+    with patch("torchtitan.models.glm5.dsa.gather_attn", wraps=gather_attn) as kernel:
+        actual = attention(
+            q,
+            k,
+            v,
+            attention_metadata=metadata,
+            topk_indices_QS=torch.full((129, 1), -1, dtype=torch.int32),
+            scale=0.5,
+        )
+    assert all(call.args[3].shape[-1] == 80 for call in kernel.call_args_list)
     documents = (positions == 0).cumsum(0)
     allowed = (
         (documents[:, None] == documents[None, :])

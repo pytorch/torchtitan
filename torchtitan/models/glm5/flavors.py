@@ -672,6 +672,7 @@ def build_model_config(
         assert isinstance(attention, Glm5Attention.Config)
         leaf = attention.inner_attention.inner_attention
         assert isinstance(leaf, Glm5SparseAttention.Config)
+        leaf.max_context_length = context_len
         leaf.training_stage = indexer_stage
         if indexer_stage == "warmup" and isinstance(layer.feed_forward, MoE.Config):
             # Keep checkpointed routing bias, but freeze its optimizer-side update.
