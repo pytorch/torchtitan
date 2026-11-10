@@ -22,6 +22,7 @@ from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable, PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import maybe_apply_numa_binding, utils as dist_utils
+from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
 from torchtitan.models.base.model import BaseModel
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
@@ -114,7 +115,7 @@ class Trainer(Configurable):
         # config doesn't run again after recipes assign fields. FlexShard's
         # state_dict() holds each rank's local shards, which
         # push_model_state_dict would publish as full weights.
-        if config.parallelism.fsdp_backend is not None:
+        if isinstance(config.parallelism.fsdp_backend, FlexShardConfig):
             raise ValueError(
                 "The RL trainer does not support "
                 f"parallelism.fsdp_backend={config.parallelism.fsdp_backend!r} yet."

@@ -10,10 +10,13 @@
 ``fsdp2_compatible`` bucket for each group that ``apply_fsdp_to_decoder`` passes
 to ``fully_shard``, with the same placements, mixed precision and reshard
 policy. The buckets' collectives then match FSDP2's byte for byte, so training
-is bitwise identical. The one difference is that FSDP2 skips the embedding's
-backward all-gather (``set_unshard_in_backward``), which FlexShard can't yet; it
-gathers the embedding again in backward, with the same values. FlexShard is
-imported only when ``parallelism.fsdp_backend`` is a ``FlexShardConfig``.
+is bitwise identical. Two differences change only memory and communication.
+FSDP2 skips the embedding's backward all-gather (``set_unshard_in_backward``),
+which FlexShard can't yet; it gathers the embedding again in backward, with the
+same values. And FlexShard has no equivalent of ``set_is_last_backward``: during
+gradient accumulation, every backward waits for its gradient reductions and
+releases its prefetch. FlexShard is imported only when
+``parallelism.fsdp_backend`` is a ``FlexShardConfig``.
 """
 
 import logging
@@ -59,23 +62,20 @@ def apply_flex_shard_to_decoder(
     *,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
-    pp_enabled: bool,
     reshard_after_forward_policy: str,
 ) -> None:
     """Shard a decoder with FlexShard as ``apply_fsdp_to_decoder`` does with FSDP2.
 
     Each ``fully_shard`` group becomes a bucket naming the same modules: the
-    embedding (with the norm and output projection when weights are tied), the
-    norm with the output projection, each transformer block, and the parameters
-    left to the root group. Gradients are summed over ``dp_mesh`` without
-    division, as ``disable_fsdp_gradient_division`` makes FSDP2 do.
+    embedding, the norm with the output projection, each transformer block, and
+    the parameters left to the root group. Gradients are summed over ``dp_mesh``
+    without division, as ``disable_fsdp_gradient_division`` makes FSDP2 do.
 
     Args:
         model: The decoder to shard.
         dp_mesh: The 1D ``dp_shard`` mesh to shard over.
         param_dtype: The dtype of the unsharded parameters.
         reduce_dtype: The dtype of gradient reduction.
-        pp_enabled: Whether pipeline parallelism is enabled.
         reshard_after_forward_policy: "default", "always" or "never", as for
             ``apply_fsdp_to_decoder``.
     """
@@ -116,7 +116,8 @@ def apply_flex_shard_to_decoder(
         model,
         dp_mesh,
         reshard_after_forward_policy=reshard_after_forward_policy,
-        pp_enabled=pp_enabled,
+        # validate_flex_shard_training rejects pipeline parallelism.
+        pp_enabled=False,
     )
     groups = [group for group in (embedding, head) if group is not None] + blocks
     # Shard dims other than 0, which FSDP2 gets from shard_placement_fn.
@@ -180,7 +181,8 @@ def as_fsdp2_dtensor(tensor: torch.Tensor, param: torch.Tensor) -> torch.Tensor:
     parallelism-agnostic initialization, grad-norm clipping) behaves the same.
     Other tensors are returned unchanged.
     """
-    # TODO: Use FlexShard's own DTensor view of a parameter once it has one.
+    # TODO(<flex_shard issue link>): Use FlexShard's own DTensor view of a
+    # parameter once it has one.
     # FlexShard parameters exist only once flex_shard is imported, which
     # happens only when it is selected.
     flex_shard = sys.modules.get("flex_shard")

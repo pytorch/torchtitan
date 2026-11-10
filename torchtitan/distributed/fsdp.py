@@ -83,7 +83,6 @@ def _fsdp_unit_holds_only_embedding_weights(
 
 
 if TYPE_CHECKING:
-    from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
     from torchtitan.models.common.decoder import Decoder
 
 
@@ -233,10 +232,7 @@ def decoder_fsdp_groups(
 
 
 def set_is_last_accumulation_step(
-    model_part: nn.Module,
-    is_last_accumulation_step: bool,
-    *,
-    fsdp_backend: "FlexShardConfig | None",
+    model_part: nn.Module, is_last_accumulation_step: bool
 ) -> None:
     """Set whether the next backward is the last of gradient accumulation.
 
@@ -244,10 +240,10 @@ def set_is_last_accumulation_step(
     backward. Earlier ones keep the parameters unsharded, and the next backward
     accumulates into their grads.
     """
-    if fsdp_backend is None:
+    if isinstance(model_part, FSDPModule):
         # FlexShard has no equivalent: every backward waits for its gradient
         # reductions and releases its prefetch.
-        cast(FSDPModule, model_part).set_is_last_backward(is_last_accumulation_step)
+        model_part.set_is_last_backward(is_last_accumulation_step)
     # pyrefly: ignore [not-callable]
     model_part.set_reshard_after_backward(is_last_accumulation_step)
     # pyrefly: ignore [not-callable]

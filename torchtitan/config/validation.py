@@ -36,6 +36,7 @@ def validate_model_training_config(
 ) -> None:
     """Validate compatibility between a model and its training configuration."""
     from torchtitan.distributed.accelerator_graph import accelerator_graphs_supported
+    from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
     from torchtitan.models.common.attention import VarlenInnerAttention
     from torchtitan.models.common.decoder import Decoder
     from torchtitan.models.common.moe import MoE
@@ -45,7 +46,7 @@ def validate_model_training_config(
         LocalTokenDispatcher,
     )
 
-    if parallelism.fsdp_backend is not None:
+    if isinstance(parallelism.fsdp_backend, FlexShardConfig):
         # Decoder._apply_fsdp has the only FlexShard path, so a model that
         # overrides it would shard with FSDP2.
         model_cls = model._owner
@@ -57,9 +58,9 @@ def validate_model_training_config(
                 "decoders that use Decoder._apply_fsdp do."
             )
         if isinstance(model, Decoder.Config) and model.enable_weight_tying:
-            # TODO(<re-tie PR>): Parallelization unties tok_embeddings and
-            # lm_head, and only init_states ties them again, after FlexShard has
-            # captured both.
+            # TODO: Parallelization unties tok_embeddings and lm_head, and only
+            # init_states ties them again, after FlexShard has captured both.
+            # Allow tied weights once _parallelize keeps them tied.
             raise ValueError(
                 f"parallelism.fsdp_backend={parallelism.fsdp_backend!r} does not "
                 "support enable_weight_tying yet."

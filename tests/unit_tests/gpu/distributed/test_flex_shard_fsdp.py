@@ -20,7 +20,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.config import PrecisionConfig
 from torchtitan.config.configs import DebugConfig
-from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.parallelism import FSDP2Config, ParallelismConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
 from torchtitan.distributed.fsdp import set_is_last_accumulation_step
@@ -50,7 +50,7 @@ class TestFlexShardDecoder(DTensorTestBase):
         self,
         build_config,
         flavor: str,
-        fsdp_backend: FlexShardConfig | None,
+        fsdp_backend: FSDP2Config | FlexShardConfig,
         reshard_after_forward: str,
         parallelism_context: ParallelismContext,
     ):
@@ -98,11 +98,7 @@ class TestFlexShardDecoder(DTensorTestBase):
             losses = []
             for microbatch in range(microbatches):
                 if microbatches > 1:
-                    set_is_last_accumulation_step(
-                        model,
-                        microbatch == microbatches - 1,
-                        fsdp_backend=parallelism.fsdp_backend,
-                    )
+                    set_is_last_accumulation_step(model, microbatch == microbatches - 1)
                 generator = torch.Generator().manual_seed(
                     1000 * step + 10 * microbatch + self.rank
                 )
@@ -183,7 +179,7 @@ class TestFlexShardDecoder(DTensorTestBase):
             fsdp2, *fsdp2_setup = self._build(
                 build_config,
                 flavor,
-                None,
+                FSDP2Config(),
                 reshard_after_forward,
                 parallelism_context,
             )

@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from torch.distributed.fsdp import FSDPModule
 from torchtitan.components.data.types import (
     TokenizedTrainingMicrobatch,
     TrainingMicrobatch,
@@ -1429,7 +1430,12 @@ def test_initialize_forward_backward_uses_eager_fsdp_reduction_config(
     )
 
 
-class _RecordingFSDPPart:
+class _RecordingFSDPPart(FSDPModule):
+    def __new__(cls) -> "_RecordingFSDPPart":
+        # FSDPModule.__new__ constructs the class that fully_shard swapped out,
+        # so construct this class directly.
+        return object.__new__(cls)
+
     def __init__(self) -> None:
         self.requires_all_reduce_calls: list[bool] = []
         self.is_last_backward_calls: list[bool] = []
@@ -1471,7 +1477,6 @@ def _run_forward_backward_recording_all_reduce(
                 pp_enabled=False,
                 dp_replicate_enabled=dp_replicate_enabled,
             ),
-            config=SimpleNamespace(parallelism=SimpleNamespace(fsdp_backend=None)),
             model_parts=[part],
             _non_pp_forward_backward_microbatch=MagicMock(
                 return_value=torch.tensor(1.0)
@@ -1557,7 +1562,6 @@ def test_fsdp_gradient_accumulation_reduction_policy(
                 pp_enabled=False,
                 dp_replicate_enabled=False,
             ),
-            config=SimpleNamespace(parallelism=SimpleNamespace(fsdp_backend=None)),
             model_parts=[fsdp_root],
             _non_pp_forward_backward_microbatch=MagicMock(
                 side_effect=(torch.tensor(1.0), torch.tensor(2.0))
