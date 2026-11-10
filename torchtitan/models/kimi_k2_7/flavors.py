@@ -36,6 +36,8 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std
+
+from torchtitan.models.common.rope import YaRNScalingConfig
 from torchtitan.models.common.vision_encoder import (
     InvariantRowParallelLinear,
     VisionAttention,
@@ -49,6 +51,7 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_colwise_sharding_config,
     vision_inner_attention_sharding_config,
     vision_invariant_linear_sharding_config,
+    vision_rope_sharding_config,
     vision_rowwise_sharding_config,
 )
 from torchtitan.models.deepseek_v3.flavors import build_mla_moe_layers
@@ -58,7 +61,6 @@ from .qk_clip import QKClipFlexInnerAttention
 from .sharding import (
     moonvit_encoder_sharding_config,
     moonvit_projector_sharding_config,
-    moonvit_rotary_sharding_config,
     sequence_parallel_first_layer_sharding_config,
 )
 
@@ -196,6 +198,7 @@ def _vision_encoder_config(
     init_pos_emb_height: int = 64,
     init_pos_emb_width: int = 64,
     rope_theta: float = 10000.0,
+    max_rope_positions: int = 512,
     merge_kernel_size: list[int] | None = None,
     text_hidden_size: int = 7168,
 ) -> KimiK25VisionEncoder.Config:
@@ -212,6 +215,12 @@ def _vision_encoder_config(
         attn=VisionAttention.Config(
             dim=dim,
             num_heads=num_heads,
+            rope=VisionRotaryEmbedding2D.Config(
+                dim=head_dim,
+                max_context_length=max_rope_positions,
+                theta=rope_theta,
+                sharding_config=vision_rope_sharding_config(),
+            ),
             wq=_vl_linear(
                 dim,
                 dim,
@@ -231,7 +240,7 @@ def _vision_encoder_config(
             inner_attention=FlexInnerAttention.Config(
                 sharding_config=vision_inner_attention_sharding_config()
             ),
-            sharding_config=vision_attention_sharding_config(rope_cache_dp=spmd.V),
+            sharding_config=vision_attention_sharding_config(positions_dp=spmd.V),
         ),
         mlp=VisionMLP.Config(
             fc1=_vl_linear(
@@ -254,11 +263,6 @@ def _vision_encoder_config(
         param_init=_POS_EMB_INIT,
         patch_embed_proj=_vl_linear(
             patch_dim, dim, sharding_config=vision_invariant_linear_sharding_config()
-        ),
-        rotary_pos_emb=VisionRotaryEmbedding2D.Config(
-            head_dim=head_dim,
-            theta=rope_theta,
-            sharding_config=moonvit_rotary_sharding_config(),
         ),
         block=block,
         final_norm=_vl_layernorm(dim),
@@ -339,11 +343,7 @@ def _debugmodel(
             dim=rope_dim,
             max_context_length=seq_len,
             theta=10000.0,
-            scaling="yarn",
-            rope_factor=40.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=4096,
+            scaling=YaRNScalingConfig(factor=40.0),
         ),
         first_layer_sharding_config=_first_layer_sharding(
             enable_sp=enable_sp, multimodal=True
@@ -564,11 +564,7 @@ def _kimi_k2_5(
             dim=rope_dim,
             max_context_length=seq_len,
             theta=50000.0,
-            scaling="yarn",
-            rope_factor=64.0,
-            beta_fast=32.0,
-            beta_slow=1.0,
-            original_seq_len=4096,
+            scaling=YaRNScalingConfig(factor=64.0),
         ),
         first_layer_sharding_config=_first_layer_sharding(
             enable_sp=enable_sp, multimodal=True

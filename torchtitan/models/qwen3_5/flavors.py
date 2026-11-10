@@ -70,6 +70,7 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_colwise_sharding_config,
     vision_inner_attention_sharding_config,
     vision_invariant_linear_sharding_config,
+    vision_rope_sharding_config,
     vision_rowwise_sharding_config,
 )
 from .model import OffsetRMSNorm, Qwen35Attention, Qwen35Model, Qwen35TransformerBlock
@@ -87,7 +88,6 @@ from .sharding import (
     transformer_block_sharding_config,
     vision_encoder_sharding_config,
     vision_merger_sharding_config,
-    vision_rotary_embedding_sharding_config,
 )
 
 from .vision_encoder import PatchMerger, Qwen35VisionEncoder, VisionRotaryEmbedding
@@ -247,9 +247,15 @@ def _qwen35_vision_encoder_config(
     num_position_embeddings: int,
     layer_norm_eps: float = 1e-6,
     rope_theta: float = 10000.0,
+    max_rope_positions: int = 4096,
     in_channels: int = 3,
 ) -> Qwen35VisionEncoder.Config:
-    """Build a fully-specified Qwen35VisionEncoder.Config."""
+    """Build a fully-specified Qwen35VisionEncoder.Config.
+
+    The default RoPE bound of 4096 covers the default 16M-pixel,
+    aspect-ratio-200 preprocessing budget with 16-pixel patches.
+    Increase it for larger preprocessing budgets.
+    """
     patch_dim = in_channels * temporal_patch_size * patch_size * patch_size
     merged_hidden_size = dim * (spatial_merge_size**2)
     head_dim = dim // num_heads
@@ -276,6 +282,12 @@ def _qwen35_vision_encoder_config(
             attn=VisionAttention.Config(
                 dim=dim,
                 num_heads=num_heads,
+                rope=VisionRotaryEmbedding.Config(
+                    dim=head_dim,
+                    max_context_length=max_rope_positions,
+                    theta=rope_theta,
+                    sharding_config=vision_rope_sharding_config(),
+                ),
                 wq=_linear(
                     dim,
                     dim,
@@ -295,7 +307,7 @@ def _qwen35_vision_encoder_config(
                 inner_attention=FlexInnerAttention.Config(
                     sharding_config=vision_inner_attention_sharding_config()
                 ),
-                sharding_config=vision_attention_sharding_config(rope_cache_dp=spmd.V),
+                sharding_config=vision_attention_sharding_config(positions_dp=spmd.V),
             ),
             mlp=VisionMLP.Config(
                 fc1=_linear(
@@ -303,11 +315,6 @@ def _qwen35_vision_encoder_config(
                 ),
                 fc2=_vision_row_parallel_linear(ffn_dim, dim),
             ),
-        ),
-        rotary_pos_emb=VisionRotaryEmbedding.Config(
-            dim=head_dim // 2,
-            theta=rope_theta,
-            sharding_config=vision_rotary_embedding_sharding_config(),
         ),
         merger=PatchMerger.Config(
             spatial_merge_size=spatial_merge_size,

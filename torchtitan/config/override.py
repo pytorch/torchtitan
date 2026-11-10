@@ -270,8 +270,8 @@ def derive(
 
     Example::
 
-        @override(target=RoPE.Config)
-        def triton_rope(cfg: RoPE.Config) -> TritonRoPE.Config:
+        @override(target=ComplexRoPE.Config, exact=True)
+        def triton_rope(cfg: ComplexRoPE.Config) -> TritonRoPE.Config:
             return derive(cfg, TritonRoPE.Config, block_size=128)
     """
     if not (isinstance(target_cls, type) and is_dataclass(target_cls)):

@@ -48,6 +48,7 @@ from torchtitan.models.common.moe import (
     TokenChoiceTopKRouter,
 )
 from torchtitan.models.common.moe.token_dispatcher import LocalTokenDispatcher
+from torchtitan.models.common.rope import IdentityRoPE
 from torchtitan.models.common.vision_encoder import (
     VisionAttention,
     VisionMLP,
@@ -306,14 +307,6 @@ def _vision_inner_attention(
     return q_THDh + k_THDh + v_THDh
 
 
-def _vision_identity_rope(
-    q_THDh: torch.Tensor,
-    k_THDh: torch.Tensor,
-    rope_cache: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return q_THDh, k_THDh
-
-
 class _CountingVisionAttention(VisionAttention):
     """Use VisionAttention.forward unchanged with counted region bodies."""
 
@@ -324,6 +317,7 @@ class _CountingVisionAttention(VisionAttention):
         self.wk = _CountingLinear(_linear_config(4, 4))
         self.wv = _CountingLinear(_linear_config(4, 4))
         self.proj = _CountingLinear(_linear_config(4, 4))
+        self.rope = IdentityRoPE.Config().build()
         self.flex_attention = _CountingOp(_vision_inner_attention)
 
 
@@ -351,8 +345,9 @@ class _VisionRematModel(Module):
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
         return self.layers["0"](
             x_TD,
-            rope_cache=x_TD.new_empty(0),
-            rope_apply=_vision_identity_rope,
+            positions=torch.zeros(
+                x_TD.shape[0], 2, device=x_TD.device, dtype=torch.long
+            ),
             attention_mask=None,  # pyrefly: ignore [bad-argument-type]
         ).sum()
 

@@ -11,6 +11,7 @@ import torch.nn as nn
 from torch.nn.attention.flex_attention import create_block_mask
 
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.rope import IdentityRoPE
 from torchtitan.models.common.vision_encoder import VisionAttention
 
 
@@ -35,6 +36,7 @@ class TestVisionAttention(unittest.TestCase):
                 wk=Linear.Config(in_features=dim, out_features=dim),
                 wv=Linear.Config(in_features=dim, out_features=dim),
                 proj=Linear.Config(in_features=dim, out_features=dim),
+                rope=IdentityRoPE.Config(),
             )
         )
         identity_attention = _IdentityAttention()
@@ -52,8 +54,7 @@ class TestVisionAttention(unittest.TestCase):
 
         out_TD = attention(
             x_TD,
-            rope_cache=torch.empty(0),
-            rope_apply=lambda q, k, cache: (q, k),
+            positions=torch.empty(0),
             attention_mask=attention_mask,
         )
 

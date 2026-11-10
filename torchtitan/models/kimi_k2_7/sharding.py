@@ -73,12 +73,3 @@ def moonvit_projector_sharding_config() -> ShardingConfig:
         out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I}),
         out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.R}),
     )
-
-
-def moonvit_rotary_sharding_config() -> ShardingConfig:
-    """TP-invariant 2D rotary embedding frequencies and output."""
-    state_placement = _moonvit_state_placement()
-    return ShardingConfig(
-        state_shardings={"inv_freq": state_placement},
-        out_src_shardings=state_placement,
-    )

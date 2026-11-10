@@ -39,6 +39,8 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 
+from torchtitan.models.common.rope import Llama3ScalingConfig
+
 from .model import Llama3Model, Llama3TransformerBlock
 
 __all__ = [
@@ -165,7 +167,7 @@ def _debugmodel(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
-                scaling="llama",
+                scaling=Llama3ScalingConfig(),
             ),
             attn_backend=attn_backend,
             enable_sp=parallelism.enable_sequence_parallel,
@@ -219,12 +221,11 @@ def _1b(
                 dim, multiple_of=1024, ffn_dim_multiplier=1.5
             ),
             rope=ComplexRoPE.Config(
+                # Llama 3.2 extends context with a 32x factor (Llama 3.1 uses 8x).
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
-                scaling="llama",
-                # Llama 3.2 extends context with a 32x factor (Llama 3.1 uses 8x).
-                scaling_factor=32.0,
+                scaling=Llama3ScalingConfig(factor=32.0),
             ),
             attn_backend=attn_backend,
             enable_sp=parallelism.enable_sequence_parallel,
@@ -278,12 +279,11 @@ def _3b(
                 dim, multiple_of=1024, ffn_dim_multiplier=1.0
             ),
             rope=ComplexRoPE.Config(
+                # Llama 3.2 extends context with a 32x factor (Llama 3.1 uses 8x).
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
-                scaling="llama",
-                # Llama 3.2 extends context with a 32x factor (Llama 3.1 uses 8x).
-                scaling_factor=32.0,
+                scaling=Llama3ScalingConfig(factor=32.0),
             ),
             attn_backend=attn_backend,
             enable_sp=parallelism.enable_sequence_parallel,
@@ -339,7 +339,7 @@ def _8b(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
-                scaling="llama",
+                scaling=Llama3ScalingConfig(),
             ),
             attn_backend=attn_backend,
             enable_sp=parallelism.enable_sequence_parallel,
@@ -395,7 +395,7 @@ def _70b(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
-                scaling="llama",
+                scaling=Llama3ScalingConfig(),
             ),
             attn_backend=attn_backend,
             enable_sp=parallelism.enable_sequence_parallel,
@@ -451,7 +451,7 @@ def _405b(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
-                scaling="llama",
+                scaling=Llama3ScalingConfig(),
             ),
             attn_backend=attn_backend,
             enable_sp=parallelism.enable_sequence_parallel,

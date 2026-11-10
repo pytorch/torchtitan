@@ -14,14 +14,17 @@ from torchtitan.models.muse_spark.vision_encoder import VisionRopeFreq
 
 def test_rope_frequency_meta_initialization_matches_hf():
     with torch.device("meta"):
-        freq = VisionRopeFreq.Config(head_dim=96, rope_theta=10000.0).build()
-    assert freq.inv_freq.device.type == "meta"
-    freq.to_empty(device="cpu")
-    freq.init_states(buffer_device=torch.device("cpu"))
+        rope = VisionRopeFreq.Config(
+            dim=96, max_context_length=9, theta=10000.0
+        ).build()
+    assert rope.cache.device.type == "meta"
+    rope.to_empty(device="cpu")
+    rope.init_states(buffer_device=torch.device("cpu"))
     exponent = torch.arange(0, 48, 2, dtype=torch.float32) / 48
-    expected = 1.0 / (10000.0**exponent)
-    torch.testing.assert_close(freq.inv_freq, expected, rtol=0, atol=0)
-    assert not freq.state_dict()
+    inv_freq = 1.0 / (10000.0**exponent)
+    angles = torch.outer(torch.arange(9, dtype=torch.float32), inv_freq)
+    torch.testing.assert_close(rope.cache, angles, rtol=0, atol=0)
+    assert not rope.state_dict()
 
 
 @pytest.mark.parametrize("grid_order", ["raster", "legacy_spark"])
@@ -29,7 +32,7 @@ def test_position_sampling_and_permutation_spmd_types(grid_order):
     config = muse_spark_navit_encoder_config(
         latent_dim=32,
         num_heads=2,
-        num_layers=0,
+        num_layers=1,
         patch_size=2,
         downsample_factor=2,
         sparse_attention_factor=2,
@@ -39,6 +42,8 @@ def test_position_sampling_and_permutation_spmd_types(grid_order):
     config.pos_emb_grid_order = grid_order
     encoder = config.build()
     encoder.init_states()
+    attention = encoder.layers["0"].attn
+    rope = attention.rope
     device = torch.device("cpu")
     expected = encoder._get_pos_emb(4, 6, device)
     expected.square().sum().backward()
@@ -56,14 +61,16 @@ def test_position_sampling_and_permutation_spmd_types(grid_order):
             encoder.positional_embedding_vlm,
             {"dp": spmd.R, "cp": spmd.I, "tp": spmd.I},
         )
-        spmd.assert_type(
-            encoder.rope_freq.inv_freq, {"dp": spmd.R, "cp": spmd.I, "tp": spmd.I}
-        )
+        spmd.assert_type(rope.cache, {"dp": spmd.R, "cp": spmd.I, "tp": spmd.I})
         positions = encoder._get_pos_emb(4, 6, device)
-        freqs = encoder._make_2d_rope(4, 6, device)
+        rope_positions = encoder._make_rope_positions(4, 6, device)
         permutation, _ = encoder._get_sparse_perm_and_slens(4, 6, device)
         spmd.assert_type(positions, activation)
-        spmd.assert_type(freqs[permutation], activation)
+        spmd.assert_type(rope_positions[permutation], activation)
+        attention._redistribute_inputs(
+            (positions.clone(),),
+            {"positions": rope.prepare_positions(rope_positions[permutation])},
+        )
         restored = positions[permutation][torch.argsort(permutation)]
         spmd.assert_type(restored, activation)
         # Explicit local gradients avoid implying a distributed scalar reduction.

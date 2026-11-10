@@ -74,12 +74,12 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_colwise_sharding_config,
     vision_inner_attention_sharding_config,
     vision_invariant_linear_sharding_config,
+    vision_rope_sharding_config,
     vision_rowwise_sharding_config,
 )
 from torchtitan.models.kimi_k2_7.sharding import (
     moonvit_encoder_sharding_config,
     moonvit_projector_sharding_config,
-    moonvit_rotary_sharding_config,
 )
 from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
 from .attention import KimiMLAAttention
@@ -466,7 +466,9 @@ def _vision_encoder_config(
     init_pos_emb_height: int = 16,
     init_pos_emb_width: int = 16,
     max_num_frames: int = 4,
+    max_rope_positions: int = 512,
 ) -> KimiK3VisionEncoder.Config:
+    """Build MoonViT3d; the coordinate bound matches 512 patches per side."""
     patch_dim = in_channels * patch_size * patch_size
     head_dim = qkv_dim // num_heads
     merged_dim = dim * merge_kernel_size[0] * merge_kernel_size[1]
@@ -482,6 +484,11 @@ def _vision_encoder_config(
         attn=VisionAttention.Config(
             dim=qkv_dim,
             num_heads=num_heads,
+            rope=VisionRotaryEmbedding2D.Config(
+                dim=head_dim,
+                max_context_length=max_rope_positions,
+                sharding_config=vision_rope_sharding_config(),
+            ),
             wq=_linear(
                 dim,
                 qkv_dim,
@@ -501,7 +508,7 @@ def _vision_encoder_config(
             inner_attention=FlexInnerAttention.Config(
                 sharding_config=vision_inner_attention_sharding_config()
             ),
-            sharding_config=vision_attention_sharding_config(rope_cache_dp=spmd.V),
+            sharding_config=vision_attention_sharding_config(positions_dp=spmd.V),
         ),
         mlp=VisionMLP.Config(
             fc1=_linear(
@@ -528,9 +535,6 @@ def _vision_encoder_config(
         interpolation_mode="bilinear",
         patch_embed_proj=_linear(
             patch_dim, dim, sharding_config=vision_invariant_linear_sharding_config()
-        ),
-        rotary_pos_emb=VisionRotaryEmbedding2D.Config(
-            head_dim=head_dim, sharding_config=moonvit_rotary_sharding_config()
         ),
         block=block,
         final_norm=vision_norm,

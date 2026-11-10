@@ -151,21 +151,28 @@ def vision_rowwise_sharding_config() -> ShardingConfig:
 
 def vision_attention_sharding_config(
     *,
-    rope_cache_dp: spmd.PerMeshAxisSpmdType,
+    positions_dp: spmd.PerMeshAxisSpmdType,
 ) -> ShardingConfig:
-    """Vision attention boundary: gather ``x`` and ``rope_cache`` across TP."""
+    """Vision attention boundary: gather ``x`` and ``positions`` across TP."""
     return ShardingConfig(
         in_src_shardings={
             "x": _vision_activation_placement(),
-            "rope_cache": _vision_activation_placement(dp=rope_cache_dp),
+            "positions": _vision_activation_placement(dp=positions_dp),
         },
         in_dst_shardings={
             "x": _vision_activation_placement(tp=spmd.R),
-            "rope_cache": _vision_activation_placement(
-                dp=rope_cache_dp,
+            "positions": _vision_activation_placement(
+                dp=positions_dp,
                 tp=spmd.R,
             ),
         },
+    )
+
+
+def vision_rope_sharding_config() -> ShardingConfig:
+    """Keep vision RoPE buffers invariant across TP and CP."""
+    return ShardingConfig(
+        state_shardings={"cache": _vision_state_placement(tp=spmd.I, cp=spmd.I)},
     )
 
 
