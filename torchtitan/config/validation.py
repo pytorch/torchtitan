@@ -37,7 +37,9 @@ def _declared_spmd_axes(model: Module.Config) -> set[MeshAxisName]:
     from torchtitan.models.base.module import Module
 
     declared = set()
-    for _, cfg, _, _ in model.traverse(Module.Config):
+    # recurse=True: the root config itself is a Module.Config, and the
+    # default stops descending into a matching subtree.
+    for _, cfg, _, _ in model.traverse(Module.Config, recurse=True):
         sharding = cfg.sharding_config
         if sharding is None:
             continue
@@ -59,39 +61,43 @@ def _declared_spmd_axes(model: Module.Config) -> set[MeshAxisName]:
 def _validate_declared_parallel_axes(
     model: Module.Config, parallelism: ParallelismConfig
 ) -> None:
-    """Reject parallelism degrees whose mesh axis the model never declares.
+    """Reject parallelism degrees the model cannot run.
 
-    A model that shards no tensor over TP cannot run with
-    ``tensor_parallel_degree > 1`` (the degree would be silently ignored),
-    and likewise for EP. The declared axes come from the sharding configs
-    themselves, so no per-model capability flag is needed: e.g. Flux only
-    declares DP/CP, while llama3 always declares TP placements.
+    Tensor parallelism is derived from the sharding configs: a model that
+    shards no tensor over TP cannot run with ``tensor_parallel_degree > 1``
+    (the degree would be silently ignored). TP placements are unconditional,
+    so this does not depend on how the model config was built.
+
+    Expert parallelism cannot be derived the same way: MoE weight placements
+    only name the EP axis when the model config was built with EP enabled,
+    so a config built with ``expert_parallel_degree == 1`` would look
+    EP-incapable even for a genuine MoE model. Instead, EP support follows
+    from the presence of MoE layers: a model with no MoE layers cannot run
+    with ``expert_parallel_degree > 1``.
     """
     from torchtitan.distributed.parallelism_context import MeshAxisName
+    from torchtitan.models.common.moe import MoE
 
     model_cls = type(model)._owner
     model_name = (
         model_cls.__name__ if model_cls is not None else type(model).__qualname__
     )
-    declared = _declared_spmd_axes(model)
-    for axis, degree, field in (
-        (
-            MeshAxisName.TP,
-            parallelism.tensor_parallel_degree,
-            "tensor_parallel_degree",
-        ),
-        (
-            MeshAxisName.EP,
-            parallelism.expert_parallel_degree,
-            "expert_parallel_degree",
-        ),
+    if (
+        parallelism.tensor_parallel_degree > 1
+        and MeshAxisName.TP not in _declared_spmd_axes(model)
     ):
-        if degree > 1 and axis not in declared:
-            raise ValueError(
-                f"{model_name} declares no {axis.value!r} sharding, but "
-                f"parallelism.{field} is {degree}. Set {field} to 1, or use "
-                f"a model that shards over {axis.value!r}."
-            )
+        raise ValueError(
+            f"{model_name} declares no 'tp' sharding, but "
+            "parallelism.tensor_parallel_degree is "
+            f"{parallelism.tensor_parallel_degree}. Set tensor_parallel_degree "
+            "to 1, or use a model that shards over 'tp'."
+        )
+    if parallelism.expert_parallel_degree > 1 and not list(model.traverse(MoE.Config)):
+        raise ValueError(
+            f"{model_name} has no MoE layers; set "
+            f"parallelism.expert_parallel_degree to 1 (got "
+            f"{parallelism.expert_parallel_degree})."
+        )
 
 
 def validate_model_training_config(
