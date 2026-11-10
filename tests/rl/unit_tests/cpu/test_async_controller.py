@@ -1019,7 +1019,7 @@ def test_generate_fn_forwards_the_session_and_releases_on_failure() -> None:
     controller = object.__new__(Controller)
     controller.generator_router = SimpleNamespace(
         reserve=SimpleNamespace(call_one=reserve),
-        release=SimpleNamespace(call_one=release),
+        release_reservation=SimpleNamespace(call_one=release),
     )
     generate = controller._make_generate_fn()
 
