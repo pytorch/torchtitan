@@ -186,6 +186,7 @@ def make_glm5_attention_config(
     base.sharding_config = glm5_attention_sharding_config(enable_sp=enable_sp)
     return Glm5Attention.Config(
         **{field.name: getattr(base, field.name) for field in dataclasses.fields(base)},
+        index_topk=index_topk,
         indexer=Glm5DsaIndexer.Config(
             n_heads=index_n_heads,
             head_dim=index_head_dim,

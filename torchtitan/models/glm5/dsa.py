@@ -373,10 +373,9 @@ class Glm5SparseAttention(InnerAttention):
                 pool_1HKD,
                 indices_QS.unsqueeze(0),
                 sliding_window_size=0,
-                cu_seqlens=torch.tensor([0, Q], dtype=torch.int32, device=q_THK.device),
-                cu_seqlens_k=torch.tensor(
-                    [0, K], dtype=torch.int32, device=q_THK.device
-                ),
+                cu_seqlens=torch.arange(2, dtype=torch.int32, device=q_THK.device) * Q,
+                cu_seqlens_k=torch.arange(2, dtype=torch.int32, device=q_THK.device)
+                * K,
                 scale=scale,
                 impl="fused" if q_THK.device.type == "cuda" else "reference",
             )

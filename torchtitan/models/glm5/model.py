@@ -66,6 +66,12 @@ class Glm5Attention(DeepSeekMLAAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(DeepSeekMLAAttention.Config):
         indexer: Glm5DsaIndexer.Config | None
+        index_topk: int
+
+        def flops_per_token(self, seq_len: int) -> int:
+            return super(Glm5Attention.Config, self).flops_per_token(
+                min(seq_len, self.index_topk)
+            )
 
     def __init__(self, config: Config):
         super().__init__(config)
@@ -248,14 +254,6 @@ class Glm5Model(DeepSeekV3Model):
                 for module in indexers
             )
             return lambda batch: base(batch) + correction * batch["input"].numel()
-
-    @classmethod
-    def _register_optimizer_hooks(
-        cls, optimizers, model_parts, parallelism_context
-    ) -> None:
-        from torchtitan.models.common.moe import register_moe_load_balancing_hook
-
-        register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
 
     def get_attention_masks(
         self,

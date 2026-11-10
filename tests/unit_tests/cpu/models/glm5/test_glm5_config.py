@@ -17,11 +17,50 @@ from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.glm5 import build_model_config, MODEL_FLAVORS
 from torchtitan.models.glm5.dsa import Glm5CPMLAAttention
-from torchtitan.models.glm5.model import Glm5Attention
+from torchtitan.models.glm5.model import Glm5Attention, Glm5Model
 from torchtitan.models.glm5.mtp import Glm5MTPTransformerBlock
 
 
 class TestGlm5Config(unittest.TestCase):
+    def test_sparse_attention_flops_saturate_for_shared_consumers(self) -> None:
+        config = build_model_config(
+            "glm5_2_debugmodel", parallelism=ParallelismConfig(), seq_len=128
+        )
+        producer = config.layers[2].attention
+        consumer = config.layers[3].attention
+        assert isinstance(producer, Glm5Attention.Config)
+        assert isinstance(consumer, Glm5Attention.Config)
+        self.assertIsNone(consumer.indexer)
+        self.assertEqual(producer.index_topk, consumer.index_topk)
+        for attention in (producer, consumer):
+            topk = attention.index_topk
+            self.assertEqual(
+                attention.flops_per_token(topk), attention.flops_per_token(topk * 8)
+            )
+            self.assertLess(
+                attention.flops_per_token(topk // 2), attention.flops_per_token(topk)
+            )
+
+    def test_optimizer_step_rolls_and_clears_aux_metrics(self) -> None:
+        from torchtitan.models.common.aux_loss import AuxLoss
+
+        with patch.dict(AuxLoss.group_acc, clear=True), patch.dict(
+            AuxLoss._group_counts, clear=True
+        ):
+            model = torch.nn.Module()
+            model.layers = torch.nn.ModuleList()
+            model.aux = AuxLoss.Config(coeff=1.0).build()
+            parameter = torch.nn.Parameter(torch.ones(1))
+            optimizer = torch.optim.SGD([parameter], lr=0.1)
+            Glm5Model._register_optimizer_hooks(optimizer, [model], None)
+            key = (model.aux.reduce_mesh, model.aux.metric_name)
+            for value in (3.0, 7.0):
+                model.aux.instance_acc.fill_(value)
+                parameter.grad = torch.ones_like(parameter)
+                optimizer.step()
+                self.assertEqual(model.aux.instance_acc.item(), 0)
+                self.assertEqual(AuxLoss.group_acc[key].item(), value)
+
     def test_all_flavors_build(self) -> None:
         parallelism = ParallelismConfig()
         for flavor in MODEL_FLAVORS:
