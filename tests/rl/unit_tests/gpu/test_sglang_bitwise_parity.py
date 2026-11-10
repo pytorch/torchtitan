@@ -24,7 +24,10 @@ Test bitwise parity between the SGLang generator and the TorchTitan trainer.
   5. test_sglang_decode_across_model_state_dict_load:
       Loading the same weights while requests decode leaves their tokens and
       logprobs unchanged.
-  6. test_context_length_limits (TestSGLangBitwiseParityVarlen only):
+  6. test_prefill_replays_cuda_graphs:
+      With prefill CUDA graphs ("breakable" or "full"), a prefill of new prompts
+      replays one, rather than falling back to eager.
+  7. test_context_length_limits (TestSGLangBitwiseParityVarlen only):
       As in vLLM, a prompt of max_context_length - 1 tokens runs and stops at
       max_context_length tokens in total, and a prompt of max_context_length
       tokens is rejected.
@@ -103,7 +106,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
     # models whose random weights each side would initialize differently.
     sync_weights_from_trainer = False
     # CUDA graphs SGLang captures (SGLangEngine.Config.cuda_graph).
-    cuda_graph = "breakable"
+    cuda_graph = "full"
     BATCH_SIZE = 5
     PROMPT_LENGTH = 150
     MAX_GEN_TOKENS = 50
@@ -294,6 +297,28 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
                     expected_result.token_logprobs,
                 )
 
+    def test_prefill_replays_cuda_graphs(self):
+        # The other tests would pass with eager prefill too.
+        if self.cuda_graph not in ("breakable", "full"):
+            self.skipTest(f"cuda_graph={self.cuda_graph!r} captures no prefill graphs")
+        model_runner = self.engine._scheduler.tp_worker.model_runner
+        backend = model_runner.prefill_cuda_graph_runner.backend
+        replay = backend.replay
+        num_replays = 0
+
+        def counting_replay(*args, **kwargs):
+            nonlocal num_replays
+            num_replays += 1
+            return replay(*args, **kwargs)
+
+        backend.replay = counting_replay
+        try:
+            # Prompts no earlier test cached, so prefill runs over all of them.
+            self._generate([prompt[::-1] for prompt in self.prompt_ids])
+        finally:
+            backend.replay = replay
+        self.assertGreater(num_replays, 0)
+
     def test_trainer_vs_sglang_decode_after_model_state_dict_load(self):
         # Runs last (unittest orders tests by name): it changes both models' weights.
         logprobs_before = self._trainer_logprobs(self.prompt_ids[0])
@@ -409,6 +434,8 @@ class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):
 
     __test__ = True
     config_fn = staticmethod(qwen3_5_debug_bitwise_config)
+    # SGLang cannot capture full prefill graphs of linear attention models.
+    cuda_graph = "breakable"
     sync_weights_from_trainer = True
     # Tests 4 and 5 then cover the reset path (retract, flush, continue), with
     # SGLang's normal event loop.
@@ -500,6 +527,8 @@ class TestSGLangBitwiseParityKDA(SGLangBitwiseParityTestBase):
 
     __test__ = True
     config_fn = staticmethod(kimi_k3_debug_bitwise_config)
+    # SGLang cannot capture full prefill graphs of linear attention models.
+    cuda_graph = "breakable"
     sync_weights_from_trainer = True
 
     @classmethod

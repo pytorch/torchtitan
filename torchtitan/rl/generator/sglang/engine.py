@@ -94,6 +94,7 @@ _TORCHTITAN_SERVER_ARGS = frozenset(
         "disable_cuda_graph",
         "disable_prefill_cuda_graph",
         "cuda_graph_backend_prefill",
+        "cuda_graph_config",
         "skip_server_warmup",
         "log_level",
         "chunked_prefill_size",
@@ -121,7 +122,7 @@ class SGLangEngine(GenerationEngine):
 
     @dataclass(kw_only=True, slots=True)
     class Config(GenerationEngine.Config):
-        cuda_graph: Literal["none", "decode", "breakable"] = "breakable"
+        cuda_graph: Literal["none", "decode", "breakable", "full"] = "full"
         """CUDA graphs SGLang captures. SGLang runs decode and prefill in separate
         batches (a mixed batch, with SGLang's enable_mixed_chunk, runs as a prefill
         batch) and captures each kind with its own graphs:
@@ -129,9 +130,15 @@ class SGLangEngine(GenerationEngine):
         - ``"none"``: everything runs eagerly.
         - ``"decode"``: full graphs for decode batches; prefill runs eagerly. Starts
           faster.
-        - ``"breakable"`` (default): ``"decode"``, plus SGLang's breakable graphs for
-          prefill batches, which run attention eagerly between graph segments.
-          Without them, prefill is bound by the eager model's CPU overhead.
+        - ``"breakable"``: ``"decode"``, plus SGLang's breakable graphs for prefill
+          batches, which run attention eagerly between graph segments, at a CPU cost
+          per layer in every prefill step. Linear attention (GDN, KDA) models need
+          this mode for prefill graphs, since ``"full"`` raises for them.
+        - ``"full"`` (default): full graphs for decode and prefill batches, attention
+          included, with a request slot per running request. Raises for linear
+          attention models, whose full prefill graphs SGLang fails to capture.
+
+        Without prefill graphs, prefill is bound by the eager model's CPU overhead.
         """
 
         extra_server_args: dict[str, Any] = field(default_factory=dict)
@@ -196,6 +203,17 @@ class SGLangEngine(GenerationEngine):
             raise ValueError(
                 "SGLangEngine does not support SGLang's hierarchical cache "
                 "(enable_hierarchical_cache) for KDA models yet"
+            )
+        has_linear_attention = any(
+            isinstance(layer.attention, LinearAttention.Config)
+            for layer in model.layers
+        )
+        if has_linear_attention and config.cuda_graph == "full":
+            # TODO(https://github.com/sgl-project/sglang/issues/48593): SGLang's
+            # hybrid linear attention backend fails to capture full prefill graphs.
+            raise ValueError(
+                "SGLang cannot capture full prefill CUDA graphs of linear attention "
+                "(GDN, KDA) models: set SGLangEngine.Config.cuda_graph to 'breakable'"
             )
         if parallelism.expert_parallel_degree > 1:
             # Dist-MoE experts have no token dispatcher, so this sees only the stock
@@ -297,10 +315,7 @@ class SGLangEngine(GenerationEngine):
         self._group_sessions: dict[int, set[str]] = {}
         # SGLang turns overlap scheduling off only for linear attention models (see
         # step()).
-        if not self._scheduler.enable_overlap and not any(
-            isinstance(layer.attention, LinearAttention.Config)
-            for layer in model.layers
-        ):
+        if not self._scheduler.enable_overlap and not has_linear_attention:
             raise ValueError("SGLangEngine needs SGLang's overlap scheduler")
         self._init_event_loop()
         # Exclude the ~1.5M objects SGLang's modules and the build created from garbage
@@ -358,8 +373,17 @@ class SGLangEngine(GenerationEngine):
             skip_server_warmup=True,
             log_level="warning",
         )
-        if self.config.cuda_graph == "breakable":
-            server_kwargs["cuda_graph_backend_prefill"] = "breakable"
+        if self.config.cuda_graph == "full":
+            # Full graphs also capture attention, whose eager CPU cost otherwise
+            # dominates small prefills. SGLang runs a prefill batch eagerly if it
+            # has more requests than full_prefill_max_req. A prefill batch has at
+            # most max_num_seqs requests, so with that many slots every prefill
+            # batch runs in a graph.
+            server_kwargs["cuda_graph_config"] = {
+                "prefill": {"backend": "full", "full_prefill_max_req": max_num_seqs}
+            }
+        elif self.config.cuda_graph == "breakable":
+            server_kwargs["cuda_graph_config"] = {"prefill": {"backend": "breakable"}}
         else:
             server_kwargs["disable_prefill_cuda_graph"] = True
         if max_num_batched_tokens is not None:
