@@ -150,9 +150,9 @@ class SGLangInnerAttention(InnerAttention):
 
     ``RadixAttention`` stores the step's K/V into SGLang's paged KV cache and runs the
     attention backend over it, reading the step's batch metadata from the forward batch
-    ``SGLangModelWrapper.forward`` publishes. Used as ``inner_attention`` of a full
-    attention layer; the q/k/v it receives are rank-local under TP, and may end in
-    padding rows (see ``_DecoderBody``), which it skips.
+    ``SGLangModelWrapper.forward`` publishes. Used as ``inner_attention`` of a softmax
+    attention layer, full or sliding-window; the q/k/v it receives are rank-local under
+    TP, and may end in padding rows (see ``_DecoderBody``), which it skips.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -163,11 +163,21 @@ class SGLangInnerAttention(InnerAttention):
         num_kv_heads: int
         head_dim: int
         scale: float | None = None
+        sliding_window_size: int | None = None
+        """Causal sliding window, in tokens including the query's own; None is full
+        attention."""
+
+        def __post_init__(self) -> None:
+            InnerAttention.Config.__post_init__(self)
+            if self.sliding_window_size == 1:
+                # SGLang reads a left edge of 0 as no window.
+                raise ValueError(
+                    "SGLang does not support a sliding window of one token"
+                )
 
         @property
         def is_full_attention(self) -> bool:
-            # The engine replaces full softmax attention only.
-            return True
+            return self.sliding_window_size is None
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -188,6 +198,18 @@ class SGLangInnerAttention(InnerAttention):
             scaling=self.scale,
             num_kv_heads=config.num_kv_heads // tp_size,
             layer_id=config.layer_id,
+            # SGLang's window is FlashAttention's left edge: the keys before the query.
+            # TODO: windowed layers keep every token's KV in the full pool. SGLang
+            # builds its sliding-window KV pool, which frees KV out of the window, for
+            # an HF config with `sliding_window` and a `layer_types` list mixing
+            # "sliding_attention" and "full_attention" (mixed_sliding_layer_types in
+            # its model_config.py); set them in _model_config_to_hf_config_dict once
+            # parity is verified with that pool.
+            sliding_window_size=(
+                -1
+                if config.sliding_window_size is None
+                else config.sliding_window_size - 1
+            ),
             prefix=f"model.layers.{config.layer_id}.attention.inner_attention",
         )
 
