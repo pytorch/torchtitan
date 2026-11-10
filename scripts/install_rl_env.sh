@@ -89,9 +89,11 @@ uv pip install --no-deps \
   "git+https://github.com/meta-pytorch/torchstore.git@main" \
   "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
 
-# Mooncake backend of torch.distributed._transport, for ModelStateDictTransport
-# (torchtitan/rl/MODEL_STATE_DICT_TRANSPORT.md). The CUDA 13 build matches cu132.
-uv pip install --no-deps "mooncake-transfer-engine-cuda13==0.3.14"
+# Mooncake and NIXL backends of torch.distributed._transport, for
+# ModelStateDictTransport (torchtitan/rl/MODEL_STATE_DICT_TRANSPORT.md). The
+# CUDA 13 builds match cu132.
+uv pip install --no-deps "mooncake-transfer-engine-cuda13==0.3.14" \
+  "nixl==1.5.0" "nixl-cu13==1.5.0"
 
 if [[ "$flash_attn" == "auto" ]]; then
   flash_attn=$(python - <<'PY'

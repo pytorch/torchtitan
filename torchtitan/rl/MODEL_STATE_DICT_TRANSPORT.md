@@ -2,12 +2,12 @@
 
 `ModelStateDictTransport` (`model_state_dict_transport.py`) moves the trainer's
 model state dict into the generators' prefetched model state dicts with
-one-sided RDMA reads over the Mooncake `torch.distributed._transport`
-backend. It replaces TorchStore when `Controller.Config.model_state_dict_transport`
-is set:
+one-sided RDMA reads over a `torch.distributed._transport` backend
+(`backend="mooncake"`, the default, or `"nixl"`). It replaces TorchStore when
+`Controller.Config.model_state_dict_transport` is set:
 
 ```python
-config.model_state_dict_transport = ModelStateDictTransport.Config()
+config.model_state_dict_transport = ModelStateDictTransport.Config(backend="nixl")
 ```
 
 It is a separate path rather than a TorchStore transport: the trainer and
@@ -31,6 +31,11 @@ https://github.com/pytorch/pytorch/pull/204113, host memory on other NUMA nodes
 uses node 0's NICs, which can cut read bandwidth several times. On IPv6-only
 hosts set `MC_USE_IPV6=1`; Mooncake's handshake otherwise resolves peer
 hostnames over IPv4.
+
+NIXL needs `nixl==1.5.0` and `nixl-cu13==1.5.0` (installed by
+`scripts/install_rl_env.sh`) and uses its UCX plugin; select NICs and
+transports with the usual UCX variables, e.g. `UCX_NET_DEVICES`, `UCX_TLS` and
+`UCX_MAX_RMA_RAILS`.
 
 ## Layout
 
