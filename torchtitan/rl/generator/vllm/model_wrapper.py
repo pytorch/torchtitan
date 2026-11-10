@@ -47,6 +47,7 @@ from torchtitan.rl.generator.model import (
     get_attention_dimensions,
     ModelStateDictLoader,
     route_tp_all_reduce,
+    validate_ep_token_dispatcher_capacity,
 )
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.vllm.registry import uses_compressed_mla_cache
@@ -288,10 +289,18 @@ class VLLMModelWrapper(Module):
         self.model, self.parallelism_context = build_inference_model(
             self.config, parallelism=parallelism, precision=precision, device=device
         )
+        # TorchTitanGPUModelRunner pads a step to a multiple of TP when TP shards the
+        # routed tokens.
+        token_multiple = parallelism.expert_sequence_parallel_size
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        validate_ep_token_dispatcher_capacity(
+            self.config,
+            parallelism=parallelism,
+            max_num_tokens_per_step=-(-max_num_batched_tokens // token_multiple)
+            * token_multiple,
+        )
         self._initialize_dist_moe_runtime(
-            dist_moe_runtime,
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            device,
+            dist_moe_runtime, max_num_batched_tokens, device
         )
         maybe_apply_numa_binding(torch.cuda.current_device(), "cuda")
         # Loads the initial weights, then unshards the model, so vLLM profiles GPU

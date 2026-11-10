@@ -110,11 +110,23 @@ prefill batches of a run can take a few seconds.
 With expert parallelism, the MoE layers shard each step's tokens over the TP
 ranks, so the model pads a step to a multiple of the TP degree; attention skips
 the padding rows. The all-to-all token dispatcher reads its split sizes on the
-host, which CUDA graphs cannot capture: it needs `cuda_graph="none"`. Dist-MoE
+host, which CUDA graphs cannot capture: it needs `cuda_graph="none"`. DeepEP with
+`cuda_graph_compatible` and HybridEP with `non_blocking_capacity_factor` dispatch
+without a host sync, so they run under CUDA graphs; without those options they
+need `cuda_graph="none"` too. Their `num_max_tokens_per_rank` must cover a step's
+tokens per EP rank, `(chunked_prefill_size + max_running_requests) / TP`; the
+engine checks it at build. HybridEP needs an EP degree divisible by 4: a step can
+have any token count, which HybridEP's 16-byte alignment otherwise rejects.
+DeepEP's deterministic dispatch (`DebugConfig.deterministic`) cannot run in CUDA
+graphs, and HybridEP's `non_blocking_capacity_factor` must be 1.0 (below it,
+HybridEP drops tokens). `scripts/install_rl_env.sh` installs neither DeepEP nor
+HybridEP; build them against the environment's PyTorch, as
+`.github/scripts/install_deepep_v2.sh` (DeepEP) and
+`.ci/docker/common/install_deepep.sh` (HybridEP) do. SGLang's own DeepEP wheel
+fails its NCCL version check under the PyTorch nightly. Dist-MoE
 (`Generator.Config.dist_moe_runtime`) runs under CUDA graphs: decode graphs, and
 breakable or full prefill graphs. It shards a step's tokens over the TP ranks
 even without expert parallelism, so with TP > 1 it needs expert parallelism too.
-The other EP token dispatchers (DeepEP, HybridEP) are not supported.
 
 ## GDN and KDA
 

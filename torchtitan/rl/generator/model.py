@@ -28,6 +28,11 @@ from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
+from torchtitan.models.common.moe.token_dispatcher import (
+    BaseEPTokenDispatcher,
+    DeepEPTokenDispatcher,
+    HybridEPTokenDispatcher,
+)
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
@@ -284,6 +289,103 @@ def build_dist_moe_runtime(
         num_tokens_per_microbatch_per_dp_rank=max_num_tokens_per_step,
         pp_schedule=None,
     )
+
+
+def validate_ep_token_dispatchers(
+    model: Decoder.Config,
+    *,
+    parallelism: InferenceParallelismConfig,
+    cuda_graph: bool,
+    deterministic: bool,
+) -> None:
+    """Raise for EP token dispatchers a generator engine cannot run.
+
+    Args:
+        cuda_graph: Whether the engine captures CUDA graphs.
+        deterministic: ``DebugConfig.deterministic``, under which DeepEP builds its
+            deterministic communication buffer.
+    """
+    if parallelism.expert_parallel_degree <= 1:
+        return
+    # Dist-MoE experts have no token dispatcher, so this sees only the stock ones.
+    for fqn, dispatcher, _, _ in model.traverse(BaseEPTokenDispatcher.Config):
+        if isinstance(dispatcher, DeepEPTokenDispatcher.Config):
+            syncs_host = not dispatcher.cuda_graph_compatible
+            # TODO: DeepEP's deterministic dispatch sorts the received tokens with
+            # data-dependent shapes (ElasticBuffer's deterministic_sort), which CUDA
+            # graphs cannot capture. https://github.com/deepseek-ai/DeepEP/issues/820
+            if deterministic and cuda_graph:
+                raise ValueError(
+                    f"{fqn}: DeepEP's deterministic dispatch "
+                    "(DebugConfig.deterministic) cannot run in CUDA graphs: turn off "
+                    "the engine's CUDA graphs"
+                )
+        elif isinstance(dispatcher, HybridEPTokenDispatcher.Config):
+            syncs_host = dispatcher.non_blocking_capacity_factor is None
+            # Below 1.0, HybridEP drops the tokens past its capacity without an error,
+            # which silently changes the sampled tokens.
+            if (
+                dispatcher.non_blocking_capacity_factor is not None
+                and dispatcher.non_blocking_capacity_factor < 1.0
+            ):
+                raise ValueError(
+                    f"{fqn}: a HybridEP non_blocking_capacity_factor below 1.0 drops "
+                    "tokens in the generator; set it to 1.0, or to None with the "
+                    "engine's CUDA graphs off"
+                )
+            # A generator step can have any token count, while HybridEP's TMA loads
+            # need a rank's tokens times the ranks in its node, in 4-byte words, to
+            # fill 16-byte rows: any count does when the ranks are a multiple of 4.
+            if parallelism.expert_parallel_degree % 4 != 0:
+                raise ValueError(
+                    f"{fqn}: HybridEP needs an expert_parallel_degree divisible by 4 "
+                    "in the generator, got "
+                    f"{parallelism.expert_parallel_degree}"
+                )
+        else:
+            # The all-to-all dispatchers.
+            syncs_host = True
+        if syncs_host and cuda_graph:
+            raise ValueError(
+                f"{fqn}: {type(dispatcher).__qualname__} reads its split sizes on the "
+                "host, which CUDA graphs cannot capture: turn off the engine's CUDA "
+                "graphs, or use Dist-MoE, DeepEP with cuda_graph_compatible, or "
+                "HybridEP with non_blocking_capacity_factor"
+            )
+
+
+def validate_ep_token_dispatcher_capacity(
+    model: Decoder.Config,
+    *,
+    parallelism: InferenceParallelismConfig,
+    max_num_tokens_per_step: int,
+) -> None:
+    """Raise if a DeepEP or HybridEP buffer cannot hold an EP rank's tokens in a step.
+
+    Args:
+        max_num_tokens_per_step: The most tokens a step passes to the model on this
+            rank, padding included.
+    """
+    if parallelism.expert_parallel_degree <= 1:
+        return
+    # The MoE splits each step's tokens evenly over the TP ranks.
+    max_num_tokens_per_rank = (
+        max_num_tokens_per_step // parallelism.expert_sequence_parallel_size
+    )
+    for fqn, dispatcher, _, _ in model.traverse(BaseEPTokenDispatcher.Config):
+        if (
+            isinstance(
+                dispatcher,
+                (DeepEPTokenDispatcher.Config, HybridEPTokenDispatcher.Config),
+            )
+            and dispatcher.num_max_tokens_per_rank is not None
+            and dispatcher.num_max_tokens_per_rank < max_num_tokens_per_rank
+        ):
+            raise ValueError(
+                f"{fqn}: num_max_tokens_per_rank={dispatcher.num_max_tokens_per_rank} "
+                f"is below the {max_num_tokens_per_rank} tokens an EP rank can get in "
+                "one engine step"
+            )
 
 
 def _load_initial_weights(

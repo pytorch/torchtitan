@@ -48,11 +48,8 @@ from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.attention.linear_attention import LinearAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
-from torchtitan.models.common.moe.token_dispatcher import (
-    AllToAllTokenDispatcher,
-    BaseEPTokenDispatcher,
-)
 from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
+from torchtitan.rl.generator.model import validate_ep_token_dispatchers
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.sglang.attention.attention import (
     TORCHTITAN_VARLEN_ATTENTION_BACKEND,
@@ -156,7 +153,8 @@ class SGLangEngine(GenerationEngine):
             # per-phase graph keys (e.g. cuda_graph_backend_decode) over
             # disable_cuda_graph, so one would capture graphs that the engine's
             # checks of cuda_graph assume are off. SGLang's default capture sizes
-            # also stay within the step budget that Dist-MoE's buffers are sized for.
+            # also stay within the step budget that Dist-MoE's buffers and the
+            # DeepEP / HybridEP capacity check assume.
             owned_keys = sorted(
                 key
                 for key in self.extra_server_args
@@ -220,22 +218,12 @@ class SGLangEngine(GenerationEngine):
                 "SGLang cannot capture full prefill CUDA graphs of linear attention "
                 "(GDN, KDA) models: set SGLangEngine.Config.cuda_graph to 'breakable'"
             )
-        if parallelism.expert_parallel_degree > 1:
-            # Dist-MoE experts have no token dispatcher, so this sees only the stock
-            # ones; Dist-MoE runs under CUDA graphs.
-            for fqn, dispatcher, _, _ in model.traverse(BaseEPTokenDispatcher.Config):
-                if not isinstance(dispatcher, AllToAllTokenDispatcher.Config):
-                    raise ValueError(
-                        f"{fqn}: the SGLang engine supports the all-to-all token "
-                        f"dispatcher and Dist-MoE only, got "
-                        f"{type(dispatcher).__qualname__}"
-                    )
-                if config.cuda_graph != "none":
-                    raise ValueError(
-                        "The all-to-all token dispatcher reads its split sizes on the "
-                        "host, which CUDA graphs cannot capture: set "
-                        "SGLangEngine.Config.cuda_graph to 'none', or use Dist-MoE"
-                    )
+        validate_ep_token_dispatchers(
+            model,
+            parallelism=parallelism,
+            cuda_graph=config.cuda_graph != "none",
+            deterministic=debug.deterministic,
+        )
         self.config = config
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load

@@ -46,11 +46,13 @@ from torchtitan.rl.generator.model import (
     get_attention_dimensions,
     ModelStateDictLoader,
     route_tp_all_reduce,
+    validate_ep_token_dispatcher_capacity,
 )
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.sglang.attention.attention import SGLangInnerAttention
 from torchtitan.rl.generator.sglang.attention.gdn import SGLangInnerGDN
 from torchtitan.rl.generator.sglang.attention.kda import SGLangInnerKDA
+from torchtitan.tools.utils import round_up
 
 logger = logging.getLogger(__name__)
 
@@ -334,17 +336,22 @@ class SGLangModelWrapper(Module):
         schedule = get_schedule()
         token_multiple = parallelism.expert_sequence_parallel_size
         # A step runs at most chunked_prefill_size prefill tokens plus a decode token
-        # per running request, padded to token_multiple.
-        max_num_tokens_per_step = (
-            schedule.chunked_prefill_size + schedule.max_running_requests
+        # per running request, padded up to a multiple of token_multiple.
+        max_num_tokens_per_step = round_up(
+            schedule.chunked_prefill_size + schedule.max_running_requests,
+            token_multiple,
+        )
+        validate_ep_token_dispatcher_capacity(
+            self.config,
+            parallelism=parallelism,
+            max_num_tokens_per_step=max_num_tokens_per_step,
         )
         dist_moe = build_dist_moe_runtime(
             decoder,
             dist_moe_runtime,
             parallelism_context=self.parallelism_context,
             device=device,
-            max_num_tokens_per_step=-(-max_num_tokens_per_step // token_multiple)
-            * token_multiple,
+            max_num_tokens_per_step=max_num_tokens_per_step,
         )
         maybe_apply_numa_binding(device_index, device_type)
         # Loads the initial weights, then unshards the model, so SGLang profiles GPU

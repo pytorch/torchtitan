@@ -26,6 +26,7 @@ from torchtitan.config import DebugConfig, PrecisionConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
+from torchtitan.rl.generator.model import validate_ep_token_dispatchers
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import (
     EngineRequest,
@@ -159,6 +160,12 @@ class VLLMEngine(GenerationEngine):
                 "session_kv_holder needs reset_kv_cache_on_model_state_dict_load=False: vLLM "
                 "cannot reset the prefix cache while blocks are held"
             )
+        validate_ep_token_dispatchers(
+            model,
+            parallelism=parallelism,
+            cuda_graph=config.cuda_graph.mode != "NONE",
+            deterministic=debug.deterministic,
+        )
         self.config = config
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load
