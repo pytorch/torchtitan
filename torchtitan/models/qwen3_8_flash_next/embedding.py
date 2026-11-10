@@ -8,6 +8,7 @@
 
 import math
 from dataclasses import dataclass
+from typing import cast
 
 import spmd_types as spmd
 import torch
@@ -153,7 +154,8 @@ class NGramTable(Embedding):
             raise ValueError(
                 "Row-owned PLE requires lookup routing from preprocess_inputs"
             )
-        return row_sharded_embedding(self.weight, routing, dtype=dtype)
+        # _parallelize stores the weight as a Shard(0) DTensor over row_mesh.
+        return row_sharded_embedding(cast(DTensor, self.weight), routing, dtype=dtype)
 
 
 class NGramEmbedding(Module):
