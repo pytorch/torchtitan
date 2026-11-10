@@ -63,6 +63,7 @@ def build_inference_model(
     parallelism: InferenceParallelismConfig,
     precision: PrecisionConfig,
     device: torch.device,
+    keep_vision_encoder: bool = False,
 ) -> tuple[Decoder, ParallelismContext]:
     """Build, parallelize and materialize the generator's model, without its weights.
 
@@ -76,6 +77,8 @@ def build_inference_model(
         parallelism: The generator's parallelism.
         precision: The trainer's dtypes, which the model mirrors.
         device: The device to materialize the model on.
+        keep_vision_encoder: Keep the model's vision encoder, for an engine that serves
+            image prompts; otherwise it is dropped.
 
     Returns:
         ``(model, parallelism_context)``, the model's buffers initialized.
@@ -126,7 +129,7 @@ def build_inference_model(
             new_param.__dict__.setdefault(name, value)
         torch.utils.swap_tensors(param, new_param)
     model._skip_lm_head = True
-    if getattr(model, "vision_encoder", None) is not None:
+    if not keep_vision_encoder and getattr(model, "vision_encoder", None) is not None:
         model.vision_encoder = None
 
     model = model.parallelize(

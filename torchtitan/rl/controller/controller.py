@@ -102,6 +102,7 @@ from typing import Any
 # and in train.py; see the note there.
 import torch  # noqa: F401
 
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import (
@@ -110,6 +111,7 @@ from torchtitan.config import (
     OverrideConfig,
     PrecisionConfig,
 )
+from torchtitan.models.common.multimodal import MultimodalModel
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.system import ActorSystem, TrainerHandle
 from torchtitan.rl.controller.metrics import (
@@ -128,7 +130,7 @@ from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout.rollouter import Rollouter
-from torchtitan.rl.rollout.types import Completion, GenerateFn, ReleaseSessionFn
+from torchtitan.rl.rollout.types import Completion, GenerateFn, Prompt, ReleaseSessionFn
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
 from torchtitan.rl.trainer.trainer import Trainer
@@ -313,6 +315,13 @@ class Controller(Configurable):
         )
         """Tokenizer loaded from `hf_assets_path`."""
 
+        vision_processor: VisionProcessor.Config | None = None
+        """The model's image preprocessing, for image prompts, e.g.
+        `VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS)`. The renderer computes each
+        image's patch grid and number of placeholder tokens with it, and the generator
+        turns the image files into pixel values with it, so both agree on every image.
+        None: text prompts only."""
+
         renderer: RendererConfig
         """The model's chat template; renders messages to token ids and parses completions
         back. E.g. `from_renderers(Qwen3RendererConfig(enable_thinking=False))`."""
@@ -440,6 +449,25 @@ class Controller(Configurable):
                     "async_loop.batcher.rdma_min_tensor_bytes does not support "
                     "trainer pipeline parallelism yet."
                 )
+            if self.vision_processor is not None:
+                generator_model = self.generator.model
+                # A model family can ship text-only variants of its multimodal model
+                # (vision_encoder=None), so the model class alone is not enough.
+                if (
+                    not isinstance(generator_model, MultimodalModel.Config)
+                    or getattr(generator_model, "vision_encoder", None) is None
+                ):
+                    raise ValueError(
+                        "vision_processor is set, but the generator model "
+                        f"({type(generator_model).__qualname__}) is not a multimodal "
+                        "model with a vision encoder."
+                    )
+                # TODO: remove once the batcher and the trainer take image inputs.
+                raise NotImplementedError(
+                    "vision_processor is set, but training on image prompts is not "
+                    "supported yet: the trainer would see their placeholder tokens "
+                    "without the images."
+                )
             if self.trainer.parallelism.enable_sequence_parallel:
                 sp_degree = self.trainer.parallelism.tensor_parallel_degree
                 max_context_length = self.trainer.model.max_context_length
@@ -530,7 +558,14 @@ class Controller(Configurable):
             job_config=config.to_dict(),
         )
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
-        self.renderer = config.renderer.build(tokenizer=self.tokenizer)
+        vision_processor = (
+            config.vision_processor.build()
+            if config.vision_processor is not None
+            else None
+        )
+        self.renderer = config.renderer.build(
+            tokenizer=self.tokenizer, vision_processor=vision_processor
+        )
 
         # Carry the base seed and renderer stop tokens on the sampling config so
         # the generator reads them off each request; the rollouter offsets the
@@ -625,7 +660,7 @@ class Controller(Configurable):
 
         @sl.log_trace_span("generate")
         async def generate(
-            prompt_token_ids: list[int],
+            prompt: Prompt,
             *,
             request_id: str,
             group_id: int,
@@ -633,7 +668,7 @@ class Controller(Configurable):
             sampling_config: SamplingConfig | None = None,
         ) -> Completion | None:
             return await generator_router.generate.call_one(
-                prompt_token_ids,
+                prompt,
                 request_id=request_id,
                 group_id=group_id,
                 routing_session_id=routing_session_id,
@@ -710,6 +745,7 @@ class Controller(Configurable):
                 model_path=config.hf_assets_path,
                 max_num_seqs=max_num_seqs,
                 output_dir=config.dump_folder,
+                vision_processor=config.vision_processor,
             )
             self.batcher = await actor_system.spawn_batcher(
                 async_loop.batcher,
@@ -735,6 +771,7 @@ class Controller(Configurable):
                 tokenizer_config=config.tokenizer,
                 renderer_config=config.renderer,
                 hf_assets_path=config.hf_assets_path,
+                vision_processor_config=config.vision_processor,
             )
 
         # Initialize TorchStore, which carries the model state dict from the trainer to the generators.

@@ -22,6 +22,7 @@ import torchstore as ts
 from torchstore import RankRole
 
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.config import Configurable, DebugConfig, PrecisionConfig
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.models.common.decoder import Decoder
@@ -33,7 +34,7 @@ from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadM
 from torchtitan.rl.generator.engine_loop import EngineLoop, EngineLoopThread
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
-from torchtitan.rl.rollout.types import Completion
+from torchtitan.rl.rollout.types import Completion, Prompt
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,8 @@ class Generator(Configurable):
             adapter supplies ``Channel.open``; standalone runtimes can supply
             an equivalent transport. It is unused when data parallelism is
             disabled.
+        vision_processor: How the model turns an image into vision tokens; the engine
+            preprocesses image prompts' files with it. None: text only.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -155,7 +158,10 @@ class Generator(Configurable):
         later turns reuse its KV across model state dict loads, while new groups use the current
         version.
         Enable this to clear prefix-cache entries and preempt running requests; the engine
-        then recomputes their KV under the new weights when they resume."""
+        then recomputes their KV under the new weights when they resume. With image
+        prompts it also clears vLLM's encoder cache (image embeddings from the old vision
+        weights); without it, image embeddings are salted by the pinned version like the
+        KV."""
 
         model_state_dict_load_mode: ModelStateDictLoadMode = "cpu_prefetch"
         """How a model state dict load moves the StorageVolume snapshot into the engine's weights.
@@ -212,6 +218,7 @@ class Generator(Configurable):
         rank: int | None = None,
         generator_name: str = "generator",
         open_result_channel: Callable[[], tuple[Any, Any]] | None = None,
+        vision_processor: VisionProcessor.Config | None = None,
     ):
         init_logger()
         # TODO: Quiet torchstore's per-op transport-resolve INFO spam (very noisy in CI).
@@ -255,6 +262,7 @@ class Generator(Configurable):
                         config.reset_kv_cache_on_model_state_dict_load
                     ),
                     model_state_dict_load_mode=config.model_state_dict_load_mode,
+                    vision_processor=vision_processor,
                     rank=self._rank,
                     generator_name=generator_name,
                     output_dir=output_dir,
@@ -367,7 +375,7 @@ class Generator(Configurable):
     @sl.log_trace_span("generate")
     async def generate(
         self,
-        prompt_token_ids: list[int],
+        prompt: Prompt,
         *,
         request_id: str,
         group_id: int,
@@ -385,7 +393,8 @@ class Generator(Configurable):
         `VLLMValidationError` or `ValueError`).
 
         Args:
-            prompt_token_ids: One tokenized prompt `[token_ids]`.
+            prompt: One prompt: its tokens and images, with their files' bytes (the engine
+                preprocesses the images).
             request_id: Unique id for this request, echoed on the `Completion`.
             group_id: Rollout group id. Requests of one group share a prefix cache
                 salt; `release_groups` drops it. Also sets the vLLM priority; see
@@ -397,7 +406,7 @@ class Generator(Configurable):
         Example:
 
             completion = await generator.slice(hosts=0, gpus=0).generate.call_one(
-                [1, 2, 3],
+                Prompt(token_ids=[1, 2, 3]),
                 request_id="step=3/group=0/sample=0/turn=0",
                 group_id=0,
                 routing_session_id="group=0/rollout=0",
@@ -412,7 +421,7 @@ class Generator(Configurable):
         return await self._engine_loop.generate(
             EngineRequest(
                 request_id=request_id,
-                prompt_token_ids=prompt_token_ids,
+                prompt=prompt,
                 sampling=sampling,
                 group_id=group_id,
                 routing_session_id=routing_session_id,
