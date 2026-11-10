@@ -8,6 +8,7 @@
 groups, 16-token blocks standing in for Qwen3.5's 1,152."""
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -23,7 +24,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 BLOCK = 16
 
@@ -115,7 +116,13 @@ def _scheduler(manager, max_num_scheduled_tokens=0, **attrs) -> SimpleNamespace:
 
 
 def _holder(
-    manager, requests, floor=0, running=(), waiting=(), skipped_waiting=()
+    manager,
+    requests,
+    floor=0,
+    running=(),
+    waiting=(),
+    skipped_waiting=(),
+    offload_connector=None,
 ) -> VLLMSessionKVHolder:
     scheduler = _scheduler(
         manager,
@@ -124,7 +131,9 @@ def _holder(
         waiting=waiting,
         skipped_waiting=skipped_waiting,
     )
-    holder = VLLMSessionKVHolder.Config().build(scheduler=scheduler)
+    holder = VLLMSessionKVHolder.Config().build(
+        scheduler=scheduler, offload_connector=offload_connector
+    )
     holder.free_floor_blocks = floor
     return holder
 
@@ -223,6 +232,83 @@ def test_evict_until_free_releases_the_session_idle_longest_first(manager):
     assert holder.num_sessions == 0
 
 
+def test_gpu_pressure_preserves_cpu_cache_until_session_release(manager):
+    connector = Mock()
+    connector.get_pending_save_ids.return_value = set()
+    connector.release_session_cache.return_value = None
+    requests = {}
+    holder = _holder(manager, requests, offload_connector=connector)
+    _finished_turn(manager, holder, requests, "s", list(range(50)))
+    hashes = set(holder._cpu_sessions["s"][1])
+    assert hashes
+    assert holder.num_sessions == 1
+
+    # GPU pressure drops the hold, but the rollout can still reuse its CPU KV.
+    holder.free_floor_blocks = manager.block_pool.get_num_free_blocks() + 1
+    holder.after_step()
+    assert holder.num_sessions == 0
+    connector.release_session_cache.assert_not_called()
+
+    # Group completion still reaches the session after its GPU hold is gone.
+    holder.release(group_ids=[0])
+    connector.release_session_cache.assert_called_once_with(hashes, set())
+    assert not holder.has_pending_work
+
+
+def test_release_waits_for_decode_and_saves_and_preserves_shared_prefix(manager):
+    connector = Mock()
+    connector.get_pending_save_ids.return_value = {0}
+    connector.release_session_cache.return_value = None
+    first = _request("first", list(range(50)))
+    requests = {first.request_id: first}
+    holder = _holder(manager, requests, offload_connector=connector)
+    holder.track(first.request_id, "session-0", 0)
+    _prefill(manager, first)
+    holder.after_step()
+    assert holder.num_sessions == 1
+    shared_hashes = set(first.block_hashes)
+    holder.release(["session-0"], [])
+    assert holder.num_sessions == 0
+    connector.release_session_cache.assert_not_called()
+
+    # Final decode hashes appear after release; the request is then removed.
+    for token in range(BLOCK):
+        _schedule(manager, first, 1, sample=100 + token)
+    decode_hashes = set(first.block_hashes) - shared_hashes
+    assert decode_hashes
+    manager.free(first)
+    del requests[first.request_id]
+    holder.after_step()
+    assert holder.has_pending_work
+    connector.release_session_cache.assert_not_called()
+
+    # Another session reuses the prefix while the old save is still in flight.
+    second = _request("second", list(range(50)))
+    requests[second.request_id] = second
+    holder.track(second.request_id, "session-1", 1)
+    _prefill(manager, second)
+    # A newer unrelated save must not keep this release waiting.
+    connector.get_pending_save_ids.return_value = {1}
+    holder.after_step()
+    assert holder.num_sessions == 1
+    connector.release_session_cache.assert_called_once_with(
+        decode_hashes, shared_hashes
+    )
+    assert not holder.has_pending_work
+
+    # Group release reaches idle sessions too. The final owner can release it.
+    manager.free(second)
+    del requests[second.request_id]
+    holder.after_step()
+    connector.get_pending_save_ids.return_value = set()
+    holder.release([], [1])
+    assert holder.num_sessions == 0
+    assert connector.release_session_cache.call_args.args == (shared_hashes, set())
+    assert not holder.has_pending_work
+    holder.release(["session-0", "unknown"], [0, 1])
+    assert connector.release_session_cache.call_count == 2
+
+
 def test_evict_until_free_skips_a_session_with_a_running_request(manager):
     requests = {}
     busy = _request("busy", list(range(50)))
@@ -311,6 +397,27 @@ def test_holder_rejects_partial_block_hits_and_speculative_decoding(manager):
 
 
 @pytest.mark.parametrize("queue", ["waiting", "skipped_waiting"])
+def test_waiting_for_kv_load_keeps_gpu_holds_unless_memory_is_low(manager, queue):
+    requests, waiting = {}, []
+    holder = _holder(manager, requests, **{queue: waiting})
+    _finished_turn(manager, holder, requests, "idle", list(range(50)))
+    free_before = manager.block_pool.get_num_free_blocks()
+    loading = _request("loading", list(range(200, 260)))
+    loading.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    waiting.append(loading)
+
+    holder.after_step()
+
+    assert holder.num_sessions == 1 and holder.num_evicted == 0
+    assert manager.block_pool.get_num_free_blocks() == free_before
+
+    # Waiting for a load must not disable genuine memory-pressure eviction.
+    holder.free_floor_blocks = free_before + 1
+    holder.after_step()
+    assert holder.num_sessions == 0 and holder.num_evicted == 1
+
+
+@pytest.mark.parametrize("queue", ["waiting", "skipped_waiting"])
 def test_a_waiting_turn_gets_room_when_held_sessions_fill_the_pool(manager, queue):
     """Nothing runs, free >= floor, and the waiting turn needs more blocks than are free.
     vLLM serves `skipped_waiting` first and leaves a refused request there."""
@@ -326,7 +433,10 @@ def test_a_waiting_turn_gets_room_when_held_sessions_fill_the_pool(manager, queu
     # 10 attention blocks + GDN state: more than the 7 free.
     head = _request("head", list(range(50_000, 50_160)))
     requests["head"] = head
-    waiting.append(head)
+    # A load in the same queue must not hide another request that needs room.
+    loading = _request("loading", list(range(200, 260)))
+    loading.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    waiting.extend([loading, head])
 
     # The engine loop with an empty batch: vLLM's admission check, then the holder.
     for _ in range(20):
