@@ -298,6 +298,8 @@ MUSE_SPARK_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
     "video_resize": MuseGlimmerPatchGridResize.Config(
         max_image_tokens=_MUSE_GLIMMER_MAX_IMAGE_TOKENS
     ),
+    # The released processor_config.json resamples with LANCZOS.
+    "image_interpolation_mode": "lanczos",
 }
 
 

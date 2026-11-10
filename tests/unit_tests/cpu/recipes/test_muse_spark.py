@@ -73,3 +73,18 @@ def test_debug_recipe_tokenizer(recipe):
     config.__post_init__()
     tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
     assert tokenizer.encode("Hello, world!")
+
+
+# Grids match the HF MuseGlimmerImageProcessor. 4000x3000 would be 20,000 merged
+# tokens, so it takes the 4096-token cap path.
+@pytest.mark.parametrize(
+    "height, width, expected",
+    [
+        (256, 256, (280, 280, 0, 0)),
+        (240, 240, (224, 224, 0, 0)),
+        (4000, 3000, (2044, 1540, 0, 0)),
+    ],
+)
+def test_muse_glimmer_patch_grid_resize(height, width, expected):
+    resize = recipes.MuseGlimmerPatchGridResize.Config(max_image_tokens=4096).build()
+    assert resize(height, width, patch_size=14, merge_size=2) == expected

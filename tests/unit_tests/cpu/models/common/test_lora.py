@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import math
 from dataclasses import dataclass
 from typing import cast
@@ -13,6 +14,7 @@ import pytest
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
+from spmd_types import SpmdType
 from spmd_types.checker import typecheck
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
@@ -25,7 +27,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import LoRATransform, transform_model_config_
-from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
 from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig
@@ -43,11 +45,23 @@ from torchtitan.models.common.linear import (
     RowParallelLinear,
 )
 from torchtitan.models.common.moe.sharding import expert_param_placement_sparse
-from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
+from torchtitan.models.common.vision_encoder import (
+    InvariantRowParallelLinear,
+    VisionMLP,
+)
+from torchtitan.models.common.vision_encoder_sharding import (
+    vision_colwise_sharding_config,
+    vision_invariant_linear_sharding_config,
+    vision_rowwise_sharding_config,
+)
 from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 from torchtitan.models.llama3 import build_model_config
 from torchtitan.models.qwen3_5.model import Qwen35Model
 from torchtitan_recipes.tests.models.qwen3_5 import qwen35_debugmodel_moe_lora
+
+DP = MeshAxisName.DP
+CP = MeshAxisName.CP
+TP = MeshAxisName.TP
 
 
 def test_qwen35_moe_lora_model_config():
@@ -774,6 +788,103 @@ class TestLoRATensorParallelTypecheck(DTensorTestBase):
 
         self.assertEqual(output.shape, x_local.shape)
         self.assertIsNotNone(feed_forward.w2.lora_b.weight.grad)
+
+    @with_comms
+    def test_vision_adapters_match_unsharded(self):
+        """TP2 LoRA output and adapter grads match a TP1 run of the same weights.
+
+        Vision linears are CP-invariant; the vision adapter is also TP-invariant.
+        """
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
+            tp=self.world_size,
+            pp=1,
+            ep=1,
+            world_size=self.world_size,
+            enable_sequence_parallel=False,
+        )
+        with patch(
+            "torchtitan.distributed.parallelism_context.device_type", self.device_type
+        ):
+            parallelism_context.build_mesh()
+        vision_config = VisionMLP.Config(
+            fc1=Linear.Config(
+                in_features=16,
+                out_features=32,
+                bias=True,
+                sharding_config=vision_colwise_sharding_config(),
+            ),
+            fc2=InvariantRowParallelLinear.Config(
+                in_features=32,
+                out_features=16,
+                # With a bias, the forward skips SPMD type checking.
+                bias=False,
+                sharding_config=vision_rowwise_sharding_config(),
+            ),
+        )
+        adapter_config = Linear.Config(
+            in_features=16,
+            out_features=16,
+            sharding_config=vision_invariant_linear_sharding_config(),
+        )
+        torch.manual_seed(0)
+        unsharded = [
+            LoRATransform(rank=2, alpha=4.0)
+            .transform(config)
+            .build()
+            .to(self.device_type)
+            for config in (vision_config, adapter_config)
+        ]
+        for module in unsharded:
+            for param in module.parameters():
+                torch.nn.init.normal_(param)
+        sharded = copy.deepcopy(unsharded)
+        x_local = torch.randn(8, 16, device=self.device_type)
+
+        expected = x_local
+        for module in unsharded:
+            expected = module(expected)
+        expected.sum().backward()
+
+        for module in sharded:
+            module._parallelize(parallelism_context)
+        mesh = parallelism_context.spmd_dense_mesh()
+        set_spmd_meshes(dense_mesh=mesh, sparse_mesh=None, dense_sp_enabled=False)
+        layout = SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I})
+        with set_current_spmd_mesh(mesh), typecheck(local=False):
+            spmd.assert_type(x_local, layout)
+            output = x_local
+            for module in sharded:
+                output = module(output)
+            spmd.assert_type(output, layout)
+            output.sum().backward()
+
+        # Explicit tolerance: TP2 sums fp32 partial products in a different order.
+        tolerance = {"atol": 1e-4, "rtol": 1e-4}
+        torch.testing.assert_close(output, expected, **tolerance)
+        for module, reference in zip(sharded, unsharded, strict=True):
+            for name, param in module.named_parameters():
+                if "lora_" not in name:
+                    assert param.grad is None, name
+                    continue
+                expected_grad = reference.get_parameter(name).grad
+                adapter = module.get_submodule(name.rsplit(".", 1)[0])
+                tp_type = adapter._sharding_config.state_shardings["weight"].local_type[
+                    TP
+                ]
+                grad = param.grad
+                # Without FSDP the TP-replicated grad stays partial. In training,
+                # FSDP redistributes the non-DP Partial grad to Replicate (TP
+                # all-reduce).
+                if tp_type == spmd.R:
+                    torch.distributed.all_reduce(grad)
+                elif isinstance(tp_type, spmd.Shard):
+                    shards = [torch.empty_like(grad) for _ in range(self.world_size)]
+                    torch.distributed.all_gather(shards, grad.contiguous())
+                    grad = torch.cat(shards, dim=tp_type.dim)
+                torch.testing.assert_close(grad, expected_grad, **tolerance, msg=name)
 
 
 instantiate_parametrized_tests(TestLoRATensorParallelTypecheck)
