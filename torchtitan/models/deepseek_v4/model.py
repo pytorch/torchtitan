@@ -131,10 +131,15 @@ class DeepSeekV4Model(Decoder):
     pipeline_last_stage_module_fqns = ("hc_head",)
 
     def pipeline(self, **kwargs):
-        """Partition the decoder; MTP layers are not assigned to pipeline stages."""
-        if len(self.mtp_layers) > 0:
+        """Partition the decoder into pipeline stages."""
+        pp_mesh = kwargs["parallelism_context"].get_mesh("pp")
+        if torch.distributed.get_backend(pp_mesh.get_group("pp")) == "fake":
+            # TODO: the static stage metadata built for fake process groups
+            # describes a [T, dim] hidden state, but V4 stages exchange
+            # [T, hc_mult, dim].
             raise ValueError(
-                "DeepSeek V4 does not support pipeline parallelism with MTP layers."
+                "DeepSeek V4 does not support pipeline parallelism on a fake "
+                "process group."
             )
         return super().pipeline(**kwargs)
 
@@ -266,32 +271,14 @@ class DeepSeekV4Model(Decoder):
                 mtp_layer.build() for mtp_layer in cfg.mtp_layers
             )
 
-    def preprocess_inputs(
-        self,
-        input_dict: dict[str, Any],
-        *,
-        parallelism_context: ParallelismContext,
-        parallelism: ParallelismConfig,
-        max_num_documents: int | None = None,
-        global_routing_token_counts: torch.Tensor | None = None,
-        **kwargs: Any,
-    ) -> tuple[
-        torch.Tensor | tuple[torch.Tensor, ...],
-        torch.Tensor | tuple[torch.Tensor, ...],
-        dict[str, Any],
-        dict[str, Any],
-    ]:
+    def preprocess_inputs(self, input_dict: dict[str, Any], **kwargs: Any):
         """Build the decoder batch and pass token IDs on for hash routing."""
         inputs, labels, model_kwargs, loss_kwargs = super().preprocess_inputs(
-            input_dict,
-            parallelism_context=parallelism_context,
-            parallelism=parallelism,
-            max_num_documents=max_num_documents,
-            global_routing_token_counts=global_routing_token_counts,
-            **kwargs,
+            input_dict, **kwargs
         )
-        # Later PP stages receive hidden states instead of tokens, but model
-        # kwargs reach every stage.
+        # `inputs` holds the token IDs on every rank here. Under PP, later
+        # stages' forward receives the previous stage's hidden state instead,
+        # but model kwargs reach every stage unchanged.
         model_kwargs["input_ids_T"] = inputs
         return inputs, labels, model_kwargs, loss_kwargs
 
