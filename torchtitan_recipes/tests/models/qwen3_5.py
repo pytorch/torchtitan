@@ -182,3 +182,24 @@ def qwen35_debugmodel_moe_lora(
             )
         ],
     )
+
+
+def qwen35_debugmodel_moe_lora_shared_outer(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
+) -> Trainer.Config:
+    """Routed-expert adapters in the shared-outer layout: one lora_a for every
+    expert's w13 and one lora_b for every expert's w2."""
+    config = qwen35_debugmodel_moe(seq_len=seq_len, parallelism=parallelism)
+    return apply_transforms(
+        config,
+        [
+            LoRATransform(
+                rank=8,
+                alpha=16.0,
+                target_modules=["w13", "w2"],
+                expert_adapter_layout="shared_outer",
+            )
+        ],
+    )

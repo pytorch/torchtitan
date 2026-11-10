@@ -16,6 +16,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform import LoRATransform
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     resolve_fsdp_mesh,
@@ -362,6 +363,104 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         )
 
         self.assertEqual(_get_expert_shard_dims(model), (0, 0))
+
+
+class TestSharedOuterLoRAExpertParallel(DTensorTestBase):
+    """A LoRA factor shared across experts keeps one value on every EP rank after a step."""
+
+    @property
+    def world_size(self):
+        return 4
+
+    @with_comms
+    def test_shared_factor_stays_replicated_across_ep(self):
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=self.world_size,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=2,
+            world_size=self.world_size,
+            enable_sequence_parallel=False,
+        )
+        parallelism_context.build_mesh()
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallelism_context)
+        assert edp_mesh is not None
+
+        config = _qwen3_moe_config(num_experts=4, enable_sp=False, enable_ep=True)
+        for layer_config in config.layers:
+            assert layer_config.feed_forward is not None
+            # The bare model call below supplies no aux-loss denominator.
+            layer_config.feed_forward.router.aux_loss = None
+        config = LoRATransform(
+            rank=8,
+            alpha=16.0,
+            expert_adapter_layout="shared_outer",
+            target_modules=["routed_experts.w13", "routed_experts.w2"],
+        ).transform(config)
+        model = config.build().to(self.device_type)
+        model.init_states()
+        model._parallelize(parallelism_context)
+        apply_fsdp_to_decoder(
+            model,
+            dp_mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            pp_enabled=False,
+            ep_degree=2,
+            edp_mesh=edp_mesh,
+            dp_mesh_dims=dp_mesh_dims,
+            edp_mesh_dims=edp_mesh_dims,
+        )
+
+        shared_factors = []
+        for layer in model.layers.values():
+            experts = layer.feed_forward.routed_experts
+            self.assertIsInstance(experts.w13.lora_a, Linear)
+            self.assertIsInstance(experts.w2.lora_b, Linear)
+            for shared in (experts.w13.lora_a, experts.w2.lora_b):
+                self.assertIs(shared.weight.device_mesh, edp_mesh)
+                shared_factors.append(shared.weight)
+            for per_expert in (experts.w13.lora_b, experts.w2.lora_a):
+                self.assertIs(per_expert.weight.device_mesh, edp_mesh)
+                self.assertEqual(per_expert.weight.full_tensor().shape[0], 4)
+            # perturb the zero-initialized B factors so every adapter factor,
+            # shared or per expert, receives a nonzero gradient
+            with torch.no_grad():
+                experts.w13.lora_b.weight.normal_()
+                experts.w2.lora_b.weight.normal_()
+
+        optimizer = torch.optim.SGD(
+            [p for p in model.parameters() if p.requires_grad], lr=0.01
+        )
+        tokens = (
+            torch.arange(8, device=self.device_type) + 8 * self.rank
+        ) % config.vocab_size
+        positions = torch.arange(8, device=self.device_type)
+        attention_metadata = model._get_attention_metadata(positions)
+        with parallelism_context.activate_spmd():
+            model(
+                tokens,
+                positions=positions,
+                attention_metadata=attention_metadata,
+            ).sum().backward()
+        for weight in shared_factors:
+            assert weight.grad is not None
+            self.assertEqual(weight.grad.placements, weight.placements)
+        clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+
+        ep_group = edp_mesh["ep"].get_group()
+        for weight in shared_factors:
+            local_weight = weight.to_local()
+            ep_replicas = [
+                torch.empty_like(local_weight) for _ in range(edp_mesh["ep"].size())
+            ]
+            dist.all_gather(ep_replicas, local_weight, group=ep_group)
+            for replica in ep_replicas[1:]:
+                self.assertEqual(replica, ep_replicas[0])
 
 
 class TestLinearStackingDistributed(DTensorTestBase):
