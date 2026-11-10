@@ -307,6 +307,7 @@ def validate_ep_token_dispatchers(
     """
     if parallelism.expert_parallel_degree <= 1:
         return
+    # Dist-MoE experts have no token dispatcher, so this sees only the stock ones.
     for fqn, dispatcher, _, _ in model.traverse(BaseEPTokenDispatcher.Config):
         if isinstance(dispatcher, DeepEPTokenDispatcher.Config):
             syncs_host = not dispatcher.cuda_graph_compatible
