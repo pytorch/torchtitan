@@ -41,6 +41,11 @@ from torchtitan.distributed.activation_remat import (
     DefaultActivationRematConfig,
 )
 from torchtitan.distributed.batch_invariant import set_batch_invariance
+from torchtitan.distributed.flex_shard_fsdp import (
+    FlexShardConfig,
+    validate_flex_shard_training,
+)
+from torchtitan.distributed.fsdp import set_is_last_accumulation_step
 from torchtitan.distributed.pipeline_parallel import (
     prepare_pipeline_schedule_for_accelerator_graph,
 )
@@ -173,6 +178,15 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             if self.parallelism.num_pp_microbatches <= 0:
                 raise ValueError(
                     "parallelism.num_pp_microbatches must be greater than 0."
+                )
+            if isinstance(self.parallelism.fsdp_backend, FlexShardConfig):
+                validate_flex_shard_training(
+                    parallelism=self.parallelism,
+                    training=self.training,
+                    loss=self.loss,
+                    checkpointer=self.checkpointer,
+                    optim=self.optim,
+                    debug=self.debug,
                 )
             if (
                 self.optim.enable_accelerator_graph
@@ -811,10 +825,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 )
             else:
                 if defer_fsdp_gradient_reduction:
-                    fsdp_root = cast(FSDPModule, self.model_parts[0])
-                    fsdp_root.set_is_last_backward(is_last_accumulation_step)
-                    fsdp_root.set_reshard_after_backward(is_last_accumulation_step)
-                    fsdp_root.set_requires_gradient_sync(is_last_accumulation_step)
+                    set_is_last_accumulation_step(
+                        self.model_parts[0], is_last_accumulation_step
+                    )
                 inputs, labels, model_kwargs, loss_kwargs = prepared_inputs
                 loss = self._non_pp_forward_backward_microbatch(
                     inputs=inputs,

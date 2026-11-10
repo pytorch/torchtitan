@@ -21,6 +21,7 @@ from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import apply_overrides, Configurable, PrecisionConfig
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.accelerator_graph import accelerator_graphs_supported
+from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.manager import maybe_semi_sync_training
@@ -165,6 +166,16 @@ class FaultTolerantTrainer(Configurable):
     class Config(Trainer.Config):
         checkpointer: TorchFTCheckpointManager.Config | None = None
         fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
+
+        def __post_init__(self) -> None:
+            Trainer.Config.__post_init__(self)
+            if isinstance(self.parallelism.fsdp_backend, FlexShardConfig):
+                # The gradient all-reduce across replica groups hooks FSDP2's
+                # parameter groups (TorchFTManager.maybe_set_all_reduce_hook).
+                raise ValueError(
+                    "FaultTolerantTrainer does not support "
+                    f"parallelism.fsdp_backend={self.parallelism.fsdp_backend!r}."
+                )
 
     engine: FaultTolerantTrainingEngine
 
