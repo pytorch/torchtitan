@@ -338,19 +338,22 @@ class TestFlexShardDecoder(DTensorTestBase):
                 lr_schedulers=cast(Any, None),
                 ema=None,
                 extra_states={},
-                sd_adapter=None,
+                sd_adapter=type(model).state_dict_adapter_cls(model.config, None),
             )
 
         def path(folder):
             return os.path.join(self.temp_dir, folder)
 
         # FSDP2's uninterrupted run, which saves after steps 3 and 6, and
-        # exports in bf16 after step 3.
+        # exports in bf16 and as a Hugging Face checkpoint after step 3.
         model, optimizers, train = build(FSDP2Config())
         reference = train(range(3))
         fsdp2 = checkpointer(model, optimizers, "fsdp2")
         fsdp2.save(3)
         export = checkpointer(model, optimizers, "fsdp2", export_dtype="bfloat16")
+        export.save(3, last_step=True)
+        export.close()
+        export = checkpointer(model, optimizers, "fsdp2_hf", last_save_in_hf=True)
         export.save(3, last_step=True)
         export.close()
         reference += train(range(3, 6))
@@ -374,6 +377,28 @@ class TestFlexShardDecoder(DTensorTestBase):
         self._assert_equal_checkpoints(
             path("fsdp2/exports/step-3"), path("flex/exports/step-3")
         )
+
+        # FlexShard loads the Hugging Face export into FSDP2's step-3
+        # parameters, and its next step's losses, grad norm and grads, which
+        # don't depend on the optimizer state, are FSDP2's.
+        model, optimizers, train = build(FlexShardConfig())
+        hf_load = checkpointer(
+            model,
+            optimizers,
+            "flex_hf",
+            initial_load_path=path("fsdp2_hf/exports/step-3"),
+            initial_load_in_hf=True,
+        )
+        self.assertTrue(hf_load.load())
+        hf_load.close()
+        self._assert_equal_tensors(
+            reference[2][3], self._local_params(model), "HF load"
+        )
+        ((losses, grad_norm, grads, _),) = train(range(3, 4))
+        for expected_loss, loss in zip(reference[3][0], losses, strict=True):
+            self.assertTrue(torch.equal(expected_loss, loss), msg="HF load loss")
+        self.assertTrue(torch.equal(reference[3][1], grad_norm), msg="HF load norm")
+        self._assert_equal_tensors(reference[3][2], grads, "HF load grad")
 
         # Each backend resumes from the other's step-3 checkpoint, and its next
         # 3 steps are FSDP2's uninterrupted ones.
@@ -452,7 +477,8 @@ class TestFlexShardDecoder(DTensorTestBase):
     def test_checkpoints_across_backends(self):
         # FlexShard's checkpoints hold the same chunks of the same full tensors
         # as FSDP2's, so either backend resumes from the other's checkpoints,
-        # bit for bit. Llama 3 shards its stacked linears on dim 1.
+        # bit for bit. Llama 3 shards its stacked linears on dim 1, which the
+        # Hugging Face conversion splits.
         self._check_checkpoints_across_backends(build_llama3_config, "debugmodel", ep=1)
 
     @with_comms

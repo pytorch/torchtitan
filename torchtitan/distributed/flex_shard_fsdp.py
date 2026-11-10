@@ -29,7 +29,7 @@ import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypeGuard
+from typing import Any, cast, TYPE_CHECKING, TypeGuard
 
 import torch
 import torch.nn as nn
@@ -48,7 +48,9 @@ __all__ = [
     "FlexShardConfig",
     "apply_flex_shard_to_decoder",
     "as_fsdp2_dtensor",
+    "as_fsdp2_state_dict",
     "flex_shard_partial_backwards",
+    "from_fsdp2_state_dict",
     "is_flex_shard_module",
     "validate_flex_shard_training",
 ]
@@ -347,6 +349,68 @@ def as_fsdp2_dtensor(tensor: torch.Tensor, param: torch.Tensor) -> torch.Tensor:
     )
 
 
+def as_fsdp2_state_dict(
+    model_parts: list[nn.Module], state_dict: dict[str, Any]
+) -> dict[str, Any]:
+    """Return ``state_dict`` with each FlexShard parameter's entry viewed as the
+    DTensor FSDP2 would give the parameter (``as_fsdp2_dtensor``).
+
+    Code written for FSDP2's state dicts, e.g. the state dict adapters' Hugging
+    Face conversions, then behaves the same. The views share the entries'
+    storage, so an in-place load such as ``dcp.load`` reaches them. Other
+    entries are unchanged.
+    """
+    params = _flex_shard_params(model_parts)
+    return {
+        key: as_fsdp2_dtensor(value, params[key]) if key in params else value
+        for key, value in state_dict.items()
+    }
+
+
+def from_fsdp2_state_dict(
+    model_parts: list[nn.Module], state_dict: dict[str, Any]
+) -> dict[str, Any]:
+    """Return ``state_dict`` with each FlexShard parameter's DTensor entry as
+    the local shard the parameter holds, for ``load_state_dict``. This inverts
+    ``as_fsdp2_state_dict``.
+
+    A DTensor laid out other than as the parameter's FSDP2 view is
+    redistributed to that layout first, as copying it into an FSDP2 parameter
+    would. Other entries are unchanged.
+    """
+    # TODO(<flex_shard issue link>): Use FlexShard's conversion from a DTensor
+    # to a parameter's local shard once it has one.
+    converted = dict(state_dict)
+    for key, param in _flex_shard_params(model_parts).items():
+        if key not in state_dict:
+            continue
+        value = state_dict[key]
+        assert isinstance(value, DTensor), f"expected a DTensor for {key}"
+        view = cast(DTensor, as_fsdp2_dtensor(param.detach(), param))
+        converted[key] = value.redistribute(
+            view.device_mesh, view.placements
+        ).to_local()
+    return converted
+
+
+def _flex_shard_params(model_parts: list[nn.Module]) -> dict[str, nn.Parameter]:
+    """The FlexShard parameters of ``model_parts`` by their state dict keys,
+    with a tied parameter under each of its keys."""
+    # FlexShard parameters exist only once flex_shard is imported, which
+    # happens only when it is selected.
+    flex_shard = sys.modules.get("flex_shard")
+    if flex_shard is None:
+        return {}
+    from torchtitan.components.checkpointer.utils import canonical_fqn
+
+    return {
+        canonical_fqn(fqn): param
+        for model in model_parts
+        for fqn, param in model.named_parameters(remove_duplicate=False)
+        if flex_shard.is_flex_shard_param(param)
+    }
+
+
 def is_flex_shard_module(module: nn.Module | None) -> TypeGuard[nn.Module]:
     """Whether ``module`` is a model that ``apply_flex_shard_to_decoder``
     sharded, which holds all its buckets."""
@@ -469,9 +533,10 @@ def validate_flex_shard_training(
             # TODO(<pytorch issue link>): The save process receives the state
             # dict through torch.multiprocessing, which drops the shard layouts.
             unsupported.append("checkpointer.async_mode='async_with_pinned_mem'")
-        # The state dict adapters need DTensor parameters.
-        if checkpointer.initial_load_in_hf:
-            unsupported.append("checkpointer.initial_load_in_hf=True")
+        # The state dict adapters convert DTensor parameters, and only HF loads
+        # give them FSDP2's DTensor views. Quantized HF loads aren't tested yet.
+        if checkpointer.initial_load_in_hf_quantized:
+            unsupported.append("checkpointer.initial_load_in_hf_quantized=True")
         if checkpointer.last_save_in_hf:
             unsupported.append("checkpointer.last_save_in_hf=True")
     if optim.ema is not None:
