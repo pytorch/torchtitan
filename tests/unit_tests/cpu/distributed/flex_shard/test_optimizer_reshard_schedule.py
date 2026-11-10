@@ -29,19 +29,6 @@ from torchtitan.distributed.flex_shard._optimizer_reshard_runtime import (
 class TestMuonPlanConstruction(unittest.TestCase):
     _FQN = "layers.0.weight"
 
-    def test_ordered_block_shards_require_matching_patterns(self):
-        for other_sharding, message in (
-            (Shard(0), "cannot mix Shard and BlockShard"),
-            (BlockShard(0, (2, 4)), "equal BlockShard block-size sequences"),
-        ):
-            with self.subTest(sharding=other_sharding), self.assertRaisesRegex(
-                ValueError, message
-            ):
-                ComputeLayout(
-                    {"dp_shard": BlockShard(0, (4, 2)), "tp": other_sharding},
-                    shard_order_by_tensor_dim={0: ("tp", "dp_shard")},
-                )
-
     def _make_1d_parameter(self) -> tuple[DeviceMesh, torch.nn.Parameter]:
         dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=2)
         self.addCleanup(dist.destroy_process_group)

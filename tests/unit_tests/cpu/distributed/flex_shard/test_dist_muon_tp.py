@@ -14,7 +14,6 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import distribute_tensor, Replicate, Shard
-from torch.distributed.tensor.debug import CommDebugMode
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
@@ -120,7 +119,6 @@ class TensorParallelParity:
                         "dp_shard": BlockShard(0, (matrix_rows,)),
                         "tp": BlockShard(0, (matrix_rows,)),
                     },
-                    shard_order_by_tensor_dim={0: ("tp", "dp_shard")},
                     compute_dtype=torch.bfloat16,
                 ),
                 "layers.0.whole": ComputeLayout(
@@ -139,9 +137,8 @@ class TensorParallelParity:
                 ),
             },
             bucket_configs=[
-                BucketConfig(patterns=("layers.0.per_head",), mesh=mesh["dp_shard"]),
                 BucketConfig(
-                    patterns=("layers.0.whole",),
+                    patterns=("layers.0.per_head", "layers.0.whole"),
                     mesh=transport_mesh,
                 ),
                 BucketConfig(patterns=("layers.0.experts",)),
@@ -152,31 +149,8 @@ class TensorParallelParity:
             nesterov=False,
             ns_steps=2,
         )
-        head_layout = optimizer._parameter_compute_layouts[0]
-        self.assertEqual(head_layout.fqn, "layers.0.per_head")
-        if mesh["dp_shard"].size() > 1:
-            self.assertEqual(head_layout.redistribution_storage_mesh_axes, (0,))
-            head_bucket = optimizer._bucket_plans[0]
-            self.assertIs(head_bucket.group.process_group, mesh["dp_shard"].get_group())
-            head_plan = head_bucket.redistribution_plans[0]
-            self.assertEqual(
-                sum(
-                    route.logical_region.shape[0]
-                    for route in head_plan.storage_to_compute_routes
-                    if route.source.participants != route.destination.participants
-                ),
-                1,
-            )
-            for route in head_plan.storage_to_compute_routes:
-                self.assertEqual(
-                    route.source.participants[0] % mesh["tp"].size(),
-                    route.destination.participants[0] % mesh["tp"].size(),
-                )
-        else:
-            self.assertTrue(head_layout.storage_is_compute_ready)
-            self.assertEqual(head_layout.redistribution_storage_mesh_axes, ())
         transport_group = transport_mesh.get_group()
-        plan = optimizer._bucket_plans[1]
+        plan = optimizer._bucket_plans[0]
         self.assertIs(plan.group.process_group, transport_group)
         self.assertIs(plan.storage_to_compute_schedule.process_group, transport_group)
         self.assertIs(plan.compute_to_storage_schedule.process_group, transport_group)
@@ -354,7 +328,6 @@ class TestDistMuonTensorParallelCPU(DTensorTestBase, TensorParallelParity):
                 ),
                 "blocks": ComputeLayout(
                     {"dp_shard": BlockShard(0, (4, 2)), "tp": BlockShard(0, (4, 2))},
-                    shard_order_by_tensor_dim={0: ("tp", "dp_shard")},
                     compute_dtype=torch.bfloat16,
                 ),
                 "experts": ComputeLayout(
@@ -362,8 +335,7 @@ class TestDistMuonTensorParallelCPU(DTensorTestBase, TensorParallelParity):
                 ),
             },
             bucket_configs=[
-                BucketConfig(patterns=("whole",)),
-                BucketConfig(patterns=("blocks",)),
+                BucketConfig(patterns=("whole", "blocks")),
                 BucketConfig(patterns=("experts",)),
             ],
             lr=0.03,
@@ -389,12 +361,6 @@ class TestDistMuonTensorParallelCPU(DTensorTestBase, TensorParallelParity):
                 settings["bucket_configs"][0], mesh=transport_mesh
             )
             optimizer = DistMuon(param_groups, **settings)
-        block_bucket = optimizer._bucket_plans[1]
-        self.assertIs(block_bucket.group.process_group, mesh["dp_shard"].get_group())
-        for route in block_bucket.redistribution_plans[0].storage_to_compute_routes:
-            self.assertEqual(
-                route.source.participants[0] % 2, route.destination.participants[0] % 2
-            )
         matrix_rows = (4, 2, 4, 2)
         references = {
             "whole": [torch.nn.Parameter(values["whole"].clone())],
@@ -447,116 +413,6 @@ class TestDistMuonTensorParallelCPU(DTensorTestBase, TensorParallelParity):
                 torch.testing.assert_close(
                     parameter.full_tensor(), expected[name], rtol=0, atol=0
                 )
-
-    @with_comms
-    def test_ordered_head_blocks_keep_tp_domains_and_skip_aligned_transport(self):
-        """Preserve mixed block phases and avoid all exchanges for aligned heads."""
-        mesh = init_device_mesh(
-            self.device_type, self.mesh_shape, mesh_dim_names=("dp_shard", "tp")
-        )
-        placements = (_StridedShard(0, split_factor=2), Shard(0))
-        for rows, block_sizes, aligned in (
-            (8, (1, 3, 4), False),
-            (16, (2,), True),
-            (24, (4, 2), True),
-        ):
-            with self.subTest(rows=rows, block_sizes=block_sizes):
-                values = torch.arange(rows * 8).reshape(rows, 8).float().div_(256)
-                parameter = torch.nn.Parameter(
-                    distribute_tensor(values.clone(), mesh, placements)
-                )
-                optimizer = DistMuon(
-                    [{"params": [parameter], "param_names": ["heads"]}],
-                    compute_sharding_by_fqn={
-                        "heads": ComputeLayout(
-                            {
-                                "dp_shard": BlockShard(0, block_sizes),
-                                "tp": BlockShard(0, block_sizes),
-                            },
-                            shard_order_by_tensor_dim={0: ("tp", "dp_shard")},
-                            compute_dtype=torch.bfloat16,
-                        )
-                    },
-                    bucket_configs=[BucketConfig(patterns=("heads",))],
-                    lr=0.03,
-                    weight_decay=0.2,
-                    momentum=0.8,
-                    nesterov=True,
-                    ns_steps=2,
-                )
-                layout = optimizer._parameter_compute_layouts[0]
-                self.assertEqual(layout.storage_is_compute_ready, aligned)
-                self.assertEqual(
-                    layout.redistribution_storage_mesh_axes, () if aligned else (0,)
-                )
-                if not aligned:
-                    bucket = optimizer._bucket_plans[0]
-                    self.assertIs(
-                        bucket.group.process_group, mesh["dp_shard"].get_group()
-                    )
-                    plan = bucket.redistribution_plans[0]
-                    self.assertEqual(
-                        plan.global_offsets, (4 * mesh["tp"].get_local_rank(), 0)
-                    )
-                    for route in plan.storage_to_compute_routes:
-                        self.assertEqual(
-                            route.source.participants[0] % 2,
-                            route.destination.participants[0] % 2,
-                        )
-                matrix_rows = block_sizes * (rows // sum(block_sizes))
-                references = [
-                    torch.nn.Parameter(block.clone())
-                    for block in values.split(matrix_rows)
-                ]
-                reference_optimizer = torch.optim.Muon(
-                    references,
-                    lr=0.03,
-                    weight_decay=0.2,
-                    momentum=0.8,
-                    nesterov=True,
-                    ns_steps=2,
-                )
-                for step in range(2):
-                    gradient = values.mul(0.37).add(0.2 + step).sin()
-                    parameter.grad = distribute_tensor(
-                        gradient.clone(), mesh, placements
-                    )
-                    for reference, block_gradient in zip(
-                        references, gradient.split(matrix_rows), strict=True
-                    ):
-                        reference.grad = block_gradient.clone()
-                    with CommDebugMode() as comms:
-                        optimizer.step()
-                    if aligned:
-                        self.assertEqual(comms.get_total_counts(), 0)
-                    reference_optimizer.step()
-                    torch.testing.assert_close(
-                        parameter.full_tensor(),
-                        torch.cat([reference.detach() for reference in references]),
-                        rtol=0,
-                        atol=0,
-                    )
-
-        # This TP storage boundary bisects the requested outer block partition.
-        # Do not silently reassign heads across TP to make the layout fit.
-        incompatible = torch.nn.Parameter(
-            distribute_tensor(torch.ones(8, 8), mesh, placements)
-        )
-        with self.assertRaisesRegex(ValueError, "preserve the outer block partitions"):
-            DistMuon(
-                [{"params": [incompatible], "param_names": ["heads"]}],
-                compute_sharding_by_fqn={
-                    "heads": ComputeLayout(
-                        {
-                            "dp_shard": BlockShard(0, (1, 1, 2, 4)),
-                            "tp": BlockShard(0, (1, 1, 2, 4)),
-                        },
-                        shard_order_by_tensor_dim={0: ("tp", "dp_shard")},
-                        compute_dtype=torch.bfloat16,
-                    )
-                },
-                bucket_configs=[BucketConfig(patterns=("heads",))],
-            )
 
     @with_comms
     def test_qk_clip_uses_tp_local_heads_with_fsdp_split_rows(self):

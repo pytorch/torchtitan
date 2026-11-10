@@ -425,15 +425,10 @@ class DistMuon(Optimizer):
         def build_views(
             layout: _ParameterComputeLayout,
             compute_partition: _ParticipantPartition | None,
-            global_row_start: int,
         ) -> tuple[_MatrixBatchView, ...]:
             if compute_partition is not None:
-                return _matrix_batch_views_for_regions(
-                    layout.compute_sharding,
-                    compute_partition.logical_regions,
-                    global_row_start=global_row_start,
-                )
-            if type(layout.compute_sharding) is BlockShard:
+                regions = compute_partition.logical_regions
+            elif type(layout.compute_sharding) is BlockShard:
                 regions = (
                     _dtensor_storage_region_for_participant(
                         layout.param, layout.param.device_mesh.get_rank()
@@ -454,19 +449,17 @@ class DistMuon(Optimizer):
         for bucket in result.plans:
             if isinstance(bucket, _LocalBucketPlan):
                 for item in bucket.items:
-                    matrix_views_by_fqn[item.fqn] = build_views(item, None, 0)
+                    matrix_views_by_fqn[item.fqn] = build_views(item, None)
             else:
                 for item in bucket.unredistributed_items:
-                    matrix_views_by_fqn[item.fqn] = build_views(item, None, 0)
+                    matrix_views_by_fqn[item.fqn] = build_views(item, None)
                 for item, plan in zip(
                     bucket.redistributed_items,
                     bucket.redistribution_plans,
                     strict=True,
                 ):
                     matrix_views_by_fqn[item.fqn] = build_views(
-                        item,
-                        plan.compute_partition(bucket.group.local_participant),
-                        plan.global_offsets[0],
+                        item, plan.compute_partition(bucket.group.local_participant)
                     )
                     row_scale = _direction_row_scale(
                         item, adjust_lr_fn=self._group(item)["adjust_lr_fn"]
@@ -771,8 +764,6 @@ def _matrix_batch_views_from_shape(
 def _matrix_batch_views_for_regions(
     compute_sharding: _ResolvedComputeSharding,
     regions: Sequence[_TensorRegion],
-    *,
-    global_row_start: int = 0,
 ) -> tuple[_MatrixBatchView, ...]:
     """Preserve each chunk's NS batches when packing several chunks on a rank."""
     views = []
@@ -785,7 +776,7 @@ def _matrix_batch_views_for_regions(
             chunk_views = _matrix_batch_views_from_shape(
                 shape,
                 matrix_row_sizes=compute_sharding.block_sizes,
-                logical_row_start=global_row_start + region.offsets[0],
+                logical_row_start=region.offsets[0],
             )
         else:
             chunk_views = (
@@ -839,7 +830,6 @@ def _row_intervals_by_mesh_axis_coordinate(
     sharding: _AxisComputeSharding,
     *,
     mesh_axis_size: int,
-    global_row_start: int = 0,
 ) -> tuple[tuple[int, int], ...]:
     """Resolve the global rows owned by each mesh-axis coordinate.
 
@@ -851,13 +841,9 @@ def _row_intervals_by_mesh_axis_coordinate(
     if type(sharding) is Replicate:
         return ((0, num_rows),) * mesh_axis_size
 
-    first_block = 0
     if type(sharding) is BlockShard:
         assert sharding.dim == 0
-        first_block = sharding.block_index(global_row_start)
-        num_sharding_units = (
-            sharding.block_index(global_row_start + num_rows) - first_block
-        )
+        num_sharding_units = sharding.num_blocks(num_rows)
     else:
         assert type(sharding) is Shard and sharding.dim == 0
         num_sharding_units = num_rows
@@ -870,98 +856,12 @@ def _row_intervals_by_mesh_axis_coordinate(
             axis_coordinate,
         )
         if type(sharding) is BlockShard:
-            first_local_block = first_block + unit_offset
-            start = sharding.block_start(first_local_block) - global_row_start
-            end = (
-                sharding.block_start(first_local_block + local_num_units)
-                - global_row_start
-            )
+            start = sharding.block_start(unit_offset)
+            end = sharding.block_start(unit_offset + local_num_units)
         else:
             start, end = unit_offset, unit_offset + local_num_units
         intervals.append((start, end))
     return tuple(intervals)
-
-
-def _merge_intervals(
-    intervals: Iterable[tuple[int, int]],
-) -> tuple[tuple[int, int], ...]:
-    """Coalesce nonempty overlapping or adjacent ownership runs."""
-    merged: list[tuple[int, int]] = []
-    for start, end in sorted(
-        interval for interval in intervals if interval[0] < interval[1]
-    ):
-        if merged and start <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-        else:
-            merged.append((start, end))
-    return tuple(merged)
-
-
-def _ordered_block_shard_transport_mesh_axes(
-    fqn: str,
-    param: DTensor,
-    ordered_storage_mesh_axes: tuple[int, ...],
-    *,
-    block_shard: BlockShard,
-) -> tuple[int, ...]:
-    """Preserve outer block ownership and redistribute only on the inner axis.
-
-    Compare actual storage with sequential block partitions, including strided
-    and empty shards. Aligned storage needs no transport. Otherwise the storage
-    union must already contain the outer partition's complete blocks.
-    """
-    storage_intervals = {}
-    compute_intervals = {}
-    groups: dict[tuple[int, ...], list[int]] = {}
-    transport_axis = ordered_storage_mesh_axes[-1]
-    num_blocks = block_shard.num_blocks(param.shape[0])
-    for participant in _device_mesh_ranks(param.device_mesh):
-        coordinate = _device_mesh_coordinate(param.device_mesh, participant)
-        block_offset, local_num_blocks = 0, num_blocks
-        for storage_mesh_axis in ordered_storage_mesh_axes:
-            local_num_blocks, local_offset = Shard.local_shard_size_and_offset(
-                local_num_blocks,
-                param.device_mesh.size(storage_mesh_axis),
-                coordinate[storage_mesh_axis],
-            )
-            block_offset += local_offset
-        compute_intervals[participant] = _merge_intervals(
-            (
-                (
-                    block_shard.block_start(block_offset),
-                    block_shard.block_start(block_offset + local_num_blocks),
-                ),
-            )
-        )
-        storage_intervals[participant] = _merge_intervals(
-            (offset, offset + size)
-            for offset, _local_offset, size in _dtensor_global_runs_by_dim(
-                param, participant
-            )[0]
-        )
-        group_key = tuple(
-            value for axis, value in enumerate(coordinate) if axis != transport_axis
-        )
-        groups.setdefault(group_key, []).append(participant)
-    if storage_intervals == compute_intervals:
-        return ()
-    for group in groups.values():
-        stored = _merge_intervals(
-            interval
-            for participant in group
-            for interval in storage_intervals[participant]
-        )
-        computed = _merge_intervals(
-            interval
-            for participant in group
-            for interval in compute_intervals[participant]
-        )
-        if stored != computed:
-            raise ValueError(
-                f"Muon parameter {fqn!r} ordered BlockShard requires storage "
-                "to preserve the outer block partitions"
-            )
-    return (transport_axis,)
 
 
 def _resolve_sharded_transport_mesh_axes(
@@ -970,7 +870,6 @@ def _resolve_sharded_transport_mesh_axes(
     block_shard: BlockShard | None,
     target_sharding_by_storage_mesh_axis: Mapping[int, _AxisComputeSharding],
     declared_storage_mesh_axes: Sequence[int],
-    ordered_block_shard_storage_mesh_axes: tuple[int, ...],
 ) -> tuple[int, ...]:
     """Return storage mesh axes that require sharded compute transport."""
     if block_shard is None:
@@ -1029,17 +928,6 @@ def _resolve_sharded_transport_mesh_axes(
             f"Muon parameter {fqn!r} matrix-batch compute requires every "
             "non-replicated storage mesh axis to use BlockShard; "
             f"non-replicated axes: {nonreplicated_other_mesh_axes}"
-        )
-
-    if ordered_block_shard_storage_mesh_axes:
-        if set(ordered_block_shard_storage_mesh_axes) != set(
-            active_block_shard_mesh_axes
-        ):
-            raise ValueError(
-                f"Muon parameter {fqn!r} must order every active BlockShard mesh axis"
-            )
-        return _ordered_block_shard_transport_mesh_axes(
-            fqn, param, ordered_block_shard_storage_mesh_axes, block_shard=block_shard
         )
 
     if len(active_block_shard_mesh_axes) != 1:
@@ -1214,7 +1102,6 @@ def _compute_chunk_regions(
     logical_shape: tuple[int, ...],
     *,
     num_participants: int,
-    global_row_start: int,
 ) -> tuple[_TensorRegion, ...]:
     """Keep the original contiguous chunks, independently of their owners."""
     if type(compute_sharding) is Owned:
@@ -1225,7 +1112,6 @@ def _compute_chunk_regions(
             logical_shape[0],
             compute_sharding,
             mesh_axis_size=num_participants,
-            global_row_start=global_row_start,
         )
     return tuple(
         _TensorRegion(
@@ -1303,16 +1189,11 @@ def _assign_balanced_compute_regions(
                 layout.compute_sharding,
                 domain.logical_shape,
                 num_participants=num_participants,
-                global_row_start=domain.global_offsets[0],
             )
         ):
             if not region.numel:
                 continue
-            views = _matrix_batch_views_for_regions(
-                layout.compute_sharding,
-                (region,),
-                global_row_start=domain.global_offsets[0],
-            )
+            views = _matrix_batch_views_for_regions(layout.compute_sharding, (region,))
             stored_numel = [0] * num_participants
             for mapping in domain.mappings:
                 intersection = _tensor_region_intersection(
@@ -1386,12 +1267,12 @@ def _lower_shard_order_to_strided_shards(
 ) -> dict[int, _LoweredComputeSharding]:
     """Encode a declared shard order as DTensor placements.
 
-    DTensor applies same-dimension ``Shard`` axes in storage-mesh order, so an
-    axis that the compute layout applies later than that default becomes a
+    DTensor applies same-dimension shard axes in storage-mesh order, so an axis
+    that the compute layout applies later than that default becomes a
     ``_StridedShard`` whose split factor is the product of the mesh sizes of the
-    axes it now follows but that sit to its right in the storage mesh.
-    ``BlockShard`` remains logical planner metadata. Axes declared for other
-    mesh variants are absent here and drop out of the order.
+    axes it now follows but that sit to its right in the storage mesh. Axes the
+    layout declares for other mesh variants are absent here and drop out of the
+    order.
     """
     lowered_shardings = dict(shardings_by_storage_mesh_axis)
     for tensor_dim, axis_names in compute_layout.shard_order_by_tensor_dim.items():
@@ -1406,7 +1287,7 @@ def _lower_shard_order_to_strided_shards(
                 for preceding_mesh_axis in ordered_mesh_axes[:order_index]
                 if preceding_mesh_axis > storage_mesh_axis
             )
-            if split_factor > 1 and type(lowered_shardings[storage_mesh_axis]) is Shard:
+            if split_factor > 1:
                 lowered_shardings[storage_mesh_axis] = _StridedShard(
                     tensor_dim, split_factor=split_factor
                 )
@@ -1624,25 +1505,12 @@ def _resolve_storage_to_compute_transition(
         normalized_target_sharding_by_storage_mesh_axis,
         applicable_owned_storage_mesh_axes,
     )
-    ordered_block_shard_storage_mesh_axes = tuple(
-        storage_axis_by_name[axis_name]
-        for axis_name in compute_layout.shard_order_by_tensor_dim.get(0, ())
-        if axis_name in storage_axis_by_name
-        and type(
-            applicable_compute_shardings_by_storage_mesh_axis[
-                storage_axis_by_name[axis_name]
-            ]
-        )
-        is BlockShard
-        and param.device_mesh.size(storage_axis_by_name[axis_name]) > 1
-    )
     sharded_transport_mesh_axes = _resolve_sharded_transport_mesh_axes(
         fqn,
         param,
         block_shard,
         normalized_target_sharding_by_storage_mesh_axis,
         tuple(applicable_compute_shardings_by_storage_mesh_axis),
-        ordered_block_shard_storage_mesh_axes,
     )
     active_owned_storage_mesh_axes = tuple(
         storage_mesh_axis

@@ -16,12 +16,7 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
 
-__all__ = [
-    "BlockShard",
-    "BucketConfig",
-    "ComputeLayout",
-    "Owned",
-]
+__all__ = ["BlockShard", "BucketConfig", "ComputeLayout", "Owned"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,20 +82,6 @@ class BlockShard:
         """Return a block boundary, including the final dimension endpoint."""
         num_periods, offset = divmod(block_index, len(self.block_sizes))
         return num_periods * sum(self.block_sizes) + sum(self.block_sizes[:offset])
-
-    def block_index(self, dim_offset: int) -> int:
-        """Return the block index at a dimension offset on a block boundary."""
-        if dim_offset < 0:
-            raise ValueError("BlockShard dimension offsets must be non-negative")
-        num_periods, period_offset = divmod(dim_offset, sum(self.block_sizes))
-        block_offset = 0
-        for block_index, block_size in enumerate(self.block_sizes):
-            if period_offset == block_offset:
-                return num_periods * len(self.block_sizes) + block_index
-            block_offset += block_size
-        raise ValueError(
-            f"BlockShard dimension offset {dim_offset} must be a block boundary"
-        )
 
 
 _ComputeSharding = Owned | Replicate | Shard | BlockShard
@@ -175,9 +156,8 @@ class ComputeLayout:
     shard it, outermost first: the leading axis partitions the whole dimension
     and every following axis partitions its predecessor's shard. Declaring an
     order is only necessary when it differs from the default, which applies the
-    axes in storage-mesh order. Every axis in one order must declare the same
-    sharding type: either ``Shard`` on that tensor dimension or ``BlockShard``
-    with the same tensor dimension and block-size sequence.
+    axes in storage-mesh order. Each named axis must declare ``Shard`` on that
+    same tensor dimension, written as a non-negative index.
 
     ``compute_dtype`` is the dtype the optimizer computes in for parameters
     that are redistributed; ``None`` keeps the storage dtype.
@@ -193,16 +173,6 @@ class ComputeLayout:
                     "ep": Shard(0),
                 },
                 shard_order_by_tensor_dim={0: ("ep", "edp_shard")},
-            )
-
-        Preserve TP head ownership, then distribute complete blocks over DP::
-
-            ComputeLayout(
-                shardings_by_mesh_axis={
-                    "dp_shard": BlockShard(dim=0, block_sizes=(head_dim,)),
-                    "tp": BlockShard(dim=0, block_sizes=(head_dim,)),
-                },
-                shard_order_by_tensor_dim={0: ("tp", "dp_shard")},
             )
 
         Assign the complete subgroup-local logical tensor to one owner rank
@@ -292,7 +262,6 @@ class ComputeLayout:
                     f"mesh axis; tensor dimension {tensor_dim} lists "
                     f"{list(ordered_axis_names)}"
                 )
-            ordered_shardings = []
             for axis_name in ordered_axis_names:
                 sharding = shardings_by_mesh_axis.get(axis_name)
                 if sharding is None:
@@ -301,31 +270,12 @@ class ComputeLayout:
                         f"{axis_name!r}, which shardings_by_mesh_axis does not "
                         "declare"
                     )
-                if (
-                    type(sharding) is not Shard and type(sharding) is not BlockShard
-                ) or sharding.dim != tensor_dim:
+                if type(sharding) is not Shard or sharding.dim != tensor_dim:
                     raise ValueError(
                         "ComputeLayout.shard_order_by_tensor_dim requires "
-                        f"Shard({tensor_dim}) or BlockShard({tensor_dim}, ...) "
-                        f"on mesh axis {axis_name!r}; got {sharding!r}"
+                        f"Shard({tensor_dim}) on mesh axis {axis_name!r}; got "
+                        f"{sharding!r}"
                     )
-                ordered_shardings.append(sharding)
-            first_sharding = ordered_shardings[0]
-            if any(
-                type(sharding) is not type(first_sharding)
-                for sharding in ordered_shardings
-            ):
-                raise ValueError(
-                    "ComputeLayout.shard_order_by_tensor_dim cannot mix Shard "
-                    "and BlockShard"
-                )
-            if type(first_sharding) is BlockShard and any(
-                sharding != first_sharding for sharding in ordered_shardings
-            ):
-                raise ValueError(
-                    "ComputeLayout.shard_order_by_tensor_dim requires equal "
-                    "BlockShard block-size sequences"
-                )
             validated_shard_order[tensor_dim] = ordered_axis_names
         return dict(sorted(validated_shard_order.items()))
 
@@ -343,9 +293,8 @@ class BucketConfig:
     one transport axis, its name must match and a storage-shaped mesh is also
     accepted. For multiple axes, supply a 1D mesh named by joining the axis
     names, for example ``dp_shard_tp``. The caller creates and owns these
-    communicators and their initialization options. ``None`` reuses the storage
-    group for a single transport axis; combined transports require an explicit
-    mesh. Entirely local buckets do not use a communication mesh.
+    communicators. ``None`` reuses the storage group for a single transport
+    axis; combined transports require an explicit mesh.
     """
 
     patterns: tuple[str, ...]

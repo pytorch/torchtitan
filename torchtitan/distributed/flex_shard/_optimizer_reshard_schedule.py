@@ -196,7 +196,6 @@ class _StorageRegionMapping:
 class _DTensorStorageDomain:
     """Transport-local logical tensor and each participant's physical storage."""
 
-    global_offsets: tuple[int, ...]
     logical_shape: tuple[int, ...]
     tensor_shapes_by_participant: tuple[tuple[int, tuple[int, ...]], ...]
     mappings: tuple[_StorageRegionMapping, ...]
@@ -264,7 +263,6 @@ class _RedistributionPlan:
     """Transport-neutral exact region partitions in both directions."""
 
     participants: tuple[int, ...]
-    global_offsets: tuple[int, ...]
     logical_shape: tuple[int, ...]
     storage_partitions: tuple[_ParticipantPartition, ...]
     compute_partitions: tuple[_ParticipantPartition, ...]
@@ -273,7 +271,6 @@ class _RedistributionPlan:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "participants", tuple(self.participants))
-        object.__setattr__(self, "global_offsets", tuple(self.global_offsets))
         object.__setattr__(self, "logical_shape", tuple(self.logical_shape))
         object.__setattr__(self, "storage_partitions", tuple(self.storage_partitions))
         object.__setattr__(self, "compute_partitions", tuple(self.compute_partitions))
@@ -284,10 +281,6 @@ class _RedistributionPlan:
             self,
             "compute_to_storage_routes",
             tuple(route.inverse() for route in self.storage_to_compute_routes),
-        )
-        _require_valid_plan(
-            len(self.global_offsets) == len(self.logical_shape),
-            "global offsets must match the logical tensor rank",
         )
         _validate_redistribution_plan(self)
 
@@ -706,7 +699,6 @@ def _build_region_redistribution_plan(
 
     return _RedistributionPlan(
         participants=participants,
-        global_offsets=storage_domain.global_offsets,
         logical_shape=logical_shape,
         storage_partitions=storage_partitions,
         compute_partitions=compute_partitions,
@@ -1133,7 +1125,6 @@ def _dtensor_storage_domain(
         for (logical_region, tensor_region), holders in holders_by_regions.items()
     )
     return _DTensorStorageDomain(
-        global_offsets=tuple(domain_offsets),
         logical_shape=tuple(domain_shape),
         tensor_shapes_by_participant=tuple(tensor_shapes_by_participant),
         mappings=mappings,
@@ -1411,7 +1402,6 @@ def _redistribution_plan_key(plan: _RedistributionPlan) -> tuple[Any, ...]:
 
     return (
         plan.participants,
-        plan.global_offsets,
         plan.logical_shape,
         tuple(map(partition_key, plan.storage_partitions)),
         tuple(map(partition_key, plan.compute_partitions)),
