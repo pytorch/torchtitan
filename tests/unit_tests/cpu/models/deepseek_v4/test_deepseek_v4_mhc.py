@@ -23,7 +23,10 @@ def _reference_hc_post(x, residual, post, comb):
 
 def _reference_sinkhorn_comb(comb, sinkhorn_iters, eps):
     """Sinkhorn part of ``hc_split_sinkhorn_kernel`` in DeepSeek-V4's reference
-    inference/kernel.py; comb ``[..., hc, hc]`` is the scaled and biased logits."""
+    inference/kernel.py; comb ``[..., hc, hc]`` is the scaled and biased logits.
+
+    https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/60d8d70770c6776ff598c94bb586a859a38244f1/inference/kernel.py#L401
+    """
     comb = comb.softmax(-1) + eps
     comb = comb / (comb.sum(-2, keepdim=True) + eps)
     for _ in range(sinkhorn_iters - 1):
