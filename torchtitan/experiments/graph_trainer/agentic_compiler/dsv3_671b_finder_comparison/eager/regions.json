@@ -1,0 +1,1277 @@
+{
+  "substrate": "eager",
+  "setup": {
+    "git_commit": "c5c112d82e8d369a76368a62282b44718f1a42db",
+    "command": "CUDA_VISIBLE_DEVICES=0 outputs/fusion_finder/eager/run_capture.sh  (= NGPU=256 LOCAL_RANK=0 LOG_RANK=0 PYTORCH_ALLOC_CONF=expandable_segments:True PYTHONPATH=outputs/fusion_finder/eager/recipe:. python -m torchtitan.train --module eager_fusion_recipe --config profile_config --comm-backend fake)",
+    "config_deltas": {
+      "parallelism.data_parallel_shard_degree": 256,
+      "parallelism.expert_parallel_degree": 64,
+      "model": "build_model_config('671B', seq_len=4096, parallelism=<updated>)",
+      "model.local_compile.regions": [],
+      "training.num_tokens_per_microbatch_per_dp_rank": 98304,
+      "training.steps": 10,
+      "debug.seed": 42,
+      "debug.deterministic": true,
+      "activation_remat": "FullActivationRematConfig()",
+      "profiler": "CaptureProfiler.Config(enable_profiling=True, profile_freq=10, profiler_warmup=3, profiler_active=1, profiler_repeat=1)",
+      "dump_folder": "/home/bahuang/local/torchtitan/outputs/fusion_finder/eager/capture",
+      "comm.backend": "fake (via --comm-backend fake)"
+    },
+    "gpu": "NVIDIA GB300 (GPU 0, 152 SMs)",
+    "gpu_busy_during_timing": false,
+    "hbm_gbps": 7216.1,
+    "bf16_gemm_tflops": 1785.9
+  },
+  "step_budget": {
+    "step_gpu_busy_ms": 41276.864,
+    "step_gpu_idle_ms": 820.348,
+    "attributed_pct": 98.56,
+    "by_category_ms": {
+      "gemm": 17084.749,
+      "attention": 3218.066,
+      "fake_comm": 1762.698,
+      "memory_bound_glue": 19178.763,
+      "optimizer": 19.455,
+      "other": 595.664
+    }
+  },
+  "regions": [
+    {
+      "title": "MoE combine: post-all-to-all concat + score multiply + bf16 cast + deterministic scatter-add",
+      "phases": [
+        "forward",
+        "recompute"
+      ],
+      "scope": [
+        "intra-module"
+      ],
+      "fusion_kind": "gather/segmented-reduction (scatter-add) with pointwise prologue; copy elimination",
+      "location": {
+        "module_fqn_pattern": "layers.{3..60}.feed_forward.routed_experts.token_dispatcher",
+        "source": "torchtitan/models/common/moe/token_dispatcher.py:144-172 (_score_and_scatter_add), token_dispatcher.py:346 (_combine_token_exchange -> spmd_types _AllToAllUneven cat), torchtitan/ops/scatter_add.py:18"
+      },
+      "ops": [
+        "aten::_assert_async",
+        "aten::_index_put_impl_",
+        "aten::aminmax",
+        "aten::arange",
+        "aten::cat",
+        "aten::copy_",
+        "aten::div_",
+        "aten::ge",
+        "aten::lt",
+        "aten::mul",
+        "aten::remainder",
+        "aten::zero_"
+      ],
+      "kernels_per_instance": 57.0,
+      "instances_per_step": 116,
+      "shapes_dtypes": "routed_output [786432,7168] bf16 (a2a output chunks) * scores [786432,1] fp32 -> fp32 [786432,7168] -> bf16; scatter-add by token index [786432] int64 into zeros [98304,7168] bf16",
+      "external_bytes_per_instance": 12693012480,
+      "measured_us_per_instance": 49079.89,
+      "measured_ms_total": 5693.267,
+      "ideal_us_per_instance": 1758.99,
+      "ideal_ms_total": 204.043,
+      "gap_ms_total": 5489.224,
+      "gap_pct_of_step": 13.299,
+      "bitwise_tier": "T2",
+      "bitwise_notes": "Product is computed in fp32 and rounded to bf16 per row (keep); each output row is the sum of top_k=8 bf16 rows accumulated by the deterministic sort-based index_put (stable sort by token, fp32 accumulation, one bf16 rounding). A gather-based segmented reduction per token must use the same contribution order (expert-sorted position order) and the same accumulation dtype. The concat is pure data movement.",
+      "blockers": "The all-to-all boundary sits before the region (real EP); reading per-rank chunks needs spmd_types _AllToAllUneven to expose them or an all_to_all_single into a caller buffer. Deterministic mode forces sort-based index_put. Under full remat this whole span is replayed in recompute only to re-capture saved inputs of the multiply and the scatter-add index; its outputs are dead there.",
+      "evidence": "measured",
+      "how_found": "op table: largest memory-bound class (aten::mul at token_dispatcher.py:155, 21.4 ms/layer); ET dataflow component mul -> copy_ -> index_put; source review of _score_and_scatter_add",
+      "overlaps_with": [],
+      "notes": "Dataflow: the all-to-all output chunks are concatenated, multiplied row-wise by the score (fp32 product, 22.5 GB), cast to bf16 (11.3 GB) and scatter-added into a zero [98304,7168] buffer; every intermediate has a single consumer inside the span, so one kernel can read each routed row once and write each token row once. Recompute instances (58 of 116, ~2846 ms) produce dead outputs: torch_remat replays the span only because the multiply and the scatter-add save tensors; a combine op whose saved inputs are already persisted would skip it entirely (remat-policy change, not fusion; not counted in the gap). A non-bitwise variant could scatter into the shared-expert output instead of zeros (removes zeros + shared_add) but changes the summation order. Fusing the score multiply into the w2 grouped-GEMM epilogue before the all-to-all is T3 and also changes rounding order.",
+      "id": "E-01"
+    },
+    {
+      "title": "MoE combine backward: scatter-add grad gather + score-multiply backward (dgrad, score grad reduction)",
+      "phases": [
+        "backward"
+      ],
+      "scope": [
+        "intra-module"
+      ],
+      "fusion_kind": "gather + pointwise + row reduction",
+      "location": {
+        "module_fqn_pattern": "layers.{3..60}.feed_forward.routed_experts.token_dispatcher",
+        "source": "token_dispatcher.py:155-169 (backward of _score_and_scatter_add), ops/scatter_add.py backward"
+      },
+      "ops": [
+        "aten::copy_",
+        "aten::gather",
+        "aten::mul",
+        "aten::sum"
+      ],
+      "kernels_per_instance": 88.0,
+      "instances_per_step": 58,
+      "shapes_dtypes": "grad_out [98304,7168] bf16 gathered to [786432,7168]; bf16->fp32 grad; *scores fp32; *routed_output fp32 then sum over 7168 -> score grad [786432] fp32; fp32 -> bf16 routed grad",
+      "external_bytes_per_instance": 23970447360,
+      "measured_us_per_instance": 49222.01,
+      "measured_ms_total": 2854.876,
+      "ideal_us_per_instance": 3321.81,
+      "ideal_ms_total": 192.665,
+      "gap_ms_total": 2662.211,
+      "gap_pct_of_step": 6.45,
+      "bitwise_tier": "T1",
+      "bitwise_notes": "Gather and casts are exact; the routed-output grad is fp32 grad*score rounded to bf16 (pointwise). The score grad is a 7168-wide fp32 row sum: the fused kernel must reproduce aten's sum reduction tree.",
+      "blockers": "Autograd splits this into GatherBackward / ToCopyBackward / MulBackward nodes; a fused version needs a custom autograd op for the whole combine. The all-to-all backward follows immediately.",
+      "evidence": "measured",
+      "how_found": "op table backward rows linked by autograd sequence number to the combine forward ops; source review",
+      "overlaps_with": [],
+      "notes": "Dataflow: grad_out [98304,7168] is gathered to routed order, upcast, multiplied by the score (routed grad, cast to bf16) and by the saved routed output (row-summed into the score grad); all intermediates are single-consumer; external inputs are grad_out, routed_output, scores, indices. Pair of E-01 (combine_fwd).",
+      "id": "E-02"
+    },
+    {
+      "title": "MoE dispatch all-to-all backward concat + local-reorder backward (zeros + deterministic scatter-add of K=8 rows per token)",
+      "phases": [
+        "backward"
+      ],
+      "scope": [
+        "intra-module"
+      ],
+      "fusion_kind": "copy elimination + segmented reduction",
+      "location": {
+        "module_fqn_pattern": "layers.{3..60}.feed_forward.routed_experts.token_dispatcher",
+        "source": "spmd_types a2a backward cat (token_dispatcher.py:321); token_dispatcher.py:89-91 backward (x_TD[token_indices] and topk_scores.view(-1)[idx] backward)"
+      },
+      "ops": [
+        "aten::_index_put_impl_",
+        "aten::arange",
+        "aten::cat",
+        "aten::div_",
+        "aten::mul",
+        "aten::remainder",
+        "aten::zero_"
+      ],
+      "kernels_per_instance": 34.0,
+      "instances_per_step": 58,
+      "shapes_dtypes": "grad [786432,7168] bf16 -> zeros [98304,7168] + index_put_(accumulate) by token index (8 rows per token)",
+      "external_bytes_per_instance": 12696158208,
+      "measured_us_per_instance": 23535.49,
+      "measured_ms_total": 1365.059,
+      "ideal_us_per_instance": 1759.43,
+      "ideal_ms_total": 102.047,
+      "gap_ms_total": 1263.012,
+      "gap_pct_of_step": 3.06,
+      "bitwise_tier": "T2",
+      "bitwise_notes": "Each token row sums 8 bf16 rows in the deterministic sort order with fp32 accumulation; must match exactly.",
+      "blockers": "Collective boundary before; IndexBackward materializes zeros; deterministic mode.",
+      "evidence": "measured",
+      "how_found": "op table backward rows linked by seq_id to the local reorder gathers",
+      "overlaps_with": [],
+      "notes": "Dataflow: the all-to-all-backward chunks are concatenated and scatter-added (8 rows per token) into a zero [98304,7168] buffer; the zeros and the concat are consumed only by the index_put. The InputBuffer add that follows (routed grad + shared-expert grad) is in E-17 (ffn_norm_bwd_accum).",
+      "id": "E-03"
+    },
+    {
+      "title": "MoE permute backward: zeros + deterministic index_put accumulate over a permutation",
+      "phases": [
+        "backward"
+      ],
+      "scope": [
+        "intra-module"
+      ],
+      "fusion_kind": "scatter-accumulate -> gather rewrite",
+      "location": {
+        "module_fqn_pattern": "layers.{3..60}.feed_forward.routed_experts.token_dispatcher",
+        "source": "token_dispatcher.py:563 (routed_input_RD[permuted_indices, :] backward)"
+      },
+      "ops": [
+        "aten::_index_put_impl_",
+        "aten::arange",
+        "aten::div_",
+        "aten::mul",
+        "aten::remainder",
+        "aten::zero_"
+      ],
+      "kernels_per_instance": 16.0,
+      "instances_per_step": 58,
+      "shapes_dtypes": "zeros [786432,7168] bf16; index_put_(accumulate=True) of grad [786432,7168] bf16 by permuted_indices",
+      "external_bytes_per_instance": 22554869760,
+      "measured_us_per_instance": 23231.37,
+      "measured_ms_total": 1347.42,
+      "ideal_us_per_instance": 3125.64,
+      "ideal_ms_total": 181.287,
+      "gap_ms_total": 1166.132,
+      "gap_pct_of_step": 2.825,
+      "bitwise_tier": "T0",
+      "bitwise_notes": "Indices form a permutation, so each element is 0 + g computed in fp32 and rounded: equal to g except that -0.0 becomes +0.0. A gather by the inverse permutation must add +0.0 to match.",
+      "blockers": "IndexBackward always materializes zeros and accumulates; replacing it needs a custom autograd op that knows the indices are a permutation.",
+      "evidence": "measured",
+      "how_found": "op table backward rows (largest backward index_put); seq_id link to _permute",
+      "overlaps_with": [],
+      "notes": "Dataflow: IndexBackward zero-fills [786432,7168] and accumulates the w13-input grad through permuted_indices; the zero buffer has no other consumer and the indices are a permutation.",
+      "id": "E-04"
+    },
+    {
+      "title": "Routed-expert SwiGLU recompute + backward in one pass (h for the w2 weight grad and d_gate_up from one read of gate_up)",
+      "phases": [
+        "recompute",
+        "backward"
+      ],
+      "scope": [
+        "recompute-backward"
+      ],
+      "fusion_kind": "pointwise",
+      "location": {
+        "module_fqn_pattern": "layers.{3..60}.feed_forward.routed_experts.activation_fn",
+        "source": "activation.py:61, 174-176 (torch_remat replay + backward)"
+      },
+      "ops": [
+        "aten::cat",
+        "aten::mul",
+        "aten::silu",
+        "aten::silu_backward"
+      ],
+      "kernels_per_instance": 26.0,
+      "instances_per_step": 58,
+      "shapes_dtypes": "recompute: gate_up [786432,2,2048] -> h [786432,2048]; backward: d_h + gate_up -> d_gate_up [786432,2,2048] bf16",
+      "external_bytes_per_instance": 19327352832,
+      "measured_us_per_instance": 22576.1,
+      "measured_ms_total": 1309.414,
+      "ideal_us_per_instance": 2678.38,
+      "ideal_ms_total": 155.346,
+      "gap_ms_total": 1154.068,
+      "gap_pct_of_step": 2.796,
+      "bitwise_tier": "T0",
+      "bitwise_notes": "Pointwise; the fused kernel must round silu(gate) to bf16 where eager saved it, and evaluate silu_backward with aten's fp32 formula (FMA contraction must match).",
+      "blockers": "Autograd node boundaries (MulBackward0, SiluBackward0, UnbindBackward0). The one-pass form also needs torch_remat to stop replaying the activation (it replays the whole block before the block's backward) and the w2 grouped-GEMM backward to run dgrad before the activation kernel and wgrad after it (one node today).",
+      "evidence": "measured",
+      "how_found": "op table backward rows linked to activation.py by seq_id; recompute-to-backward edges (rc_to_bwd) from the silu/mul replay to the mul backward",
+      "overlaps_with": [],
+      "notes": "Dataflow: the recompute reads gate_up and writes h (consumed only by the w2 weight-grad GEMM); the backward reads d_h, gate_up and the saved silu output and writes d_gate_up through two muls, silu_backward and a stack; gate_up is read by both phases and every intermediate is single-consumer. Fallback without reordering: one fused recompute kernel + one fused backward kernel, ideal 1339 + 2232 = 3571 us per layer (vs 2678 us one-pass).",
+      "id": "E-05"
+    },
+    {
+      "title": "MoE unpermute (expert-major -> rank-major) as deterministic index_put scatter",
+      "phases": [
+        "forward",
+        "recompute"
+      ],
+      "scope": [
+        "intra-module"
+      ],
+      "fusion_kind": "permutation (scatter -> gather rewrite)",
+      "location": {
+        "module_fqn_pattern": "layers.{3..60}.feed_forward.routed_experts.token_dispatcher",
+        "source": "token_dispatcher.py:567-572 (_unpermute)"
+      },
+      "ops": [
+        "aten::_assert_async",
+        "aten::_index_put_impl_",
+        "aten::aminmax",
+        "aten::arange",
+        "aten::div_",
+        "aten::ge",
+        "aten::lt",
+        "aten::mul",
+        "aten::remainder"
+      ],
+      "kernels_per_instance": 21.0,
+      "instances_per_step": 116,
+      "shapes_dtypes": "out[permuted_indices,:] = routed_output, [786432,7168] bf16, permuted_indices [786432] int64",
+      "external_bytes_per_instance": 22554869760,
+      "measured_us_per_instance": 12093.86,
+      "measured_ms_total": 1402.887,
+      "ideal_us_per_instance": 3125.64,
+      "ideal_ms_total": 362.575,
+      "gap_ms_total": 1040.313,
+      "gap_pct_of_step": 2.52,
+      "bitwise_tier": "T0",
+      "bitwise_notes": "permuted_indices is a permutation (no duplicates), so a gather by the inverse permutation (or a plain scatter) writes identical bits; only the bounds checks of index_put are extra.",
+      "blockers": "Deterministic mode routes index_put through the sort-based kernel even without accumulation. The output feeds the combine all-to-all, so fusion with the combine is blocked by the collective; fusion with the w2 grouped GEMM epilogue would be T3.",
+      "evidence": "measured",
+      "how_found": "op table: aten::_index_put_impl_ at token_dispatcher.py:569 at 3.4x its roofline; source review",
+      "overlaps_with": [],
+      "notes": "Dataflow: the w2 output [786432,7168] is scattered through permuted_indices into a fresh buffer that is the all-to-all send buffer; no other consumer.",
+      "id": "E-06"
+    },
+    {
+      "title": "MoE dispatch all-to-all concat + rank-major -> expert-major permute gather + permute index math",
+      "phases": [
+        "forward",
+        "recompute"
+      ],
+      "scope": [
+        "intra-module"
+      ],
+      "fusion_kind": "copy elimination + gather; integer scan for indices",
+      "location": {
+        "module_fqn_pattern": "layers.{3..60}.feed_forward.routed_experts.token_dispatcher",
+        "source": "token_dispatcher.py:321 (a2a concat), 517-565 (_permute), moe.py:136 (offsets cumsum)"
+      },
+      "ops": [
+        "aten::add",
+        "aten::arange",
+        "aten::cat",
+        "aten::copy_",
+        "aten::cumsum",
+        "aten::gather",
+        "aten::index",
+        "aten::repeat_interleave",
+        "aten::sub",
+        "aten::sum"
+      ],
+      "kernels_per_instance": 32.0,
+      "instances_per_step": 116,
+      "shapes_dtypes": "a2a output chunks [786432,7168] bf16 -> concat -> routed[permuted_indices]; index math on [256] counts -> [786432] int64",
+      "external_bytes_per_instance": 22554871808,
+      "measured_us_per_instance": 7876.47,
+      "measured_ms_total": 913.671,
+      "ideal_us_per_instance": 3125.64,
+      "ideal_ms_total": 362.575,
+      "gap_ms_total": 551.096,
+      "gap_pct_of_step": 1.335,
+      "bitwise_tier": "T0",
+      "bitwise_notes": "Data movement plus integer cumsum/arange/repeat_interleave (exact in any order).",
+      "blockers": "Collective boundary before; permuted_indices must exist before the gather (two-pass or a scan kernel).",
+      "evidence": "measured",
+      "how_found": "op table + ET dataflow component (cat -> index); source review of _permute",
+      "overlaps_with": [],
+      "notes": "Dataflow: the all-to-all output chunks are concatenated and gathered by permuted_indices, which ~15 tiny integer kernels derive from the per-expert counts; the concat has one consumer. The permute gather could be folded into the w13 grouped-GEMM A-operand load (T3).",
+      "id": "E-07"
+    },
+    {
+      "title": "Query RoPE (bf16->fp32 strided copy, complex multiply, fp32->bf16) + concat with q_nope",
+      "phases": [
+        "forward",
+        "recompute"
+      ],
+      "scope": [
+        "cross-module"
+      ],
+      "fusion_kind": "pointwise + concat",
+      "location": {
+        "module_fqn_pattern": "layers.{0..60}.attention (+ .rope)",
+        "source": "torchtitan/models/deepseek_v3/attention.py:196-203 (_apply_rope_to_q_and_k_pe), torchtitan/models/common/rope.py:280-328 (ComplexRoPE.apply_rotary_emb); local_compile mla_qk (disabled here)"
+      },
+      "ops": [
+        "aten::_assert_async",
+        "aten::all",
+        "aten::cat",
+        "aten::copy_",
+        "aten::index",
+        "aten::le",
+        "aten::mul"
+      ],
+      "kernels_per_instance": 20.0,
+      "instances_per_step": 122,
+      "shapes_dtypes": "q [98304,128,192] bf16 (q_pe slice [.., 64] strided) -> q' [98304,128,192] bf16; k_pe [98304,1,64]",
+      "external_bytes_per_instance": 9690677248,
+      "measured_us_per_instance": 5493.39,
+      "measured_ms_total": 670.193,
+      "ideal_us_per_instance": 1342.93,
+      "ideal_ms_total": 163.837,
+      "gap_ms_total": 506.356,
+      "gap_pct_of_step": 1.227,
+      "bitwise_tier": "T0",
+      "bitwise_notes": "Complex multiply in fp32 (re = ac - bd, im = ad + bc) then round to bf16; FMA contraction must match aten's complex mul kernel.",
+      "blockers": "Spans RoPE module and the attention method; the existing mla_qk local_compile region covers it but is disabled in this setup.",
+      "evidence": "measured",
+      "how_found": "op table: strided copy_ at rope.py:321 at 3x roofline; ET dataflow copy -> mul -> copy -> cat",
+      "overlaps_with": [],
+      "notes": "Dataflow: q_pe, a strided slice of the wq_b output, is upcast to fp32, multiplied by the complex cache, cast back and concatenated with q_nope into a new q; every intermediate has one consumer. An in-place variant (rotate only the 64-wide tail of q) would need 3.2 GB instead of 9.7 GB.",
+      "id": "E-08"
+    },
+    {
+      "title": "Routed-expert SwiGLU: silu(gate) * up on strided halves of w13 output",
+      "phases": [
+        "forward"
+      ],
+      "scope": [
+        "intra-module"
+      ],
+      "fusion_kind": "pointwise",
+      "location": {
+        "module_fqn_pattern": "layers.{3..60}.feed_forward.routed_experts.activation_fn",
+        "source": "torchtitan/models/common/activation.py:61 (unbind), 174-176 (SwiGLU._activation_fn); local_compile region fused_binary_activation (disabled here)"
+      },
+      "ops": [
+        "aten::mul",
+        "aten::silu"
+      ],
+      "kernels_per_instance": 8.0,
+      "instances_per_step": 58,
+      "shapes_dtypes": "gate_up [786432,2,2048] bf16 -> h [786432,2048] bf16",
+      "external_bytes_per_instance": 9663676416,
+      "measured_us_per_instance": 8827.61,
+      "measured_ms_total": 512.002,
+      "ideal_us_per_instance": 1339.19,
+      "ideal_ms_total": 77.673,
+      "gap_ms_total": 434.329,
+      "gap_pct_of_step": 1.052,
+      "bitwise_tier": "T0",
+      "bitwise_notes": "silu runs in fp32 and rounds to bf16, then the bf16*bf16 product rounds again: keep both roundings.",
+      "blockers": "None structural (the existing local_compile region targets it); eager runs two strided kernels at ~30% of roofline.",
+      "evidence": "measured",
+      "how_found": "op table: aten::silu / aten::mul at activation.py:175-176 at 3.6x roofline",
+      "overlaps_with": [],
+      "notes": "Dataflow: gate and up are strided halves of the w13 output; silu(gate) is written to HBM and read once by the multiply. Also the recompute instance; see E-05 (swiglu_routed_rc_bwd) for the recompute-backward fusion.",
+      "id": "E-09"
+    },
+    {
+      "title": "MoE local reorder: token counts + argsort + score gather + token gather (all-to-all send buffer)",
+      "phases": [
+        "forward",
+        "recompute"
+      ],
+      "scope": [
+        "intra-module"
+      ],
+      "fusion_kind": "sort + gather",
+      "location": {
+        "module_fqn_pattern": "layers.{3..60}.feed_forward.routed_experts.token_dispatcher",
+        "source": "token_dispatcher.py:59-95 (_local_reorder), :394 (routing_map.sum)"
+      },
+      "ops": [
+        "aten::copy_",
+        "aten::floor_divide",
+        "aten::index",
+        "aten::sort",
+        "aten::sum"
+      ],
+      "kernels_per_instance": 35.0,
+      "instances_per_step": 116,
+      "shapes_dtypes": "x [98304,7168] bf16 gathered by token index -> [786432,7168]; argsort of [786432] int64; routing_map [98304,256] bool summed over tokens",
+      "external_bytes_per_instance": 12727617536,
+      "measured_us_per_instance": 4755.67,
+      "measured_ms_total": 551.657,
+      "ideal_us_per_instance": 1763.79,
+      "ideal_ms_total": 204.599,
+      "gap_ms_total": 347.058,
+      "gap_pct_of_step": 0.841,
+      "bitwise_tier": "T2",
+      "bitwise_notes": "Stable argsort order must be reproduced (ties broken by position); gathers and integer counts are exact.",
+      "blockers": "The gather output is the all-to-all send buffer (fine); the sort is a separate pass; deterministic mode.",
+      "evidence": "measured",
+      "how_found": "op table + ET component; the token gather re-reads each x row 8 times (4.4 ms vs 1.8 ms ideal)",
+      "overlaps_with": [],
+      "notes": "Dataflow: routing-map counts, the argsort of expert ids, the score gather and the token gather all derive from router outputs; the sorted indices feed only the gathers. The bool->int64 copy before routing_map.sum writes 201 MB per call; the count could come from the sort.",
+      "id": "E-10"
+    },
+    {
+      "title": "MLA K/V layout glue: K materialization concat (fwd) and dK/dV pack + dk_pe head-sum (bwd)",
+      "phases": [
+        "forward",
+        "recompute",
+        "backward"
+      ],
+      "scope": [
+        "intra-module"
+      ],
+      "fusion_kind": "absorb layout change into attention kernels",
+      "location": {
+        "module_fqn_pattern": "layers.{0..60}.attention.inner_attention",
+        "source": "torchtitan/models/common/attention/mla.py:38-48 (materialize_mla_kv)"
+      },
+      "ops": [
+        "aten::cat",
+        "aten::sum"
+      ],
+      "kernels_per_instance": 9.33,
+      "instances_per_step": 183,
+      "shapes_dtypes": "k = cat(k_nope [98304,128,128] (strided view of kv), k_pe expand) -> [98304,128,192]; bwd: cat(dk_nope, dv) -> [98304,128,256], sum dk_pe over heads",
+      "external_bytes_per_instance": 0,
+      "measured_us_per_instance": 1527.23,
+      "measured_ms_total": 279.482,
+      "ideal_us_per_instance": 0.0,
+      "ideal_ms_total": 0.0,
+      "gap_ms_total": 279.482,
+      "gap_pct_of_step": 0.677,
+      "bitwise_tier": "T3",
+      "bitwise_notes": "Needs the flash-attention kernels to read k_nope/k_pe and write dk_nope/dv/dk_pe in the packed layout.",
+      "blockers": "Requires attention-kernel changes (FA4 cute kernels).",
+      "evidence": "estimated",
+      "how_found": "op table: standalone the copies are at roofline, so the only gain is elimination",
+      "overlaps_with": [],
+      "notes": "Dataflow: k = cat(k_nope view of the wkv_b output, broadcast k_pe) is consumed only by flash attention; in backward dk and dv from flash attention are only repacked (cat) and head-summed for the wkv_b dgrad. Ideal assumes the attention kernels absorb the layout at no extra cost (estimated).",
+      "id": "E-11"
+    },
+    {
+      "title": "MoE combine all-to-all backward concat + unpermute backward gather",
+      "phases": [
+        "backward"
+      ],
+      "scope": [
+        "intra-module"
+      ],
+      "fusion_kind": "copy elimination + permutation gather",
+      "location": {
+        "module_fqn_pattern": "layers.{3..60}.feed_forward.routed_experts.token_dispatcher",
+        "source": "spmd_types _AllToAllUneven backward cat (called at token_dispatcher.py:346); token_dispatcher.py:569 (_unpermute backward = index gather)"
+      },
+      "ops": [
+        "aten::cat",
+        "aten::index"
+      ],
+      "kernels_per_instance": 10.0,
+      "instances_per_step": 58,
+      "shapes_dtypes": "[786432,7168] bf16 chunks -> concat -> gather by permuted_indices",
+      "external_bytes_per_instance": 22554869760,
+      "measured_us_per_instance": 7726.22,
+      "measured_ms_total": 448.121,
+      "ideal_us_per_instance": 3125.64,
+      "ideal_ms_total": 181.287,
+      "gap_ms_total": 266.834,
+      "gap_pct_of_step": 0.646,
+      "bitwise_tier": "T0",
+      "bitwise_notes": "Pure data movement.",
+      "blockers": "Collective boundary before the concat; needs per-chunk access (spmd_types) to skip the concat.",
+      "evidence": "measured",
+      "how_found": "op table backward rows; ET shows cat output consumed only by the index gather",
+      "overlaps_with": [],
+      "notes": "Dataflow: the combine all-to-all backward output chunks are concatenated and gathered by permuted_indices; the concat has one consumer.",
+      "id": "E-12"
+    },
+    {
+      "title": "Query RoPE backward + q split backward concat",
+      "phases": [
+        "backward"
+      ],
+      "scope": [
+        "cross-module"
+      ],
+      "fusion_kind": "pointwise + concat",
+      "location": {
+        "module_fqn_pattern": "layers.{0..60}.attention (+ .rope)",
+        "source": "attention.py:196-203 and rope.py:316-328 backward"
+      },
+      "ops": [
+        "aten::cat",
+        "aten::copy_",
+        "aten::mul"
+      ],
+      "kernels_per_instance": 16.0,
+      "instances_per_step": 61,
+      "shapes_dtypes": "dq [98304,128,192] bf16 -> rotate dq_pe in fp32 -> concat [dq_nope, dq_pe] -> [98304,128,192] bf16",
+      "external_bytes_per_instance": 9688842240,
+      "measured_us_per_instance": 5357.04,
+      "measured_ms_total": 326.779,
+      "ideal_us_per_instance": 1342.68,
+      "ideal_ms_total": 81.903,
+      "gap_ms_total": 244.876,
+      "gap_pct_of_step": 0.593,
+      "bitwise_tier": "T0",
+      "bitwise_notes": "As E-08 (rope_q_fwd) with the conjugate cache.",
+      "blockers": "Autograd nodes CatBackward/ToCopyBackward/MulBackward/SplitWithSizesBackward.",
+      "evidence": "measured",
+      "how_found": "op table backward rows",
+      "overlaps_with": [],
+      "notes": "Dataflow: dq from flash attention: the rope part is upcast, rotated by the conjugate cache, cast back and concatenated with dq_nope for the wq_b dgrad; a single-consumer chain.",
+      "id": "E-13"
+    },
+    {
+      "title": "Router group-limited top-k selection (bias add, group top-2 sum, group top-4, mask, top-8)",
+      "phases": [
+        "forward"
+      ],
+      "scope": [
+        "intra-module"
+      ],
+      "fusion_kind": "per-token selection (top-k) in registers",
+      "location": {
+        "module_fqn_pattern": "layers.{3..60}.feed_forward.router",
+        "source": "torchtitan/models/deepseek_v3/moe.py:30-83 (DeepSeekV3Router._select_experts), remat region routing_decision (recompute=False)"
+      },
+      "ops": [
+        "aten::add",
+        "aten::copy_",
+        "aten::fill_",
+        "aten::masked_fill_",
+        "aten::scatter_",
+        "aten::sum",
+        "aten::topk"
+      ],
+      "kernels_per_instance": 10.0,
+      "instances_per_step": 58,
+      "shapes_dtypes": "scores [98304,256] fp32 -> [98304,8,32] top-2 -> [98304,8] top-4 -> masked [98304,256] -> top-8 ids int64",
+      "external_bytes_per_instance": 106955776,
+      "measured_us_per_instance": 4153.89,
+      "measured_ms_total": 240.926,
+      "ideal_us_per_instance": 14.82,
+      "ideal_ms_total": 0.86,
+      "gap_ms_total": 240.066,
+      "gap_pct_of_step": 0.582,
+      "bitwise_tier": "T2",
+      "bitwise_notes": "topk(sorted=False) index order and tie-breaking must match aten's implementation; values are exact copies.",
+      "blockers": "Forward only (saved region). aten::topk on short rows is slow (2.1 ms for k=2 over 32, 1.6 ms for k=8 over 256).",
+      "evidence": "measured",
+      "how_found": "op table: aten::topk at 120x-2000x its per-op roofline",
+      "overlaps_with": [],
+      "notes": "Dataflow: scores [98304,256] -> +bias -> group top-2 -> sum -> group top-4 -> mask -> top-8; every intermediate is per token with one consumer.",
+      "id": "E-14"
+    },
+    {
+      "title": "Shared-expert SwiGLU recompute + backward in one pass",
+      "phases": [
+        "recompute",
+        "backward"
+      ],
+      "scope": [
+        "recompute-backward"
+      ],
+      "fusion_kind": "pointwise",
+      "location": {
+        "module_fqn_pattern": "layers.{3..60}.feed_forward.shared_experts",
+        "source": "activation.py:61, 174-176 (replay + backward)"
+      },
+      "ops": [
+        "aten::cat",
+        "aten::mul",
+        "aten::silu",
+        "aten::silu_backward"
+      ],
+      "kernels_per_instance": 6.0,
+      "instances_per_step": 58,
+      "shapes_dtypes": "[98304,2,2048] -> h [98304,2048]; d_h + gate_up -> [98304,2,2048] bf16",
+      "external_bytes_per_instance": 2415919104,
+      "measured_us_per_instance": 2376.31,
+      "measured_ms_total": 137.826,
+      "ideal_us_per_instance": 334.8,
+      "ideal_ms_total": 19.418,
+      "gap_ms_total": 118.408,
+      "gap_pct_of_step": 0.287,
+      "bitwise_tier": "T0",
+      "bitwise_notes": "As E-05 (swiglu_routed_rc_bwd).",
+      "blockers": "As E-05 (swiglu_routed_rc_bwd) (the w2 _LinearFunctionBackward computes dgrad and wgrad in one node).",
+      "evidence": "measured",
+      "how_found": "op table",
+      "overlaps_with": [],
+      "notes": "Dataflow: as the routed variant, at [98304,2,2048].",
+      "id": "E-15"
+    },
+    {
+      "title": "Chunked cross-entropy: fp32 upcast + log_softmax + nll (fwd) and nll/log_softmax backward + bf16 cast (bwd)",
+      "phases": [
+        "forward",
+        "backward"
+      ],
+      "scope": [
+        "intra-module"
+      ],
+      "fusion_kind": "row reduction (logsumexp) + pointwise",
+      "location": {
+        "module_fqn_pattern": "loss (ChunkedLossWrapper, 8 chunks of 12288 tokens)",
+        "source": "torchtitan/components/loss.py:80-86 (cross_entropy), 600-830 (ChunkedLossWrapper); local_compile region loss (disabled here)"
+      },
+      "ops": [
+        "aten::_log_softmax",
+        "aten::_log_softmax_backward_data",
+        "aten::copy_",
+        "aten::nll_loss_backward",
+        "aten::nll_loss_forward",
+        "aten::zero_"
+      ],
+      "kernels_per_instance": 104.0,
+      "instances_per_step": 1,
+      "shapes_dtypes": "logits [12288,129280] bf16 per chunk x 8 -> loss + grad logits bf16",
+      "external_bytes_per_instance": 50835750912,
+      "measured_us_per_instance": 92123.55,
+      "measured_ms_total": 92.124,
+      "ideal_us_per_instance": 7044.8,
+      "ideal_ms_total": 7.045,
+      "gap_ms_total": 85.079,
+      "gap_pct_of_step": 0.206,
+      "bitwise_tier": "T1",
+      "bitwise_notes": "logsumexp reduction order and fp32 math must match aten's log_softmax / nll kernels.",
+      "blockers": "Chunk forward and backward run inside the loss call; the existing loss local_compile region covers it.",
+      "evidence": "measured",
+      "how_found": "op table rows under components/loss.py",
+      "overlaps_with": [],
+      "notes": "Dataflow: per chunk, logits bf16 -> fp32 copy -> log_softmax -> nll; the backward zero-fills a [12288,129280] fp32 grad, scatters the targets, runs log_softmax backward and casts to bf16, right after the forward of the same chunk; all [12288,129280] intermediates are single-consumer. One instance = the whole step's loss (8 chunks).",
+      "id": "E-16"
+    },
+    {
+      "title": "ffn_norm input-grad accumulation (routed + shared + router-gate) + RMSNorm backward + residual grad add",
+      "phases": [
+        "backward"
+      ],
+      "scope": [
+        "cross-module"
+      ],
+      "fusion_kind": "multi-input add + RMSNorm backward",
+      "location": {
+        "module_fqn_pattern": "layers.{0..60}.ffn_norm (+ InputBuffer adds of its output grad)",
+        "source": "nn_modules.py:155 backward; autograd InputBuffer for ffn_norm output (token_dispatcher.py:89, hi_mid_lo_linear.py:66, shared_experts)"
+      },
+      "ops": [
+        "_native::_fused_rms_norm_backward_cutedsl_5",
+        "aten::add",
+        "aten::add_"
+      ],
+      "kernels_per_instance": 4.9,
+      "instances_per_step": 61,
+      "shapes_dtypes": "up to 3 grads [98304,7168] bf16 + h + residual grad -> grad_h [98304,7168] bf16",
+      "external_bytes_per_instance": 8317491771,
+      "measured_us_per_instance": 2379.99,
+      "measured_ms_total": 145.179,
+      "ideal_us_per_instance": 1152.63,
+      "ideal_ms_total": 70.311,
+      "gap_ms_total": 74.869,
+      "gap_pct_of_step": 0.181,
+      "bitwise_tier": "T1",
+      "bitwise_notes": "InputBuffer sums 3 grads in arrival order (3 terms do not commute bitwise): keep the order. RMSNorm backward reductions must match.",
+      "blockers": "Autograd engine owns the InputBuffer accumulation; fusing needs a custom autograd op owning the norm and its consumers.",
+      "evidence": "measured",
+      "how_found": "op table: [T,D] add/add_ kernels between rmsnorm backward and its producers; ET grad edges",
+      "overlaps_with": [],
+      "notes": "Dataflow: autograd's InputBuffer sums the three branch grads of ffn_norm's output (routed, shared, router gate) with two add kernels; the sum is consumed only by the RMSNorm backward, whose output is consumed only by the residual-grad add_. Dense layers (0-2) have no accumulation adds (single consumer).",
+      "id": "E-17"
+    },
+    {
+      "title": "Dense-FFN SwiGLU recompute + backward in one pass (layers 0-2)",
+      "phases": [
+        "recompute",
+        "backward"
+      ],
+      "scope": [
+        "recompute-backward"
+      ],
+      "fusion_kind": "pointwise",
+      "location": {
+        "module_fqn_pattern": "layers.{0,1,2}.feed_forward",
+        "source": "activation.py:61, 174-176 (replay + backward)"
+      },
+      "ops": [
+        "aten::cat",
+        "aten::mul",
+        "aten::silu",
+        "aten::silu_backward"
+      ],
+      "kernels_per_instance": 26.0,
+      "instances_per_step": 3,
+      "shapes_dtypes": "[98304,2,18432] -> h [98304,18432]; d_h + gate_up -> [98304,2,18432] bf16",
+      "external_bytes_per_instance": 21743271936,
+      "measured_us_per_instance": 25225.46,
+      "measured_ms_total": 75.676,
+      "ideal_us_per_instance": 3013.17,
+      "ideal_ms_total": 9.04,
+      "gap_ms_total": 66.637,
+      "gap_pct_of_step": 0.161,
+      "bitwise_tier": "T0",
+      "bitwise_notes": "As E-05 (swiglu_routed_rc_bwd).",
+      "blockers": "As E-15 (swiglu_shared_rc_bwd).",
+      "evidence": "measured",
+      "how_found": "op table",
+      "overlaps_with": [],
+      "notes": "Dataflow: as the routed variant, at [98304,2,18432].",
+      "id": "E-18"
+    },
+    {
+      "title": "Router + aux-loss backward (route-norm backward, gather backward, sigmoid backward, aux grads)",
+      "phases": [
+        "backward"
+      ],
+      "scope": [
+        "intra-module"
+      ],
+      "fusion_kind": "pointwise + scatter + reductions",
+      "location": {
+        "module_fqn_pattern": "layers.{3..60}.feed_forward.router",
+        "source": "moe.py:232-330 and 490-610 backward"
+      },
+      "ops": [
+        "aten::_assert_async",
+        "aten::_index_put_impl_",
+        "aten::add_",
+        "aten::aminmax",
+        "aten::arange",
+        "aten::copy_",
+        "aten::div",
+        "aten::div_",
+        "aten::fill_",
+        "aten::ge",
+        "aten::gt",
+        "aten::lt",
+        "aten::mul",
+        "aten::neg",
+        "aten::remainder",
+        "aten::sgn",
+        "aten::sigmoid_backward",
+        "aten::sum",
+        "aten::where",
+        "aten::zero_"
+      ],
+      "kernels_per_instance": 61.0,
+      "instances_per_step": 58,
+      "shapes_dtypes": "grad topk scores [98304,8] fp32 -> grad gate [98304,256] fp32",
+      "external_bytes_per_instance": 235929600,
+      "measured_us_per_instance": 1047.0,
+      "measured_ms_total": 60.726,
+      "ideal_us_per_instance": 32.7,
+      "ideal_ms_total": 1.896,
+      "gap_ms_total": 58.83,
+      "gap_pct_of_step": 0.143,
+      "bitwise_tier": "T1",
+      "bitwise_notes": "Reductions (route-norm sum backward, aux sums) must keep aten's order.",
+      "blockers": "Many small autograd nodes; deterministic index_put for the gather backward.",
+      "evidence": "measured",
+      "how_found": "op table backward rows linked to router forward ops",
+      "overlaps_with": [],
+      "notes": "Dataflow: the grad of the top-k scores flows through route-scale and route-norm backward, the gather backward (scatter into [98304,256]), aux-loss backward and sigmoid backward into the gate grad; a per-token chain of small tensors.",
+      "id": "E-19"
+    },
+    {
+      "title": "MoE load-balance statistics (aux loss forward)",
+      "phases": [
+        "forward",
+        "recompute"
+      ],
+      "scope": [
+        "intra-module"
+      ],
+      "fusion_kind": "column reductions over [T,E]",
+      "location": {
+        "module_fqn_pattern": "layers.{3..60}.feed_forward.router.aux_loss",
+        "source": "torchtitan/models/common/moe/moe.py:490-610, torchtitan/models/common/aux_loss.py:205-236"
+      },
+      "ops": [
+        "aten::add_",
+        "aten::bitwise_not",
+        "aten::clamp_min",
+        "aten::copy_",
+        "aten::div",
+        "aten::linalg_vector_norm",
+        "aten::mul",
+        "aten::reciprocal",
+        "aten::sum"
+      ],
+      "kernels_per_instance": 19.5,
+      "instances_per_step": 116,
+      "shapes_dtypes": "scores [98304,256] fp32, masked routing map bool -> per-expert sums [256]",
+      "external_bytes_per_instance": 125931520,
+      "measured_us_per_instance": 478.52,
+      "measured_ms_total": 55.508,
+      "ideal_us_per_instance": 17.45,
+      "ideal_ms_total": 2.024,
+      "gap_ms_total": 53.484,
+      "gap_pct_of_step": 0.13,
+      "bitwise_tier": "T1",
+      "bitwise_notes": "fp32 column sums over 98304 tokens: reduction order must match aten.",
+      "blockers": "Interleaved with the routing decision; norm/clamp/div chain.",
+      "evidence": "measured",
+      "how_found": "op table",
+      "overlaps_with": [],
+      "notes": "Dataflow: scores and the masked routing map are reduced over tokens into per-expert statistics; all intermediates are single-consumer.",
+      "id": "E-20"
+    },
+    {
+      "title": "attention_norm input-grad accumulation (wq_a + wkv_a) + RMSNorm backward + residual grad add",
+      "phases": [
+        "backward"
+      ],
+      "scope": [
+        "cross-module"
+      ],
+      "fusion_kind": "add + RMSNorm backward",
+      "location": {
+        "module_fqn_pattern": "layers.{0..60}.attention_norm",
+        "source": "nn_modules.py:155 backward; InputBuffer for attention_norm output (wq_a, wkv_a)"
+      },
+      "ops": [
+        "_native::_fused_rms_norm_backward_cutedsl_5",
+        "aten::add",
+        "aten::add_"
+      ],
+      "kernels_per_instance": 4.0,
+      "instances_per_step": 61,
+      "shapes_dtypes": "2 grads [98304,7168] + x + residual grad -> grad_x [98304,7168] bf16",
+      "external_bytes_per_instance": 7046823936,
+      "measured_us_per_instance": 1812.24,
+      "measured_ms_total": 110.547,
+      "ideal_us_per_instance": 976.55,
+      "ideal_ms_total": 59.569,
+      "gap_ms_total": 50.978,
+      "gap_pct_of_step": 0.124,
+      "bitwise_tier": "T1",
+      "bitwise_notes": "Two-term add commutes exactly; RMSNorm backward reductions must match.",
+      "blockers": "InputBuffer accumulation owned by the autograd engine.",
+      "evidence": "measured",
+      "how_found": "op table + ET grad edges",
+      "overlaps_with": [],
+      "notes": "Dataflow: the wq_a and wkv_a dgrads are summed by an InputBuffer add, consumed only by the RMSNorm backward, whose output is consumed only by the residual-grad add_.",
+      "id": "E-21"
+    },
+    {
+      "title": "Shared-expert SwiGLU forward",
+      "phases": [
+        "forward"
+      ],
+      "scope": [
+        "intra-module"
+      ],
+      "fusion_kind": "pointwise",
+      "location": {
+        "module_fqn_pattern": "layers.{3..60}.feed_forward.shared_experts",
+        "source": "activation.py:61, 174-176"
+      },
+      "ops": [
+        "aten::mul",
+        "aten::silu"
+      ],
+      "kernels_per_instance": 2.0,
+      "instances_per_step": 58,
+      "shapes_dtypes": "[98304,2,2048] bf16 -> [98304,2048] bf16",
+      "external_bytes_per_instance": 1207959552,
+      "measured_us_per_instance": 951.98,
+      "measured_ms_total": 55.215,
+      "ideal_us_per_instance": 167.4,
+      "ideal_ms_total": 9.709,
+      "gap_ms_total": 45.505,
+      "gap_pct_of_step": 0.11,
+      "bitwise_tier": "T0",
+      "bitwise_notes": "As E-09 (swiglu_routed_fwd).",
+      "blockers": "As E-09 (swiglu_routed_fwd).",
+      "evidence": "measured",
+      "how_found": "op table",
+      "overlaps_with": [],
+      "notes": "Dataflow: as E-09 (swiglu_routed_fwd) at [98304,2,2048].",
+      "id": "E-22"
+    },
+    {
+      "title": "MoE output add (routed + shared) + block residual add + next layer's attention_norm (or final norm)",
+      "phases": [
+        "forward"
+      ],
+      "scope": [
+        "cross-module",
+        "cross-layer"
+      ],
+      "fusion_kind": "multi-input add + RMSNorm",
+      "location": {
+        "module_fqn_pattern": "layers.L.feed_forward (shared_add) + layers.L (ffn_residual) + layers.L+1.attention_norm",
+        "source": "moe.py:822-826; model.py:66-70; nn_modules.py:155 (next block)"
+      },
+      "ops": [
+        "_native::_fused_rms_norm_cutedsl_4",
+        "aten::add"
+      ],
+      "kernels_per_instance": 2.95,
+      "instances_per_step": 61,
+      "shapes_dtypes": "routed, shared, h [98304,7168] bf16 -> x_next + attention_norm(x_next) [98304,7168] bf16",
+      "external_bytes_per_instance": 6977514781,
+      "measured_us_per_instance": 1603.96,
+      "measured_ms_total": 97.842,
+      "ideal_us_per_instance": 966.94,
+      "ideal_ms_total": 58.983,
+      "gap_ms_total": 38.858,
+      "gap_pct_of_step": 0.094,
+      "bitwise_tier": "T1",
+      "bitwise_notes": "Two-term adds in the same order ((routed+shared) then h + ...); RMSNorm reduction must match.",
+      "blockers": "Crosses the transformer-block boundary and the torch_remat checkpoint boundary (the residual adds are saved regions; the next block's norm is inside the next checkpoint and replays alone in recompute).",
+      "evidence": "measured",
+      "how_found": "ET dataflow (cross-layer edge add -> rms_norm); op table",
+      "overlaps_with": [],
+      "notes": "Dataflow: routed + shared (shared_add) -> + h (ffn_residual) -> x_next, which the next block's attention_norm reads first (x_next is also the next checkpoint's saved input). Forward only: in recompute the adds are skipped (saved regions) and attention_norm reads the saved block input.",
+      "id": "E-23"
+    },
+    {
+      "title": "Dense-FFN SwiGLU forward (layers 0-2)",
+      "phases": [
+        "forward"
+      ],
+      "scope": [
+        "intra-module"
+      ],
+      "fusion_kind": "pointwise",
+      "location": {
+        "module_fqn_pattern": "layers.{0,1,2}.feed_forward",
+        "source": "activation.py:61, 174-176"
+      },
+      "ops": [
+        "aten::mul",
+        "aten::silu"
+      ],
+      "kernels_per_instance": 8.0,
+      "instances_per_step": 3,
+      "shapes_dtypes": "[98304,2,18432] bf16 -> [98304,18432] bf16",
+      "external_bytes_per_instance": 10871635968,
+      "measured_us_per_instance": 10174.41,
+      "measured_ms_total": 30.523,
+      "ideal_us_per_instance": 1506.59,
+      "ideal_ms_total": 4.52,
+      "gap_ms_total": 26.003,
+      "gap_pct_of_step": 0.063,
+      "bitwise_tier": "T0",
+      "bitwise_notes": "As E-09 (swiglu_routed_fwd).",
+      "blockers": "As E-09 (swiglu_routed_fwd).",
+      "evidence": "measured",
+      "how_found": "op table",
+      "overlaps_with": [],
+      "notes": "Dataflow: as E-09 (swiglu_routed_fwd) at [98304,2,18432].",
+      "id": "E-24"
+    },
+    {
+      "title": "Attention residual add + ffn_norm RMSNorm",
+      "phases": [
+        "forward",
+        "recompute"
+      ],
+      "scope": [
+        "cross-module"
+      ],
+      "fusion_kind": "add + RMSNorm",
+      "location": {
+        "module_fqn_pattern": "layers.{0..60} (block) + layers.{0..60}.ffn_norm",
+        "source": "torchtitan/models/deepseek_v3/model.py:56-59; nn_modules.py:155"
+      },
+      "ops": [
+        "_native::_fused_rms_norm_cutedsl_4",
+        "aten::add"
+      ],
+      "kernels_per_instance": 2.0,
+      "instances_per_step": 122,
+      "shapes_dtypes": "x, attn_out [98304,7168] bf16 -> h, ffn_norm(h) [98304,7168] bf16 + rstd",
+      "external_bytes_per_instance": 5637537792,
+      "measured_us_per_instance": 982.59,
+      "measured_ms_total": 119.876,
+      "ideal_us_per_instance": 781.25,
+      "ideal_ms_total": 95.312,
+      "gap_ms_total": 24.564,
+      "gap_pct_of_step": 0.06,
+      "bitwise_tier": "T1",
+      "bitwise_notes": "The add is exact-order (two terms); RMSNorm reduction must match the CuTeDSL kernel.",
+      "blockers": "Spans block forward and the RMSNorm module.",
+      "evidence": "measured",
+      "how_found": "ET dataflow: add output consumed by rms_norm; op table",
+      "overlaps_with": [],
+      "notes": "Dataflow: x + attn_out -> h, read by ffn_norm (and later by the trailing residual add).",
+      "id": "E-25"
+    },
+    {
+      "title": "Router scoring: sigmoid + gather top-k scores + route norm + scale + routing map + token counts",
+      "phases": [
+        "forward",
+        "recompute"
+      ],
+      "scope": [
+        "intra-module"
+      ],
+      "fusion_kind": "pointwise + per-token reduction + scatter",
+      "location": {
+        "module_fqn_pattern": "layers.{3..60}.feed_forward.router",
+        "source": "torchtitan/models/common/moe/moe.py:232-330 (TokenChoiceTopKRouter.forward)"
+      },
+      "ops": [
+        "aten::add",
+        "aten::add_",
+        "aten::bitwise_and",
+        "aten::bitwise_not",
+        "aten::copy_",
+        "aten::div",
+        "aten::gather",
+        "aten::mul",
+        "aten::scatter_",
+        "aten::sigmoid",
+        "aten::sum",
+        "aten::zero_"
+      ],
+      "kernels_per_instance": 12.0,
+      "instances_per_step": 116,
+      "shapes_dtypes": "gate [98304,256] fp32 -> sigmoid; gather [98304,8]; sum/div/mul; routing map [98304,256] bool; masked map; counts [256]",
+      "external_bytes_per_instance": 261096448,
+      "measured_us_per_instance": 202.06,
+      "measured_ms_total": 23.439,
+      "ideal_us_per_instance": 36.18,
+      "ideal_ms_total": 4.197,
+      "gap_ms_total": 19.241,
+      "gap_pct_of_step": 0.047,
+      "bitwise_tier": "T1",
+      "bitwise_notes": "The route-norm sum over 8 values in fp32 must keep aten's order; counts are integer sums (exact).",
+      "blockers": "The routing decision (topk) sits in a saved remat region between sigmoid and gather.",
+      "evidence": "measured",
+      "how_found": "op table small-kernel sweep of the router module",
+      "overlaps_with": [],
+      "notes": "Dataflow: sigmoid(gate) -> gather of the top-k scores -> sum, divide, scale; routing-map scatter -> masked map -> counts; per-token chains. tokens_per_expert accumulation (moe.py:313) runs only in forward.",
+      "id": "E-26"
+    },
+    {
+      "title": "HiMidLo router-gate backward: split fp32 grad into bf16 hi/mid pieces + concat",
+      "phases": [
+        "backward"
+      ],
+      "scope": [
+        "intra-module"
+      ],
+      "fusion_kind": "pointwise bit manipulation + concat",
+      "location": {
+        "module_fqn_pattern": "layers.{3..60}.feed_forward.router.gate",
+        "source": "torchtitan/models/common/linear/hi_mid_lo_linear.py:140-220 (_HiMidLoLinearFunction.backward)"
+      },
+      "ops": [
+        "aten::__lshift__",
+        "aten::add_",
+        "aten::cat",
+        "aten::copy_",
+        "aten::sub"
+      ],
+      "kernels_per_instance": 13.0,
+      "instances_per_step": 58,
+      "shapes_dtypes": "grad [98304,256] fp32 -> hi/mid bf16 pieces concatenated for the backward GEMMs",
+      "external_bytes_per_instance": 208666624,
+      "measured_us_per_instance": 353.13,
+      "measured_ms_total": 20.482,
+      "ideal_us_per_instance": 28.92,
+      "ideal_ms_total": 1.677,
+      "gap_ms_total": 18.804,
+      "gap_pct_of_step": 0.046,
+      "bitwise_tier": "T0",
+      "bitwise_notes": "Bit-exact casts/shifts/subtractions.",
+      "blockers": "Lives inside a custom autograd Function between GEMMs.",
+      "evidence": "measured",
+      "how_found": "op table",
+      "overlaps_with": [],
+      "notes": "Dataflow: the fp32 gate grad is split into bf16 hi/mid pieces by casts, shifts and subtractions, then concatenated for the backward GEMMs; a single-consumer chain.",
+      "id": "E-27"
+    },
+    {
+      "title": "wkv_a output epilogue: kv contiguous copy + kv_norm RMSNorm + k_pe RoPE",
+      "phases": [
+        "forward",
+        "recompute"
+      ],
+      "scope": [
+        "cross-module"
+      ],
+      "fusion_kind": "norm + pointwise",
+      "location": {
+        "module_fqn_pattern": "layers.{0..60}.attention.{kv_norm,rope}",
+        "source": "attention.py:128-145; nn_modules.py:155 (RMSNorm); rope.py:324-328"
+      },
+      "ops": [
+        "_native::_fused_rms_norm_cutedsl_4",
+        "aten::copy_",
+        "aten::mul"
+      ],
+      "kernels_per_instance": 5.0,
+      "instances_per_step": 122,
+      "shapes_dtypes": "wkv_a out [98304,576] bf16 -> kv_norm [98304,512] + k_pe rope [98304,1,64]",
+      "external_bytes_per_instance": 226885632,
+      "measured_us_per_instance": 93.52,
+      "measured_ms_total": 11.409,
+      "ideal_us_per_instance": 31.44,
+      "ideal_ms_total": 3.836,
+      "gap_ms_total": 7.573,
+      "gap_pct_of_step": 0.018,
+      "bitwise_tier": "T1",
+      "bitwise_notes": "RMSNorm reduction order must match the CuTeDSL kernel; RoPE as E-08 (rope_q_fwd).",
+      "blockers": "Small; spans RMSNorm and RoPE modules.",
+      "evidence": "measured",
+      "how_found": "op table",
+      "overlaps_with": [],
+      "notes": "Dataflow: the wkv_a output [98304,576] is split; the kv part is made contiguous and RMS-normalized, the k_pe part is rotated; each piece has one consumer.",
+      "id": "E-28"
+    },
+    {
+      "title": "kv_norm backward + k_pe RoPE backward + kv split backward concat",
+      "phases": [
+        "backward"
+      ],
+      "scope": [
+        "cross-module"
+      ],
+      "fusion_kind": "norm backward + pointwise + concat",
+      "location": {
+        "module_fqn_pattern": "layers.{0..60}.attention.{kv_norm,rope}",
+        "source": "attention.py:128-145 backward"
+      },
+      "ops": [
+        "_native::_fused_rms_norm_backward_cutedsl_5",
+        "aten::cat",
+        "aten::copy_",
+        "aten::mul"
+      ],
+      "kernels_per_instance": 9.0,
+      "instances_per_step": 61,
+      "shapes_dtypes": "-> d(wkv_a out) [98304,576] bf16",
+      "external_bytes_per_instance": 327548928,
+      "measured_us_per_instance": 162.68,
+      "measured_ms_total": 9.924,
+      "ideal_us_per_instance": 45.39,
+      "ideal_ms_total": 2.769,
+      "gap_ms_total": 7.155,
+      "gap_pct_of_step": 0.017,
+      "bitwise_tier": "T1",
+      "bitwise_notes": "RMSNorm backward reductions must match.",
+      "blockers": "Small.",
+      "evidence": "measured",
+      "how_found": "op table",
+      "overlaps_with": [],
+      "notes": "Dataflow: the reverse: kv_norm backward, k_pe rope backward, and a concat into the wkv_a output grad.",
+      "id": "E-29"
+    },
+    {
+      "title": "MoE dispatch split bookkeeping (count sums before the host copy)",
+      "phases": [
+        "forward",
+        "recompute"
+      ],
+      "scope": [
+        "intra-module"
+      ],
+      "fusion_kind": "tiny reductions (launch bound)",
+      "location": {
+        "module_fqn_pattern": "layers.{3..60}.feed_forward.routed_experts.token_dispatcher",
+        "source": "token_dispatcher.py:264-301 (_token_count_exchange / _sync_token_count_exchange)"
+      },
+      "ops": [
+        "aten::cat",
+        "aten::sum"
+      ],
+      "kernels_per_instance": 3.0,
+      "instances_per_step": 116,
+      "shapes_dtypes": "[256] int64 counts -> [64] sums",
+      "external_bytes_per_instance": 8192,
+      "measured_us_per_instance": 6.62,
+      "measured_ms_total": 0.768,
+      "ideal_us_per_instance": 0.0,
+      "ideal_ms_total": 0.0,
+      "gap_ms_total": 0.768,
+      "gap_pct_of_step": 0.002,
+      "bitwise_tier": "T1",
+      "bitwise_notes": "Integer sums: exact in any order.",
+      "blockers": "Interleaved with the count all-to-all and a device-to-host copy (host sync).",
+      "evidence": "measured",
+      "how_found": "op table small-kernel sweep",
+      "overlaps_with": [],
+      "notes": "Dataflow: per-expert counts are reduced to per-rank splits right before the host copy. Launch-bound; listed for completeness.",
+      "id": "E-30"
+    }
+  ],
+  "no_opportunity": [
+    {
+      "what": "FSDP2 all-gather copy-in / copy-out and reduce-scatter packing (_foreach_copy_, split_with_sizes_copy, chunk_cat, chunk_cat_mixed_dtype, cat)",
+      "time_ms": 149.98,
+      "reason": "Owned by FSDP2's flat-buffer protocol around real collectives; the copies remain with NCCL. Fusing them means changing FSDP (all-gather into parameter storage, reduce-scatter from strided grads), not model code. With the fake process group the neighbouring collective is itself a copy, so no fusion can be judged."
+    },
+    {
+      "what": "MoE split host copies (device-to-host sync for all-to-all splits) and int32 offsets copy",
+      "time_ms": 0.5,
+      "reason": "Device-to-host copies forced by the variable-size all-to-all; a host sync, not fusable glue."
+    },
+    {
+      "what": "Standalone RMSNorm kernels at roofline: q_norm (fwd/rc/bwd), attention_norm in recompute and layer 0 forward, final norm backward",
+      "time_ms": 56.36,
+      "reason": "CuTeDSL RMSNorm kernels run at 1.0-1.3x roofline; their neighbours are GEMMs (q_norm sits between wq_a and wq_b; recompute attention_norm reads the saved block input), so only GEMM prologue/epilogue fusion (T3) remains."
+    },
+    {
+      "what": "Embedding gather (fwd) and embedding_dense_backward",
+      "time_ms": 5.439,
+      "reason": "Single ops with no memory-bound neighbour; the backward's 10x gap is the deterministic sort-based algorithm, not missing fusion."
+    },
+    {
+      "what": "Flash-attention auxiliary zero-fills and tiny metadata kernels (cu_seqlens/aux buffers)",
+      "time_ms": 2.96,
+      "reason": "Microsecond buffer initializations inside the attention op; would disappear inside the attention kernel (T3)."
+    },
+    {
+      "what": "Loss metadata and chunking copies outside the cross-entropy core (chunk_cat of lm_head grad, label splits, misc)",
+      "time_ms": 0.708,
+      "reason": "Chunk bookkeeping and FSDP-adjacent gradient packing for the lm_head; a few milliseconds total."
+    },
+    {
+      "what": "Optimizer (fused AdamW, grad-norm, clipping, expert-bias update)",
+      "time_ms": 19.455,
+      "reason": "Already fused (_fused_adamw_, _foreach_*); outside the training-step glue under study."
+    }
+  ]
+}
