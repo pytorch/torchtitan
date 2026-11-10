@@ -69,6 +69,7 @@ scripts/install_rl_env.sh --sglang
 | Tensor parallelism | Supported; outside batch-invariant mode, the model's TP all-reduces run on SGLang's TP all-reduce (custom all-reduce) instead of NCCL |
 | CUDA graphs (decode and prefill), overlap scheduling, chunked prefill | Supported |
 | Priority scheduling by rollout group | Supported |
+| Prompt KV reuse within a rollout group | Supported for softmax attention, not linear attention (GDN, KDA); see below |
 | Model state dict loads (`cpu_prefetch`, `gpu_fetch`) | Supported |
 | Policy-version prefix cache isolation | Supported (`cache_salt`) |
 | `reset_kv_cache_on_model_state_dict_load` | Supported: running requests are retracted and recompute their KV |
@@ -142,6 +143,36 @@ prefix (prompt and completion) until the rollout ends and the engine loop
 releases the session or its group. Eviction takes unreferenced KV first and
 referenced KV only when nothing else is left, so the next turn usually reuses
 the whole history; no request ever waits for a held session.
+
+## Rollout groups
+
+The samples of a rollout group share a prompt. SGLang inserts a request's KV
+into its radix cache only after the request's prefill, so if a group's samples
+are prefilled in the same batch, each computes the whole prompt. (SGLang's
+in-batch prefix caching only reorders the waiting queue, under the `lpm`
+policy, which priority scheduling excludes.)
+
+So the engine puts the first request with a given prompt into SGLang's waiting
+queue and holds the others outside it until that request's prefill is done.
+The held requests then read the prompt's KV from the radix cache and compute
+only the prompt's last token (with pages larger than one token, its last
+partial page):
+
+```
+add_requests([g7/s0, g7/s1, ..., g7/s15])   same prompt, same cache salt
+  waiting queue: g7/s0                      held: g7/s1 .. g7/s15
+step()  prefill g7/s0 -> its prompt KV enters the radix cache
+  waiting queue: g7/s1 .. g7/s15            each prefills only the last token
+```
+
+For Qwen3-4B (TP 1) and 8 prompts x 16 samples admitted at once, the cached
+share of prompt tokens goes from 0% to 94% for 1K-token prompts (TTFT p50
+0.46 s -> 0.10 s) and from 59% to 94% for 4K-token prompts (0.73 s -> 0.25 s).
+The held requests keep their priority and wait queue entry times, so groups
+still run oldest first. Linear attention (GDN, KDA) models do not hold requests.
+Without SGLang's `extra_buffer` strategy, SGLang saves their states only at the
+end of a cached prefix, but a request with the same prompt needs the state one
+token earlier to compute the prompt's last token, so it could reuse nothing.
 
 ## CPU KV offload
 

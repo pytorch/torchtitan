@@ -118,6 +118,10 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
     policy_version = 0
     # Off by default, so test 4 covers the cache salt.
     reset_kv_cache_on_model_state_dict_load = False
+    # Whether a request reuses the prompt KV of an earlier request with the same
+    # prompt admitted in the same call. Linear attention models don't (see
+    # SGLangEngine._hold_shared_prompts).
+    reuses_shared_prompt = True
 
     @classmethod
     def setUpClass(cls):
@@ -188,7 +192,8 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         self, prompt_ids: list[list[int]], *, load_at_step: int = -1
     ) -> list[FinishedRequest]:
         """Sample a completion of each prompt at temperature 1, each with its own seed
-        and session, and return the results in prompt order.
+        and session, and return the results in prompt order. Equal prompts form one
+        rollout group.
 
         With ``load_at_step`` >= 0, load the trainer's weights before that step.
         """
@@ -203,7 +208,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
                     seed=1000 + i,
                     stop_token_ids=[],
                 ),
-                group_id=i,
+                group_id=prompt_ids.index(ids),
                 routing_session_id=str(i),
                 arrival_time=time.time(),
             )
@@ -257,7 +262,13 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         return results
 
     def test_trainer_vs_sglang_decode(self):
-        self._check_trainer_vs_sglang_decode(self.prompt_ids)
+        # The last two requests share a prompt that no earlier test cached, like two
+        # samples of a rollout group: the second must reuse the first's prompt KV.
+        shared_prompt = self.prompt_ids[0][::-1]
+        prompt_ids = self.prompt_ids[:-2] + [shared_prompt, shared_prompt]
+        results = self._check_trainer_vs_sglang_decode(prompt_ids)
+        if dist.get_rank() == 0 and self.reuses_shared_prompt:
+            self.assertGreater(results[-1].metrics_inputs.num_cached_tokens, 0)
 
     def test_sglang_decode_batch_invariance(self):
         (single,) = self._generate(self.prompt_ids[:1])
@@ -440,6 +451,7 @@ class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):
     # Tests 4 and 5 then cover the reset path (retract, flush, continue), with
     # SGLang's normal event loop.
     reset_kv_cache_on_model_state_dict_load = True
+    reuses_shared_prompt = False
 
 
 def _debug_model_config(
@@ -530,6 +542,7 @@ class TestSGLangBitwiseParityKDA(SGLangBitwiseParityTestBase):
     # SGLang cannot capture full prefill graphs of linear attention models.
     cuda_graph = "breakable"
     sync_weights_from_trainer = True
+    reuses_shared_prompt = False
 
     @classmethod
     def setUpClass(cls):
