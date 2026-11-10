@@ -74,8 +74,10 @@ arbitrary learned Top-K key set for each query.
 
 The frozen indexer delegates weighted-ReLU Top-K selection to Attention Gym's
 `lightning_indexer`, using the repository's existing `attn-gym==0.0.17`
-dependency. Its reference implementation preserves FP32 ranking and mixing
-weights. Valid tokens are packed by document before selection, and the returned
+dependency. Like DeepSeek V4, it selects the fused implementation for FP16/BF16
+query features on NVIDIA SM90 or newer; other inputs use the FP32 reference
+implementation. Mixing weights remain FP32. Valid tokens are packed by document
+before selection, and the returned
 document-local indices are mapped back to global key indices. Under CP, the
 indexer gathers query features and weights in addition to keys to satisfy
 Attention Gym's complete-document input contract, then returns local queries'

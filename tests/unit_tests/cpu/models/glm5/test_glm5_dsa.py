@@ -180,6 +180,8 @@ class TestGlm5Dsa(unittest.TestCase):
                 q, k, weights, metadata=DsaMetadata.from_positions(torch.arange(4))
             )
         kernel.assert_called_once()
+        self.assertEqual(kernel.call_args.kwargs["impl"], "reference")
+        self.assertEqual(kernel.call_args.args[0].dtype, torch.float32)
         self.assertFalse(kernel.call_args.args[0].requires_grad)
         self.assertFalse(indices.requires_grad)
 

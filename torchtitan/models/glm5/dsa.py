@@ -34,6 +34,7 @@ from torchtitan.models.common.attn_gym import (
     lightning_indexer,
     require_attn_gym,
 )
+from torchtitan.tools.utils import has_cuda_capability
 
 
 @dataclass(frozen=True)
@@ -167,17 +168,23 @@ class DSAIndexerTopK(Module):
             )
         )
         document_offsets_K = torch.where(starts_K, token_indices_K, 0).cummax(0).values
-        # Keep FP32 ranking, including FP32 mixing weights. Attention Gym's
-        # fused indexer requires FP16/BF16 inputs and would change this contract.
+        # Match DSV4: fused selection requires low-precision inputs on SM90+.
+        fused = (
+            q_QNH.is_cuda
+            and q_QNH.dtype in (torch.float16, torch.bfloat16)
+            and has_cuda_capability(9, 0)
+        )
+        q_QNH = q_QNH if fused else q_QNH.float()
+        k_KH = k_KH if fused else k_KH.float()
         indices_KS = lightning_indexer(
-            q_QNH[token_order_K].float().unsqueeze(0),
-            k_KH[token_order_K].float().unsqueeze(0),
+            q_QNH[token_order_K].unsqueeze(0),
+            k_KH[token_order_K].unsqueeze(0),
             weights_QN[token_order_K].float().unsqueeze(0),
             min(self.index_topk, K),
             causal=True,
             cu_seqlens=cu_seqlens,
             cu_seqlens_k=cu_seqlens,
-            impl="reference",
+            impl="fused" if fused else "reference",
         ).squeeze(0)
         packed_indices_KS = document_offsets_K[:, None] + indices_KS.clamp_min(0)
         global_indices_KS = token_order_K[packed_indices_KS.long()].to(torch.int32)
