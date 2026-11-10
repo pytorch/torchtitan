@@ -17,7 +17,7 @@ Test bitwise parity between the SGLang generator and the TorchTitan trainer.
   3. test_trainer_vs_sglang_decode_after_cached_turn:
       Test 1 for each session's next turn (its prompt extends the previous turn's
       prompt and completion), which resumes the session's cached prefix: KV, and
-      the recurrent state of GDN layers.
+      the recurrent state of GDN and KDA layers.
   4. test_trainer_vs_sglang_decode_after_model_state_dict_load:
       Test 1 after perturbed trainer weights are loaded into SGLang in place (CUDA
       graphs kept) and requests move to the next policy version's cache salt.
@@ -33,7 +33,8 @@ Debug models with random weights start from the trainer's weights, loaded throug
 same in-place model state dict load.
 
 Runs in the B200 RL CI job.
-Run each class in its own launch with the SGLang environment (see
+Run each class in its own launch, with as many processes as its TP degree (one for
+TestSGLangBitwiseParityKDA, else two), with the SGLang environment (see
 torchtitan/rl/generator/sglang/README.md; the Dist-MoE class also needs the dist_moe
 package):
     torchrun --nproc_per_node=2 -m pytest \
@@ -81,11 +82,12 @@ from torchtitan_recipes.tests.rl.alphabet_sort import (
 from tests.rl.unit_tests.gpu.test_bitwise_parity import (
     build_trainer_model,
     compute_trainer_prefill_logprobs,
+    kimi_k3_debug_bitwise_config,
     make_prompt_tokens,
     qwen3_5_debug_bitwise_config,
 )
 
-# Each class runs under its own two-GPU torchrun launch.
+# Each class runs under its own torchrun launch (see the module docstring).
 pytestmark = pytest.mark.multi_gpu
 
 
@@ -480,6 +482,33 @@ class TestSGLangBitwiseParityMLA(SGLangBitwiseParityTestBase):
     sync_weights_from_trainer = True
     # The all-to-all token dispatcher syncs the host for its split sizes.
     cuda_graph = "none"
+
+
+@unittest.skipUnless(
+    torch.cuda.is_available() and torch.cuda.get_device_capability() >= (9, 0),
+    "Batch-invariant Attention Gym KDA uses fixed-tile TMA kernels (SM90+)",
+)
+class TestSGLangBitwiseParityKDA(SGLangBitwiseParityTestBase):
+    """Kimi K3 debug model with random weights: KDA state slots, with Attention Gym's
+    replay state of each slot's unfinished 64-token chunk, and MLA. One GPU, as
+    test_bitwise_parity's vLLM Kimi K3 class.
+
+    TODO: also run at TP 2 / EP 2, which covers the TP-sharded replay state. TP 2
+    needs EP, whose all-to-all dispatcher rules out CUDA graphs, and this class covers
+    KDA decode with replay state in CUDA graphs.
+    """
+
+    __test__ = True
+    config_fn = staticmethod(kimi_k3_debug_bitwise_config)
+    sync_weights_from_trainer = True
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        # The RL trainer's forward runs in training mode (as test_bitwise_parity's
+        # KimiK3BitwiseParityTestBase); for the MoE, it only adds load-balancing
+        # statistics.
+        cls.model.train()
 
 
 def _qwen3_moe_debug_dist_moe_tp2_ep2_config() -> Controller.Config:

@@ -44,6 +44,7 @@ from sglang.srt.utils.common import next_power_of_2
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import DebugConfig, PrecisionConfig
+from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.attention.linear_attention import LinearAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
@@ -111,9 +112,9 @@ class SGLangEngine(GenerationEngine):
     identical decisions, as the engine loop's SPMD contract requires. ``step()`` runs one
     iteration of SGLang's overlap event loop, so the CPU schedules the next batch while
     the GPU runs the current one, and returns the requests whose results that iteration
-    processed. For GDN models, whose radix cache of recurrent states disables overlap
-    without SGLang's extra_buffer strategy (not registered, see the README), it runs
-    one iteration of SGLang's normal event loop instead.
+    processed. For linear attention (GDN, KDA) models, whose radix cache of recurrent
+    states disables overlap without SGLang's extra_buffer strategy (not registered,
+    see the README), it runs one iteration of SGLang's normal event loop instead.
 
     See ``GenerationEngine`` for the build arguments and the threading contract.
     """
@@ -186,6 +187,16 @@ class SGLangEngine(GenerationEngine):
             )
         if parallelism.enable_sequence_parallel:
             raise ValueError("SGLangEngine does not support sequence parallelism")
+        if config.extra_server_args.get("enable_hierarchical_cache") and any(
+            isinstance(layer.attention, KDA.Config) for layer in model.layers
+        ):
+            # TODO(https://github.com/pytorch/torchtitan/issues/6015): with HiCache's
+            # default write_through policy, one run in 18 of the KDA parity class
+            # mismatched the trainer (max logprob delta 3.1e-2); not root-caused.
+            raise ValueError(
+                "SGLangEngine does not support SGLang's hierarchical cache "
+                "(enable_hierarchical_cache) for KDA models yet"
+            )
         if parallelism.expert_parallel_degree > 1:
             # Dist-MoE experts have no token dispatcher, so this sees only the stock
             # ones; Dist-MoE runs under CUDA graphs.
