@@ -111,6 +111,7 @@ from torchtitan.config import (
     PrecisionConfig,
 )
 from torchtitan.observability import structured_logger as sl
+from torchtitan.rl.actors.rdma import RDMAObject
 from torchtitan.rl.actors.system import ActorSystem, TrainerHandle
 from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
@@ -128,7 +129,7 @@ from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout.rollouter import Rollouter
-from torchtitan.rl.rollout.types import Completion, GenerateFn, ReleaseSessionFn
+from torchtitan.rl.rollout.types import Completion, GenerateFn, Prompt, ReleaseSessionFn
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
 from torchtitan.rl.trainer.trainer import Trainer
@@ -625,7 +626,7 @@ class Controller(Configurable):
 
         @sl.log_trace_span("generate")
         async def generate(
-            prompt_token_ids: list[int],
+            prompt: Prompt | RDMAObject[Prompt],
             *,
             request_id: str,
             group_id: int,
@@ -633,7 +634,7 @@ class Controller(Configurable):
             sampling_config: SamplingConfig | None = None,
         ) -> Completion | None:
             return await generator_router.generate.call_one(
-                prompt_token_ids,
+                prompt,
                 request_id=request_id,
                 group_id=group_id,
                 routing_session_id=routing_session_id,

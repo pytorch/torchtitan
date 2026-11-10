@@ -19,13 +19,16 @@ from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
+from torchtitan.rl.actors.rdma import RDMAObject, RegisterRDMAObject
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import RLDataset, RolloutDataLoader
 from torchtitan.rl.rollout.message_env import MessageEnv
 from torchtitan.rl.rollout.rubric import Rubric, RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.rollout.types import (
+    Completion,
     GenerateFn,
+    Prompt,
     ReleaseSessionFn,
     Rollout,
     RolloutGroup,
@@ -281,7 +284,11 @@ class Rollouter(Configurable):
 
 
 class RolloutWorker(Configurable):
-    """Builds, executes, scores, and advantages one rollout group."""
+    """Builds, executes, scores, and advantages one rollout group.
+
+    With `rdma_min_prompt_bytes` set, it registers long prompts with `register_rdma_object`, the
+    actor system's RDMA registration (e.g. `MonarchRDMAObject.register`), which is then required.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -300,7 +307,38 @@ class RolloutWorker(Configurable):
         """Post-scoring advantage estimator. Default = Dr.GRPO (mean-baseline only);
         set `AdvantageEstimator.Config(should_std_normalize=True)` for standard GRPO."""
 
-    def __init__(self, config: Config) -> None:
+        rdma_min_prompt_bytes: int | None = None
+        """Keep prompts whose token ids take at least this many bytes (4 per token) in this worker
+        as RDMA buffers (the actor system's `RDMAObject`), which generator rank 0 reads, instead of
+        sending them in the `generate` call, which the router forwards:
+            None (default): every prompt in the call.
+            e.g. 65536: prompts of >= 16384 tokens stay in the worker until `generate` returns.
+        Same transport as `Batcher.Config.rdma_min_tensor_bytes`. With Monarch, each rollout
+        worker makes a CUDA context on GPU 0 (~256 MiB) when it starts."""
+
+        def __post_init__(self) -> None:
+            if (
+                self.rdma_min_prompt_bytes is not None
+                and self.rdma_min_prompt_bytes < 1
+            ):
+                raise ValueError(
+                    "rdma_min_prompt_bytes must be None or >= 1 (RDMABuffer rejects empty "
+                    f"buffers), got {self.rdma_min_prompt_bytes}"
+                )
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        register_rdma_object: RegisterRDMAObject | None = None,
+    ) -> None:
+        if config.rdma_min_prompt_bytes is not None and register_rdma_object is None:
+            raise ValueError(
+                "rdma_min_prompt_bytes is set, but no register_rdma_object was given: "
+                "the rollout worker must run in an actor system that provides RDMA."
+            )
+        self._rdma_min_prompt_bytes = config.rdma_min_prompt_bytes
+        self._register_rdma_object = register_rdma_object
         self.rubric: Rubric = config.rubric.build()
         self._message_env_config = config.message_env
         self._token_env_config = config.token_env
@@ -482,8 +520,13 @@ class RolloutWorker(Configurable):
                 )
 
                 # generator call
-                completion = await generate_fn(
-                    prompt_token_ids=env_step.next_prompt_token_ids,
+                completion = await self._generate(
+                    generate_fn,
+                    Prompt(
+                        token_ids=np.asarray(
+                            env_step.next_prompt_token_ids, dtype=np.int32
+                        )
+                    ),
                     request_id=turn_rollout_id.to_string(),
                     group_id=group_id,
                     routing_session_id=routing_session_id,
@@ -541,3 +584,34 @@ class RolloutWorker(Configurable):
             status=status,
             turns=turns,
         )
+
+    async def _generate(
+        self,
+        generate_fn: GenerateFn,
+        prompt: Prompt,
+        *,
+        request_id: str,
+        group_id: int,
+        routing_session_id: str,
+        sampling_config: SamplingConfig,
+    ) -> Completion | None:
+        """Call `generate_fn` on `prompt`, registered for RDMA reads when its token ids take at
+        least `rdma_min_prompt_bytes`; the generator then reads them from this worker."""
+        min_bytes = self._rdma_min_prompt_bytes
+        sent: Prompt | RDMAObject[Prompt] = prompt
+        if min_bytes is not None and prompt.token_ids.nbytes >= min_bytes:
+            assert self._register_rdma_object is not None
+            sent = self._register_rdma_object(prompt, min_bytes=min_bytes)
+        try:
+            return await generate_fn(
+                sent,
+                request_id=request_id,
+                group_id=group_id,
+                routing_session_id=routing_session_id,
+                sampling_config=sampling_config,
+            )
+        finally:
+            # Generator rank 0 has read the prompt once `generate_fn` returns or raises. A cancelled
+            # call drops it too; a read rank 0 is still doing then fails, for no caller.
+            if isinstance(sent, RDMAObject):
+                await sent.drop()

@@ -28,12 +28,13 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
+from torchtitan.rl.actors.rdma import RDMAObject
 from torchtitan.rl.generator.dispatcher import RequestDispatcher
 from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
 from torchtitan.rl.generator.engine_loop import EngineLoop, EngineLoopThread
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
-from torchtitan.rl.rollout.types import Completion
+from torchtitan.rl.rollout.types import Completion, Prompt
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 
 logger = logging.getLogger(__name__)
@@ -366,7 +367,7 @@ class Generator(Configurable):
     @sl.log_trace_span("generate")
     async def generate(
         self,
-        prompt_token_ids: list[int],
+        prompt: Prompt | RDMAObject[Prompt],
         *,
         request_id: str,
         group_id: int,
@@ -384,7 +385,8 @@ class Generator(Configurable):
         `VLLMValidationError` or `ValueError`).
 
         Args:
-            prompt_token_ids: One tokenized prompt `[token_ids]`.
+            prompt: One prompt. An `RDMAObject` (`RolloutWorker.Config.rdma_min_prompt_bytes`)
+                is read from its rollout worker first.
             request_id: Unique id for this request, echoed on the `Completion`.
             group_id: Rollout group id. Requests of one group share a prefix cache
                 salt; `release_groups` drops it. Also sets the vLLM priority; see
@@ -396,7 +398,7 @@ class Generator(Configurable):
         Example:
 
             completion = await generator.slice(hosts=0, gpus=0).generate.call_one(
-                [1, 2, 3],
+                Prompt(token_ids=np.array([1, 2, 3], dtype=np.int32)),
                 request_id="step=3/group=0/sample=0/turn=0",
                 group_id=0,
                 routing_session_id="group=0/rollout=0",
@@ -408,10 +410,12 @@ class Generator(Configurable):
         assert (
             sampling.stop_token_ids is not None
         ), f"{request_id}: stop_token_ids must be set from the renderer"
+        if isinstance(prompt, RDMAObject):
+            prompt = await prompt.read()
         return await self._engine_loop.generate(
             EngineRequest(
                 request_id=request_id,
-                prompt_token_ids=prompt_token_ids,
+                prompt_token_ids=prompt.token_ids.tolist(),
                 sampling=sampling,
                 group_id=group_id,
                 routing_session_id=routing_session_id,

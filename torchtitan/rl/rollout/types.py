@@ -16,6 +16,8 @@ from renderers import Message
 from torchtitan.rl.observability import metrics as m
 
 if TYPE_CHECKING:
+    from torchtitan.rl.actors.rdma import RDMAObject
+
     # Type-only: importing the generator module here would pull in vLLM at import time.
     from torchtitan.rl.generator.types import SamplingConfig
 
@@ -24,6 +26,20 @@ _TRUNCATED = frozenset(
     {"truncated_length", "truncated_prompt_too_long", "truncated_max_turns"}
 )
 _ERROR = frozenset({"error_parse", "error_timeout", "error_abort", "error"})
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class Prompt:
+    """What `GenerateFn` generates from.
+
+    Example:
+
+        Prompt(token_ids=np.array([1, 2, 3], dtype=np.int32))
+    """
+
+    token_ids: np.ndarray  # [num_prompt_tokens] int32
+    """The tokenized prompt. An array, not a list, so a rollout worker can keep it as one RDMA
+    buffer (`RolloutWorker.Config.rdma_min_prompt_bytes`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +107,7 @@ class GenerateFn(Protocol):
 
     async def __call__(
         self,
-        prompt_token_ids: list[int],
+        prompt: Prompt | RDMAObject[Prompt],
         *,
         request_id: str,
         group_id: int,
@@ -101,7 +117,9 @@ class GenerateFn(Protocol):
         """Run one generation.
 
         Args:
-            prompt_token_ids: The tokenized prompt to generate from.
+            prompt: The prompt to generate from. An `RDMAObject` when the rollout worker keeps
+                its token ids (`RolloutWorker.Config.rdma_min_prompt_bytes`): the generator reads
+                them from the worker, which drops them once the call returns.
             request_id: Unique per call; identifies the exact turn (e.g. ".../turn=2") in logs.
             group_id: Rollout group this call belongs to. Calls of one group share a prefix
                 cache namespace, so siblings and later turns can reuse the group's KV.
