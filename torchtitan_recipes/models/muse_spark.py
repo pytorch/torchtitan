@@ -8,11 +8,9 @@
 
 from __future__ import annotations
 
-import itertools
-import math
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Any, cast, Literal
 
 from renderers import Message, ToolSpec
@@ -29,7 +27,6 @@ from torchtitan.components.data import (
     IndexedJsonlSource,
     SingleDatasetConfig,
 )
-from torchtitan.components.data.multimodal.vision_processor import ResizeRule
 from torchtitan.components.data.text_datasets import ChatProcessor, DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
@@ -75,7 +72,7 @@ from torchtitan.models.common.moe import (
     TokenChoiceTopKRouter,
 )
 
-from torchtitan.models.muse_spark import build_model_config
+from torchtitan.models.muse_spark import build_model_config, MUSE_SPARK_SPECIAL_TOKENS
 from torchtitan.models.muse_spark.model import MuseSparkModel
 from torchtitan.models.muse_spark.renderer import MuseSparkRendererConfig
 from torchtitan.models.muse_spark.tokenizer import MuseSparkTokenizer
@@ -86,7 +83,6 @@ from torchtitan.trainer import Trainer
 _TRAINING_LR = 5e-5
 _ROUTER_LR_MULTIPLIER = 0.125
 _MUSE_SPARK_HF_ASSETS_PATH = "./assets/hf/Muse-Spark-Open-816B-A42B"
-_MUSE_GLIMMER_MAX_IMAGE_TOKENS = 4096
 _MUSE_SPARK_FUSED_SWIGLU_OVERRIDE = (
     "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"
 )
@@ -118,23 +114,6 @@ def _muse_spark_kv_all_gather_context_parallel_transform() -> ContextParallelTra
             ),
         },
     )
-
-
-# TODO: Add production Muse Spark Open video and audio datasets. Muse Spark Open encodes images as
-# <|image_start|> + repeated <|patch|> + <|image_end|>; videos as <|vid_start|>
-# + timestamped runs of <|video|>, separated by <|vid_frame_separator|>, then
-# <|vid_end|>; and audio as <|soft_audio_start|> + repeated <|audio|> +
-# <|soft_audio_end|>.
-MUSE_SPARK_SPECIAL_TOKENS = {
-    "image_token": "<|patch|>",
-    "video_token": "<|video|>",
-    "vision_start_token": "<|image_start|>",
-    "vision_end_token": "<|image_end|>",
-    "audio_token": "<|audio|>",
-    "audio_start_token": "<|soft_audio_start|>",
-    "audio_end_token": "<|soft_audio_end|>",
-    "pad_token": "<|finetune_right_pad|>",
-}
 
 
 def _with_dist_moe(
@@ -229,80 +208,7 @@ def _use_flex_flash_attention(model_config: MuseSparkModel.Config) -> None:
         attention.inner_attention = inner_attention
 
 
-class MuseGlimmerPatchGridResize(ResizeRule):
-    """Select the closest-aspect-ratio merged-patch grid under the token cap."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ResizeRule.Config):
-        max_image_tokens: int
-        """Cap on the merged-patch grid size, i.e. the placeholder tokens of
-        one image or frame."""
-
-    def __init__(self, config: Config) -> None:
-        self.max_image_tokens = config.max_image_tokens
-
-    def __call__(
-        self, height: int, width: int, *, patch_size: int, merge_size: int
-    ) -> tuple[int, int, int, int]:
-        max_image_tokens = self.max_image_tokens
-        merged_patch_size = patch_size * merge_size
-        ideal_grid_h = height / merged_patch_size
-        ideal_grid_w = width / merged_patch_size
-        aspect_ratio = ideal_grid_w / ideal_grid_h if ideal_grid_h > 0 else 1.0
-        if ideal_grid_h * ideal_grid_w > max_image_tokens:
-            ideal_grid_h = math.sqrt(max_image_tokens / aspect_ratio)
-            ideal_grid_w = ideal_grid_h * aspect_ratio
-
-        candidates = list(
-            set(
-                itertools.product(
-                    [math.floor(ideal_grid_h), math.ceil(ideal_grid_h)],
-                    [math.floor(ideal_grid_w), math.ceil(ideal_grid_w)],
-                )
-            )
-        )
-        candidates = [
-            (grid_h, grid_w)
-            for grid_h, grid_w in candidates
-            if grid_h >= 1 and grid_w >= 1 and grid_h * grid_w <= max_image_tokens
-        ]
-        if not candidates:
-            candidates = [(max(1, round(ideal_grid_h)), max(1, round(ideal_grid_w)))]
-
-        grid_h, grid_w = min(
-            candidates,
-            key=lambda grid: abs(grid[0] / grid[1] - height / width),
-        )
-        return (
-            grid_h * merged_patch_size,
-            grid_w * merged_patch_size,
-            0,
-            0,
-        )
-
-
-# ``VisionProcessor.Config`` fields, used like the special tokens:
-# ``VisionProcessor.Config(**MUSE_SPARK_VISION_PROCESSOR_KWARGS)``. The patch
-# sizes match the NaViT encoder (``patch_size``, ``patch_temporal``,
-# ``downsample_factor``). Video applies the image settings to every frame.
-MUSE_SPARK_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
-    "patch_size": 14,
-    "temporal_patch_size": 2,
-    "spatial_merge_size": 2,
-    "image_mean": (0.5, 0.5, 0.5),
-    "image_std": (0.5, 0.5, 0.5),
-    "resize": MuseGlimmerPatchGridResize.Config(
-        max_image_tokens=_MUSE_GLIMMER_MAX_IMAGE_TOKENS
-    ),
-    "patch_order": "raster",
-    "video_resize": MuseGlimmerPatchGridResize.Config(
-        max_image_tokens=_MUSE_GLIMMER_MAX_IMAGE_TOKENS
-    ),
-    # The released processor_config.json resamples with LANCZOS.
-    "image_interpolation_mode": "lanczos",
-}
-
-
+# TODO: Add production Muse Spark Open video and audio datasets.
 def _muse_spark_mm_dataloader(
     model_config: MuseSparkModel.Config,
     dataset: SingleDatasetConfig,

@@ -6,15 +6,10 @@
 
 """Muse Glimmer model configurations used by tests."""
 
-from typing import Any
-
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
 from torchtitan.components.data.multimodal.mm_datasets import MM_DATASETS
-from torchtitan.components.data.multimodal.vision_processor import (
-    PixelBudgetResize,
-    VisionProcessor,
-)
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
@@ -35,60 +30,17 @@ from torchtitan.models.common.config_utils import (
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
 
-from torchtitan.models.muse_glimmer import build_model_config
+from torchtitan.models.muse_glimmer import (
+    build_model_config,
+    MUSE_GLIMMER_30B_SPECIAL_TOKENS,
+    MUSE_GLIMMER_30B_VISION_PROCESSOR_KWARGS,
+    MUSE_GLIMMER_DEBUG_SPECIAL_TOKENS,
+    MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS,
+)
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
 from torchtitan_recipes.data import c4_document_capacity
-from torchtitan_recipes.models.muse_spark import MuseGlimmerPatchGridResize
-
-
-# Multimodal special tokens for the Muse Glimmer debug flavor. The debug tokenizer asset
-# (``./tests/assets/tokenizer``) already defines these (IDs 2004-2008, all <
-# debugmodel_mm's vocab_size=2048), so no asset change is needed.
-MUSE_GLIMMER_DEBUG_SPECIAL_TOKENS = {
-    "image_token": "<|image_pad|>",
-    "video_token": "<|video_pad|>",
-    "vision_start_token": "<|vision_start|>",
-    "vision_end_token": "<|vision_end|>",
-    "pad_token": "<|endoftext|>",
-}
-
-# ``VisionProcessor.Config`` fields, used like the special tokens:
-# ``VisionProcessor.Config(**MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS)``. The patch
-# sizes match the NaViT encoder (``patch_size``, ``patch_temporal``,
-# ``downsample_factor``), and raster order matches its row-major patch layout.
-MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
-    "patch_size": 14,
-    "temporal_patch_size": 2,
-    "spatial_merge_size": 2,
-    "image_mean": (0.5, 0.5, 0.5),
-    "image_std": (0.5, 0.5, 0.5),
-    "resize": PixelBudgetResize.Config(min_pixels=784, max_pixels=3136),
-    "patch_order": "raster",
-}
-
-# Multimodal special tokens of the released Muse Glimmer 30B tokenizer.
-MUSE_GLIMMER_30B_SPECIAL_TOKENS = {
-    "image_token": "<|patch|>",
-    "video_token": "<|video|>",
-    "vision_start_token": "<|image_start|>",
-    "vision_end_token": "<|image_end|>",
-    "pad_token": "<|finetune_right_pad|>",
-}
-
-# The released Muse Glimmer 30B image processor: closest-aspect patch grid up to
-# 4096 merged tokens, LANCZOS. Images only.
-MUSE_GLIMMER_30B_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
-    "patch_size": 14,
-    "temporal_patch_size": 2,
-    "spatial_merge_size": 2,
-    "image_mean": (0.5, 0.5, 0.5),
-    "image_std": (0.5, 0.5, 0.5),
-    "resize": MuseGlimmerPatchGridResize.Config(max_image_tokens=4096),
-    "patch_order": "raster",
-    "image_interpolation_mode": "lanczos",
-}
 
 
 def _muse_glimmer_mm_dataloader(dataset_name: str) -> GrainDataLoader.Config:
