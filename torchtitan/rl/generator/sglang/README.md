@@ -110,10 +110,10 @@ With expert parallelism, the MoE layers shard each step's tokens over the TP
 ranks, so the model pads a step to a multiple of the TP degree; attention skips
 the padding rows. The all-to-all token dispatcher reads its split sizes on the
 host, which CUDA graphs cannot capture: it needs `cuda_graph="none"`. Dist-MoE
-(`Generator.Config.dist_moe_runtime`) runs under both kinds of CUDA graphs. It
-shards a step's tokens over the TP ranks even without expert parallelism, so with
-TP > 1 it needs expert parallelism too. The other EP token dispatchers (DeepEP,
-HybridEP) are not supported.
+(`Generator.Config.dist_moe_runtime`) runs under CUDA graphs: decode graphs, and
+breakable or full prefill graphs. It shards a step's tokens over the TP ranks
+even without expert parallelism, so with TP > 1 it needs expert parallelism too.
+The other EP token dispatchers (DeepEP, HybridEP) are not supported.
 
 ## GDN and KDA
 
