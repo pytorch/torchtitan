@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 from sglang.srt.layers.attention.flashattention_backend import FlashAttentionBackend
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.model_executor.runner_utils.forward_batch import get_forward_batch
@@ -150,7 +151,8 @@ class SGLangInnerAttention(InnerAttention):
     ``RadixAttention`` stores the step's K/V into SGLang's paged KV cache and runs the
     attention backend over it, reading the step's batch metadata from the forward batch
     ``SGLangModelWrapper.forward`` publishes. Used as ``inner_attention`` of a full
-    attention layer; the q/k/v it receives are rank-local under TP.
+    attention layer; the q/k/v it receives are rank-local under TP, and may end in
+    padding rows (see ``_DecoderBody``), which it skips.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -203,7 +205,7 @@ class SGLangInnerAttention(InnerAttention):
         """Run SGLang paged attention on rank-local tensors.
 
         Returns:
-            ``(T, H, V)``.
+            ``(T, H, V)``, zeros in the padding rows.
         """
         if attention_metadata is not None:
             raise ValueError(
@@ -223,7 +225,15 @@ class SGLangInnerAttention(InnerAttention):
             raise NotImplementedError(
                 f"SGLangInnerAttention does not support {unsupported}"
             )
-        num_tokens = q_THK.shape[0]
+        forward_batch = get_forward_batch()
+        # The rows SGLang scheduled, which own a KV cache slot each.
+        num_tokens = forward_batch.out_cache_loc.shape[0]
+        num_padding = q_THK.shape[0] - num_tokens
         # RadixAttention returns (T, H * V).
-        out = self.radix_attention(q_THK, k_THK, v_THV, get_forward_batch())
-        return out.view(num_tokens, -1, self.head_dim)
+        out = self.radix_attention(
+            q_THK[:num_tokens], k_THK[:num_tokens], v_THV[:num_tokens], forward_batch
+        )
+        out = out.view(num_tokens, -1, self.head_dim)
+        if num_padding:
+            out = F.pad(out, (0, 0, 0, 0, 0, num_padding))
+        return out

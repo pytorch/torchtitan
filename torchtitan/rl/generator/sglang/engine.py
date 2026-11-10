@@ -21,6 +21,7 @@ from typing import Any, Literal
 
 import torch
 import torch.distributed as dist
+import triton
 from sglang.srt.managers.io_struct import (
     AbortReq,
     BatchTokenIDOutput,
@@ -39,11 +40,16 @@ from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.runtime_context import publish, SpawnRanks
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.utils.common import next_power_of_2
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import DebugConfig, PrecisionConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
+from torchtitan.models.common.moe.token_dispatcher import (
+    AllToAllTokenDispatcher,
+    BaseEPTokenDispatcher,
+)
 from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.sglang.attention.attention import (
@@ -133,7 +139,8 @@ class SGLangEngine(GenerationEngine):
             # cuda_graph owns SGLang's CUDA-graph settings: SGLang applies its
             # per-phase graph keys (e.g. cuda_graph_backend_decode) over
             # disable_cuda_graph, so one would capture graphs that the engine's
-            # checks of cuda_graph assume are off.
+            # checks of cuda_graph assume are off. SGLang's default capture sizes
+            # also stay within the step budget that Dist-MoE's buffers are sized for.
             owned_keys = sorted(
                 key
                 for key in self.extra_server_args
@@ -174,10 +181,24 @@ class SGLangEngine(GenerationEngine):
                 "SGLangEngine supports data_parallel_degree=1 only; run more "
                 "generators to scale out"
             )
-        if parallelism.expert_parallel_degree != 1 or dist_moe_runtime is not None:
-            raise ValueError("SGLangEngine does not support MoE expert parallelism yet")
         if parallelism.enable_sequence_parallel:
             raise ValueError("SGLangEngine does not support sequence parallelism")
+        if parallelism.expert_parallel_degree > 1:
+            # Dist-MoE experts have no token dispatcher, so this sees only the stock
+            # ones; Dist-MoE runs under CUDA graphs.
+            for fqn, dispatcher, _, _ in model.traverse(BaseEPTokenDispatcher.Config):
+                if not isinstance(dispatcher, AllToAllTokenDispatcher.Config):
+                    raise ValueError(
+                        f"{fqn}: the SGLang engine supports the all-to-all token "
+                        f"dispatcher and Dist-MoE only, got "
+                        f"{type(dispatcher).__qualname__}"
+                    )
+                if config.cuda_graph != "none":
+                    raise ValueError(
+                        "The all-to-all token dispatcher reads its split sizes on the "
+                        "host, which CUDA graphs cannot capture: set "
+                        "SGLangEngine.Config.cuda_graph to 'none', or use Dist-MoE"
+                    )
         self.config = config
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load
@@ -199,6 +220,11 @@ class SGLangEngine(GenerationEngine):
                 f"{parallelism.tensor_parallel_degree}"
             )
 
+        # TODO(https://github.com/sgl-project/sglang/issues/48460): importing SGLang
+        # replaces triton.next_power_of_2 with a host-only function, process-wide,
+        # which Triton kernels cannot call (e.g. Dist-MoE's routing kernels); make it
+        # callable in kernels again.
+        triton.next_power_of_2 = triton.constexpr_function(next_power_of_2)
         if debug.seed is not None:
             # TODO(https://github.com/sgl-project/sglang/issues/48474): SGLang's
             # deterministic mode (needed for seeded sampling, see _build_server_args)
@@ -213,6 +239,7 @@ class SGLangEngine(GenerationEngine):
             parallelism=parallelism,
             precision=precision,
             checkpointer_config=checkpointer,
+            dist_moe_runtime=dist_moe_runtime,
             model_state_dict_load_mode=model_state_dict_load_mode,
         )
         server_args = self._build_server_args(
