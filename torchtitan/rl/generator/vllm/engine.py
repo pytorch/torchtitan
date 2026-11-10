@@ -36,7 +36,10 @@ from torchtitan.rl.generator.types import (
 from torchtitan.rl.generator.vllm.batch_invariance import (
     force_logprobs_fn_for_batch_invariance,
 )
-from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
+from torchtitan.rl.generator.vllm.config import (
+    resolve_max_num_batched_tokens,
+    VLLMCudaGraphConfig,
+)
 from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
@@ -289,8 +292,12 @@ class VLLMEngine(GenerationEngine):
         # returns the raw model's logprobs, before temperature.
         engine_kwargs["logprobs_mode"] = "processed_logprobs"
         engine_kwargs["max_num_seqs"] = max_num_seqs
-        if max_num_batched_tokens is not None:
-            engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
+        max_num_batched_tokens = resolve_max_num_batched_tokens(
+            max_num_batched_tokens,
+            max_num_seqs=max_num_seqs,
+            max_model_len=model.max_context_length,
+        )
+        engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
         engine_kwargs["watermark"] = self.config.watermark
         # Smaller `priority` runs first and is preempted last; we pass `EngineRequest.group_id`
         # (-1 for all validation), so older groups have higher priority (see its docstring).

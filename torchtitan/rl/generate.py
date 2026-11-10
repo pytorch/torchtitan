@@ -40,6 +40,7 @@ from vllm.sampling_params import RequestOutputKind
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import apply_overrides, ConfigLoader
 from torchtitan.distributed.batch_invariant import set_batch_invariance
+from torchtitan.rl.generator.vllm.config import resolve_max_num_batched_tokens
 from torchtitan.rl.generator.vllm.engine import add_extra_vllm_engine_args, VLLMEngine
 from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
@@ -166,8 +167,12 @@ def generate() -> None:
     )
     engine_kwargs["max_model_len"] = model_config.max_context_length
     engine_kwargs["max_num_seqs"] = max_num_seqs
-    if gen_config.max_num_batched_tokens is not None:
-        engine_kwargs["max_num_batched_tokens"] = gen_config.max_num_batched_tokens
+    max_num_batched_tokens = resolve_max_num_batched_tokens(
+        gen_config.max_num_batched_tokens,
+        max_num_seqs=max_num_seqs,
+        max_model_len=model_config.max_context_length,
+    )
+    engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
     engine_kwargs["watermark"] = engine_config.watermark
     if not has_cuda_capability(9, 0):
         engine_kwargs["block_size"] = 256
@@ -175,7 +180,7 @@ def generate() -> None:
     vllm_compilation_config = engine_config.cuda_graph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
         max_model_len=model_config.max_context_length,
-        max_num_batched_tokens=gen_config.max_num_batched_tokens,
+        max_num_batched_tokens=max_num_batched_tokens,
         expert_sequence_parallel_size=expert_sequence_parallel_size,
         enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,
     )

@@ -63,6 +63,7 @@ from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.generator.vllm.config import resolve_max_num_batched_tokens
 from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
@@ -247,10 +248,17 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     engine_kwargs["max_model_len"] = gen_config.model.max_context_length
     max_num_seqs = config.max_num_seqs_per_generator_dp_rank
     engine_kwargs["max_num_seqs"] = max_num_seqs
+    max_num_batched_tokens = resolve_max_num_batched_tokens(
+        gen_config.max_num_batched_tokens,
+        max_num_seqs=max_num_seqs,
+        max_model_len=gen_config.model.max_context_length,
+    )
+    engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
     expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
     vllm_compilation_config = gen_config.engine.cuda_graph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
         max_model_len=gen_config.model.max_context_length,
+        max_num_batched_tokens=max_num_batched_tokens,
         expert_sequence_parallel_size=expert_sequence_parallel_size,
         enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,
     )

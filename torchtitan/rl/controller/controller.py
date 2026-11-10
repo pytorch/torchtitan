@@ -486,7 +486,8 @@ class Controller(Configurable):
         def max_num_seqs_per_generator_dp_rank(self) -> int:
             """2x each generator DP rank's even share of the training rollouts in flight,
             rounded up to a power of two, clamped to [token budget / 64, token budget]. The token
-            budget is ``generator.max_num_batched_tokens``, or 2048 when unset.
+            budget is ``generator.max_num_batched_tokens``, or 2048 when unset: the smallest value in
+            vLLM's table, and what FA2 GPUs keep (``resolve_max_num_batched_tokens``).
 
             Example (token budget unset):
                 1536 rollouts in flight, 8 generator DP ranks -> 2 x 192 = 384 -> 512
@@ -510,8 +511,8 @@ class Controller(Configurable):
             max_num_seqs = 2 ** math.ceil(
                 math.log2(max(max_num_seqs, max_num_batched_tokens / 64))
             )
-            # vLLM requires max_num_seqs <= max_num_batched_tokens, which defaults to 2048 for
-            # the engine torchtitan builds.
+            # vLLM requires max_num_seqs <= max_num_batched_tokens. An unset budget resolves to at
+            # least the max_num_seqs returned here (resolve_max_num_batched_tokens).
             return min(max_num_seqs, max_num_batched_tokens)
 
     def __init__(self, config: Config):
