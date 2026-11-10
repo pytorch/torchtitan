@@ -26,17 +26,19 @@ FlexShard is imported only when ``parallelism.fsdp_backend`` is a
 
 import logging
 import sys
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeGuard
 
 import torch
+import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 
 if TYPE_CHECKING:
     from torchtitan.components.checkpointer import CheckpointManager
-    from torchtitan.components.loss import Loss
     from torchtitan.components.optim import Optim
     from torchtitan.config.configs import DebugConfig, TrainingConfig
     from torchtitan.config.parallelism import ParallelismConfig
@@ -46,6 +48,8 @@ __all__ = [
     "FlexShardConfig",
     "apply_flex_shard_to_decoder",
     "as_fsdp2_dtensor",
+    "flex_shard_partial_backwards",
+    "is_flex_shard_module",
     "validate_flex_shard_training",
 ]
 
@@ -293,11 +297,81 @@ def as_fsdp2_dtensor(tensor: torch.Tensor, param: torch.Tensor) -> torch.Tensor:
     )
 
 
+def is_flex_shard_module(module: nn.Module | None) -> TypeGuard[nn.Module]:
+    """Whether ``module`` is a model that ``apply_flex_shard_to_decoder``
+    sharded, which holds all its buckets."""
+    # FlexShard modules exist only once flex_shard is imported, which happens
+    # only when parallelism.fsdp_backend selects it.
+    if "flex_shard" not in sys.modules:
+        return False
+    # TODO(<flex_shard issue link>): Import FlexShardModule from flex_shard once
+    # it exports it.
+    # pyrefly: ignore [missing-import]
+    from flex_shard.flex_shard.flex_shard import FlexShardModule
+
+    return isinstance(module, FlexShardModule)
+
+
+@contextmanager
+def flex_shard_partial_backwards(
+    module: nn.Module,
+    *,
+    flex_shard_module: nn.Module,
+    run_backward: bool,
+    outer_backward_follows: bool,
+) -> Iterator[Callable[[], None]]:
+    """``fsdp_partial_backwards`` for ``module`` of ``flex_shard_module``, with
+    the collectives FSDP2 issues. Yields ``before_last_forward``.
+
+    A call of ``module`` on its own leaves its bucket's forward open, so
+    FlexShard runs no post-forward for it and finishes the bucket as soon as
+    the call's input grads are ready: with gradient sync, it reduce-scatters
+    and reshards; without, it keeps the grads and reshards only with
+    ``reshard_after_backward``. That backward finishes no other bucket, so
+    unlike FSDP2, the other buckets and the root need no changes. Pipeline
+    schedules' manual finalization isn't handled, as FlexShard rejects pipeline
+    parallelism.
+
+    Without backward, the bucket's forward stays open, as FSDP2 leaves its
+    group's; ``post_validate_fsdp_for_accelerator_graph`` closes both.
+    """
+    if run_backward and not outer_backward_follows:
+        # Calls whose inputs don't require grad have no trigger that finishes
+        # the bucket. FSDP2 uses complete_fsdp_grouped_forward instead.
+        raise ValueError(
+            "parallelism.fsdp_backend=FlexShardConfig() does not support "
+            "ChunkedLossWrapper with a frozen decoder yet."
+        )
+    # pyrefly: ignore [not-callable]
+    storage = flex_shard_module.bucket_storage_of(next(module.parameters()))
+    # TODO(<flex_shard issue link>): Read the bucket's gradient sync setting, and
+    # whether it keeps grads from backwards without sync (FSDP2's
+    # _post_backward_pending), through public FlexShard APIs once it has them.
+    requires_gradient_sync = storage._requires_gradient_sync
+    has_kept_grads = storage._runtime()[1].needs_sync
+    reshard_after_backward = storage.reshard_after_backward
+
+    def before_last_forward() -> None:
+        # Kept grads wait for the outer backward, which reduce-scatters the
+        # whole bucket at once, as FSDP2 does.
+        if not has_kept_grads:
+            storage.set_requires_gradient_sync(requires_gradient_sync)
+
+    try:
+        storage.set_requires_gradient_sync(False)
+        storage.set_reshard_after_backward(False)
+        yield before_last_forward
+    finally:
+        storage.set_requires_gradient_sync(requires_gradient_sync)
+        storage.set_reshard_after_backward(reshard_after_backward)
+        if not run_backward or reshard_after_backward:
+            storage.reshard()
+
+
 def validate_flex_shard_training(
     *,
     parallelism: "ParallelismConfig",
     training: "TrainingConfig",
-    loss: "Loss.Config",
     checkpointer: "CheckpointManager.Config | None",
     optim: "Optim.Config",
     debug: "DebugConfig",
@@ -309,7 +383,6 @@ def validate_flex_shard_training(
     config loader runs again after recipes assign fields, rather than from
     ``ParallelismConfig.__post_init__``, which runs only at construction.
     """
-    from torchtitan.components.loss import ChunkedLossWrapper
     from torchtitan.components.optim.optimizer import DistMuon
     from torchtitan.distributed.accelerator_graph import accelerator_graphs_supported
 
@@ -336,8 +409,6 @@ def validate_flex_shard_training(
         unsupported.append(
             "accelerator graphs (set training.disable_accelerator_graphs=True)"
         )
-    if isinstance(loss, ChunkedLossWrapper.Config):
-        unsupported.append("ChunkedLossWrapper")
     if checkpointer is not None:
         unsupported.append("checkpointing")
     if optim.ema is not None:
