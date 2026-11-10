@@ -14,6 +14,7 @@ import copy
 import dataclasses
 from collections.abc import Callable
 from functools import partial
+from typing import Literal
 
 import torch.nn as nn
 
@@ -37,6 +38,7 @@ from torchtitan.models.common.decoder_sharding import (
     rope_cache_sharding_config,
     token_embedding_sharding_config,
 )
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 from torchtitan.models.deepseek_v3.flavors import (
@@ -44,7 +46,13 @@ from torchtitan.models.deepseek_v3.flavors import (
     build_mla_moe_layers,
     make_deepseek_v3_router_config,
 )
-from .dsa import DSAIndexerTopK, Glm5CPMLAAttention, Glm5DsaIndexer, Glm5SparseAttention
+from .dsa import (
+    DSAIndexerTopK,
+    Glm5CPMLAAttention,
+    Glm5DsaIndexer,
+    Glm5IndexerLoss,
+    Glm5SparseAttention,
+)
 
 from .model import Glm5Attention, Glm5Model, Glm5TransformerBlock
 from .mtp import Glm5MTPTransformerBlock
@@ -630,8 +638,14 @@ def build_model_config(
     *,
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
+    indexer_stage: Literal["frozen", "warmup", "sparse"] = "frozen",
+    indexer_loss_coeff: float = 1.0,
 ) -> Glm5Model.Config:
     """Build one GLM-5 flavor using TorchTitan's current model contract."""
+    if indexer_stage not in ("frozen", "warmup", "sparse"):
+        raise ValueError("GLM indexer_stage must be frozen, warmup or sparse")
+    if indexer_loss_coeff < 0:
+        raise ValueError("GLM indexer_loss_coeff must be non-negative")
     if flavor not in MODEL_FLAVORS:
         raise ValueError(
             f"Unknown glm5 flavor: {flavor}. Available: {list(MODEL_FLAVORS)}"
@@ -652,6 +666,25 @@ def build_model_config(
             "GLM DSA currently requires contiguous context parallel shards"
         )
     config = get_config(seq_len=context_len, parallelism=parallelism)
+    config.indexer_training_stage = indexer_stage
+    for layer in config.layers + list(config.mtp_layers or ()):
+        attention = layer.attention
+        assert isinstance(attention, Glm5Attention.Config)
+        leaf = attention.inner_attention.inner_attention
+        assert isinstance(leaf, Glm5SparseAttention.Config)
+        leaf.training_stage = indexer_stage
+        if indexer_stage == "warmup" and isinstance(layer.feed_forward, MoE.Config):
+            # Keep checkpointed routing bias, but freeze its optimizer-side update.
+            layer.feed_forward.freeze_expert_bias = True
+        if attention.indexer is not None:
+            attention.indexer.training_stage = indexer_stage
+            if indexer_stage != "frozen":
+                leaf.indexer_loss = Glm5IndexerLoss.Config(
+                    coeff=indexer_loss_coeff,
+                    reduce_mesh="loss",
+                    softmax_scale=attention.softmax_scale,
+                    num_heads=attention.n_heads,
+                )
     if parallelism.context_parallel_degree > 1:
         ContextParallelTransform(
             inner_attention_map={MLAAttention: Glm5CPMLAAttention}

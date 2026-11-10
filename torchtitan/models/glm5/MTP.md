@@ -1,107 +1,46 @@
-# GLM-5.2 multi-token prediction
+# GLM-5 multi-token prediction
 
-This note describes the training implementation and its boundary with
-serving-time speculative decoding.
+GLM reuses DeepSeek-V3's MTP construction, token shifting, auxiliary loss,
+shared output head and distributed lifecycle. See the
+[shared MTP documentation](../deepseek_v3/MTP.md) for those mechanics and the
+[GLM README](README.md) for recipes and validation commands. This note covers
+the GLM-specific checkpoint and DSA contracts.
 
-## Released checkpoint contract
+## Checkpoint layout
 
-The official GLM-5.2 configuration contains:
+The released GLM-5.2 configuration has 78 decoder layers and one NextN block.
+Its checkpoint stores that block under `model.layers.78`, including its DSA
+indexer, MLA, routed/shared MoE and norms, plus `enorm`, `hnorm`, `eh_proj`
+and `shared_head.norm`. The vocabulary projection uses the shared top-level
+`lm_head`; there is no additional `shared_head.head.weight`.
 
-- `num_hidden_layers = 78`
-- `num_nextn_predict_layers = 1`
-- `index_share_for_mtp_iteration = true`
+`Glm5StateDictAdapter` maps this block to native `mtp_layers.0.*`.
+Adapter tests cover native/HF round trips and the released key layout.
+GLM-5.3 uses the same architecture configurations rather than separate aliases.
 
-The safetensors index stores the NextN block under `model.layers.78`.  It is a
-full decoder block: MLA/DSA projections and indexer, routed and shared MoE
-weights, input and post-attention norms, plus the four MTP-only tensors
-`enorm`, `hnorm`, `eh_proj`, and `shared_head.norm`.  It does not store another
-vocabulary projection; the top-level `lm_head` is shared.
+References: [released configuration](https://huggingface.co/zai-org/GLM-5.2/blob/main/config.json)
+and [checkpoint index](https://huggingface.co/zai-org/GLM-5.2/blob/main/model.safetensors.index.json).
 
-Primary references:
+## DSA training differences
 
-- [GLM-5.2 config](https://huggingface.co/zai-org/GLM-5.2/blob/main/config.json)
-- [GLM-5.2 checkpoint index](https://huggingface.co/zai-org/GLM-5.2/blob/main/model.safetensors.index.json)
+For each shifted objective, GLM constructs linear-size document and validity
+metadata so DSA selections respect packed-document and padding boundaries.
+Under CP this metadata identifies local queries against the global key pool.
+`Glm5MTPTransformerBlock` specializes the attention metadata contract while
+reusing the upstream block construction. Frozen indexer work is included in
+the model's forward-only indexer FLOP correction, including MTP indexers.
 
-## Training data path
+The recipe's default `mtp_scale=0.3` follows TorchTitan's DeepSeek-V3
+convention; the released GLM configuration does not publish a training loss
+scale. Hugging Face target-decoder parity does not validate auxiliary MTP
+logits because its GLM implementation omits the NextN block.
 
-`torchtitan_recipes/tests/models/glm5.py` derives the effective MTP depth from
-`len(model_config.mtp_layers)`, passes it to the dataloader, and selects
-`MTPLoss` only for an MTP flavor.  This keeps the ordinary GLM recipe unchanged.
+## Supported boundary
 
-`Glm5Model.preprocess_inputs()` performs the following before CP sharding:
+MTP uses the shared FSDP and TP/SP lifecycle and GLM's CP metadata handling.
+PP+MTP is rejected at model configuration time; it is not silently reduced to
+base-model training.
 
-1. left-shift token ids and labels by each prediction depth;
-2. reject shifts that cross packed-document or padding boundaries;
-3. use `IGNORE_INDEX` for invalid auxiliary labels;
-4. build linear-size DSA document and validity metadata per shifted sequence;
-5. declare token, label, validity-mask, and metadata SPMD placements;
-6. return aligned tuples for the main and auxiliary objectives.
-
-The generic rolling and loss semantics are shared with DeepSeek-V3 through
-`torchtitan.models.deepseek_v3.mtp`; GLM only specializes the DSA attention
-interface and checkpoint schema.
-
-The recipe exposes `mtp_scale` explicitly. Its default value of `0.3` follows
-the TorchTitan DeepSeek-V3 training convention; the released GLM configuration
-does not publish an MTP loss scale.
-
-## Model path
-
-For depth `d`, `Glm5MTPTransformerBlock` computes:
-
-```text
-shifted embedding -- enorm --+
-                              +-- concat -- eh_proj -- DSA -- MoE -- mtp_norm
-previous hidden  -- hnorm ----+
-```
-
-The block receives the pre-final-norm hidden state from the target decoder,
-masks invalid shifted positions, executes the full GLM DSA attention and MoE
-block, and returns a normalized auxiliary hidden state.  The normal top-level
-`lm_head` projects both the target and auxiliary hidden states.  `MTPLoss`
-computes normal next-token cross entropy plus the configured weighted MTP term.
-
-The pre-final-norm input follows TorchTitan's DeepSeek-V3 training MTP
-contract. The Transformers GLM implementation currently omits this MTP layer,
-so the reduced Hugging Face parity script validates the target decoder but not
-the auxiliary MTP logits.
-
-## Checkpoint conversion
-
-`Glm5StateDictAdapter` maps native `mtp_layers.0.*` keys to HF
-`model.layers.78.*` for the released flavor.  It preserves the existing
-individual-expert/grouped-expert conversion and maps the MTP-only tensors
-explicitly.  Tests assert both a bitwise native-to-HF-to-native round trip and
-the real released key shape, including the absence of a duplicated
-`shared_head.head.weight`.
-
-## Parallelism
-
-The implementation reuses the common MTP FSDP lifecycle and MTP TP/SP sharding
-configs. GLM additionally prepares rank-local DSA query metadata under CP.
-
-Parameter and FLOP accounting includes both the 78 target decoder layers and
-the configured MTP layers.  In particular, the frozen DSA indexer is charged
-for forward work but not nonexistent backward work for every executed target
-or MTP block.  This keeps MTP on/off MFU comparisons internally consistent.
-
-### Pipeline parallelism
-
-Pipeline parallel MTP currently requires the token embedding, target decoder
-tail, MTP block, final norm, and shared lm_head to be represented coherently at
-the pipeline boundary. Model configuration rejects PP with MTP before training;
-`Glm5Model.forward()` also rejects a partition missing the embedding or lm_head.
-Until a dedicated PP contract and test exist, PP+MTP is unsupported rather
-than a fallback to non-MTP training.
-
-## Training and speculative decoding
-
-`index_share_for_mtp_iteration` is a serving optimization. A speculative
-decoder can apply the same single MTP block repeatedly: iteration zero computes
-the lightning-indexer Top-K and later iterations reuse that selection.
-
-TorchTitan's current implementation is the training objective.  It runs one
-NextN block once for each configured objective and does not contain a serving
-scheduler, KV cache, acceptance/rejection loop, or multi-stream proposer.
-Consequently, the model implements the MTP weights and auxiliary training loss,
-while iterative Top-K reuse remains outside the TorchTitan training path.
+The released `index_share_for_mtp_iteration` describes iterative index reuse
+in speculative decoding. This implementation trains the NextN objective;
+it does not provide a serving scheduler, KV cache or acceptance/rejection loop.

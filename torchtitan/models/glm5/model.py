@@ -13,7 +13,7 @@ Read this file from the outside in:
 2. ``Glm5TransformerBlock`` composes pre-norm DSA attention with either a
    dense FFN or the common TorchTitan MoE implementation.
 3. ``Glm5Attention`` expands MLA's low-rank Q/KV representations, asks the
-   frozen ``Glm5DsaIndexer`` which keys each query may attend to, and delegates
+   ``Glm5DsaIndexer`` which keys each query may attend to, and delegates
    score/value computation to ``Glm5SparseAttention`` in ``dsa.py``.
 4. ``dsa.py`` contains the indexer and selected-key gathering.
 
@@ -24,7 +24,7 @@ shapes. Distributed adaptation of this sparse path is a separate step.
 """
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import spmd_types as spmd
 
@@ -44,7 +44,7 @@ from torchtitan.models.deepseek_v3.model import (
 )
 from torchtitan.models.deepseek_v3.mtp import roll_mtp_sequence
 
-from .dsa import DsaMetadata, Glm5DsaIndexer
+from .dsa import DsaMetadata, Glm5DsaIndexer, Glm5SparseAttention
 from .state_dict_adapter import Glm5StateDictAdapter
 
 # Tensor dimensions used in this file:
@@ -68,8 +68,12 @@ class Glm5Attention(DeepSeekMLAAttention):
         index_topk: int
 
         def flops_per_token(self, seq_len: int) -> int:
+            leaf = self.inner_attention.inner_attention
+            assert isinstance(leaf, Glm5SparseAttention.Config)
             return super(Glm5Attention.Config, self).flops_per_token(
-                min(seq_len, self.index_topk)
+                seq_len
+                if leaf.training_stage == "warmup"
+                else min(seq_len, self.index_topk)
             )
 
     def __init__(self, config: Config):
@@ -85,6 +89,8 @@ class Glm5Attention(DeepSeekMLAAttention):
         *,
         topk_indices_TS: torch.Tensor | None = None,
         prepared_query: tuple[torch.Tensor, torch.Tensor] | None = None,
+        indexer_features: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x_TD, q_resid_TR = (
             self.prepare_query(x_TD) if prepared_query is None else prepared_query
@@ -114,11 +120,15 @@ class Glm5Attention(DeepSeekMLAAttention):
         with spmd.local():
             k_shared_TR = k_rope_T1R.squeeze(1)
         # Selection and value computation are separate on purpose: the indexer
-        # is frozen and discrete, while the attention path remains trainable.
+        # is discrete; the optional KL objective trains its feature projections.
         if topk_indices_TS is None:
             if self.indexer is None:
                 raise ValueError("shared-indexer attention requires top-k indices")
-            topk_indices_TS = self.indexer(x_TD, q_resid_TR, positions, attention_masks)
+            selection = self.indexer(x_TD, q_resid_TR, positions, attention_masks)
+            if isinstance(selection, tuple):
+                topk_indices_TS, indexer_features = selection
+            else:
+                topk_indices_TS = selection
         output_TNV = self.inner_attention(
             q_TNH,
             kv_TR,
@@ -126,6 +136,8 @@ class Glm5Attention(DeepSeekMLAAttention):
             attention_metadata=attention_masks,
             topk_indices_QS=topk_indices_TS,
             scale=self.softmax_scale,
+            indexer_features=indexer_features,
+            aux_loss_denominator=aux_loss_denominator,
         )
         # The contiguous view reads the attention output with bare ops.
         remat.recompute_needs_tensor(output_TNV)
@@ -133,7 +145,7 @@ class Glm5Attention(DeepSeekMLAAttention):
         return output_TD
 
     def prepare_query(self, x_TD):
-        """Share the gathered input and normalized query with the frozen indexer."""
+        """Share the gathered input and normalized query with the indexer."""
         gathered_TD = maybe_gather_tp_input(self, x_TD)
         q_resid_TR = self.wq_a(gathered_TD)
         remat.recompute_needs_tensor(q_resid_TR)
@@ -166,18 +178,23 @@ class Glm5TransformerBlock(DeepSeekV3TransformerBlock):
         normalized_TD = self.attention_norm(x_TD)
         assert isinstance(self.attention, Glm5Attention)
         prepared = self.attention.prepare_query(normalized_TD)
+        indexer_features = None
         if topk_indices_TS is None:
             if self.attention.indexer is None:
                 raise ValueError("shared-indexer block requires producer indices")
-            topk_indices_TS = self.attention.indexer(
-                *prepared, positions, attention_masks
-            )
+            selection = self.attention.indexer(*prepared, positions, attention_masks)
+            if isinstance(selection, tuple):
+                topk_indices_TS, indexer_features = selection
+            else:
+                topk_indices_TS = selection
         attention_TD = self.attention(
             normalized_TD,
             attention_masks,
             positions,
             topk_indices_TS=topk_indices_TS,
             prepared_query=prepared,
+            indexer_features=indexer_features,
+            aux_loss_denominator=aux_loss_denominator,
         )
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attention_TD)
@@ -229,11 +246,12 @@ class Glm5Model(DeepSeekV3Model):
         dim: int = 6144
         vocab_size: int = 154880
         index_sources: tuple[int, ...] = ()
+        indexer_training_stage: Literal["frozen", "warmup", "sparse"] = "frozen"
 
         def build_flops_estimator(self, model, *, seq_len, excluded_submodules=()):
-            base = super(Glm5Model.Config, self).build_flops_estimator(
-                model, seq_len=seq_len, excluded_submodules=excluded_submodules
-            )
+            from torchtitan.models.common.flops import active_parameter_flops_per_token
+
+            excluded_submodules = tuple(excluded_submodules)
             excluded_ids = {
                 id(child)
                 for parent in excluded_submodules
@@ -245,13 +263,51 @@ class Glm5Model(DeepSeekV3Model):
                 for module in model.modules()
                 if isinstance(module, Glm5DsaIndexer) and id(module) not in excluded_ids
             ]
-            # Frozen selection has forward-only projection work and global-key scoring.
-            correction = sum(
-                -4 * sum(parameter.numel() for parameter in module.parameters())
-                + 2 * module.n_heads * (module.head_dim + 1) * seq_len
-                for module in indexers
+            excluded = (*excluded_submodules, *indexers)
+            base = super(Glm5Model.Config, self).build_flops_estimator(
+                model, seq_len=seq_len, excluded_submodules=excluded
             )
-            return lambda batch: base(batch) + correction * batch["input"].numel()
+            extra = 0
+            for module in indexers:
+                projection_flops = active_parameter_flops_per_token(
+                    module, excluded_submodules=excluded_submodules
+                )
+                extra += (
+                    projection_flops // 3
+                    if module.training_stage == "frozen"
+                    else projection_flops
+                )
+                extra += 2 * module.n_heads * (module.head_dim + 1) * seq_len
+            for attention in model.modules():
+                if (
+                    isinstance(attention, Glm5Attention)
+                    and attention.indexer in indexers
+                    and self.indexer_training_stage != "frozen"
+                ):
+                    assert attention.indexer is not None
+                    idx = attention.indexer
+                    selected = (
+                        seq_len
+                        if self.indexer_training_stage == "warmup"
+                        else min(seq_len, idx.topk.index_topk)
+                    )
+                    extra += 6 * idx.n_heads * (idx.head_dim + 1) * selected
+                    extra += 2 * attention.n_heads * attention.qk_head_dim * selected
+            if self.indexer_training_stage == "warmup":
+                # Frozen backbone projections still propagate carrier/input gradients.
+                extra -= (
+                    active_parameter_flops_per_token(
+                        model, excluded_submodules=excluded
+                    )
+                    // 3
+                )
+                if model.lm_head is not None:
+                    extra -= (
+                        2
+                        * len(self.mtp_layers or ())
+                        * sum(p.numel() for p in model.lm_head.parameters())
+                    )
+            return lambda batch: base(batch) + extra * batch["input"].numel()
 
     def get_attention_masks(
         self,
@@ -269,6 +325,11 @@ class Glm5Model(DeepSeekV3Model):
 
     def __init__(self, config):
         super().__init__(config)
+        if config.indexer_training_stage == "warmup":
+            self.requires_grad_(False)
+            for module in self.modules():
+                if isinstance(module, Glm5DsaIndexer):
+                    module.requires_grad_(True)
         self.index_sources = config.index_sources
         if self.index_sources:
             if len(self.index_sources) != len(config.layers):

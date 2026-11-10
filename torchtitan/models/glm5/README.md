@@ -12,7 +12,7 @@ shared PyTorch-native components for distributed training.
 ## Model support
 
 - Multi-head latent attention (MLA)
-- DeepSeek sparse attention (DSA) with a frozen learned indexer
+- DeepSeek sparse attention (DSA), with frozen, warmup, and sparse indexer stages
 - Dense-to-MoE layer transition and shared experts
 - Cross-layer reuse of DSA index selections
 - One full NextN multi-token-prediction (MTP) block for the released model
@@ -72,7 +72,7 @@ DSA gathers the selected keys and values through Attention Gym. It does
 not use the packed-sequence `varlen` attention contract because DSA selects an
 arbitrary learned Top-K key set for each query.
 
-The frozen indexer delegates weighted-ReLU Top-K selection to Attention Gym's
+The indexer delegates discrete weighted-ReLU Top-K selection to Attention Gym's
 `lightning_indexer`, using the repository's existing `attn-gym==0.0.17`
 dependency. Like DeepSeek V4, it selects the fused implementation for FP16/BF16
 query features on NVIDIA SM90 or newer; other inputs use the FP32 reference
@@ -84,9 +84,32 @@ document-local indices are mapped back to global key indices. Under CP, the
 indexer gathers query features and weights in addition to keys to satisfy
 Attention Gym's complete-document input contract, then returns local queries'
 selections. This currently repeats indexer selection across CP ranks.
-The learned indexer is loaded from the checkpoint and remains frozen during
-continued training; this implementation does not train a new indexer with an
-auxiliary distillation loss from random initialization.
+The default continued-training recipe keeps the pretrained indexer frozen.
+Explicit `indexer_stage` settings also provide dense-attention `warmup`, which
+freezes the backbone and trains indexers, and `sparse`, which jointly trains
+the backbone and indexers. Indexer inputs and attention teacher targets are
+detached; the KL objective reuses DeepSeek-V4's `SparseIndexerLoss` and the
+shared auxiliary-loss normalization and optimizer hooks. Dense warmup is
+processed in query chunks rather than constructing a full sequence mask.
+
+```text
+warmup: frozen backbone + dense attention -> train indexer
+                         model weights
+sparse: train backbone + top-k attention -> train indexer
+```
+
+Select a stage when constructing the existing Python recipe:
+
+```python
+config = glm5_debugmodel(seq_len=128, indexer_stage="warmup")
+# Construct a separate sparse-stage recipe after warmup.
+config = glm5_debugmodel(seq_len=128, indexer_stage="sparse")
+```
+
+The native CLI loads a named, zero-argument recipe factory, not a Python call
+expression. Stage changes rebuild the
+optimizer; load the warmup model weights for sparse training using the normal
+checkpoint path. There is no automatic step-based stage switch.
 Attention uses the shared `MLAAttention` backend, or
 the GLM compact-KV adapter under CP. CP gathers normalized compressed KV
 and the shared rotary key before KV expansion. Q/KV projections, RoPE,
@@ -157,7 +180,7 @@ TorchTitan therefore models training-time MTP as a real auxiliary decoder
 depth, not as an inference-only flag.  The dataloader prepares a shifted token
 and label sequence, the GLM block builds the corresponding DSA metadata, and
 ``MTPLoss`` adds the weighted auxiliary cross-entropy objective.  See
-[`MTP.md`](MTP.md) for the data, model, checkpoint, parallelism, and validation
+[`MTP.md`](MTP.md) for the GLM-specific checkpoint, DSA, and support
 contracts.
 
 ## Validation

@@ -6,6 +6,8 @@
 
 """GLM-5 configurations used by tests and local development."""
 
+from typing import Literal
+
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
@@ -35,6 +37,8 @@ def glm5_debugmodel(
     parallelism: ParallelismConfig | None = None,
     flavor: str = "glm5_2_debugmodel",
     mtp_scale: float | None = None,
+    indexer_stage: Literal["frozen", "warmup", "sparse"] = "frozen",
+    indexer_loss_coeff: float = 1.0,
 ) -> Trainer.Config:
     """Return a deterministic small GLM-5 training recipe."""
     if parallelism is None:
@@ -43,6 +47,8 @@ def glm5_debugmodel(
         flavor,
         parallelism=parallelism,
         seq_len=seq_len,
+        indexer_stage=indexer_stage,
+        indexer_loss_coeff=indexer_loss_coeff,
     )
     num_mtp_layers = len(model_config.mtp_layers or ())
     if mtp_scale is not None and num_mtp_layers == 0:
@@ -108,12 +114,16 @@ def glm5_2_debugmodel_mtp(
     *,
     parallelism: ParallelismConfig | None = None,
     mtp_scale: float = 0.3,
+    indexer_stage: Literal["frozen", "warmup", "sparse"] = "frozen",
+    indexer_loss_coeff: float = 1.0,
 ) -> Trainer.Config:
     return glm5_debugmodel(
         seq_len,
         parallelism=parallelism,
         flavor="glm5_2_debugmodel_mtp",
         mtp_scale=mtp_scale,
+        indexer_stage=indexer_stage,
+        indexer_loss_coeff=indexer_loss_coeff,
     )
 
 

@@ -13,6 +13,7 @@ gathered backend; Attention Gym owns the weighted-ReLU top-k selection.
 """
 
 from dataclasses import dataclass
+from typing import Literal
 
 import spmd_types as spmd
 import torch
@@ -27,10 +28,12 @@ from torchtitan.models.common import ComplexRoPE, LayerNorm, Linear
 from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.attention.cp_mla import AllGatherKVMLAFlexAttention
 from torchtitan.models.common.attn_gym import (
+    AuxRequest,
     gather_attn,
     lightning_indexer,
     require_attn_gym,
 )
+from torchtitan.models.deepseek_v4.compressor import SparseIndexerLoss
 from torchtitan.tools.utils import has_cuda_capability
 
 
@@ -38,11 +41,11 @@ from torchtitan.tools.utils import has_cuda_capability
 class DsaMetadata:
     """Global keys in CP order and rank-local query indices; all tensors are 1D."""
 
-    positions_T: torch.Tensor
-    documents_T: torch.Tensor
-    valid_T: torch.Tensor
-    query_indices_Q: torch.Tensor
-    order_T: torch.Tensor
+    positions_T: torch.Tensor  # noqa: N815
+    documents_T: torch.Tensor  # noqa: N815
+    valid_T: torch.Tensor  # noqa: N815
+    query_indices_Q: torch.Tensor  # noqa: N815
+    order_T: torch.Tensor  # noqa: N815
 
     @classmethod
     def from_positions(cls, positions, padding_mask=None):
@@ -186,7 +189,7 @@ class DSAIndexerTopK(Module):
 
 
 class Glm5DsaIndexer(Module):
-    """Frozen pretrained query-to-key selector used by DSA.
+    """Query-to-key selector with detached backbone inputs for distillation.
 
     ``hidden_states_TD`` supplies both the shared key and per-head mixing
     weights. ``q_resid_TR`` reuses MLA's normalized Q LoRA representation so
@@ -206,6 +209,11 @@ class Glm5DsaIndexer(Module):
         weights_proj: Linear.Config
         rope: ComplexRoPE.Config
         topk: DSAIndexerTopK.Config
+        training_stage: Literal["frozen", "warmup", "sparse"] = "frozen"
+
+        def __post_init__(self):
+            if self.training_stage not in ("frozen", "warmup", "sparse"):
+                raise ValueError("Unknown GLM indexer training stage")
 
     def __init__(self, config: Config):
         super().__init__()
@@ -218,19 +226,30 @@ class Glm5DsaIndexer(Module):
         self.weights_proj = config.weights_proj.build().float()
         self.rope = config.rope.build()
         self.topk = config.topk.build()
-        # Released GLM-5 checkpoints contain a pretrained indexer. This model
-        # has no auxiliary indexer objective, so LM training must keep it fixed
-        # and exclude its parameters from optimizer state.
-        self.requires_grad_(False)
+        self.training_stage = config.training_stage
+        self.requires_grad_(config.training_stage != "frozen")
 
-    @torch.no_grad()
     def forward(
         self,
         hidden_states_TD: torch.Tensor,
         q_resid_TR: torch.Tensor,
         positions_T: torch.Tensor,
         attention_mask_TK: DsaMetadata | None,
-    ) -> torch.Tensor:
+    ):
+        # Indexer distillation must not optimize the backbone feature producer.
+        remat.recompute_needs_tensor(hidden_states_TD, q_resid_TR)
+        with torch.set_grad_enabled(
+            torch.is_grad_enabled() and self.training_stage != "frozen"
+        ):
+            features = self._project_features(
+                hidden_states_TD.detach(), q_resid_TR.detach(), positions_T
+            )
+        if attention_mask_TK is None:
+            attention_mask_TK = DsaMetadata.from_positions(positions_T)
+        indices = self.topk(*features, metadata=attention_mask_TK)
+        return indices if self.training_stage == "frozen" else (indices, features)
+
+    def _project_features(self, hidden_states_TD, q_resid_TR, positions_T):
         T = hidden_states_TD.shape[0]
         # Build query and key features in the same indexer space. The key has a
         # singleton head dimension because every query head searches one shared
@@ -281,9 +300,57 @@ class Glm5DsaIndexer(Module):
             )
         remat.recompute_needs_tensor(weights_TN)
         # Attention Gym applies the 1/sqrt(N*H) indexer normalization.
-        if attention_mask_TK is None:
-            attention_mask_TK = DsaMetadata.from_positions(positions_T)
-        return self.topk(q_TNH, k_TH, weights_TN, metadata=attention_mask_TK)
+        return q_TNH, k_TH, weights_TN
+
+
+class Glm5IndexerLoss(SparseIndexerLoss):
+    """Reuse DSV4 normalized KL and injection with GLM's per-head key pool."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(SparseIndexerLoss.Config):
+        compress_ratio: int = 1
+
+    @torch.no_grad()
+    def _teacher(
+        self,
+        q_THD: torch.Tensor,
+        cmp_k_SD: torch.Tensor,
+        topk_indices_TK: torch.Tensor,
+        attn_lse_TH: torch.Tensor,
+        cu_seqlens: torch.Tensor | None,
+        padding_mask_T: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        from torch.distributed._functional_collectives import all_reduce, wait_tensor
+
+        from torchtitan.distributed.spmd_types import spmd_mesh_size
+
+        if q_THD.shape[1] * spmd_mesh_size("tp") != self.num_heads:
+            raise ValueError("Teacher head count does not match TP-sharded GLM queries")
+        targets = []
+        with torch.autocast(device_type=q_THD.device.type, enabled=False):
+            for start in range(0, q_THD.shape[0], self.chunk_size):
+                stop = start + self.chunk_size
+                indices_QS = topk_indices_TK[start:stop]
+                keys_QSHD = cmp_k_SD[indices_QS.clamp_min(0).long()].float()
+                logits_QHS = (
+                    torch.einsum("qhd,qshd->qhs", q_THD[start:stop].float(), keys_QSHD)
+                    * self.softmax_scale
+                )
+                logits_QHS = logits_QHS - attn_lse_TH[start:stop, :, None].float()
+                valid_QS = indices_QS >= 0
+                if padding_mask_T is not None:
+                    valid_QS = valid_QS & ~padding_mask_T[start:stop, None]
+                targets.append(
+                    logits_QHS.masked_fill(~valid_QS[:, None], -torch.inf)
+                    .exp()
+                    .sum(dim=1)
+                    / self.num_heads
+                )
+        targets_QS = torch.cat(targets)
+        group = spmd_mesh_group("tp")
+        if group is not None:
+            targets_QS = wait_tensor(all_reduce(targets_QS, "sum", group))
+        return targets_QS
 
 
 def filter_dsa_indices(
@@ -325,6 +392,13 @@ class Glm5SparseAttention(InnerAttention):
 
     @dataclass(kw_only=True, slots=True)
     class Config(InnerAttention.Config):
+        training_stage: Literal["frozen", "warmup", "sparse"] = "frozen"
+        indexer_loss: Glm5IndexerLoss.Config | None = None
+
+        def __post_init__(self):
+            if self.training_stage not in ("frozen", "warmup", "sparse"):
+                raise ValueError("Unknown GLM indexer training stage")
+
         @property
         def is_full_attention(self) -> bool:
             return True
@@ -332,6 +406,8 @@ class Glm5SparseAttention(InnerAttention):
     def __init__(self, config):
         super().__init__()
         require_attn_gym(gather_attn)
+        self.training_stage = config.training_stage
+        self.indexer_loss = config.indexer_loss.build() if config.indexer_loss else None
 
     def forward(
         self,
@@ -342,10 +418,74 @@ class Glm5SparseAttention(InnerAttention):
         attention_metadata: DsaMetadata,
         topk_indices_QS: torch.Tensor,
         scale: float,
+        indexer_features: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.training_stage == "warmup":
+            # Bound dense teacher indices/scores by query chunks, never Q x K.
+            outputs = []
+            keys_K = torch.arange(k_THK.shape[0], device=q_THK.device)
+            for start in range(0, q_THK.shape[0], 128):
+                stop = min(start + 128, q_THK.shape[0])
+                queries_Q = attention_metadata.query_indices_Q[start:stop]
+                valid_QK = (
+                    attention_metadata.valid_T[queries_Q, None]
+                    & attention_metadata.valid_T[None, :]
+                    & (
+                        attention_metadata.documents_T[queries_Q, None]
+                        == attention_metadata.documents_T[None, :]
+                    )
+                    & (
+                        attention_metadata.positions_T[queries_Q, None]
+                        >= attention_metadata.positions_T[None, :]
+                    )
+                )
+                indices_QK = keys_K.expand(stop - start, -1).masked_fill(~valid_QK, -1)
+                features = (
+                    None
+                    if indexer_features is None
+                    else (
+                        indexer_features[0][start:stop],
+                        indexer_features[1],
+                        indexer_features[2][start:stop],
+                    )
+                )
+                outputs.append(
+                    self._attend(
+                        q_THK[start:stop],
+                        k_THK,
+                        v_THV,
+                        indices_QK,
+                        scale,
+                        features,
+                        aux_loss_denominator,
+                    )
+                )
+            return torch.cat(outputs)
         indices_QS = filter_dsa_indices(topk_indices_QS, attention_metadata)
+        return self._attend(
+            q_THK,
+            k_THK,
+            v_THV,
+            indices_QS,
+            scale,
+            indexer_features,
+            aux_loss_denominator,
+        )
+
+    def _attend(
+        self,
+        q_THK,
+        k_THK,
+        v_THV,
+        indices_QS,
+        scale,
+        indexer_features,
+        aux_loss_denominator,
+    ):
         Q, H, _ = q_THK.shape
         K, _, V = v_THV.shape
+        train_indexer = self.training and self.indexer_loss is not None
         with spmd.no_typecheck():
             query_1HQD = (
                 torch.cat((q_THK, q_THK.new_zeros(Q, H, V)), dim=-1)
@@ -355,7 +495,7 @@ class Glm5SparseAttention(InnerAttention):
             pool_1HKD = torch.cat((k_THK, v_THV), dim=-1).transpose(0, 1).unsqueeze(0)
             # No local window: real document/causal rules are already in indices.
             # Explicit offsets select the gathered (not dense) reference path.
-            output_1HQD = gather_attn(
+            output_1HQD, aux = gather_attn(
                 query_1HQD,
                 query_1HQD.new_zeros(()).expand_as(query_1HQD),
                 pool_1HKD,
@@ -366,8 +506,47 @@ class Glm5SparseAttention(InnerAttention):
                 * K,
                 scale=scale,
                 impl="fused" if q_THK.device.type == "cuda" else "reference",
+                return_aux=AuxRequest(lse=train_indexer),
             )
             output_THV = output_1HQD[..., -V:].squeeze(0).transpose(0, 1)
+            if train_indexer:
+                assert self.indexer_loss is not None
+                assert indexer_features is not None
+                assert aux.lse is not None
+                if aux_loss_denominator is None:
+                    raise ValueError(
+                        "Indexer training requires a global token denominator"
+                    )
+                qi_QNH, ki_KH, weights_QN = indexer_features
+                scores = []
+                for start in range(0, Q, self.indexer_loss.chunk_size):
+                    stop = start + self.indexer_loss.chunk_size
+                    selected_QSH = ki_KH[indices_QS[start:stop].clamp_min(0).long()]
+                    with torch.autocast(device_type=q_THK.device.type, enabled=False):
+                        scores_QNS = torch.einsum(
+                            "qnh,qsh->qns",
+                            qi_QNH[start:stop].float(),
+                            selected_QSH.float(),
+                        )
+                    scores.append(
+                        (
+                            scores_QNS.relu()
+                            * weights_QN[start:stop].float().unsqueeze(-1)
+                        ).sum(1)
+                    )
+                scores_QS = torch.cat(scores)
+                scores_QS = scores_QS / (qi_QNH.shape[1] * qi_QNH.shape[2]) ** 0.5
+                scores_QS = scores_QS.masked_fill(indices_QS < 0, -torch.inf)
+                output_THV = self.indexer_loss(
+                    q_THK.detach(),
+                    k_THK.detach(),
+                    indices_QS,
+                    scores_QS,
+                    aux.lse.squeeze(0).transpose(0, 1).detach(),
+                    None,
+                    carrier=output_THV,
+                    denominator=aux_loss_denominator,
+                )
         if spmd.is_type_checking():
             spmd.assert_type(
                 output_THV, spmd.get_local_type(q_THK), spmd.get_partition_spec(q_THK)

@@ -49,7 +49,10 @@ class Glm5MTPTransformerBlock(MTPTransformerBlock):
         )
         remat.recompute_needs_tensor(h_TD)
         attention_TD = self.attention(
-            self.attention_norm(h_TD), attention_metadata, positions
+            self.attention_norm(h_TD),
+            attention_metadata,
+            positions,
+            aux_loss_denominator=aux_loss_denominator,
         )
         remat.recompute_needs_tensor(attention_TD)
         h_TD = h_TD + attention_TD
