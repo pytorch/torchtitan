@@ -45,6 +45,29 @@ def validate_model_training_config(
         LocalTokenDispatcher,
     )
 
+    model_cls = type(model)._owner
+    if model_cls is not None:
+        model_name = model_cls.__name__
+        if (
+            not getattr(model_cls, "supports_tensor_parallel", True)
+            and parallelism.tensor_parallel_degree > 1
+        ):
+            raise ValueError(
+                f"{model_name} does not support tensor parallelism; set "
+                f"parallelism.tensor_parallel_degree to 1 (got "
+                f"{parallelism.tensor_parallel_degree})."
+            )
+
+        if (
+            not list(model.traverse(MoE.Config))
+            and parallelism.expert_parallel_degree > 1
+        ):
+            raise ValueError(
+                f"{model_name} has no MoE layers; set "
+                f"parallelism.expert_parallel_degree to 1 (got "
+                f"{parallelism.expert_parallel_degree})."
+            )
+
     if isinstance(model, Decoder.Config):
         if model.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
             raise NotImplementedError(

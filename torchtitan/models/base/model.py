@@ -126,6 +126,7 @@ class BaseModel(Module, ABC):
     pipeline_first_stage_module_fqns: ClassVar[tuple[str, ...]] = ()
     pipeline_last_stage_module_fqns: ClassVar[tuple[str, ...]] = ()
     supports_pipeline_parallel: ClassVar[bool] = True
+    supports_tensor_parallel: ClassVar[bool] = True
 
     def pipeline(self, **kwargs: Any) -> tuple[Any, list[BaseModel], bool, bool]:
         """Partition the model and build its pipeline schedule."""
