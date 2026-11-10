@@ -8,9 +8,11 @@
 initial weights, and loads model state dicts into it. Shared by every engine's model
 wrapper; the wrappers replace the attention layers before the build."""
 
+import logging
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
+import spmd_types as spmd
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -23,11 +25,14 @@ from torchtitan.components import loss as _loss  # noqa: F401
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.tools.utils import set_default_dtype
+
+logger = logging.getLogger(__name__)
 
 
 def get_attention_dimensions(
@@ -148,6 +153,89 @@ def build_inference_model(
         with parallelism_context.activate_spmd():
             model.init_weights(buffer_device=None)
     return model, parallelism_context
+
+
+def compute_logits(
+    model: Decoder,
+    hidden_states: torch.Tensor,
+    parallelism_context: ParallelismContext,
+) -> torch.Tensor:
+    """Full-vocabulary logits of ``hidden_states`` on every rank: the model's lm_head,
+    gathered over TP (lm_head returns vocab-sharded logits under TP)."""
+    with parallelism_context.activate_spmd():
+        logits = model.lm_head(hidden_states)
+        if parallelism_context.tp_enabled:
+            mesh = current_spmd_mesh()
+            assert mesh is not None
+            logits = spmd.redistribute(
+                logits,
+                mesh.get_group("tp"),
+                src=spmd.S(-1),
+                dst=spmd.R,
+                backward_options={"op_dtype": logits.dtype},
+            )
+    return logits
+
+
+# The engine TP all-reduce that route_tp_all_reduce's op swaps call. Process-global:
+# the swaps are installed once, and a later call (e.g. a rebuilt engine) replaces it.
+_tp_all_reduce: Callable[[torch.Tensor], torch.Tensor] | None = None
+
+
+def route_tp_all_reduce(all_reduce: Callable[[torch.Tensor], torch.Tensor]) -> None:
+    """Route the model's tensor-parallel sum all-reduces through an engine's TP
+    all-reduce (e.g. its custom one-shot all-reduce) instead of NCCL's ring, for
+    the steps outside batch-invariant mode.
+
+    ``all_reduce`` sums a tensor over the engine's TP group: the same ranks as the
+    model's TP mesh axis, in the group that owns the engine's communicator buffers.
+    Every routed sum is assumed to be over those ranks; TP is the only axis the
+    generator's forward reduces over. ``all_reduce`` must be capturable in CUDA
+    graphs over the expandable_segments (VMM) memory the RL stack enables. It may
+    reduce in place and return its input (SGLang's NCCL fallback does): a Partial
+    input is dead once reduced.
+
+    Two entry points are swapped:
+
+    1. ``torch.ops._c10d_functional.all_reduce``, which every DTensor Partial ->
+       Replicate redistribute calls. DTensor wraps the synchronous result in an
+       AsyncCollectiveTensor whose wait_tensor is a no-op. Only sum reductions are
+       routed; others fall through to the original op.
+    2. ``spmd.redistribute`` from Partial to Replicate or Invariant, without grad.
+       Its all-reduce reaches the first swap too (through funcol), but calling
+       ``all_reduce`` directly skips spmd's autograd Function and funcol's
+       wrapping: about 2-3% of a vLLM decode step at TP 2 (Qwen3-0.6B, GB300).
+       Under grad, spmd.redistribute keeps its dst-dependent backward.
+
+    TODO: this is a stopgap to close the generator's TP all-reduce perf gap.
+    Improve our native (DTensor) all-reduce path and remove this patch.
+    """
+    global _tp_all_reduce
+    installed = _tp_all_reduce is not None
+    _tp_all_reduce = all_reduce
+    if installed:
+        return
+
+    c10d = torch.ops._c10d_functional
+    # Op schema: all_reduce(Tensor input, str reduce_op, Any group_name) -> Tensor.
+    original_all_reduce = c10d.all_reduce
+
+    def routed_all_reduce(input, reduce_op, group_name):
+        if reduce_op == "sum":
+            return _tp_all_reduce(input)
+        return original_all_reduce(input, reduce_op, group_name)
+
+    c10d.all_reduce = routed_all_reduce
+
+    original_redistribute = spmd.redistribute
+
+    def redistribute(x, group, *, src, dst, **kwargs):
+        if src == spmd.P and dst in (spmd.R, spmd.I) and not torch.is_grad_enabled():
+            return _tp_all_reduce(x)
+        return original_redistribute(x, group, src=src, dst=dst, **kwargs)
+
+    spmd.redistribute = redistribute
+    logger.info("Routed the model's TP sum all-reduces through the engine's all-reduce")
 
 
 def _load_initial_weights(

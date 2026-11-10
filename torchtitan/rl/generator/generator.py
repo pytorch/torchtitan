@@ -61,8 +61,9 @@ class Generator(Configurable):
       model state dict loads on every rank;
     - `RequestDispatcher` (`dispatcher.py`): routes requests across data-parallel replicas and
       resolves each call's reply when its request finishes;
-    - `GenerationEngine` (`engine.py`): the inference engine interface, implemented for vLLM by
-      `VLLMEngine` (`vllm/engine.py`) and selected by `Config.engine`.
+    - `GenerationEngine` (`engine.py`): the inference engine interface, implemented by
+      `VLLMEngine` (`vllm/engine.py`) and `SGLangEngine` (`sglang/engine.py`) and selected by
+      `Config.engine`.
 
     `prefetch_model_state_dict` runs on the caller's event loop and writes the staging buffers the
     engine loop reads on a load: the router awaits it before `load_model_state_dict`, and the

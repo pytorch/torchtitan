@@ -211,10 +211,10 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
             # The v2 logprob Triton kernel bypasses the aten overrides. Apply the
             # same generator-side patch the production Generator does.
             from torchtitan.rl.generator.vllm.batch_invariance import (
-                force_logprobs_fn_for_batch_invariance,
+                force_trainer_logprobs_for_batch_invariance,
             )
 
-            force_logprobs_fn_for_batch_invariance()
+            force_trainer_logprobs_for_batch_invariance()
         backend_enum = AttentionBackendEnum.CUSTOM
 
     _set_generator_determinism(gen_config.debug)
@@ -546,7 +546,7 @@ _FILLER_TEXT = (
 )
 
 
-def _make_prompt_tokens(batch_size, prompt_length, tokenizer):
+def make_prompt_tokens(batch_size, prompt_length, tokenizer):
     """Create token ID sequences of the given prompt_length.
 
     For batch_size > 1, varies lengths across the batch (first seq at max,
@@ -687,7 +687,7 @@ class BitwiseParityTestBase(unittest.TestCase):
             _sync_trainer_weights_to_vllm(cls.model, cls.engine)
 
         tokenizer = cls.engine.get_tokenizer()
-        cls.prompt_ids = _make_prompt_tokens(
+        cls.prompt_ids = make_prompt_tokens(
             cls.BATCH_SIZE, cls.PROMPT_LENGTH, tokenizer
         )
 

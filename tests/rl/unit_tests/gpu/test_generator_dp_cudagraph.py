@@ -35,8 +35,8 @@ from vllm.config import CUDAGraphMode
 from vllm.sampling_params import RequestOutputKind
 
 from tests.rl.unit_tests.gpu.test_bitwise_parity import (
-    _make_prompt_tokens,
     build_inference_engine,
+    make_prompt_tokens,
 )
 
 # Runs under a torchrun launch with two or more GPUs.
@@ -168,14 +168,14 @@ def test_vllm_dp_decode_graphs_with_prefilling_peer():
     generator.gpu_memory_limit = 0.5
 
     with _dp_engine(config) as (engine, records, max_decode_capture_size):
-        prompts = _make_prompt_tokens(3, 64, engine.get_tokenizer())
+        prompts = make_prompt_tokens(3, 64, engine.get_tokenizer())
         alone = _run(engine, "alone", prompts, _greedy_params())
         alone_records = records[:]
         records.clear()
         engine.reset_prefix_cache()
         long_prompt = None
         if dist.get_rank() == 0:
-            long_prompt = _make_prompt_tokens(
+            long_prompt = make_prompt_tokens(
                 1, LONG_PROMPT_TOKENS, engine.get_tokenizer()
             )[0]
         beside_prefill = _run(
@@ -223,10 +223,10 @@ def test_vllm_dp_linear_attention_full_graphs():
 
     with _dp_engine(config) as (engine, records, max_decode_capture_size):
         tokenizer = engine.get_tokenizer()
-        prompts = _make_prompt_tokens(3, 64, tokenizer)
+        prompts = make_prompt_tokens(3, 64, tokenizer)
         long_prompt = None
         if dist.get_rank() == 0:
-            long_prompt = _make_prompt_tokens(1, LONG_PROMPT_TOKENS, tokenizer)[0]
+            long_prompt = make_prompt_tokens(1, LONG_PROMPT_TOKENS, tokenizer)[0]
         _run(engine, "busy", prompts, _greedy_params(), long_prompt=long_prompt)
         busy_records = records[:]
         records.clear()

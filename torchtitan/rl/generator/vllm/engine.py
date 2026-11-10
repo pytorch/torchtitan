@@ -34,7 +34,7 @@ from torchtitan.rl.generator.types import (
     SamplingConfig,
 )
 from torchtitan.rl.generator.vllm.batch_invariance import (
-    force_logprobs_fn_for_batch_invariance,
+    force_trainer_logprobs_for_batch_invariance,
 )
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.registry import (
@@ -231,7 +231,7 @@ class VLLMEngine(GenerationEngine):
         if batch_invariant:
             # The vLLM v2 logprob Triton kernel bypasses the batch-invariant aten
             # overrides; route it through trainer's function to match the trainer exactly.
-            force_logprobs_fn_for_batch_invariance()
+            force_trainer_logprobs_for_batch_invariance()
 
     def _build_engine_args(
         self,

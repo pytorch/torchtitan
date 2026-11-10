@@ -1,0 +1,144 @@
+# SGLang generator engine
+
+**Status:** an alternative to the vLLM engine. Verified only at SGLang
+`851642ade`, which `scripts/install_rl_env.sh --sglang` installs; CI runs
+`test_sglang_bitwise_parity.py` on B200 (`integration_test_rl_b200.yaml`). It
+relies on private SGLang APIs (see the TODOs linking sgl-project/sglang issues),
+so other SGLang versions may break it.
+
+`SGLangEngine` runs the generator's TorchTitan model inside
+[SGLang](https://github.com/sgl-project/sglang), as `VLLMEngine` does inside
+vLLM. SGLang provides KV-cache management (paged KV pool, radix prefix cache)
+and scheduling (continuous batching, chunked prefill, priority, overlap
+scheduling, CUDA graphs); the model and its attention kernel are TorchTitan's.
+
+```
+Generator engine loop (every rank, SPMD)
+  SGLangEngine
+    add_requests ----> Scheduler.process_input_requests   (no tokenizer/detokenizer procs)
+    step ------------> one iteration of Scheduler.event_loop_overlap
+                          ModelRunner -> SGLangModelWrapper.forward(input_ids, positions, forward_batch)
+                                           TorchTitan Decoder
+                                             Attention -> SGLangInnerAttention -> RadixAttention
+                                                            TorchTitanVarlenAttnBackend:
+                                                            SGLang's paged-KV metadata,
+                                                            torch varlen FlashAttention (the trainer's kernel)
+                                           lm_head + TP gather -> SGLang LogitsProcessor / Sampler
+    load_model_state_dict -> ModelStateDictLoader (FSDP groups, in place: CUDA graphs stay valid)
+```
+
+Each rank builds its own SGLang `Scheduler` in-process. SGLang's TP
+schedulers make identical scheduling decisions, which is the contract the
+engine loop already relies on.
+
+## Use it
+
+Select it by config type:
+
+```python
+from torchtitan.rl.generator.sglang.engine import SGLangEngine
+
+generator=Generator.Config(..., engine=SGLangEngine.Config())
+```
+
+`torchtitan_recipes.rl.alphabet_sort.rl_grpo_qwen3_0_6b_varlen_sglang` is a
+complete recipe (6 GPUs: 4 generator + 2 trainer).
+
+## Environment
+
+SGLang pins an older PyTorch than TorchTitan's nightly, so install it into its
+own environment on top of the RL environment, without replacing PyTorch:
+
+```bash
+uv venv --python 3.12 .venv-sglang && source .venv-sglang/bin/activate
+# The RL environment: PyTorch and vLLM nightlies (batch-invariant mode uses vLLM's
+# batch-invariant bmm), TorchStore and FlashAttention; then SGLang at the verified
+# commit, keeping the RL environment's PyTorch.
+scripts/install_rl_env.sh --sglang
+```
+
+## Supported
+
+| Feature | Status |
+| --- | --- |
+| Dense softmax attention, varlen backend (Qwen3, Llama 3) | Supported |
+| Tensor parallelism | Supported; outside batch-invariant mode, the model's TP all-reduces run on SGLang's TP all-reduce (custom all-reduce) instead of NCCL |
+| CUDA graphs (decode, and breakable prefill graphs), overlap scheduling, chunked prefill | Supported |
+| Priority scheduling by rollout group | Supported |
+| Model state dict loads (`cpu_prefetch`, `gpu_fetch`) | Supported |
+| Policy-version prefix cache isolation | Supported (`cache_salt`) |
+| `reset_kv_cache_on_model_state_dict_load` | Supported: running requests are retracted and recompute their KV |
+| Multi-turn session KV | Supported, always on; see below |
+| CPU KV offload (SGLang HiCache) | Supported through `extra_server_args`; see below |
+| Batch-invariant mode | Supported; see below |
+| Per-request metrics (queue time, TTFT, prefill, decode, preemptions, cached tokens) | Supported |
+| Data parallelism within a generator | Not supported: run more generators |
+| Flex attention, MLA, GDN/KDA, sliding window, attention sinks | Not supported |
+| MoE expert parallelism, sequence parallelism | Not supported |
+
+Unsupported configurations raise at engine build.
+
+## CUDA graphs
+
+`SGLangEngine.Config.cuda_graph` picks what SGLang captures. SGLang runs decode
+and prefill in separate batches; `"decode"` captures full graphs for decode
+batches. The default, `"breakable"`, also captures prefill batches as SGLang's
+breakable CUDA graphs: the model runs in graph segments, with attention eager in
+between.
+Without them, prefill is bound by the eager model's CPU overhead (about 7x the
+GPU time of a 16K-token prefill chunk of Qwen3-0.6B at TP 2). Capture adds
+about 30 s to startup; `"decode"` skips it.
+
+Attention kernels compile on first use for each kernel variant, so the first
+prefill batches of a run can take a few seconds.
+
+## Multi-turn sessions
+
+Each request carries its rollout's `routing_session_id` as an SGLang session.
+When a turn finishes, SGLang's radix cache references the session's cached
+prefix (prompt and completion) until the rollout ends and the engine loop
+releases the session or its group. Eviction takes unreferenced KV first and
+referenced KV only when nothing else is left, so the next turn usually reuses
+the whole history; no request ever waits for a held session.
+
+## CPU KV offload
+
+SGLang's hierarchical cache keeps KV evicted from GPU memory in host memory and
+loads it back on a prefix hit:
+
+```python
+SGLangEngine.Config(
+    extra_server_args={
+        "enable_hierarchical_cache": True,
+        "hicache_size": 64,  # GB of host memory per rank
+        "hicache_write_policy": "write_back",
+    }
+)
+```
+
+KV loaded back is bitwise identical to recomputed KV (checked in batch-invariant
+mode on a multi-turn workload), and a reset on model state dict load clears the
+host cache too. It pays off when recomputing a prefix costs more than copying
+its KV: for Qwen3-0.6B, recompute is faster.
+
+## Seeds
+
+SGLang samples with each request's seed only in its deterministic mode, which
+the engine turns on with `DebugConfig(seed=...)`; otherwise a request with a seed
+is rejected. A seed makes sampling reproducible for given logits; the logits
+themselves are reproducible across batches only in batch-invariant mode.
+
+## Batch-invariant mode
+
+With `DebugConfig(batch_invariant=True)`, the generator matches the trainer's
+logprobs bitwise at matched TP (see `torchtitan/rl/BITWISE_PARITY.md`):
+
+- attention runs the trainer's varlen FlashAttention with `num_splits=1`
+  (`torchtitan/rl/generator/attention/attention.py`, shared with the vLLM engine);
+- the sampled tokens' logprobs come from the trainer's `compute_logprobs` on
+  `logits / temperature` (`batch_invariance.py`);
+- SGLang's custom all-reduce is off, and the model's TP all-reduces run on NCCL.
+
+`tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py` checks trainer vs.
+SGLang decode parity, before and after an in-place model state dict load, and
+SGLang decode batch invariance.
