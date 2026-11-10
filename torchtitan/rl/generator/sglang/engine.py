@@ -698,8 +698,10 @@ class SGLangEngine(GenerationEngine):
 
 
 class _OutputCollector:
-    """The scheduler's output sink (no tokenizer or detokenizer process runs,
-    ``skip_tokenizer_init``): keeps the token ids, logprobs and aborts of each request.
+    """Stands in for the scheduler's sockets to the tokenizer and detokenizer processes.
+
+    No tokenization or detokenization runs (``skip_tokenizer_init``): the scheduler
+    hands its outputs to this object (its ``output_sink``) instead of those processes.
 
     SGLang sends a request's tokens and logprobs in increments: every
     ``SGLANG_FORCE_STREAM_INTERVAL`` tokens even without streaming, and the rest when it
