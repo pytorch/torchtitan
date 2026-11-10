@@ -23,7 +23,7 @@ separately in ``sharding.py``; the formulas below describe global logical
 shapes. Distributed adaptation of this sparse path is a separate step.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import spmd_types as spmd
@@ -32,7 +32,6 @@ import torch
 import torch_remat as remat
 
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -230,7 +229,6 @@ class Glm5Model(DeepSeekV3Model):
         dim: int = 6144
         vocab_size: int = 154880
         index_sources: tuple[int, ...] = ()
-        local_compile: LocalCompileConfig = field(default_factory=LocalCompileConfig)
 
         def build_flops_estimator(self, model, *, seq_len, excluded_submodules=()):
             base = super(Glm5Model.Config, self).build_flops_estimator(

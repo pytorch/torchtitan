@@ -28,8 +28,8 @@ from torchtitan.models.common import (
     RMSNorm,
     Sigmoid,
 )
-from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
 from torchtitan.models.common.attention import MLAAttention
+from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
 from torchtitan.models.common.decoder_sharding import (
     lm_head_sharding_config,
     pre_lm_head_norm_sharding_config,
@@ -38,11 +38,11 @@ from torchtitan.models.common.decoder_sharding import (
     token_embedding_sharding_config,
 )
 from torchtitan.models.common.param_init import depth_scaled_std
+from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 from torchtitan.models.deepseek_v3.flavors import (
     _build_mtp_layers,
     build_mla_moe_layers,
     make_deepseek_v3_router_config,
-    make_mla_attention_config,
 )
 from .dsa import DSAIndexerTopK, Glm5CPMLAAttention, Glm5DsaIndexer, Glm5SparseAttention
 
@@ -66,7 +66,6 @@ __all__ = [
     "build_glm5_layers",
     "MODEL_FLAVORS",
     "build_model_config",
-    "make_glm5_attention_config",
 ]
 
 
@@ -125,46 +124,16 @@ def _depth_experts_init(layer_id: int) -> dict[str, Callable]:
     }
 
 
-def make_glm5_attention_config(
+def _make_glm5_attention_config(
+    base: DeepSeekMLAAttention.Config,
     *,
-    layer_id: int,
-    dim: int,
-    n_heads: int,
-    q_lora_rank: int,
-    kv_lora_rank: int,
-    qk_nope_head_dim: int,
-    qk_rope_head_dim: int,
-    v_head_dim: int,
     index_n_heads: int,
     index_head_dim: int,
     index_topk: int,
     mla_norm_eps: float,
-    rope: ComplexRoPE.Config,
     enable_sp: bool,
 ) -> Glm5Attention.Config:
-    """Build a fully specified GLM-5 MLA plus DSA attention config.
-
-    Configs are nested instead of constructing modules directly so TorchTitan
-    can validate, shard, pipeline-partition, and initialize the model before
-    materializing parameters on the target device.
-    """
-    base = make_mla_attention_config(
-        layer_id=layer_id,
-        dim=dim,
-        n_heads=n_heads,
-        q_lora_rank=q_lora_rank,
-        kv_lora_rank=kv_lora_rank,
-        qk_nope_head_dim=qk_nope_head_dim,
-        qk_rope_head_dim=qk_rope_head_dim,
-        v_head_dim=v_head_dim,
-        attn_backend="flex",
-        linear_init=_LINEAR_INIT,
-        norm_init=_RMS_NORM_INIT,
-        depth_init=_depth_init,
-        rope=rope,
-        enable_sp=enable_sp,
-        attention_config_factory=lambda _: Glm5SparseAttention.Config(),
-    )
+    """Add GLM indexing to the MLA config constructed by the shared layer builder."""
     base.q_norm.eps = mla_norm_eps
     base.kv_norm.eps = mla_norm_eps
     mla = base.inner_attention
@@ -177,15 +146,15 @@ def make_glm5_attention_config(
         indexer=Glm5DsaIndexer.Config(
             n_heads=index_n_heads,
             head_dim=index_head_dim,
-            qk_rope_head_dim=qk_rope_head_dim,
+            qk_rope_head_dim=base.qk_rope_head_dim,
             wq_b=Linear.Config(
-                in_features=q_lora_rank,
+                in_features=base.q_lora_rank,
                 out_features=index_n_heads * index_head_dim,
                 param_init=_LINEAR_INIT,
                 sharding_config=replicated_state_sharding_config("weight", "bias"),
             ),
             wk=Linear.Config(
-                in_features=dim,
+                in_features=base.dim,
                 out_features=index_head_dim,
                 param_init=_LINEAR_INIT,
                 sharding_config=replicated_state_sharding_config("weight", "bias"),
@@ -197,14 +166,14 @@ def make_glm5_attention_config(
                 sharding_config=replicated_state_sharding_config("weight", "bias"),
             ),
             weights_proj=Linear.Config(
-                in_features=dim,
+                in_features=base.dim,
                 out_features=index_n_heads,
                 param_init=_LINEAR_INIT,
                 preserve_dtype_params=("weight",),
                 sharding_config=replicated_state_sharding_config("weight", "bias"),
             ),
             rope=dataclasses.replace(
-                rope,
+                base.rope,
                 sharding_config=rope_cache_sharding_config(),
             ),
             topk=DSAIndexerTopK.Config(
@@ -286,6 +255,7 @@ def build_glm5_layers(
         router_route_scale=router_route_scale,
         router_route_norm=True,
         attn_backend="flex",
+        attention_config_factory=lambda _: Glm5SparseAttention.Config(),
         linear_init=_LINEAR_INIT,
         norm_init=_RMS_NORM_INIT,
         depth_init=_depth_init,
@@ -302,20 +272,13 @@ def build_glm5_layers(
     )
     layers = []
     for layer_id, base in enumerate(base_layers):
-        base.attention = make_glm5_attention_config(
-            layer_id=layer_id,
-            dim=dim,
-            n_heads=n_heads,
-            q_lora_rank=q_lora_rank,
-            kv_lora_rank=kv_lora_rank,
-            qk_nope_head_dim=qk_nope_head_dim,
-            qk_rope_head_dim=qk_rope_head_dim,
-            v_head_dim=v_head_dim,
+        assert isinstance(base.attention, DeepSeekMLAAttention.Config)
+        base.attention = _make_glm5_attention_config(
+            base.attention,
             index_n_heads=index_n_heads,
             index_head_dim=index_head_dim,
             index_topk=index_topk,
             mla_norm_eps=mla_norm_eps,
-            rope=rope,
             enable_sp=enable_sp,
         )
         if index_sources[layer_id] != layer_id:
