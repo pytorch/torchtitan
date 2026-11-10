@@ -118,8 +118,8 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
     policy_version = 0
     # Off by default, so test 4 covers the cache salt.
     reset_kv_cache_on_model_state_dict_load = False
-    # Whether a request reuses the KV of an earlier request with the same prompt
-    # admitted with it. SGLang cannot reuse linear attention states there (see
+    # Whether a request reuses the prompt KV of an earlier request with the same
+    # prompt admitted in the same call. Linear attention models don't (see
     # SGLangEngine._hold_shared_prompts).
     reuses_shared_prompt = True
 
@@ -262,8 +262,8 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         return results
 
     def test_trainer_vs_sglang_decode(self):
-        # The last two requests share a prompt no earlier test cached, as the samples
-        # of a rollout group do: the second reuses the first's prompt KV.
+        # The last two requests share a prompt that no earlier test cached, like two
+        # samples of a rollout group: the second must reuse the first's prompt KV.
         shared_prompt = self.prompt_ids[0][::-1]
         prompt_ids = self.prompt_ids[:-2] + [shared_prompt, shared_prompt]
         results = self._check_trainer_vs_sglang_decode(prompt_ids)

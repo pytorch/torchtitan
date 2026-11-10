@@ -146,13 +146,17 @@ the whole history; no request ever waits for a held session.
 
 ## Rollout groups
 
-SGLang inserts a request's KV into its radix cache only after the request's
-prefill, so the samples of a rollout group admitted in one prefill batch would
-each compute the shared prompt (SGLang's in-batch prefix caching only reorders
-the waiting queue, under the `lpm` policy, which priority scheduling excludes).
-The engine admits the first request of a prompt and holds the others outside
-SGLang's waiting queue until that prefill is done; they then reuse its KV for
-all but the prompt's last token (last partial page with pages over one token):
+The samples of a rollout group share a prompt. SGLang inserts a request's KV
+into its radix cache only after the request's prefill, so if a group's samples
+are prefilled in the same batch, each computes the whole prompt. (SGLang's
+in-batch prefix caching only reorders the waiting queue, under the `lpm`
+policy, which priority scheduling excludes.)
+
+So the engine puts the first request with a given prompt into SGLang's waiting
+queue and holds the others outside it until that request's prefill is done.
+The held requests then read the prompt's KV from the radix cache and compute
+only the prompt's last token (with pages larger than one token, its last
+partial page):
 
 ```
 add_requests([g7/s0, g7/s1, ..., g7/s15])   same prompt, same cache salt
@@ -165,10 +169,10 @@ For Qwen3-4B (TP 1) and 8 prompts x 16 samples admitted at once, the cached
 share of prompt tokens goes from 0% to 94% for 1K-token prompts (TTFT p50
 0.46 s -> 0.10 s) and from 59% to 94% for 4K-token prompts (0.73 s -> 0.25 s).
 The held requests keep their priority and wait queue entry times, so groups
-still run oldest first. Linear attention (GDN, KDA) models do not hold requests:
-without the `extra_buffer` strategy, SGLang snapshots their states only at the
-end of a cached prefix, and a request with the same prompt needs the state one
-token earlier to compute its last token.
+still run oldest first. Linear attention (GDN, KDA) models do not hold requests.
+Without SGLang's `extra_buffer` strategy, SGLang saves their states only at the
+end of a cached prefix, but a request with the same prompt needs the state one
+token earlier to compute the prompt's last token, so it could reuse nothing.
 
 ## CPU KV offload
 

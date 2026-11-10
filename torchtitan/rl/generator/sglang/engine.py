@@ -74,9 +74,9 @@ from torchtitan.rl.generator.types import (
 
 logger = logging.getLogger(__name__)
 
-# The ServerArgs SGLangEngine sets itself or does not support, which
-# extra_server_args cannot set. Every key naming CUDA graphs is the engine's too
-# (see Config.__post_init__).
+# ServerArgs fields that SGLangEngine sets itself or does not support, so
+# extra_server_args cannot set them. Every key that names CUDA graphs is also
+# reserved for the engine (see Config.__post_init__).
 _TORCHTITAN_SERVER_ARGS = frozenset(
     {
         "model_path",
@@ -102,8 +102,9 @@ _TORCHTITAN_SERVER_ARGS = frozenset(
         "random_seed",
         "enable_deterministic_inference",
         "disable_custom_all_reduce",
-        # SGLang's queue limit counts its waiting queue only, which held requests
-        # (see SGLangEngine._awaiting_prefill) are not in.
+        # SGLang's limit counts only the requests in its waiting queue, so it would
+        # not count the requests the engine holds back (see
+        # SGLangEngine._awaiting_prefill).
         "max_queued_requests",
     }
 )
@@ -317,22 +318,29 @@ class SGLangEngine(GenerationEngine):
         # The sessions of each rollout group with a request admitted, for
         # `release_sessions`.
         self._group_sessions: dict[int, set[str]] = {}
-        # Per (priority, cache salt, prompt) whose first admitted request awaits its
-        # prefill: that request, and the later requests with that key, held out of
-        # SGLang's waiting queue until then (see add_requests). The priority keeps a
-        # request from waiting on a newer group's request that SGLang runs later.
-        # SGLang's code that walks its request lists does not see held requests:
-        # e.g. its SGLANG_REQ_WAITING_TIMEOUT (off by default) never times them out.
+        # Requests held back so that they reuse a shared prompt's KV (see
+        # add_requests), keyed by (priority, cache salt, prompt token ids). Each
+        # value is the first admitted request with that key (the leader), which is
+        # in SGLang's waiting queue, and the later requests with that key (its
+        # followers), which the engine holds outside the queue. step() queues the
+        # followers once the leader's prefill is done.
+        # The key includes the priority, so a request never waits for a request of
+        # lower priority (a newer rollout group), which SGLang would run later.
+        # SGLang does not know about held requests, so its code that scans its
+        # request lists skips them: e.g. SGLANG_REQ_WAITING_TIMEOUT (off by default)
+        # never times them out.
         # TODO(https://github.com/sgl-project/sglang/issues/48963): SGLang could share
         # a prompt's KV among requests in one prefill batch, as vLLM's prefix cache
-        # does; then drop the holding.
+        # does; then drop the holding. The same hold inside SGLang's scheduler
+        # (https://github.com/sgl-project/sglang/pull/49147) would also let us drop it.
         self._awaiting_prefill: dict[
             tuple[int, str | None, tuple[int, ...]], tuple[Req, list[Req]]
         ] = {}
-        # Without the extra_buffer strategy, SGLang snapshots a linear attention
-        # state only at the end of the cached prefix: a request that shares a whole
-        # prompt still recomputes its last token, so it needs the state one token
-        # earlier and reuses nothing. Holding it would only delay it.
+        # Linear attention models don't hold requests. Without SGLang's extra_buffer
+        # strategy, SGLang saves a linear attention state only at the end of a
+        # cached prefix. A request with the same prompt still computes the prompt's
+        # last token, which needs the state one token earlier, so it can reuse
+        # nothing, and holding it would only delay it.
         self._hold_shared_prompts = not has_linear_attention
         # SGLang turns overlap scheduling off only for linear attention models (see
         # step()).
@@ -467,13 +475,16 @@ class SGLangEngine(GenerationEngine):
         instead of raising, so that rejection is the abort, before SGLang schedules it.
         The checks are deterministic, so every TP rank rejects the same requests.
 
-        A request whose prompt, priority and cache salt match an admitted request
-        still awaiting its prefill waits outside SGLang's waiting queue until that
-        prefill is done, then reuses its KV. SGLang caches a request's KV only after its
-        prefill, so the samples of a rollout group admitted in one prefill batch
-        would each compute the prompt. SGLang's own parallel sampling (n > 1)
-        prefills the prompt first for the same reason. Linear attention models do
-        not hold requests (see ``_hold_shared_prompts``).
+        Requests that share a prompt reuse its KV. If a request's prompt, priority
+        and cache salt match those of an admitted request whose prefill is not done
+        yet (admitted in this call or an earlier one), the engine holds the new
+        request outside SGLang's waiting queue until that prefill is done; the
+        held request then reads the prompt's KV from SGLang's radix cache. Without
+        holding, SGLang would prefill a rollout group's samples in one batch and
+        each would compute the whole prompt, because SGLang caches a request's KV
+        only after its prefill. SGLang's own parallel sampling (n > 1) prefills
+        the prompt once first for the same reason. Linear attention models do not
+        hold requests (see ``_hold_shared_prompts``).
         """
         sglang_requests = []
         rejected: list[tuple[str, Exception]] = []
@@ -627,15 +638,17 @@ class SGLangEngine(GenerationEngine):
                 # overlap, but needs the kernels to write state snapshots at
                 # intermediate positions (see register_to_sglang).
                 _normal_event_loop_iteration(scheduler)
-            # Processing a prefill's results appends the first token and caches the
-            # prompt's KV; queue the requests held for it (see add_requests).
+            # When SGLang processes a prefill's results, it appends the request's
+            # first output token and inserts the prompt's KV into its radix cache.
+            # So once a leader has an output token (or has finished), queue its
+            # followers (see add_requests).
             released = []
             for key, (leader, followers) in list(self._awaiting_prefill.items()):
                 if leader.output_ids or leader.finished():
                     del self._awaiting_prefill[key]
                     released.extend(followers)
-            # Without restamping their wait queue entry times, which order requests
-            # of equal priority.
+            # join() keeps the followers' wait queue entry times, which SGLang uses to
+            # order requests of equal priority, so they keep their place in line.
             scheduler.waiting_queue.join(released)
         finished, self._finished = self._finished, []
         finished.extend(request for request, _ in self._output_collector.take())
