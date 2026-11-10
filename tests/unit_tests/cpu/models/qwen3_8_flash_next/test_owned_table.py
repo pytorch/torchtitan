@@ -54,7 +54,6 @@ class TestOwnedTable(DTensorTestBase):
             for column_shards, num_rows, num_parts, hsdp in (
                 (1, 60, 5, False),
                 (2, 60, 5, False),
-                (1, 3, 3, False),
                 (1, 60, 5, True),
             ):
                 mesh = init_device_mesh(
@@ -110,9 +109,9 @@ class TestOwnedTable(DTensorTestBase):
                     (self.rank, 0) if hsdp else mesh.get_coordinate()
                 )
                 num_owners = self.world_size if hsdp else mesh.size(0)
-                rows_per_owner = (num_rows + num_owners - 1) // num_owners
-                begin = min(row_owner * rows_per_owner, num_rows)
-                end = min(begin + rows_per_owner, num_rows)
+                rows_per_owner = num_rows // num_owners
+                begin = row_owner * rows_per_owner
+                end = begin + rows_per_owner
                 feature_begin = feature_owner * (6 // column_shards)
                 feature_end = feature_begin + 6 // column_shards
                 expected = full[begin:end, feature_begin:feature_end].bfloat16()
@@ -125,9 +124,8 @@ class TestOwnedTable(DTensorTestBase):
                     hf = adapter.to_hf(exported)
                     restored = adapter.from_hf(dict(reversed(list(hf.items()))))
                 self.assertEqual(communication.get_total_counts(), 0)
-                if begin != end:
-                    with self.assertRaisesRegex(ValueError, "Rank-local HF"):
-                        Qwen38FlashNextStateDictAdapter(config, None).from_hf(hf)
+                with self.assertRaisesRegex(ValueError, "Rank-local HF"):
+                    Qwen38FlashNextStateDictAdapter(config, None).from_hf(hf)
                 self.assertIsInstance(restored[key], DTensor)
                 self.assertEqual(restored[key].device_mesh, mesh)
                 self.assertEqual(restored[key].placements, placements)

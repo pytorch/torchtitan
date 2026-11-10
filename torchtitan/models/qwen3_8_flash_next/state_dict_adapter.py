@@ -32,7 +32,7 @@ class Qwen38FlashNextStateDictAdapter(Qwen35StateDictAdapter):
     ):
         super().__init__(model_config, hf_assets_path)
         self.flash_config = model_config
-        self._ngram_weight_layouts: dict[int, tuple[DTensor, torch.device]] = {}
+        self._ngram_weight_layouts: dict[int, DTensor] = {}
         self._split_projection_layouts: dict[str, tuple[int, int, int]] = {}
         for layer_id, layer in enumerate(model_config.layers):
             if isinstance(layer.attention, GDN.Config):
@@ -131,9 +131,8 @@ class Qwen38FlashNextStateDictAdapter(Qwen35StateDictAdapter):
             self._ngram_weight_layouts.pop(layer_id, None)
             if isinstance(weight_ND, DTensor):
                 # Keep only a meta template; retaining the export buffer would pin its storage.
-                self._ngram_weight_layouts[layer_id] = (
-                    cast(DTensor, weight_ND.to(device="meta")),
-                    weight_ND.device,
+                self._ngram_weight_layouts[layer_id] = cast(
+                    DTensor, weight_ND.to(device="meta")
                 )
                 num_rows, num_features = weight_ND.shape
                 mesh = weight_ND.device_mesh
@@ -142,17 +141,14 @@ class Qwen38FlashNextStateDictAdapter(Qwen35StateDictAdapter):
                 local_shape = list(weight_ND.shape)
                 offsets = [0, 0]
                 # Apply shards in mesh-axis order; HSDP shards the rows twice.
+                # NGramTable requires rows divisible by the DP degree, so every
+                # shard is even.
                 for mesh_axis, placement in enumerate(weight_ND.placements):
                     if isinstance(placement, Shard):
                         dim = placement.dim
-                        shard_size = (
-                            local_shape[dim] + mesh.size(mesh_axis) - 1
-                        ) // mesh.size(mesh_axis)
-                        start = min(
-                            coordinate[mesh_axis] * shard_size, local_shape[dim]
-                        )
-                        offsets[dim] += start
-                        local_shape[dim] = min(shard_size, local_shape[dim] - start)
+                        assert local_shape[dim] % mesh.size(mesh_axis) == 0
+                        local_shape[dim] //= mesh.size(mesh_axis)
+                        offsets[dim] += coordinate[mesh_axis] * local_shape[dim]
                 row_start, feature_start = offsets
                 weight_ND = weight_ND.to_local(
                     grad_placements=weight_ND.placements
@@ -236,7 +232,7 @@ class Qwen38FlashNextStateDictAdapter(Qwen35StateDictAdapter):
             ordered_parts = sorted(shards)
             weight_ND = torch.cat([shards[part] for part in ordered_parts], 0)
             if layer_id in self._ngram_weight_layouts:
-                layout, _ = self._ngram_weight_layouts[layer_id]
+                layout = self._ngram_weight_layouts[layer_id]
                 weight_ND = DTensor.from_local(
                     weight_ND,
                     layout.device_mesh,
@@ -246,13 +242,6 @@ class Qwen38FlashNextStateDictAdapter(Qwen35StateDictAdapter):
                     run_check=False,
                 )
             state_dict[base] = weight_ND
-        for layer_id, (layout, device) in self._ngram_weight_layouts.items():
-            if (
-                layer_id not in shards_by_layer
-                and layout.to_local(grad_placements=layout.placements).shape[0] == 0
-            ):
-                base = f"{self.hf_language_model_prefix}.layers.{layer_id}.ple.ple_embedding.ngram_embedding.weight"
-                state_dict[base] = torch.empty_like(layout, device=device)
         result = super().from_hf(state_dict, is_quantized_layout=is_quantized_layout)
         for prefix, (
             num_groups,

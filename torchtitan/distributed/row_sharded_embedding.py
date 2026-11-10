@@ -38,7 +38,8 @@ def prepare_row_sharded_embedding(
 ) -> RowShardedEmbeddingMetadata:
     """Route IDs and prepare splits outside the model forward.
 
-    The named one-dimensional mesh owns contiguous ``torch.chunk`` row shards.
+    The named one-dimensional mesh owns equal contiguous row shards, so
+    ``num_embeddings`` must be divisible by the mesh size.
     Counts depend on the IDs and are copied to CPU here for variable-size
     all-to-all. Reuse the resulting metadata during activation recomputation.
     Every rank in the row mesh must participate, including ranks with no IDs.
@@ -53,12 +54,15 @@ def prepare_row_sharded_embedding(
         raise ValueError("input_ids and row_mesh must use the same device type")
 
     num_owners = row_mesh.size()
-    rows_per_owner = (num_embeddings + num_owners - 1) // num_owners
+    if num_embeddings % num_owners:
+        raise ValueError("num_embeddings must be divisible by the row mesh size")
+    rows_per_owner = num_embeddings // num_owners
     row_start = row_mesh.get_local_rank() * rows_per_owner
-    num_local_rows = min(rows_per_owner, max(0, num_embeddings - row_start))
     # Use the same wire dtype when requesters supply different integer dtypes.
     ids_L = input_ids.reshape(-1).to(torch.int64)
     ids_U, inverse_L = torch.unique(ids_L, sorted=True, return_inverse=True)
+    # Invalid IDs may map outside [0, num_owners); clamp only to keep bincount
+    # well-formed until the validity exchange below raises on every owner.
     owners_U = ids_U.div(rows_per_owner, rounding_mode="floor").clamp(0, num_owners - 1)
     # Sorted unique IDs are already grouped by their contiguous row owner.
     counts_P = torch.bincount(owners_U, minlength=num_owners)
@@ -80,7 +84,7 @@ def prepare_row_sharded_embedding(
     )
     return RowShardedEmbeddingMetadata(
         row_mesh=row_mesh,
-        num_local_rows=num_local_rows,
+        num_local_rows=rows_per_owner,
         input_ids=input_ids,
         local_row_ids=routed_ids_M - row_start,
         inverse_indices=inverse_L,
@@ -90,32 +94,31 @@ def prepare_row_sharded_embedding(
 
 
 def row_sharded_embedding(
-    weight_RD: torch.Tensor,
+    weight_RD: DTensor,
     metadata: RowShardedEmbeddingMetadata,
     *,
     dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """Look up owned rows and return vectors to the original requesters.
 
-    ``weight_RD`` is the local row shard, possibly also a feature-column shard.
-    The output has shape ``[*metadata.input_ids.shape, D]`` and uses ``dtype``
+    ``weight_RD`` is a ``Shard(0)`` DTensor over ``metadata.row_mesh``. The
+    output has shape ``[*metadata.input_ids.shape, D]`` and uses ``dtype``
     (the weight's dtype by default). Duplicate IDs are expanded on the requester
     with ``F.embedding`` so their gradients accumulate in the compute dtype,
     as in an ordinary mixed-precision embedding. Owners then sum the requester
     contributions in the master weight's dtype, without mesh-size division.
 
-    The caller owns parameter sharding and FSDP exclusion. DTensor parameters
-    retain their placements through the local lookup and its backward. Weights
-    remain fixed until the ordinary optimizer step.
+    The caller owns parameter sharding and FSDP exclusion. The gradient keeps
+    the weight's placements. Weights remain fixed until the ordinary optimizer
+    step.
     """
-    if isinstance(weight_RD, DTensor):
-        weight_RD = weight_RD.to_local(grad_placements=weight_RD.placements)
-    if weight_RD.ndim != 2 or weight_RD.shape[0] != metadata.num_local_rows:
+    local_weight_RD = weight_RD.to_local(grad_placements=weight_RD.placements)
+    if local_weight_RD.ndim != 2 or local_weight_RD.shape[0] != metadata.num_local_rows:
         raise ValueError("weight_RD must contain exactly this owner's row shard")
-    if weight_RD.device != metadata.local_row_ids.device:
+    if local_weight_RD.device != metadata.local_row_ids.device:
         raise ValueError("weight_RD and routed IDs must be on the same device")
-    local_vectors_MD = F.embedding(metadata.local_row_ids, weight_RD).to(
-        dtype=dtype or weight_RD.dtype
+    local_vectors_MD = F.embedding(metadata.local_row_ids, local_weight_RD).to(
+        dtype=dtype or local_weight_RD.dtype
     )
     returned_vectors_UD = wait_tensor(
         all_to_all_single(
@@ -126,5 +129,5 @@ def row_sharded_embedding(
         )
     )
     return F.embedding(metadata.inverse_indices, returned_vectors_UD).reshape(
-        *metadata.input_ids.shape, weight_RD.shape[1]
+        *metadata.input_ids.shape, local_weight_RD.shape[1]
     )

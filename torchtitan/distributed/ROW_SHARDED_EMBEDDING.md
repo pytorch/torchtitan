@@ -5,10 +5,10 @@ row owners using PyTorch functional collectives and `F.embedding`.
 
 ## Routing and Shapes
 
-The caller supplies a named one-dimensional `DeviceMesh` with contiguous
-`torch.chunk` row ownership. Every rank uses the same global row count,
-weight dtype and local feature width. Separate row groups may own different
-feature columns. Input IDs can be int32 or int64 and have any shape.
+The caller supplies a named one-dimensional `DeviceMesh`; each rank owns an
+equal contiguous block of rows, so the global row count must be divisible by
+the mesh size. Every rank uses the same weight dtype and feature width.
+Input IDs can be int32 or int64 and have any shape.
 
 ```python
 from torchtitan.distributed.row_sharded_embedding import (
@@ -55,13 +55,13 @@ and optimizer moments remain dense local shards.
 ## Parameter and Recompute Contracts
 
 The caller allocates local rows, owns the storage mesh, and excludes the
-parameter from FSDP gathers. The helper accepts a local tensor or a DTensor
-with the corresponding row/feature ownership. DTensor gradients retain their
-placements; existing clipping, optimizers and native DCP can consume them.
+parameter from FSDP gathers. The weight is a `Shard(0)` DTensor over the row
+mesh. Its gradient retains that placement, so existing clipping, optimizers and
+native DCP can consume it.
 
 Preparation performs one count-dependent device-to-host synchronization
 before forward. The prepared metadata can be reused during recomputation.
-Every owner participates, including ranks with empty inputs or row shards.
+Every owner participates, including ranks with no input IDs.
 Invalid IDs fail on every owner before request/response exchanges begin.
 
 All owners must replay response collectives together. Nonreentrant PyTorch
@@ -72,7 +72,7 @@ collective that another rank replays.
 
 Four-rank CPU/Gloo tests compare values, accumulated gradients and optimizer
 updates with a dense reference. Cases include duplicate IDs, BF16
-cancellation, uneven/empty shards, integer dtypes and recomputation.
+cancellation, ranks with no input IDs, integer dtypes and recomputation.
 
 ```bash
 pytest tests/unit_tests/cpu/distributed/test_row_sharded_embedding.py -q
