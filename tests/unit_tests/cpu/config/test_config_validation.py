@@ -13,6 +13,8 @@ from torchtitan.components.checkpointer.dcp import CheckpointManager
 from torchtitan.components.validator import Validator
 from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.validation import validate_model_training_config
+from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.observability.sdc_replayer import SDCReplayer
@@ -21,6 +23,7 @@ from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_hybridep,
 )
+from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_debugmodel
 from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel,
     llama3_debugmodel_varlen_attn,
@@ -213,6 +216,26 @@ def test_microbatch_tokens_match_activation_sharding() -> None:
 
     config.training.num_tokens_per_microbatch_per_dp_rank = 16
     config.__post_init__()
+
+
+def test_flex_shard_rejects_models_with_their_own_fsdp() -> None:
+    # Overriding _apply_fsdp bypasses the FlexShard path, so it must raise rather
+    # than silently shard with FSDP2.
+    def validate(config):
+        validate_model_training_config(
+            config.model,
+            parallelism=ParallelismConfig(fsdp_backend=FlexShardConfig()),
+            training=config.training,
+            debug=config.debug,
+            activation_remat=config.activation_remat,
+            max_num_documents=config.dataloader.max_num_documents,
+        )
+
+    validate(llama3_debugmodel())
+    with pytest.raises(
+        ValueError, match="DeepSeekV4Model does not support parallelism.fsdp_backend"
+    ):
+        validate(deepseek_v4_debugmodel())
 
 
 def test_spmd_typechecking_rejects_pipeline_parallelism() -> None:
