@@ -648,7 +648,7 @@ class Controller(Configurable):
                     sampling_config=sampling_config,
                 )
             finally:
-                await generator_router.release_reservation.call_one(request_id)
+                generator_router.release_reservation.broadcast(request_id)
 
         return generate
 

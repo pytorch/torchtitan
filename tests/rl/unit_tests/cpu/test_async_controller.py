@@ -1008,18 +1008,18 @@ def test_generate_fn_forwards_the_session_and_releases_on_failure() -> None:
 
     async def generate_call(*args, **kwargs) -> None:
         # The load stays reserved while the generator runs the call.
-        release.assert_not_awaited()
+        release.assert_not_called()
         raise RuntimeError("generator failed")
 
     generate_call = AsyncMock(side_effect=generate_call)
     reserve = AsyncMock(
         return_value=SimpleNamespace(generate=SimpleNamespace(call_one=generate_call))
     )
-    release = AsyncMock()
+    release = Mock()
     controller = object.__new__(Controller)
     controller.generator_router = SimpleNamespace(
         reserve=SimpleNamespace(call_one=reserve),
-        release_reservation=SimpleNamespace(call_one=release),
+        release_reservation=SimpleNamespace(broadcast=release),
     )
     generate = controller._make_generate_fn()
 
@@ -1037,7 +1037,7 @@ def test_generate_fn_forwards_the_session_and_releases_on_failure() -> None:
         routing_session_id="s0",
         sampling_config=None,
     )
-    release.assert_awaited_once_with("r0")
+    release.assert_called_once_with("r0")
 
 
 def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
