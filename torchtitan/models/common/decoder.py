@@ -187,6 +187,10 @@ class Decoder(BaseModel):
         precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
+        from torchtitan.distributed.flex_shard_fsdp import (
+            apply_flex_shard_to_decoder,
+            FlexShardConfig,
+        )
         from torchtitan.distributed.fsdp import (
             apply_fsdp_to_decoder,
             resolve_fsdp_mesh,
@@ -194,6 +198,15 @@ class Decoder(BaseModel):
         )
 
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
+        if isinstance(parallelism.fsdp_backend, FlexShardConfig):
+            apply_flex_shard_to_decoder(
+                self,
+                dp_mesh,
+                param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
+                reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
+                reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+            )
+            return
         edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallelism_context)
         apply_fsdp_to_decoder(
             self,
