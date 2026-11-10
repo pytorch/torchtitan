@@ -15,7 +15,7 @@ import itertools
 import math
 import weakref
 from dataclasses import dataclass
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import torch
 
@@ -317,11 +317,11 @@ class ModelStateDictTransport(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        pass
+        backend: Literal["mooncake", "nixl"] = "mooncake"
+        """The ``torch.distributed._transport`` backend."""
 
     def __init__(self, config: Config):
-        # TODO: make the backend configurable once another one is verified.
-        self._transport = new_transport("mooncake")
+        self._transport = new_transport(config.backend)
         # Trainer: the staging buffer and, per key in model state dict order, the
         # dtype and placements it is staged in (None to keep its own) and a
         # (local index, staging view) per piece.
