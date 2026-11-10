@@ -286,8 +286,8 @@ class SGLangEngine(GenerationEngine):
             ),
         )
         logger.info("Building the SGLang scheduler...")
-        # SGLang hands the scheduler's results and aborts, which it would send to its
-        # tokenizer and detokenizer processes, to the collector.
+        # No tokenizer or detokenizer process runs (skip_tokenizer_init); SGLang hands
+        # every scheduler output to the collector instead.
         self._output_collector = _OutputCollector()
         self._scheduler = Scheduler(
             server_args,
@@ -698,8 +698,8 @@ class SGLangEngine(GenerationEngine):
 
 
 class _OutputCollector:
-    """The scheduler's output sink: receives the token ids and aborts it would send to
-    its tokenizer and detokenizer processes (none run, ``skip_tokenizer_init``).
+    """The scheduler's output sink (no tokenizer or detokenizer process runs,
+    ``skip_tokenizer_init``): keeps the token ids, logprobs and aborts of each request.
 
     SGLang sends a request's tokens and logprobs in increments: every
     ``SGLANG_FORCE_STREAM_INTERVAL`` tokens even without streaming, and the rest when it
@@ -726,8 +726,9 @@ class _OutputCollector:
         )
 
     def receive(self, output: Any) -> None:
-        """Receive a scheduler output: token increments (``BatchTokenIDOutput``) and
-        aborts; ignore the rest."""
+        """Collect token increments (``BatchTokenIDOutput``) and aborts (``AbortReq``);
+        drop the other outputs (e.g. replies to control requests), which the engine
+        does not use."""
         if isinstance(output, BatchTokenIDOutput):
             self._receive_tokens(output)
         elif isinstance(output, AbortReq):
