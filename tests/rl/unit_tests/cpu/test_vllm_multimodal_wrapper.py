@@ -32,12 +32,17 @@ from torchtitan.rl.generator.vllm.multimodal_wrapper import (
     _ImageProcessingInfo,
     _largest_patch_grid,
     image_prompt_to_engine_input,
+    keep_prefix_cached_image_data,
     VLLMMultimodalModelWrapper,
 )
 from torchtitan.rl.generator.vllm.registry import model_config_to_hf_config_dict
 from torchtitan.rl.rollout.types import Prompt, PromptImage
+from vllm import SamplingParams
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.transformers_utils.config import PretrainedConfig, uses_mrope
+from vllm.v1.core.sched import output as vllm_scheduler_output
+from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.request import Request
 
 QWEN3_5_SMALL_IMAGES = dataclasses.replace(
     VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS),
@@ -171,6 +176,54 @@ def test_mrope_input_positions_follow_placeholders():
     ]
     # Token 8 (the first after the prompt) has position 8 + delta = 6.
     assert delta == -2
+
+
+def test_scheduler_sends_prefix_cached_image_data_to_the_worker(monkeypatch):
+    # A GRPO sample admitted after its group's first prefill: its prefix-cache hit (6
+    # tokens) covers its image (tokens 2-5). If it is preempted, it resumes from what the
+    # worker got here, and may need the encoder then.
+    image = PromptImage(
+        hash_value="k", source_path="k.png", grid_thw=(1, 4, 4), data=b"k"
+    )
+    prompt = image_prompt_to_engine_input(
+        Prompt(
+            token_ids=[0] * 8,
+            images=(image,),
+            image_placeholders=(PlaceholderRange(offset=2, length=4),),
+        ),
+        [torch.zeros(16, 1536)],
+        cache_salt="3",
+    )
+    [item] = prompt["mm_kwargs"]["image"]
+    [mm_hash] = prompt["mm_hashes"]["image"]
+    [placeholder] = prompt["mm_placeholders"]["image"]
+    request = Request(
+        request_id="group=0/rollout=1/turn=0",
+        prompt_token_ids=prompt["prompt_token_ids"],
+        sampling_params=SamplingParams(),
+        pooling_params=None,
+        mm_features=[
+            MultiModalFeatureSpec(
+                data=item,
+                modality="image",
+                identifier=mm_hash,
+                mm_position=placeholder,
+                mm_hash=mm_hash,
+            )
+        ],
+    )
+    request.num_computed_tokens = 6
+    # Restore vLLM's function after the test.
+    monkeypatch.setattr(
+        vllm_scheduler_output,
+        "strip_covered_mm_data",
+        vllm_scheduler_output.strip_covered_mm_data,
+    )
+
+    keep_prefix_cached_image_data()
+    [feature] = NewRequestData.from_request(request, block_ids=([0],)).mm_features
+
+    assert feature.data is item
 
 
 def test_largest_patch_grid() -> None:
