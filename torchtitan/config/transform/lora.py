@@ -135,8 +135,6 @@ def _shared_factor(
 ) -> Literal["lora_a", "lora_b"] | None:
     if expert_adapter_layout == "per_expert":
         return None
-    # The roles come from the routed-experts contract (w13 reads the hidden
-    # stream, w2 writes it), not from a field name alone.
     shared = _SHARED_OUTER_FACTOR.get(cast(str, attr))
     if shared is None or not isinstance(
         parent, (RoutedExperts.Config, DistMoeRoutedExperts.Config)
