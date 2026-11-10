@@ -120,7 +120,7 @@ jobs:
           HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
             tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParityVarlen -v \
             || failed_classes+=(Varlen)
-          for test_class in MoEEP SlidingWindow DistMoE; do
+          for test_class in MoEEP GDN SlidingWindow DistMoE; do
             torchrun --nproc-per-node=2 -m pytest \
               "tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParity${test_class}" -v \
               || failed_classes+=("$test_class")
