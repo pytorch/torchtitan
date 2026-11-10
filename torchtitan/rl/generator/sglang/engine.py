@@ -190,9 +190,9 @@ class SGLangEngine(GenerationEngine):
         if config.extra_server_args.get("enable_hierarchical_cache") and any(
             isinstance(layer.attention, KDA.Config) for layer in model.layers
         ):
-            # TODO: with HiCache's default write_through policy, one run in 18 of
-            # the KDA parity class mismatched the trainer (max logprob delta 3.1e-2);
-            # not root-caused.
+            # TODO(https://github.com/pytorch/torchtitan/issues/6015): with HiCache's
+            # default write_through policy, one run in 18 of the KDA parity class
+            # mismatched the trainer (max logprob delta 3.1e-2); not root-caused.
             raise ValueError(
                 "SGLangEngine does not support SGLang's hierarchical cache "
                 "(enable_hierarchical_cache) for KDA models yet"

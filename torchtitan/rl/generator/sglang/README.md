@@ -162,7 +162,7 @@ prefixes in host memory too: a cached turn whose prefix was loaded back matched
 the trainer's prefill bitwise. HiCache pays off when recomputing a prefix costs
 more than copying its KV: for Qwen3-0.6B, recompute is faster.
 
-KDA models raise with HiCache for now. TODO: with HiCache's `write_through`
+KDA models raise with HiCache for now (#6015). TODO: with HiCache's `write_through`
 policy (SGLang's default), one run in 18 of the KDA parity class mismatched the
 trainer (max logprob delta 3.1e-2); not root-caused.
 
