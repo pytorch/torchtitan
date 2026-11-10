@@ -219,9 +219,13 @@ def register_to_sglang(
         )
 
         # TODO(https://github.com/sgl-project/sglang/issues/48463): support SGLang's
-        # extra_buffer mamba cache strategy (support_mamba_cache_extra_buffer), which
-        # keeps overlap scheduling; it needs the kernels to write state snapshots at
-        # intermediate positions.
+        # extra_buffer mamba cache strategy (support_mamba_cache_extra_buffer).
+        # Without it, SGLang turns overlap scheduling off for these models, and
+        # caches a request's state only at the end of its cached prefix, so a prefix
+        # shared at an earlier position (e.g. a rollout group's prompt) is
+        # recomputed. It needs Attention Gym's chunked kernels to return the states
+        # at chunk boundaries, as SGLang's own GDN kernel does (gdn_track_ssm_state):
+        # https://github.com/meta-pytorch/attention-gym/issues/735
         register_linear_attn_model(
             LinearAttnModelSpec(
                 config_class=TorchTitanGDNConfig,

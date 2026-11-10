@@ -284,13 +284,14 @@ class SGLangEngine(GenerationEngine):
         # The sessions of each rollout group with a request admitted, for
         # `release_sessions`.
         self._group_sessions: dict[int, set[str]] = {}
-        # Only linear attention models run without overlap scheduling (see step()).
-        self._init_event_loop(
-            needs_overlap=not any(
-                isinstance(layer.attention, LinearAttention.Config)
-                for layer in model.layers
-            )
-        )
+        # SGLang turns overlap scheduling off only for linear attention models (see
+        # step()).
+        if not self._scheduler.enable_overlap and not any(
+            isinstance(layer.attention, LinearAttention.Config)
+            for layer in model.layers
+        ):
+            raise ValueError("SGLangEngine needs SGLang's overlap scheduler")
+        self._init_event_loop()
         # Exclude the ~1.5M objects SGLang's modules and the build created from garbage
         # collection, as SGLang's freeze_gc does: each full collection (e.g. the engine
         # loop's after a model state dict load) otherwise traverses them for ~1s.
@@ -366,20 +367,14 @@ class SGLangEngine(GenerationEngine):
         server_kwargs.update(self.config.extra_server_args)
         return ServerArgs(**server_kwargs)
 
-    def _init_event_loop(self, *, needs_overlap: bool) -> None:
-        """Set up what SGLang's ``run_event_loop`` sets before its event loop.
-
-        Args:
-            needs_overlap: Raise if SGLang runs the model without overlap scheduling.
-        """
+    def _init_event_loop(self) -> None:
+        """Set up what SGLang's ``run_event_loop`` sets before its event loop."""
         # TODO(https://github.com/sgl-project/sglang/issues/48472): mirrors the pinned
         # SGLang version's run_event_loop, private fields included; SGLang has no public
         # API to run its loop one iteration at a time.
         scheduler = self._scheduler
         scheduler._war_barrier_enabled = is_war_barrier_enabled()
         if not scheduler.enable_overlap:
-            if needs_overlap:
-                raise ValueError("SGLangEngine needs SGLang's overlap scheduler")
             return
         scheduler.enable_skip_finishing_decode = True
         scheduler.result_queue = deque()

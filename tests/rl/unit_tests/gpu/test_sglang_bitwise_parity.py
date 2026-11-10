@@ -405,6 +405,9 @@ class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):
     __test__ = True
     config_fn = staticmethod(qwen3_5_debug_bitwise_config)
     sync_weights_from_trainer = True
+    # Tests 4 and 5 then cover the reset path (retract, flush, continue), with
+    # SGLang's normal event loop.
+    reset_kv_cache_on_model_state_dict_load = True
 
 
 def _debug_model_config(build_model_config, **kwargs) -> Controller.Config:
