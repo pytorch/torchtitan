@@ -10,6 +10,8 @@ import logging
 
 import torch
 
+from torchtitan.models.common.decoder import Decoder
+
 logger = logging.getLogger(__name__)
 
 MAX_FLEX_BATCH_INVARIANT_REQUESTS = 64
@@ -21,6 +23,26 @@ def validate_flex_page_mapping_request_limit(num_requests: int) -> None:
             "ROCm FlexAttention batch invariance supports at most "
             f"{MAX_FLEX_BATCH_INVARIANT_REQUESTS} concurrent requests, "
             f"got {num_requests}"
+        )
+
+
+def validate_rocm_flex_attention(
+    model: Decoder.Config,
+    *,
+    owner: str,
+) -> None:
+    from torchtitan.models.common.attention import Attention, FlexInnerAttention
+
+    attention_configs = tuple(
+        attention for _, attention, _, _ in model.traverse(Attention.Config)
+    )
+    if not attention_configs or any(
+        not isinstance(attention.inner_attention, FlexInnerAttention.Config)
+        for attention in attention_configs
+    ):
+        raise ValueError(
+            "batch_invariant mode on ROCm requires FlexAttention "
+            f"for every {owner} attention layer"
         )
 
 
