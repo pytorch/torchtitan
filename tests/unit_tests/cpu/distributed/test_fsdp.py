@@ -110,7 +110,7 @@ def test_apply_fsdp_to_decoder_shards_an_moe_held_as_mlp() -> None:
             pp_enabled=False,
         )
 
-    block_call = next(c for c in fully_shard.call_args_list if c.args[0] is block)
+    block_call = next(c for c in fully_shard.call_args_list if c.args[0] == [block])
     shard_placement_fn = block_call.kwargs["shard_placement_fn"]
     assert shard_placement_fn(moe.routed_experts.weight) == Shard(0)
 
