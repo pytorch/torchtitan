@@ -153,7 +153,9 @@ SGLang splits an engine's memory between the KV pool and a fixed state pool,
 by `mamba_full_memory_ratio` (default 0.9: the state pool gets 0.9 / 1.9 of
 it). With the radix cache, a running request needs 3 state slots, so SGLang
 runs at most `state slots // 3` requests and queues the rest, even when the KV
-pool has room. vLLM keeps KV and states in one pool and needs no split.
+pool has room. vLLM keeps KV and states in one pool and needs no split
+([sgl-project/sglang#49676](https://github.com/sgl-project/sglang/issues/49676)
+asks SGLang to do the same).
 
 Size the state pool for the requests an engine runs at once: its share of the
 rollouts in flight, `max_active_rollout_groups x num_samples_per_prompt /
