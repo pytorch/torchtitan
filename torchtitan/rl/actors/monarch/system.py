@@ -36,6 +36,10 @@ from torchtitan.rl.actors.monarch.trainer import TrainerActor
 from torchtitan.rl.actors.system import ActorSystem, ServiceHandle, TrainerHandle
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.model_state_dict_transport import (
+    ModelStateDictTransport,
+    shared_rank_layouts,
+)
 from torchtitan.rl.rollout.rollouter import RolloutWorker
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.trainer.batcher import Batcher
@@ -208,6 +212,33 @@ class MonarchActorSystem(ActorSystem):
                 )
                 for requester_index, generator in enumerate(self._generators)
             ),
+        )
+
+    async def initialize_model_state_dict_transport(
+        self, config: ModelStateDictTransport.Config
+    ) -> None:
+        assert self._trainer is not None, "spawn the trainer first"
+        results = await asyncio.gather(
+            *(
+                generator.all_ranks.model_state_dict_layout.call()
+                for generator in self._generators
+            )
+        )
+        rank_layouts = shared_rank_layouts([list(r.values()) for r in results])
+        sources = list(
+            (
+                await self._trainer.register_model_state_dict_source.call(
+                    config, rank_layouts
+                )
+            ).values()
+        )
+        await asyncio.gather(
+            *(
+                generator.all_ranks.connect_model_state_dict_transport.call(
+                    config, sources, generator_index=generator_index
+                )
+                for generator_index, generator in enumerate(self._generators)
+            )
         )
 
     async def stop(self) -> None:

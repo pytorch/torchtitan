@@ -13,6 +13,11 @@ from typing import Any
 import torch
 from monarch.actor import Actor, concurrent_endpoint
 
+from torchtitan.rl.model_state_dict_transport import (
+    ModelStateDictTransport,
+    TensorShard,
+    TrainerSource,
+)
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import RDMAMicrobatch
 
@@ -23,6 +28,14 @@ class _TrainerActorEndpoints:
     @concurrent_endpoint
     async def initialize_torchstore_client(self) -> None:
         await super().initialize_torchstore_client()
+
+    @concurrent_endpoint
+    async def register_model_state_dict_source(
+        self,
+        config: ModelStateDictTransport.Config,
+        rank_layouts: list[dict[str, TensorShard]],
+    ) -> TrainerSource:
+        return super().register_model_state_dict_source(config, rank_layouts)
 
     @concurrent_endpoint
     async def get_policy_version(self) -> int:
