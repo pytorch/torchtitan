@@ -23,7 +23,6 @@ from vllm.sampling_params import RequestOutputKind
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import DebugConfig, PrecisionConfig
-from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
@@ -38,6 +37,7 @@ from torchtitan.rl.generator.vllm.batch_invariance import (
     enable_rocm_batch_invariant_page_mapping,
     force_logprobs_fn_for_batch_invariance,
     validate_flex_page_mapping_request_limit,
+    validate_rocm_flex_attention,
 )
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.registry import (
@@ -101,12 +101,7 @@ def _configure_rocm_flex_batch_invariance(
     if not batch_invariant or torch.version.hip is None:
         return
 
-    attention = model.first_full_attention
-    if attention is None or not isinstance(
-        attention.inner_attention, FlexInnerAttention.Config
-    ):
-        raise ValueError("batch_invariant mode on ROCm requires FlexAttention")
-
+    validate_rocm_flex_attention(model, owner="generator")
     validate_flex_page_mapping_request_limit(max_num_seqs)
     if cuda_graph.mode != "NONE":
         # TODO: Support graph replay after

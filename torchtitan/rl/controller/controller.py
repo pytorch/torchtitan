@@ -432,6 +432,10 @@ class Controller(Configurable):
 
             if self.trainer.debug.batch_invariant:
                 if torch.version.hip is not None:
+                    # torch.version.hip reports the HIP runtime version (for example,
+                    # 7.15 on ROCm 10 wheels), not the ROCm release. Untagged and
+                    # source builds are intentionally rejected because only +rocm
+                    # wheel builds provide the validated release marker.
                     rocm_version = str(torch.__version__).partition("+rocm")[2]
                     if not rocm_version or int(rocm_version.partition(".")[0]) < 10:
                         raise ValueError(
@@ -439,28 +443,15 @@ class Controller(Configurable):
                             f"ROCm 10.0 or newer, got torch {torch.__version__}"
                         )
 
-                    from torchtitan.models.common.attention import (
-                        Attention,
-                        FlexInnerAttention,
+                    from torchtitan.rl.generator.vllm.batch_invariance import (
+                        validate_flex_page_mapping_request_limit,
+                        validate_rocm_flex_attention,
                     )
 
-                    attention_configs = tuple(
-                        attention
-                        for model in (self.trainer.model, self.generator.model)
-                        for _, attention, _, _ in model.traverse(Attention.Config)
-                    )
-                    # vLLM's parity path uses compiled FlexAttention; ROCm varlen cannot
-                    # use the fixed split count needed to keep logprobs identical.
-                    if not attention_configs or any(
-                        not isinstance(
-                            attention.inner_attention, FlexInnerAttention.Config
-                        )
-                        for attention in attention_configs
-                    ):
-                        raise ValueError(
-                            "batch_invariant mode on ROCm requires FlexAttention "
-                            "for every trainer and generator attention layer."
-                        )
+                    # Recipes and overrides may mutate nested generator fields after
+                    # its initial construction.
+                    self.generator.validate_batch_invariance()
+                    validate_rocm_flex_attention(self.trainer.model, owner="trainer")
 
                     cuda_graph = getattr(self.generator.engine, "cuda_graph", None)
                     if cuda_graph is not None and cuda_graph.mode != "NONE":
@@ -470,6 +461,15 @@ class Controller(Configurable):
                             "ROCm FlexAttention batch invariance requires "
                             "cuda_graph.mode='NONE'"
                         )
+
+                    # Validation requests are included only after the rollouter is
+                    # built; the engine validates the final max_num_seqs value.
+                    static_max_num_seqs = min(
+                        self.async_loop.max_active_rollout_groups
+                        * self.async_loop.num_samples_per_prompt,
+                        512,
+                    )
+                    validate_flex_page_mapping_request_limit(static_max_num_seqs)
 
                 if not (
                     self.trainer.debug.deterministic

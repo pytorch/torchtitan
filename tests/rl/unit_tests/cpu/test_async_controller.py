@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, patch
 import numpy as np
 import pytest
 import torch
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.rl.controller.controller import Controller
 from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
@@ -37,7 +38,6 @@ from torchtitan.rl.rollout.types import (
     RolloutTurn,
     RolloutTurnID,
 )
-
 from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.training_sample_builder import (
     TrainingSample,
@@ -88,6 +88,24 @@ def test_rocm_batch_invariance_config_validation():
             Controller(config)
         config.generator.engine.cuda_graph.mode = "NONE"
         config.__post_init__()
+        config.async_loop.num_prompts_per_train_step = 9
+        with pytest.raises(ValueError, match="at most 64 concurrent requests"):
+            config.__post_init__()
+
+        for owner in ("trainer", "generator"):
+            config = alphabet_sort.rl_grpo_qwen3_0_6b_flex_batch_invariant()
+            config.generator.engine.cuda_graph.mode = "NONE"
+            model = getattr(config, owner).model
+            model.layers[-1].attention.inner_attention = VarlenInnerAttention.Config()
+            assert isinstance(
+                model.layers[0].attention.inner_attention,
+                FlexInnerAttention.Config,
+            )
+            with pytest.raises(
+                ValueError,
+                match=f"every {owner} attention layer",
+            ):
+                config.__post_init__()
 
 
 def test_batch_invariance_requires_matching_generator_debug_config():
