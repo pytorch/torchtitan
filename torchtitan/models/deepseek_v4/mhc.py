@@ -59,9 +59,7 @@ class HcSplitSinkhorn(Module):
             *([1] * (comb.ndim - 2)), hc_mult, hc_mult
         )
 
-        # Matches the reference kernel: eps is added to every entry after the
-        # first row softmax (not to its denominator), so the Sinkhorn kernel is
-        # strictly positive even when exp underflows.
+        # Same as the reference kernel: eps goes after the softmax, not in its denominator.
         # https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/60d8d70770c6776ff598c94bb586a859a38244f1/inference/kernel.py#L401
         comb = torch.softmax(comb, dim=-1) + self.eps
         comb = comb / (comb.sum(dim=-2, keepdim=True) + self.eps)
