@@ -157,14 +157,14 @@ SGLangEngine.Config(
 
 KV loaded back is bitwise identical to recomputed KV (checked in batch-invariant
 mode on a multi-turn workload), and a reset on model state dict load clears the
-host cache too. For GDN and KDA models, it keeps the conv and recurrent states
-(and KDA's replay state) of evicted prefixes in host memory too: a cached turn
-whose prefix was loaded back matched the trainer's prefill bitwise. HiCache pays
-off when recomputing a prefix costs more than copying its KV: for Qwen3-0.6B,
-recompute is faster.
+host cache too. For GDN models, it keeps the conv and recurrent states of evicted
+prefixes in host memory too: a cached turn whose prefix was loaded back matched
+the trainer's prefill bitwise. HiCache pays off when recomputing a prefix costs
+more than copying its KV: for Qwen3-0.6B, recompute is faster.
 
-TODO: with HiCache's `write_through` policy, one run in 18 of the KDA parity
-class mismatched the trainer (max logprob delta 3.1e-2); not root-caused.
+KDA models raise with HiCache for now. TODO: with HiCache's `write_through`
+policy (SGLang's default), one run in 18 of the KDA parity class mismatched the
+trainer (max logprob delta 3.1e-2); not root-caused.
 
 ## Seeds
 

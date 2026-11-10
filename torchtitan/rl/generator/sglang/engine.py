@@ -44,6 +44,7 @@ from sglang.srt.utils.common import next_power_of_2
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import DebugConfig, PrecisionConfig
+from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.attention.linear_attention import LinearAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
@@ -186,6 +187,16 @@ class SGLangEngine(GenerationEngine):
             )
         if parallelism.enable_sequence_parallel:
             raise ValueError("SGLangEngine does not support sequence parallelism")
+        if config.extra_server_args.get("enable_hierarchical_cache") and any(
+            isinstance(layer.attention, KDA.Config) for layer in model.layers
+        ):
+            # TODO: with HiCache's default write_through policy, one run in 18 of
+            # the KDA parity class mismatched the trainer (max logprob delta 3.1e-2);
+            # not root-caused.
+            raise ValueError(
+                "SGLangEngine does not support SGLang's hierarchical cache "
+                "(enable_hierarchical_cache) for KDA models yet"
+            )
         if parallelism.expert_parallel_degree > 1:
             # Dist-MoE experts have no token dispatcher, so this sees only the stock
             # ones; Dist-MoE runs under CUDA graphs.

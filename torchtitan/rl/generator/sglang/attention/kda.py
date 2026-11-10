@@ -96,7 +96,9 @@ class TorchTitanKDAConfig(TorchTitanLinearAttentionConfig):
         )
 
 
-# SGLang's HiCache copies each slot's state entries in 16-byte words.
+# SGLang's HiCache copies each slot's state entries in 16-byte words. The constant
+# is in its CUDA source only (kBytesPerThreadPerStep in
+# kernels/jit/csrc/kvcacheio/transfer_mamba.cuh), which checks the entry size.
 _STATE_ENTRY_ALIGNMENT_BYTES = 16
 
 
