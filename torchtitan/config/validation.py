@@ -36,14 +36,56 @@ def validate_model_training_config(
 ) -> None:
     """Validate compatibility between a model and its training configuration."""
     from torchtitan.distributed.accelerator_graph import accelerator_graphs_supported
+    from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
     from torchtitan.models.common.attention import VarlenInnerAttention
     from torchtitan.models.common.decoder import Decoder
-    from torchtitan.models.common.moe import MoE
+    from torchtitan.models.common.moe import MoE, RoutedExperts
     from torchtitan.models.common.moe.token_dispatcher import (
+        AllToAllTokenDispatcher,
         DeepEPTokenDispatcher,
         HybridEPTokenDispatcher,
         LocalTokenDispatcher,
     )
+
+    if isinstance(parallelism.fsdp_backend, FlexShardConfig):
+        # Decoder._apply_fsdp has the only FlexShard path, so a model that
+        # overrides it would shard with FSDP2.
+        model_cls = model._owner
+        if getattr(model_cls, "_apply_fsdp", None) is not Decoder._apply_fsdp:
+            name = type(model).__qualname__ if model_cls is None else model_cls.__name__
+            raise ValueError(
+                f"{name} does not support "
+                f"parallelism.fsdp_backend={parallelism.fsdp_backend!r} yet; only "
+                "decoders that use Decoder._apply_fsdp do."
+            )
+        if isinstance(model, Decoder.Config) and model.enable_weight_tying:
+            # TODO: Parallelization unties tok_embeddings and lm_head, and only
+            # init_states ties them again, after FlexShard has captured both.
+            # Allow tied weights once _parallelize keeps them tied.
+            raise ValueError(
+                f"parallelism.fsdp_backend={parallelism.fsdp_backend!r} does not "
+                "support enable_weight_tying yet."
+            )
+        if parallelism.expert_parallel_degree > 1:
+            # Only RoutedExperts with AllToAllTokenDispatcher has been checked
+            # against FSDP2 under EP. FlexShard's expert bucket treats every
+            # routed-expert parameter as sharded over ep, but output_postprocess
+            # parameters are replicated over ep (models/common/moe/SHARDING.md),
+            # so their grads would never be summed over it.
+            for fqn, moe, _, _ in model.traverse(MoE.Config):
+                routed_experts = moe.routed_experts
+                if (
+                    type(routed_experts) is not RoutedExperts.Config
+                    or type(routed_experts.token_dispatcher)
+                    is not AllToAllTokenDispatcher.Config
+                    or routed_experts.output_postprocess is not None
+                ):
+                    raise ValueError(
+                        f"parallelism.fsdp_backend={parallelism.fsdp_backend!r} "
+                        "with expert_parallel_degree > 1 supports only "
+                        "RoutedExperts with AllToAllTokenDispatcher and no "
+                        f"output_postprocess yet, not {fqn}.routed_experts."
+                    )
 
     if isinstance(model, Decoder.Config):
         if model.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:

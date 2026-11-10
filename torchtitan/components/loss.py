@@ -769,7 +769,8 @@ class ChunkedLossWrapper(Loss[LossInput]):
         root callback reduce the head instead, keeping each group's gradients
         together. Inner backwards preserve the decoder's prefetch and
         finalization state. Frozen decoders finish through the head backward
-        or the caller's manual finalization.
+        or the caller's manual finalization. FlexShard gives lm_head's bucket
+        the same treatment, but doesn't support frozen decoders yet.
 
     TP / SP composability:
         The root decoder norm emits hidden states that are replicated on the
@@ -797,10 +798,18 @@ class ChunkedLossWrapper(Loss[LossInput]):
         self.num_chunks = config.num_chunks
         self.loss_fn: Callable[..., LossResult] = config.loss_fn.build()
         self.lm_head: nn.Module | None = None
+        self.fsdp_root: nn.Module | None = None
 
-    def set_lm_head(self, lm_head: nn.Module) -> None:
-        """Set the lm_head module. Must be called before the first __call__."""
+    def set_lm_head(
+        self, lm_head: nn.Module, *, fsdp_root: nn.Module | None = None
+    ) -> None:
+        """Set the lm_head module. Must be called before the first __call__.
+
+        ``fsdp_root`` is the module that FSDP sharded and that holds
+        ``lm_head``, e.g. the model. FlexShard needs it to find lm_head's bucket.
+        """
         self.lm_head = lm_head
+        self.fsdp_root = fsdp_root
 
     def __call__(
         self,
@@ -912,6 +921,7 @@ class ChunkedLossWrapper(Loss[LossInput]):
 
             with fsdp_partial_backwards(
                 lm_head,
+                fsdp_root=self.fsdp_root,
                 run_backward=run_backward,
                 outer_backward_follows=decoder_requires_grad,
             ) as fsdp:
