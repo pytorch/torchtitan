@@ -21,7 +21,6 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import torch
-
 import torchtitan.rl.generator.generator as generator_module
 import torchtitan.rl.generator.vllm.engine as vllm_engine_module
 from torchstore import RankRole
@@ -553,9 +552,13 @@ def test_decode_metrics_absent_for_single_generated_token():
 # A valid inference parallelism; the model state dict load guards run after it is accepted.
 _PARALLELISM = InferenceParallelismConfig()
 # The fields of a model config that VLLMEngine reads when it builds EngineArgs.
+_ATTENTION_CONFIG = SimpleNamespace(
+    inner_attention=VarlenInnerAttention.Config(),
+)
 _MODEL_CONFIG = SimpleNamespace(
-    first_full_attention=SimpleNamespace(inner_attention=VarlenInnerAttention.Config()),
+    first_full_attention=_ATTENTION_CONFIG,
     max_context_length=1024,
+    traverse=lambda _: ((None, _ATTENTION_CONFIG, None, None),),
 )
 
 
@@ -588,6 +591,43 @@ def test_batch_invariant_requires_kv_cache_reset():
             model=_MODEL_CONFIG,
             parallelism=_PARALLELISM,
             debug=DebugConfig(batch_invariant=True),
+        )
+
+
+def test_rocm_batch_invariant_runtime_requires_flex_attention():
+    with (
+        patch.object(torch.version, "hip", "7.15.26333"),
+        pytest.raises(ValueError, match="requires FlexAttention"),
+    ):
+        VLLMEngine.configure_runtime(
+            _MODEL_CONFIG,
+            parallelism=_PARALLELISM,
+            precision=PrecisionConfig(),
+            checkpointer=None,
+            dist_moe_runtime=None,
+            batch_invariant=True,
+            model_state_dict_load_mode="cpu_prefetch",
+            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
+            max_num_seqs=8,
+        )
+
+
+def test_rocm_batch_invariant_runtime_enforces_request_limit():
+    with (
+        patch.object(torch.version, "hip", "7.15.26333"),
+        patch.object(vllm_engine_module, "validate_rocm_flex_attention"),
+        pytest.raises(ValueError, match="at most 64 concurrent requests"),
+    ):
+        VLLMEngine.configure_runtime(
+            _MODEL_CONFIG,
+            parallelism=_PARALLELISM,
+            precision=PrecisionConfig(),
+            checkpointer=None,
+            dist_moe_runtime=None,
+            batch_invariant=True,
+            model_state_dict_load_mode="cpu_prefetch",
+            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
+            max_num_seqs=65,
         )
 
 

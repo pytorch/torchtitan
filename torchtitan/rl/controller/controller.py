@@ -419,15 +419,66 @@ class Controller(Configurable):
             # e.g. rollout max length cannot be larger than the model max_seq_len
             # or the packing len, etc.
 
+            self._validate_batch_invariance()
+
+        def _validate_batch_invariance(self) -> None:
+            if (
+                self.trainer.debug.batch_invariant
+                != self.generator.debug.batch_invariant
+            ):
+                raise ValueError(
+                    "trainer and generator must use the same batch_invariant setting"
+                )
+
             if self.trainer.debug.batch_invariant:
                 if torch.version.hip is not None:
-                    raise ValueError(
-                        "batch_invariant mode is not supported on ROCm: the varlen "
-                        "attention path cannot force num_splits=1 (rejected by ROCm), "
-                        "so split-k reductions are non-deterministic."
+                    # torch.version.hip reports the HIP runtime version (for example,
+                    # 7.15 on ROCm 10 wheels), not the ROCm release. Untagged and
+                    # source builds are intentionally rejected because only +rocm
+                    # wheel builds provide the validated release marker.
+                    rocm_version = str(torch.__version__).partition("+rocm")[2]
+                    if not rocm_version or int(rocm_version.partition(".")[0]) < 10:
+                        raise ValueError(
+                            "batch_invariant mode requires PyTorch built for "
+                            f"ROCm 10.0 or newer, got torch {torch.__version__}"
+                        )
+
+                    from torchtitan.rl.generator.vllm.batch_invariance import (
+                        validate_flex_page_mapping_request_limit,
+                        validate_rocm_flex_attention,
                     )
-                if not self.trainer.debug.deterministic:
-                    raise ValueError("batch_invariant requires deterministic=True")
+
+                    # Recipes and overrides may mutate nested generator fields after
+                    # its initial construction.
+                    self.generator.validate_batch_invariance()
+                    validate_rocm_flex_attention(self.trainer.model, owner="trainer")
+
+                    cuda_graph = getattr(self.generator.engine, "cuda_graph", None)
+                    if cuda_graph is not None and cuda_graph.mode != "NONE":
+                        # TODO: Support graph replay after
+                        # https://github.com/pytorch/torchtitan/issues/5725 is resolved.
+                        raise ValueError(
+                            "ROCm FlexAttention batch invariance requires "
+                            "cuda_graph.mode='NONE'"
+                        )
+
+                    # Validation requests are included only after the rollouter is
+                    # built; the engine validates the final max_num_seqs value.
+                    static_max_num_seqs = min(
+                        self.async_loop.max_active_rollout_groups
+                        * self.async_loop.num_samples_per_prompt,
+                        512,
+                    )
+                    validate_flex_page_mapping_request_limit(static_max_num_seqs)
+
+                if not (
+                    self.trainer.debug.deterministic
+                    and self.generator.debug.deterministic
+                ):
+                    raise ValueError(
+                        "batch_invariant requires deterministic=True for both "
+                        "trainer and generator"
+                    )
                 # Batch-invariant mode computes in bf16. The generator computes in
                 # precision.param_dtype, and so does the trainer forward: the trainer
                 # always wraps the model in FSDP (even at data_parallel_shard_degree=1,
@@ -482,6 +533,8 @@ class Controller(Configurable):
     def __init__(self, config: Config):
         self.config = config
         config.resolve_overrides()
+        # Recipes and overrides may mutate an already-constructed config.
+        config.__post_init__()
         config.maybe_log()
         self.actor_system: ActorSystem | None = None
         self.trainer: TrainerHandle | None = None

@@ -10,7 +10,115 @@ import logging
 
 import torch
 
+from torchtitan.models.common.decoder import Decoder
+
 logger = logging.getLogger(__name__)
+
+MAX_FLEX_BATCH_INVARIANT_REQUESTS = 64
+
+
+def validate_flex_page_mapping_request_limit(num_requests: int) -> None:
+    if num_requests > MAX_FLEX_BATCH_INVARIANT_REQUESTS:
+        raise ValueError(
+            "ROCm FlexAttention batch invariance supports at most "
+            f"{MAX_FLEX_BATCH_INVARIANT_REQUESTS} concurrent requests, "
+            f"got {num_requests}"
+        )
+
+
+def validate_rocm_flex_attention(
+    model: Decoder.Config,
+    *,
+    owner: str,
+) -> None:
+    from torchtitan.models.common.attention import Attention, FlexInnerAttention
+
+    attention_configs = tuple(
+        attention for _, attention, _, _ in model.traverse(Attention.Config)
+    )
+    if not attention_configs or any(
+        not isinstance(attention.inner_attention, FlexInnerAttention.Config)
+        for attention in attention_configs
+    ):
+        raise ValueError(
+            "batch_invariant mode on ROCm requires FlexAttention "
+            f"for every {owner} attention layer"
+        )
+
+
+def enable_rocm_batch_invariant_page_mapping() -> None:
+    """Use a request-independent page lookup for ROCm FlexAttention.
+
+    On the tested gfx950 Qwen capture, vLLM's request-indexed page lookup
+    changed the generated reduction order and produced a one-ULP BF16
+    difference from the trainer's contiguous FlexAttention. For that
+    full-attention path, this mapping preserved the mask semantics and
+    reproduced the trainer output.
+
+    Each physical page has one logical index. A separate ownership bitmask
+    preserves request isolation and shared prefix-cache pages.
+    """
+    from vllm.v1.attention.backends.flex_attention import FlexAttentionMetadata
+
+    # TODO: Replace this internal-method override with a supported vLLM page mapping
+    # after https://github.com/vllm-project/vllm/issues/66460 is resolved.
+    def get_paged_mask_mod(self):
+        active_mapping = self.physical_to_logical[: self.num_reqs]
+        valid_mapping = active_mapping >= 0
+        # A physical page is either exclusive to one request or shared as the
+        # same logical prefix page, so all valid entries in a column agree.
+        physical_to_logical = active_mapping.amax(dim=0)
+        request_indices = torch.arange(
+            self.num_reqs,
+            device=active_mapping.device,
+            dtype=torch.int64,
+        )[:, None]
+        request_bits = 1 << request_indices
+        physical_request_mask = torch.where(valid_mapping, request_bits, 0).sum(dim=0)
+        doc_ids = self.doc_ids
+        query_start_loc = self.query_start_loc
+        decode_offset = self.decode_offset
+        seq_lens = self.seq_lens
+        logical_mask_mod = self.logical_mask_mod
+        block_size = self.block_size
+
+        def global_page_mask_mod(
+            batch_index,
+            head_index,
+            query_index,
+            physical_kv_index,
+        ):
+            query_request = doc_ids[query_index]
+            query_request_i64 = query_request.to(torch.int64)
+            physical_kv_block = physical_kv_index // block_size
+            physical_kv_offset = physical_kv_index % block_size
+            logical_block = physical_to_logical[physical_kv_block]
+            logical_kv_index = logical_block * block_size + physical_kv_offset
+            logical_query_index = (
+                query_index
+                - query_start_loc[query_request]
+                + decode_offset[query_request]
+            )
+            request_bit = torch.ones_like(query_request_i64) << query_request_i64
+            request_owns_page = (
+                physical_request_mask[physical_kv_block] & request_bit
+            ) != 0
+            return (
+                (logical_block >= 0)
+                & (logical_kv_index < seq_lens[query_request])
+                & request_owns_page
+                & logical_mask_mod(
+                    batch_index,
+                    head_index,
+                    logical_query_index,
+                    logical_kv_index,
+                )
+            )
+
+        return global_page_mask_mod
+
+    FlexAttentionMetadata.get_paged_mask_mod = get_paged_mask_mod
+    logger.info("Enabled ROCm batch-invariant page mapping for vLLM FlexAttention")
 
 
 def force_logprobs_fn_for_batch_invariance() -> None:
@@ -48,7 +156,7 @@ def force_logprobs_fn_for_batch_invariance() -> None:
         # the trainer's compute_logprobs once per column.
         #
         # NOTE: each element of token_ids is scored independently, after the
-        # whole generated sequence is marterialized. We iterate column-by-column
+        # whole generated sequence is materialized. We iterate column-by-column
         # purely because torchtitan's compute_logprobs takes one token id per
         # position; it is not a cross-column/cross-position dependency.
         token_ids = token_ids.to(torch.int64)

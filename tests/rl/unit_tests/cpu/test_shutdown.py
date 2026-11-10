@@ -152,6 +152,9 @@ def _make_stub_rl_trainer(tmp_path):
         def resolve_overrides(self) -> None:
             pass
 
+        def __post_init__(self) -> None:
+            pass
+
         def maybe_log(self) -> None:
             pass
 

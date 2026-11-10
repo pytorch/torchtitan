@@ -191,14 +191,24 @@ class Generator(Configurable):
                     f"tensor_parallel_degree ({full_ep}) in the generator."
                 )
 
-            if (
-                self.debug.batch_invariant
-                and not self.reset_kv_cache_on_model_state_dict_load
-            ):
+            self.validate_batch_invariance()
+
+        def validate_batch_invariance(self) -> None:
+            if not self.debug.batch_invariant:
+                return
+
+            if not self.reset_kv_cache_on_model_state_dict_load:
                 raise ValueError(
                     "batch_invariant requires reset_kv_cache_on_model_state_dict_load=True so "
                     "cached KV cannot cross a policy update"
                 )
+
+            if torch.version.hip is not None:
+                from torchtitan.rl.generator.vllm.batch_invariance import (
+                    validate_rocm_flex_attention,
+                )
+
+                validate_rocm_flex_attention(self.model, owner="generator")
 
     def __init__(
         self,
