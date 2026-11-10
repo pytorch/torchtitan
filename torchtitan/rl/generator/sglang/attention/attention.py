@@ -162,6 +162,10 @@ class SGLangInnerAttention(InnerAttention):
         num_heads: int
         num_kv_heads: int
         head_dim: int
+        """Query and key head dim (K)."""
+        value_head_dim: int
+        """Value head dim (V): the width of the KV cache's V rows and of the output
+        heads. MLA's differs from ``head_dim`` (its K adds the rotary dims)."""
         scale: float | None = None
         sliding_window_size: int | None = None
         """Causal sliding window, in tokens including the query's own; None is full
@@ -188,13 +192,14 @@ class SGLangInnerAttention(InnerAttention):
                     f"{name} ({getattr(config, name)}) must be divisible by "
                     f"tensor_parallel_degree ({tp_size})"
                 )
-        self.head_dim = config.head_dim
+        self.value_head_dim = config.value_head_dim
         self.scale = (
             config.scale if config.scale is not None else config.head_dim**-0.5
         )
         self.radix_attention = _SGLangRadixAttention(
             num_heads=config.num_heads // tp_size,
             head_dim=config.head_dim,
+            v_head_dim=config.value_head_dim,
             scaling=self.scale,
             num_kv_heads=config.num_kv_heads // tp_size,
             layer_id=config.layer_id,
@@ -251,11 +256,14 @@ class SGLangInnerAttention(InnerAttention):
         # The rows SGLang scheduled, which own a KV cache slot each.
         num_tokens = forward_batch.out_cache_loc.shape[0]
         num_padding = q_THK.shape[0] - num_tokens
+        # MLA's V is a strided view of its per-head KV projection, and SGLang's KV
+        # cache stores V rows flat. A no-op for a contiguous V.
+        v_THV = v_THV[:num_tokens].contiguous()
         # RadixAttention returns (T, H * V).
         out = self.radix_attention(
-            q_THK[:num_tokens], k_THK[:num_tokens], v_THV[:num_tokens], forward_batch
+            q_THK[:num_tokens], k_THK[:num_tokens], v_THV, forward_batch
         )
-        out = out.view(num_tokens, -1, self.head_dim)
+        out = out.view(num_tokens, -1, self.value_head_dim)
         if num_padding:
             out = F.pad(out, (0, 0, 0, 0, 0, num_padding))
         return out

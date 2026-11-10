@@ -19,6 +19,7 @@ from typing import Any
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import PrecisionConfig
 from torchtitan.models.common.attention.gdn import GDN
+from torchtitan.models.common.attention.linear_attention import LinearAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
@@ -52,7 +53,20 @@ def _model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
         raise ValueError(
             f"Model config {type(cfg).__qualname__} has no full attention layer."
         )
-    n_heads, n_kv_heads, head_dim, _ = get_attention_dimensions(attn, cfg.dim)
+    n_heads, n_kv_heads, head_dim, value_head_dim = get_attention_dimensions(
+        attn, cfg.dim
+    )
+    # SGLang sizes one K/V row shape for all softmax attention layers.
+    kv_shapes = {
+        get_attention_dimensions(layer.attention, cfg.dim)[1:]
+        for layer in cfg.layers
+        if not isinstance(layer.attention, LinearAttention.Config)
+    }
+    if len(kv_shapes) > 1:
+        raise ValueError(
+            "The SGLang engine needs one (n_kv_heads, head_dim, value_head_dim) for "
+            f"all softmax attention layers, got {sorted(kv_shapes)}"
+        )
     return {
         "architectures": [TORCHTITAN_ARCHITECTURE],
         "model_type": "torchtitan",
@@ -61,6 +75,7 @@ def _model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
         "num_attention_heads": n_heads,
         "num_key_value_heads": n_kv_heads,
         "head_dim": head_dim,
+        "v_head_dim": value_head_dim,
         "num_hidden_layers": len(cfg.layers),
         # SGLang rejects a context length above this.
         "max_position_embeddings": cfg.max_context_length + CONTEXT_LENGTH_MARGIN,
