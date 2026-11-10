@@ -45,7 +45,7 @@ from sglang.srt.utils.common import next_power_of_2
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import DebugConfig, PrecisionConfig
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
+from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.models.common.moe.token_dispatcher import (
     AllToAllTokenDispatcher,
     BaseEPTokenDispatcher,
@@ -139,7 +139,8 @@ class SGLangEngine(GenerationEngine):
             # cuda_graph owns SGLang's CUDA-graph settings: SGLang applies its
             # per-phase graph keys (e.g. cuda_graph_backend_decode) over
             # disable_cuda_graph, so one would capture graphs that the engine's
-            # checks of cuda_graph assume are off.
+            # checks of cuda_graph assume are off. SGLang's default capture sizes
+            # also stay within the step budget that Dist-MoE's buffers are sized for.
             owned_keys = sorted(
                 key
                 for key in self.extra_server_args
@@ -183,6 +184,8 @@ class SGLangEngine(GenerationEngine):
         if parallelism.enable_sequence_parallel:
             raise ValueError("SGLangEngine does not support sequence parallelism")
         if parallelism.expert_parallel_degree > 1:
+            # Dist-MoE experts have no token dispatcher, so this sees only the stock
+            # ones; Dist-MoE runs under CUDA graphs.
             for fqn, dispatcher, _, _ in model.traverse(BaseEPTokenDispatcher.Config):
                 if not isinstance(dispatcher, AllToAllTokenDispatcher.Config):
                     raise ValueError(
@@ -196,16 +199,6 @@ class SGLangEngine(GenerationEngine):
                         "host, which CUDA graphs cannot capture: set "
                         "SGLangEngine.Config.cuda_graph to 'none', or use Dist-MoE"
                     )
-        if (
-            parallelism.expert_parallel_degree == 1
-            and parallelism.tensor_parallel_degree > 1
-            and next(model.traverse(DistMoeRoutedExperts.Config), None) is not None
-        ):
-            raise ValueError(
-                "Dist-MoE splits each step's tokens over the TP ranks, and SGLangEngine "
-                "pads steps to a multiple of TP only with expert parallelism: set "
-                "expert_parallel_degree > 1 or tensor_parallel_degree = 1"
-            )
         self.config = config
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load

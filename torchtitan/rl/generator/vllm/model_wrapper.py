@@ -354,7 +354,6 @@ class VLLMModelWrapper(Module):
     ) -> None:
         """Build the Dist-MoE runtime (see ``build_dist_moe_runtime``) and the
         device scalar of each step's real token count."""
-        self._num_valid_tokens: torch.Tensor | None = None
         self._dist_moe_runtime = build_dist_moe_runtime(
             self.model,
             runtime_config,
@@ -362,15 +361,16 @@ class VLLMModelWrapper(Module):
             device=device,
             max_num_tokens_per_step=max_num_batched_tokens,
         )
-        if self._dist_moe_runtime is None:
-            return
-        # The runner writes each step's real token count here before the forward
-        # runs, and forward builds the padding mask from it on the device, so
-        # CUDA-graph replay sees the current count. The address must stay fixed
-        # from before capture. Until a step publishes, every token counts as real.
-        self._num_valid_tokens = torch.full(
-            (), torch.iinfo(torch.int32).max, dtype=torch.int32, device=device
-        )
+        self._num_valid_tokens: torch.Tensor | None = None
+        if self._dist_moe_runtime is not None:
+            # The runner writes each step's real token count here before the
+            # forward runs, and forward builds the padding mask from it on the
+            # device, so CUDA-graph replay sees the current count. The address must
+            # stay fixed from before capture. Until a step publishes, every token
+            # counts as real.
+            self._num_valid_tokens = torch.full(
+                (), torch.iinfo(torch.int32).max, dtype=torch.int32, device=device
+            )
 
     # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:
