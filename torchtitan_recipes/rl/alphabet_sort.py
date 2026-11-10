@@ -669,6 +669,9 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     config.override = OverrideConfig(
         imports=["torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"]
     )
+    # Validation beside training would change the step times this recipe measures: validate at the end.
+    config.async_loop.validation.validate_at_step_0 = False
+    config.async_loop.validation.validate_after_training = True
     return config
 
 
@@ -950,4 +953,7 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
     config.generator = dataclasses.replace(
         config.generator, model=generator_model, parallelism=generator_parallelism
     )
+    # Validation beside training would change the step times this recipe measures: validate at the end.
+    config.async_loop.validation.validate_at_step_0 = False
+    config.async_loop.validation.validate_after_training = True
     return config

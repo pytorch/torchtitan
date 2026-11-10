@@ -213,7 +213,7 @@ def test_process_finished_requests_resolves_reply_with_completion():
         reply = concurrent.futures.Future()
         reply.set_running_or_notify_cancel()  # admitted, as the engine loop leaves it
         # Admitted (sampled) under v7 (the min); a model state dict load then advanced the live version to 8 (the max).
-        generation = OutstandingGeneration(reply=reply, metrics_prefix="generator")
+        generation = OutstandingGeneration(reply=reply)
         generation.min_policy_version = 7
         dispatcher._rank0_outstanding_generations = {"r0": generation}
 
@@ -264,7 +264,7 @@ def test_process_finished_requests_releases_dp_router_load():
         assert dispatcher._rank0_dp_router is not None
         reply = concurrent.futures.Future()
         reply.set_running_or_notify_cancel()  # admitted, as the engine loop leaves it
-        generation = OutstandingGeneration(reply=reply, metrics_prefix="generator")
+        generation = OutstandingGeneration(reply=reply)
         generation.min_policy_version = 7
         dispatcher._rank0_outstanding_generations = {"r0": generation}
         dispatcher._rank0_dp_router.reserve("r0", routing_session_id=None)
@@ -407,9 +407,7 @@ def test_process_rejected_requests_fails_only_their_replies():
         for request_id in ("r0", "r1"):
             replies[request_id] = concurrent.futures.Future()
             replies[request_id].set_running_or_notify_cancel()
-            dispatcher.rank0_register_generation(
-                request_id, "generator", replies[request_id]
-            )
+            dispatcher.rank0_register_generation(request_id, replies[request_id])
             dispatcher._rank0_dp_router.reserve(request_id, routing_session_id=None)
         error = ValueError("prompt too long")
 
@@ -526,27 +524,23 @@ def test_sampling_config_rejects_top_p_below_one():
 # --- vLLM metric timing math (the `_prepare_generation_request_metrics` helper) ---
 
 
-def test_metric_timing_math_and_prefix_override():
+def test_metric_timing_math():
     metrics = _prepare_generation_request_metrics(
-        _extract_request_metrics_inputs(_request_output(num_preemptions=2)),
-        prefix="validation_generator",
+        _extract_request_metrics_inputs(_request_output(num_preemptions=2))
     )
     aggregate = m.MetricsProcessor._aggregate_metrics(metrics)
-    assert all(key.startswith("validation_generator/") for key in aggregate)
-    assert aggregate["validation_generator/num_preemptions/mean"] == 2
-    assert aggregate["validation_generator/queue_time_ms/mean"] == pytest.approx(5)
-    assert aggregate["validation_generator/time_to_first_token_ms/mean"] == 12
-    assert aggregate["validation_generator/prefill_time_ms/mean"] == pytest.approx(12)
-    assert aggregate["validation_generator/decode_time_ms/mean"] == pytest.approx(30)
-    assert aggregate[
-        "validation_generator/inter_token_latency_ms/mean"
-    ] == pytest.approx(10)
+    assert all(key.startswith("generator/") for key in aggregate)
+    assert aggregate["generator/num_preemptions/mean"] == 2
+    assert aggregate["generator/queue_time_ms/mean"] == pytest.approx(5)
+    assert aggregate["generator/time_to_first_token_ms/mean"] == 12
+    assert aggregate["generator/prefill_time_ms/mean"] == pytest.approx(12)
+    assert aggregate["generator/decode_time_ms/mean"] == pytest.approx(30)
+    assert aggregate["generator/inter_token_latency_ms/mean"] == pytest.approx(10)
 
 
 def test_decode_metrics_absent_for_single_generated_token():
     metrics = _prepare_generation_request_metrics(
-        _extract_request_metrics_inputs(_request_output(num_generation_tokens=1)),
-        prefix="generator",
+        _extract_request_metrics_inputs(_request_output(num_generation_tokens=1))
     )
     keys = {metric.key for metric in metrics}
     assert "generator/prefill_time_ms" in keys
@@ -669,16 +663,20 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dic
     return engine_args.call_args.kwargs
 
 
-def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
+def test_engine_config_reaches_engine_args(monkeypatch, tmp_path):
     engine_kwargs = _build_engine_kwargs(
         monkeypatch,
         tmp_path,
         Generator.Config(
             model=_MODEL_CONFIG,
-            engine=VLLMEngine.Config(extra_engine_args={"watermark": 0.03}),
+            engine=VLLMEngine.Config(
+                watermark=0.03,
+                extra_engine_args={"long_prefill_token_threshold": 4096},
+            ),
         ),
     )
     assert engine_kwargs["watermark"] == 0.03
+    assert engine_kwargs["long_prefill_token_threshold"] == 4096
     assert engine_kwargs["scheduling_policy"] == "priority"
 
 
@@ -693,6 +691,7 @@ def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
             r"use Generator\.Config\.max_num_batched_tokens",
         ),
         ("seed", r"use Generator\.Config\.debug\.seed"),
+        ("watermark", r"use VLLMEngine\.Config\.watermark"),
     ],
 )
 def test_extra_engine_args_rejects_torchtitan_owned_keys(key, match):

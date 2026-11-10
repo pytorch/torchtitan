@@ -245,16 +245,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
     engine_kwargs["max_model_len"] = gen_config.model.max_context_length
-    # Mirror Controller.setup_async for a single engine: derive from active rollout concurrency
-    # (the active-buffer capacity num_group_workers, or the validation pass).
-    async_loop = config.async_loop
-    gen_dp = max(gen_config.parallelism.data_parallel_degree, 1)
-    num_group_workers = async_loop.max_active_rollout_groups
-    rollout_concurrency = max(
-        num_group_workers * async_loop.num_samples_per_prompt,
-        async_loop.validation.steps,
-    )
-    max_num_seqs = min((rollout_concurrency + gen_dp - 1) // gen_dp, 512)
+    max_num_seqs = config.max_num_seqs_per_generator_dp_rank
     engine_kwargs["max_num_seqs"] = max_num_seqs
     expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
     vllm_compilation_config = gen_config.engine.cuda_graph.get_vllm_compilation_config(
