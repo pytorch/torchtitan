@@ -162,8 +162,10 @@ class SGLangInnerAttention(InnerAttention):
         num_heads: int
         num_kv_heads: int
         head_dim: int
-        """The query/key head dim."""
+        """Query and key head dim (K)."""
         value_head_dim: int
+        """Value head dim (V): the width of the KV cache's V rows and of the output
+        heads. MLA's differs from ``head_dim`` (its K adds the rotary dims)."""
         scale: float | None = None
         sliding_window_size: int | None = None
         """Causal sliding window, in tokens including the query's own; None is full
@@ -190,7 +192,6 @@ class SGLangInnerAttention(InnerAttention):
                     f"{name} ({getattr(config, name)}) must be divisible by "
                     f"tensor_parallel_degree ({tp_size})"
                 )
-        self.head_dim = config.head_dim
         self.value_head_dim = config.value_head_dim
         self.scale = (
             config.scale if config.scale is not None else config.head_dim**-0.5
@@ -255,11 +256,9 @@ class SGLangInnerAttention(InnerAttention):
         # The rows SGLang scheduled, which own a KV cache slot each.
         num_tokens = forward_batch.out_cache_loc.shape[0]
         num_padding = q_THK.shape[0] - num_tokens
-        v_THV = v_THV[:num_tokens]
-        if self.value_head_dim != self.head_dim:
-            # MLA's V is a strided view of its per-head KV projection; SGLang's KV
-            # cache stores V rows flat.
-            v_THV = v_THV.contiguous()
+        # MLA's V is a strided view of its per-head KV projection, and SGLang's KV
+        # cache stores V rows flat. A no-op for a contiguous V.
+        v_THV = v_THV[:num_tokens].contiguous()
         # RadixAttention returns (T, H * V).
         out = self.radix_attention(
             q_THK[:num_tokens], k_THK[:num_tokens], v_THV, forward_batch

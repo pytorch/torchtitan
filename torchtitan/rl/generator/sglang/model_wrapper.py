@@ -101,13 +101,16 @@ def _replace_sglang_layer_configs(model_config: Decoder.Config) -> Decoder.Confi
                 "sinks (GPT-OSS)"
             )
         inner_cfg = attention_cfg.inner_attention
-        mla_cfg = None
-        if isinstance(inner_cfg, MLAAttention.Config):
+        # An MLA layer keeps its projection of the latent to per-head K/V (mla_cfg),
+        # around the kernel config this replaces.
+        mla_cfg = inner_cfg if isinstance(inner_cfg, MLAAttention.Config) else None
+        if mla_cfg is not None:
             # TODO(https://github.com/sgl-project/sglang/issues/48462): cache MLA's
             # compressed latent with SGLang's MLA backends, as the vLLM engine does
             # outside batch-invariant mode; SGLang recognizes MLA models by their
-            # architecture name only.
-            mla_cfg, inner_cfg = inner_cfg, inner_cfg.inner_attention
+            # architecture name only. Per-head K/V take ~9x the cache per token for
+            # DeepSeek V3 671B at TP 8 (5,120 elements per layer and rank, vs 576).
+            inner_cfg = mla_cfg.inner_attention
         if isinstance(inner_cfg, FlexInnerAttention.Config):
             # TODO: run flex attention through an SGLang backend with the trainer's
             # block sizes, as the vLLM engine does with vLLM's FLEX_ATTENTION.
@@ -140,15 +143,18 @@ def _replace_sglang_layer_configs(model_config: Decoder.Config) -> Decoder.Confi
             ),
             sharding_config=inner_cfg.sharding_config,
         )
-        if mla_cfg is not None:
-            sglang_inner_cfg = dataclasses.replace(
-                mla_cfg, inner_attention=sglang_inner_cfg
-            )
         new_layers.append(
             dataclasses.replace(
                 layer_cfg,
                 attention=dataclasses.replace(
-                    attention_cfg, inner_attention=sglang_inner_cfg
+                    attention_cfg,
+                    inner_attention=(
+                        sglang_inner_cfg
+                        if mla_cfg is None
+                        else dataclasses.replace(
+                            mla_cfg, inner_attention=sglang_inner_cfg
+                        )
+                    ),
                 ),
             )
         )
