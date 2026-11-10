@@ -4,8 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# Shape suffixes: T = tokens, M = HC branches (hc_mult), D = hidden width.
+
 from dataclasses import dataclass, field
-from typing import cast, TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
@@ -62,7 +64,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        input_ids_T: torch.Tensor,
+        input_ids_T: torch.Tensor | None,
         attention_metadata: VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
@@ -73,7 +75,8 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
 
         Args:
             x: Hidden states of shape ``[T, hc_mult, D]``.
-            input_ids_T: Token IDs of shape ``[T]`` used by hash routing.
+            input_ids_T: Token IDs of shape ``[T]``; required by hash-routed
+                layers.
             attention_metadata: Optional document offsets consumed by sparse
                 attention.
             positions: Optional position IDs of shape ``[T]``.
@@ -124,6 +127,16 @@ class DeepSeekV4Model(Decoder):
     """DeepSeek V4 decoder model with HC branches and sparse attention."""
 
     mtp_layers: "ModuleList[MTPBlock]"
+
+    pipeline_last_stage_module_fqns = ("hc_head",)
+
+    def pipeline(self, **kwargs):
+        """Partition the decoder; MTP layers are not assigned to pipeline stages."""
+        if len(self.mtp_layers) > 0:
+            raise ValueError(
+                "DeepSeek V4 does not support pipeline parallelism with MTP layers."
+            )
+        return super().pipeline(**kwargs)
 
     @classmethod
     def _register_optimizer_hooks(
@@ -245,7 +258,6 @@ class DeepSeekV4Model(Decoder):
         self.hc_mult = cfg.hc_mult
         self.n_mtp_layers = cfg.n_mtp_layers
         self.compress_ratios = list(cfg.compress_ratios)[: cfg.n_layers]
-        self.n_main_layers = cfg.n_layers
 
         self.hc_head = cfg.hc_head.build()
         self.mtp_layers = ModuleList()
@@ -254,6 +266,35 @@ class DeepSeekV4Model(Decoder):
                 mtp_layer.build() for mtp_layer in cfg.mtp_layers
             )
 
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, Any],
+        *,
+        parallelism_context: ParallelismContext,
+        parallelism: ParallelismConfig,
+        max_num_documents: int | None = None,
+        global_routing_token_counts: torch.Tensor | None = None,
+        **kwargs: Any,
+    ) -> tuple[
+        torch.Tensor | tuple[torch.Tensor, ...],
+        torch.Tensor | tuple[torch.Tensor, ...],
+        dict[str, Any],
+        dict[str, Any],
+    ]:
+        """Build the decoder batch and pass token IDs on for hash routing."""
+        inputs, labels, model_kwargs, loss_kwargs = super().preprocess_inputs(
+            input_dict,
+            parallelism_context=parallelism_context,
+            parallelism=parallelism,
+            max_num_documents=max_num_documents,
+            global_routing_token_counts=global_routing_token_counts,
+            **kwargs,
+        )
+        # Later PP stages receive hidden states instead of tokens, but model
+        # kwargs reach every stage.
+        model_kwargs["input_ids_T"] = inputs
+        return inputs, labels, model_kwargs, loss_kwargs
+
     def forward(
         self,
         tokens: torch.Tensor,
@@ -261,8 +302,14 @@ class DeepSeekV4Model(Decoder):
         attention_metadata: AttentionMetadataMap | None = None,
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominators: torch.Tensor | None = None,
+        *,
+        input_ids_T: torch.Tensor | None = None,
     ):
-        """Run the DeepSeek V4 decoder."""
+        """Run the DeepSeek V4 decoder.
+
+        On a later PP stage, ``tokens`` is the previous stage's ``[T, M, D]``
+        hidden state and ``input_ids_T`` carries the token IDs.
+        """
         if len(self.mtp_layers) > 0 and self.tok_embeddings is None:
             raise ValueError("DeepSeek V4 MTP forward requires token embeddings.")
         if len(self.mtp_layers) > 0 and self._skip_lm_head:
@@ -271,23 +318,25 @@ class DeepSeekV4Model(Decoder):
                 "cross entropy is not supported."
             )
 
-        input_ids_T = tokens.detach().long()
-        h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
-        h = h.unsqueeze(1).repeat(1, self.hc_mult, 1)
+        if self.tok_embeddings is not None:
+            if input_ids_T is None:
+                input_ids_T = tokens.detach().long()
+            h_TMD = self.tok_embeddings(tokens).unsqueeze(1).repeat(1, self.hc_mult, 1)
+        else:
+            h_TMD = tokens
 
         with spmd.no_typecheck():
             main_aux_loss_denominator = (
                 None if aux_loss_denominators is None else aux_loss_denominators[0]
             )
-        for i in range(self.n_main_layers):
-            layer = self.layers[str(i)]
+        for layer in self.layers.values():
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
                 else attention_metadata.get(type(layer.attention.inner_attention))
             )
-            h = layer(
-                h,
+            h_TMD = layer(
+                h_TMD,
                 input_ids_T,
                 layer_attention_metadata,
                 positions,
@@ -295,17 +344,18 @@ class DeepSeekV4Model(Decoder):
                 aux_loss_denominator=main_aux_loss_denominator,
             )
 
-        prev_hc_hidden = h
-        main_hidden = self.hc_head(h)
-        main_hidden = self.norm(main_hidden) if self.norm is not None else main_hidden
+        # Only the last PP stage owns hc_head and norm.
+        if self.norm is None:
+            return h_TMD
+        h_TD = self.norm(self.hc_head(h_TMD))
 
         if len(self.mtp_layers) == 0:
             if self._skip_lm_head or self.lm_head is None:
-                return main_hidden
-            return self.lm_head(main_hidden)
+                return h_TD
+            return self.lm_head(h_TD)
 
-        outputs = [main_hidden] + self.mtp_forward(
-            prev_hc_hidden,
+        outputs = [h_TD] + self.mtp_forward(
+            h_TMD,
             tokens,
             attention_metadata,
             positions,
