@@ -132,7 +132,8 @@ class SGLangEngine(GenerationEngine):
           faster.
         - ``"breakable"``: ``"decode"``, plus SGLang's breakable graphs for prefill
           batches, which run attention eagerly between graph segments, at a CPU cost
-          per layer in every prefill step. For linear attention (GDN, KDA) models.
+          per layer in every prefill step. Linear attention (GDN, KDA) models need
+          this mode for prefill graphs, since ``"full"`` raises for them.
         - ``"full"`` (default): full graphs for decode and prefill batches, attention
           included, with a request slot per running request. Raises for linear
           attention models, whose full prefill graphs SGLang fails to capture.
@@ -374,9 +375,10 @@ class SGLangEngine(GenerationEngine):
         )
         if self.config.cuda_graph == "full":
             # Full graphs also capture attention, whose eager CPU cost otherwise
-            # dominates small prefills. A request slot per running request, so no
-            # prefill batch has too many requests for the graphs (it would run
-            # eagerly).
+            # dominates small prefills. SGLang runs a prefill batch eagerly if it
+            # has more requests than full_prefill_max_req. A prefill batch has at
+            # most max_num_seqs requests, so with that many slots every prefill
+            # batch runs in a graph.
             server_kwargs["cuda_graph_config"] = {
                 "prefill": {"backend": "full", "full_prefill_max_req": max_num_seqs}
             }
