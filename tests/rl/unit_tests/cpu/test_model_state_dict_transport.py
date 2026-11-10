@@ -108,9 +108,14 @@ def _transfer(
     generator ranks' state dicts."""
     boxes = {}
     monkeypatch.setattr(m, "_box", lambda tensor, placements=None: boxes[id(tensor)])
-    monkeypatch.setattr(m, "new_transport", lambda backend: _FakeTransport())
+    config = ModelStateDictTransport.Config(backend="nixl")
+
+    def new_transport(backend):
+        assert backend == config.backend
+        return _FakeTransport()
+
+    monkeypatch.setattr(m, "new_transport", new_transport)
     monkeypatch.setattr(m, "wait_all", _wait_all)
-    config = ModelStateDictTransport.Config()
 
     generator_sds = []
     for shards in generator_shards:
