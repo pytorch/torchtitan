@@ -20,6 +20,7 @@ from torch.distributed.fsdp import (
 from torch.distributed.tensor import Shard
 
 from torchtitan.config.parallelism import FSDPSymmMemScope
+from torchtitan.distributed.flex_shard_fsdp import is_flex_shard_module
 from torchtitan.distributed.fsdp_lifecycle import complete_fsdp_grouped_forward
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.base.module import Module
@@ -52,14 +53,18 @@ def post_validate_fsdp_for_accelerator_graph(model_parts: list[nn.Module]) -> No
     Eager and captured validation use the same cleanup. With ChunkedLossWrapper,
     the model skips lm_head, then the loss calls it after the root forward.
     A group containing norm and lm_head can still have norm pending. Validation
-    has no backward callback to clear this state.
+    has no backward callback to clear this state. FlexShard's ``reshard()``
+    closes the same forward of norm and lm_head's bucket and reshards all
+    buckets.
     """
     for model in model_parts:
         for module in model.modules():
-            if not isinstance(module, FSDPModule):
-                continue
-            complete_fsdp_grouped_forward(module, None)
-            module.reshard()
+            if isinstance(module, FSDPModule):
+                complete_fsdp_grouped_forward(module, None)
+                module.reshard()
+            elif is_flex_shard_module(module):
+                # pyrefly: ignore [not-callable]
+                module.reshard()
 
 
 def _fsdp_unit_holds_only_embedding_weights(

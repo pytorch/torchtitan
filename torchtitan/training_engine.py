@@ -183,7 +183,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 validate_flex_shard_training(
                     parallelism=self.parallelism,
                     training=self.training,
-                    loss=self.loss,
                     checkpointer=self.checkpointer,
                     optim=self.optim,
                     debug=self.debug,
@@ -477,7 +476,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             model_with_lm_head = cast(Any, model)
             lm_head = model_with_lm_head.lm_head
             assert lm_head is not None, error_message
-            self.loss_fn.set_lm_head(lm_head)
+            self.loss_fn.set_lm_head(lm_head, fsdp_root=model)
             model_with_lm_head._skip_lm_head = True
 
     def _parallelize_kwargs(self) -> dict[str, Any]:
