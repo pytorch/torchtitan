@@ -52,6 +52,7 @@ from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.sglang.attention.attention import SGLangInnerAttention
 from torchtitan.rl.generator.sglang.attention.gdn import SGLangInnerGDN
 from torchtitan.rl.generator.sglang.attention.kda import SGLangInnerKDA
+from torchtitan.tools.utils import round_up
 
 logger = logging.getLogger(__name__)
 
@@ -335,9 +336,11 @@ class SGLangModelWrapper(Module):
         schedule = get_schedule()
         token_multiple = parallelism.expert_sequence_parallel_size
         # A step runs at most chunked_prefill_size prefill tokens plus a decode token
-        # per running request, padded to token_multiple.
-        num_tokens = schedule.chunked_prefill_size + schedule.max_running_requests
-        max_num_tokens_per_step = -(-num_tokens // token_multiple) * token_multiple
+        # per running request, padded up to a multiple of token_multiple.
+        max_num_tokens_per_step = round_up(
+            schedule.chunked_prefill_size + schedule.max_running_requests,
+            token_multiple,
+        )
         validate_ep_token_dispatcher_capacity(
             self.config,
             parallelism=parallelism,
