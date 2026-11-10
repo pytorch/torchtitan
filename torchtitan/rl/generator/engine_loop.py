@@ -23,7 +23,7 @@ import torch.distributed as dist
 
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.generator.dispatcher import RequestDispatcher
-from torchtitan.rl.generator.engine import GenerationEngine
+from torchtitan.rl.generator.engine import GenerationEngine, KVCacheBudget
 from torchtitan.rl.generator.types import EngineRequest
 from torchtitan.rl.rollout.types import Completion
 
@@ -241,6 +241,12 @@ class EngineLoop:
         engine = self._engine
         if engine is not None and self._rank == 0:
             engine.log_stats(step)
+
+    def kv_cache_budget(self) -> KVCacheBudget:
+        """Return the engine's KV cache size; it reads only engine config, safe from any thread."""
+        if self._engine is None:
+            raise RuntimeError("the engine loop has released its engine")
+        return self._engine.kv_cache_budget()
 
     async def close(self) -> None:
         """Stop the loop, which releases the dispatcher and the engine on exit.

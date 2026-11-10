@@ -22,12 +22,17 @@ from vllm.config import AttentionConfig
 from vllm.exceptions import VLLMClientError
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import DebugConfig, PrecisionConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
-from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
+from torchtitan.rl.generator.engine import (
+    GenerationEngine,
+    KVCacheBudget,
+    ModelStateDictLoadMode,
+)
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import (
     EngineRequest,
@@ -438,6 +443,40 @@ class VLLMEngine(GenerationEngine):
             step,
             self._session_kv_evictor.num_sessions,
             self._session_kv_evictor.num_evicted_blocks,
+        )
+
+    def kv_cache_budget(self) -> KVCacheBudget:
+        """Return the counts behind vLLM's logged "GPU KV cache size": blocks summed over the
+        DP replicas, and the blocks one session holds.
+
+            full attention, or Mamba with mamba_cache_mode="all"   1 block per block_size tokens
+            Mamba in "align" mode, sliding window                  a fixed count per session
+        """
+        vllm_config = self._engine.vllm_config
+        kv_cache_config = self._engine.engine_core.engine_core.scheduler.kv_cache_config
+        num_growing_kv_cache_groups, fixed_blocks_per_session = 0, 0
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            spec = kv_cache_group.kv_cache_spec
+            if isinstance(spec, FullAttentionSpec) or (
+                isinstance(spec, MambaSpec)
+                and vllm_config.cache_config.mamba_cache_mode == "all"
+            ):
+                num_growing_kv_cache_groups += 1
+            else:
+                fixed_blocks_per_session += math.ceil(
+                    spec.max_memory_usage_bytes(vllm_config) / spec.page_size_bytes
+                )
+        return KVCacheBudget(
+            # Each DP replica has its own engine; assumes they all have this one's size.
+            # TODO: with DP > 1 the router charges the pooled blocks, but `IntraGeneratorRouter`
+            # spreads a placed group's sessions over the replicas without looking at their KV.
+            # So one replica can fill while the pooled charge stays under `limit`. Check
+            # per-replica KV usage in a GPU run before turning admission on with DP > 1.
+            num_blocks=kv_cache_config.num_blocks * self.data_parallel_size,
+            block_size=vllm_config.cache_config.block_size,
+            num_growing_kv_cache_groups=num_growing_kv_cache_groups,
+            fixed_blocks_per_session=fixed_blocks_per_session,
+            max_model_len=vllm_config.model_config.max_model_len,
         )
 
     def load_model_state_dict(

@@ -50,6 +50,10 @@ class _InterGeneratorRouterActorEndpoints:
         )
 
     @concurrent_endpoint
+    async def acquire_group(self, group_id: int, *, group_size: int) -> None:
+        await super().acquire_group(group_id, group_size=group_size)
+
+    @concurrent_endpoint
     async def start_engine_loop(self) -> None:
         await super().start_engine_loop()
 

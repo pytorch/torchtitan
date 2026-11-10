@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -16,11 +17,18 @@ from typing import Any
 from torchtitan.config import Configurable
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.system import ServiceHandle
+from torchtitan.rl.routing.admission import KVGrowthEstimateAdmission
 from torchtitan.rl.routing.strategies import (
     RoutingStrategy,
     StickySessionRoutingStrategy,
 )
 from torchtitan.rl.routing.types import RoutingCandidate, RoutingContext
+
+logger = logging.getLogger(__name__)
+
+# How often waiting groups retry placement: ended sessions and the growth window change what
+# fits without a group release.
+_ADMISSION_RETRY_S = 1.0
 
 
 @dataclass(kw_only=True, slots=True)
@@ -95,6 +103,15 @@ class InterGeneratorRouter(Configurable):
         under different policy versions. A turn whose session is pinned to a
         draining generator waits for it instead of moving to another one."""
 
+        admission: KVGrowthEstimateAdmission.Config | None = None
+        """When each new rollout group starts, and on which generator:
+            None (default):  every group starts at once; ``strategy`` routes each call
+            set:             a group waits in ``acquire_group`` until a generator's KV cache has
+                             room for it, then all its calls go there. ``strategy`` routes the
+                             calls of groups not placed, e.g. validation groups, whose KV is not
+                             charged while they run
+        Set it for multi-turn rollouts, so their histories stay cached between turns."""
+
     def __init__(
         self,
         config: Config,
@@ -116,6 +133,15 @@ class InterGeneratorRouter(Configurable):
         self._session_generators: dict[str, list[_GeneratorHandle]] = {}
         self._group_session_ids: dict[int, set[str]] = {}
 
+        # Admission state, used when `admission` is set; `start_engine_loop` builds the policy from
+        # the generators' KV cache sizes.
+        self._admission: KVGrowthEstimateAdmission | None = None
+        self._retry_task: asyncio.Task | None = None
+        self._placed_groups: dict[int, _GeneratorHandle] = {}
+        # Groups waiting in `acquire_group`: (group size, a future that resolves once the group
+        # is placed), by group id.
+        self._waiting_groups: dict[int, tuple[int, asyncio.Future[None]]] = {}
+
     def _reserve(self, h: _GeneratorHandle, cost: int) -> None:
         """Reserve estimated generation work on a handle before dispatch."""
 
@@ -136,11 +162,16 @@ class InterGeneratorRouter(Configurable):
         method: str,
         *args,
         routing_ctx: RoutingContext,
+        placed: _GeneratorHandle | None = None,
         **kwargs,
     ) -> Any:
-        """Dispatch one call to a generator's rank 0 and return its result."""
+        """Dispatch one call to a generator's rank 0 and return its result: to ``placed``, the
+        generator admission placed the call's group on, else to the strategy's pick."""
         pinned = self._strategy.pinned_candidate(routing_ctx)
-        if pinned is not None and pinned.draining:
+        if placed is not None:
+            # A draining generator holds the call until its load is applied.
+            h = placed
+        elif pinned is not None and pinned.draining:
             # Stay on the draining generator, which queues the turn until its load is
             # applied; the strategy would re-pin the session just because it drains.
             h = pinned
@@ -241,7 +272,20 @@ class InterGeneratorRouter(Configurable):
     ) -> Any:
         """Route one generation call to a generator and return its completion."""
         self._group_session_ids.setdefault(group_id, set()).add(routing_session_id)
-        return await self._route(
+        # Not placed: no admission, a validation group, or a call that outlived its group (e.g. a
+        # sibling still running after its group failed), routed by the strategy.
+        placed = self._placed_groups.get(group_id)
+        # The policy that charges this call's session, if its group is placed.
+        admission = self._admission if placed is not None else None
+        if admission is not None:
+            # The policy sees the session's prompt while the call runs, then its prompt plus
+            # completion.
+            admission.set_session_tokens(
+                group_id,
+                session_id=routing_session_id,
+                num_tokens=len(prompt_token_ids),
+            )
+        completion = await self._route(
             "generate",
             prompt_token_ids,
             request_id=request_id,
@@ -255,21 +299,88 @@ class InterGeneratorRouter(Configurable):
                 estimated_cost=1,
                 session_id=routing_session_id,
             ),
+            placed=placed,
         )
+        # Skipped if the group was released while the call ran.
+        if admission is not None and group_id in self._placed_groups:
+            admission.set_session_tokens(
+                group_id,
+                session_id=routing_session_id,
+                num_tokens=len(prompt_token_ids) + len(completion.token_ids),
+            )
+        return completion
+
+    async def acquire_group(self, group_id: int, *, group_size: int) -> None:
+        """Wait until ``admission`` places this training rollout group on a generator, after
+        groups with lower ids. Call it before the group builds its envs, and ``release_groups``
+        once it is done.
+
+        Args:
+            group_id: The group to place.
+            group_size: Rollouts in the group.
+        """
+        if self._admission is None:
+            raise RuntimeError(
+                "acquire_group needs InterGeneratorRouter.Config.admission"
+            )
+        placed = asyncio.get_running_loop().create_future()
+        self._waiting_groups[group_id] = (group_size, placed)
+        self._place_waiting_groups()
+        # Shielded: a caller cancelled at shutdown leaves the group queued, and placing it later
+        # still resolves this future.
+        await asyncio.shield(placed)
+
+    def _place_waiting_groups(self) -> None:
+        """Place waiting groups, lowest id first, until the policy keeps one waiting."""
+        # Without admission nothing waits. `place` recounts every live session's charge once per
+        # pass, so skip it when nothing waits.
+        if self._admission is None or not self._waiting_groups:
+            return
+        placements = self._admission.place(
+            {
+                group_id: group_size
+                for group_id, (group_size, _) in self._waiting_groups.items()
+            }
+        )
+        for group_id, generator in placements.items():
+            _, placed = self._waiting_groups.pop(group_id)
+            self._placed_groups[group_id] = self._generators[generator]
+            placed.set_result(None)
+
+    async def _retry_waiting_groups(self) -> None:
+        while True:
+            await asyncio.sleep(_ADMISSION_RETRY_S)
+            self._place_waiting_groups()
 
     async def start_engine_loop(self) -> None:
-        """Start the engine loop on every rank of every generator."""
+        """Start the engine loop on every rank of every generator, then the admission policy
+        from their KV cache sizes."""
         await self._fanout("start_engine_loop")
+        if self._config.admission is not None:
+            budgets = await asyncio.gather(
+                *(h.rank0_actor.kv_cache_budget.call_one() for h in self._generators)
+            )
+            self._admission = self._config.admission.build(budgets=list(budgets))
+            self._retry_task = asyncio.create_task(self._retry_waiting_groups())
 
     async def sync_log_step(self, step: int) -> None:
-        """Set the step counter in this process and in every generator rank."""
+        """Set the step counter in this process and in every generator rank, and log admission."""
         sl.set_step(step)
+        if self._admission is not None:
+            logger.info(
+                "Admission at step %d: %d groups waiting, %s",
+                step,
+                len(self._waiting_groups),
+                self._admission.summary(),
+            )
         await self._fanout("sync_log_step", step)
 
     async def release_session(self, routing_session_id: str) -> None:
         """Forget a routing session after its rollout's last generation call, and ask every
         generator that served its calls to evict its cached KV."""
         self._strategy.release_session(routing_session_id)
+        if self._admission is not None:
+            self._admission.release_session(routing_session_id)
         await asyncio.gather(
             *(
                 h.rank0_actor.release_sessions.call_one([routing_session_id])
@@ -279,12 +390,18 @@ class InterGeneratorRouter(Configurable):
 
     async def release_groups(self, group_ids: list[int]) -> None:
         """Tell every generator that these rollout groups are finished, so it evicts their KV,
-        and forget their sessions."""
+        and forget their sessions and their admission placement."""
         for group_id in group_ids:
             for session_id in self._group_session_ids.pop(group_id, ()):
                 self._session_generators.pop(session_id, None)
+            placed = self._placed_groups.pop(group_id, None)
+            if placed is not None and self._admission is not None:
+                self._admission.release_group(group_id)
+        self._place_waiting_groups()
         await self._fanout("release_groups", group_ids)
 
     async def close_generators(self) -> list[Any | BaseException]:
         """Close every generator, returning each one's result or exception."""
+        if self._retry_task is not None:
+            self._retry_task.cancel()
         return await self._fanout("close", return_exceptions=True)
