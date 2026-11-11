@@ -229,23 +229,21 @@ class _DecoderBody(Module):
         self._parallelism_context = parallelism_context
         self._token_multiple = token_multiple
         self._dist_moe_runtime = dist_moe_runtime
-        # TODO(https://github.com/sgl-project/sglang/issues/48475): SGLang finds each
-        # layer's RadixAttention or RadixLinearAttention by attribute path
-        # (``layers[i].attention.attn`` among others); alias it there, unregistered so
-        # the state dict is unchanged.
-        for layer in decoder.layers.values():
+
+    def get_attention_layers(self) -> list[torch.nn.Module]:
+        """Each layer's ``RadixAttention`` or ``RadixLinearAttention``, which SGLang's
+        prefill CUDA graphs look up."""
+        attention_layers = []
+        for layer in self.decoder.layers.values():
             inner = layer.attention.inner_attention
             if isinstance(inner, MLAAttention):
                 inner = inner.inner_attention
-            object.__setattr__(
-                layer.attention,
-                "attn",
-                (
-                    inner.linear_attention
-                    if isinstance(inner, (SGLangInnerGDN, SGLangInnerKDA))
-                    else inner.radix_attention
-                ),
+            attention_layers.append(
+                inner.linear_attention
+                if isinstance(inner, (SGLangInnerGDN, SGLangInnerKDA))
+                else inner.radix_attention
             )
+        return attention_layers
 
     @property
     def layers(self):
