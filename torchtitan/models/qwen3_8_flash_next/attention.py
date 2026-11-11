@@ -391,7 +391,8 @@ class QSAInnerAttention(InnerAttention):
     class Config(InnerAttention.Config):
         compress_ratio: int
         indexer_loss: QSAIndexerLoss.Config | None = None
-        chunk_size: int = 16
+        # 128 queries bound the fp32 gathered keys to ~0.5 GiB at J=2051.
+        chunk_size: int = 128
 
         @property
         def is_full_attention(self) -> bool:
@@ -463,21 +464,28 @@ class QSAInnerAttention(InnerAttention):
         # An empty slice is finite even when all selected scores are -inf.
         raw_sum = scores_TB[..., :0].sum()
         num_teacher_tokens = query_THK.shape[0] if num_blocks else 0
+        num_heads, num_kv_heads = query_THK.shape[1], key_THK.shape[1]
         for start in range(0, num_teacher_tokens, self.chunk_size):
             stop = start + self.chunk_size
             indices_QJ = selected_indices_TJ[start:stop]
             with torch.no_grad():
                 valid_QJ = indices_QJ >= 0
-                query_QH1K = query_THK[start:stop].unsqueeze(2)
-                keys_QHJK = key_THK[indices_QJ.clamp_min(0)].transpose(1, 2)
-                keys_QHJK = keys_QHJK.repeat_interleave(
-                    query_QH1K.shape[1] // keys_QHJK.shape[1], 1
+                # Query head h reads KV head h // R: one batched GEMM per KV
+                # head group, without replicating gathered keys R times.
+                query_QGRK = query_THK[start:stop].unflatten(
+                    1, (num_kv_heads, num_heads // num_kv_heads)
                 )
-                logits_QHJ = (query_QH1K.float() * keys_QHJK.float()).sum(-1) * scale
-                logits_QHJ = logits_QHJ.masked_fill(
-                    ~valid_QJ[:, None], torch.finfo(torch.float32).min
+                keys_QJGK = key_THK[indices_QJ.clamp_min(0)]
+                logits_QGRJ = (
+                    torch.einsum(
+                        "qgrk,qjgk->qgrj", query_QGRK.float(), keys_QJGK.float()
+                    )
+                    * scale
                 )
-                teacher_QJ = logits_QHJ.softmax(-1).sum(1) / query_QH1K.shape[1]
+                logits_QGRJ = logits_QGRJ.masked_fill(
+                    ~valid_QJ[:, None, None], torch.finfo(torch.float32).min
+                )
+                teacher_QJ = logits_QGRJ.softmax(-1).sum((1, 2)) / num_heads
                 teacher_QJ = teacher_QJ * valid_QJ
                 teacher_QB = (
                     teacher_QJ[:, : num_blocks * self.compress_ratio]
