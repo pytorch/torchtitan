@@ -5,16 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 import itertools
-import os
 import unittest
 
 from unittest.mock import patch
 
 import pytest
 import torch
-import torch.utils.deterministic
 import torch_remat as remat
 from torch.distributed.device_mesh import init_device_mesh
+from torch.testing._internal.common_utils import DeterministicGuard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -208,7 +207,11 @@ class _EPActivationCheckpointing(DTensorTestBase):
             activation_fn,
             output_postprocess,
         ) in itertools.product(ac_configs, expert_configs):
+            # Spawned ranks run the test method without setUp, so set determinism
+            # here, matching set_determinism in torchtitan/distributed/utils.py.
+            # Filling empty outputs must stay off: it races with comm streams.
             with (
+                DeterministicGuard(True, fill_uninitialized_memory=False),
                 self.subTest(
                     ac=type(activation_remat).__qualname__,
                     linear=grouped_linear_cls.__name__,
@@ -412,25 +415,6 @@ class TestDeepEPActivationCheckpointing(_EPActivationCheckpointing):
     "requires two CUDA devices and HybridEP",
 )
 class TestHybridEPActivationCheckpointing(_EPActivationCheckpointing):
-    def setUp(self):
-        super().setUp()
-        self.addCleanup(
-            torch.use_deterministic_algorithms,
-            torch.are_deterministic_algorithms_enabled(),
-        )
-        torch.use_deterministic_algorithms(True)
-        # Match set_determinism: filling empty outputs races with comm streams.
-        self.addCleanup(
-            setattr,
-            torch.utils.deterministic,
-            "fill_uninitialized_memory",
-            torch.utils.deterministic.fill_uninitialized_memory,
-        )
-        torch.utils.deterministic.fill_uninitialized_memory = False
-        env = patch.dict(os.environ, {"CUBLAS_WORKSPACE_CONFIG": ":4096:8"})
-        env.start()
-        self.addCleanup(env.stop)
-
     def _check_hybridep_activation_checkpointing(
         self, ac_configs, *, num_replays, capture=False
     ):

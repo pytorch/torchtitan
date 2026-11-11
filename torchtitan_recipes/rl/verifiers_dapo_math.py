@@ -136,7 +136,7 @@ def _qwen3_4b_verifiers_config(
             num_prompts_per_train_step=8,
             num_samples_per_prompt=16,
             target_offpolicy_steps=4,
-            validation=ValidationConfig(steps=num_validation_samples),
+            validation=ValidationConfig(steps=num_validation_samples, freq=25),
         ),
         rollouter=_verifiers_math_rollouter_config(max_rollout_tokens=max_total_tokens),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=True)),

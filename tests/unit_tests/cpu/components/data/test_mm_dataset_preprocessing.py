@@ -22,6 +22,7 @@ import torchvision.transforms.v2.functional as TVF
 from PIL import Image
 from torchtitan.components.data.multimodal.mm_datasets import _process_mm_sample
 from torchtitan.components.data.multimodal.vision_processor import (
+    MuseGlimmerPatchGridResize,
     NaViTPatchGridResize,
     PixelBudgetResize,
     ResizeRule,
@@ -153,6 +154,21 @@ class TestNaViTPatchGridResize(unittest.TestCase):
         height, width = self.PS * self.SIDE, self.PS * self.MERGE
         rh, rw, ph, pw = self._resize(height, width)
         self.assertEqual((rh, rw, ph, pw), (height, width, 0, 0))
+
+
+class TestMuseGlimmerPatchGridResize(unittest.TestCase):
+    def test_matches_hf_muse_glimmer_image_processor(self):
+        # Grids match the HF MuseGlimmerImageProcessor. 4000x3000 would be 20,000
+        # merged tokens, so it takes the 4096-token cap path.
+        resize = MuseGlimmerPatchGridResize.Config(max_image_tokens=4096).build()
+        for height, width, expected in [
+            (256, 256, (280, 280, 0, 0)),
+            (240, 240, (224, 224, 0, 0)),
+            (4000, 3000, (2044, 1540, 0, 0)),
+        ]:
+            with self.subTest(height=height, width=width):
+                got = resize(height, width, patch_size=14, merge_size=2)
+                self.assertEqual(got, expected)
 
 
 class TestVisionProcessorNaViTPatchGrid(unittest.TestCase):

@@ -46,6 +46,7 @@ from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.models.muse_spark import (
     build_model_config as build_muse_spark_model_config,
+    MUSE_SPARK_SPECIAL_TOKENS,
 )
 from torchtitan.models.muse_spark.renderer import MuseSparkRendererConfig
 from torchtitan.models.muse_spark.tokenizer import MuseSparkTokenizer
@@ -75,8 +76,6 @@ from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.losses import DAPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
 from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
-
-from torchtitan_recipes.models.muse_spark import MUSE_SPARK_SPECIAL_TOKENS
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
@@ -142,6 +141,7 @@ def _qwen3_4b_dapo_math_config(
             target_offpolicy_steps=4,
             validation=ValidationConfig(
                 steps=num_validation_samples,
+                freq=25,
             ),
         ),
         rollouter=_dapo_math_rollouter_config(
@@ -301,7 +301,7 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
             num_prompts_per_train_step=8,
             num_samples_per_prompt=8,
             target_offpolicy_steps=0,
-            # Skip the pre- and post-training validation passes.
+            # Skip validation.
             validation=ValidationConfig(steps=0),
             # Keep all-pass / all-fail groups so every step trains exactly
             # num_prompts_per_train_step groups.
@@ -438,7 +438,7 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
             num_prompts_per_train_step=32,
             num_samples_per_prompt=16,
             target_offpolicy_steps=4,
-            validation=ValidationConfig(steps=30),
+            validation=ValidationConfig(steps=30, freq=25),
         ),
         rollouter=_dapo_math_rollouter_config(
             validation_dataset=AIME2025Dataset.Config(),
