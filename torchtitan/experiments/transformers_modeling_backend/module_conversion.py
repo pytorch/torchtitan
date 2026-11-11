@@ -16,15 +16,31 @@ forward behavior, or state_dict keys. After conversion,
 """
 
 import logging
-from typing import cast
 
+import torch
 import torch.nn as nn
 
+from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.base.module import Module
 
-from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common.embedding import VocabParallelEmbedding
 
 logger = logging.getLogger(__name__)
+
+
+class _VocabShardEmbedding(VocabParallelEmbedding):
+    """Vocab-sharded lookup that returns the TP-``Partial`` output unreduced.
+
+    HF embeddings keep their ``(batch, sequence)`` layout, which
+    ``VocabParallelEmbedding``'s token-layout reduction does not cover, so the
+    embedding's sharding config owns the reduction instead.
+    """
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if spmd_mesh_group(MeshAxisName.TP) is None:
+            return super().forward(input)
+        return self.lookup_vocab_shard(input)
 
 
 _module_class_cache: dict[type, type] = {}
@@ -55,8 +71,7 @@ def convert_hf_to_module(model: nn.Module) -> None:
     """
     for child in model.children():
         if type(child) is nn.Embedding:
-            child.__class__ = Embedding
-            cast(Embedding, child).tp_group = None
+            child.__class__ = _VocabShardEmbedding
         elif not isinstance(child, Module):
             cls = type(child)
             if any("__slots__" in k.__dict__ for k in cls.__mro__[:-1]):

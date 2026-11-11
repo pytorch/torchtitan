@@ -22,7 +22,6 @@ from torchtitan.config.transform import (
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     ComplexRoPE,
-    Embedding,
     FeedForward,
     HiMidLoLinear,
     Linear,
@@ -32,6 +31,7 @@ from torchtitan.models.common import (
     Sigmoid,
     Softmax,
     UnaryActivationFn,
+    VocabParallelEmbedding,
 )
 from torchtitan.models.common.attention import InnerAttention, MLAAttention
 from torchtitan.models.common.config_utils import (
@@ -47,7 +47,6 @@ from torchtitan.models.common.decoder_sharding import (
     mla_attention_local_spmd_sharding_config,
     mla_kv_projection_sharding_config,
     norm_sharding_config,
-    pre_lm_head_norm_sharding_config,
     replicated_input_colwise_sharding_config,
     replicated_state_sharding_config,
     residual_activation_placement,
@@ -454,9 +453,7 @@ def _build_mtp_layers(
                 mtp_norm=RMSNorm.Config(
                     normalized_shape=dim,
                     eps=1e-6,
-                    sharding_config=pre_lm_head_norm_sharding_config(
-                        enable_sp=enable_sp
-                    ),
+                    sharding_config=norm_sharding_config(enable_sp=enable_sp),
                 ),
                 sharding_config=mtp_block_sharding_config(enable_sp=enable_sp),
             )
@@ -520,7 +517,7 @@ def _debugmodel(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -530,7 +527,7 @@ def _debugmodel(
             normalized_shape=dim,
             eps=1e-6,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
+            sharding_config=norm_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -604,7 +601,7 @@ def _16b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -614,7 +611,7 @@ def _16b(
             normalized_shape=dim,
             eps=1e-6,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
+            sharding_config=norm_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -691,7 +688,7 @@ def _236b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -701,7 +698,7 @@ def _236b(
             normalized_shape=dim,
             eps=1e-6,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
+            sharding_config=norm_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -779,7 +776,7 @@ def _671b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -789,7 +786,7 @@ def _671b(
             normalized_shape=dim,
             eps=1e-6,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
+            sharding_config=norm_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=Linear.Config(
             in_features=dim,

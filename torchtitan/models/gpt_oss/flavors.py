@@ -21,7 +21,6 @@ from torchtitan.models.common import (
     BatchWiseLoadBalanceLoss,
     ColumnParallelLinear,
     CosSinRoPE,
-    Embedding,
     HiMidLoLinear,
     Linear,
     RMSNorm,
@@ -29,6 +28,7 @@ from torchtitan.models.common import (
     RowParallelLinear,
     Softmax,
     TransformerBlock,
+    VocabParallelEmbedding,
 )
 from torchtitan.models.common.activation import ClampedSwiGLU
 from torchtitan.models.common.attention import (
@@ -44,7 +44,6 @@ from torchtitan.models.common.decoder_sharding import (
     inner_attention_local_spmd_sharding_config,
     lm_head_sharding_config,
     norm_sharding_config,
-    pre_lm_head_norm_sharding_config,
     residual_activation_placement,
     rope_cache_sharding_config,
     rowwise_sharding_config,
@@ -304,7 +303,7 @@ def _debugmodel(
         max_context_length=seq_len,
         vocab_size=2048,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=2048,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -315,7 +314,7 @@ def _debugmodel(
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -363,7 +362,7 @@ def _20b(
         max_context_length=seq_len,
         dim=dim,
         vocab_size=201088,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=201088,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -374,7 +373,7 @@ def _20b(
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -422,7 +421,7 @@ def _120b(
         max_context_length=seq_len,
         dim=dim,
         vocab_size=201088,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=201088,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -433,7 +432,7 @@ def _120b(
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
