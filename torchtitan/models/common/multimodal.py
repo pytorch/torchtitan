@@ -274,11 +274,17 @@ def scatter_vision_embeds(
 ) -> torch.Tensor:
     """Copy packed vision features into the text sequence at placeholder runs.
 
+    Returns a copy of ``inputs_embeds`` with the vision rows written in.
+    ``inputs_embeds`` is left unchanged: it can alias its producer's input,
+    e.g. the output of a no-op TP ``Invariant -> Replicate`` gather, which
+    autograd does not allow writing in place.
+
     Args:
-        inputs_embeds: ``(T, D)`` text embeddings, modified in place.
+        inputs_embeds: ``(T, D)`` text embeddings.
         vision_embeds: Packed vision features ``(total_tokens, dim)``.
         vision_positions: from ``get_vision_positions``.
     """
+    inputs_embeds = inputs_embeds.clone()
     vision_offset = 0
     for _, vision_start, num_tokens in vision_positions:
         inputs_embeds[vision_start : vision_start + num_tokens] = vision_embeds[

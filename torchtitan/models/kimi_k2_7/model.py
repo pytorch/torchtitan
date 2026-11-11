@@ -23,11 +23,13 @@ from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
+    spmd_dense_sp_enabled,
     spmd_local_context,
     spmd_mesh_size,
 )
 from torchtitan.models.common.attention import AttentionMetadataMap
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
     build_dummy_vision_inputs,
@@ -178,9 +180,11 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         to visual items in order. Mixing images and videos in one batch is not
         yet supported (see the TODO below).
         """
-        inputs_embeds = (
-            self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
-        )
+        inputs_embeds = self.tok_embeddings(tokens)
+        # The vision scatter writes arbitrary positions, so every TP rank needs
+        # the full sequence. Without SP the stream already holds it.
+        if self.vision_encoder is not None and spmd_dense_sp_enabled():
+            inputs_embeds = maybe_gather_tp_input(self.tok_embeddings, inputs_embeds)
 
         modalities = []
         if pixel_values is not None and grid_thw is not None:

@@ -187,25 +187,6 @@ def norm_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def pre_lm_head_norm_sharding_config(*, enable_sp: bool) -> ShardingConfig:
-    """Root decoder norm sharding before ``lm_head`` / chunked CE loss.
-
-    Decoder blocks emit sequence-sharded hidden states when sequence
-    parallelism is enabled. The root norm is the last clean module boundary to
-    all-gather the TP sequence shard back to replicated hidden states before
-    either the model forward or ``ChunkedLossWrapper`` applies ``lm_head``.
-    """
-    activation = residual_activation_placement(enable_sp=enable_sp)
-    return ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.R if enable_sp else spmd.I)
-        },
-        in_src_shardings={"input": activation},
-        out_src_shardings=activation,
-        out_dst_shardings=dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
-    )
-
-
 def replicated_activation_placement() -> SpmdType:
     """``(tokens, hidden)`` activation gathered to Replicate across TP."""
     return dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
@@ -336,19 +317,15 @@ def feed_forward_sharding_config(*, enable_sp: bool) -> ShardingConfig:
 
 
 def token_embedding_sharding_config(*, enable_sp: bool) -> ShardingConfig:
-    """Vocab-sharded token embedding whose output enters the residual layout.
+    """``VocabParallelEmbedding`` whose output enters the residual layout.
 
-    The local lookup produces a TP-Partial output that is reduced (and
-    sequence-scattered under SP) at the module boundary.
+    The module reduces its TP-partial lookup (and sequence-scatters it under
+    SP) itself.
     """
-    embed_input = token_id_placement()
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
-        in_src_shardings={"input": embed_input},
-        in_dst_shardings={"input": embed_input},
-        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
-        out_dst_shardings=residual_activation_placement(enable_sp=enable_sp),
-        local_spmd=True,
+        in_src_shardings={"input": token_id_placement()},
+        out_src_shardings=residual_activation_placement(enable_sp=enable_sp),
     )
 
 

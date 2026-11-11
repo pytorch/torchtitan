@@ -586,11 +586,12 @@ class Qwen35Model(MultimodalModel):
         Returns:
             ``(num_tokens, dim)`` embeddings with vision tokens scattered in.
         """
-        inputs_embeds = (
-            self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
-        )
+        inputs_embeds = self.tok_embeddings(tokens)
         if self.vision_encoder is None:
             return inputs_embeds
+        # The vision scatter writes arbitrary positions, so every TP rank needs
+        # the full sequence.
+        inputs_embeds = maybe_gather_tp_input(self.tok_embeddings, inputs_embeds)
 
         # TODO: Configure the job-wide modality set from the dataset so
         # single-modality jobs can avoid the second encoder call.
