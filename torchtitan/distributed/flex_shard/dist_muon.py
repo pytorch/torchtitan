@@ -9,9 +9,10 @@
 from __future__ import annotations
 
 import math
+import struct
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from functools import partial
+from functools import cache, partial
 from typing import Any, cast, Literal, NoReturn, overload
 
 import torch
@@ -86,7 +87,7 @@ def _ns_coefficients_by_step(
 ) -> tuple[_NSCoefficients, ...]:
     if _is_ns_coefficient_triple(coefficients):
         return (cast(_NSCoefficients, coefficients),) * ns_steps
-    return cast(tuple[_NSCoefficients, ...], coefficients)
+    return cast("tuple[_NSCoefficients, ...]", coefficients)
 
 
 def _normalize_param_groups(
@@ -232,6 +233,9 @@ class DistMuon(Optimizer):
         ns_device: Literal["accelerator"] | None = None,
     ) -> None:
         self._ns_device = self._resolve_ns_device(ns_device)
+        self._prepare_input = _prepare_muon_input
+        self._compute_direction = _compute_muon_direction
+        self._apply_parameter_update = _apply_muon_update
         defaults = {
             "lr": lr,
             "weight_decay": weight_decay,
@@ -252,6 +256,61 @@ class DistMuon(Optimizer):
             compute_sharding_by_fqn=compute_sharding_by_fqn,
             bucket_configs=bucket_configs,
         )
+
+    def compile(self) -> None:
+        """Compile local momentum, direction, and parameter updates.
+
+        This opt-in path supports FP32 storage and is independent of model
+        compilation. Transport stays eager. Compilation is lazy; CUDA Graph
+        capture is not requested because scratch storage is released each step.
+        """
+        if any(
+            parameter.dtype != torch.float32
+            for group in self.param_groups
+            for parameter in group["params"]
+        ):
+            raise ValueError("DistMuon.compile() currently requires FP32 storage")
+        compile_fn = partial(
+            torch.compile,
+            fullgraph=True,
+            dynamic=False,
+            recompile_limit=256,
+            options={"emulate_precision_casts": True},
+        )
+        compiled_prepare = compile_fn(_prepare_muon_input_with_rounded_weights)
+
+        @cache
+        def lerp_coefficients(weight: float) -> tuple[bool, float]:
+            # Native CUDA FP32 lerp rounds weight before forming its complement.
+            weight = struct.unpack("f", struct.pack("f", weight))[0]
+            from_start = abs(weight) < 0.5
+            alpha = weight if from_start else weight - 1
+            return from_start, struct.unpack("f", struct.pack("f", alpha))[0]
+
+        def prepare(
+            gradient: Tensor,
+            momentum_buffer: Tensor,
+            *,
+            momentum: float,
+            nesterov: bool,
+            out: Tensor,
+        ) -> Tensor:
+            update_from_start, update_alpha = lerp_coefficients(1 - momentum)
+            nesterov_from_start, nesterov_alpha = lerp_coefficients(momentum)
+            return compiled_prepare(
+                gradient,
+                momentum_buffer,
+                update_from_start=update_from_start,
+                update_alpha=update_alpha,
+                nesterov_from_start=nesterov_from_start,
+                nesterov_alpha=nesterov_alpha,
+                nesterov=nesterov,
+                out=out,
+            )
+
+        self._prepare_input = prepare
+        self._compute_direction = compile_fn(_compute_muon_direction)
+        self._apply_parameter_update = compile_fn(_apply_muon_update)
 
     @staticmethod
     def _resolve_ns_device(ns_device: str | None) -> torch.device | None:
@@ -612,7 +671,7 @@ class DistMuon(Optimizer):
         grad, momentum, momentum_state, group = self._local_gradient_and_momentum(
             compute_layout
         )
-        _prepare_muon_input(
+        self._prepare_input(
             grad,
             momentum,
             momentum=group["momentum"],
@@ -634,7 +693,7 @@ class DistMuon(Optimizer):
             if self._ns_device is None or compute.device == self._ns_device
             else compute.to(self._ns_device, non_blocking=False)
         )
-        _compute_muon_direction(
+        self._compute_direction(
             staged,
             matrix_views=self._matrix_views_by_fqn[compute_layout.fqn],
             lr_reference_shape=(
@@ -660,7 +719,7 @@ class DistMuon(Optimizer):
         row_scale = self._direction_row_scale_by_fqn.get(compute_layout.fqn)
         if row_scale is not None:
             direction.mul_(row_scale)
-        _apply_muon_update(
+        self._apply_parameter_update(
             local_param,
             direction,
             lr=group["lr"],
@@ -1833,6 +1892,28 @@ def _prepare_muon_input(
             momentum,
             out=out,
         )
+    else:
+        out.copy_(momentum_buffer)
+    return out
+
+
+def _prepare_muon_input_with_rounded_weights(
+    gradient: Tensor,
+    momentum_buffer: Tensor,
+    *,
+    update_from_start: bool,
+    update_alpha: float,
+    nesterov_from_start: bool,
+    nesterov_alpha: float,
+    nesterov: bool,
+    out: Tensor,
+) -> Tensor:
+    """Express native CUDA FP32 lerp with explicitly rounded scalar coefficients."""
+    base = momentum_buffer if update_from_start else gradient
+    torch.add(base, gradient - momentum_buffer, alpha=update_alpha, out=momentum_buffer)
+    if nesterov:
+        base = gradient if nesterov_from_start else momentum_buffer
+        torch.add(base, momentum_buffer - gradient, alpha=nesterov_alpha, out=out)
     else:
         out.copy_(momentum_buffer)
     return out
