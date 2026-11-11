@@ -21,6 +21,8 @@ from torchtitan.config import Function
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
+from torchtitan.models.base.module import Module
+from torchtitan.models.common.decoder_sharding import vocab_sharded_on_cp
 
 # PyTorch's default ignore index for cross-entropy loss
 IGNORE_INDEX = -100
@@ -57,6 +59,7 @@ def cross_entropy_loss(
     *,
     global_vocab_size: int | None = None,
     reduction: Literal["sum", "none"] = "sum",
+    vocab_parallel_axis: Literal["tp", "cp"] = "tp",
 ) -> torch.Tensor:
     """Cross-entropy over ``pred[T, V]`` and ``labels[T]``.
 
@@ -68,7 +71,7 @@ def cross_entropy_loss(
     """
     if reduction not in ("sum", "none"):
         raise ValueError(f"Unsupported cross-entropy reduction: {reduction}")
-    if spmd_mesh_size("tp") > 1:
+    if spmd_mesh_size(vocab_parallel_axis) > 1:
         if global_vocab_size is None:
             raise ValueError(
                 "global_vocab_size is required for vocab-parallel cross-entropy"
@@ -76,7 +79,8 @@ def cross_entropy_loss(
         return _LossParallelCrossEntropy.apply(
             pred,
             labels,
-            current_spmd_mesh().get_group("tp"),  # pyrefly: ignore[missing-attribute]
+            # pyrefly: ignore[missing-attribute]
+            current_spmd_mesh().get_group(vocab_parallel_axis),
             global_vocab_size,
             reduction,
         )
@@ -95,6 +99,7 @@ def cross_entropy_and_logsumexp(
     labels: torch.Tensor,
     *,
     global_vocab_size: int | None = None,
+    vocab_parallel_axis: Literal["tp", "cp"] = "tp",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Summed cross-entropy and per-token logsumexp over ``pred[T, V]``.
 
@@ -103,7 +108,7 @@ def cross_entropy_and_logsumexp(
     ``IGNORE_INDEX`` labels. Both share one logsumexp; under TP the lse comes
     from the vocab-parallel CE's existing all-reduces.
     """
-    if spmd_mesh_size("tp") > 1:
+    if spmd_mesh_size(vocab_parallel_axis) > 1:
         if global_vocab_size is None:
             raise ValueError(
                 "global_vocab_size is required for vocab-parallel cross-entropy"
@@ -111,7 +116,8 @@ def cross_entropy_and_logsumexp(
         return _LossParallelCrossEntropy.apply(
             pred,
             labels,
-            current_spmd_mesh().get_group("tp"),  # pyrefly: ignore[missing-attribute]
+            # pyrefly: ignore[missing-attribute]
+            current_spmd_mesh().get_group(vocab_parallel_axis),
             global_vocab_size,
             "sum",
             True,  # return_lse; apply() is positional-only under spmd typechecking
@@ -365,25 +371,35 @@ class CrossEntropyLoss(Loss[torch.Tensor]):
         pred: torch.Tensor,
         labels: torch.Tensor,
         global_loss_token_counts: torch.Tensor | None = None,
+        *,
+        vocab_parallel_axis: Literal["tp", "cp"] = "tp",
         **kwargs: Any,
     ) -> LossResult:
+        """``vocab_parallel_axis`` names the mesh axis that shards the vocab
+        dim of ``pred`` when that axis has size > 1."""
         del kwargs
         metrics: dict[str, torch.Tensor] = {}
         if self.z_loss_weight is None:
             ce = cross_entropy_loss(
-                pred, labels, global_vocab_size=self.global_vocab_size
+                pred,
+                labels,
+                global_vocab_size=self.global_vocab_size,
+                vocab_parallel_axis=vocab_parallel_axis,
             )
             loss = ce
         else:
             ce, lse = cross_entropy_and_logsumexp(
-                pred, labels, global_vocab_size=self.global_vocab_size
+                pred,
+                labels,
+                global_vocab_size=self.global_vocab_size,
+                vocab_parallel_axis=vocab_parallel_axis,
             )
             z = lse.square().sum()
             loss = ce + self.z_loss_weight * z
             metrics = {"ce_loss/mean": ce.detach(), "z_loss/mean": z.detach()}
 
         # loss: V->P, annotate global_loss_token_counts
-        if current_spmd_mesh() is not None:
+        if current_spmd_mesh() is not None and vocab_parallel_axis == "tp":
             spmd.assert_type(ce, {"dp": spmd.P, "cp": spmd.P})
             if global_loss_token_counts is not None:
                 spmd.assert_type(
@@ -748,6 +764,18 @@ def combine_loss_metrics(
     return reduced
 
 
+def _cp_all_gather(tensor: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor:
+    return funcol.wait_tensor(
+        funcol.all_gather_tensor(tensor.contiguous(), gather_dim=0, group=group)
+    )
+
+
+def _cp_reduce_scatter(tensor: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor:
+    return funcol.wait_tensor(
+        funcol.reduce_scatter_tensor(tensor, "sum", scatter_dim=0, group=group)
+    )
+
+
 class ChunkedLossWrapper(Loss[LossInput]):
     """Chunked loss wrapper that splits the sequence dimension to reduce peak memory.
 
@@ -793,6 +821,10 @@ class ChunkedLossWrapper(Loss[LossInput]):
         all-reduce for the correct log-sum-exp.
 
     CP: Further chunks the local sequence dimension. Works out of the box.
+    If the lm_head sharding config shards the vocab over CP, hidden states
+    and labels are all-gathered over CP, each CP rank computes CE on its
+    ``V/cp`` slice for all gathered tokens, and the accumulated hidden-state
+    gradient is reduce-scattered back.
 
     Compile: the inner ``loss_fn`` can be compiled independently; lm_head is not compiled.
     """
@@ -809,10 +841,14 @@ class ChunkedLossWrapper(Loss[LossInput]):
         self.num_chunks = config.num_chunks
         self.loss_fn: Callable[..., LossResult] = config.loss_fn.build()
         self.lm_head: nn.Module | None = None
+        self.vocab_on_cp = False
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
         """Set the lm_head module. Must be called before the first __call__."""
         self.lm_head = lm_head
+        self.vocab_on_cp = isinstance(lm_head, Module) and vocab_sharded_on_cp(
+            lm_head._sharding_config
+        )
 
     def __call__(
         self,
@@ -886,6 +922,16 @@ class ChunkedLossWrapper(Loss[LossInput]):
             )
 
         with spmd.local():
+            cp_group = None
+            loss_pred = pred
+            cp_loss_kwargs = {}
+            if self.vocab_on_cp:
+                cp_loss_kwargs = {"vocab_parallel_axis": "cp"}
+                # pyrefly: ignore[missing-attribute]
+                cp_group = current_spmd_mesh().get_group("cp")
+                loss_pred = tuple(_cp_all_gather(h.detach(), cp_group) for h in pred)
+                labels = tuple(_cp_all_gather(label, cp_group) for label in labels)
+                # CrossEntropyLoss ignores loss_inputs, so they are not gathered.
             # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
             # accumulates ``.grad`` for ``GradAccumulator``.
             hidden_state_chunks_per_output = tuple(
@@ -893,7 +939,7 @@ class ChunkedLossWrapper(Loss[LossInput]):
                     chunk.detach().requires_grad_(decoder_requires_grad)
                     for chunk in _chunk_local(hidden_state)
                 )
-                for hidden_state in pred
+                for hidden_state in loss_pred
             )
             label_chunks_per_output = tuple(_chunk_local(label) for label in labels)
             input_chunks = {
@@ -907,7 +953,7 @@ class ChunkedLossWrapper(Loss[LossInput]):
                         num_chunks=num_chunks,
                         dtype=hidden_state.dtype,
                     )
-                    for hidden_state in pred
+                    for hidden_state in loss_pred
                 )
                 if decoder_requires_grad
                 else ()
@@ -958,6 +1004,7 @@ class ChunkedLossWrapper(Loss[LossInput]):
                         label_chunks,
                         global_loss_token_counts,
                         **loss_inputs,
+                        **cp_loss_kwargs,
                     )
                     # Free logits before backward.
                     del logits
@@ -976,6 +1023,22 @@ class ChunkedLossWrapper(Loss[LossInput]):
                                     h_chunk.grad = None
 
             metrics = combine_loss_metrics(chunk_metrics_list)
+            if cp_group is not None:
+                # Each CP rank holds the loss of all tokens in its CP group.
+                # Scale the reported values so the later sum over CP counts
+                # them once. The per-chunk backward above used the unscaled
+                # loss, which gives each vocab slice its full gradient. The
+                # trainer's max_loss divides this by the rank's own token
+                # count, so it is the CP group's mean loss only when the CP
+                # ranks hold the same number of valid tokens.
+                cp_size = cp_group.size()
+                total_loss = total_loss / cp_size
+                metrics = {
+                    key: value / cp_size
+                    if loss_metric_reduce_op(key) == "sum"
+                    else value
+                    for key, value in metrics.items()
+                }
             if not decoder_requires_grad:
                 # Scaling this leaf cannot rescale already accumulated head gradients.
                 return total_loss.requires_grad_(run_backward), metrics
@@ -983,6 +1046,12 @@ class ChunkedLossWrapper(Loss[LossInput]):
             accumulated_grads = tuple(
                 grad_accumulator.buffer for grad_accumulator in grad_accumulators
             )
+            if cp_group is not None:
+                # Each CP rank holds the gradient contribution of its vocab
+                # slice for all gathered tokens.
+                accumulated_grads = tuple(
+                    _cp_reduce_scatter(grad, cp_group) for grad in accumulated_grads
+                )
 
         with spmd.no_typecheck():
             loss = self._gradient_backprop(
