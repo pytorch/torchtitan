@@ -721,6 +721,81 @@ class TestDistMuonCpuOffload(DTensorTestBase):
             )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_compiled_local_updates_match_eager(tmp_path) -> None:
+    """Guard CUDA lerp rounding and NS tracing for matrix and expert updates."""
+    torch.distributed.init_process_group(
+        "nccl", init_method=(tmp_path / "store").as_uri(), rank=0, world_size=1
+    )
+    try:
+        mesh = init_device_mesh("cuda", (1,), mesh_dim_names=("dp_shard",))
+        generator = torch.Generator(device="cuda").manual_seed(42)
+        names = ("matrix", "experts")
+        values = [
+            torch.randn(shape, device="cuda", dtype=torch.float32, generator=generator)
+            for shape in ((8, 12), (2, 12, 8))
+        ]
+        parameters, optimizers = [], []
+        for _ in range(2):
+            params = [
+                nn.Parameter(distribute_tensor(value.clone(), mesh, (Replicate(),)))
+                for value in values
+            ]
+            optimizers.append(
+                DistMuon(
+                    [{"params": params, "param_names": names}],
+                    compute_sharding_by_fqn={
+                        name: ComputeLayout(
+                            {"dp_shard": Owned()}, compute_dtype=torch.bfloat16
+                        )
+                        for name in names
+                    },
+                    bucket_configs=[BucketConfig(patterns=names)],
+                    momentum=0.95,
+                    ns_steps=10,
+                    ns_coefficients=((3.4445, -4.7750, 2.0315),) * 8
+                    + ((2.0, -1.5, 0.5),) * 2,
+                )
+            )
+            parameters.append(params)
+        optimizers[1].compile()
+        for step in range(10):
+            gradients = [
+                torch.randn(
+                    value.shape, device="cuda", dtype=value.dtype, generator=generator
+                )
+                for value in values
+            ]
+            for params, optimizer in zip(parameters, optimizers, strict=True):
+                for param, gradient in zip(params, gradients, strict=True):
+                    param.grad = distribute_tensor(
+                        gradient.clone(), mesh, (Replicate(),)
+                    )
+                optimizer.param_groups[0]["lr"] = 1e-3 / (step + 1)
+                optimizer.step()
+            for reference, actual in zip(*parameters, strict=True):
+                torch.testing.assert_close(
+                    reference.to_local(), actual.to_local(), rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    optimizers[0].state[reference]["momentum_buffer"].to_local(),
+                    optimizers[1].state[actual]["momentum_buffer"].to_local(),
+                    rtol=0,
+                    atol=0,
+                )
+            if step == 4:
+                checkpoint = tmp_path / "optimizer.pt"
+                torch.save(
+                    [optimizer.state_dict() for optimizer in optimizers], checkpoint
+                )
+                for optimizer, state in zip(
+                    optimizers, torch.load(checkpoint, weights_only=False), strict=True
+                ):
+                    optimizer.load_state_dict(state)
+    finally:
+        torch.distributed.destroy_process_group()
+
+
 instantiate_parametrized_tests(TestDistMuon)
 
 
