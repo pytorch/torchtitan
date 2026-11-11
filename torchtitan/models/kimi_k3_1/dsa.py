@@ -45,7 +45,6 @@ __all__ = [
 # V = main value head dimension
 # L = KV latent dimension (kv_lora_rank)
 # P = packed per-head KV up-projection channels (N + V)
-# G = shared latent key channels (L + R)
 # I = indexer head count (num_index_heads)
 # E = indexer head dimension (index_head_dim)
 # J = flattened projection channels
@@ -130,9 +129,9 @@ class KimiDSAIndexer(Module):
 class KimiSparseAttention(InnerAttention):
     """Absorbed MLA over indexer-selected tokens, run by Attention Gym.
 
-    Each query head absorbs its key up-projection, so all heads attend one
-    shared latent ``[kv_c_normed, k_shared]`` that is also the value. The
-    first ``kv_lora_rank`` output channels are up-projected per head.
+    Each query head absorbs its key up-projection, so all heads attend the
+    shared latent ``kv_c_normed``, which is also the value, and the shared
+    RoPE key ``k_shared``. The latent output is up-projected per head.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -193,7 +192,6 @@ class KimiSparseAttention(InnerAttention):
             return_scores=aux_loss is not None,
         )
 
-        latent_dim = kv_c_normed_TL.shape[-1]
         nope_dim = q_THK.shape[-1] - k_shared_TR.shape[-1]
         w_uk_HNL, w_uv_HVL = self.wkv_b()
         q_nope_THN, q_shared_THR = q_THK.split(
@@ -204,12 +202,13 @@ class KimiSparseAttention(InnerAttention):
             q_nope_THN,
             w_uk_HNL,
         )
-        q_THG = torch.cat((q_latent_THL, q_shared_THR), dim=-1)
-        kv_TG = torch.cat((kv_c_normed_TL, k_shared_TR), dim=-1)
-        out_1HTG, aux = gather_attn(
-            q_THG.transpose(0, 1).unsqueeze(0),
+        out_1HTL, aux = gather_attn(
+            (
+                q_latent_THL.transpose(0, 1).unsqueeze(0),
+                q_shared_THR.transpose(0, 1).unsqueeze(0),
+            ),
             None,
-            kv_TG[None, None],
+            (kv_c_normed_TL[None, None], k_shared_TR[None, None]),
             topk_indices_TS.unsqueeze(0),
             sliding_window_size=0,
             cu_seqlens=cu_seqlens,
@@ -218,7 +217,7 @@ class KimiSparseAttention(InnerAttention):
             impl="fused" if q_THK.device.type == "cuda" else "reference",
             return_aux=AuxRequest(lse=aux_loss is not None),
         )
-        out_THL = out_1HTG.squeeze(0).transpose(0, 1)[..., :latent_dim]
+        out_THL = out_1HTL.squeeze(0).transpose(0, 1)
         out_THV = torch.einsum("thl,hvl->thv", out_THL, w_uv_HVL)
         if aux_loss is not None:
             assert (
@@ -227,8 +226,8 @@ class KimiSparseAttention(InnerAttention):
                 and aux.lse is not None
             )
             out_THV = aux_loss(
-                q_THG.detach(),
-                kv_TG.detach(),
+                torch.cat((q_latent_THL, q_shared_THR), dim=-1).detach(),
+                torch.cat((kv_c_normed_TL, k_shared_TR), dim=-1).detach(),
                 topk_indices_TS,
                 topk_scores_TS,
                 aux.lse.squeeze(0).transpose(0, 1).detach(),
