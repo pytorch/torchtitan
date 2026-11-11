@@ -16,6 +16,7 @@ from torchtitan.components.data.balancing import (
     document_attention_cost,
     HeaviestFirstIterDataset,
     HeaviestFirstOrderingConfig,
+    vision_encoder_cost,
 )
 from torchtitan.components.data.collators import TextCollator
 from torchtitan.components.data.dataset import SingleDatasetConfig
@@ -65,6 +66,37 @@ class TestDocumentAttentionCost(unittest.TestCase):
     def test_rejects_untokenized_microbatch(self):
         with self.assertRaises(ValueError):
             document_attention_cost(object())  # type: ignore[arg-type]
+
+
+class TestVisionEncoderCost(unittest.TestCase):
+    def test_images_and_videos(self):
+        mb = _microbatch([4, 4])
+        mb.model_kwargs = {
+            # Two images: 1x2x3 and 1x4x4 patches.
+            "grid_thw": torch.tensor([[1, 2, 3], [1, 4, 4]]),
+            # One video: 3 frames of 2x2 patches, attended per frame.
+            "grid_thw_videos": torch.tensor([[3, 2, 2]]),
+        }
+        patches, segments_sq = 6 + 16 + 12, 36 + 256 + 3 * 16
+        cost = functools.partial(vision_encoder_cost, patch_attention_weight=0.0)
+        self.assertEqual(cost(mb, patch_weight=1.0), patches)
+        cost = functools.partial(vision_encoder_cost, patch_weight=0.0)
+        self.assertEqual(cost(mb, patch_attention_weight=1.0), segments_sq)
+        self.assertEqual(
+            vision_encoder_cost(
+                mb,
+                patch_weight=2.0,
+                patch_attention_weight=0.5,
+                document_attention_weight=3.0,
+            ),
+            2.0 * patches + 0.5 * segments_sq + 3.0 * 32,
+        )
+
+    def test_text_only_microbatch(self):
+        cost = vision_encoder_cost(
+            _microbatch([SEQ]), patch_weight=1.0, patch_attention_weight=1.0
+        )
+        self.assertEqual(cost, 0.0)
 
 
 def _ordered(values, window_size):

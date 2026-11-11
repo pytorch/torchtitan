@@ -507,6 +507,20 @@ config.dataloader = GrainDataLoader.Config(
 )
 ```
 
+For multimodal data, `vision_encoder_cost` adds vision-encoder cost from each microbatch's image and video grids:
+
+```python
+from torchtitan.components.data import vision_encoder_cost
+
+# Qwen3.5-9B on GB300, fitted from profiles (seconds)
+cost_fn = functools.partial(
+    vision_encoder_cost,
+    patch_weight=8.6e-6,
+    patch_attention_weight=2.2e-9,
+    document_attention_weight=7.7e-10,
+)
+```
+
 Only the order within a window changes: every microbatch is still trained once, and each moves by at most `window_size - 1` steps. Ordering works the same for `dp_replicate`, `dp_shard`, CP, gradient accumulation, and pipeline microbatches. Rows that are one full-length document stay as heavy as they are. The rank holds `window_size` collated microbatches in host memory, and a checkpoint resumes mid-window by re-reading the window.
 
 Measured on GB300 with one microbatch per rank per step (OBELICS on Qwen3.5-9B, 32K rows; ProLong 512K on Llama-3-8B with head-tail CP):
