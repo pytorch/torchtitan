@@ -172,11 +172,14 @@ def _staged_pieces(
 ) -> tuple[list[dict[str, StagedPiece]], int]:
     """Lay out a trainer rank's staging buffer: for each generator rank in order, the
     intersection of each of its boxes with the trainer rank's, in its key order.
+    Generator ranks that receive the same piece (e.g. a tensor replicated over TP)
+    share one copy.
 
     Returns the pieces per generator rank and the buffer size in bytes.
     """
     nbytes = 0
     pieces = []
+    byte_offsets: dict[tuple, int] = {}
     for layout in rank_layouts:
         rank_pieces = {}
         for key, shard in layout.items():
@@ -193,9 +196,11 @@ def _staged_pieces(
             if any(h <= low for low, h in zip(lo, hi)):
                 continue
             shape = tuple(h - low for low, h in zip(lo, hi))
-            rank_pieces[key] = StagedPiece(nbytes, tuple(lo), shape)
-            size = math.prod(shape) * shard.dtype.itemsize
-            nbytes += -(-size // _ALIGNMENT) * _ALIGNMENT
+            byte_offset = byte_offsets.setdefault((key, tuple(lo), shape), nbytes)
+            rank_pieces[key] = StagedPiece(byte_offset, tuple(lo), shape)
+            if byte_offset == nbytes:
+                size = math.prod(shape) * shard.dtype.itemsize
+                nbytes += -(-size // _ALIGNMENT) * _ALIGNMENT
         pieces.append(rank_pieces)
     return pieces, nbytes
 
@@ -383,8 +388,12 @@ class ModelStateDictTransport(Configurable):
         self._staging_plan = {
             key: (dtype, placements.get(key), []) for key, dtype in dtypes.items()
         }
+        copied = set()
         for rank_pieces in pieces:
             for key, piece in rank_pieces.items():
+                if piece.byte_offset in copied:
+                    continue
+                copied.add(piece.byte_offset)
                 dtype = dtypes[key]
                 start = piece.byte_offset
                 end = start + math.prod(piece.shape) * dtype.itemsize
