@@ -25,6 +25,7 @@ from torch.distributed.tensor.placement_types import _StridedShard
 
 from .optimizer_reshard import _BucketSpec, BucketConfig
 
+
 __all__: list[str] = []
 
 
@@ -662,7 +663,10 @@ def _build_region_redistribution_plan(
         source_holders = storage_mapping.holders
         storage_region = storage_mapping.logical_region
         for destination, compute_region, packed_offsets in compute_endpoints:
-            logical_region = _tensor_region_intersection(storage_region, compute_region)
+            logical_region = _tensor_region_intersection(
+                storage_region,
+                compute_region,
+            )
             if logical_region is None:
                 continue
             storage_tensor_region = _TensorRegion(
@@ -693,7 +697,10 @@ def _build_region_redistribution_plan(
                 _TensorRegionRoute(
                     logical_region=logical_region,
                     source=_RouteEndpoint(storage_tensor_region, source_holders),
-                    destination=_RouteEndpoint(compute_tensor_region, (destination,)),
+                    destination=_RouteEndpoint(
+                        compute_tensor_region,
+                        (destination,),
+                    ),
                 )
             )
 

@@ -30,7 +30,6 @@ from torchtitan.distributed.flex_shard import (
     DistMuon as FlexShardDistMuon,
     redistribution_mesh_axes,
 )
-
 from torchtitan.distributed.utils import build_transport_meshes
 
 from .utils import (
@@ -195,8 +194,9 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
 
     Note:
         The CTA cap is disabled by default because it is a workload-dependent
-        memory/performance tradeoff. Enabling it uses resource-independent NCCL
-        communicators for optimizer redistribution. Each communicator adds fixed
+        memory/performance tradeoff. Enabling it builds explicit redistribution
+        meshes backed by resource-independent NCCL child communicators and
+        passes them through ``BucketConfig``. Each communicator adds fixed
         memory and may reduce throughput; the cap benefits workloads only when
         the reduction in all-peer connection state outweighs that overhead.
         Recipes leave ``BucketConfig.mesh`` unset: process groups do not exist

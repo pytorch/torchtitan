@@ -22,6 +22,7 @@ from torch.distributed.tensor.placement_types import _StridedShard
 from torch.optim import Optimizer
 
 from ._optimizer_reshard_runtime import _BucketedRedistributionRuntime
+
 from ._optimizer_reshard_schedule import (
     _bind_bucket_configs,
     _BucketPlanningContext,
@@ -49,6 +50,7 @@ from .optimizer_reshard import (
     ComputeLayout,
     Owned,
 )
+
 
 __all__ = [
     "DistMuon",
@@ -159,10 +161,12 @@ def _initialize_dist_muon(
     frozen because optimizer state and collectives depend on them.
     """
     _validate_compute_sharding_configuration(compute_sharding_by_fqn)
+
     for param_group in optimizer.param_groups:
         for fqn in param_group["param_names"]:
             if fqn not in compute_sharding_by_fqn:
                 raise ValueError(f"missing compute sharding for Muon parameter {fqn!r}")
+
     tensor_device = optimizer._validate_parameter_storage()
     compute_layouts = optimizer._build_parameter_compute_layouts(
         compute_sharding_by_fqn
@@ -864,14 +868,14 @@ def _row_intervals_by_mesh_axis_coordinate(
     return tuple(intervals)
 
 
-def _resolve_sharded_transport_mesh_axes(
+def _resolve_storage_to_compute_redistribution_requirement(
     fqn: str,
     param: DTensor,
     block_shard: BlockShard | None,
     target_sharding_by_storage_mesh_axis: Mapping[int, _AxisComputeSharding],
     declared_storage_mesh_axes: Sequence[int],
 ) -> tuple[int, ...]:
-    """Return storage mesh axes that require sharded compute transport."""
+    """Compare actual storage with the target compute tensor."""
     if block_shard is None:
         changed_storage_mesh_axes = []
         mesh_axis_names = param.device_mesh.mesh_dim_names
@@ -894,71 +898,82 @@ def _resolve_sharded_transport_mesh_axes(
             )
             if target_sharding is not None and source_sharding != target_sharding:
                 changed_storage_mesh_axes.append(storage_mesh_axis)
-        return tuple(changed_storage_mesh_axes)
-
-    mesh_axis_names = param.device_mesh.mesh_dim_names
-    assert mesh_axis_names is not None
-    active_block_shard_mesh_axes = tuple(
-        storage_mesh_axis
-        for storage_mesh_axis, target_sharding in (
-            target_sharding_by_storage_mesh_axis.items()
-        )
-        if type(target_sharding) is BlockShard
-        and param.device_mesh.size(storage_mesh_axis) > 1
-    )
-    nonreplicated_other_mesh_axes = []
-    for storage_mesh_axis, placement in enumerate(param.placements):
-        if storage_mesh_axis in active_block_shard_mesh_axes:
-            continue
-        storage_sharding = _normalize_storage_placement(
-            placement,
-            ndim=param.ndim,
-            mesh_axis_size=param.device_mesh.size(storage_mesh_axis),
-        )
-        if type(storage_sharding) is not Replicate:
-            nonreplicated_other_mesh_axes.append(mesh_axis_names[storage_mesh_axis])
-    if nonreplicated_other_mesh_axes:
-        if not active_block_shard_mesh_axes:
-            raise NotImplementedError(
-                f"Muon parameter {fqn!r} matrix-batch compute requires an "
-                "active BlockShard target for every non-replicated storage "
-                f"mesh axis; non-replicated axes: {nonreplicated_other_mesh_axes}"
+        redistribution_storage_mesh_axes = tuple(changed_storage_mesh_axes)
+    else:
+        mesh_axis_names = param.device_mesh.mesh_dim_names
+        assert mesh_axis_names is not None
+        active_block_shard_mesh_axes = tuple(
+            storage_mesh_axis
+            for storage_mesh_axis, target_sharding in (
+                target_sharding_by_storage_mesh_axis.items()
             )
-        raise NotImplementedError(
-            f"Muon parameter {fqn!r} matrix-batch compute requires every "
-            "non-replicated storage mesh axis to use BlockShard; "
-            f"non-replicated axes: {nonreplicated_other_mesh_axes}"
+            if type(target_sharding) is BlockShard
+            and param.device_mesh.size(storage_mesh_axis) > 1
         )
+        nonreplicated_other_mesh_axes = []
+        for storage_mesh_axis, placement in enumerate(param.placements):
+            if storage_mesh_axis in active_block_shard_mesh_axes:
+                continue
+            storage_sharding = _normalize_storage_placement(
+                placement,
+                ndim=param.ndim,
+                mesh_axis_size=param.device_mesh.size(storage_mesh_axis),
+            )
+            if type(storage_sharding) is not Replicate:
+                nonreplicated_other_mesh_axes.append(mesh_axis_names[storage_mesh_axis])
+        if nonreplicated_other_mesh_axes:
+            if not active_block_shard_mesh_axes:
+                raise NotImplementedError(
+                    f"Muon parameter {fqn!r} matrix-batch compute requires an "
+                    "active BlockShard target for every non-replicated storage "
+                    f"mesh axis; non-replicated axes: {nonreplicated_other_mesh_axes}"
+                )
+            raise NotImplementedError(
+                f"Muon parameter {fqn!r} matrix-batch compute requires every "
+                "non-replicated storage mesh axis to use BlockShard; "
+                f"non-replicated axes: {nonreplicated_other_mesh_axes}"
+            )
 
-    if len(active_block_shard_mesh_axes) != 1:
-        return active_block_shard_mesh_axes
+        if len(active_block_shard_mesh_axes) != 1 or (
+            type(param.placements[active_block_shard_mesh_axes[0]]) is _StridedShard
+        ):
+            # Several axes, or strided rows that never match sequential compute
+            # blocks, always redistribute over every active axis.
+            redistribution_storage_mesh_axes = active_block_shard_mesh_axes
+        else:
+            redistribution_storage_mesh_axis = active_block_shard_mesh_axes[0]
+            storage_sharding = cast(
+                Replicate | Shard,
+                _normalize_storage_placement(
+                    param.placements[redistribution_storage_mesh_axis],
+                    ndim=param.ndim,
+                    mesh_axis_size=param.device_mesh.size(
+                        redistribution_storage_mesh_axis
+                    ),
+                ),
+            )
+            compute_sharding = target_sharding_by_storage_mesh_axis[
+                redistribution_storage_mesh_axis
+            ]
+            assert type(compute_sharding) is BlockShard
+            mesh_axis_size = param.device_mesh.size(redistribution_storage_mesh_axis)
+            storage_intervals = _row_intervals_by_mesh_axis_coordinate(
+                param.shape[0],
+                storage_sharding,
+                mesh_axis_size=mesh_axis_size,
+            )
+            compute_intervals = _row_intervals_by_mesh_axis_coordinate(
+                param.shape[0],
+                compute_sharding,
+                mesh_axis_size=mesh_axis_size,
+            )
+            redistribution_storage_mesh_axes = (
+                ()
+                if storage_intervals == compute_intervals
+                else (redistribution_storage_mesh_axis,)
+            )
 
-    storage_mesh_axis = active_block_shard_mesh_axes[0]
-    storage_sharding = cast(
-        Replicate | Shard | _StridedShard,
-        _normalize_storage_placement(
-            param.placements[storage_mesh_axis],
-            ndim=param.ndim,
-            mesh_axis_size=param.device_mesh.size(storage_mesh_axis),
-        ),
-    )
-    compute_sharding = target_sharding_by_storage_mesh_axis[storage_mesh_axis]
-    assert type(compute_sharding) is BlockShard
-    if type(storage_sharding) is _StridedShard:
-        return (storage_mesh_axis,)
-
-    mesh_axis_size = param.device_mesh.size(storage_mesh_axis)
-    storage_intervals = _row_intervals_by_mesh_axis_coordinate(
-        param.shape[0],
-        storage_sharding,
-        mesh_axis_size=mesh_axis_size,
-    )
-    compute_intervals = _row_intervals_by_mesh_axis_coordinate(
-        param.shape[0],
-        compute_sharding,
-        mesh_axis_size=mesh_axis_size,
-    )
-    return () if storage_intervals == compute_intervals else (storage_mesh_axis,)
+    return redistribution_storage_mesh_axes
 
 
 @dataclass(frozen=True, slots=True)
@@ -1048,14 +1063,12 @@ def _resolve_muon_redistribution_plans(
             participants, (0,) * len(participants)
         )
         domains = tuple(
-            (
-                None
-                if layout.storage_is_compute_ready
-                else _dtensor_storage_regions(
-                    layout.param,
-                    participants,
-                    required_storage_mesh_axes=layout.redistribution_storage_mesh_axes,
-                )
+            None
+            if layout.storage_is_compute_ready
+            else _dtensor_storage_regions(
+                layout.param,
+                participants,
+                required_storage_mesh_axes=layout.redistribution_storage_mesh_axes,
             )
             for layout in context.items
         )
@@ -1505,7 +1518,7 @@ def _resolve_storage_to_compute_transition(
         normalized_target_sharding_by_storage_mesh_axis,
         applicable_owned_storage_mesh_axes,
     )
-    sharded_transport_mesh_axes = _resolve_sharded_transport_mesh_axes(
+    changed_storage_mesh_axes = _resolve_storage_to_compute_redistribution_requirement(
         fqn,
         param,
         block_shard,
@@ -1518,7 +1531,7 @@ def _resolve_storage_to_compute_transition(
         if param.device_mesh.size(storage_mesh_axis) > 1
     )
     transport_mesh_axes = tuple(
-        sorted(set(sharded_transport_mesh_axes).union(active_owned_storage_mesh_axes))
+        sorted(set(changed_storage_mesh_axes).union(active_owned_storage_mesh_axes))
     )
     if len(transport_mesh_axes) == 1 and block_shard is None:
         transport_mesh_axis = transport_mesh_axes[0]
