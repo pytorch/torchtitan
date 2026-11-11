@@ -934,6 +934,50 @@ def no_registered_aux_losses():
     AuxLoss._group_counts.update(saved_group_counts)
 
 
+@pytest.mark.parametrize("failure_kind", ["none", "oom", "wrapped_oom"])
+def test_train_passes_failure_to_profiler_close(failure_kind: str) -> None:
+    """An OOM ending train() writes the exit memory snapshot; a normal exit does not."""
+    oom = torch.OutOfMemoryError("test OOM")
+    failure = None
+    if failure_kind == "oom":
+        failure = oom
+    elif failure_kind == "wrapped_oom":
+        # Pipeline parallelism wraps the OOM it catches in a RuntimeError.
+        failure = RuntimeError("pipeline failure")
+        failure.__cause__ = oom
+    profiler = Profiler(Profiler.Config())
+    memory_profiler = MagicMock()
+    profiler.memory_profiler = memory_profiler
+    engine = SimpleNamespace(
+        num_completed_steps=0,
+        load_checkpoint=MagicMock(),
+        start_profiler=MagicMock(),
+        profiler=profiler,
+    )
+    engine.close_profiler = partial(TrainingEngine.close_profiler, engine)
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            config=SimpleNamespace(),
+            engine=engine,
+            dataloader=object(),
+            microbatch_generator=MagicMock(return_value=iter(())),
+            should_continue_training=MagicMock(return_value=failure is not None),
+            train_step=MagicMock(side_effect=failure),
+        ),
+    )
+
+    if failure is None:
+        with patch("torchtitan.trainer.torch.distributed.get_rank", return_value=1):
+            Trainer.train.__wrapped__(trainer)
+        memory_profiler.step.assert_not_called()
+    else:
+        with pytest.raises(type(failure)) as excinfo:
+            Trainer.train.__wrapped__(trainer)
+        assert excinfo.value is failure
+        memory_profiler.step.assert_called_once_with(exit_ctx=True)
+
+
 @pytest.fixture
 def fake_dp_mesh():
     """An 8-way DP mesh on a fake process group, whose collectives change nothing."""

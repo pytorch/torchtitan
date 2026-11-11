@@ -14,7 +14,6 @@ import torch
 
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
-from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.accelerator_graph import (
     accelerator_graphs_supported,
     NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
@@ -236,8 +235,6 @@ class GraphTrainingEngine(TrainingEngine):
                 num_warmup_iterations=NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
                 annotation_config=self.config.profiler.maybe_cuda_graph_annotation_config(),
             )
-
-        maybe_apply_numa_binding(self.device.index, self.device.type)
 
         if self.config.compile.memory_policy == "sac_and_offload":
             from torch._functorch._activation_offloading.offload_ops import (

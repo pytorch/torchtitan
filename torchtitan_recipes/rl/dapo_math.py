@@ -46,6 +46,7 @@ from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.models.muse_spark import (
     build_model_config as build_muse_spark_model_config,
+    MUSE_SPARK_SPECIAL_TOKENS,
 )
 from torchtitan.models.muse_spark.renderer import MuseSparkRendererConfig
 from torchtitan.models.muse_spark.tokenizer import MuseSparkTokenizer
@@ -75,8 +76,6 @@ from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.losses import DAPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
 from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
-
-from torchtitan_recipes.models.muse_spark import MUSE_SPARK_SPECIAL_TOKENS
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 

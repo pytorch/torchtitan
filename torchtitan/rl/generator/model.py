@@ -8,9 +8,11 @@
 initial weights, and loads model state dicts into it. Shared by every engine's model
 wrapper; the wrappers replace the attention layers before the build."""
 
+import logging
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
+import spmd_types as spmd
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -22,12 +24,22 @@ from torch.distributed._state_dict_utils import _create_cpu_state_dict
 from torchtitan.components import loss as _loss  # noqa: F401
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
+from torchtitan.distributed.fsdp import maybe_store_frozen_params_in_param_dtype_
 from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
+from torchtitan.models.common.moe.token_dispatcher import (
+    BaseEPTokenDispatcher,
+    DeepEPTokenDispatcher,
+    HybridEPTokenDispatcher,
+)
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.tools.utils import set_default_dtype
+
+logger = logging.getLogger(__name__)
 
 
 def get_attention_dimensions(
@@ -52,6 +64,7 @@ def build_inference_model(
     parallelism: InferenceParallelismConfig,
     precision: PrecisionConfig,
     device: torch.device,
+    keep_vision_encoder: bool = False,
 ) -> tuple[Decoder, ParallelismContext]:
     """Build, parallelize and materialize the generator's model, without its weights.
 
@@ -65,6 +78,8 @@ def build_inference_model(
         parallelism: The generator's parallelism.
         precision: The trainer's dtypes, which the model mirrors.
         device: The device to materialize the model on.
+        keep_vision_encoder: Keep the model's vision encoder, for an engine that serves
+            image prompts; otherwise it is dropped.
 
     Returns:
         ``(model, parallelism_context)``, the model's buffers initialized.
@@ -87,7 +102,6 @@ def build_inference_model(
         enable_sequence_parallel=training_parallelism.enable_sequence_parallel,
     )
 
-    param_dtype = TORCH_DTYPE_MAP[precision.param_dtype]
     # Build model on meta device to avoid allocating full model on every GPU.
     # Build in the trainer's master dtype (`precision.dtype`), so buffers and
     # `preserve_dtype_params` get the dtypes the trainer has and sends.
@@ -101,21 +115,11 @@ def build_inference_model(
     # hold mixed dtypes, and Dist-MoE's inference context rejects any operand
     # with requires_grad.
     model.requires_grad_(False)
-    # Hold the other parameters in `precision.param_dtype`, the dtype the trainer
-    # computes with and sends, so the FSDP below casts none of them. Swap each
-    # parameter's tensor rather than assigning `param.data`, which keeps a
-    # quantized tensor subclass's inner tensor in the old dtype; keep the
-    # parameter's attributes (e.g. its SPMD type).
-    preserved = {param for _, param in model.named_preserve_dtype_params()}
-    for param in model.parameters():
-        if param in preserved or param.dtype == param_dtype:
-            continue
-        new_param = nn.Parameter(param.detach().to(param_dtype), requires_grad=False)
-        for name, value in param.__dict__.items():
-            new_param.__dict__.setdefault(name, value)
-        torch.utils.swap_tensors(param, new_param)
+    # Store the parameters as the trainer stores its frozen ones. The trainer
+    # sends weights in `precision.param_dtype`, so the FSDP below casts none of them.
+    maybe_store_frozen_params_in_param_dtype_(model, precision)
     model._skip_lm_head = True
-    if getattr(model, "vision_encoder", None) is not None:
+    if not keep_vision_encoder and getattr(model, "vision_encoder", None) is not None:
         model.vision_encoder = None
 
     model = model.parallelize(
@@ -148,6 +152,233 @@ def build_inference_model(
         with parallelism_context.activate_spmd():
             model.init_weights(buffer_device=None)
     return model, parallelism_context
+
+
+def compute_logits(
+    model: Decoder,
+    hidden_states: torch.Tensor,
+    parallelism_context: ParallelismContext,
+) -> torch.Tensor:
+    """Full-vocabulary logits of ``hidden_states`` on every rank: the model's lm_head,
+    gathered over TP (lm_head returns vocab-sharded logits under TP)."""
+    with parallelism_context.activate_spmd():
+        logits = model.lm_head(hidden_states)
+        if parallelism_context.tp_enabled:
+            mesh = current_spmd_mesh()
+            assert mesh is not None
+            logits = spmd.redistribute(
+                logits,
+                mesh.get_group("tp"),
+                src=spmd.S(-1),
+                dst=spmd.R,
+                backward_options={"op_dtype": logits.dtype},
+            )
+    return logits
+
+
+# The engine TP all-reduce that route_tp_all_reduce's op swaps call. Process-global:
+# the swaps are installed once, and a later call (e.g. a rebuilt engine) replaces it.
+_tp_all_reduce: Callable[[torch.Tensor], torch.Tensor] | None = None
+
+
+def route_tp_all_reduce(all_reduce: Callable[[torch.Tensor], torch.Tensor]) -> None:
+    """Route the model's tensor-parallel sum all-reduces through an engine's TP
+    all-reduce (e.g. its custom one-shot all-reduce) instead of NCCL's ring, for
+    the steps outside batch-invariant mode.
+
+    ``all_reduce`` sums a tensor over the engine's TP group: the same ranks as the
+    model's TP mesh axis, in the group that owns the engine's communicator buffers.
+    Every routed sum is assumed to be over those ranks; TP is the only axis the
+    generator's forward reduces over. ``all_reduce`` must be capturable in CUDA
+    graphs over the expandable_segments (VMM) memory the RL stack enables. It may
+    reduce in place and return its input (SGLang's NCCL fallback does): a Partial
+    input is dead once reduced.
+
+    Two entry points are swapped:
+
+    1. ``torch.ops._c10d_functional.all_reduce``, which every DTensor Partial ->
+       Replicate redistribute calls. DTensor wraps the synchronous result in an
+       AsyncCollectiveTensor whose wait_tensor is a no-op. Only sum reductions are
+       routed; others fall through to the original op.
+    2. ``spmd.redistribute`` from Partial to Replicate or Invariant, without grad.
+       Its all-reduce reaches the first swap too (through funcol), but calling
+       ``all_reduce`` directly skips spmd's autograd Function and funcol's
+       wrapping: about 2-3% of a vLLM decode step at TP 2 (Qwen3-0.6B, GB300).
+       Under grad, spmd.redistribute keeps its dst-dependent backward.
+
+    TODO: this is a stopgap to close the generator's TP all-reduce perf gap.
+    Improve our native (DTensor) all-reduce path and remove this patch.
+    """
+    global _tp_all_reduce
+    installed = _tp_all_reduce is not None
+    _tp_all_reduce = all_reduce
+    if installed:
+        return
+
+    c10d = torch.ops._c10d_functional
+    # Op schema: all_reduce(Tensor input, str reduce_op, Any group_name) -> Tensor.
+    original_all_reduce = c10d.all_reduce
+
+    def routed_all_reduce(input, reduce_op, group_name):
+        if reduce_op == "sum":
+            return _tp_all_reduce(input)
+        return original_all_reduce(input, reduce_op, group_name)
+
+    c10d.all_reduce = routed_all_reduce
+
+    original_redistribute = spmd.redistribute
+
+    def redistribute(x, group, *, src, dst, **kwargs):
+        if src == spmd.P and dst in (spmd.R, spmd.I) and not torch.is_grad_enabled():
+            return _tp_all_reduce(x)
+        return original_redistribute(x, group, src=src, dst=dst, **kwargs)
+
+    spmd.redistribute = redistribute
+    logger.info("Routed the model's TP sum all-reduces through the engine's all-reduce")
+
+
+def build_dist_moe_runtime(
+    model: Decoder,
+    runtime_config: DistMoeRuntime.Config | None,
+    *,
+    parallelism_context: ParallelismContext,
+    device: torch.device,
+    max_num_tokens_per_step: int,
+) -> DistMoeRuntime | None:
+    """Build the runtime the model's Dist-MoE experts run with, or None without them.
+
+    Dist-MoE experts refuse to run without a runtime. The trainer gets one from
+    ``TrainingEngine``; the generator builds its own, once, before any CUDA-graph
+    capture, so no per-forward Python work runs under capture or replay.
+
+    Args:
+        max_num_tokens_per_step: The most tokens a forward passes to the model on this
+            rank, which sizes the runtime's buffers.
+    """
+    if not any(isinstance(module, DistMoeRoutedExperts) for module in model.modules()):
+        if runtime_config is not None:
+            logger.warning(
+                "Ignoring dist_moe_runtime: the generator model has no "
+                "Dist-MoE routed experts."
+            )
+        return None
+    if runtime_config is None:
+        raise ValueError(
+            "The generator model uses Dist-MoE routed experts but no "
+            "dist_moe_runtime was set. Set Generator.Config.dist_moe_runtime to a "
+            "DistMoeRuntime.Config(inference=True)."
+        )
+    if not runtime_config.inference:
+        raise ValueError(
+            "dist_moe_runtime must set inference=True; got "
+            f"{runtime_config!r}. The generator runs no "
+            "backward, so a training context's activation slots would reserve "
+            "memory it can never use."
+        )
+    return runtime_config.build(
+        model_parts=[model],
+        parallelism_context=parallelism_context,
+        device=device,
+        num_tokens_per_microbatch_per_dp_rank=max_num_tokens_per_step,
+        pp_schedule=None,
+    )
+
+
+def validate_ep_token_dispatchers(
+    model: Decoder.Config,
+    *,
+    parallelism: InferenceParallelismConfig,
+    cuda_graph: bool,
+    deterministic: bool,
+) -> None:
+    """Raise for EP token dispatchers a generator engine cannot run.
+
+    Args:
+        cuda_graph: Whether the engine captures CUDA graphs.
+        deterministic: ``DebugConfig.deterministic``, under which DeepEP builds its
+            deterministic communication buffer.
+    """
+    if parallelism.expert_parallel_degree <= 1:
+        return
+    # Dist-MoE experts have no token dispatcher, so this sees only the stock ones.
+    for fqn, dispatcher, _, _ in model.traverse(BaseEPTokenDispatcher.Config):
+        if isinstance(dispatcher, DeepEPTokenDispatcher.Config):
+            syncs_host = not dispatcher.cuda_graph_compatible
+            # TODO: DeepEP's deterministic dispatch sorts the received tokens with
+            # data-dependent shapes (ElasticBuffer's deterministic_sort), which CUDA
+            # graphs cannot capture. https://github.com/deepseek-ai/DeepEP/issues/820
+            if deterministic and cuda_graph:
+                raise ValueError(
+                    f"{fqn}: DeepEP's deterministic dispatch "
+                    "(DebugConfig.deterministic) cannot run in CUDA graphs: turn off "
+                    "the engine's CUDA graphs"
+                )
+        elif isinstance(dispatcher, HybridEPTokenDispatcher.Config):
+            syncs_host = dispatcher.non_blocking_capacity_factor is None
+            # Below 1.0, HybridEP drops the tokens past its capacity without an error,
+            # which silently changes the sampled tokens.
+            if (
+                dispatcher.non_blocking_capacity_factor is not None
+                and dispatcher.non_blocking_capacity_factor < 1.0
+            ):
+                raise ValueError(
+                    f"{fqn}: a HybridEP non_blocking_capacity_factor below 1.0 drops "
+                    "tokens in the generator; set it to 1.0, or to None with the "
+                    "engine's CUDA graphs off"
+                )
+            # A generator step can have any token count, while HybridEP's TMA loads
+            # need a rank's tokens times the ranks in its node, in 4-byte words, to
+            # fill 16-byte rows: any count does when the ranks are a multiple of 4.
+            if parallelism.expert_parallel_degree % 4 != 0:
+                raise ValueError(
+                    f"{fqn}: HybridEP needs an expert_parallel_degree divisible by 4 "
+                    "in the generator, got "
+                    f"{parallelism.expert_parallel_degree}"
+                )
+        else:
+            # The all-to-all dispatchers.
+            syncs_host = True
+        if syncs_host and cuda_graph:
+            raise ValueError(
+                f"{fqn}: {type(dispatcher).__qualname__} reads its split sizes on the "
+                "host, which CUDA graphs cannot capture: turn off the engine's CUDA "
+                "graphs, or use Dist-MoE, DeepEP with cuda_graph_compatible, or "
+                "HybridEP with non_blocking_capacity_factor"
+            )
+
+
+def validate_ep_token_dispatcher_capacity(
+    model: Decoder.Config,
+    *,
+    parallelism: InferenceParallelismConfig,
+    max_num_tokens_per_step: int,
+) -> None:
+    """Raise if a DeepEP or HybridEP buffer cannot hold an EP rank's tokens in a step.
+
+    Args:
+        max_num_tokens_per_step: The most tokens a step passes to the model on this
+            rank, padding included.
+    """
+    if parallelism.expert_parallel_degree <= 1:
+        return
+    # The MoE splits each step's tokens evenly over the TP ranks.
+    max_num_tokens_per_rank = (
+        max_num_tokens_per_step // parallelism.expert_sequence_parallel_size
+    )
+    for fqn, dispatcher, _, _ in model.traverse(BaseEPTokenDispatcher.Config):
+        if (
+            isinstance(
+                dispatcher,
+                (DeepEPTokenDispatcher.Config, HybridEPTokenDispatcher.Config),
+            )
+            and dispatcher.num_max_tokens_per_rank is not None
+            and dispatcher.num_max_tokens_per_rank < max_num_tokens_per_rank
+        ):
+            raise ValueError(
+                f"{fqn}: num_max_tokens_per_rank={dispatcher.num_max_tokens_per_rank} "
+                f"is below the {max_num_tokens_per_rank} tokens an EP rank can get in "
+                "one engine step"
+            )
 
 
 def _load_initial_weights(
