@@ -24,6 +24,9 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   selected rank for the compute phase.
 - `BucketConfig` groups and orders parameters by fully qualified name for
   packed redistribution and communication-compute overlap.
+- `redistribution_mesh_axes(fqn, parameter, compute_layout)` returns the
+  storage mesh axes a parameter's transport spans, or `()` when its storage
+  already holds complete compute matrices. It does not communicate.
 - `BlockShard.block_sizes` is a nonempty tuple describing a repeating sequence
   of independently shardable block sizes. Use `(R,)` for uniform blocks.
   For example, `(128, 64)` partitions
@@ -66,27 +69,28 @@ into one transport group; complete matrices are assigned across that group.
 For example, expert storage `Shard(0), Shard(1)` on DP/TP preserves each DP
 rank's expert range while TP redistributes matrix rows to whole-expert compute.
 
-`redistribution_mesh_axes(fqn, parameter, compute_layout)` returns the storage
-axes a parameter's transport spans, without communication. FlexShard does not
-create communicators: a single-axis bucket with `mesh=None` reuses its storage
-group, and a combined transport needs an explicit 1D `BucketConfig.mesh` named
-by joining the axes (e.g. `dp_shard_tp`) with the storage ranks in the same
-order:
+### Transport meshes
+
+FlexShard never creates process groups. A bucket whose transport spans one
+storage axis uses that axis's existing group when `BucketConfig.mesh` is
+`None`. A transport spanning several axes needs an explicit 1D mesh over the
+same ranks in storage order, named by joining the axes.
+
+Which axes a transport spans follows from FlexShard's resolution rules (e.g.
+`Owned` on a replicated axis still transports over it, and `BlockShard` rows
+already aligned with storage do not), so callers cannot derive them on their
+own. `redistribution_mesh_axes` answers from the same code `DistMuon` plans
+with, so the caller's mesh always matches the plan. It reads metadata only
+and validates the layout, so a bad layout fails before any group is created:
 
 ```python
-from torchtitan.distributed.utils import build_transport_mesh
-
-axes = redistribution_mesh_axes("matrix", parameter, compute_layout)
-bucket = BucketConfig(
-    patterns=("matrix",), mesh=build_transport_mesh(parameter.device_mesh, axes)
-)
+axes = redistribution_mesh_axes("matrix", parameter, compute_layout)  # ("dp_shard", "tp")
+mesh = parameter.device_mesh[axes]._flatten("_".join(axes))  # collective over WORLD
+bucket = BucketConfig(patterns=("matrix",), mesh=mesh)
 ```
 
-The TorchTitan `DistMuon` wrapper builds these meshes for buckets without one,
-optionally with the `max_nccl_ctas_for_comms` cap. Because native group
-creation is collective over WORLD and pipeline stages own different buckets,
-it first creates the union of all ranks' transports with
-`precreate_transport_meshes`.
+TorchTitan's `DistMuon` wrapper builds these meshes for every bucket with
+`torchtitan.distributed.utils.build_transport_meshes`.
 
 Several mesh axes may shard the same tensor dimension. By default they apply
 in storage-mesh order; `shard_order_by_tensor_dim` states a different order,

@@ -7,7 +7,6 @@
 import unittest
 from dataclasses import dataclass
 from tempfile import TemporaryDirectory
-from unittest.mock import MagicMock
 
 import torch
 import torch.distributed.checkpoint as dcp
@@ -17,11 +16,9 @@ from torchtitan.components.optim import (
     Adam,
     AdamW,
     BaseOptimizer,
-    DistMuon,
     LRSchedulersContainer,
     OptimizersContainer,
 )
-from torchtitan.distributed.flex_shard import BucketConfig, ComputeLayout, Owned
 from torchtitan.models.common import HiMidLoLinear, Sigmoid
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.moe import (
@@ -569,21 +566,6 @@ class TestOptimizersContainerWithParamGroups(unittest.TestCase):
         self.assertTrue(
             all(len(optimizer.param_groups) == 1 for optimizer in container.optimizers)
         )
-
-
-class TestDistMuonRedistributionMeshes(unittest.TestCase):
-    def test_explicit_mesh_rejects_automatic_cta_cap(self):
-        with self.assertRaisesRegex(
-            ValueError, "Explicit BucketConfig.mesh requires.*<= 0"
-        ):
-            DistMuon.Config(
-                pattern=r".*",
-                compute_sharding_by_fqn={
-                    "matrix": ComputeLayout({"dp_shard": Owned()})
-                },
-                bucket_configs=(BucketConfig(patterns=("matrix",), mesh=MagicMock()),),
-                max_nccl_ctas_for_comms=8,
-            )
 
 
 class TestDCPWithParamGroups(unittest.TestCase):

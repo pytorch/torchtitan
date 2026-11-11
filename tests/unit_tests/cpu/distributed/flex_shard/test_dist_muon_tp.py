@@ -36,7 +36,7 @@ from torchtitan.distributed.flex_shard.dist_muon import (
     _adjust_muon_learning_rate,
     DistMuon,
 )
-from torchtitan.distributed.utils import build_transport_mesh
+from torchtitan.distributed.utils import build_transport_meshes
 from torchtitan.models.kimi_k2_7.qk_clip import _scale_mla_heads
 from torchtitan_recipes.tests.models.kimi_k2_7 import _per_expert_compute_layout
 
@@ -93,15 +93,13 @@ class TensorParallelParity:
                 placements[fqn],
             )
 
-        transport_mesh = build_transport_mesh(
-            mesh,
-            redistribution_mesh_axes(
-                "layers.0.whole",
-                parameters["layers.0.whole"],
-                ComputeLayout(
-                    shardings_by_mesh_axis={"dp_shard": Owned(), "tp": Owned()}
-                ),
-            ),
+        transport_axes = redistribution_mesh_axes(
+            "layers.0.whole",
+            parameters["layers.0.whole"],
+            ComputeLayout(shardings_by_mesh_axis={"dp_shard": Owned(), "tp": Owned()}),
+        )
+        (transport_mesh,) = build_transport_meshes(
+            [(mesh, transport_axes)], max_ctas=None, storage_meshes={mesh}
         )
         optimizer = DistMuon(
             [
@@ -295,7 +293,9 @@ class TestDistMuonTensorParallelCPU(DTensorTestBase, TensorParallelParity):
             nesterov=True,
             ns_steps=2,
         )
-        transport_mesh = build_transport_mesh(mesh, ("dp_shard", "tp"))
+        (transport_mesh,) = build_transport_meshes(
+            [(mesh, ("dp_shard", "tp"))], max_ctas=None, storage_meshes={mesh}
+        )
         param_groups = [
             {"params": list(parameters.values()), "param_names": list(parameters)}
         ]
@@ -459,7 +459,9 @@ class TestDistMuonTensorParallelCPU(DTensorTestBase, TensorParallelParity):
         values = torch.arange(36).reshape(12, 3).float().div_(41)
         gradient = values.mul(0.37).add(0.2).sin()
         lr = 0.03
-        transport_mesh = build_transport_mesh(mesh, ("dp_shard", "tp"))
+        (transport_mesh,) = build_transport_meshes(
+            [(mesh, ("dp_shard", "tp"))], max_ctas=None, storage_meshes={mesh}
+        )
         for storage_placements in (
             (Shard(0), Shard(0)),
             (_StridedShard(0, split_factor=2), Shard(0)),
@@ -597,7 +599,7 @@ class TestDistMuonUnevenPipelineCPU(DTensorTestBase):
         parameter = torch.nn.Parameter(
             distribute_tensor(torch.ones(4, 4), mesh, (Shard(0), Shard(1)))
         )
-        with self.assertRaisesRegex(ValueError, "supply explicit BucketConfig.mesh"):
+        with self.assertRaisesRegex(ValueError, "have no storage mesh on some ranks"):
             ConfigurableDistMuon.Config(
                 pattern=".*",
                 compute_sharding_by_fqn={
@@ -700,41 +702,4 @@ class TestDistMuonUnevenPipelineCPU(DTensorTestBase):
             torch.testing.assert_close(
                 parameter.full_tensor(), expected, rtol=0, atol=0
             )
-        dist.destroy_process_group(group)
-        # Unequal constructor counts use caller-precreated explicit transports.
-        # Native cached groups remain shared across local optimizer instances.
-        explicit_muon = replace(
-            muon,
-            bucket_configs=[
-                replace(
-                    muon.bucket_configs[0],
-                    mesh=build_transport_mesh(mesh, ("dp_shard", "tp")),
-                ),
-                replace(
-                    muon.bucket_configs[1], mesh=build_transport_mesh(mesh, ("tp",))
-                ),
-            ],
-        )
-        model_parts = [model]
-        if self.rank < 4:
-            extra = torch.nn.Module()
-            extra.register_parameter(
-                name, torch.nn.Parameter(parameter.detach().clone())
-            )
-            model_parts.append(extra)
-        repeated = OptimizersContainer.Config(optimizers=[explicit_muon]).build(
-            model_parts=model_parts
-        )
-        self.assertEqual(len(repeated.optimizers), len(model_parts))
-        if len(model_parts) == 2:
-            self.assertIs(
-                repeated.optimizers[0]._bucket_plans[0].group.process_group,
-                repeated.optimizers[1]._bucket_plans[0].group.process_group,
-            )
-        group = dist.new_group(
-            ranks=list(range(self.world_size)), timeout=timedelta(seconds=5)
-        )
-        total = torch.ones(1)
-        dist.all_reduce(total, group=group)
-        self.assertEqual(total.item(), self.world_size)
         dist.destroy_process_group(group)

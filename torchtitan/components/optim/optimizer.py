@@ -31,10 +31,7 @@ from torchtitan.distributed.flex_shard import (
     redistribution_mesh_axes,
 )
 
-from torchtitan.distributed.utils import (
-    build_transport_mesh,
-    precreate_transport_meshes,
-)
+from torchtitan.distributed.utils import build_transport_meshes
 
 from .utils import (
     get_flat_optim_state_dict,
@@ -202,8 +199,9 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         communicators for optimizer redistribution. Each communicator adds fixed
         memory and may reduce throughput; the cap benefits workloads only when
         the reduction in all-peer connection state outweighs that overhead.
-        For buckets without an explicit ``BucketConfig.mesh``, this wrapper
-        builds the transport meshes (see ``precreate_transport_meshes``), which
+        Recipes leave ``BucketConfig.mesh`` unset: process groups do not exist
+        when a recipe is written. This wrapper builds each bucket's transport
+        mesh from the storage layout (see ``build_transport_meshes``), which
         requires every rank to construct the same sequence of DistMuon
         optimizers.
     """
@@ -242,23 +240,12 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
 
         A positive value requires NCCL on the transport axes. Other backends
         raise ``ValueError``; fake warns and keeps the storage groups without
-        modeling the cap. Explicit ``BucketConfig.mesh`` values require the
-        cap to be disabled; their communicator options belong to the caller.
+        modeling the cap.
 
         TODO: Replace this temporary all-to-all connection-memory workaround
         with lower-memory redistribution, such as a pull-based symmetric-memory
         implementation.
         """
-
-        def __post_init__(self) -> None:
-            if self.max_nccl_ctas_for_comms > 0 and any(
-                bucket.mesh is not None for bucket in self.bucket_configs
-            ):
-                raise ValueError(
-                    "Explicit BucketConfig.mesh requires "
-                    "max_nccl_ctas_for_comms <= 0; set communicator options "
-                    "when constructing the mesh"
-                )
 
     def __init__(
         self,
@@ -267,63 +254,48 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         params: Iterable[dict[str, Any]] | Iterable[Tensor],
     ) -> None:
         param_groups = tuple(cast(Iterable[dict[str, Any]], params))
-        bucket_configs = tuple(config.bucket_configs)
-        if any(bucket.mesh is None for bucket in bucket_configs):
-            named_parameters = [
-                (fqn, param)
-                for group in param_groups
-                for fqn, param in zip(
-                    group["param_names"], group["params"], strict=True
-                )
-                if isinstance(param, DTensor)
-            ]
-            max_ctas = (
-                config.max_nccl_ctas_for_comms
-                if config.max_nccl_ctas_for_comms > 0
-                else None
+        named_parameters = [
+            (fqn, param)
+            for group in param_groups
+            for fqn, param in zip(group["param_names"], group["params"], strict=True)
+            if isinstance(param, DTensor)
+        ]
+        max_ctas = (
+            config.max_nccl_ctas_for_comms
+            if config.max_nccl_ctas_for_comms > 0
+            else None
+        )
+        if max_ctas is not None and dist.get_backend() == "fake":
+            warnings.warn(
+                "Redistribution max_ctas is not modeled by the fake process "
+                "group; using the storage-mesh process group",
+                stacklevel=2,
             )
-            if max_ctas is not None and dist.get_backend() == "fake":
-                warnings.warn(
-                    "Redistribution max_ctas is not modeled by the fake process "
-                    "group; using the storage-mesh process group",
-                    stacklevel=2,
-                )
-                max_ctas = None
-            # Storage mesh and transport axes of each bucket's first parameter
-            # that needs redistribution; FlexShard rejects mixed transports.
-            transports = [
-                next(
-                    (
-                        (param.device_mesh, axes)
-                        for fqn, param in named_parameters
-                        if bucket.mesh is None
-                        and fqn in config.compute_sharding_by_fqn
-                        and any(
-                            fnmatch.fnmatchcase(fqn, pattern)
-                            for pattern in bucket.patterns
-                        )
-                        and (
-                            axes := redistribution_mesh_axes(
-                                fqn, param, config.compute_sharding_by_fqn[fqn]
-                            )
-                        )
-                    ),
-                    None,
-                )
-                for bucket in bucket_configs
-            ]
-            precreate_transport_meshes(
-                [(mesh, axes, max_ctas) for mesh, axes in filter(None, transports)],
-                storage_meshes=[param.device_mesh for _, param in named_parameters],
-            )
-            bucket_configs = tuple(
-                bucket
-                if transport is None
-                else replace(
-                    bucket, mesh=build_transport_mesh(*transport, max_ctas=max_ctas)
-                )
-                for bucket, transport in zip(bucket_configs, transports, strict=True)
-            )
+            max_ctas = None
+        # Storage mesh and transport axes of each bucket's first parameter
+        # that needs redistribution; FlexShard rejects mixed transports.
+        transports = []
+        for bucket in config.bucket_configs:
+            transport = None
+            for fqn, param in named_parameters:
+                layout = config.compute_sharding_by_fqn.get(fqn)
+                if layout is None or not any(
+                    fnmatch.fnmatchcase(fqn, pattern) for pattern in bucket.patterns
+                ):
+                    continue
+                if axes := redistribution_mesh_axes(fqn, param, layout):
+                    transport = (param.device_mesh, axes)
+                    break
+            transports.append(transport)
+        meshes = build_transport_meshes(
+            transports,
+            max_ctas=max_ctas,
+            storage_meshes={param.device_mesh for _, param in named_parameters},
+        )
+        bucket_configs = tuple(
+            bucket if mesh is None else replace(bucket, mesh=mesh)
+            for bucket, mesh in zip(config.bucket_configs, meshes, strict=True)
+        )
         super().__init__(
             param_groups,
             compute_sharding_by_fqn=config.compute_sharding_by_fqn,

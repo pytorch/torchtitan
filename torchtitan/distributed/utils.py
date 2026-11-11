@@ -10,7 +10,7 @@ import logging
 import math
 import os
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from datetime import timedelta
 from typing import Any, TYPE_CHECKING
 
@@ -414,114 +414,110 @@ def configure_nccl_for_ulysses(
     logger.info("Using NCCL_GRAPH_REGISTER=0 for Ulysses on NCCL before 2.32.3.")
 
 
-# TODO: Replace the private DeviceMesh._flatten and _get_root_mesh with public
-# APIs (https://github.com/pytorch/pytorch/issues/159013).
-_RootKey = tuple[tuple[str, ...], tuple[int, ...]]
-# (root, transport axes, max_ctas or 0), comparable across ranks.
-_TransportRequest = tuple[_RootKey, tuple[str, ...], int]
-
-
-def _root_key(mesh: DeviceMesh) -> _RootKey:
-    """Identify ``mesh``'s root identically on every rank."""
-    root = mesh._get_root_mesh()
-    return root.mesh_dim_names or (), tuple(root.mesh.shape)
-
-
-def precreate_transport_meshes(
-    requests: Sequence[tuple[DeviceMesh, tuple[str, ...], int | None]],
+def build_transport_meshes(
+    transports: Sequence[tuple[DeviceMesh, tuple[str, ...]] | None],
     *,
-    storage_meshes: Sequence[DeviceMesh],
-) -> None:
-    """Create the WORLD-wide union of the requested optimizer transport meshes.
+    max_ctas: int | None,
+    storage_meshes: Collection[DeviceMesh],
+) -> list[DeviceMesh | None]:
+    """Build one optimizer transport mesh per ``(storage mesh, axes)`` entry.
 
-    ``DeviceMesh._flatten`` creates a new group collectively over WORLD, so
-    every rank must make the same first-creation calls in the same order.
-    Pipeline stages own different buckets and request different transports,
-    so every rank all-gathers the ``(storage mesh, axes, max_ctas)`` requests
-    and creates their sorted union from a local storage mesh with the same root
-    and axes. Later ``build_transport_mesh`` calls are cache hits. Raises
-    ``ValueError`` on every rank if a rank has no such mesh (e.g. an
-    expert-free stage); supply explicit ``BucketConfig.mesh`` values instead.
+    Returns a list aligned with ``transports``; ``None`` entries stay ``None``.
+    Each mesh is 1D and named by joining its axes (``dp_shard_tp``), as
+    ``BucketConfig.mesh`` expects. A single uncapped axis reuses its storage
+    group. Other transports get a new group from ``DeviceMesh._flatten``; a
+    ``max_ctas`` cap builds a separate NCCL group and leaves the storage groups
+    unchanged.
+
+    Group creation is collective over WORLD, so every rank must create the same
+    groups in the same order, but pipeline stages request different transports.
+    Transports never span stages, but every group creation advances a per-rank
+    counter that names later WORLD-wide groups, so members-only creation would
+    desynchronize them. Every rank therefore all-gathers the axes to flatten and
+    creates their sorted union from one of its own storage meshes, which all
+    share TorchTitan's world root. ``max_ctas`` must be the same on every rank.
+    Raises ``ValueError`` on every rank if some rank has no storage mesh with
+    the requested axes (e.g. an expert-free stage asked to create an expert
+    transport).
     """
-    if dist.get_backend() == "fake":
-        return
-    gathered: list[Any] = [None] * dist.get_world_size()
-    dist.all_gather_object(
-        gathered,
-        {
-            (_root_key(mesh), axes, max_ctas or 0)
-            for mesh, axes, max_ctas in requests
-            # A single uncapped axis reuses its storage group.
-            if len(axes) > 1 or max_ctas is not None
-        },
+    axes_to_flatten = {
+        axes
+        for _, axes in filter(None, transports)
+        # A single uncapped axis reuses its existing group.
+        if len(axes) > 1 or max_ctas is not None
+    }
+    # Fake process groups are local, so ranks need not agree on the union.
+    fake = dist.get_backend() == "fake"
+    axes_to_flatten_by_rank: list[Any] = [axes_to_flatten]
+    if not fake:
+        axes_to_flatten_by_rank = [None] * dist.get_world_size()
+        dist.all_gather_object(axes_to_flatten_by_rank, axes_to_flatten)
+    all_axes_to_flatten: list[tuple[str, ...]] = sorted(
+        set().union(*axes_to_flatten_by_rank)
     )
-    union: list[_TransportRequest] = sorted(set().union(*gathered))
-    if not union:
-        return
-    views = [
-        next(
+    flatten_source_by_axes: dict[tuple[str, ...], DeviceMesh] = {}
+    unavailable_axes = []
+    for axes in all_axes_to_flatten:
+        flatten_source = next(
             (
                 mesh
                 for mesh in storage_meshes
-                if _root_key(mesh) == root_key
-                and set(axes) <= set(mesh.mesh_dim_names or ())
+                if set(axes) <= set(mesh.mesh_dim_names or ())
             ),
             None,
         )
-        for root_key, axes, _ in union
-    ]
-    dist.all_gather_object(
-        gathered,
-        [axes for (_, axes, _), view in zip(union, views) if view is None],
-    )
-    if missing := sorted({axes for rank_missing in gathered for axes in rank_missing}):
-        raise ValueError(
-            f"Optimizer transports {missing} have no storage mesh on some ranks; "
-            "supply explicit BucketConfig.mesh values"
+        if flatten_source is None:
+            unavailable_axes.append(axes)
+        else:
+            flatten_source_by_axes[axes] = flatten_source
+    if not fake:
+        unavailable_axes_by_rank: list[Any] = [None] * dist.get_world_size()
+        dist.all_gather_object(unavailable_axes_by_rank, unavailable_axes)
+        unavailable_axes = sorted(
+            {axes for rank_axes in unavailable_axes_by_rank for axes in rank_axes}
         )
-    for view, (_, axes, max_ctas) in zip(views, union, strict=True):
-        assert view is not None
-        build_transport_mesh(view, axes, max_ctas=max_ctas or None)
+    if unavailable_axes:
+        raise ValueError(
+            f"Optimizer transports {unavailable_axes} have no storage mesh on "
+            "some ranks, so their process groups cannot be created on every rank"
+        )
 
+    transport_mesh_by_axes = {}
+    for axes, flatten_source in flatten_source_by_axes.items():
+        name = "_".join(axes)
+        transport = flatten_source[axes[0] if len(axes) == 1 else axes]
+        if max_ctas is None:
+            transport_mesh_by_axes[axes] = transport._flatten(name)
+            continue
+        backend = dist.get_backend(transport.get_group(0))
+        if backend != dist.Backend.NCCL:
+            raise ValueError(f"max_ctas requires NCCL, got {backend!r}")
+        options = dist.ProcessGroupNCCL.Options()
+        options.config.max_ctas = max_ctas
+        # Keep redistribution channels independent from the storage groups.
+        options.config.split_share = 0  # pyrefly: ignore [missing-attribute]
+        capped = transport._flatten(
+            f"{name}_max_ctas_{max_ctas}", backend_override=(backend, options)
+        )
+        transport_mesh_by_axes[axes] = DeviceMesh.from_group(
+            [capped.get_group()],
+            flatten_source.device_type,
+            mesh=capped.mesh,
+            mesh_dim_names=(name,),
+        )
 
-def build_transport_mesh(
-    storage_mesh: DeviceMesh,
-    mesh_axis_names: tuple[str, ...],
-    *,
-    max_ctas: int | None = None,
-) -> DeviceMesh:
-    """Return a 1D optimizer transport mesh over ``mesh_axis_names``.
-
-    The mesh is named by joining the axis names, as ``BucketConfig.mesh``
-    expects. A single uncapped axis reuses its storage group. Otherwise
-    ``DeviceMesh._flatten`` creates the group (collectively over WORLD, see
-    ``precreate_transport_meshes``) and caches it on the root mesh. A
-    ``max_ctas`` cap builds a separate NCCL communicator and leaves the storage
-    groups unchanged.
-    """
-    axis_name = "_".join(mesh_axis_names)
-    transport_mesh = storage_mesh[
-        mesh_axis_names[0] if len(mesh_axis_names) == 1 else mesh_axis_names
-    ]
-    if max_ctas is None:
-        return transport_mesh._flatten(axis_name)
-    backend = dist.get_backend(transport_mesh.get_group(0))
-    if backend != dist.Backend.NCCL:
-        raise ValueError(f"max_ctas requires NCCL, got {backend!r}")
-    options = dist.ProcessGroupNCCL.Options()
-    options.config.max_ctas = max_ctas
-    # Keep redistribution channels independent from the storage groups.
-    options.config.split_share = 0  # pyrefly: ignore [missing-attribute]
-    # The flatten cache is keyed by name, so each cap needs its own name.
-    capped = transport_mesh._flatten(
-        f"{axis_name}_max_ctas_{max_ctas}", backend_override=(backend, options)
-    )
-    return DeviceMesh.from_group(
-        [capped.get_group()],
-        storage_mesh.device_type,
-        mesh=capped.mesh,
-        mesh_dim_names=(axis_name,),
-    )
+    meshes: list[DeviceMesh | None] = []
+    for transport in transports:
+        if transport is None:
+            meshes.append(None)
+            continue
+        storage_mesh, axes = transport
+        meshes.append(
+            transport_mesh_by_axes[axes]
+            if axes in transport_mesh_by_axes
+            else storage_mesh[axes[0]]
+        )
+    return meshes
 
 
 def init_distributed(
