@@ -485,32 +485,39 @@ trainer computes batch 10
 background thread prepares batches 11 and 12
 ```
 
-### Balancing microbatches across ranks
+### Heaviest-first ordering across data-parallel ranks
 
-With gradient accumulation, every microbatch synchronizes all data-parallel ranks, so a microbatch runs at the speed of its slowest rank. Packed rows of equal length can differ several times in attention cost with document masking: one full-length document costs far more than many short ones. `balancer` reassigns each optimizer step's microbatches across data-parallel ranks and accumulation slots so each slot holds microbatches of similar cost:
+Data-parallel ranks synchronize every microbatch, so a step runs at the speed of its slowest rank. With document masking, attention cost grows with the sum of squared document lengths, and packers emit rows in arbitrary order, so one rank's full-length document often shares a step with other ranks' short documents. `heaviest_first` makes each rank yield every window of `window_size` collated microbatches heaviest first. All ranks open a window at the same step, so each step pairs microbatches of similar cost, without communication:
 
 ```python
-from torchtitan.components.data import DocumentAttentionCost, MicrobatchBalancer
+import functools
+
+from torchtitan.components.data import (
+    document_attention_cost,
+    HeaviestFirstOrderingConfig,
+)
 
 config.dataloader = GrainDataLoader.Config(
     dataset=packed_pretraining_ds,
-    balancer=MicrobatchBalancer.Config(
-        cost=DocumentAttentionCost.Config(),  # sum of squared document lengths
-        group_size=0,  # 0: all data-parallel ranks; else consecutive groups
+    heaviest_first=HeaviestFirstOrderingConfig(
+        window_size=8,
+        # sum(document_length ** 2) + token_weight * non-padding tokens
+        cost_fn=functools.partial(document_attention_cost, token_weight=57_220),
     ),
 )
 ```
 
-Per step, ranks all-gather their microbatch costs over gloo, every rank computes the same assignment (heaviest first, one group of ranks per slot, keeping microbatches on their owner when possible), and only moved microbatches are exchanged. The step's microbatches and the loss normalization are unchanged, so the gradient is unchanged up to summation order.
+Only the order within a window changes: every microbatch is still trained once, and each moves by at most `window_size - 1` steps. Ordering works the same for `dp_replicate`, `dp_shard`, CP, gradient accumulation, and pipeline microbatches. Rows that are one full-length document stay as heavy as they are. The rank holds `window_size` collated microbatches in host memory, and a checkpoint resumes mid-window by re-reading the window.
 
-```text
-balancing group -> data-parallel ranks with the same CP/TP coordinate
-CP/TP peers     -> compute the same plan, receive the same microbatches
-group_size      -> consecutive data-parallel ranks; with HSDP, <= dp_shard stays in one replica
-PP              -> not supported (pipeline schedules need per-replica totals balanced instead)
-```
+Measured on GB300 with one microbatch per rank per step (OBELICS on Qwen3.5-9B, 32K rows; ProLong 512K on Llama-3-8B with head-tail CP):
 
-Balancing runs when the trainer requests a step's first microbatch, so dataloader checkpoints stay exact. The exchange costs are a few floats per rank for costs plus the moved microbatches (about 0.5 MB per 64K-token text row).
+| Data, layout | Step time, packed order | Step time, heaviest first | Speedup |
+|---|---|---|---|
+| OBELICS, FSDP 8 | 10.94 s | 7.71 s | 1.42x |
+| OBELICS, FSDP 16 | 14.77 s | 9.51 s | 1.55x |
+| ProLong 512K, 4 replicas x CP 4 | 52.94 s | 35.69 s | 1.48x |
+
+Datasets whose rows already cost about the same (C4, short chat SFT) gain little.
 
 # Distributed and checkpoint behavior
 

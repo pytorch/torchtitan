@@ -7,9 +7,11 @@
 import json
 
 import pytest
+from torchtitan.models.muse_spark import (
+    MUSE_SPARK_DEBUG_SPECIAL_TOKENS,
+    MUSE_SPARK_SPECIAL_TOKENS,
+)
 from torchtitan.models.muse_spark.tokenizer import MuseSparkTokenizer
-from torchtitan_recipes.models.muse_spark import MUSE_SPARK_SPECIAL_TOKENS
-from torchtitan_recipes.tests.models.muse_spark import MUSE_SPARK_DEBUG_SPECIAL_TOKENS
 
 
 @pytest.fixture

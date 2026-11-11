@@ -373,6 +373,32 @@ def _rl_microbatch(token: int) -> TrainingMicrobatch:
     )
 
 
+def test_forward_backward_preprocesses_images_before_training() -> None:
+    async def run() -> None:
+        trainer = object.__new__(Trainer)
+        engine = SimpleNamespace(num_completed_steps=0, pp_has_last_stage=False)
+        engine.forward_backward = MagicMock(
+            return_value=ForwardBackwardResult(
+                loss=torch.tensor(-1.0), loss_metrics=[[{}]], num_flops=0
+            )
+        )
+        trainer.engine = engine
+        trainer.config = Trainer.Config(model=MagicMock())
+        trainer.dp_rank = 0
+        preprocessed = _rl_microbatch(1)
+        microbatch = MagicMock(spec=TrainingMicrobatch)
+        microbatch.preprocess_images.return_value = preprocessed
+
+        await Trainer.forward_backward(
+            trainer, [[microbatch]], torch.tensor([1]), torch.tensor([1])
+        )
+
+        groups = engine.forward_backward.call_args.kwargs["microbatch_groups"]
+        assert groups == [[preprocessed]]
+
+    asyncio.run(run())
+
+
 def test_forward_backward_without_last_pipeline_stage_returns_no_metrics() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
