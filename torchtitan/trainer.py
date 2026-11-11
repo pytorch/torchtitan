@@ -562,10 +562,14 @@ class Trainer(Configurable):
                             ),
                             parallelism_context=engine.parallelism_context,
                         )
-        finally:
-            # The entry point also calls close() for checkpoint and graph
-            # cleanup; close the profiler here so direct train() callers get
-            # balanced lifecycle handling.
+        except BaseException as e:
+            # Pass the failure so an OOM writes the exit memory snapshot. The
+            # entry point also calls close() for checkpoint and graph cleanup;
+            # close the profiler here so direct train() callers get balanced
+            # lifecycle handling.
+            engine.close_profiler(e)
+            raise
+        else:
             engine.close_profiler()
 
         if torch.distributed.get_rank() == 0:
