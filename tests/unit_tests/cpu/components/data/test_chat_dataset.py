@@ -467,6 +467,22 @@ class TestMultiTurnChatProcessor(unittest.TestCase):
         np.testing.assert_array_equal(sequence.input_ids, [1, 2])
         np.testing.assert_array_equal(sequence.labels, [IGNORE_INDEX, 3])
 
+    def test_rejects_image_content(self):
+        messages = [
+            {"role": "user", "content": [{"type": "image", "image": b""}]},
+            {"role": "assistant", "content": "yes"},
+        ]
+        # Without a renderer, apply_chat_template would accept the image part.
+        for renderer in (None, _FakeRendererConfig(renderer=object())):
+            with self.subTest(renderer=renderer):
+                config = ChatProcessor.Config(
+                    messages_fn=lambda row: row["messages"], renderer=renderer
+                )
+                with self.assertRaisesRegex(ValueError, "'image' content part"):
+                    config.build(context=_runtime(256))(
+                        {"messages": messages}, np.random.default_rng(0)
+                    )
+
     def test_rejects_tools_without_renderer(self):
         with self.assertRaisesRegex(ValueError, "^tools_fn requires a renderer$"):
             ChatProcessor.Config(

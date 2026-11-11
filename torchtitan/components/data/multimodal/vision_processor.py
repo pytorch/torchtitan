@@ -300,6 +300,22 @@ class VisionProcessor(Configurable):
         frames_TCHW = self._resize(frames.permute(0, 3, 1, 2), self.video_resize)
         return self._normalize(frames_TCHW)
 
+    def process_images(
+        self, images: Sequence[str | bytes | Image.Image]
+    ) -> tuple[list[torch.Tensor], list[int]]:
+        """Resize and normalize ``images`` and count each one's placeholder tokens.
+
+        Raises on an image that cannot be processed; the caller decides whether to
+        drop the sample.
+        """
+        pixels: list[torch.Tensor] = []
+        num_tokens: list[int] = []
+        for image in images:
+            image_pixels, grid_thw = self.resize_and_normalize(image)
+            pixels.append(image_pixels)
+            num_tokens.append(self.num_placeholder_tokens(grid_thw))
+        return pixels, num_tokens
+
     def num_placeholder_tokens(self, grid_thw: Sequence[int] | torch.Tensor) -> int:
         """Placeholder tokens of an item with patch grid ``grid_thw``
         ``[T, H, W]``: one per ``spatial_merge_size x spatial_merge_size``
