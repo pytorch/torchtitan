@@ -89,26 +89,19 @@ recipes.
 
 ## Local optimizer compilation
 
-Call `optimizer.compile()` on a constructed `DistMuon` with FP32 parameter
-storage to compile three local stages with Inductor: momentum preparation,
-Newton-Schulz and direction writeback, and parameter update. Without this call,
-the optimizer remains eager. Model compilation is independent:
+After constructing a `DistMuon` with FP32 parameter storage, compile its local
+momentum preparation, Newton-Schulz and direction writeback, and parameter update
+with Inductor:
 
 ```python
-optimizer = DistMuon(
-    param_groups,
-    compute_sharding_by_fqn=compute_layouts,
-    bucket_configs=buckets,
-)
 optimizer.compile()
 ```
 
-Redistribution remains eager. The compiled momentum stage explicitly rounds
-scalar coefficients to preserve native CUDA FP32 `lerp` arithmetic. Static graphs
-are cached for the shapes encountered, with precision casts preserved. Initial
-calls include compilation cost and should be measured separately from warmed-up
-steps. CUDA Graph capture is not requested because scratch storage is released
-and regrown between optimizer steps.
+Without this call, updates remain eager. Model compilation is independent, and
+redistribution stays eager. Precision casts and native CUDA FP32 `lerp` rounding
+are preserved. Static graphs are cached per shape. Measure initial compilation
+separately from warmed-up steps. CUDA Graph capture is not requested because
+scratch storage is released between steps.
 
 This is a WIP path; CPU bitwise parity remains unresolved.
 

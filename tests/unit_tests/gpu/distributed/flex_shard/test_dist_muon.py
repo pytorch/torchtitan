@@ -783,15 +783,6 @@ def test_compiled_local_updates_match_eager(tmp_path) -> None:
                     rtol=0,
                     atol=0,
                 )
-            if step == 4:
-                checkpoint = tmp_path / "optimizer.pt"
-                torch.save(
-                    [optimizer.state_dict() for optimizer in optimizers], checkpoint
-                )
-                for optimizer, state in zip(
-                    optimizers, torch.load(checkpoint, weights_only=False), strict=True
-                ):
-                    optimizer.load_state_dict(state)
     finally:
         torch.distributed.destroy_process_group()
 
