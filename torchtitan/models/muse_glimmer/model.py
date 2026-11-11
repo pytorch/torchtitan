@@ -27,6 +27,7 @@ from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
     AttentionMetadataMap,
+    compile_qkv_norm_rope,
     FlexAttentionMetadata,
     GQAttention,
     split_qkv,
@@ -117,22 +118,8 @@ class Attention(GQAttention):
         x_TD = maybe_gather_tp_input(self, x_TD)
 
         num_tokens = x_TD.shape[0]
-        xq, xk, xv = split_qkv(
-            self.qkv_linear(x_TD),
-            heads_per_kv=self.qkv_linear.heads_per_kv,
-            head_dim=self.qkv_linear.head_dim,
-        )
-
-        # QK normalization before RoPE. Query is additionally scaled by a
-        # tuned constant (k is only normalized).
-        if self.q_norm is not None or self.k_norm is not None:
-            assert self.q_norm is not None and self.k_norm is not None
-            xq = self.q_norm(xq) * self.scale_query_by
-            xk = self.k_norm(xk)
-
-        # iRoPE: RoPE is skipped on NoPE layers (config-driven per layer).
-        if self.rope is not None:
-            xq, xk = self.rope(xq, xk, positions)
+        qkv = self.qkv_linear(x_TD)
+        xq, xk, xv = self._prepare_query_key_value(qkv, positions)
 
         output = remat.region(
             self.inner_attention,
@@ -157,6 +144,39 @@ class Attention(GQAttention):
             output = output * torch.sigmoid(gate)
 
         return self.wo(output)
+
+    @compile_qkv_norm_rope
+    def _prepare_query_key_value(
+        self, qkv: torch.Tensor, positions: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Split the packed ``QKVLinear`` output and return q, k, v as attention reads them. Norms and RoPE run only if configured.
+
+        query: split -> q_norm -> * scale_query_by -> RoPE (RoPE layers only)
+        key:   split -> k_norm -> RoPE (RoPE layers only)
+        value: split
+        """
+        xq, xk, xv = split_qkv(
+            qkv,
+            heads_per_kv=self.qkv_linear.heads_per_kv,
+            head_dim=self.qkv_linear.head_dim,
+        )
+        if self.q_norm is not None or self.k_norm is not None:
+            assert self.q_norm is not None and self.k_norm is not None
+            xq = self.q_norm(xq)
+            if torch.compiler.is_compiling():
+                # emulate_precision_casts rounds a Python float to bf16 before a bf16 multiply,
+                # but eager multiplies by it in fp32. Writing the multiply in fp32 matches eager.
+                # TODO(felipemello1/pytorch#24): use the plain multiply once emulate_precision_casts
+                # keeps Python floats in fp32.
+                xq = (xq.float() * self.scale_query_by).to(xq.dtype)
+            else:
+                # Eager keeps the plain multiply: the fp32 form launches 3 kernels instead of 1.
+                xq = xq * self.scale_query_by
+            xk = self.k_norm(xk)
+        # iRoPE: RoPE is skipped on NoPE layers (config-driven per layer).
+        if self.rope is not None:
+            xq, xk = self.rope(xq, xk, positions)
+        return xq, xk, xv
 
 
 class MuseGlimmerTransformerBlock(TransformerBlock):

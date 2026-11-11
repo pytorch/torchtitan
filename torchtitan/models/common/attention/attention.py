@@ -62,6 +62,7 @@ __all__ = [
     "SlidingWindowVarlenInnerAttention",
     "VarlenInnerAttention",
     "VarlenAttentionMetadata",
+    "compile_qkv_norm_rope",
     "create_attention_mask",
     "create_varlen_metadata_for_document",
     "get_causal_mask_mod",
@@ -206,6 +207,25 @@ def split_qkv(
     )
 
 
+# The region of `GQAttention._prepare_query_key_value` and of overrides that reuse it (Muse Glimmer).
+# Compiled, the head copies fuse into the q/k norm and RoPE reads. emulate_precision_casts
+# rounds the normed q/k to bf16 before RoPE, as the eager modules do; without it ~31%
+# of q elements differ from eager. No pointwise autotuning: kernel configs
+# picked by timing can round differently from run to run.
+# recompile_limit counts graphs per compiled method; one more raises. A generator compiles
+# 3 per code path: its first token count (static), a symbolic count, and T=1. Muse Glimmer's
+# RoPE and NoPE layers are 2 paths, so 6 graphs, near the default limit of 8. Hence 16.
+compile_qkv_norm_rope = local_compile(
+    "qkv_norm_rope",
+    batch_invariant=False,
+    recompile_limit=16,
+    options={
+        "emulate_precision_casts": True,
+        "triton.autotune_pointwise": False,
+    },
+)
+
+
 class GQAttention(Attention):
     """Grouped-Query Attention with a fused Q/K/V projection.
 
@@ -320,18 +340,7 @@ class GQAttention(Attention):
         out_TD = out_THV.view(out_THV.shape[0], -1)
         return self.wo(out_TD)
 
-    # Compiled, the head copies fuse into the q/k norm and RoPE reads. emulate_precision_casts
-    # rounds the normed q/k to bf16 before RoPE, as the eager modules do; without it ~31%
-    # of q elements differ from eager. No pointwise autotuning: kernel configs
-    # picked by timing can round differently from run to run.
-    @local_compile(
-        "qkv_norm_rope",
-        batch_invariant=False,
-        options={
-            "emulate_precision_casts": True,
-            "triton.autotune_pointwise": False,
-        },
-    )
+    @compile_qkv_norm_rope
     def _prepare_query_key_value(
         self, qkv: torch.Tensor, positions: torch.Tensor | None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
