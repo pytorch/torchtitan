@@ -104,6 +104,34 @@ full remat W2 and its bias addition replay. Full remat also replays W2 in the
 common BF16 path: absorption enables saving W2 without retaining its output,
 but does not itself change W2's policy.
 
+### Skip W2 replay while recomputing the rest
+
+For BF16 experts without output postprocessing or a real output dtype cast,
+save only W2 and let the other policy-controlled regions replay:
+
+```python
+from torchtitan.distributed.activation_remat import ActivationRematConfig
+
+config.activation_remat = ActivationRematConfig(
+    save_regions=["*routed_experts.w2.grouped_mm"],
+)
+```
+
+This skips W2's forward GEMM during backward. Replay still rebuilds its scored
+input, and W2's input-gradient and weight-gradient GEMMs still run. The GPT-OSS
+bias addition follows the same policy. Saved combine removes the remaining
+replay consumer of W2's output, so that output need not remain resident.
+For bias-free experts, each skipped forward replay avoids approximately
+`2 * R * F * D` FLOPs, including any routed padding rows in `R`.
+`DefaultActivationRematConfig` already saves W2; the explicit policy above
+also replays dispatch and the other projections.
+
+`FullActivationRematConfig` continues to replay W2. Saving the region is an
+explicit choice because quantized and LoRA grouped linears can retain internal
+activations in addition to their inputs. Compare saved-tensor reports and
+profile GEMM counts for the selected implementation; a policy name alone does
+not establish the memory or compute saving.
+
 ## HybridEP dispatch and combine
 
 HybridEP returns its permuted FP32 scores explicitly with dispatched rows.
