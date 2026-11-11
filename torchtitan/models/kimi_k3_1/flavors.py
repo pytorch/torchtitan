@@ -35,7 +35,7 @@ from .dsa import (
     KimiDSAIndexer,
     KimiSparseAttention,
 )
-from .model import KimiK31Model, KimiK31TransformerBlock
+from .model import KimiK31Model
 
 __all__ = ["build_model_config", "KimiK31Model", "MODEL_FLAVORS"]
 
@@ -136,7 +136,6 @@ def _debugmodel(
             index_head_dim=64,
             indexer_loss_coeff=indexer_loss_coeff,
         ),
-        full_attention_block_cls=KimiK31TransformerBlock.Config,
         attn_res_block_size=4,
         num_heads=16,
         q_lora_rank=128,
@@ -184,7 +183,6 @@ def _kimi_k3_1_pro(
             index_head_dim=128,
             indexer_loss_coeff=indexer_loss_coeff,
         ),
-        full_attention_block_cls=KimiK31TransformerBlock.Config,
         attn_res_block_size=12,
         num_heads=96,
         q_lora_rank=1536,

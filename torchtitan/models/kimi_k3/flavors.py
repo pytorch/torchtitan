@@ -623,9 +623,6 @@ def kimi_k3_config(
     num_shared_experts: int,
     vision_encoder: KimiK3VisionEncoder.Config | None,
     parallelism: ParallelismConfig,
-    full_attention_block_cls: type[
-        KimiK3TransformerBlock.Config
-    ] = KimiK3TransformerBlock.Config,
     config_cls: type[KimiK3Model.Config] = KimiK3Model.Config,
     multimodal_config_cls: type[
         KimiK3MultimodalModel.Config
@@ -666,13 +663,8 @@ def kimi_k3_config(
     layers = []
     for layer_idx in range(num_layers):
         is_full_attention = layer_idx in full_attention_layers
-        block_cls = (
-            full_attention_block_cls
-            if is_full_attention
-            else KimiK3TransformerBlock.Config
-        )
         layers.append(
-            block_cls(
+            KimiK3TransformerBlock.Config(
                 layer_id=layer_idx,
                 attn_res_block_size=attn_res_block_size,
                 attention=(
