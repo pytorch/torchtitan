@@ -300,6 +300,22 @@ class VisionProcessor(Configurable):
         frames_TCHW = self._resize(frames.permute(0, 3, 1, 2), self.video_resize)
         return self._normalize(frames_TCHW)
 
+    def process_images(
+        self, images: Sequence[str | bytes | Image.Image]
+    ) -> tuple[list[torch.Tensor], list[int]]:
+        """Resize and normalize ``images`` and count each one's placeholder tokens.
+
+        Raises on an image that cannot be processed; the caller decides whether to
+        drop the sample.
+        """
+        pixels: list[torch.Tensor] = []
+        num_tokens: list[int] = []
+        for image in images:
+            image_pixels, grid_thw = self.resize_and_normalize(image)
+            pixels.append(image_pixels)
+            num_tokens.append(self.num_placeholder_tokens(grid_thw))
+        return pixels, num_tokens
+
     def num_placeholder_tokens(self, grid_thw: Sequence[int] | torch.Tensor) -> int:
         """Placeholder tokens of an item with patch grid ``grid_thw``
         ``[T, H, W]``: one per ``spatial_merge_size x spatial_merge_size``
@@ -437,6 +453,16 @@ class VisionProcessor(Configurable):
 
         grid_thw = torch.tensor([T_patches, H_patches, W_patches])
         return patches, grid_thw
+
+    def patchify_all(
+        self, items_THWC: Sequence[torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """`patchify` each item and pack them as the vision encoder takes a batch:
+        ``(total_num_patches, patch_dim)`` patches and ``(num_items, 3)`` grids, in
+        item order. ``grid_thw.prod(-1)`` gives each item's length in the patches.
+        """
+        patches, grids = zip(*(self.patchify(item) for item in items_THWC))
+        return torch.cat(patches), torch.stack(grids)
 
     def grid_thw(self, height: int, width: int) -> tuple[int, int, int]:
         """The patch grid ``(1, H, W)`` that ``resize_and_normalize`` gives a
