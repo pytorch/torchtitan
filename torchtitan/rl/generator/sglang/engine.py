@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import gc
+import json
 import logging
 import os
 import time
@@ -166,6 +167,26 @@ class SGLangEngine(GenerationEngine):
                     "extra_server_args cannot set ServerArgs that TorchTitan controls: "
                     f"{owned_keys}"
                 )
+            storage_backend = self.extra_server_args.get("hicache_storage_backend")
+            if storage_backend is not None:
+                if storage_backend != "mooncake":
+                    raise ValueError(
+                        "SGLangEngine supports only the 'mooncake' HiCache storage "
+                        f"backend, got {storage_backend!r}"
+                    )
+                # The Store outlives a run and policy versions (the requests' cache
+                # salts) restart, so without a new prefix per launch a run could
+                # read KV that another run's weights computed.
+                extra_config = json.loads(
+                    self.extra_server_args.get("hicache_storage_backend_extra_config")
+                    or "{}"
+                )
+                if not extra_config.get("extra_backend_tag"):
+                    raise ValueError(
+                        "The Mooncake HiCache storage backend needs a new "
+                        "'extra_backend_tag' per launch in "
+                        "hicache_storage_backend_extra_config (a JSON string)"
+                    )
 
     def __init__(
         self,
@@ -204,6 +225,17 @@ class SGLangEngine(GenerationEngine):
             )
         if parallelism.enable_sequence_parallel:
             raise ValueError("SGLangEngine does not support sequence parallelism")
+        if (
+            config.extra_server_args.get("hicache_storage_backend") is not None
+            and reset_kv_cache_on_model_state_dict_load
+        ):
+            # With a KV reset requests have no cache salt, so Store keys depend only
+            # on tokens, and SGLang's KV reset (flush_cache) leaves the Store as is:
+            # requests would read KV that earlier weights computed.
+            raise ValueError(
+                "SGLangEngine does not support a HiCache storage backend with "
+                "reset_kv_cache_on_model_state_dict_load"
+            )
         if config.extra_server_args.get("enable_hierarchical_cache") and any(
             isinstance(layer.attention, KDA.Config) for layer in model.layers
         ):
