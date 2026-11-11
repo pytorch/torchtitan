@@ -319,6 +319,26 @@ class _PinnedBufferPool:
         )
 
 
+@dataclass
+class _PipelineScheduleState:
+    """Created by ``defer_to_schedule``: a pipeline schedule frees and reloads
+    each microbatch's last groups, naming the microbatch by the index its
+    actions carry (``set_microbatch``, ``wait_offload``, ``reload_backward``).
+    """
+
+    # Set by set_microbatch for the next forward, cleared when it finishes. A
+    # forward without one (e.g. a stage's metadata inference) is not tracked.
+    current_microbatch: int | None = None
+    # The groups of the tracked forward in progress.
+    current_groups: list[_OffloadGroup] = field(default_factory=list)
+    # The groups of each tracked microbatch, in block order, until
+    # reload_backward takes them.
+    groups_by_microbatch: dict[int, list[_OffloadGroup]] = field(default_factory=dict)
+    # The last group of each tracked microbatch, held on GPU until
+    # wait_offload frees it.
+    last_group_by_microbatch: dict[int, _OffloadGroup] = field(default_factory=dict)
+
+
 class ActivationOffloader:
     """Offload runtime for the transformer blocks of one model part.
 
@@ -366,6 +386,8 @@ class ActivationOffloader:
         self._logged_summary = False
         # Reloads that no backward trigger prefetched; each one is exposed.
         self.num_on_demand_reloads = 0
+        # Set by defer_to_schedule.
+        self._pp_schedule: _PipelineScheduleState | None = None
         # The same blocks ActivationRematConfig.apply checkpoints.
         blocks = [
             (f"layers.{layer_id}", block)
@@ -428,6 +450,9 @@ class ActivationOffloader:
             # once they all finish. The free point makes the compute stream
             # wait on it before dropping the group's GPU copies.
             group.copy_done_event = self._offload_stream.record_event()
+            pp_schedule = self._pp_schedule
+            if pp_schedule is not None and pp_schedule.current_microbatch is not None:
+                pp_schedule.current_groups.append(group)
         previous, self._group_awaiting_free = self._group_awaiting_free, group
         if previous is not None:
             # Group i - 1's copies had group i's forward to finish.
@@ -447,6 +472,8 @@ class ActivationOffloader:
             comm_ctx = fully_shard.state(self._model_part)._comm_ctx
             self._reload_stream = comm_ctx.all_gather_copy_in_stream
         self._group_awaiting_free = None
+        if self._pp_schedule is not None:
+            self._pp_schedule.current_groups = []
         self._model_part_input_storages = {
             t.untyped_storage().data_ptr()
             for t in tree_flatten((args, kwargs))[0]
@@ -457,18 +484,36 @@ class ActivationOffloader:
     def _model_part_post_forward(
         self, module: nn.Module, args: Any, output: Any
     ) -> None:
-        """Model-part post-forward hook: free the last group and install its
-        reload trigger on the model part's output."""
+        """Model-part post-forward hook: free the last group (or, for a
+        microbatch the pipeline schedule tracks, leave it to ``wait_offload``)
+        and install its reload trigger on the model part's output."""
         # The last group runs first in backward, so the model part's output
         # triggers the reload of the last group. On a non-last pipeline stage
         # this output's gradient arrives from the next stage and the backward
         # starts at once, so the trigger cannot overlap the reload and freeing
-        # here would wait on the copies; hence skip_last_layers.
+        # here would wait on the copies; hence skip_last_layers. A schedule
+        # that tracks the microbatch frees the last group after another action
+        # instead and reloads it ahead of the backward; the trigger stays as a
+        # fallback.
+        # The schedule state, if the schedule tagged this forward.
+        tracked = None
+        microbatch = -1
+        pp_schedule = self._pp_schedule
+        if pp_schedule is not None and pp_schedule.current_microbatch is not None:
+            if torch.is_grad_enabled():
+                tracked, microbatch = pp_schedule, pp_schedule.current_microbatch
+            pp_schedule.current_microbatch = None
         last_group = self._group_awaiting_free
         if last_group is not None:
             self._group_awaiting_free = None
-            self._free_gpu_copies(last_group)
+            if tracked is not None:
+                tracked.last_group_by_microbatch[microbatch] = last_group
+            else:
+                self._free_gpu_copies(last_group)
             self._prefetch_on_grad(output, group_to_reload=last_group)
+        if tracked is not None:
+            tracked.groups_by_microbatch[microbatch] = tracked.current_groups
+            tracked.current_groups = []
         if not self._logged_summary and torch.is_grad_enabled():
             self._logged_summary = True
             self._log_first_forward_summary()
@@ -497,6 +542,72 @@ class ActivationOffloader:
                     for k, v in stats.still_resident_bytes.items()
                 },
             )
+
+    # ---------------------------------------------- pipeline schedule hooks
+    def defer_to_schedule(self) -> None:
+        """Hand the timing of each microbatch's last group to a pipeline
+        schedule. For each microbatch, the schedule calls ``set_microbatch``
+        before the stage's forward, ``wait_offload`` after a later action, and
+        ``reload_backward`` ahead of the stage's backward, passing the
+        microbatch index its actions carry.
+
+        Like FSDP's UNSHARD/RESHARD actions, this lets the schedule overlap
+        the transfers at the stage boundary with other work on the rank, in
+        any order the schedule runs microbatches, so the last blocks need not
+        be skipped. Within the stage, gradient hooks still prefetch one block
+        ahead.
+        """
+        self._pp_schedule = _PipelineScheduleState()
+
+    def set_microbatch(self, microbatch_index: int) -> None:
+        """Tag the next forward of this model part with ``microbatch_index``."""
+        pp_schedule = self._pp_schedule
+        assert pp_schedule is not None, "set_microbatch needs defer_to_schedule"
+        assert pp_schedule.current_microbatch is None, (
+            f"microbatch {pp_schedule.current_microbatch} was set but its "
+            "forward has not run"
+        )
+        assert microbatch_index not in pp_schedule.groups_by_microbatch, (
+            f"microbatch {microbatch_index} already has a forward whose "
+            "backward was not reloaded"
+        )
+        pp_schedule.current_microbatch = microbatch_index
+
+    def wait_offload(self, microbatch_index: int) -> None:
+        """Free the GPU copies of ``microbatch_index``'s last group.
+
+        Call it after at least one action following that microbatch's
+        forward, so the copies had that action's compute to finish; the
+        compute stream still waits on them. After the microbatch's backward
+        it does nothing.
+        """
+        pp_schedule = self._pp_schedule
+        assert pp_schedule is not None, "wait_offload needs defer_to_schedule"
+        last_group = pp_schedule.last_group_by_microbatch.pop(microbatch_index, None)
+        assert last_group is not None, (
+            f"microbatch {microbatch_index} has no last group awaiting " "wait_offload"
+        )
+        self._free_gpu_copies(last_group)
+
+    def reload_backward(self, microbatch_index: int, num_groups: int = 1) -> None:
+        """Queue the reload of ``microbatch_index``'s last ``num_groups``
+        groups, last block first.
+
+        Call it one transfer latency before that microbatch's backward.
+        ``num_groups=1`` matches the in-stage prefetch depth; reloading every
+        group brings back the stage's whole stash for that microbatch at once,
+        which only pays off for stages of one or two blocks.
+        """
+        if num_groups < 1:
+            raise ValueError(f"num_groups must be >= 1, got {num_groups}")
+        pp_schedule = self._pp_schedule
+        assert pp_schedule is not None, "reload_backward needs defer_to_schedule"
+        groups = pp_schedule.groups_by_microbatch.pop(microbatch_index, None)
+        assert (
+            groups is not None
+        ), f"microbatch {microbatch_index} has no forward awaiting reload_backward"
+        for group in reversed(groups[-num_groups:]):
+            self._reload_group(group)
 
     def _pack(self, tensor: torch.Tensor) -> Any:
         info = remat.current_saved_tensor_info()
@@ -681,7 +792,8 @@ class ActivationOffloader:
 
         The one entry point for reloads queued ahead of unpack. It is
         idempotent, so callers can race: whichever runs first reloads, and
-        later calls find the group empty.
+        later calls find the group empty. Callers: the reload trigger, and
+        ``reload_backward`` under a pipeline schedule.
         """
         # Reloads are queued in pack order. The block's backward first replays
         # its forward, which reads the block input and then the SAVE_OUTPUTs in
