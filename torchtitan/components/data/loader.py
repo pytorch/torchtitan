@@ -14,6 +14,10 @@ from typing import Any
 import grain.python as grain
 from grain import experimental as grain_experimental
 from torch.distributed.checkpoint.stateful import Stateful
+from torchtitan.components.data.balancing import (
+    HeaviestFirstIterDataset,
+    HeaviestFirstOrderingConfig,
+)
 from torchtitan.components.data.collators import Collator, TextCollator
 from torchtitan.components.data.dataset import DatasetConfig
 
@@ -82,6 +86,10 @@ class GrainDataLoader(BaseDataLoader):
         """Concurrent indexed reads used when a `MapDataset` becomes an `IterDataset`."""
         num_prefetch_microbatches: int = 2
         """Collated microbatches queued per rank for trainer consumption."""
+        heaviest_first: HeaviestFirstOrderingConfig | None = None
+        """Yield each window of collated microbatches heaviest first so that
+        data-parallel ranks run similar-cost microbatches in the same step.
+        None keeps the packed order."""
 
     def __init__(
         self,
@@ -153,6 +161,13 @@ class GrainDataLoader(BaseDataLoader):
             drop_remainder=config.repeat,
             batch_fn=collator,
         )
+
+        if config.heaviest_first is not None:
+            dataset = HeaviestFirstIterDataset(
+                dataset,
+                window_size=config.heaviest_first.window_size,
+                cost_fn=config.heaviest_first.cost_fn,
+            )
 
         # Queue completed microbatches while the trainer consumes the previous one.
         dataset = grain_experimental.ThreadPrefetchIterDataset(
