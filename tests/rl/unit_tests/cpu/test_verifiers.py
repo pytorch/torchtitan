@@ -258,7 +258,7 @@ def test_verifiers_worker_sends_muse_glimmer_renderer_config(monkeypatch) -> Non
     assert sent.renderer_model_name == "muse-checkpoint"
 
 
-def test_setup_spawns_workers_with_the_env_server_address_and_close_stops_the_workers_first() -> None:
+def test_setup_spawns_workers_with_the_env_server_address_and_close_stops_the_env_server_first() -> None:
     from renderers import Qwen3RendererConfig
     from torchtitan.components.renderer import from_renderers
 
@@ -267,6 +267,7 @@ def test_setup_spawns_workers_with_the_env_server_address_and_close_stops_the_wo
     class _Worker:
         def __init__(self) -> None:
             self.setup_async = SimpleNamespace(call_one=AsyncMock())
+            self.wait_for_generate_calls = SimpleNamespace(call_one=AsyncMock())
 
     class _ActorSystem:
         async def spawn_rollout_workers(self, config, *, num_workers, num_threads):
@@ -312,8 +313,8 @@ def test_setup_spawns_workers_with_the_env_server_address_and_close_stops_the_wo
     assert events == [
         ("start_env_server",),
         ("spawn", "tcp://127.0.0.1:5555"),
-        ("stop_workers",),
         ("close_env_server",),
+        ("stop_workers",),
     ]
 
 

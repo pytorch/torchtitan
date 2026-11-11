@@ -7,11 +7,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
 import logging
 import random
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any, TYPE_CHECKING
 
@@ -48,9 +49,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# How long `Rollouter.close` waits for in-flight `run_group` calls before stopping their workers anyway.
-# Drains took under 0.3 s once the generators closed; 30 s only covers a group stuck in a slow env step.
-_RUN_GROUP_DRAIN_TIMEOUT_S = 30.0
+# Caps two waits at shutdown: a cancelled group stopping (`run_group_rollouts`), and `close`.
+# The `run_group` drain took under 0.3 s once the generators closed; 30 s covers a slow env step.
+_SHUTDOWN_DRAIN_TIMEOUT_S = 30.0
 
 
 class Rollouter(Configurable):
@@ -199,33 +200,46 @@ class Rollouter(Configurable):
         )
 
     async def close(self) -> None:
-        """Wait for in-flight `run_group` calls, then stop the rollout worker pool.
+        """Stop the rollout workers once no generator owes any of them an answer.
 
-        Close the generators first, so pending `generate_fn` calls fail fast:
+        An answer that reaches a stopped worker fails the actor that sends it (a generator, or the
+        generator router), and the finished job exits 130. `Controller.close` closes the generators
+        first, so pending generate calls fail fast. Then, within one _SHUTDOWN_DRAIN_TIMEOUT_S:
 
-            generators closed -> generate_fn raises -> run_group returns -> stop_rollout_workers()
-            run_group still running after _RUN_GROUP_DRAIN_TIMEOUT_S       -> stop_rollout_workers()
-
-        Why wait: if a worker stops while a generator (or the generator router) still owes it a reply,
-        Monarch fails that actor and the finished job exits 130.
+            1. wait for the `run_group` calls still running (each fails at its next generate call)
+            2. on every worker, wait for the generate calls no generator has answered yet: a
+               cancelled rollout stopped waiting for its call, but its generator still answers it.
+               A dead worker's error is logged with its traceback; the other workers still wait.
+            3. stop the workers, also after a timeout, an error, or a cancel of `close`
         """
+        workers = self._workers
         actor_system = self._actor_system
         self._workers = []
         self._actor_system = None
         calls = tuple(self._inflight_run_group_calls)
-        if calls:
-            _, pending = await asyncio.wait(calls, timeout=_RUN_GROUP_DRAIN_TIMEOUT_S)
-            if pending:
-                logger.warning(
-                    "Stopping rollout workers with %d run_group calls still running; "
-                    "the job may exit 130",
-                    len(pending),
+        try:
+            async with asyncio.timeout(_SHUTDOWN_DRAIN_TIMEOUT_S):
+                # return_exceptions: a failed group or a dead worker must not end the wait for the others.
+                await asyncio.gather(*calls, return_exceptions=True)
+                results = await asyncio.gather(
+                    *(worker.wait_for_generate_calls.call_one() for worker in workers),
+                    return_exceptions=True,
                 )
-                for call in pending:
-                    call.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
-        if actor_system is not None:
-            await actor_system.stop_rollout_workers()
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error(
+                        "A rollout worker failed while waiting for its generate calls; "
+                        "the job may exit 130",
+                        exc_info=result,
+                    )
+        except TimeoutError:
+            logger.warning(
+                "Stopping rollout workers before every run_group and generate call ended; "
+                "the job may exit 130"
+            )
+        finally:
+            if actor_system is not None:
+                await actor_system.stop_rollout_workers()
 
     async def sync_log_step(self, step: int) -> None:
         """Propagate the controller log step to every rollout worker."""
@@ -248,6 +262,11 @@ class Rollouter(Configurable):
         Builds `group_size` sibling envs from one sample and drives them concurrently;
         each sibling drives its own `generate_fn` calls, so the generator runs a whole
         group's calls together in one continuous batch. Then `score_group` fills each reward.
+
+        A cancel stops the group on its worker too, so the caller can release the group next:
+
+            caller cancelled         -> cancel_group -> group stopped -> CancelledError raised
+            group ignores the cancel -> CancelledError raised after _SHUTDOWN_DRAIN_TIMEOUT_S
 
         Args:
             generate_fn: Async callable that returns a Completion given a prompt.
@@ -279,12 +298,26 @@ class Rollouter(Configurable):
         )
         self._inflight_run_group_calls.add(call)
         call.add_done_callback(self._on_run_group_call_done)
-        # Shield `call` from the controller's end-of-training cancel, so `close` can still wait for it.
-        return await asyncio.shield(call)
+        try:
+            # Shield `call` from the controller's end-of-training cancel, so `close` can still wait for it.
+            return await asyncio.shield(call)
+        except asyncio.CancelledError:
+            # Monarch never forwards a cancel to the remote call ("Messaging Adverbs" in its actor docs).
+            # So stop the group on the worker that runs it. Log an error instead of raising it:
+            # a raise here would hide the CancelledError from the caller.
+            async with (
+                _suppress_and_log(
+                    "cancel_group(%d) failed; the group may keep running", group_id
+                ),
+                asyncio.timeout(_SHUTDOWN_DRAIN_TIMEOUT_S),
+            ):
+                await worker.cancel_group.call_one(group_id)
+            raise
 
     def _on_run_group_call_done(self, call: asyncio.Future[RolloutGroup]) -> None:
         self._inflight_run_group_calls.discard(call)
-        # A cancelled caller never reads the error; read it so asyncio does not log it.
+        # Once its caller is cancelled, `asyncio.shield` stops watching `call`, so nobody reads its
+        # error and asyncio logs "exception was never retrieved". Read it here.
         if not call.cancelled():
             call.exception()
 
@@ -357,7 +390,8 @@ class BaseRolloutWorker(Configurable, ABC):
     ) -> RolloutGroup:
         """Roll out and score one prompt group. An implementation gathers its rollouts with
         `return_exceptions=True` and passes the results to `make_scored_group`, which keeps
-        rollouts that aren't `is_trainable()` out of scoring and training.
+        rollouts that aren't `is_trainable()` out of scoring and training. On a cancel it returns
+        only after every rollout's cleanup ran: `RolloutWorkerActor.cancel_group` waits for that.
 
         Args:
             generate_fn: Async callable that returns a Completion given a prompt.
@@ -517,8 +551,9 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
         # TODO(perf): siblings in a group share the first-turn prompt; tokenize it once per group and
         # reuse across the group_size rollouts (truest spot is the worker's first-turn render).
         try:
-            # produce the rollouts. With return_exceptions, a failing sibling doesn't end the gather
-            # early: see `make_scored_group`.
+            # produce the rollouts. return_exceptions=True: the gather ends only once every rollout
+            # ended, also when one raises (see `make_scored_group`) or when the whole group is
+            # cancelled (`RolloutWorkerActor.cancel_group`): each rollout first releases its session.
             results = await asyncio.gather(
                 *(
                     self._run_single_rollout(
@@ -636,8 +671,6 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
             # An exception is read as a failure outside the policy: `TokenEnv` turns the policy's
             # failures into statuses (e.g. ERROR_PARSE), and an env answers bad output instead of
             # raising (`MessageEnv.step`).
-            # TODO: at shutdown, every rollout still generating lands here with a ~40-line remote
-            # traceback. Raise a typed error on generator close and log it at info, without the traceback.
             logger.exception(
                 "rollout %s/rollout=%d failed after %d turn(s); marking ERROR_INFRA",
                 group_id,
@@ -646,12 +679,13 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
             )
             status = RolloutStatus.ERROR_INFRA
             logs["error"] = repr(error)
-
-        try:
-            await release_session_fn(routing_session_id=routing_session_id)
-        except Exception:
-            # Not fatal: `max_sessions` evicts an unreleased session.
-            logger.exception("releasing routing session %s failed", routing_session_id)
+        finally:
+            # A failure is only logged: `release_groups` frees the KV and `max_sessions` evicts the
+            # routing pin. A raised error would turn this rollout into ERROR_INFRA.
+            async with _suppress_and_log(
+                "releasing routing session %s failed", routing_session_id
+            ):
+                await release_session_fn(routing_session_id=routing_session_id)
         return Rollout(
             group_id=group_id,
             rollout_id=rollout_id,
@@ -659,3 +693,19 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
             turns=turns,
             logs=logs,
         )
+
+
+@contextlib.asynccontextmanager
+async def _suppress_and_log(
+    failure_message: str, *message_args: object
+) -> AsyncIterator[None]:
+    """Like `contextlib.suppress(Exception)`, plus a log line with the traceback.
+
+    Example:
+        async with _suppress_and_log("cancel_group(%d) failed", 7):
+            await cancel_group(7)   # RuntimeError -> logged, not raised; CancelledError -> raised
+    """
+    try:
+        yield
+    except Exception:
+        logger.exception(failure_message, *message_args)
