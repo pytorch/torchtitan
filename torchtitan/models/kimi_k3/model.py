@@ -43,6 +43,7 @@ from torchtitan.models.common.multimodal import (
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 
+from .attention import KimiMLAAttention
 from .moe import KimiLatentMoE
 from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import KimiK3VisionEncoder
@@ -154,7 +155,16 @@ class KimiK3TransformerBlock(TransformerBlock):
                 self.attention_res_norm,
             )
         h_TD = self.attention_norm(h_TD)
-        h_TD = self.attention(h_TD, attention_metadata, positions)
+        if isinstance(self.attention, KimiMLAAttention):
+            h_TD = self.attention(
+                h_TD,
+                attention_metadata,
+                positions,
+                padding_mask=padding_mask,
+                aux_loss_denominator=aux_loss_denominator,
+            )
+        else:
+            h_TD = self.attention(h_TD, attention_metadata, positions)
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(h_TD)
         prefix_sum_TD = h_TD if self.first_layer_in_block else x_TD + h_TD
