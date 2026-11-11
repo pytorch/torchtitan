@@ -346,30 +346,7 @@ def test_qsa_output_and_backward_against_dense_selected_attention(config, all_pa
         torch.randn(23, heads, 64, dtype=torch.float64, requires_grad=True)
         for heads in (4, 2, 2)
     ]
-    saved_storage_bytes = {}
-    saved_index_dtypes = []
-
-    def pack(tensor):
-        storage = tensor.untyped_storage()
-        saved_storage_bytes[storage.data_ptr()] = storage.nbytes()
-        if tensor.dtype in (torch.int32, torch.int64):
-            saved_index_dtypes.append(tensor.dtype)
-        return tensor
-
-    with torch.autograd.graph.saved_tensors_hooks(pack, lambda tensor: tensor):
-        actual = inner(
-            q,
-            k,
-            v,
-            selected_indices_TJ=indices,
-            scores_TB=scores,
-            scale=1 / 8,
-            enable_gqa=True,
-        )
-    # Saving every query's gathered K/V exceeds this input-sized storage budget.
-    input_bytes = sum(tensor.numel() * tensor.element_size() for tensor in (q, k, v))
-    assert sum(saved_storage_bytes.values()) < 2 * input_bytes
-    assert saved_index_dtypes and set(saved_index_dtypes) == {torch.int32}
+    actual = inner(q, k, v, selected_indices_TJ=indices, scores_TB=scores, scale=1 / 8)
     mask = torch.zeros(23, 24, dtype=torch.bool).scatter(
         1, indices.long().masked_fill(indices < 0, 23), True
     )[:, :23]

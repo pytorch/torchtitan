@@ -15,7 +15,6 @@ import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 import torch_remat as remat
-from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.utils.checkpoint import checkpoint
 
 from torchtitan.models.base.module import Module
@@ -25,6 +24,7 @@ from torchtitan.models.common.attention import (
     InnerAttention,
     local_head_split,
 )
+from torchtitan.models.common.attn_gym import gather_attn
 from torchtitan.models.common.aux_loss import AuxLoss
 
 from torchtitan.models.common.decoder_sharding import token_id_placement
@@ -146,23 +146,6 @@ def _select_blocks(
             :, :num_selected
         ]
     return blocks_QB, ranked_scores_QG.gather(-1, blocks_QB)
-
-
-def _selected_attention(
-    query_QHK, key_THK, value_THV, indices_QJ, *, scale, enable_gqa
-):
-    valid_QJ = indices_QJ >= 0
-    keys_QHJK = key_THK[indices_QJ.clamp_min(0)].transpose(1, 2)
-    values_QHJV = value_THV[indices_QJ.clamp_min(0)].transpose(1, 2)
-    with sdpa_kernel(SDPBackend.MATH):
-        return F.scaled_dot_product_attention(
-            query_QHK.unsqueeze(2),
-            keys_QHJK,
-            values_QHJV,
-            attn_mask=valid_QJ[:, None, None],
-            scale=scale,
-            enable_gqa=enable_gqa,
-        ).squeeze(2)
 
 
 class QSAIndexMetadata(NamedTuple):
@@ -360,7 +343,12 @@ class QSAIndexerLoss(AuxLoss):
 
 
 class QSAInnerAttention(InnerAttention):
-    """Recompute selected-token gathers and SDPA per query chunk for backward."""
+    """Attention over the indexer's selected tokens via Attention Gym's gather_attn.
+
+    The selected blocks and the incomplete tail are sparse KV indices into the
+    packed sequence; there is no sliding window. The indexer teacher is
+    computed per query chunk of ``chunk_size`` to bound its Q x H x J logits.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(InnerAttention.Config):
@@ -402,7 +390,6 @@ class QSAInnerAttention(InnerAttention):
         selected_indices_TJ: torch.Tensor,
         scores_TB: torch.Tensor,
         scale: float,
-        enable_gqa: bool,
         aux_loss_denominator: torch.Tensor | None = None,
     ) -> torch.Tensor:
         train_indexer = self.training and self.indexer_loss is not None
@@ -410,65 +397,62 @@ class QSAInnerAttention(InnerAttention):
             raise ValueError(
                 "QSA training requires the step-global auxiliary-loss denominator"
             )
+        with spmd.no_typecheck():
+            # gather_attn takes [B, H, T, K]; query head h reads KV head
+            # h // (H / H_kv). Padded query rows have no selections and return 0.
+            output_1HTV = gather_attn(
+                query_THK.transpose(0, 1).unsqueeze(0),
+                None,
+                key_THK.transpose(0, 1).unsqueeze(0),
+                selected_indices_TJ.unsqueeze(0),
+                sliding_window_size=0,
+                scale=scale,
+                impl="fused" if query_THK.device.type == "cuda" else "reference",
+                sparse_v=value_THV.transpose(0, 1).unsqueeze(0),
+            )
+            output_THV = output_1HTV.squeeze(0).transpose(0, 1)
+        # Kernel output is opaque to SPMD typechecking; it keeps the query layout.
+        if spmd.is_type_checking():
+            spmd.assert_type(
+                output_THV,
+                spmd.get_local_type(query_THK),
+                spmd.get_partition_spec(query_THK),
+            )
+        if not train_indexer:
+            return output_THV
+        assert self.indexer_loss is not None
         num_blocks = scores_TB.shape[-1]
-        outputs = []
         # Empty ranks must participate in the indexer's FSDP gradient reduction.
         # An empty slice is finite even when all selected scores are -inf.
         raw_sum = scores_TB[..., :0].sum()
-        for start in range(0, query_THK.shape[0], self.chunk_size):
+        num_teacher_tokens = query_THK.shape[0] if num_blocks else 0
+        for start in range(0, num_teacher_tokens, self.chunk_size):
             stop = start + self.chunk_size
             indices_QJ = selected_indices_TJ[start:stop]
-            # TODO: use Attention Gym's distinct-K/V grouped backward when
-            # available: https://github.com/meta-pytorch/attention-gym/pull/702.
-            # Native checkpoints can nest inside a block torch_remat checkpoint.
-            # TODO: use torch_remat after nesting and chunk early-stop are supported.
-            # Early-stop tracking: https://github.com/meta-pytorch/remat/issues/6.
-            output_QHV = checkpoint(
-                _selected_attention,
-                query_THK[start:stop],
-                key_THK,
-                value_THV,
-                indices_QJ,
-                scale=scale,
-                enable_gqa=enable_gqa,
-                use_reentrant=False,
-                preserve_rng_state=False,
-            )
-            outputs.append(output_QHV)
-            if train_indexer and num_blocks:
-                assert self.indexer_loss is not None
-                with torch.no_grad():
-                    valid_QJ = indices_QJ >= 0
-                    query_QH1K = query_THK[start:stop].unsqueeze(2)
-                    keys_QHJK = key_THK[indices_QJ.clamp_min(0)].transpose(1, 2)
-                    keys_QHJK = keys_QHJK.repeat_interleave(
-                        query_QH1K.shape[1] // keys_QHJK.shape[1], 1
-                    )
-                    logits_QHJ = (query_QH1K.float() * keys_QHJK.float()).sum(
-                        -1
-                    ) * scale
-                    logits_QHJ = logits_QHJ.masked_fill(
-                        ~valid_QJ[:, None], torch.finfo(torch.float32).min
-                    )
-                    teacher_QJ = logits_QHJ.softmax(-1).sum(1) / query_QH1K.shape[1]
-                    teacher_QJ = teacher_QJ * valid_QJ
-                    teacher_QB = (
-                        teacher_QJ[:, : num_blocks * self.compress_ratio]
-                        .unflatten(-1, (num_blocks, self.compress_ratio))
-                        .amax(-1)
-                    )
-                raw_sum = raw_sum + self.indexer_loss.block_kl(
-                    scores_TB[start:stop], teacher_QB
+            with torch.no_grad():
+                valid_QJ = indices_QJ >= 0
+                query_QH1K = query_THK[start:stop].unsqueeze(2)
+                keys_QHJK = key_THK[indices_QJ.clamp_min(0)].transpose(1, 2)
+                keys_QHJK = keys_QHJK.repeat_interleave(
+                    query_QH1K.shape[1] // keys_QHJK.shape[1], 1
                 )
-        output_THV = torch.cat(outputs)
-        if train_indexer:
-            assert self.indexer_loss is not None
-            output_THV = self.indexer_loss.inject(
-                raw_sum,
-                carrier=output_THV,
-                denominator=aux_loss_denominator,
+                logits_QHJ = (query_QH1K.float() * keys_QHJK.float()).sum(-1) * scale
+                logits_QHJ = logits_QHJ.masked_fill(
+                    ~valid_QJ[:, None], torch.finfo(torch.float32).min
+                )
+                teacher_QJ = logits_QHJ.softmax(-1).sum(1) / query_QH1K.shape[1]
+                teacher_QJ = teacher_QJ * valid_QJ
+                teacher_QB = (
+                    teacher_QJ[:, : num_blocks * self.compress_ratio]
+                    .unflatten(-1, (num_blocks, self.compress_ratio))
+                    .amax(-1)
+                )
+            raw_sum = raw_sum + self.indexer_loss.block_kl(
+                scores_TB[start:stop], teacher_QB
             )
-        return output_THV
+        return self.indexer_loss.inject(
+            raw_sum, carrier=output_THV, denominator=aux_loss_denominator
+        )
 
 
 class QSAAttention(Qwen35Attention):
@@ -559,7 +543,6 @@ class QSAAttention(Qwen35Attention):
             selected_indices_TJ=selected_indices_TJ,
             scores_TB=scores_TB,
             scale=self.scaling,
-            enable_gqa=self.enable_gqa,
             aux_loss_denominator=aux_loss_denominator,
         )
         remat.recompute_needs_tensor(output_THV, gate_THV)
