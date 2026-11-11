@@ -138,7 +138,7 @@ def _debugmodel(
         ),
         full_attention_block_cls=KimiK31TransformerBlock.Config,
         attn_res_block_size=4,
-        num_heads=4,
+        num_heads=16,
         q_lora_rank=128,
         kv_lora_rank=512,
         qk_nope_head_dim=128,
