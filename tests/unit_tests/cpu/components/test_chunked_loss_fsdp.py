@@ -12,7 +12,7 @@ from unittest.mock import patch
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import fully_shard
+from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.distributed.pipelining import PipelineStage
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
@@ -297,6 +297,36 @@ def _exercise_multi_output_head(device, world_size):
             )
 
 
+def _exercise_mixed_precision_grad_dtype(device, world_size):
+    # Chunk backwards through a separate lm_head unit must keep the decoder's
+    # forward grad_dtype. Otherwise its outer backward writes fp32 gradients.
+    mesh = init_device_mesh(device.type, (world_size,), mesh_dim_names=("dp_shard",))
+    torch.manual_seed(42)
+    model = _Decoder().to(device)
+    policy = MixedPrecisionPolicy(
+        param_dtype=torch.bfloat16, reduce_dtype=torch.float32
+    )
+    for module in (model.projection, model.norm):
+        fully_shard(module, mesh=mesh, mp_policy=policy)
+    fully_shard(model.lm_head, mesh=mesh, mp_policy=policy, reshard_after_forward=False)
+    fully_shard(model, mesh=mesh, mp_policy=policy)
+    loss_fn = ChunkedLossWrapper.Config(num_chunks=2).build()
+    loss_fn.set_lm_head(model.lm_head)
+    hidden = model(model.sample_inputs(device))
+    decoder_params = [
+        fsdp_param._unsharded_param
+        for module in (model.projection, model.norm)
+        for group in module._get_fsdp_state()._fsdp_param_groups
+        for fsdp_param in group.fsdp_params
+    ]
+    expected = [param.grad_dtype for param in decoder_params]
+    labels = torch.randint(16, (8,), device=device)
+    loss, _ = loss_fn(hidden, labels, torch.tensor(8, device=device))
+    if [param.grad_dtype for param in decoder_params] != expected:
+        raise RuntimeError("Chunk backward changed the decoder grad_dtype")
+    loss.backward()
+
+
 class TestChunkedLossFSDP(DTensorTestBase):
     device_type = "cpu"
 
@@ -448,3 +478,4 @@ class TestChunkedLossFSDP(DTensorTestBase):
 
         _exercise_pipeline_accumulation(self.rank, self.world_size, device)
         _exercise_multi_output_head(device, self.world_size)
+        _exercise_mixed_precision_grad_dtype(device, self.world_size)

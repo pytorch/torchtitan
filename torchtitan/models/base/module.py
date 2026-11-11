@@ -441,10 +441,11 @@ class Module(nn.Module, Configurable):
         layout: SpmdType,
         parallelism_context: ParallelismContext,
     ) -> None:
-        """Reject parameter layouts that produce uneven TP or EP local shards."""
+        """Reject parameter layouts that produce uneven TP, CP, or EP local shards."""
         axis_types = _per_axis_types(layout)
         axis_sizes = {
             MeshAxisName.TP: parallelism_context.tp,
+            MeshAxisName.CP: parallelism_context.cp,
             MeshAxisName.EP: parallelism_context.ep,
         }
         for axis_name, axis_size in axis_sizes.items():
