@@ -18,7 +18,10 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from sglang.srt.layers.attention.flashattention_backend import FlashAttentionBackend
+from sglang.srt.layers.attention.flashattention_backend import (
+    FlashAttentionBackend,
+    FlashAttentionKernels,
+)
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.model_executor.runner_utils.forward_batch import get_forward_batch
 from sglang.srt.runtime_context import get_parallel
@@ -37,11 +40,11 @@ class TorchTitanVarlenAttnBackend(FlashAttentionBackend):
     """SGLang's FlashAttention backend with the trainer's kernel.
 
     SGLang's backend builds the paged-KV metadata (page table, sequence lengths, CUDA
-    graph buffers) and writes the KV cache; every kernel call goes through the two
-    functions ``_init_flash_attention_functions`` sets, which this subclass points at
-    PyTorch's varlen FlashAttention, the kernel the trainer's ``VarlenInnerAttention``
-    runs. It supports causal attention over the paged KV cache only; any other call
-    (no-cache prefill, cascade, soft-capping, FP8 KV) raises.
+    graph buffers) and writes the KV cache; every kernel call goes through the
+    ``kernels`` this subclass passes it: PyTorch's varlen FlashAttention, the kernel
+    the trainer's ``VarlenInnerAttention`` runs. It supports causal attention over the
+    paged KV cache only; any other call (no-cache prefill, cascade, soft-capping, FP8
+    KV) raises.
 
     Args:
         model_runner: SGLang's model runner.
@@ -56,16 +59,14 @@ class TorchTitanVarlenAttnBackend(FlashAttentionBackend):
                 f"got {fa_impl}"
             )
         # The FA version selects SGLang's metadata layout for that kernel.
-        super().__init__(model_runner, fa_impl_ver=4 if fa_impl == "FA4" else 3)
-
-    def _init_flash_attention_functions(self, device_capability) -> None:
-        # TODO(https://github.com/sgl-project/sglang/issues/48475): overrides a private
-        # hook of SGLang's FlashAttentionBackend; SGLang has no public way to plug a
-        # kernel into its FA metadata.
-        self._get_scheduler_metadata = None
-        self._get_fa_runtime_policy = None
-        self.flash_attn_varlen_func = _no_cache_attention_unsupported
-        self.flash_attn_with_kvcache = self._paged_attention
+        super().__init__(
+            model_runner,
+            fa_impl_ver=4 if fa_impl == "FA4" else 3,
+            kernels=FlashAttentionKernels(
+                varlen_func=_no_cache_attention_unsupported,
+                with_kvcache_func=self._paged_attention,
+            ),
+        )
 
     def _paged_attention(
         self,
