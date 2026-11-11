@@ -179,12 +179,16 @@ def _small_qwen35_model() -> Qwen35Model:
 def test_qwen35_registry_keeps_released_flavors() -> None:
     assert set(MODEL_FLAVORS) == {
         "debugmodel",
+        "debugmodel_text",
         "debugmodel_moe",
+        "debugmodel_moe_text",
         "0.8B",
         "2B",
         "4B",
         "9B",
+        "9B_text",
         "27B",
+        "27B_text",
         "35B-A3B",
         "122B-A10B",
         "397B-A17B",
@@ -259,3 +263,18 @@ def test_qwen35_always_calls_vision_encoder_twice(
             encoder.patch_embed.weight.grad,
             torch.zeros_like(encoder.patch_embed.weight),
         )
+
+
+@pytest.mark.parametrize("flavor", ["debugmodel", "debugmodel_moe", "9B", "27B"])
+def test_qwen35_text_only_flavor_has_no_vision_encoder(flavor: str) -> None:
+    """The ``_text`` flavor is the multimodal one without the vision encoder, so
+    layer 0 takes the residual layout instead of the post-scatter Replicate."""
+    parallelism = ParallelismConfig(enable_sequence_parallel=True)
+    multimodal = build_model_config(flavor, parallelism=parallelism)
+    text = build_model_config(f"{flavor}_text", parallelism=parallelism)
+
+    assert multimodal.vision_encoder is not None
+    assert text.vision_encoder is None
+    assert len(text.layers) == len(multimodal.layers)
+    assert text.layers[0].sharding_config == text.layers[1].sharding_config
+    assert text.layers[0].sharding_config != multimodal.layers[0].sharding_config

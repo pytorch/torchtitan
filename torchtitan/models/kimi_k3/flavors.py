@@ -581,7 +581,7 @@ def _kimi_k3_config(
     num_experts: int,
     top_k: int,
     num_shared_experts: int,
-    vision_encoder: KimiK3VisionEncoder.Config,
+    vision_encoder: KimiK3VisionEncoder.Config | None,
     attn_backend: str,
     parallelism: ParallelismConfig,
 ) -> KimiK3Model.Config:
@@ -713,7 +713,9 @@ def _debugmodel(
     *,
     seq_len: int,
     parallelism: ParallelismConfig,
+    has_vision_encoder: bool = True,
 ) -> KimiK3Model.Config:
+    """Debug config for Kimi K3, with a vision encoder if ``has_vision_encoder``."""
     dim = 256
     return _kimi_k3_config(
         max_context_length=seq_len,
@@ -736,15 +738,19 @@ def _debugmodel(
         num_experts=8,
         top_k=2,
         num_shared_experts=2,
-        vision_encoder=_vision_encoder_config(
-            text_dim=dim,
-            dim=256,
-            qkv_dim=512,
-            hidden_dim=512,
-            num_layers=2,
-            num_heads=4,
-            init_pos_emb_height=32,
-            init_pos_emb_width=32,
+        vision_encoder=(
+            _vision_encoder_config(
+                text_dim=dim,
+                dim=256,
+                qkv_dim=512,
+                hidden_dim=512,
+                num_layers=2,
+                num_heads=4,
+                init_pos_emb_height=32,
+                init_pos_emb_width=32,
+            )
+            if has_vision_encoder
+            else None
         ),
         attn_backend=attn_backend,
         parallelism=parallelism,
@@ -796,6 +802,7 @@ def _kimi_k3(
 
 MODEL_FLAVORS = {
     "debugmodel": (_debugmodel, 16384),
+    "debugmodel_text": (partial(_debugmodel, has_vision_encoder=False), 16384),
     "Kimi-K3": (_kimi_k3, 262144),
 }
 

@@ -41,10 +41,18 @@ class Qwen35StateDictAdapter(StateDictAdapter):
     def __init__(self, model_config: Qwen35Model.Config, hf_assets_path: str | None):
         super().__init__(model_config, hf_assets_path)
         self.model_config = model_config
+        # Multimodal HF checkpoints nest the decoder under ``model.language_model``.
+        # A text-only flavor (no vision encoder) can still load one, so read the
+        # layout from the checkpoint index when there is one.
+        if self.fqn_to_index_mapping:
+            multimodal_checkpoint = any(
+                key.startswith("model.language_model.")
+                for key in self.fqn_to_index_mapping
+            )
+        else:
+            multimodal_checkpoint = model_config.vision_encoder is not None
         self.hf_language_model_prefix = (
-            "model.language_model"
-            if model_config.vision_encoder is not None
-            else "model"
+            "model.language_model" if multimodal_checkpoint else "model"
         )
 
         self.from_hf_map = {
@@ -116,12 +124,16 @@ class Qwen35StateDictAdapter(StateDictAdapter):
             "model.visual.merger.linear_fc2.bias": "vision_encoder.merger.linear_fc2.bias",
         }
         if model_config.vision_encoder is None:
-            # multimodal checkpoints use model.language_model.*, while
-            # text-only checkpoints use model.*.
+            self.from_hf_map = {
+                hf_key: tt_key
+                for hf_key, tt_key in self.from_hf_map.items()
+                if not hf_key.startswith("model.visual.")
+            }
+        if not multimodal_checkpoint:
+            # Text-only checkpoints use model.* instead of model.language_model.*.
             self.from_hf_map = {
                 hf_key.replace("model.language_model.", "model.", 1): tt_key
                 for hf_key, tt_key in self.from_hf_map.items()
-                if not hf_key.startswith("model.visual.")
             }
 
     def to_hf(

@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
 from typing import cast
 
 import pytest
@@ -58,3 +59,36 @@ def test_adapter_packs_deltanet_projections_into_one_in_proj() -> None:
     assert restored.keys() == hf_state_dict.keys()
     for key, value in hf_state_dict.items():
         assert torch.equal(restored[key], value), key
+
+
+def test_text_only_flavor_loads_multimodal_checkpoint(tmp_path) -> None:
+    """A text-only flavor reads the decoder from a multimodal HF checkpoint
+    (``model.language_model.*``) and ignores its vision weights."""
+    weight_map = {
+        "model.language_model.embed_tokens.weight": "model-00001.safetensors",
+        "model.language_model.norm.weight": "model-00001.safetensors",
+        "model.visual.merger.norm.weight": "model-00001.safetensors",
+    }
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": weight_map})
+    )
+    config = cast(
+        Qwen35Model.Config,
+        build_model_config("debugmodel_text", parallelism=ParallelismConfig()),
+    )
+    adapter = Qwen35StateDictAdapter(config, hf_assets_path=str(tmp_path))
+    assert adapter.hf_language_model_prefix == "model.language_model"
+
+    native = {"tok_embeddings.weight": torch.randn(2, 3), "norm.weight": torch.randn(3)}
+    hf_state_dict = adapter.to_hf(native)
+    assert hf_state_dict.keys() == {
+        "model.language_model.embed_tokens.weight",
+        "model.language_model.norm.weight",
+    }
+    hf_state_dict["model.visual.merger.norm.weight"] = torch.randn(3)
+    restored = adapter.from_hf(hf_state_dict)
+    assert restored.keys() == native.keys() | {"lm_head.weight"}
+
+    # Without an index, a text-only flavor assumes a text-only checkpoint.
+    adapter = Qwen35StateDictAdapter(config, hf_assets_path=None)
+    assert adapter.hf_language_model_prefix == "model"

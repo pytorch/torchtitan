@@ -813,7 +813,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
         tensor_parallel_degree=2,
     )
     trainer_model, generator_model = _qwen3_5_rl_model_configs(
-        "9B",
+        "9B_text",
         seq_len=seq_len,
         attn_backend="varlen",
         trainer_parallelism=trainer_parallelism,
@@ -892,7 +892,7 @@ def rl_grpo_qwen3_5_9b_varlen_batch_invariant() -> Controller.Config:
         reset_kv_cache_on_model_state_dict_load=True,
     )
     config.trainer.model, config.generator.model = _qwen3_5_rl_model_configs(
-        "9B",
+        "9B_text",
         seq_len=config.trainer.model.max_context_length,
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
@@ -923,7 +923,7 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
         tensor_parallel_degree=4,
     )
     trainer_model, generator_model = _qwen3_5_rl_model_configs(
-        "27B",
+        "27B_text",
         seq_len=seq_len,
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,

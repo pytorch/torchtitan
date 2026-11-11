@@ -527,7 +527,7 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         tensor_parallel_degree=2,
     )
     trainer_model, generator_model = _qwen3_5_rl_model_configs(
-        "debugmodel",
+        "debugmodel_text",
         seq_len=seq_len,
         attn_backend="varlen",
         trainer_parallelism=trainer_parallelism,
@@ -610,7 +610,7 @@ def rl_grpo_qwen3_5_debug_varlen_batch_invariant(
         reset_kv_cache_on_model_state_dict_load=True,
     )
     config.trainer.model, config.generator.model = _qwen3_5_rl_model_configs(
-        "debugmodel",
+        "debugmodel_text",
         seq_len=seq_len,
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
@@ -658,7 +658,7 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         tensor_parallel_degree=1,
     )
     trainer_model, generator_model = _kimi_k3_rl_model_configs(
-        "debugmodel",
+        "debugmodel_text",
         seq_len=seq_len,
         attn_backend="varlen",
         trainer_parallelism=trainer_parallelism,
@@ -743,7 +743,7 @@ def _set_kimi_k3_batch_invariant(config: Controller.Config) -> Controller.Config
         reset_kv_cache_on_model_state_dict_load=True,
     )
     config.trainer.model, config.generator.model = _kimi_k3_rl_model_configs(
-        "debugmodel",
+        "debugmodel_text",
         seq_len=config.trainer.model.max_context_length,
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,

@@ -181,7 +181,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
     )
     trainer_model, generator_model = build_rl_model_configs(
         build_model_config,
-        "9B",
+        "9B_text",
         seq_len=max_context_length,
         attn_backend="varlen",
         trainer_parallelism=trainer_parallelism,

@@ -211,7 +211,7 @@ def test_vllm_dp_linear_attention_full_graphs():
     # Every DP rank holds every expert: the local MoE path captures in FULL graphs.
     generator.parallelism = InferenceParallelismConfig(data_parallel_degree=world_size)
     generator.model = build_qwen3_5_model_config(
-        "debugmodel_moe",
+        "debugmodel_moe_text",
         seq_len=2048,
         attn_backend="varlen",
         parallelism=generator.parallelism.to_training(),
