@@ -264,14 +264,14 @@ def test_setup_spawns_workers_with_the_env_server_address_and_close_stops_the_wo
 
     events = []
 
-    class _WorkerActors:
+    class _Worker:
         def __init__(self) -> None:
-            self.setup_async = SimpleNamespace(call=AsyncMock())
+            self.setup_async = SimpleNamespace(call_one=AsyncMock())
 
     class _ActorSystem:
         async def spawn_rollout_workers(self, config, *, num_workers, num_threads):
             events.append(("spawn", config.env_server_address))
-            return _WorkerActors()
+            return [_Worker()]
 
         async def stop_rollout_workers(self) -> None:
             events.append(("stop_workers",))
@@ -295,7 +295,7 @@ def test_setup_spawns_workers_with_the_env_server_address_and_close_stops_the_wo
     rollouter._verifiers_env_server = SimpleNamespace(
         start=start, close=close_env_server
     )
-    rollouter._worker_actors = None
+    rollouter._workers = []
     rollouter._actor_system = None
     rollouter._inflight_run_group_calls = set()
 

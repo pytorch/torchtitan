@@ -5,8 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+import sys
 from types import SimpleNamespace
 
+import cloudpickle
 import pytest
 
 from torchtitan.config import OverrideConfig
@@ -472,6 +474,39 @@ def test_spawn_proc_mesh_checks_gpus_per_host_before_spawning(
         )
 
     assert all(mesh.visible_devices == [] for mesh in meshes.values())
+
+
+class _Worker:
+    async def close(self):
+        pass
+
+
+class _WorkerConfig:
+    def build(self):
+        return _Worker()
+
+
+def test_spawn_rollout_workers_returns_one_handle_per_worker():
+    """5 workers on this host come back as 5 single-actor handles (`call_one` raises on a
+    handle to several actors)."""
+
+    async def run():
+        system = MonarchActorSystem(MonarchActorSystem.Config())
+        # The worker processes can't import this test module, so ship the fakes by value.
+        cloudpickle.register_pickle_by_value(sys.modules[__name__])
+        try:
+            workers = await system.spawn_rollout_workers(
+                _WorkerConfig(), num_workers=5, num_threads=1
+            )
+            assert len(workers) == 5
+            await asyncio.gather(
+                *(worker.sync_log_step.call_one(1) for worker in workers)
+            )
+            await system.stop_rollout_workers()
+        finally:
+            cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
+
+    asyncio.run(run())
 
 
 def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch):
