@@ -7,6 +7,7 @@
 from torchtitan.components.data.balancing import (
     document_attention_cost,
     HeaviestFirstOrderingConfig,
+    vision_encoder_cost,
 )
 from torchtitan.components.data.collators import Collator, TextCollator
 from torchtitan.components.data.dataset import (
@@ -60,5 +61,6 @@ __all__ = [
     "TextSequence",
     "TokenizedTrainingMicrobatch",
     "TrainingMicrobatch",
+    "vision_encoder_cost",
     "WeightedDataset",
 ]

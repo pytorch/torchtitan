@@ -97,6 +97,58 @@ def document_attention_cost(
     return float(torch.dot(lengths, lengths)) + token_weight * doc_ids.numel()
 
 
+def vision_encoder_cost(
+    microbatch: TrainingMicrobatch,
+    *,
+    patch_weight: float,
+    patch_attention_weight: float,
+    document_attention_weight: float = 0.0,
+) -> float:
+    """Relative vision-encoder plus LLM-attention cost of a multimodal microbatch.
+
+    ``cost = patch_weight * num_patches
+           + patch_attention_weight * sum(segment_patches ** 2)
+           + document_attention_weight * document_attention_cost(microbatch)``
+
+    Patches come from ``grid_thw`` / ``grid_thw_videos`` in ``model_kwargs``
+    (rows of [T, H, W] in patches). Encoders that attend within each temporal
+    frame of an item (Qwen3.5) use one attention segment of H * W patches per
+    frame, so video cost is linear in duration::
+
+        grid_thw        [[1, 2, 3],       image: 1 frame of 2x3 patches
+                         [1, 4, 4]]       image: 1 frame of 4x4 patches
+        grid_thw_videos [[3, 2, 2]]       video: 3 frames of 2x2 patches
+        num_patches     6 + 16 + 3 * 4             = 34
+        segments ** 2   6 ** 2 + 16 ** 2 + 3 * 4 ** 2 = 340
+
+    With block-diagonal attention the squared term dominates for large
+    images: with the Qwen3.5-9B weights below, one 4096x4096 image (65,536
+    16-px patches) costs about as much as 900 images of 1,024 patches.
+
+    The weights depend on the model and hardware; fit them from a profile
+    (encoder time per microbatch against patches and squared segments).
+    Qwen3.5-9B on GB300, in seconds: ``patch_weight=8.6e-6``,
+    ``patch_attention_weight=2.2e-9``, encoder fit R^2 = 0.9998.
+    """
+    if not isinstance(microbatch, TokenizedTrainingMicrobatch):
+        raise ValueError(
+            "vision_encoder_cost requires TokenizedTrainingMicrobatch, got "
+            f"{type(microbatch).__name__}"
+        )
+    cost = 0.0
+    if document_attention_weight:
+        cost += document_attention_weight * document_attention_cost(microbatch)
+    for key in ("grid_thw", "grid_thw_videos"):
+        grid = microbatch.model_kwargs.get(key)
+        if grid is None:
+            continue
+        grid = grid.to(torch.float64).reshape(-1, 3)
+        frame = grid[:, 1] * grid[:, 2]
+        cost += patch_weight * float((grid[:, 0] * frame).sum())
+        cost += patch_attention_weight * float((grid[:, 0] * frame * frame).sum())
+    return cost
+
+
 @dataclass(frozen=True, kw_only=True, slots=True)
 class HeaviestFirstOrderingConfig:
     """Yield each window of ``window_size`` local microbatches heaviest first."""
