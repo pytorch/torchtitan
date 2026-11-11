@@ -92,6 +92,48 @@ padding can overflow the allocation even at factor `1.0`. Check
 nonblocking dispatch, and reset the flag between measurements; it stays on the
 device until explicitly read.
 
+## Shared-expert overlap
+
+A MoE can run its shared experts on a side stream while the routed combine is in
+flight. The dispatcher publishes the stream position at the start of `combine`
+with an optional `combine_ready_event`; the MoE takes it once and starts the
+shared experts after the routed experts finish:
+
+```text
+routed experts -> combine starts (event recorded) -> routed combine (main stream)
+                              \-> shared experts (side stream) -> wait -> add
+```
+
+Enable it on a dispatcher that implements the publisher:
+
+```python
+from torchtitan.models.common.moe.token_dispatcher import (
+    AllToAllTokenDispatcher,
+    CombineReadyEvent,
+)
+
+token_dispatcher = AllToAllTokenDispatcher.Config(
+    num_experts=8,
+    top_k=1,
+    combine_ready_event=CombineReadyEvent.Config(),
+)
+```
+
+Pass this config as `RoutedExperts.Config.token_dispatcher`.
+
+`AllToAllTokenDispatcher`, `DeepEPTokenDispatcher`, `HybridEPTokenDispatcher`,
+and `TorchAOTokenDispatcher` publish the event; the EP=1 local-only
+`LocalTokenDispatcher` does not. The MoE must have `shared_experts`; otherwise
+the config raises `ValueError` because the event would have no consumer. The
+overlap requires eager execution: `torch.compile` raises at the first forward,
+accelerator graph capture is not supported, and `DeepEPTokenDispatcher` rejects
+`combine_ready_event` together with `cuda_graph_compatible=True`. Without the
+option, the MoE keeps the synchronous path.
+
+When replacing dispatchers with `TokenDispatcherTransform`, pass
+`combine_ready_event` through its `kwargs`; the transform fills only structural
+fields from the existing config.
+
 ## Activation rematerialization
 
 The default remat policy saves dispatcher communication and recomputes the

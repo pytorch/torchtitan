@@ -13,7 +13,11 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.moe.sharding import expert_param_placement_sparse
-from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import (
+    AllToAllTokenDispatcher,
+    CombineReadyEvent,
+    DeepEPTokenDispatcher,
+)
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.trainer import Trainer
 
@@ -45,6 +49,30 @@ class TestTokenDispatcherModule(unittest.TestCase):
 
         self.assertIsInstance(dispatcher, torch.nn.Module)
         self.assertEqual(list(dispatcher.state_dict()), [])
+
+    def test_combine_ready_event_is_opt_in(self):
+        dispatcher = AllToAllTokenDispatcher.Config(
+            num_experts=2,
+            top_k=1,
+        ).build()
+        self.assertIsNone(dispatcher.combine_ready_event)
+
+        dispatcher = AllToAllTokenDispatcher.Config(
+            num_experts=2,
+            top_k=1,
+            combine_ready_event=CombineReadyEvent.Config(),
+        ).build()
+        self.assertIsNotNone(dispatcher.combine_ready_event)
+        self.assertIsNone(dispatcher.combine_ready_event.take())
+
+        with self.assertRaises(ValueError):
+            DeepEPTokenDispatcher.Config(
+                num_experts=2,
+                top_k=1,
+                num_max_tokens_per_rank=8,
+                cuda_graph_compatible=True,
+                combine_ready_event=CombineReadyEvent.Config(),
+            )
 
 
 class TestExpertParallelConfigValidation(unittest.TestCase):
