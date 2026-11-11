@@ -16,9 +16,8 @@ Top-k selection and the indexer loss come from
 the indexer loss. `build_model_config(..., indexer_loss_coeff=...)` sets its
 coefficient (default 0.01); 0 turns the loss off.
 
-Sparse attention runs Attention Gym `gather_attn`. Its kernel does not yet
-finish compiling for the Kimi-K3.1-Pro shape (576-wide latent, top-k 2048), so
-only the debug model runs today.
+Sparse attention runs Attention Gym `gather_attn` with `(latent, rope)`
+pairs. Its fused kernel needs 16 to 128 heads, so the debug model has 16.
 
 ## Supported Parallelisms
 
