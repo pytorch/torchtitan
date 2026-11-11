@@ -113,19 +113,20 @@ class _CountingRowParallelLinear(_CountingProjection, RowParallelLinear):
 
 
 class _CountingQKVProjection(Module):
+    """One q head, one KV head, head_dim 4: the packed output is [T, 12]."""
+
     def __init__(self):
         super().__init__()
         self.wqkv = _CountingColumnParallelLinear(
-            ColumnParallelLinear.Config(in_features=4, out_features=4)
+            ColumnParallelLinear.Config(in_features=4, out_features=12)
         )
+        self.heads_per_kv = 1
+        self.head_dim = 4
 
-    def forward(
-        self, x_TD: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
         qkv_TD = self.wqkv(x_TD)
         remat.recompute_needs_tensor(qkv_TD)
-        x_TNH = qkv_TD.unsqueeze(1)
-        return x_TNH, x_TNH, x_TNH
+        return qkv_TD
 
 
 def _inner_attention(

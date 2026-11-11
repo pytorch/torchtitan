@@ -167,6 +167,8 @@ aligned (same architecture, same weights layout) is the recipe's job, and
 `build_rl_model_configs` builds both from one call. Per-role differences, such
 as a CUDA-graph-compatible MoE dispatcher for the generator, are model config
 transforms applied to one role (`apply_transforms(config.generator, ...)`).
+`build_rl_model_configs` also adds the `qkv_norm_rope` compiled region to the
+generator only: with a backward, the trainer is faster without it.
 `Controller.Config.override` applies registered overrides to both models.
 
 Then run it by module and config name. `--output-dir` sets the output directory:
