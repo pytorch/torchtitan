@@ -28,7 +28,11 @@ from torchtitan.config.configs import (
     TrainingConfig,
 )
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed import ParallelismContext, utils as dist_utils
+from torchtitan.distributed import (
+    maybe_apply_numa_binding,
+    ParallelismContext,
+    utils as dist_utils,
+)
 from torchtitan.distributed.accelerator_graph import (
     accelerator_graph_teardown,
     accelerator_graphs_supported,
@@ -308,6 +312,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.device = utils.get_local_device()
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
+        # Before anything allocates pinned host memory (FSDP CPU offload
+        # shards, pinned batches, EMA copies), so it lands on the GPU's NUMA node.
+        maybe_apply_numa_binding(self.device.index, device_type)
         config = self.config
         set_batch_invariance(config.debug.batch_invariant)
         # TODO: Remove this workaround once supported PyTorch builds ship
