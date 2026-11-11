@@ -22,6 +22,7 @@ from torchtitan.distributed.local_compile import local_compile, LocalCompileConf
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
+    maybe_invariant_to_replicate,
     spmd_local_context,
 )
 from torchtitan.models.base.module import Module
@@ -551,6 +552,9 @@ class Qwen35Model(MultimodalModel):
             raise ValueError("Vision inputs were provided without a vision encoder.")
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
         vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
+        # The encoder output is TP-invariant; the decoder consumes it in
+        # TP-sharded computation, so its gradient is summed across TP.
+        vision_embeds = maybe_invariant_to_replicate(vision_embeds, MeshAxisName.TP)
 
         merge_unit = self.vision_encoder.spatial_merge_unit
         num_tokens_per_item = grid_thw.prod(-1) // merge_unit

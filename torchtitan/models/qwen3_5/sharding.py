@@ -163,22 +163,22 @@ def sigmoid_gate_sharding_config() -> ShardingConfig:
 
 
 def vision_encoder_sharding_config() -> ShardingConfig:
-    """Vision encoder root: invariant ``pos_embed``, replicated output.
+    """Vision encoder root: invariant ``pos_embed``, TP-invariant output.
 
-    All activations flow without SP in the vision encoder.
+    All activations flow without SP in the vision encoder. The model converts
+    the output to TP-``Replicate`` where the decoder consumes it.
     """
     return ShardingConfig(
         state_shardings={"pos_embed": SpmdType({DP: spmd.R, CP: spmd.I, TP: spmd.I})},
-        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.R}),
-        out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.R}),
+        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I}),
+        out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I}),
     )
 
 
 def vision_merger_sharding_config() -> ShardingConfig:
-    """The merger owns the TP boundary; the encoder output owns the CP boundary."""
+    """Merger output: TP-invariant; the encoder output owns the CP boundary."""
     return ShardingConfig(
         out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I}),
-        out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.R}),
     )
 
 

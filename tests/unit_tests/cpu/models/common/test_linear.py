@@ -24,6 +24,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.distributed.spmd_types import (
     disable_dense_sp,
     set_current_spmd_mesh,
+    set_spmd_meshes,
     spmd_dense_sp_enabled,
 )
 from torchtitan.models.base.module import Module
@@ -338,6 +339,77 @@ class TestTensorParallelLinearSpmdTypes(unittest.TestCase):
 
         linear = AsyncRowParallelLinear.Config(in_features=4, out_features=2, bias=True)
         assert self._row_reduction_dst(linear.build()) == spmd.I
+
+
+class TestColumnParallelLinearWithDenseSPDisabled(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 2
+
+    @with_comms
+    def test_invariant_input_matches_unsharded_with_and_without_sp(self):
+        """Under ``disable_dense_sp`` (vision encoders), a column projection of a
+        TP-invariant input does ``I -> R`` even when decoder SP is on.
+
+        The forward is a no-op; the backward all-reduce makes the input gradient
+        complete on every rank. An ``S(0)`` source would fail the typecheck.
+        """
+        mesh = init_device_mesh(self.device_type, (2,), mesh_dim_names=("tp",))
+        tp_group = mesh.get_group("tp")
+        torch.manual_seed(42)
+        input = torch.randn(3, 4, device=self.device_type)
+        weight = torch.randn(6, 4, device=self.device_type)
+        bias = torch.randn(6, device=self.device_type)
+
+        expected_input = input.detach().clone().requires_grad_()
+        expected_weight = weight.detach().clone().requires_grad_()
+        expected_bias = bias.detach().clone().requires_grad_()
+        expected = F.linear(expected_input, expected_weight, expected_bias)
+        expected.sum().backward()
+
+        def local_shard(tensor, dim):
+            return distribute_tensor(tensor.detach(), mesh, (Shard(dim),)).to_local()
+
+        for dense_sp_enabled in (False, True):
+            with self.subTest(dense_sp_enabled=dense_sp_enabled):
+                linear = (
+                    ColumnParallelLinear.Config(
+                        in_features=4, out_features=6, bias=True
+                    )
+                    .build()
+                    .to(self.device_type)
+                )
+                linear.weight = nn.Parameter(local_shard(weight, 0))
+                linear.bias = nn.Parameter(local_shard(bias, 0))
+                local_input = input.detach().clone().requires_grad_()
+                set_spmd_meshes(
+                    dense_mesh=mesh,
+                    sparse_mesh=None,
+                    dense_sp_enabled=dense_sp_enabled,
+                )
+                with (
+                    set_current_spmd_mesh(mesh),
+                    disable_dense_sp(),
+                    typecheck(local=False),
+                ):
+                    linear._parameters["weight"] = spmd.assert_type(
+                        linear.weight, {tp_group: spmd.S(0)}
+                    )
+                    linear._parameters["bias"] = spmd.assert_type(
+                        linear.bias, {tp_group: spmd.S(0)}
+                    )
+                    typed_input = spmd.assert_type(local_input, {tp_group: spmd.I})
+                    actual = linear(typed_input)
+                    actual.sum().backward()
+
+                torch.testing.assert_close(actual, local_shard(expected, 1))
+                torch.testing.assert_close(local_input.grad, expected_input.grad)
+                torch.testing.assert_close(
+                    linear.weight.grad, local_shard(expected_weight.grad, 0)
+                )
+                torch.testing.assert_close(
+                    linear.bias.grad, local_shard(expected_bias.grad, 0)
+                )
 
 
 class TestBiasedRowParallelLinearDistributed(DTensorTestBase):

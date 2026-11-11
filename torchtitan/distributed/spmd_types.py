@@ -413,6 +413,18 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
         _validate_redistribute_spmd_pair(out_src, out_dst, name="output")
 
 
+def maybe_invariant_to_replicate(x: torch.Tensor, axis: MeshAxisName) -> torch.Tensor:
+    """``spmd.invariant_to_replicate`` over ``axis``, if ``axis`` is in the SPMD mesh.
+
+    A forward no-op whose backward all-reduces the gradient over ``axis``.
+    Returns ``x`` unchanged when ``axis`` is not in the SPMD mesh.
+    """
+    group = spmd_mesh_group(axis)
+    if group is None:
+        return x
+    return spmd.invariant_to_replicate(x, group, backward_options={"op_dtype": x.dtype})
+
+
 def spmd_redistribute_per_axis(
     x: torch.Tensor,
     mesh: DeviceMesh | None,

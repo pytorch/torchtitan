@@ -22,6 +22,7 @@ from torchtitan.distributed.parallelism_context import MeshAxisName, Parallelism
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     annotate_replicated_parameters,
+    maybe_invariant_to_replicate,
     spmd_local_context,
 )
 from torchtitan.models.common import Linear
@@ -384,6 +385,9 @@ class KimiK3Model(MultimodalModel):
 
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
         vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
+        # The encoder output is TP-invariant; the decoder consumes it in
+        # TP-sharded computation, so its gradient is summed across TP.
+        vision_embeds = maybe_invariant_to_replicate(vision_embeds, MeshAxisName.TP)
         if is_dummy:
             return add_zero_vision_dependency(embeddings_TD, vision_embeds)
 
