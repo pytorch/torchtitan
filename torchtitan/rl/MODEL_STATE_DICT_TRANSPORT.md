@@ -87,7 +87,8 @@ placements.
    forward/backward reaches each rank first; ranks then issue it in the same
    order relative to their training collectives.
 3. Pull: each generator rank issues its reads (`read`) and waits for them,
-   raising after 600 s. A timeout leaves the reads in flight; restart the job.
+   raising after `read_timeout_s` (600 s). A timeout leaves the reads in flight;
+   restart the job.
 
 The controller finishes pull N before push N+1, so a single staging buffer is
 enough.
