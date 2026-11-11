@@ -112,6 +112,7 @@ from torchtitan.config import (
     PrecisionConfig,
 )
 from torchtitan.models.common.multimodal import MultimodalModel
+from torchtitan.models.qwen3_5.rope import get_mrope_config
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.system import ActorSystem, TrainerHandle
 from torchtitan.rl.controller.metrics import (
@@ -319,8 +320,8 @@ class Controller(Configurable):
         """The model's image preprocessing, for image prompts, e.g.
         `VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS)`. The renderer computes each
         image's patch grid and number of placeholder tokens with it, and the generator
-        turns the image files into pixel values with it, so both agree on every image.
-        None: text prompts only."""
+        and the trainer turn the image files into pixel values with it, so all three
+        agree on every image. None: text prompts only."""
 
         renderer: RendererConfig
         """The model's chat template; renders messages to token ids and parses completions
@@ -462,12 +463,16 @@ class Controller(Configurable):
                         f"({type(generator_model).__qualname__}) is not a multimodal "
                         "model with a vision encoder."
                     )
-                # TODO: remove once the batcher and the trainer take image inputs.
-                raise NotImplementedError(
-                    "vision_processor is set, but training on image prompts is not "
-                    "supported yet: the trainer would see their placeholder tokens "
-                    "without the images."
-                )
+                # The generator gives image tokens M-RoPE positions exactly when the model
+                # uses M-RoPE; the batcher must give the trainer the same.
+                uses_mrope = get_mrope_config(self.trainer.model) is not None
+                if self.async_loop.batcher.build_mrope_positions != uses_mrope:
+                    raise ValueError(
+                        "async_loop.batcher.build_mrope_positions="
+                        f"{self.async_loop.batcher.build_mrope_positions}, but the trainer "
+                        f"model's image tokens take {'M-RoPE' if uses_mrope else '1D'} "
+                        f"positions; set it to {uses_mrope}."
+                    )
             if self.trainer.parallelism.enable_sequence_parallel:
                 sp_degree = self.trainer.parallelism.tensor_parallel_degree
                 max_context_length = self.trainer.model.max_context_length
@@ -764,6 +769,7 @@ class Controller(Configurable):
                 temperature=self._sampling.temperature,
                 output_dir=config.dump_folder,
                 enable_structured_logging=config.trainer.debug.enable_structured_logging,
+                vision_processor=config.vision_processor,
             )
 
             await self._rollouter.setup_async(
