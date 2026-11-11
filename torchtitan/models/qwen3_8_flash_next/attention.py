@@ -24,13 +24,15 @@ from torchtitan.models.common.attention import (
     InnerAttention,
     local_head_split,
 )
-from torchtitan.models.common.attn_gym import gather_attn
+from torchtitan.models.common.attn_gym import gather_attn, lightning_indexer
 from torchtitan.models.common.aux_loss import AuxLoss
 
 from torchtitan.models.common.decoder_sharding import token_id_placement
 from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.qwen3_5.model import OffsetRMSNorm, Qwen35Attention
 from torchtitan.models.qwen3_5.rope import MRoPE as Qwen35MRoPE
+
+from torchtitan.tools.utils import has_cuda_capability
 
 from .embedding import document_starts
 
@@ -120,32 +122,17 @@ class MRoPE(Qwen35MRoPE):
         return query_THF if key is None else (query_THF, rotate(key))
 
 
-def _select_blocks(
-    query_QHK,
-    key_GK,
-    block_ends_G,
-    block_starts_G,
-    indices_Q,
-    starts_Q,
-    valid_Q,
-    *,
-    num_selected,
-    scale,
-):
+def _selected_block_scores(query_QHK, key_GK, blocks_QB, *, scale):
+    """Indexer logits of the selected blocks; -inf marks unused slots.
+
+    One dense Q x G GEMM, then a gather. Gathering Q x B keys instead turns the
+    backward into a scatter-add into key_GK, about 30x slower at T=4096.
+    """
     scores_QHG = torch.einsum("qhk,gk->qhg", query_QHK.float(), key_GK.float())
     scores_QG = scores_QHG.relu().sum(1) * scale
-    visible_QG = (
-        (block_ends_G[None] <= indices_Q[:, None])
-        & (block_starts_G[None] == starts_Q[:, None])
-        & valid_Q[:, None]
+    return scores_QG.gather(-1, blocks_QB.clamp_min(0)).masked_fill(
+        blocks_QB < 0, -torch.inf
     )
-    ranked_scores_QG = scores_QG.masked_fill(~visible_QG, -torch.inf)
-    # ReLU creates exact ties; chronological ordering preserves causality.
-    with torch.no_grad():
-        blocks_QB = ranked_scores_QG.argsort(dim=-1, descending=True, stable=True)[
-            :, :num_selected
-        ]
-    return blocks_QB, ranked_scores_QG.gather(-1, blocks_QB)
 
 
 class QSAIndexMetadata(NamedTuple):
@@ -268,7 +255,6 @@ class QSAIndexer(Module):
         metadata: QSAIndexMetadata | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens = x_TD.shape[0]
-        indices_T = torch.arange(num_tokens, device=x_TD.device)
         qk_TC = self.index_qk_proj(x_TD)
         remat.recompute_needs_tensor(qk_TC)
         query_TC, raw_key_TK = qk_TC.split(
@@ -285,43 +271,94 @@ class QSAIndexer(Module):
                 compress_ratio=self.compress_ratio,
             )
         starts_T, valid_T, block_indices_GR, tail_indices_TR = metadata
-        block_ends_G = block_indices_GR[:, -1]
-        block_starts_G = starts_T[block_ends_G]
+        num_blocks = block_indices_GR.shape[0]
         pooled_GK = raw_key_TK[block_indices_GR].float().mean(1).to(raw_key_TK.dtype)
         key_GK = self._rotate(
             self.k_layernorm(pooled_GK).unsqueeze(1), positions[block_indices_GR[:, 0]]
         ).squeeze(1)
-        num_selected = min(self.block_topk, block_ends_G.numel())
-        selected_indices = []
+        num_selected = min(self.block_topk, num_blocks)
+        blocks_TB = torch.full(
+            (num_tokens, num_selected), -1, dtype=torch.long, device=x_TD.device
+        )
+        if num_selected:
+            with torch.no_grad():
+                valid_U, blocks_UB = self._select_blocks(
+                    query_THK, key_GK, starts_T, valid_T, num_selected=num_selected
+                )
+            blocks_TB[valid_U] = blocks_UB
+        tokens_TBR = block_indices_GR[blocks_TB.clamp_min(0)].masked_fill(
+            (blocks_TB < 0).unsqueeze(-1), -1
+        )
+        selected_indices_TJ = torch.cat(
+            (tokens_TBR.flatten(-2), tail_indices_TR), -1
+        ).int()
         selected_scores = []
         for start in range(0, num_tokens, self.chunk_size):
             stop = start + self.chunk_size
-            # Checkpoint the dense score graph, including the visibility mask.
-            # Saving a precomputed Q x G mask would retain quadratic storage.
-            blocks_QB, scores_QB = checkpoint(
-                _select_blocks,
-                query_THK[start:stop],
-                key_GK,
-                block_ends_G,
-                block_starts_G,
-                indices_T[start:stop],
-                starts_T[start:stop],
-                valid_T[start:stop],
-                num_selected=num_selected,
-                scale=self.head_dim**-0.5,
-                use_reentrant=False,
-                preserve_rng_state=False,
+            # Checkpoint per chunk: saving dense Q x G scores is quadratic storage.
+            selected_scores.append(
+                checkpoint(
+                    _selected_block_scores,
+                    query_THK[start:stop],
+                    key_GK,
+                    blocks_TB[start:stop],
+                    scale=self.head_dim**-0.5,
+                    use_reentrant=False,
+                    preserve_rng_state=False,
+                )
             )
-            tokens_QBR = block_indices_GR[blocks_QB].masked_fill(
-                ~scores_QB.isfinite().unsqueeze(-1), -1
+        return selected_indices_TJ, torch.cat(selected_scores)
+
+    def _select_blocks(self, query_THK, key_GK, starts_T, valid_T, *, num_selected):
+        """Top-k complete blocks per valid query with Attention Gym's lightning_indexer.
+
+        lightning_indexer groups each document's tokens into compress_ratio-token
+        candidates. Run it over valid tokens only, so padding never forms or splits
+        a block and the candidates are exactly ``QSAIndexMetadata``'s blocks.
+        Scores rank as sum_h relu(q_h . k); the positive scale is irrelevant.
+        ReLU makes exact ties common. Under deterministic algorithms the CuTe
+        backend resolves them toward earlier blocks, independent of later
+        candidates; otherwise the choice among cutoff ties is backend-defined.
+
+        Returns:
+            ``(valid_U, blocks_UB)``: valid token positions and their selected
+            global block ids in ascending order, -1 after the valid ones.
+        """
+        valid_U = valid_T.nonzero().flatten()
+        starts_U = starts_T[valid_U]
+        new_document_U = F.pad(starts_U[1:] != starts_U[:-1], (1, 0), value=True)
+        document_U = new_document_U.cumsum(0) - 1
+        tokens_N = torch.bincount(document_U)
+        cu_seqlens = F.pad(tokens_N.cumsum(0), (1, 0)).int()
+        cu_seqlens_k = F.pad((tokens_N // self.compress_ratio).cumsum(0), (1, 0)).int()
+        query_UHK = query_THK[valid_U]
+        # The fused kernels need fp16/bf16 on SM90 or newer, as in DeepSeek-V4.
+        fused = (
+            query_UHK.is_cuda
+            and query_UHK.dtype in (torch.float16, torch.bfloat16)
+            and has_cuda_capability(9, 0)
+        )
+        local_UB = lightning_indexer(
+            query_UHK.unsqueeze(0),
+            key_GK.unsqueeze(0),
+            query_UHK.new_ones(1, *query_UHK.shape[:2]),
+            num_selected,
+            causal=True,
+            compress_ratio=self.compress_ratio,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_k=cu_seqlens_k,
+            impl="fused" if fused else "reference",
+        ).squeeze(0)
+        num_blocks = key_GK.shape[0]
+        # Document-local -> global block ids; sort for a backend-independent order.
+        blocks_UB = (
+            torch.where(
+                local_UB >= 0, local_UB + cu_seqlens_k[document_U, None], num_blocks
             )
-            selected_indices.append(
-                torch.cat(
-                    (tokens_QBR.flatten(-2), tail_indices_TR[start:stop]), -1
-                ).int()
-            )
-            selected_scores.append(scores_QB)
-        return torch.cat(selected_indices), torch.cat(selected_scores)
+            .sort(-1)
+            .values
+        )
+        return valid_U, blocks_UB.masked_fill(blocks_UB == num_blocks, -1).long()
 
 
 class QSAIndexerLoss(AuxLoss):

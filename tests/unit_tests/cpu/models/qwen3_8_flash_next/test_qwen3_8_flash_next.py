@@ -303,31 +303,6 @@ def test_qsa_selection_matches_document_local_block_oracle(config):
     assert pruned_queries > 0
 
 
-def test_qsa_equal_score_ties_are_independent_of_future_candidates(config):
-    indexer = config.layers[3].attention.indexer.build()
-    indexer.init_states()
-    with torch.no_grad():
-        indexer.index_qk_proj.weight.zero_()
-    x = torch.randn(40, 256)
-    padding = torch.arange(40) >= 20
-    variants = (
-        (x[:20], torch.arange(20), None),
-        (x, torch.arange(40), None),
-        (x, torch.arange(20).repeat(2), None),
-        (x, torch.arange(40), padding),
-    )
-    for hidden, positions, mask in variants:
-        selected, scores = indexer(
-            hidden,
-            positions=positions,
-            document_positions_T=positions,
-            padding_mask_T=mask,
-        )
-        actual = selected[19][selected[19] >= 0].sort().values
-        torch.testing.assert_close(actual, torch.arange(16).int(), atol=0, rtol=0)
-        assert not scores[19].any()
-
-
 @pytest.mark.parametrize("all_padding", [False, True])
 def test_qsa_output_and_backward_against_dense_selected_attention(config, all_padding):
     torch.manual_seed(42)
