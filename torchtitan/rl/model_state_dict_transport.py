@@ -18,16 +18,9 @@ from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple
 
 import torch
-
-# TODO: private CUDA-only upstream API; see _pinned_buffer.
 import torch.cuda._pin_memory_utils as pin_memory_utils
-
-# TODO: torch.distributed._transport is private; switch to the public API once
-# it lands upstream.
 from torch.distributed._transport import new_transport, wait_all
 from torch.distributed.tensor import DTensor, Partial, Placement, Shard
-
-# TODO: private upstream APIs; no public helper maps placements to a local box.
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
 from torch.distributed.tensor.placement_types import _StridedShard
 
