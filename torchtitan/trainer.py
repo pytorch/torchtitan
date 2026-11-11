@@ -187,7 +187,6 @@ class Trainer(Configurable):
         # Logging needs to happen after distributed initialized
         config.maybe_log()
 
-        dp_mesh = None
         if parallelism_context.dp_enabled:
             dp_mesh = parallelism_context.get_mesh("dp")
             dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
@@ -245,11 +244,6 @@ class Trainer(Configurable):
             max_context_length=config.model.max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
             vision_processor=self.vision_processor,
-            dp_mesh=dp_mesh,
-            num_microbatches_per_step=(
-                self.gradient_accumulation_steps * self.num_pp_microbatches
-            ),
-            pp_enabled=parallelism_context.pp_enabled,
         )
 
         try:

@@ -6,11 +6,8 @@
 
 from torchtitan.components.data.balancing import (
     document_attention_cost,
-    DocumentAttentionCost,
-    MicrobatchBalancer,
-    MicrobatchCost,
-    plan_balanced_assignment,
-    VisionEncoderCost,
+    HeaviestFirstOrderingConfig,
+    vision_encoder_cost,
 )
 from torchtitan.components.data.collators import Collator, TextCollator
 from torchtitan.components.data.dataset import (
@@ -50,15 +47,12 @@ __all__ = [
     "DatasetIterationPolicy",
     "DatasetMixConfig",
     "document_attention_cost",
-    "DocumentAttentionCost",
     "FirstFitPackingConfig",
     "GrainDataLoader",
+    "HeaviestFirstOrderingConfig",
     "HuggingFaceRandomAccessSource",
     "HuggingFaceStreamingSource",
     "IndexedJsonlSource",
-    "MicrobatchBalancer",
-    "MicrobatchCost",
-    "plan_balanced_assignment",
     "RandomAccessDataSource",
     "SampleProcessor",
     "SingleDatasetConfig",
@@ -67,6 +61,6 @@ __all__ = [
     "TextSequence",
     "TokenizedTrainingMicrobatch",
     "TrainingMicrobatch",
-    "VisionEncoderCost",
+    "vision_encoder_cost",
     "WeightedDataset",
 ]

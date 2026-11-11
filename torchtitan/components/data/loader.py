@@ -6,7 +6,6 @@
 
 """Grain-backed TorchTitan dataloader."""
 
-import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -15,10 +14,9 @@ from typing import Any
 import grain.python as grain
 from grain import experimental as grain_experimental
 from torch.distributed.checkpoint.stateful import Stateful
-from torch.distributed.device_mesh import DeviceMesh
 from torchtitan.components.data.balancing import (
-    balanced_step_iterator,
-    MicrobatchBalancer,
+    HeaviestFirstIterDataset,
+    HeaviestFirstOrderingConfig,
 )
 from torchtitan.components.data.collators import Collator, TextCollator
 from torchtitan.components.data.dataset import DatasetConfig
@@ -31,8 +29,6 @@ from torchtitan.components.data.types import (
 )
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable
-
-logger = logging.getLogger(__name__)
 
 
 # NOTE: This class deliberately inherits from `Exception` and not `StopIteration`.
@@ -90,9 +86,10 @@ class GrainDataLoader(BaseDataLoader):
         """Concurrent indexed reads used when a `MapDataset` becomes an `IterDataset`."""
         num_prefetch_microbatches: int = 2
         """Collated microbatches queued per rank for trainer consumption."""
-        balancer: MicrobatchBalancer.Config | None = None
-        """Reassign each optimizer step's microbatches across data-parallel ranks
-        to equalize per-slot cost. None: each rank keeps its microbatches."""
+        heaviest_first: HeaviestFirstOrderingConfig | None = None
+        """Yield each window of collated microbatches heaviest first so that
+        data-parallel ranks run similar-cost microbatches in the same step.
+        None keeps the packed order."""
 
     def __init__(
         self,
@@ -104,9 +101,6 @@ class GrainDataLoader(BaseDataLoader):
         max_context_length: int,
         num_tokens_per_microbatch: int,
         vision_processor: VisionProcessor | None = None,
-        dp_mesh: DeviceMesh | None = None,
-        num_microbatches_per_step: int | None = None,
-        pp_enabled: bool = False,
         **kwargs: Any,
     ) -> None:
         del kwargs
@@ -168,39 +162,21 @@ class GrainDataLoader(BaseDataLoader):
             batch_fn=collator,
         )
 
+        if config.heaviest_first is not None:
+            dataset = HeaviestFirstIterDataset(
+                dataset,
+                window_size=config.heaviest_first.window_size,
+                cost_fn=config.heaviest_first.cost_fn,
+            )
+
         # Queue completed microbatches while the trainer consumes the previous one.
         dataset = grain_experimental.ThreadPrefetchIterDataset(
             dataset, prefetch_buffer_size=config.num_prefetch_microbatches
         )
         self._iterator = iter(dataset)
 
-        self._balancer: MicrobatchBalancer | None = None
-        if config.balancer is not None:
-            if pp_enabled:
-                # TODO: pipeline schedules stagger a replica's microbatches, so
-                # balance per-replica totals instead of per-slot costs.
-                raise ValueError(
-                    "dataloader.balancer does not support pipeline parallelism"
-                )
-            if num_microbatches_per_step is None:
-                raise ValueError(
-                    "dataloader.balancer requires num_microbatches_per_step"
-                )
-            if dp_mesh is None:
-                logger.warning(
-                    "dataloader.balancer is set but data parallelism is disabled; "
-                    "microbatches are not rebalanced"
-                )
-            else:
-                self._balancer = config.balancer.build(
-                    dp_mesh=dp_mesh,
-                    num_microbatches_per_step=num_microbatches_per_step,
-                )
-
     def __iter__(self) -> Iterator[TrainingMicrobatch]:
-        if self._balancer is None:
-            return self._iterator
-        return balanced_step_iterator(self._iterator, self._balancer)
+        return self._iterator
 
     def state_dict(self) -> dict[str, Any]:
         return {

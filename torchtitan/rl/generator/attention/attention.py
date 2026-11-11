@@ -11,7 +11,7 @@ the generator computes attention with the trainer's kernel whatever the engine."
 from typing import Any
 
 import torch
-from torch.nn.attention import current_flash_attention_impl
+from torch.nn.attention import current_flash_attention_impl, sdpa_kernel, SDPBackend
 from torch.nn.attention.varlen import AuxRequest
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
@@ -80,18 +80,23 @@ def paged_varlen_attention_out(
     if return_lse:
         extra_kwargs["return_aux"] = AuxRequest(lse=True)
 
-    return torch.nn.attention.varlen.varlen_attn_out(
-        out,
-        query,
-        key_cache,
-        value_cache,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        max_seqlen_q,
-        max_seqlen_k,
-        scale=scale,
-        window_size=window_size,
-        block_table=block_table,
-        seqused_k=seqused_k,
-        **extra_kwargs,
-    )
+    # varlen_attn otherwise prefers cuDNN where it accepts the call (paged KV with
+    # power-of-two pages, outside batch-invariant mode, whose num_splits=1 it rejects).
+    # On the generator's paged decode and mixed batches, cuDNN is 1.5-15x slower than
+    # FA4 (e.g. 1.70 vs 0.51 ms for 100 decode rows at head dim 256 on GB300).
+    with sdpa_kernel([SDPBackend.FLASH_ATTENTION]):
+        return torch.nn.attention.varlen.varlen_attn_out(
+            out,
+            query,
+            key_cache,
+            value_cache,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            scale=scale,
+            window_size=window_size,
+            block_table=block_table,
+            seqused_k=seqused_k,
+            **extra_kwargs,
+        )
