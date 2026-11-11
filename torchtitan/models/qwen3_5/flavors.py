@@ -53,6 +53,7 @@ from torchtitan.models.common.decoder_sharding import (
     residual_activation_placement,
     rope_cache_sharding_config,
     rowwise_sharding_config,
+    token_embedding_sharding_config,
 )
 from torchtitan.models.common.moe.sharding import shared_experts_sharding_config
 from torchtitan.models.common.nn_modules import LayerNorm
@@ -649,9 +650,13 @@ def _build_qwen35_moe_layers(
 
 
 def _debugmodel(
-    attn_backend: str, *, seq_len: int, parallelism: ParallelismConfig
+    attn_backend: str,
+    *,
+    seq_len: int,
+    parallelism: ParallelismConfig,
+    has_vision_encoder: bool = True,
 ) -> Qwen35Model.Config:
-    """Debug config for Qwen3.5 with vision encoder."""
+    """Debug config for Qwen3.5, with a vision encoder if ``has_vision_encoder``."""
     dim = 256
     head_dim = 64
     rotary_dim = 16
@@ -674,7 +679,13 @@ def _debugmodel(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=(
+                multimodal_token_embedding_sharding_config()
+                if has_vision_encoder
+                else token_embedding_sharding_config(
+                    enable_sp=parallelism.enable_sequence_parallel
+                )
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -703,18 +714,22 @@ def _debugmodel(
             key_head_dim=128,
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
-            has_vision_encoder=True,
+            has_vision_encoder=has_vision_encoder,
         ),
-        vision_encoder=_qwen35_vision_encoder_config(
-            dim=256,
-            ffn_dim=512,
-            num_layers=4,
-            num_heads=4,
-            patch_size=16,
-            temporal_patch_size=2,
-            spatial_merge_size=2,
-            out_hidden_size=256,
-            num_position_embeddings=1024,
+        vision_encoder=(
+            _qwen35_vision_encoder_config(
+                dim=256,
+                ffn_dim=512,
+                num_layers=4,
+                num_heads=4,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                out_hidden_size=256,
+                num_position_embeddings=1024,
+            )
+            if has_vision_encoder
+            else None
         ),
     )
 
@@ -724,8 +739,9 @@ def _debugmodel_moe(
     *,
     seq_len: int,
     parallelism: ParallelismConfig,
+    has_vision_encoder: bool = True,
 ) -> Qwen35Model.Config:
-    """Debug MoE config for Qwen3.5 with shared expert."""
+    """Debug MoE config for Qwen3.5 with shared expert, with a vision encoder if ``has_vision_encoder``."""
     dim = 256
     head_dim = 64
     rotary_dim = 16
@@ -746,7 +762,13 @@ def _debugmodel_moe(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=(
+                multimodal_token_embedding_sharding_config()
+                if has_vision_encoder
+                else token_embedding_sharding_config(
+                    enable_sp=parallelism.enable_sequence_parallel
+                )
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -778,26 +800,34 @@ def _debugmodel_moe(
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,
-            has_vision_encoder=True,
+            has_vision_encoder=has_vision_encoder,
         ),
-        vision_encoder=_qwen35_vision_encoder_config(
-            dim=256,
-            ffn_dim=512,
-            num_layers=2,
-            num_heads=4,
-            patch_size=16,
-            temporal_patch_size=2,
-            spatial_merge_size=2,
-            out_hidden_size=256,
-            num_position_embeddings=1024,
+        vision_encoder=(
+            _qwen35_vision_encoder_config(
+                dim=256,
+                ffn_dim=512,
+                num_layers=2,
+                num_heads=4,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                out_hidden_size=256,
+                num_position_embeddings=1024,
+            )
+            if has_vision_encoder
+            else None
         ),
     )
 
 
 def _0_8b(
-    attn_backend: str, *, seq_len: int, parallelism: ParallelismConfig
+    attn_backend: str,
+    *,
+    seq_len: int,
+    parallelism: ParallelismConfig,
+    has_vision_encoder: bool = True,
 ) -> Qwen35Model.Config:
-    """Qwen3.5-0.8B dense config with vision encoder.
+    """Qwen3.5-0.8B dense config, with a vision encoder if ``has_vision_encoder``.
 
     The HF checkpoint ties the input embedding and lm_head weights
     (tie_word_embeddings=true), so this config ties them as well.
@@ -823,7 +853,13 @@ def _0_8b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=(
+                multimodal_token_embedding_sharding_config()
+                if has_vision_encoder
+                else token_embedding_sharding_config(
+                    enable_sp=parallelism.enable_sequence_parallel
+                )
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -851,26 +887,34 @@ def _0_8b(
             key_head_dim=128,
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
-            has_vision_encoder=True,
+            has_vision_encoder=has_vision_encoder,
         ),
-        vision_encoder=_qwen35_vision_encoder_config(
-            dim=768,
-            ffn_dim=3072,
-            num_layers=12,
-            num_heads=12,
-            patch_size=16,
-            temporal_patch_size=2,
-            spatial_merge_size=2,
-            out_hidden_size=1024,
-            num_position_embeddings=2304,
+        vision_encoder=(
+            _qwen35_vision_encoder_config(
+                dim=768,
+                ffn_dim=3072,
+                num_layers=12,
+                num_heads=12,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                out_hidden_size=1024,
+                num_position_embeddings=2304,
+            )
+            if has_vision_encoder
+            else None
         ),
     )
 
 
 def _2b(
-    attn_backend: str, *, seq_len: int, parallelism: ParallelismConfig
+    attn_backend: str,
+    *,
+    seq_len: int,
+    parallelism: ParallelismConfig,
+    has_vision_encoder: bool = True,
 ) -> Qwen35Model.Config:
-    """Qwen3.5-2B dense config with vision encoder.
+    """Qwen3.5-2B dense config, with a vision encoder if ``has_vision_encoder``.
 
     The HF checkpoint ties the input embedding and lm_head weights
     (tie_word_embeddings=true), so this config ties them as well.
@@ -896,7 +940,13 @@ def _2b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=(
+                multimodal_token_embedding_sharding_config()
+                if has_vision_encoder
+                else token_embedding_sharding_config(
+                    enable_sp=parallelism.enable_sequence_parallel
+                )
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -924,26 +974,34 @@ def _2b(
             key_head_dim=128,
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
-            has_vision_encoder=True,
+            has_vision_encoder=has_vision_encoder,
         ),
-        vision_encoder=_qwen35_vision_encoder_config(
-            dim=1024,
-            ffn_dim=4096,
-            num_layers=24,
-            num_heads=16,
-            patch_size=16,
-            temporal_patch_size=2,
-            spatial_merge_size=2,
-            out_hidden_size=2048,
-            num_position_embeddings=2304,
+        vision_encoder=(
+            _qwen35_vision_encoder_config(
+                dim=1024,
+                ffn_dim=4096,
+                num_layers=24,
+                num_heads=16,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                out_hidden_size=2048,
+                num_position_embeddings=2304,
+            )
+            if has_vision_encoder
+            else None
         ),
     )
 
 
 def _4b(
-    attn_backend: str, *, seq_len: int, parallelism: ParallelismConfig
+    attn_backend: str,
+    *,
+    seq_len: int,
+    parallelism: ParallelismConfig,
+    has_vision_encoder: bool = True,
 ) -> Qwen35Model.Config:
-    """Qwen3.5-4B dense config with vision encoder.
+    """Qwen3.5-4B dense config, with a vision encoder if ``has_vision_encoder``.
 
     The HF checkpoint ties the input embedding and lm_head weights
     (tie_word_embeddings=true), so this config ties them as well.
@@ -969,7 +1027,13 @@ def _4b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=(
+                multimodal_token_embedding_sharding_config()
+                if has_vision_encoder
+                else token_embedding_sharding_config(
+                    enable_sp=parallelism.enable_sequence_parallel
+                )
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -997,26 +1061,34 @@ def _4b(
             key_head_dim=128,
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
-            has_vision_encoder=True,
+            has_vision_encoder=has_vision_encoder,
         ),
-        vision_encoder=_qwen35_vision_encoder_config(
-            dim=1024,
-            ffn_dim=4096,
-            num_layers=24,
-            num_heads=16,
-            patch_size=16,
-            temporal_patch_size=2,
-            spatial_merge_size=2,
-            out_hidden_size=2560,
-            num_position_embeddings=2304,
+        vision_encoder=(
+            _qwen35_vision_encoder_config(
+                dim=1024,
+                ffn_dim=4096,
+                num_layers=24,
+                num_heads=16,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                out_hidden_size=2560,
+                num_position_embeddings=2304,
+            )
+            if has_vision_encoder
+            else None
         ),
     )
 
 
 def _9b(
-    attn_backend: str, *, seq_len: int, parallelism: ParallelismConfig
+    attn_backend: str,
+    *,
+    seq_len: int,
+    parallelism: ParallelismConfig,
+    has_vision_encoder: bool = True,
 ) -> Qwen35Model.Config:
-    """Qwen3.5-9B dense config with vision encoder."""
+    """Qwen3.5-9B dense config, with a vision encoder if ``has_vision_encoder``."""
     dim = 4096
     head_dim = 256
     rotary_dim = 64
@@ -1037,7 +1109,13 @@ def _9b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=(
+                multimodal_token_embedding_sharding_config()
+                if has_vision_encoder
+                else token_embedding_sharding_config(
+                    enable_sp=parallelism.enable_sequence_parallel
+                )
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -1065,26 +1143,34 @@ def _9b(
             key_head_dim=128,
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
-            has_vision_encoder=True,
+            has_vision_encoder=has_vision_encoder,
         ),
-        vision_encoder=_qwen35_vision_encoder_config(
-            dim=1152,
-            ffn_dim=4304,
-            num_layers=27,
-            num_heads=16,
-            patch_size=16,
-            temporal_patch_size=2,
-            spatial_merge_size=2,
-            out_hidden_size=4096,
-            num_position_embeddings=2304,
+        vision_encoder=(
+            _qwen35_vision_encoder_config(
+                dim=1152,
+                ffn_dim=4304,
+                num_layers=27,
+                num_heads=16,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                out_hidden_size=4096,
+                num_position_embeddings=2304,
+            )
+            if has_vision_encoder
+            else None
         ),
     )
 
 
 def _27b(
-    attn_backend: str, *, seq_len: int, parallelism: ParallelismConfig
+    attn_backend: str,
+    *,
+    seq_len: int,
+    parallelism: ParallelismConfig,
+    has_vision_encoder: bool = True,
 ) -> Qwen35Model.Config:
-    """Qwen3.5-27B dense config with vision encoder."""
+    """Qwen3.5-27B dense config, with a vision encoder if ``has_vision_encoder``."""
     dim = 5120
     head_dim = 256
     rotary_dim = 64
@@ -1105,7 +1191,13 @@ def _27b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=(
+                multimodal_token_embedding_sharding_config()
+                if has_vision_encoder
+                else token_embedding_sharding_config(
+                    enable_sp=parallelism.enable_sequence_parallel
+                )
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -1133,18 +1225,22 @@ def _27b(
             key_head_dim=128,
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
-            has_vision_encoder=True,
+            has_vision_encoder=has_vision_encoder,
         ),
-        vision_encoder=_qwen35_vision_encoder_config(
-            dim=1152,
-            ffn_dim=4304,
-            num_layers=27,
-            num_heads=16,
-            patch_size=16,
-            temporal_patch_size=2,
-            spatial_merge_size=2,
-            out_hidden_size=5120,
-            num_position_embeddings=2304,
+        vision_encoder=(
+            _qwen35_vision_encoder_config(
+                dim=1152,
+                ffn_dim=4304,
+                num_layers=27,
+                num_heads=16,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                out_hidden_size=5120,
+                num_position_embeddings=2304,
+            )
+            if has_vision_encoder
+            else None
         ),
     )
 
@@ -1154,8 +1250,9 @@ def _35b_a3b(
     *,
     seq_len: int,
     parallelism: ParallelismConfig,
+    has_vision_encoder: bool = True,
 ) -> Qwen35Model.Config:
-    """Qwen3.5-35B-A3B MoE config with vision encoder."""
+    """Qwen3.5-35B-A3B MoE config, with a vision encoder if ``has_vision_encoder``."""
     dim = 2048
     head_dim = 256
     rotary_dim = 64
@@ -1176,7 +1273,13 @@ def _35b_a3b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=(
+                multimodal_token_embedding_sharding_config()
+                if has_vision_encoder
+                else token_embedding_sharding_config(
+                    enable_sp=parallelism.enable_sequence_parallel
+                )
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -1208,18 +1311,22 @@ def _35b_a3b(
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,
-            has_vision_encoder=True,
+            has_vision_encoder=has_vision_encoder,
         ),
-        vision_encoder=_qwen35_vision_encoder_config(
-            dim=1152,
-            ffn_dim=4304,
-            num_layers=27,
-            num_heads=16,
-            patch_size=16,
-            temporal_patch_size=2,
-            spatial_merge_size=2,
-            out_hidden_size=2048,
-            num_position_embeddings=2304,
+        vision_encoder=(
+            _qwen35_vision_encoder_config(
+                dim=1152,
+                ffn_dim=4304,
+                num_layers=27,
+                num_heads=16,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                out_hidden_size=2048,
+                num_position_embeddings=2304,
+            )
+            if has_vision_encoder
+            else None
         ),
     )
 
@@ -1229,8 +1336,9 @@ def _122b_a10b(
     *,
     seq_len: int,
     parallelism: ParallelismConfig,
+    has_vision_encoder: bool = True,
 ) -> Qwen35Model.Config:
-    """Qwen3.5-122B-A10B MoE config with vision encoder."""
+    """Qwen3.5-122B-A10B MoE config, with a vision encoder if ``has_vision_encoder``."""
     dim = 3072
     head_dim = 256
     rotary_dim = 64
@@ -1251,7 +1359,13 @@ def _122b_a10b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=(
+                multimodal_token_embedding_sharding_config()
+                if has_vision_encoder
+                else token_embedding_sharding_config(
+                    enable_sp=parallelism.enable_sequence_parallel
+                )
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -1283,18 +1397,22 @@ def _122b_a10b(
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,
-            has_vision_encoder=True,
+            has_vision_encoder=has_vision_encoder,
         ),
-        vision_encoder=_qwen35_vision_encoder_config(
-            dim=1152,
-            ffn_dim=4304,
-            num_layers=27,
-            num_heads=16,
-            patch_size=16,
-            temporal_patch_size=2,
-            spatial_merge_size=2,
-            out_hidden_size=3072,
-            num_position_embeddings=2304,
+        vision_encoder=(
+            _qwen35_vision_encoder_config(
+                dim=1152,
+                ffn_dim=4304,
+                num_layers=27,
+                num_heads=16,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                out_hidden_size=3072,
+                num_position_embeddings=2304,
+            )
+            if has_vision_encoder
+            else None
         ),
     )
 
@@ -1304,8 +1422,9 @@ def _397b_a17b(
     *,
     seq_len: int,
     parallelism: ParallelismConfig,
+    has_vision_encoder: bool = True,
 ) -> Qwen35Model.Config:
-    """Qwen3.5-397B-A17B MoE config with vision encoder."""
+    """Qwen3.5-397B-A17B MoE config, with a vision encoder if ``has_vision_encoder``."""
     dim = 4096
     head_dim = 256
     rotary_dim = 64
@@ -1326,7 +1445,13 @@ def _397b_a17b(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=(
+                multimodal_token_embedding_sharding_config()
+                if has_vision_encoder
+                else token_embedding_sharding_config(
+                    enable_sp=parallelism.enable_sequence_parallel
+                )
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -1358,33 +1483,47 @@ def _397b_a17b(
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,
-            has_vision_encoder=True,
+            has_vision_encoder=has_vision_encoder,
         ),
-        vision_encoder=_qwen35_vision_encoder_config(
-            dim=1152,
-            ffn_dim=4304,
-            num_layers=27,
-            num_heads=16,
-            patch_size=16,
-            temporal_patch_size=2,
-            spatial_merge_size=2,
-            out_hidden_size=4096,
-            num_position_embeddings=2304,
+        vision_encoder=(
+            _qwen35_vision_encoder_config(
+                dim=1152,
+                ffn_dim=4304,
+                num_layers=27,
+                num_heads=16,
+                patch_size=16,
+                temporal_patch_size=2,
+                spatial_merge_size=2,
+                out_hidden_size=4096,
+                num_position_embeddings=2304,
+            )
+            if has_vision_encoder
+            else None
         ),
     )
 
 
 MODEL_FLAVORS = {
-    "debugmodel": (_debugmodel, 4096),
-    "debugmodel_moe": (_debugmodel_moe, 4096),
-    "0.8B": (_0_8b, 262144),
-    "2B": (_2b, 262144),
-    "4B": (_4b, 262144),
-    "9B": (_9b, 262144),
-    "27B": (_27b, 262144),
-    "35B-A3B": (_35b_a3b, 262144),
-    "122B-A10B": (_122b_a10b, 262144),
-    "397B-A17B": (_397b_a17b, 262144),
+    "debugmodel": (partial(_debugmodel, has_vision_encoder=False), 4096),
+    "debugmodel_mm": (_debugmodel, 4096),
+    "debugmodel_moe": (partial(_debugmodel_moe, has_vision_encoder=False), 4096),
+    "debugmodel_moe_mm": (_debugmodel_moe, 4096),
+    "0.8B": (partial(_0_8b, has_vision_encoder=False), 262144),
+    "0.8B_mm": (_0_8b, 262144),
+    "2B": (partial(_2b, has_vision_encoder=False), 262144),
+    "2B_mm": (_2b, 262144),
+    "4B": (partial(_4b, has_vision_encoder=False), 262144),
+    "4B_mm": (_4b, 262144),
+    "9B": (partial(_9b, has_vision_encoder=False), 262144),
+    "9B_mm": (_9b, 262144),
+    "27B": (partial(_27b, has_vision_encoder=False), 262144),
+    "27B_mm": (_27b, 262144),
+    "35B-A3B": (partial(_35b_a3b, has_vision_encoder=False), 262144),
+    "35B-A3B_mm": (_35b_a3b, 262144),
+    "122B-A10B": (partial(_122b_a10b, has_vision_encoder=False), 262144),
+    "122B-A10B_mm": (_122b_a10b, 262144),
+    "397B-A17B": (partial(_397b_a17b, has_vision_encoder=False), 262144),
+    "397B-A17B_mm": (_397b_a17b, 262144),
 }
 
 

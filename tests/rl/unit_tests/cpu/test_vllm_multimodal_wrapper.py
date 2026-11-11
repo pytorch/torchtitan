@@ -230,7 +230,7 @@ def test_profiling_uses_the_vision_processors_largest_grid():
 
 def test_hf_config_declares_mrope_only_for_image_prompts():
     config = build_model_config(
-        "0.8B", seq_len=256, attn_backend="varlen", parallelism=ParallelismConfig()
+        "0.8B_mm", seq_len=256, attn_backend="varlen", parallelism=ParallelismConfig()
     )
 
     text = PretrainedConfig.from_dict(model_config_to_hf_config_dict(config))

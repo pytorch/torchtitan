@@ -300,7 +300,8 @@ class VLLMModelWrapper(Module):
             parallelism=parallelism,
             precision=precision,
             device=device,
-            # Text-only generators drop the vision encoder; VLLMMultimodalModelWrapper keeps it.
+            # Text-only generators need a config without a vision encoder;
+            # VLLMMultimodalModelWrapper keeps it.
             keep_vision_encoder=supports_multimodal(self),
         )
         # TorchTitanGPUModelRunner pads a step to a multiple of TP when TP shards the

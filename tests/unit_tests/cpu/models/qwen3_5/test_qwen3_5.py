@@ -35,7 +35,7 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
     config = cast(
         Qwen35Model.Config,
         build_model_config(
-            "debugmodel_moe",
+            "debugmodel_moe_mm",
             parallelism=ParallelismConfig(
                 enable_sequence_parallel=enable_sp,
                 expert_parallel_degree=2 if enable_ep else 1,
@@ -87,7 +87,7 @@ def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
 
     config = cast(
         Qwen35Model.Config,
-        build_model_config("debugmodel", parallelism=ParallelismConfig()),
+        build_model_config("debugmodel_mm", parallelism=ParallelismConfig()),
     )
     vision_encoder = config.vision_encoder
     assert vision_encoder is not None
@@ -119,7 +119,7 @@ def test_qwen35_attention_output_matches_row_parallel_projection(
     config = cast(
         Qwen35Model.Config,
         build_model_config(
-            "debugmodel",
+            "debugmodel_mm",
             parallelism=ParallelismConfig(enable_sequence_parallel=enable_sp),
         ),
     )
@@ -158,7 +158,7 @@ class _RecordingVisionEncoder(nn.Module):
 def _small_qwen35_model() -> Qwen35Model:
     config = cast(
         Qwen35Model.Config,
-        build_model_config("debugmodel", seq_len=8, parallelism=ParallelismConfig()),
+        build_model_config("debugmodel_mm", seq_len=8, parallelism=ParallelismConfig()),
     )
     config = replace(
         config,
@@ -179,15 +179,25 @@ def _small_qwen35_model() -> Qwen35Model:
 def test_qwen35_registry_keeps_released_flavors() -> None:
     assert set(MODEL_FLAVORS) == {
         "debugmodel",
+        "debugmodel_mm",
         "debugmodel_moe",
+        "debugmodel_moe_mm",
         "0.8B",
+        "0.8B_mm",
         "2B",
+        "2B_mm",
         "4B",
+        "4B_mm",
         "9B",
+        "9B_mm",
         "27B",
+        "27B_mm",
         "35B-A3B",
+        "35B-A3B_mm",
         "122B-A10B",
+        "122B-A10B_mm",
         "397B-A17B",
+        "397B-A17B_mm",
     }
 
 
@@ -259,3 +269,32 @@ def test_qwen35_always_calls_vision_encoder_twice(
             encoder.patch_embed.weight.grad,
             torch.zeros_like(encoder.patch_embed.weight),
         )
+
+
+@pytest.mark.parametrize(
+    "flavor",
+    [
+        "debugmodel",
+        "debugmodel_moe",
+        "0.8B",
+        "2B",
+        "4B",
+        "9B",
+        "27B",
+        "35B-A3B",
+        "122B-A10B",
+        "397B-A17B",
+    ],
+)
+def test_qwen35_text_only_flavor_has_no_vision_encoder(flavor: str) -> None:
+    """The plain flavor is its ``_mm`` flavor without the vision encoder, so
+    layer 0 takes the residual layout instead of the post-scatter Replicate."""
+    parallelism = ParallelismConfig(enable_sequence_parallel=True)
+    multimodal = build_model_config(f"{flavor}_mm", parallelism=parallelism)
+    text = build_model_config(flavor, parallelism=parallelism)
+
+    assert multimodal.vision_encoder is not None
+    assert text.vision_encoder is None
+    assert len(text.layers) == len(multimodal.layers)
+    assert text.layers[0].sharding_config == text.layers[1].sharding_config
+    assert text.layers[0].sharding_config != multimodal.layers[0].sharding_config

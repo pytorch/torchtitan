@@ -550,7 +550,7 @@ class TestTransformModel(unittest.TestCase):
         from torchtitan.models.kimi_k3 import build_model_config
 
         model = build_model_config(
-            "debugmodel",
+            "debugmodel_mm",
             attn_backend="flex",
             seq_len=128,
             parallelism=ParallelismConfig(),
