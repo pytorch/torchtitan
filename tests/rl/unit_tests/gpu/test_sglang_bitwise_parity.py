@@ -73,6 +73,7 @@ from torchtitan.models.muse_glimmer import (
 from torchtitan.rl.controller.controller import Controller
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, FinishedRequest, SamplingConfig
+from torchtitan.rl.rollout.types import Prompt
 from torchtitan.tools.utils import activate_cuda_flash_attention_impl
 from torchtitan_recipes.rl.alphabet_sort import (
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
@@ -172,6 +173,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
                 cls.reset_kv_cache_on_model_state_dict_load
             ),
             model_state_dict_load_mode="gpu_fetch",
+            vision_processor=None,
             rank=dist.get_rank(),
             generator_name="generator",
             output_dir=tempfile.gettempdir(),
@@ -201,7 +203,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         for i, ids in enumerate(prompt_ids):
             request = EngineRequest(
                 request_id=f"{time.monotonic_ns()}-{i}",
-                prompt_token_ids=ids,
+                prompt=Prompt(token_ids=ids),
                 sampling=SamplingConfig(
                     temperature=1.0,
                     max_tokens=self.MAX_GEN_TOKENS,
@@ -384,7 +386,7 @@ class TestSGLangBitwiseParityVarlen(SGLangBitwiseParityTestBase):
         requests = [
             EngineRequest(
                 request_id=f"{time.monotonic_ns()}-{length}",
-                prompt_token_ids=self.prompt_ids[0][:1] * length,
+                prompt=Prompt(token_ids=self.prompt_ids[0][:1] * length),
                 sampling=SamplingConfig(
                     temperature=1.0, max_tokens=self.MAX_GEN_TOKENS, stop_token_ids=[]
                 ),

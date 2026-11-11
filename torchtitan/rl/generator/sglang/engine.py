@@ -43,6 +43,7 @@ from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils.common import next_power_of_2
 
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.config import DebugConfig, PrecisionConfig
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.attention.linear_attention import LinearAttention
@@ -182,11 +183,17 @@ class SGLangEngine(GenerationEngine):
         debug: DebugConfig,
         reset_kv_cache_on_model_state_dict_load: bool,
         model_state_dict_load_mode: ModelStateDictLoadMode,
+        vision_processor: VisionProcessor.Config | None,
         rank: int,
         generator_name: str,
         output_dir: str,
     ):
         del generator_name, output_dir
+        if vision_processor is not None:
+            raise ValueError(
+                "SGLangEngine serves text prompts only; image prompts "
+                "(Controller.Config.vision_processor) need VLLMEngine."
+            )
         if parallelism.data_parallel_degree != 1:
             # TODO(https://github.com/sgl-project/sglang/issues/48476): SGLang builds
             # one torch world per data-parallel replica; run DP replicas in one world by
@@ -478,7 +485,7 @@ class SGLangEngine(GenerationEngine):
         rejected: list[tuple[str, Exception]] = []
         vocab_size = self._scheduler.model_config.vocab_size
         for request in requests:
-            prompt = request.prompt_token_ids
+            prompt = request.prompt.token_ids
             # SGLang checks only the prompt's length. At TP > 1, the vocab-parallel
             # embedding would embed an out-of-range id as zeros, without an error.
             if not prompt or min(prompt) < 0 or max(prompt) >= vocab_size:
@@ -491,7 +498,7 @@ class SGLangEngine(GenerationEngine):
                 continue
             try:
                 sampling_params = self._build_sampling_params(
-                    request.sampling, prompt_length=len(request.prompt_token_ids)
+                    request.sampling, prompt_length=len(prompt)
                 )
             except ValueError as error:
                 rejected.append((request.request_id, error))
@@ -507,7 +514,7 @@ class SGLangEngine(GenerationEngine):
             sglang_request = TokenizedGenerateReqInput(
                 rid=request.request_id,
                 input_text=None,
-                input_ids=array("q", request.prompt_token_ids),
+                input_ids=array("q", prompt),
                 input_embeds=None,
                 mm_inputs=None,
                 token_type_ids=None,
