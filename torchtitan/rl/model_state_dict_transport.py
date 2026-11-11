@@ -28,9 +28,6 @@ from torchtitan.config import Configurable
 
 # Byte alignment of each staged piece, so it can be viewed as any dtype.
 _ALIGNMENT = 16
-# A pull moves tens of GB per generator rank at most, well under a minute at
-# line rate; this fails a stuck transfer instead of hanging the controller.
-_READ_TIMEOUT_S = 600.0
 
 
 class TensorShard(NamedTuple):
@@ -77,7 +74,7 @@ class _Read(NamedTuple):
     """Offset in the generator's local tensor of ``key``."""
 
 
-def _box(
+def _global_offset_and_local_shape(
     tensor: torch.Tensor, placements: tuple[Placement, ...] | None = None
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
     """Global offset and shape of this rank's local part of ``tensor``, if placed
@@ -140,7 +137,7 @@ def _local(tensor: torch.Tensor) -> torch.Tensor:
 def shard_layout(state_dict: dict[str, torch.Tensor]) -> dict[str, TensorShard]:
     """The layout of a generator rank's state dict, in its key order."""
     return {
-        key: TensorShard(*_box(tensor), tensor.dtype)
+        key: TensorShard(*_global_offset_and_local_shape(tensor), tensor.dtype)
         for key, tensor in state_dict.items()
     }
 
@@ -313,8 +310,14 @@ class ModelStateDictTransport(Configurable):
         backend: Literal["mooncake", "nixl"] = "mooncake"
         """The ``torch.distributed._transport`` backend."""
 
+        read_timeout_s: float = 600.0
+        """Seconds to wait for a generator rank's reads before raising. A pull
+        moves tens of GB per generator rank at most, well under a minute at line
+        rate; this fails a stuck transfer instead of hanging the controller."""
+
     def __init__(self, config: Config):
         self._transport = new_transport(config.backend)
+        self._read_timeout_s = config.read_timeout_s
         # Trainer: the staging buffer and, per key in model state dict order, the
         # dtype and placements it is staged in (None to keep its own) and a
         # (local index, staging view) per piece.
@@ -372,7 +375,7 @@ class ModelStateDictTransport(Configurable):
                 staged = _staged_placements(tensor)
                 if staged != tensor.placements:
                     placements[key] = staged
-            boxes[key] = _box(tensor, placements.get(key))
+            boxes[key] = _global_offset_and_local_shape(tensor, placements.get(key))
 
         pieces, nbytes = _staged_pieces(boxes, rank_layouts)
         staging = _pinned_buffer(max(nbytes, 1))
@@ -477,4 +480,4 @@ class ModelStateDictTransport(Configurable):
                 for local, remote in self._reads
             ]
         )
-        await wait_all(works, timeout=_READ_TIMEOUT_S)
+        await wait_all(works, timeout=self._read_timeout_s)

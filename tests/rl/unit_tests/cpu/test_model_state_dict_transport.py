@@ -107,15 +107,22 @@ def _transfer(
     connect and read each generator rank's ``{key: (box, dtype)}``; returns the
     generator ranks' state dicts."""
     boxes = {}
-    monkeypatch.setattr(m, "_box", lambda tensor, placements=None: boxes[id(tensor)])
-    config = ModelStateDictTransport.Config(backend="nixl")
+    monkeypatch.setattr(
+        m,
+        "_global_offset_and_local_shape",
+        lambda tensor, placements=None: boxes[id(tensor)],
+    )
+    config = ModelStateDictTransport.Config(backend="nixl", read_timeout_s=5.0)
 
     def new_transport(backend):
         assert backend == config.backend
         return _FakeTransport()
 
+    async def wait_all(works, *, timeout):
+        assert timeout == config.read_timeout_s
+
     monkeypatch.setattr(m, "new_transport", new_transport)
-    monkeypatch.setattr(m, "wait_all", _wait_all)
+    monkeypatch.setattr(m, "wait_all", wait_all)
 
     generator_sds = []
     for shards in generator_shards:
@@ -304,7 +311,7 @@ def test_box_rejects(placements, shape, match):
             torch.empty(2, 6), mesh, placements, shape=torch.Size(shape), stride=(6, 1)
         )
         with pytest.raises(ValueError, match=match):
-            m._box(tensor, m._staged_placements(tensor))
+            m._global_offset_and_local_shape(tensor, m._staged_placements(tensor))
     finally:
         dist.destroy_process_group()
 
@@ -363,15 +370,15 @@ class TestStageDTensors(DTensorTestBase):
         self.assertEqual(m._staged_placements(sd["row"]), (Shard(0), Shard(0)))
 
         boxes = {}
-        box = m._box
+        global_offset_and_local_shape = m._global_offset_and_local_shape
         with (
             patch.object(m, "new_transport", lambda backend: _FakeTransport()),
             patch.object(m, "wait_all", _wait_all),
             patch.object(
                 m,
-                "_box",
+                "_global_offset_and_local_shape",
                 lambda tensor, placements=None: boxes.get(id(tensor))
-                or box(tensor, placements),
+                or global_offset_and_local_shape(tensor, placements),
             ),
         ):
             # Generator TP dims per key: as its trainer TP, and all on dim 0.
