@@ -213,6 +213,23 @@ def test_stacked_pieces(monkeypatch, generator_tp, generator_dim):
         torch.testing.assert_close(out, full[_index(*box)], rtol=0, atol=0)
 
 
+def test_replicated_pieces(monkeypatch):
+    # Generator ranks that receive the same piece share one staged copy.
+    full = torch.arange(8 * 6, dtype=torch.float32).reshape(8, 6)
+    trainer_box = _boxes(full.shape, 4, 0)[1]
+    shard = m.TensorShard((0, 0), (8, 6), torch.float32)
+    pieces, nbytes = m._staged_pieces({"w": trainer_box}, [{"w": shard}] * 2)
+    assert pieces[0] == pieces[1] and nbytes == 2 * 6 * 4
+    outputs = _transfer_w(
+        monkeypatch,
+        [(full[_index(*box)], box) for box in _boxes(full.shape, 4, 0)],
+        [((0, 0), (8, 6))] * 2,
+        dtype=torch.float32,
+    )
+    for out in outputs:
+        torch.testing.assert_close(out, full, rtol=0, atol=0)
+
+
 def test_missing_coverage(monkeypatch):
     full = torch.zeros(8, 6)
     with pytest.raises(ValueError, match="covers"):
