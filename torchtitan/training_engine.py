@@ -45,6 +45,7 @@ from torchtitan.distributed.activation_remat import (
     DefaultActivationRematConfig,
 )
 from torchtitan.distributed.batch_invariant import set_batch_invariance
+from torchtitan.distributed.fsdp import maybe_store_frozen_params_in_param_dtype_
 from torchtitan.distributed.pipeline_parallel import (
     prepare_pipeline_schedule_for_accelerator_graph,
 )
@@ -396,6 +397,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             utils.set_default_dtype(TORCH_DTYPE_MAP[self.precision.dtype]),
         ):
             model = self.model_config.build()
+        maybe_store_frozen_params_in_param_dtype_(model, self.precision)
         self.model_cls = type(model)
         adapter_cls = type(model).state_dict_adapter_cls
         self.state_dict_adapter = (
