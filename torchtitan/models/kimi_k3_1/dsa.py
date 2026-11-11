@@ -8,6 +8,7 @@
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch_remat as remat
@@ -181,16 +182,17 @@ class KimiSparseAttention(InnerAttention):
     ) -> torch.Tensor:
         aux_loss = self.aux_loss if self.training else None
         cu_seqlens = attention_metadata.cu_seq_q
-        topk_indices_TS, topk_scores_TS = Indexer.select(
-            idx_q_TIE,
-            idx_k_TE,
-            idx_w_TI,
-            max_seqlen=attention_metadata.max_k,
-            ratio=1,
-            topk=self.index_topk,
-            cu_seqlens=cu_seqlens,
-            return_scores=aux_loss is not None,
-        )
+        with spmd.no_typecheck():
+            topk_indices_TS, topk_scores_TS = Indexer.select(
+                idx_q_TIE,
+                idx_k_TE,
+                idx_w_TI,
+                max_seqlen=attention_metadata.max_k,
+                ratio=1,
+                topk=self.index_topk,
+                cu_seqlens=cu_seqlens,
+                return_scores=aux_loss is not None,
+            )
 
         nope_dim = q_THK.shape[-1] - k_shared_TR.shape[-1]
         w_uk_HNL, w_uv_HVL = self.wkv_b()
@@ -202,39 +204,44 @@ class KimiSparseAttention(InnerAttention):
             q_nope_THN,
             w_uk_HNL,
         )
-        out_1HTL, aux = gather_attn(
-            (
-                q_latent_THL.transpose(0, 1).unsqueeze(0),
-                q_shared_THR.transpose(0, 1).unsqueeze(0),
-            ),
-            None,
-            (kv_c_normed_TL[None, None], k_shared_TR[None, None]),
-            topk_indices_TS.unsqueeze(0),
-            sliding_window_size=0,
-            cu_seqlens=cu_seqlens,
-            cu_seqlens_k=cu_seqlens,
-            scale=scale,
-            impl="fused" if q_THK.device.type == "cuda" else "reference",
-            return_aux=AuxRequest(lse=aux_loss is not None),
-        )
-        out_THL = out_1HTL.squeeze(0).transpose(0, 1)
-        out_THV = torch.einsum("thl,hvl->thv", out_THL, w_uv_HVL)
-        if aux_loss is not None:
-            assert (
-                topk_scores_TS is not None
-                and aux_loss_denominator is not None
-                and aux.lse is not None
+        with spmd.no_typecheck():
+            out_1HTL, aux = gather_attn(
+                (
+                    q_latent_THL.transpose(0, 1).unsqueeze(0),
+                    q_shared_THR.transpose(0, 1).unsqueeze(0),
+                ),
+                None,
+                (kv_c_normed_TL[None, None], k_shared_TR[None, None]),
+                topk_indices_TS.unsqueeze(0),
+                sliding_window_size=0,
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                scale=scale,
+                impl="fused" if q_THK.device.type == "cuda" else "reference",
+                return_aux=AuxRequest(lse=aux_loss is not None),
             )
-            out_THV = aux_loss(
-                torch.cat((q_latent_THL, q_shared_THR), dim=-1).detach(),
-                torch.cat((kv_c_normed_TL, k_shared_TR), dim=-1).detach(),
-                topk_indices_TS,
-                topk_scores_TS,
-                aux.lse.squeeze(0).transpose(0, 1).detach(),
-                cu_seqlens,
-                carrier=out_THV,
-                denominator=aux_loss_denominator,
-                padding_mask_T=padding_mask,
+            out_THL = out_1HTL.squeeze(0).transpose(0, 1)
+            out_THV = torch.einsum("thl,hvl->thv", out_THL, w_uv_HVL)
+            if aux_loss is not None:
+                assert (
+                    topk_scores_TS is not None
+                    and aux_loss_denominator is not None
+                    and aux.lse is not None
+                )
+                out_THV = aux_loss(
+                    torch.cat((q_latent_THL, q_shared_THR), dim=-1).detach(),
+                    torch.cat((kv_c_normed_TL, k_shared_TR), dim=-1).detach(),
+                    topk_indices_TS,
+                    topk_scores_TS,
+                    aux.lse.squeeze(0).transpose(0, 1).detach(),
+                    cu_seqlens,
+                    carrier=out_THV,
+                    denominator=aux_loss_denominator,
+                    padding_mask_T=padding_mask,
+                )
+        if spmd.is_type_checking():
+            spmd.assert_type(
+                out_THV, spmd.get_local_type(q_THK), spmd.get_partition_spec(q_THK)
             )
         return out_THV
 
