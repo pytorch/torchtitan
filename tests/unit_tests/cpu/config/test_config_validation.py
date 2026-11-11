@@ -202,6 +202,7 @@ def test_ep_off_built_moe_rejects_ep_gt1() -> None:
             debug=config.debug,
             activation_remat=config.activation_remat,
             max_num_documents=config.dataloader.max_num_documents,
+            loss=config.loss,
         )
 
 
@@ -228,6 +229,7 @@ def test_ep_dense_postprocess_under_routed_experts_passes() -> None:
         debug=config.debug,
         activation_remat=config.activation_remat,
         max_num_documents=config.dataloader.max_num_documents,
+        loss=config.loss,
     )
 
 
@@ -258,6 +260,7 @@ def test_ep_off_routed_experts_checked_as_dense() -> None:
             debug=config.debug,
             activation_remat=config.activation_remat,
             max_num_documents=config.dataloader.max_num_documents,
+            loss=config.loss,
         )
 
 

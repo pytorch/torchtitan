@@ -110,6 +110,7 @@ class Trainer(Configurable):
                     debug=self.debug,
                     activation_remat=self.activation_remat,
                     max_num_documents=self.dataloader.max_num_documents,
+                    loss=self.loss,
                 )
             if self.create_seed_checkpoint and (
                 self.checkpointer is None or self.checkpointer.load_only

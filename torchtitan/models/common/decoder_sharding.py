@@ -330,6 +330,46 @@ def replicated_input_colwise_sharding_config() -> ShardingConfig:
     return colwise_sharding_config(input_layout=replicated_activation_placement())
 
 
+def cp_vocab_parallel_lm_head_sharding_config() -> ShardingConfig:
+    """``lm_head`` whose vocab is sharded over CP instead of TP.
+
+    ``ChunkedLossWrapper`` detects this config and all-gathers the hidden
+    states over CP before calling it, so its input is CP-replicated and its
+    logits are ``[tokens, vocab / cp]``. TP must be 1.
+    """
+    return ShardingConfig(
+        state_shardings={"weight": SpmdType({DP: spmd.R, CP: spmd.S(0), TP: spmd.R})},
+        input_shardings={"input": dense_activation_placement(tp=spmd.R, cp=spmd.R)},
+        output_shardings=SpmdType(
+            {DP: spmd.V, CP: spmd.V, TP: spmd.R},
+            partition_spec=spmd.PartitionSpec(DP, CP),
+        ),
+    )
+
+
+def cp_vocab_parallel_token_embedding_sharding_config() -> ShardingConfig:
+    """Token embedding whose vocab is sharded over CP instead of TP.
+
+    ``VocabParallelEmbedding`` all-gathers the token IDs over CP, looks up its
+    vocab slice for all CP tokens, and reduce-scatters the CP-partial output
+    back to the local tokens. TP must be 1.
+    """
+    return ShardingConfig(
+        state_shardings={"weight": SpmdType({DP: spmd.R, CP: spmd.S(0), TP: spmd.R})},
+        input_shardings={"input": token_id_placement()},
+        output_shardings=residual_activation_placement(enable_sp=False),
+    )
+
+
+def vocab_sharded_on_cp(sharding_config: ShardingConfig | None) -> bool:
+    """Whether an embedding or ``lm_head`` sharding config shards the vocab
+    (weight dim 0) over CP."""
+    if sharding_config is None or "weight" not in sharding_config.state_shardings:
+        return False
+    weight = sharding_config.state_shardings["weight"]
+    return isinstance(weight.local_type.get(CP), spmd.Shard)
+
+
 def lm_head_sharding_config() -> ShardingConfig:
     """Vocab-sharded ``lm_head`` over replicated hidden states."""
     replicated = replicated_activation_placement()

@@ -122,6 +122,7 @@ class Trainer(Configurable):
             debug=config.debug,
             activation_remat=config.activation_remat,
             max_num_documents=max_num_documents,
+            loss=config.loss,
         )
 
         self.engine = TrainingEngine(
