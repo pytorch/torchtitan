@@ -10,6 +10,9 @@ Each configuration function is selected by module and name in the launched
 training process, so it must stay importable from this module.
 """
 
+from dataclasses import replace
+
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.trainer import Trainer
@@ -20,6 +23,9 @@ from torchtitan_recipes.tests.models.deepseek_v3 import (
 )
 from torchtitan_recipes.tests.models.multimodal import (
     set_rank_conditional_image_presence,
+)
+from torchtitan_recipes.tests.models.qwen3_8_flash_next import (
+    qwen38_flash_next_debugmodel_mm,
 )
 
 from tests.integration_tests import IntegrationTestDefinition
@@ -133,6 +139,30 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_vmm() -> Trainer.Config:
     return config
 
 
+def qwen38_flash_next_debugmodel_mm_checkpoint_save() -> Trainer.Config:
+    config = qwen38_flash_next_debugmodel_mm()
+    return replace(
+        config,
+        training=replace(config.training, steps=5),
+        optim=replace(
+            config.optim,
+            # Keep the ten-step LR schedule across the save/load split.
+            lr_scheduler=replace(config.optim.lr_scheduler, total_steps=10),
+        ),
+        checkpointer=CheckpointManager.Config(interval=5, last_save_model_only=False),
+    )
+
+
+def qwen38_flash_next_debugmodel_mm_checkpoint_load() -> Trainer.Config:
+    config = qwen38_flash_next_debugmodel_mm_checkpoint_save()
+    assert config.checkpointer is not None
+    return replace(
+        config,
+        training=replace(config.training, steps=10),
+        checkpointer=replace(config.checkpointer, load_step=5),
+    )
+
+
 def build_b200_tests_list() -> list[IntegrationTestDefinition]:
     """Build integration tests that require B200-class hardware."""
     return [
@@ -184,6 +214,19 @@ def build_b200_tests_list() -> list[IntegrationTestDefinition]:
             test_descr="Eager MXFP8 Dist-MoE PP with BF16 reduction",
             test_name="dist_moe_eager_fsdp_ep_pp_accelerator_graph",
             ngpu=4,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[
+                qwen38_flash_next_debugmodel_mm_checkpoint_save,
+                qwen38_flash_next_debugmodel_mm_checkpoint_load,
+            ],
+            test_descr=(
+                "Qwen3.8-Flash-Next FSDP, EP, image fusion, PLE, sparse attention "
+                "and checkpoint resume"
+            ),
+            test_name="qwen3_8_flash_next_fsdp",
+            ngpu=2,
             use_real_pg=True,
         ),
     ]
