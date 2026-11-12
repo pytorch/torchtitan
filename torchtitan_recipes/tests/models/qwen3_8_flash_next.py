@@ -23,6 +23,7 @@ from torchtitan.components.optim import (
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.qwen3_8 import (
     QWEN3_8_SPECIAL_TOKENS,
@@ -164,4 +165,62 @@ def qwen38_flash_next_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
     )
     # The Dist-MoE graph test shares the base config and cannot typecheck.
     config.debug.spmd_typechecking = True
+    return config
+
+
+def _interleaved_pp2_parallelism(**degrees: int) -> ParallelismConfig:
+    """PP2 Interleaved1F1B with PLE (``layers.1``) in a later local part.
+
+    PLE lands in the second local model part of PP rank 0, so the first local
+    part prepares routing for a table it does not own, and the
+    ``tok_embeddings``-only part holds no DistMuon parameters.
+    """
+    return ParallelismConfig(
+        pipeline_parallel_degree=2,
+        num_pp_microbatches=4,
+        pipeline_parallel_schedule="Interleaved1F1B",
+        pipeline_parallel_module_fqns_per_model_part=[
+            ["tok_embeddings"],
+            ["layers.0"],
+            ["layers.1", "layers.2", "layers.3"],
+            [f"layers.{i}" for i in range(4, 8)]
+            + ["norm", "lm_head", "hyper_connection_mixer"],
+        ],
+        **degrees,
+    )
+
+
+def qwen38_flash_next_debugmodel_fsdp2_tp2_ep4_pp2() -> Trainer.Config:
+    """FSDP2 + TP2 + SP + EP4 + PP2 with Interleaved1F1B and full remat.
+
+    AdamW replaces the DistMuon policy, which does not support TP
+    (https://github.com/pytorch/torchtitan/pull/5678).
+    """
+    config = qwen38_flash_next_debugmodel(
+        parallelism=_interleaved_pp2_parallelism(
+            data_parallel_shard_degree=2,
+            tensor_parallel_degree=2,
+            expert_parallel_degree=4,
+            enable_sequence_parallel=True,
+        ),
+        optimizer=OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+        ),
+    )
+    config.activation_remat = FullActivationRematConfig()
+    return config
+
+
+def qwen38_flash_next_debugmodel_fsdp2_ep2_pp2() -> Trainer.Config:
+    """FSDP2 + EP2 + PP2 with Interleaved1F1B, full remat and the DistMuon policy.
+
+    PP rank 1 holds no PLE parameters and the ``tok_embeddings``-only part no
+    DistMuon parameters, so those optimizers are skipped there.
+    """
+    config = qwen38_flash_next_debugmodel(
+        parallelism=_interleaved_pp2_parallelism(
+            data_parallel_shard_degree=2, expert_parallel_degree=2
+        )
+    )
+    config.activation_remat = FullActivationRematConfig()
     return config
