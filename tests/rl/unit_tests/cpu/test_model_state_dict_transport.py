@@ -328,7 +328,7 @@ def test_box_rejects(placements, shape, match):
             torch.empty(2, 6), mesh, placements, shape=torch.Size(shape), stride=(6, 1)
         )
         with pytest.raises(ValueError, match=match):
-            m._global_offset_and_local_shape(tensor, m._staged_placements(tensor))
+            m._global_offset_and_local_shape(tensor)
     finally:
         dist.destroy_process_group()
 
@@ -374,8 +374,9 @@ class TestStageDTensors(DTensorTestBase):
             "col": torch.arange(8 * 6, dtype=torch.float32).reshape(8, 6) + 1000,
             # Stacked [2, F, D] w13: FSDP over TP on dim 1.
             "w13": torch.arange(2 * 8 * 6, dtype=torch.float32).reshape(2, 8, 6) + 2000,
-            # Restaged to (Shard(0), Shard(0)): 2 rows leave 2 ranks without
-            # pieces, which must still join the redistribute.
+            # Restaged to (Shard(0), Shard(0)) for the generator split on dim
+            # 0: 2 rows leave 2 ranks without pieces, which must still join the
+            # redistribute.
             "small": torch.arange(2 * 6, dtype=torch.float32).reshape(2, 6) + 3000,
         }
         sd = {
@@ -384,8 +385,6 @@ class TestStageDTensors(DTensorTestBase):
             "w13": _fsdp_over_tp(full["w13"], mesh, 1),
             "small": distribute_tensor(full["small"], mesh, [Shard(0), Shard(1)]),
         }
-        self.assertEqual(m._staged_placements(sd["row"]), (Shard(0), Shard(0)))
-
         boxes = {}
         global_offset_and_local_shape = m._global_offset_and_local_shape
         with (
@@ -398,10 +397,11 @@ class TestStageDTensors(DTensorTestBase):
                 or global_offset_and_local_shape(tensor, placements),
             ),
         ):
-            # Generator TP dims per key: as its trainer TP, and all on dim 0.
-            for dims in (
-                {"row": 1, "col": 0, "w13": 1, "small": 1},
-                dict.fromkeys(full, 0),
+            # Generator TP dims per key: as its trainer TP (staged as is), and
+            # all on dim 0 (row and small restaged).
+            for dims, staged in (
+                ({"row": 1, "col": 0, "w13": 1, "small": 1}, None),
+                (dict.fromkeys(full, 0), (Shard(0), Shard(0))),
             ):
                 rank_layouts = [
                     {
@@ -413,6 +413,13 @@ class TestStageDTensors(DTensorTestBase):
                     }
                     for rank in range(2)
                 ]
+                for key in ("row", "small"):
+                    self.assertEqual(
+                        m._staged_placements(
+                            sd[key], [layout[key] for layout in rank_layouts]
+                        ),
+                        staged,
+                    )
                 config = ModelStateDictTransport.Config()
                 trainer = ModelStateDictTransport(config)
                 source = trainer.register_trainer_source(

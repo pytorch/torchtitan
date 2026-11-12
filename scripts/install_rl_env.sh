@@ -91,7 +91,9 @@ uv pip install --no-deps \
 
 # Mooncake and NIXL backends of torch.distributed._transport, for
 # ModelStateDictTransport (torchtitan/rl/MODEL_STATE_DICT_TRANSPORT.md). The
-# CUDA 13 builds match cu132.
+# CUDA 13 builds match cu132. --no-deps: nixl-cu13 requires torch, and the nixl
+# package also requires nixl-cu12; mooncake's deps (aiohttp, requests, msgpack)
+# come with vllm.
 uv pip install --no-deps "mooncake-transfer-engine-cuda13==0.3.14" \
   "nixl==1.5.0" "nixl-cu13==1.5.0"
 

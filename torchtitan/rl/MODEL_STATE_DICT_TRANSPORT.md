@@ -62,16 +62,18 @@ on dim 1.
        generator rank 1 (g1): (8, 3), rows 0-1, 2-3, 4-5, 6-7
 ```
 
-The trainer stages each DTensor with its shards of later dims moved to its
-first sharded dim, one DTensor redistribute per such tensor per push: a row-parallel
-weight (FSDP `Shard(0)`, TP `Shard(1)`) is staged as `(Shard(0), Shard(0))`.
-Every staged box then spans all dims after that one, so each piece is one
-contiguous read per index of the dims before it: one read for a row-parallel
-weight, 2 for a stacked `[2, F, D]` weight sharded on dim 1. When several
-trainer ranks stage the same piece (HSDP replicas), generator ranks are spread
-across them round-robin. Init raises if the trainer does not cover every
-element of a generator shard, or on `Partial` and uneven `_StridedShard`
-placements.
+Each piece is one contiguous read per index of the dims before the last one it
+does not span. Where a trainer shard cuts a generator shard on a dim after the
+trainer's first sharded dim, the trainer restages the DTensor with its shards of
+later dims moved to that dim, one DTensor redistribute per such tensor per
+push: a row-parallel weight (FSDP `Shard(0)`, TP `Shard(1)`) read by generator
+ranks split on dim 0 is staged as `(Shard(0), Shard(0))`, one read instead of
+one per row. With generator TP on dim 1 matching the trainer's it is staged as
+is, also one read. A stacked `[2, F, D]` weight sharded on dim 1 takes 2
+reads. When several trainer ranks stage the same piece (HSDP replicas),
+generator ranks are spread across them round-robin. Init raises if the trainer
+does not cover every element of a generator shard, or on `Partial` and uneven
+`_StridedShard` placements.
 
 ## Lifecycle
 
@@ -81,11 +83,11 @@ placements.
    staging buffer (`register_trainer_source`); every generator rank registers
    its prefetch buffers, connects to every trainer rank and plans its reads
    (`connect_generator`).
-2. Push: the trainer casts and restages its shards and copies them into the
-   staging buffer (`stage`). Restaging is a collective, so it runs once per
-   optimizer step on the actor thread, by whichever of the push and the next
-   forward/backward reaches each rank first; ranks then issue it in the same
-   order relative to their training collectives.
+2. Push: the trainer casts and, where needed, restages its shards and copies
+   them into the staging buffer (`stage`). Restaging is a collective, so it
+   runs once per optimizer step on the actor thread, by whichever of the push
+   and the next forward/backward reaches each rank first; ranks then issue it
+   in the same order relative to their training collectives.
 3. Pull: each generator rank issues its reads (`read`) and waits for them,
    raising after `read_timeout_s` (600 s). A timeout leaves the reads in flight;
    restart the job.
