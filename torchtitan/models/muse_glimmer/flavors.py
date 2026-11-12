@@ -10,9 +10,14 @@ import dataclasses
 import math
 from collections.abc import Callable
 from functools import partial
+from typing import Any
 
 import torch.nn as nn
 
+from torchtitan.components.data.multimodal.vision_processor import (
+    MuseGlimmerPatchGridResize,
+    PixelBudgetResize,
+)
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
@@ -25,6 +30,7 @@ from torchtitan.models.common.attention import (
     FlexInnerAttention,
     QKVLinear,
     SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.config_utils import (
@@ -71,11 +77,64 @@ from .sharding import (
 )
 
 __all__ = [
+    "MUSE_GLIMMER_30B_SPECIAL_TOKENS",
+    "MUSE_GLIMMER_30B_VISION_PROCESSOR_KWARGS",
+    "MUSE_GLIMMER_DEBUG_SPECIAL_TOKENS",
+    "MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS",
     "MuseGlimmerModel",
     "MODEL_FLAVORS",
     "build_model_config",
     "muse_glimmer_vision_configs",
 ]
+
+
+# Multimodal special tokens for the Muse Glimmer debug flavor. The debug tokenizer asset
+# (``./tests/assets/tokenizer``) already defines these (IDs 2004-2008, all <
+# debugmodel_mm's vocab_size=2048), so no asset change is needed.
+MUSE_GLIMMER_DEBUG_SPECIAL_TOKENS = {
+    "image_token": "<|image_pad|>",
+    "video_token": "<|video_pad|>",
+    "vision_start_token": "<|vision_start|>",
+    "vision_end_token": "<|vision_end|>",
+    "pad_token": "<|endoftext|>",
+}
+
+# Multimodal special tokens of the released Muse Glimmer 30B tokenizer.
+MUSE_GLIMMER_30B_SPECIAL_TOKENS = {
+    "image_token": "<|patch|>",
+    "video_token": "<|video|>",
+    "vision_start_token": "<|image_start|>",
+    "vision_end_token": "<|image_end|>",
+    "pad_token": "<|finetune_right_pad|>",
+}
+
+
+# ``VisionProcessor.Config`` fields, used like the special tokens:
+# ``VisionProcessor.Config(**MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS)``. The patch
+# sizes match the NaViT encoder (``patch_size``, ``patch_temporal``,
+# ``downsample_factor``), and raster order matches its row-major patch layout.
+MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
+    "patch_size": 14,
+    "temporal_patch_size": 2,
+    "spatial_merge_size": 2,
+    "image_mean": (0.5, 0.5, 0.5),
+    "image_std": (0.5, 0.5, 0.5),
+    "resize": PixelBudgetResize.Config(min_pixels=784, max_pixels=3136),
+    "patch_order": "raster",
+}
+
+# The released Muse Glimmer 30B image processor: closest-aspect patch grid up to
+# 4096 merged tokens, LANCZOS. Images only.
+MUSE_GLIMMER_30B_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
+    "patch_size": 14,
+    "temporal_patch_size": 2,
+    "spatial_merge_size": 2,
+    "image_mean": (0.5, 0.5, 0.5),
+    "image_std": (0.5, 0.5, 0.5),
+    "resize": MuseGlimmerPatchGridResize.Config(max_image_tokens=4096),
+    "patch_order": "raster",
+    "image_interpolation_mode": "lanczos",
+}
 
 
 # The query is scaled by this tuned constant divided by sqrt(head_dim) after
@@ -170,17 +229,19 @@ def _build_muse_glimmer_attention(
     # (scale_query_by, o_gate, per-layer window_size).
     window = _layer_window_size(layer_id, n_layers, window_pattern)
     inner_attention = get_attention_config(attn_backend)
-    # Varlen carries the per-layer sliding window as an FA3 kernel argument.
-    # Flex uses a distinct backend class so metadata can be keyed by backend.
     if window is not None and isinstance(inner_attention, VarlenInnerAttention.Config):
-        inner_attention = dataclasses.replace(
-            inner_attention, window_size=(window - 1, 0)
+        inner_attention = SlidingWindowVarlenInnerAttention.Config(
+            **{
+                f.name: getattr(inner_attention, f.name)
+                for f in dataclasses.fields(inner_attention)
+            },
+            sliding_window_size=window,
         )
     elif window is not None and isinstance(inner_attention, FlexInnerAttention.Config):
         inner_attention = SlidingWindowFlexInnerAttention.Config(
             block_size=inner_attention.block_size,
             kernel_options=inner_attention.kernel_options,
-            window_size=window,
+            sliding_window_size=window,
         )
     inner_attention = dataclasses.replace(
         inner_attention, sharding_config=inner_attention_local_spmd_sharding_config()

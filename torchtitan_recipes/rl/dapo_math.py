@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import cast, Literal
 
 from renderers import Qwen3RendererConfig
 
@@ -24,20 +24,35 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.components.renderer import from_renderers
-from torchtitan.config import TrainingConfig
+from torchtitan.config import PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 
-from torchtitan.config.transform import apply_transforms
+from torchtitan.config.transform import (
+    apply_transforms,
+    ContextParallelTransform,
+    LMHeadFP32OutputConverter,
+)
 from torchtitan.config.transform.dist_moe import DistMoeTransform
 from torchtitan.distributed.activation_remat import ActivationRematConfig
+from torchtitan.models.common.attention import (
+    SlidingWindowVarlenInnerAttention,
+    VarlenInnerAttention,
+)
+from torchtitan.models.common.attention.cp_attention import (
+    UlyssesSlidingWindowVarlenInnerAttention,
+    UlyssesVarlenInnerAttention,
+)
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.models.muse_spark import (
     build_model_config as build_muse_spark_model_config,
+    MUSE_SPARK_SPECIAL_TOKENS,
 )
 from torchtitan.models.muse_spark.renderer import MuseSparkRendererConfig
 from torchtitan.models.muse_spark.tokenizer import MuseSparkTokenizer
 from torchtitan.models.qwen3 import build_model_config
+
+from torchtitan.observability.metrics import WandBLogger
 from torchtitan.rl.controller.controller import (
     AsyncLoopConfig,
     Controller,
@@ -53,7 +68,7 @@ from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
-from torchtitan.rl.rollout.data import IterableRLDataLoader
+from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.rollout.token_env import TokenEnv
@@ -61,8 +76,6 @@ from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.losses import DAPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
 from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
-
-from torchtitan_recipes.models.muse_spark import MUSE_SPARK_SPECIAL_TOKENS
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
@@ -76,7 +89,7 @@ def _dapo_math_rollouter_config(
     token_env: TokenEnv.Config,
 ) -> Rollouter.Config:
     return Rollouter.Config(
-        training_dataloader=IterableRLDataLoader.Config(
+        training_dataloader=IterableRolloutDataLoader.Config(
             dataset=DapoMathDataset.Config()
         ),
         validation_dataset=validation_dataset,
@@ -128,6 +141,7 @@ def _qwen3_4b_dapo_math_config(
             target_offpolicy_steps=4,
             validation=ValidationConfig(
                 steps=num_validation_samples,
+                freq=25,
             ),
         ),
         rollouter=_dapo_math_rollouter_config(
@@ -140,7 +154,7 @@ def _qwen3_4b_dapo_math_config(
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=True)),
         num_generators=6,
         metrics=MetricsProcessor.Config(
-            enable_wandb=True,
+            loggers=[WandBLogger.Config()],
             console_log_keys_validation=[
                 "validation_reward/_mean",
                 "validation_reward/_max",
@@ -168,9 +182,8 @@ def _qwen3_4b_dapo_math_config(
             ),
             # A minimum factor of 1 keeps the learning rate constant.
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
-                max_context_length=max_total_tokens,
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -190,7 +203,6 @@ def _qwen3_4b_dapo_math_config(
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             checkpointer=None,
@@ -233,20 +245,24 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
     a 65,536-token context and up to 63,488 response tokens. Validation is disabled.
     Checks trainer/generator logprob agreement with padding in both roles.
 
-    Trainer: 256 GPUs (FSDP(shard)=64, TP=4, EP=4), fp32 master weights and a bf16
-    forward, no CUDA graphs. Generator: 16 GPUs (DP=4, TP=4, EP=16), bf16 weights,
-    full CUDA graphs.
+    Trainer: 128 GPUs (FSDP(shard)=8, TP=4, CP=4, EP=16), fp32 master weights and a
+    bf16 forward, no CUDA graphs. CP shards each rollout's tokens over 4 ranks with
+    Ulysses varlen attention; with EP=16 the expert FSDP group is 8 instead of 64,
+    which avoids the expert all-gathers that dominated FSDP(shard)=64 x EP=4.
+    Generator: 16 GPUs (DP=4, TP=4, EP=16), bf16 weights, full CUDA graphs.
 
     Supply the checkpoint directory and dataset repo IDs or local directories;
-    the launcher owns cluster placement.
+    the launcher owns cluster placement. Dist-MoE exchanges tokens through peer GPU
+    memory, so each EP=16 group (4 GB300 hosts) must share one NVLink domain.
     """
     max_response_tokens = 63488
     max_total_tokens = 65536
     trainer_parallelism = ParallelismConfig(
         data_parallel_replicate_degree=1,
-        data_parallel_shard_degree=64,
+        data_parallel_shard_degree=8,
         tensor_parallel_degree=4,
-        expert_parallel_degree=4,
+        context_parallel_degree=4,
+        expert_parallel_degree=16,
         enable_sequence_parallel=True,
     )
     generator_parallelism = InferenceParallelismConfig(
@@ -260,7 +276,6 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
         seq_len=max_total_tokens,
-        moe_comm_backend="standard",
         attn_backend="varlen",
     )
     rollouter = _dapo_math_rollouter_config(
@@ -285,7 +300,7 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
             num_prompts_per_train_step=8,
             num_samples_per_prompt=8,
             target_offpolicy_steps=0,
-            # Skip the pre- and post-training validation passes.
+            # Skip validation.
             validation=ValidationConfig(steps=0),
             # Keep all-pass / all-fail groups so every step trains exactly
             # num_prompts_per_train_step groups.
@@ -298,6 +313,7 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
         rollouter=rollouter,
         renderer=MuseSparkRendererConfig(reasoning_effort="low"),
         num_generators=1,
+        precision=PrecisionConfig(dtype="float32", param_dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -317,16 +333,13 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
-                max_context_length=max_total_tokens,
-                dtype="float32",
-                mixed_precision_param="bfloat16",
             ),
             parallelism=trainer_parallelism,
-            # EP=4 confines each expert group to one host; factor 4 covers
-            # its worst-case routing imbalance.
-            dist_moe_runtime=DistMoeRuntime.Config(scratch_capacity_factor=4.0),
+            # Factor EP=16 keeps the worst case (every token routed to one rank)
+            # in device scratch; host-backed VMM scratch stays off.
+            dist_moe_runtime=DistMoeRuntime.Config(scratch_capacity_factor=16.0),
             # Test run: load the HF weights, never write a checkpoint.
             checkpointer=cast(
                 CheckpointManager.Config,
@@ -350,7 +363,6 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             # vLLM's profiling dummy batch can route every token to one expert.
@@ -366,11 +378,169 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
             ),
         ),
     )
-    # Dist-MoE routed experts in both roles.
+    # Dist-MoE routed experts in both roles; only the trainer shards sequences.
     config.trainer = apply_transforms(
-        config.trainer, [DistMoeTransform(inplace_wgrad_accum=True)]
+        config.trainer,
+        [
+            ContextParallelTransform(
+                inner_attention_map={
+                    VarlenInnerAttention: UlyssesVarlenInnerAttention,
+                    SlidingWindowVarlenInnerAttention: (
+                        UlyssesSlidingWindowVarlenInnerAttention
+                    ),
+                }
+            ),
+            DistMoeTransform(inplace_wgrad_accum=True),
+        ],
     )
     config.generator = apply_transforms(
         config.generator, [DistMoeTransform(inplace_wgrad_accum=True)]
     )
     return config
+
+
+def _qwen3_30b_a3b_dapo_math_8k_config(
+    *, expert_precision: Literal["bf16", "mxfp8"]
+) -> Controller.Config:
+    """Build the shared Qwen3-30B-A3B-Base DAPO-Math configuration with Dist-MoE experts.
+
+    One node: trainer FSDP4 / EP4 on 4 GPUs and one generator DP4 / EP4 on 4 GPUs,
+    8K responses, 32 prompts x 16 samples per step.
+    """
+    max_response_tokens = 8192
+    max_total_tokens = 10240
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_replicate_degree=1,
+        data_parallel_shard_degree=4,
+        tensor_parallel_degree=1,
+        expert_parallel_degree=4,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=4,
+        tensor_parallel_degree=1,
+        expert_parallel_degree=4,
+    )
+    trainer_model, generator_model = build_rl_model_configs(
+        build_model_config,
+        "30B-A3B",
+        seq_len=max_total_tokens,
+        attn_backend="varlen",
+        converters=[LMHeadFP32OutputConverter.Config()],
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
+    )
+    config = Controller.Config(
+        hf_assets_path="./assets/hf/Qwen3-30B-A3B-Base",
+        dump_folder=f"outputs/rl/qwen3_30b_a3b_dapo_math_8k_{expert_precision}",
+        async_loop=AsyncLoopConfig(
+            num_training_steps=50,
+            num_prompts_per_train_step=32,
+            num_samples_per_prompt=16,
+            target_offpolicy_steps=4,
+            validation=ValidationConfig(steps=30, freq=25),
+        ),
+        rollouter=_dapo_math_rollouter_config(
+            validation_dataset=AIME2025Dataset.Config(),
+            token_env=TokenEnv.Config(
+                max_rollout_tokens=max_total_tokens,
+                max_num_turns=1,
+            ),
+        ),
+        renderer=from_renderers(Qwen3RendererConfig(enable_thinking=True)),
+        num_generators=1,
+        metrics=MetricsProcessor.Config(
+            loggers=[WandBLogger.Config()],
+            console_log_keys_validation=[
+                "validation_reward/_mean",
+                "validation_reward/_max",
+                "validation/response_length/mean",
+                "timing/validate",
+            ],
+        ),
+        precision=PrecisionConfig(dtype="bfloat16"),
+        trainer=Trainer.Config(
+            model=trainer_model,
+            optim=Optim.Config(
+                optimizer=OptimizersContainer.Config(
+                    optimizers=[
+                        AdamW.Config(
+                            pattern=r".*",
+                            lr=5e-6,
+                            betas=(0.9, 0.98),
+                            weight_decay=0.1,
+                        )
+                    ]
+                ),
+                # A minimum factor of 1 keeps the learning rate constant.
+                lr_scheduler=LRSchedulersContainer.Config(
+                    warmup_steps=10,
+                    min_lr_factor=1.0,
+                ),
+            ),
+            training=TrainingConfig(
+                disable_accelerator_graphs=True,
+                # Pack several rollouts per microbatch (a multiple of
+                # max_total_tokens).
+                num_tokens_per_microbatch_per_dp_rank=4 * max_total_tokens,
+            ),
+            dist_moe_runtime=DistMoeRuntime.Config(scratch_capacity_factor=4.0),
+            parallelism=trainer_parallelism,
+            checkpointer=CheckpointManager.Config(
+                initial_load_in_hf=True,
+                interval=100,
+                last_save_model_only=False,
+                keep_latest_k=3,
+            ),
+            loss=ChunkedLossWrapper.Config(
+                num_chunks=8,
+                loss_fn=DAPOLoss.Config(
+                    ratio_clip_low=0.2,
+                    ratio_clip_high=0.28,
+                    global_vocab_size=decoder_vocab_size(trainer_model),
+                ),
+            ),
+        ),
+        generator=Generator.Config(
+            model=generator_model,
+            parallelism=generator_parallelism,
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
+            dist_moe_runtime=DistMoeRuntime.Config(
+                scratch_capacity_factor=4.0, inference=True
+            ),
+            max_num_batched_tokens=8192,
+            checkpointer=None,
+            sampling=SamplingConfig(
+                temperature=1.0,
+                top_p=1.0,
+                max_tokens=max_response_tokens,
+            ),
+        ),
+    )
+    config.trainer = apply_transforms(
+        config.trainer, [DistMoeTransform(expert_precision=expert_precision)]
+    )
+    if expert_precision == "mxfp8":
+        from dist_moe import BlockScaledConfig
+
+        generator_transform = DistMoeTransform(
+            expert_precision="mxfp8",
+            block_scaled_config=BlockScaledConfig(pipeline="mega"),
+            mxfp8_mega_fused_inference=True,
+        )
+    else:
+        generator_transform = DistMoeTransform(expert_precision=expert_precision)
+    config.generator = apply_transforms(config.generator, [generator_transform])
+    return config
+
+
+def rl_dapo_qwen3_30b_a3b_math_8k() -> Controller.Config:
+    """Qwen3-30B-A3B-Base, 8K responses, 32 prompts x 16 samples per step, BF16 Dist-MoE experts."""
+    return _qwen3_30b_a3b_dapo_math_8k_config(expert_precision="bf16")
+
+
+def rl_dapo_qwen3_30b_a3b_math_8k_mxfp8() -> Controller.Config:
+    """Qwen3-30B-A3B-Base, 8K responses, 32 prompts x 16 samples per step, MXFP8 Dist-MoE experts.
+
+    The generator uses the Mega pipeline with fused SwiGLU inference weights.
+    """
+    return _qwen3_30b_a3b_dapo_math_8k_config(expert_precision="mxfp8")

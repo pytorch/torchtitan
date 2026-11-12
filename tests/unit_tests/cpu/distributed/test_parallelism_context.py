@@ -898,6 +898,34 @@ class TestOneDimensionalMeshesSkipFakeAxes(DTensorTestBase):
                     dist.get_backend(mesh.get_group()), "fake", f"axis {name}"
                 )
 
+    @with_comms
+    def test_size_one_shard_axes_are_fake_but_available(self):
+        """Size-1 dp_shard and edp_shard are fake-backed but kept for FSDP."""
+        with patch(
+            "torchtitan.distributed.parallelism_context.device_type", self.device_type
+        ):
+            pd = ParallelismContext(
+                dp_replicate=1,
+                dp_shard=1,
+                cp=1,
+                tp=8,
+                pp=1,
+                ep=8,
+                world_size=8,
+                enable_sequence_parallel=False,
+            )
+            pd.build_mesh()
+
+            # dp_shard = 1 and edp_shard = dp_shard * cp * tp / ep = 8 / 8 = 1.
+            # FSDP still shards on both axes, but one rank needs no communicator.
+            one_d_meshes = pd.get_all_one_dimensional_meshes()
+            for axis in ("dp_shard", "edp_shard"):
+                mesh = pd.get_optional_mesh(axis)
+                self.assertIsNotNone(mesh, axis)
+                self.assertEqual(mesh.size(), 1, axis)
+                self.assertEqual(dist.get_backend(mesh.get_group()), "fake", axis)
+                self.assertNotIn(axis, one_d_meshes)
+
 
 class TestParallelismContextWorld8MeshOperations(DTensorTestBase):
     """Test ParallelismContext mesh operations with 8-rank distributed environment."""

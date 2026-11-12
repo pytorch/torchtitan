@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any
 
 import spmd_types as spmd
 import torch
@@ -15,10 +15,10 @@ import torch_remat as remat
 from spmd_types import SpmdType
 from torch import nn
 
-from torchtitan.config import TrainingConfig
+from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
-from torchtitan.distributed.local_compile import local_compile
+from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -36,15 +36,10 @@ from torchtitan.models.common.attention import (
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.attention.gdn import GDN
-from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
     token_id_placement,
-)
-from torchtitan.models.common.flops import (
-    delta_rule_flops_per_token,
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
 )
 from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.moe import MoE
@@ -122,6 +117,20 @@ class Qwen35Attention(Attention):
         wo: Linear.Config
         q_norm: OffsetRMSNorm.Config
         k_norm: OffsetRMSNorm.Config
+
+        def flops_per_token(self, seq_len: int) -> int:
+            from torchtitan.models.common.flops import (
+                quadratic_attention_flops_per_token,
+            )
+
+            head_dim = self.head_dim
+            return quadratic_attention_flops_per_token(
+                num_heads=self.n_heads,
+                qk_head_dim=head_dim,
+                v_head_dim=head_dim,
+                seq_len=seq_len,
+                sliding_window_size=None,
+            )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -319,7 +328,7 @@ class Qwen35Model(MultimodalModel):
           │
           ├─ _prepare_multimodal_embeds
           │    ├─ tok_embeddings(tokens)              → text embeddings
-          │    ├─ _get_vision_embeds(pixel_values)     → vision embeddings
+          │    ├─ get_vision_embeds(pixel_values)      → vision embeddings
           │    │    └─ vision_encoder(pixel_values)     → merge patches
           │    ├─ get_vision_positions              → locate vision regions
           │    └─ _scatter_vision_embeds                → scatter into text sequence
@@ -332,51 +341,24 @@ class Qwen35Model(MultimodalModel):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
+    class Config(MultimodalModel.Config):
+        # pyrefly: ignore [bad-override]
+        layers: list[Qwen35TransformerBlock.Config]
         vision_encoder: Qwen35VisionEncoder.Config | None = None
-        local_compile_regions: list[str] = field(
-            default_factory=lambda: [
-                "loss",
-                "fused_binary_activation",
-                "gated_rmsnorm",
-                "offset_rmsnorm",
-                "partial_rope",
-                "shared_expert_gate",
-                "fp32_to_bf16_split",
-            ]
-        )
-
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
-            # The vision encoder cost scales with patches rather than text
-            # sequence length, so this remains a decoder-only MFU estimate.
-            qwen_model = cast("Qwen35Model", model)
-            nparams, active_nparams = get_nparams_and_active_nparams(
-                model,
-                modules_excluded_from_active_params=(qwen_model.vision_encoder,),
+        local_compile: LocalCompileConfig = field(
+            default_factory=lambda: LocalCompileConfig(
+                regions=[
+                    "loss",
+                    "fused_binary_activation",
+                    "gated_rmsnorm",
+                    "gdn_split_in_proj",
+                    "offset_rmsnorm",
+                    "partial_rope",
+                    "shared_expert_gate",
+                    "fp32_to_bf16_split",
+                ]
             )
-            attention_op_flops = 0
-            for layer in self.layers:
-                if isinstance(layer.attention, Qwen35Attention.Config):
-                    attention = layer.attention
-                    attention_op_flops += quadratic_attention_flops_per_token(
-                        num_heads=attention.n_heads,
-                        qk_head_dim=attention.head_dim,
-                        v_head_dim=attention.head_dim,
-                        seq_len=seq_len,
-                    )
-                elif isinstance(layer.attention, GDN.Config):
-                    delta_net = layer.attention
-                    num_value_heads = (
-                        delta_net.in_proj_v.out_features // delta_net.value_head_dim
-                    )
-                    attention_op_flops += delta_rule_flops_per_token(
-                        num_heads=num_value_heads,
-                        key_head_dim=delta_net.key_head_dim,
-                        v_head_dim=delta_net.value_head_dim,
-                    )
-            return nparams, 6 * active_nparams + attention_op_flops
+        )
 
     def __init__(self, config: Config):
         from torchtitan.distributed.spmd_types import spmd_mesh_size
@@ -392,12 +374,8 @@ class Qwen35Model(MultimodalModel):
                 None,
             )
             if delta_net is not None:
-                num_key_heads = (
-                    delta_net.in_proj_q.out_features // delta_net.key_head_dim
-                )
-                num_value_heads = (
-                    delta_net.in_proj_v.out_features // delta_net.value_head_dim
-                )
+                num_key_heads = delta_net.n_key_heads
+                num_value_heads = delta_net.n_heads
                 if num_key_heads % tp != 0 or num_value_heads % tp != 0:
                     raise ValueError(
                         f"tensor parallel degree ({tp}) must divide "
@@ -419,17 +397,17 @@ class Qwen35Model(MultimodalModel):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
-        local_compile_regions: list[str],
+        local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
         dump_folder: str,
     ) -> Qwen35Model:
         return super().parallelize(
             parallelism_context=parallelism_context,
-            training=training,
+            precision=precision,
             parallelism=parallelism,
-            local_compile_regions=local_compile_regions,
+            local_compile=local_compile,
             activation_remat=activation_remat,
             dump_folder=dump_folder,
         )
@@ -441,12 +419,12 @@ class Qwen35Model(MultimodalModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Build masks, CP-shard, SPMD-wrap (+ deltanet annotation), and return."""
         del kwargs
+        loss_kwargs = input_dict.pop("loss_kwargs", {})
         padding_mask = input_dict.get("padding_mask", None)
 
         # Attention masks are built from the 1D ``positions``.
@@ -456,17 +434,22 @@ class Qwen35Model(MultimodalModel):
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
             )
 
         if parallelism_context.cp_enabled and self.tok_embeddings is not None:
             special_tokens = input_dict.get("special_tokens")
             pixel_values = input_dict.get("pixel_values")
-            if pixel_values is not None:
+            # Under CP, give each token its row in the image embeddings by counting the
+            # placeholder tokens (a block of rows per placeholder run, in order), unless the
+            # batch provides the rows: the RL batcher encodes each distinct image once and
+            # points every run that shows it at the same rows, which counting would not.
+            if (
+                pixel_values is not None
+                and "image_vision_bank_indices_T" not in input_dict
+            ):
                 if special_tokens is None or "image_id" not in special_tokens:
                     raise ValueError(
-                        "pixel_values require special_tokens with an 'image_id' "
-                        "entry."
+                        "pixel_values require special_tokens with an 'image_id' entry."
                     )
                 input_dict["image_vision_bank_indices_T"] = build_vision_bank_indices(
                     input_dict["input"],
@@ -519,6 +502,8 @@ class Qwen35Model(MultimodalModel):
             "'positions' or 'mrope_positions'."
         )
         input_dict["positions"] = rope_positions
+        input_shardings.update(dict.fromkeys(loss_kwargs, input_shardings["labels"]))
+        input_dict.update(loss_kwargs)
         if parallelism_context.cp_enabled:
             input_dict = self._cp_shard(
                 input_dict,
@@ -537,15 +522,16 @@ class Qwen35Model(MultimodalModel):
                 if isinstance(metadata, LinearAttentionMetadata):
                     metadata.annotate_spmd_types()
 
+        loss_kwargs = {name: input_dict.pop(name) for name in loss_kwargs}
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
         if any(
             isinstance(layer.feed_forward, MoE.Config) for layer in self.config.layers
         ):
             input_dict["aux_loss_denominators"] = global_routing_token_counts
-        return inputs, labels, input_dict
+        return inputs, labels, input_dict, loss_kwargs
 
-    def _get_vision_embeds(
+    def get_vision_embeds(
         self,
         pixel_values: torch.Tensor,
         *,
@@ -592,8 +578,10 @@ class Qwen35Model(MultimodalModel):
             grid_thw: Grid dimensions for images or None
             grid_thw_videos: Grid dimensions for videos or None
             special_tokens: Special token definitions
-            image_vision_bank_indices_T: Image-bank rows for local CP tokens
-            video_vision_bank_indices_T: Video-bank rows for local CP tokens
+            image_vision_bank_indices_T: Each local token's row in the image embeddings,
+                -1 for text; built from placeholders under CP, or provided by the batch
+                (several placeholder runs may share rows). None: placed by special_tokens.
+            video_vision_bank_indices_T: Same for videos.
 
         Returns:
             ``(num_tokens, dim)`` embeddings with vision tokens scattered in.
@@ -614,14 +602,12 @@ class Qwen35Model(MultimodalModel):
                 grid_thw=(1, grid_size, grid_size),
                 device=inputs_embeds.device,
             )
-        vision_embeds, num_tokens = self._get_vision_embeds(
+        vision_embeds, num_tokens = self.get_vision_embeds(
             pixel_values, grid_thw=grid_thw
         )
         if image_is_dummy:
             inputs_embeds = add_zero_vision_dependency(inputs_embeds, vision_embeds)
         else:
-            if special_tokens is None:
-                raise ValueError("special_tokens is required for image inputs")
             if image_vision_bank_indices_T is not None:
                 inputs_embeds = gather_vision_embeds(
                     inputs_embeds,
@@ -629,6 +615,8 @@ class Qwen35Model(MultimodalModel):
                     vision_bank_indices_T=image_vision_bank_indices_T,
                 )
             else:
+                if special_tokens is None:
+                    raise ValueError("special_tokens is required for image inputs")
                 image_positions = get_vision_positions(
                     tokens, num_tokens, special_tokens["image_id"]
                 )
@@ -647,14 +635,12 @@ class Qwen35Model(MultimodalModel):
                 grid_thw=(1, grid_size, grid_size),
                 device=inputs_embeds.device,
             )
-        vision_embeds, num_tokens = self._get_vision_embeds(
+        vision_embeds, num_tokens = self.get_vision_embeds(
             pixel_values_videos, grid_thw=grid_thw_videos
         )
         if video_is_dummy:
             inputs_embeds = add_zero_vision_dependency(inputs_embeds, vision_embeds)
         else:
-            if special_tokens is None:
-                raise ValueError("special_tokens is required for video inputs")
             if video_vision_bank_indices_T is not None:
                 inputs_embeds = gather_vision_embeds(
                     inputs_embeds,
@@ -662,6 +648,8 @@ class Qwen35Model(MultimodalModel):
                     vision_bank_indices_T=video_vision_bank_indices_T,
                 )
             else:
+                if special_tokens is None:
+                    raise ValueError("special_tokens is required for video inputs")
                 video_positions = get_vision_positions(
                     tokens, num_tokens, special_tokens["video_id"]
                 )

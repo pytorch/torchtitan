@@ -4,28 +4,33 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import grain.python as grain
 import numpy as np
 import pytest
 import torch
-import torchvision.transforms.v2.functional as TVF
 
 from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.data.dataset import SingleDatasetConfig
 from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
 from torchtitan.components.data.multimodal.mm_datasets import (
-    MM_DATASETS,
     MMSamplePackingConfig,
+    VisionSampleProcessor,
+)
+from torchtitan.components.data.multimodal.vision_processor import (
+    NaViTPatchGridResize,
+    PixelBudgetResize,
     VisionProcessor,
 )
-from torchtitan.components.data.multimodal.utils.image import resize_to_navit_patch_grid
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan_recipes.tests.datasets.synthetic_multimodal import SYNTHETIC_MM_DATASETS
 from torchtitan_recipes.tests.models import (
     kimi_k2_7 as kimi_configs,
+    kimi_k3 as kimi_k3_configs,
+    muse_glimmer as muse_glimmer_configs,
+    muse_spark as muse_spark_configs,
     qwen3_5 as qwen35_configs,
     qwen3_6 as qwen36_configs,
     qwen3_8 as qwen38_configs,
@@ -56,6 +61,22 @@ CONTEXT = DatasetBuildContext(
     max_context_length=9,
     num_tokens_per_microbatch=9,
     read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
+)
+
+_RESIZE = PixelBudgetResize.Config(min_pixels=65_536, max_pixels=16_777_216)
+_PROCESSOR_FIELDS = dict(
+    patch_size=16,
+    temporal_patch_size=2,
+    spatial_merge_size=2,
+    image_mean=(0.5, 0.5, 0.5),
+    image_std=(0.5, 0.5, 0.5),
+    resize=_RESIZE,
+    patch_order="block",
+    video_resize=_RESIZE,
+)
+VISION_CONTEXT = replace(
+    CONTEXT,
+    vision_processor=VisionProcessor.Config(**_PROCESSOR_FIELDS).build(),
 )
 
 
@@ -102,30 +123,26 @@ class _RowsSourceConfig:
         return _RowsSource(self.rows)
 
 
-def test_multimodal_registry_does_not_enable_packing():
-    assert isinstance(MM_DATASETS["cc12m"], SingleDatasetConfig)
-
-
-def test_vision_processor_forwards_resize_config():
+def test_vision_sample_processor_passes_the_vision_processor():
     captured = {}
 
     def process_sample(**kwargs):
         captured.update(kwargs)
         return None
 
-    processor = VisionProcessor.Config(
-        sample_processor=process_sample,
-        resize_fn=resize_to_navit_patch_grid,
-        image_interpolation_mode=TVF.InterpolationMode.LANCZOS,
-        max_patches=123,
-        max_patches_per_side=45,
-    ).build(context=CONTEXT)
+    processor = VisionSampleProcessor.Config(sample_processor=process_sample).build(
+        context=VISION_CONTEXT
+    )
 
     assert processor({}, np.random.default_rng(0)) is None
-    assert captured["resize_fn"] is resize_to_navit_patch_grid
-    assert captured["image_interpolation_mode"] is TVF.InterpolationMode.LANCZOS
-    assert captured["max_patches"] == 123
-    assert captured["max_patches_per_side"] == 45
+    assert captured["vision_processor"] is VISION_CONTEXT.vision_processor
+
+
+def test_vision_sample_processor_requires_a_vision_processor():
+    with pytest.raises(ValueError, match="vision_processor"):
+        VisionSampleProcessor.Config(sample_processor=lambda **kwargs: None).build(
+            context=CONTEXT
+        )
 
 
 def test_dp_rank_image_presence_dataset_drops_images_on_even_ranks():
@@ -138,12 +155,12 @@ def test_dp_rank_image_presence_dataset_drops_images_on_even_ranks():
 
     base = SingleDatasetConfig(
         source=_RowsSourceConfig(rows=({"jpg": b"image"}, {"jpg": b"image"})),
-        processor=VisionProcessor.Config(sample_processor=process_sample),
+        processor=VisionSampleProcessor.Config(sample_processor=process_sample),
     )
     has_image = []
     for dp_rank in range(2):
         dataset = DPRankImagePresenceDatasetConfig(dataset=base).build(
-            context=CONTEXT,
+            context=VISION_CONTEXT,
             dataset_iteration_policy=DatasetIterationPolicy(
                 seed=0,
                 shuffle=False,
@@ -178,28 +195,54 @@ def test_multimodal_dp_integration_recipes_use_rank_conditional_images(recipe):
 
 
 @pytest.mark.parametrize(
-    "recipe_name",
+    ("recipe_module", "recipe_name"),
     [
-        "kimi_k2_5_debugmodel",
+        (kimi_configs, "kimi_k2_5_debugmodel"),
+        (kimi_configs, "kimi_vl_a3b"),
+        (kimi_k3_configs, "kimi_k3_debugmodel"),
     ],
 )
-def test_kimi_multimodal_recipe_copies_unpacked_dataset(recipe_name):
-    base_dataset = MM_DATASETS["cc12m-test"]
-    base_processor = base_dataset.processor
+def test_kimi_recipe_vision_processor_matches_vision_encoder(
+    recipe_module, recipe_name
+):
+    config = getattr(recipe_module, recipe_name)()
+    vision_processor = config.vision_processor
+    vision_encoder = config.model.vision_encoder
 
-    config = getattr(kimi_configs, recipe_name)()
-    dataset = config.dataloader.dataset
-    collator = config.dataloader.collator
+    assert isinstance(vision_processor, VisionProcessor.Config)
+    assert vision_processor.patch_size == vision_encoder.patch_size
+    # MoonViT3d patches one frame at a time and merges a square kernel.
+    assert vision_processor.temporal_patch_size == 1
+    assert (vision_processor.spatial_merge_size,) * 2 == tuple(
+        vision_encoder.merge_kernel_size
+    )
+    assert isinstance(vision_processor.resize, NaViTPatchGridResize.Config)
+    assert vision_processor.patch_order == "raster"
 
-    assert isinstance(dataset, SingleDatasetConfig)
-    assert dataset is not base_dataset
-    assert isinstance(dataset.processor, VisionProcessor.Config)
-    assert dataset.processor is not base_processor
-    assert dataset.processor.resize_fn is resize_to_navit_patch_grid
-    assert dataset.processor.max_patches == 16_384
-    assert isinstance(collator, MultiModalCollator.Config)
-    assert collator.patch_order == "raster"
-    assert MM_DATASETS["cc12m-test"] is base_dataset
+
+@pytest.mark.parametrize(
+    ("recipe_module", "recipe_name"),
+    [
+        (muse_glimmer_configs, "muse_glimmer_debugmodel_mm"),
+        (muse_glimmer_configs, "muse_glimmer_30b_mm"),
+        (muse_spark_configs, "muse_spark_debugmodel_mm"),
+    ],
+)
+def test_muse_recipe_processors_match_vision_encoder(recipe_module, recipe_name):
+    config = getattr(recipe_module, recipe_name)()
+    vision_encoder = config.model.vision_encoder
+
+    processor = config.vision_processor
+    assert processor.patch_size == vision_encoder.patch_size
+    assert processor.temporal_patch_size == vision_encoder.patch_temporal
+    assert processor.spatial_merge_size == vision_encoder.downsample_factor
+    assert processor.patch_order == "raster"
+
+
+def _assert_matches_vision_encoder(processor_config, vision_encoder):
+    assert processor_config.patch_size == vision_encoder.patch_size
+    assert processor_config.temporal_patch_size == vision_encoder.temporal_patch_size
+    assert processor_config.spatial_merge_size == vision_encoder.spatial_merge_size
 
 
 @pytest.mark.parametrize(
@@ -209,60 +252,36 @@ def test_kimi_multimodal_recipe_copies_unpacked_dataset(recipe_name):
         (qwen35_configs, "qwen35_debugmodel_moe"),
         (qwen36_configs, "qwen36_debugmodel"),
         (qwen36_configs, "qwen36_debugmodel_moe"),
+        (qwen36_configs, "qwen36_27b"),
+        (qwen36_configs, "qwen36_35b_a3b"),
         (qwen38_configs, "qwen38_debugmodel"),
         (qwen38_configs, "qwen38_debugmodel_moe"),
+        (qwen38_configs, "qwen38_27b"),
     ],
 )
-def test_qwen_recipe_geometry_matches_dataset_processor(recipe_module, recipe_name):
-    registry_state = {
-        name: (
-            id(dataset),
-            id(dataset.processor),
-            dataset.processor.patch_size,
-            dataset.processor.temporal_patch_size,
-            dataset.processor.spatial_merge_size,
-        )
-        for name, dataset in MM_DATASETS.items()
-        if isinstance(dataset.processor, VisionProcessor.Config)
-    }
-
+def test_qwen_recipe_vision_processor_matches_vision_encoder(
+    recipe_module, recipe_name
+):
     config = getattr(recipe_module, recipe_name)()
-    dataset = config.dataloader.dataset
-    collator = config.dataloader.collator
 
-    assert isinstance(dataset, SingleDatasetConfig)
-    assert isinstance(dataset.processor, VisionProcessor.Config)
-    assert isinstance(collator, MultiModalCollator.Config)
-    assert collator.patch_size == dataset.processor.patch_size
-    assert collator.temporal_patch_size == dataset.processor.temporal_patch_size
-    assert collator.spatial_merge_size == dataset.processor.spatial_merge_size
-    assert {
-        name: (
-            id(dataset),
-            id(dataset.processor),
-            dataset.processor.patch_size,
-            dataset.processor.temporal_patch_size,
-            dataset.processor.spatial_merge_size,
-        )
-        for name, dataset in MM_DATASETS.items()
-        if isinstance(dataset.processor, VisionProcessor.Config)
-    } == registry_state
+    assert isinstance(config.dataloader.dataset, SingleDatasetConfig)
+    assert isinstance(config.dataloader.dataset.processor, VisionSampleProcessor.Config)
+    assert isinstance(config.vision_processor, VisionProcessor.Config)
+    assert config.vision_processor.patch_order == "block"
+    _assert_matches_vision_encoder(config.vision_processor, config.model.vision_encoder)
 
 
 def test_qwen35_video_recipe_uses_synthetic_video_dataset():
     config = qwen35_configs.qwen35_debugmodel_video()
     assert isinstance(config.dataloader, GrainDataLoader.Config)
     dataset = config.dataloader.dataset
-    collator = config.dataloader.collator
 
     assert dataset is SYNTHETIC_MM_DATASETS["synthetic-video-text"]
-    assert isinstance(dataset.processor, VisionProcessor.Config)
-    assert isinstance(collator, MultiModalCollator.Config)
-    assert collator.patch_size == dataset.processor.patch_size
-    assert collator.temporal_patch_size == dataset.processor.temporal_patch_size
-    assert collator.spatial_merge_size == dataset.processor.spatial_merge_size
+    assert isinstance(dataset.processor, VisionSampleProcessor.Config)
+    assert config.vision_processor.video_resize is not None
+    _assert_matches_vision_encoder(config.vision_processor, config.model.vision_encoder)
     assert config.training.steps == 10
-    assert config.training.disable_cuda_graphs
+    assert config.training.disable_accelerator_graphs
 
 
 def test_packing_preserves_ordered_media_when_merging_rows():
@@ -401,6 +420,18 @@ def test_multimodal_collator_preserves_aligned_labels():
     torch.testing.assert_close(microbatch.loss_token_counts, torch.tensor(4))
     torch.testing.assert_close(microbatch.loss_token_counts, torch.tensor(4))
     torch.testing.assert_close(microbatch.routing_token_counts, torch.tensor([4]))
+
+
+def test_mrope_collator_rejects_raster_patch_order():
+    context = replace(
+        CONTEXT,
+        vision_processor=VisionProcessor.Config(
+            **{**_PROCESSOR_FIELDS, "patch_order": "raster"}
+        ).build(),
+    )
+
+    with pytest.raises(ValueError, match="MRoPE requires patch_order='block'"):
+        MultiModalCollator.Config(build_mrope_positions=True).build(context=context)
 
 
 def test_mm_finite_underfilled_tail_flushes():

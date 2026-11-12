@@ -20,22 +20,28 @@ Shape suffixes:
 - Dh = head dim
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
+from torchtitan.distributed.local_compile import compile
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.base.module import Module
-from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    local_head_split,
+    VarlenAttentionMetadata,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 
-compiled_create_block_mask = torch.compile(create_block_mask)
+compiled_create_block_mask = compile(create_block_mask)
 
 # Applies rotary position embedding: (query, key, rope_cache) -> (query, key).
 RopeApply = Callable[
@@ -155,7 +161,10 @@ class VisionMLP(Module):
 
 
 class VisionAttention(Module):
-    """Multi-head self-attention with FlexInnerAttention over visual patches.
+    """Multi-head self-attention over visual patches.
+
+    The inner attention is flex (``BlockMask`` metadata) or varlen
+    (``VarlenAttentionMetadata``); the encoder builds the matching metadata.
 
     Separate q/k/v projections (clean per-head ColwiseParallel under TP). RoPE is
     applied via the injected ``rope_apply`` callable so this class is reused
@@ -174,6 +183,9 @@ class VisionAttention(Module):
             default_factory=FlexInnerAttention.Config
         )
 
+        def flops_per_query_key_pair(self) -> int:
+            return 12 * self.dim
+
     def __init__(self, config: Config):
         super().__init__()
         if config.dim % config.num_heads != 0:
@@ -187,7 +199,7 @@ class VisionAttention(Module):
         self.wk = config.wk.build()
         self.wv = config.wv.build()
         self.proj = config.proj.build()
-        self.flex_attention = config.inner_attention.build()
+        self.inner_attention = config.inner_attention.build()
 
     def _qkv(
         self, x_TD: torch.Tensor
@@ -203,7 +215,7 @@ class VisionAttention(Module):
         *,
         rope_cache: torch.Tensor,
         rope_apply: RopeApply,
-        attention_mask: BlockMask,
+        attention_mask: BlockMask | VarlenAttentionMetadata,
     ) -> torch.Tensor:
         num_tokens = x.shape[0]
 
@@ -216,7 +228,7 @@ class VisionAttention(Module):
         q_THDh, k_THDh = rope_apply(q_THDh, k_THDh, rope_cache)
 
         out_THDh = remat.region(
-            self.flex_attention,
+            self.inner_attention,
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
         )(q_THDh, k_THDh, v_THDh, attention_metadata=attention_mask)
@@ -249,7 +261,7 @@ class VisionTransformerBlock(Module):
         *,
         rope_cache: torch.Tensor,
         rope_apply: RopeApply,
-        attention_mask: BlockMask,
+        attention_mask: BlockMask | VarlenAttentionMetadata,
     ) -> torch.Tensor:
         attn_out = self.attn(
             self.norm1(x),
@@ -266,3 +278,18 @@ class VisionTransformerBlock(Module):
         return remat.region(
             torch.add, self.remat_region_name("ffn_residual"), recompute=False
         )(x, mlp_out)
+
+
+def get_packed_vision_grids(
+    input_dict: Mapping[str, Any]
+) -> tuple[tuple[int, int, int], ...]:
+    """Extract image and video patch grids from a raw CPU microbatch."""
+    return tuple(
+        (temporal, height, width)
+        for pixels, grid_key in (
+            ("pixel_values", "grid_thw"),
+            ("pixel_values_videos", "grid_thw_videos"),
+        )
+        if input_dict.get(pixels) is not None
+        for temporal, height, width in input_dict[grid_key].tolist()
+    )

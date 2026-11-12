@@ -79,7 +79,7 @@ def deepseek_v3_mxfp8_linear_converter_config(
     return MXFP8LinearConverter.Config(
         fqns=fqns,
         linears_saving_inputs_for_backward_in_mxfp8=[
-            "attention.wkv_b",
+            "attention.inner_attention.wkv_b",
             "feed_forward.w2",
             "shared_experts.w2",
         ],
@@ -120,9 +120,8 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10000,
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=None,
@@ -159,10 +158,10 @@ def deepseek_v3_671b_dist_moe_bf16(seq_len: int = 4096) -> Trainer.Config:
         config.model.max_context_length
     )
     config.training.num_tokens_per_train_step = 15360 * config.model.max_context_length
-    config.training.disable_cuda_graphs = False
-    config.training.dtype = "float32"
-    config.training.mixed_precision_param = "bfloat16"
-    config.training.mixed_precision_reduce = "bfloat16"
+    config.training.disable_accelerator_graphs = False
+    config.precision.dtype = "float32"
+    config.precision.param_dtype = "bfloat16"
+    config.precision.reduce_dtype = "bfloat16"
     config.activation_remat = None
     config.override.imports = [
         "torchtitan_recipes.overrides.fused_mla.fused_mla",
@@ -204,10 +203,10 @@ def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int = 4096) -> Trainer.Config:
         config.model.max_context_length
     )
     config.training.num_tokens_per_train_step = 15360 * config.model.max_context_length
-    config.training.disable_cuda_graphs = False
-    config.training.dtype = "float32"
-    config.training.mixed_precision_param = "bfloat16"
-    config.training.mixed_precision_reduce = "bfloat16"
+    config.training.disable_accelerator_graphs = False
+    config.precision.dtype = "float32"
+    config.precision.param_dtype = "bfloat16"
+    config.precision.reduce_dtype = "bfloat16"
     config.activation_remat = None
     config.override.imports = [
         "torchtitan_recipes.overrides.fused_mla.fused_mla",
@@ -268,5 +267,5 @@ def deepseek_v3_671b_nvfp4_ffn_mxfp8_attn(
             )
         ],
     )
-    config.model.local_compile_regions = ["loss"]
+    config.model.local_compile.regions = ["loss"]
     return config

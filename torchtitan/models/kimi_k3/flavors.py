@@ -9,11 +9,13 @@
 from collections.abc import Callable
 from dataclasses import replace
 from functools import partial
+from typing import Any
 
 import spmd_types as spmd
 import torch
 import torch.nn as nn
 
+from torchtitan.components.data.multimodal.vision_processor import NaViTPatchGridResize
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
@@ -31,8 +33,9 @@ from torchtitan.models.common import (
     Sigmoid,
     SiTUGLU,
 )
-from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.attention import FlexInnerAttention, InnerAttention
 from torchtitan.models.common.attention.kda import InnerKDA, KDA, KDAKernel
+from torchtitan.models.common.attention.mla import MLAAttention
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
@@ -40,8 +43,9 @@ from torchtitan.models.common.config_utils import (
     make_shared_expert_ffn_config,
 )
 from torchtitan.models.common.decoder_sharding import (
-    inner_attention_local_spmd_sharding_config,
     lm_head_sharding_config,
+    mla_attention_local_spmd_sharding_config,
+    mla_kv_projection_sharding_config,
     norm_sharding_config,
     pre_lm_head_norm_sharding_config,
     replicated_input_colwise_sharding_config,
@@ -95,6 +99,7 @@ from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
 
 __all__ = [
     "KIMI_K3_SPECIAL_TOKENS",
+    "KIMI_K3_VISION_PROCESSOR_KWARGS",
     "KimiK3Model",
     "KimiK3VisionEncoder",
     "MODEL_FLAVORS",
@@ -108,6 +113,24 @@ KIMI_K3_SPECIAL_TOKENS = {
     "vision_start_token": "<|media_begin|>",
     "vision_end_token": "<|media_end|>",
     "pad_token": "[PAD]",
+}
+
+# ``VisionProcessor.Config`` fields, used like the special tokens:
+# ``VisionProcessor.Config(**KIMI_K3_VISION_PROCESSOR_KWARGS)``. The values match
+# ``media_proc_cfg`` in the Hugging Face ``preprocessor_config.json``
+# (``in_patch_limit``, ``patch_limit_on_one_side``, ``merge_kernel_size``);
+# MoonViT3d patches one frame at a time (``temporal_patch_size=1``). Two fields
+# are not in the Hugging Face config: ``resize`` reimplements the NaViT
+# patch-grid resize in the processor's code, and ``patch_order`` is the raster
+# layout MoonViT3d expects.
+KIMI_K3_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
+    "patch_size": 14,
+    "temporal_patch_size": 1,
+    "spatial_merge_size": 2,
+    "image_mean": (0.5, 0.5, 0.5),
+    "image_std": (0.5, 0.5, 0.5),
+    "resize": NaViTPatchGridResize.Config(max_patches=65_536, max_patches_per_side=512),
+    "patch_order": "raster",
 }
 
 
@@ -226,9 +249,18 @@ def _mla_config(
 ) -> KimiMLAAttention.Config:
     """Low-rank projections and norms stay replicated; up-projections and the
     gate are column-parallel; ``wo`` is row-parallel to the residual layout."""
-    inner_attention = replace(
-        get_attention_config(attn_backend),
-        sharding_config=inner_attention_local_spmd_sharding_config(),
+    wkv_b = _linear(
+        kv_lora_rank,
+        num_heads * (qk_nope_head_dim + v_head_dim),
+        sharding_config=mla_kv_projection_sharding_config(cp=spmd.S(0)),
+    )
+    qkv_attention = get_attention_config(attn_backend)
+    assert isinstance(qkv_attention, InnerAttention.Config)
+    inner_attention = MLAAttention.Config(
+        wkv_b=wkv_b,
+        packed_kv_head_dim=qk_nope_head_dim + v_head_dim,
+        inner_attention=qkv_attention,
+        sharding_config=mla_attention_local_spmd_sharding_config(),
     )
 
     q_head_dim = qk_nope_head_dim + qk_rope_head_dim
@@ -257,11 +289,6 @@ def _mla_config(
         ),
         kv_norm=_norm(
             kv_lora_rank, sharding_config=replicated_state_sharding_config("weight")
-        ),
-        wkv_b=_linear(
-            kv_lora_rank,
-            num_heads * (qk_nope_head_dim + v_head_dim),
-            sharding_config=replicated_input_colwise_sharding_config(),
         ),
         gate=_linear(
             dim,
@@ -698,7 +725,7 @@ def _debugmodel(
         attn_res_block_size=4,
         num_heads=4,
         q_lora_rank=128,
-        kv_lora_rank=64,
+        kv_lora_rank=512,
         qk_nope_head_dim=128,
         qk_rope_head_dim=64,
         v_head_dim=128,

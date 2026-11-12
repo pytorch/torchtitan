@@ -3,9 +3,9 @@
 ## Where regions live
 
 - Declare: `@local_compile("name", batch_invariant=..., options={...})` on a function (`torchtitan/distributed/local_compile.py`). `grep -rn "@local_compile(" torchtitan/` lists existing names.
-- Enable: the model config's `local_compile_regions` list (e.g. `["loss", "swiglu"]`), set in the model's config builder or appended in a recipe (`config.local_compile_regions.append("router")`).
-- Bind: `apply_local_compile(regions)` (the trainer calls it); in a harness call it yourself after building the model.
-- The API differs by torchtitan version. Newer main keeps regions in the model config (`local_compile_regions`). Older trees set them at recipe level, `Trainer.Config.compile = LocalCompileConfig(regions=...)` with a shared default list, bound with `.apply_local_compile()`. Check which applies: `grep -rn "LocalCompileConfig\|local_compile_regions" torchtitan/`.
+- Enable: the model config's `local_compile.regions` list (e.g. `["loss", "swiglu"]`), set in the model's config builder or appended in a recipe (`config.local_compile.regions.append("router")`).
+- Bind: `LocalCompileConfig(regions=regions).apply()` (the trainer calls the configured object's `apply()` method); in a harness call it yourself after building the model.
+- The API differs by torchtitan version. Newer main keeps regions in the model config (`local_compile.regions`). Older trees set them at recipe level, `Trainer.Config.compile = LocalCompileConfig(regions=...)` with a shared default list. Check which applies: `grep -rn "LocalCompileConfig\|local_compile" torchtitan/`.
 
 ## Bandwidth (once per GPU)
 
@@ -25,7 +25,7 @@ torch.backends.cuda.matmul.fp32_precision = ...       # whatever this tree's tra
 cfg = ModelConfig(...)                                 # the model's real flavor config
 blocks = nn.ModuleList([Block(cfg, layer_id=i) for i in (a, b)]).cuda().to(torch.bfloat16)
 # pick layer ids that cover each block type (e.g. one dense + one MoE layer)
-apply_local_compile(regions)                           # [] for eager, the upstream list, or your variant
+LocalCompileConfig(regions=regions).apply()            # [] for eager, the upstream list, or your variant
 x = torch.randn(tokens, cfg.dim, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 # read Model.forward for what each block takes (positions, rope cache, masks); build those once here,
 # with requires_grad where training has it (e.g. a residual stream passed between blocks)

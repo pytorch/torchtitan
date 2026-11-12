@@ -8,6 +8,7 @@ import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from functools import partial
+from typing import Any
 
 import torch
 from torch.distributed.pipelining.schedules import (
@@ -17,21 +18,26 @@ from torch.distributed.pipelining.schedules import (
 )
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.data.loader import BaseDataLoader
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.data.types import TrainingMicrobatch
-from torchtitan.components.loss import LossFunction
+from torchtitan.components.loss import (
+    combine_loss_metrics,
+    loss_metric_reduce_op,
+    LossFunction,
+)
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
-from torchtitan.distributed.cuda_graph import (
-    cuda_graph_manager,
-    cuda_graphs_supported,
-    wrap_with_cuda_graph,
+from torchtitan.distributed.accelerator_graph import (
+    accelerator_graph_manager,
+    accelerator_graphs_supported,
+    wrap_with_accelerator_graph,
 )
-from torchtitan.distributed.fsdp import post_validate_fsdp_for_cuda_graph
+from torchtitan.distributed.fsdp import post_validate_fsdp_for_accelerator_graph
 from torchtitan.distributed.pipeline_parallel import (
-    prepare_pipeline_schedule_for_cuda_graph,
+    prepare_pipeline_schedule_for_accelerator_graph,
 )
 from torchtitan.models.base.model import BaseModel
 from torchtitan.observability import structured_logger as sl
@@ -131,7 +137,9 @@ class Validator(BaseValidator):
         metrics_processor: MetricsProcessor,
         seq_len: int,
         num_tokens_per_microbatch: int,
-        cuda_graph_enabled: bool = False,
+        vision_processor: VisionProcessor | None = None,
+        accelerator_graph_enabled: bool = False,
+        cuda_graph_annotation_config: dict[str, Any] | None = None,
         pp_schedule: _PipelineSchedule | None = None,
         pp_has_first_stage: bool | None = None,
         pp_has_last_stage: bool | None = None,
@@ -140,6 +148,7 @@ class Validator(BaseValidator):
         super().__init__(config=config)
         self.parallelism = parallelism
         self.tokenizer = tokenizer
+        self.vision_processor = vision_processor
         self.parallelism_context = parallelism_context
         self.loss_fn = loss_fn
         # A bounded validation run repeats data; steps=-1 consumes one finite pass.
@@ -162,29 +171,33 @@ class Validator(BaseValidator):
         self.pp_has_first_stage = pp_has_first_stage
         self.pp_has_last_stage = pp_has_last_stage
         self._run_eval = None
-        self._cuda_graph_enabled = cuda_graph_enabled and cuda_graphs_supported()
-        if self._cuda_graph_enabled:
+        self._cuda_graph_annotation_config = cuda_graph_annotation_config
+        self._accelerator_graph_enabled = (
+            accelerator_graph_enabled and accelerator_graphs_supported()
+        )
+        if self._accelerator_graph_enabled:
             # Keep training and optimizer eager until eval captures.
-            cuda_graph_manager.capture_allowed = False
-        elif cuda_graph_enabled:
+            accelerator_graph_manager.capture_allowed = False
+        elif accelerator_graph_enabled:
             logger.warning(
-                "CUDA graph capture is only supported on NVIDIA CUDA; "
+                "Graph capture is unavailable on this accelerator; "
                 "using eager validation."
             )
 
     def should_validate(self, step: int) -> bool:
         """Return whether validation is scheduled or eval capture is pending.
 
-        With eval CUDA graphs enabled, validate after each training update until
+        With eval accelerator graphs enabled, validate after each training update until
         eval captures. These passes warm up eval and capture it before training capture.
         """
         return super().should_validate(step) or (
-            self._cuda_graph_enabled and not cuda_graph_manager.capture_allowed
+            self._accelerator_graph_enabled
+            and not accelerator_graph_manager.capture_allowed
         )
 
     def _init_validate_fn(self, model_parts):
         evaluate = partial(self._validate_body, model_parts)
-        if not self._cuda_graph_enabled:
+        if not self._accelerator_graph_enabled:
             return evaluate
 
         if self._run_eval is None:
@@ -198,7 +211,7 @@ class Validator(BaseValidator):
                 assert self.pp_schedule is not None
                 inputs, labels, kwargs = prepared[0]
                 with self.parallelism_context.activate_spmd():
-                    prepare_pipeline_schedule_for_cuda_graph(
+                    prepare_pipeline_schedule_for_accelerator_graph(
                         self.pp_schedule,
                         args=(inputs,) if self.pp_has_first_stage else (),
                         kwargs=kwargs,
@@ -208,19 +221,20 @@ class Validator(BaseValidator):
                     )
 
             # Keep the first validation pass eager, including all its groups.
-            self._run_eval = wrap_with_cuda_graph(
+            self._run_eval = wrap_with_accelerator_graph(
                 evaluate,
                 num_warmup_iterations=1,
                 prepare_for_capture=prepare_for_capture
                 if self.parallelism_context.pp_enabled
                 else None,
                 name="validation",
+                annotation_config=self._cuda_graph_annotation_config,
             )
         elif (
-            not cuda_graph_manager.capture_allowed
-            and cuda_graph_manager.all_wrappers_warmed_up
+            not accelerator_graph_manager.capture_allowed
+            and accelerator_graph_manager.all_wrappers_warmed_up
         ):
-            cuda_graph_manager.capture_allowed = True
+            accelerator_graph_manager.capture_allowed = True
         return self._run_eval
 
     def _validate_body(self, model_parts, prepared):
@@ -228,6 +242,8 @@ class Validator(BaseValidator):
             if self.parallelism_context.pp_enabled:
                 assert self.pp_schedule is not None
                 losses = [] if self.pp_has_last_stage else None
+                # The last stage's loss fills one dict per microbatch.
+                loss_metrics: list[dict[str, torch.Tensor]] = [{} for _ in prepared]
                 self.pp_schedule.eval(
                     arg_mbs=[(inputs,) for inputs, _, _ in prepared]
                     if self.pp_has_first_stage
@@ -236,6 +252,7 @@ class Validator(BaseValidator):
                     target_mbs=[labels for _, labels, _ in prepared]
                     if self.pp_has_last_stage
                     else None,
+                    loss_kwarg_mbs=[{"loss_metrics": m} for m in loss_metrics],
                     losses=losses,
                     return_outputs=False,
                 )
@@ -254,10 +271,11 @@ class Validator(BaseValidator):
                 assert len(prepared) == len(model_parts) == 1
                 inputs, labels, kwargs = prepared[0]
                 predictions = model_parts[0](inputs, **kwargs)
-                loss_sum, _ = self.loss_fn(predictions, labels)
+                loss_sum, metrics = self.loss_fn(predictions, labels)
+                loss_metrics = [metrics]
                 del predictions
-            post_validate_fsdp_for_cuda_graph(model_parts)
-        return loss_sum.detach()
+            post_validate_fsdp_for_accelerator_graph(model_parts)
+        return loss_sum.detach(), loss_metrics
 
     @sl.log_trace_span("eval")
     @torch.no_grad()
@@ -278,6 +296,7 @@ class Validator(BaseValidator):
             parallelism_context = self.parallelism_context
 
             accumulated_loss: torch.Tensor | None = None
+            accumulated_metrics: dict[str, torch.Tensor] = {}
             evaluate = None
             device_type = utils.device_type
             total_global_valid_tokens = torch.zeros(
@@ -296,6 +315,7 @@ class Validator(BaseValidator):
                 tokenizer=self.tokenizer,
                 max_context_length=self.seq_len,
                 num_tokens_per_microbatch=self.num_tokens_per_microbatch,
+                vision_processor=self.vision_processor,
             )
 
             validation_iterator = iter(
@@ -335,23 +355,28 @@ class Validator(BaseValidator):
                 prepared = []
                 for input_dict in microbatch_group:
                     with parallelism_context.activate_spmd():
-                        prepared.append(
-                            model_parts[0].preprocess_inputs(
-                                input_dict,
-                                parallelism_context=parallelism_context,
-                                parallelism=self.parallelism,
-                                max_num_documents=self.dl_config.max_num_documents,
-                                max_context_length=self.seq_len,
-                            )
+                        inputs, labels, kwargs, _ = model_parts[0].preprocess_inputs(
+                            input_dict,
+                            parallelism_context=parallelism_context,
+                            parallelism=self.parallelism,
+                            max_num_documents=self.dl_config.max_num_documents,
                         )
+                    prepared.append((inputs, labels, kwargs))
                 if evaluate is None:
                     evaluate = self._init_validate_fn(model_parts)
-                loss_sum = evaluate(prepared)
+                loss_sum, step_metrics = evaluate(prepared)
 
                 if accumulated_loss is None:
                     accumulated_loss = loss_sum.clone()
                 else:
                     accumulated_loss.add_(loss_sum)
+                # Clone: graph replay overwrites the output tensors.
+                accumulated_metrics = combine_loss_metrics(
+                    [
+                        accumulated_metrics,
+                        *({k: v.clone() for k, v in m.items()} for m in step_metrics),
+                    ]
+                )
                 total_global_valid_tokens.add_(global_valid_tokens)
                 num_steps += 1
 
@@ -371,15 +396,30 @@ class Validator(BaseValidator):
                     "validation loss. Ensure the validation batches contain unmasked "
                     "labels."
                 )
-            if parallelism_context.dp_cp_enabled:
-                global_loss_sum = dist_utils.dist_sum(
-                    accumulated_loss, parallelism_context.get_optional_mesh("loss")
-                )
+            loss_mesh = parallelism_context.get_optional_mesh("loss")
+            if loss_mesh is not None:
+                global_loss_sum = dist_utils.dist_sum(accumulated_loss, loss_mesh)
             else:
                 global_loss_sum = float(accumulated_loss.item())
             global_avg_loss = global_loss_sum / num_global_valid_tokens
 
-            self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
+            # The loss runs without token counts here, so /mean and /frac
+            # metrics are raw sums; normalize them like the loss above. Under
+            # PP, ranks without the last stage have none.
+            global_metrics = combine_loss_metrics([accumulated_metrics], mesh=loss_mesh)
+            extra_metrics = {
+                f"validation_metrics/{key}": value.item()
+                / (
+                    num_global_valid_tokens
+                    if loss_metric_reduce_op(key) == "sum"
+                    else 1
+                )
+                for key, value in global_metrics.items()
+            }
+
+            self.metrics_processor.log_validation(
+                loss=global_avg_loss, step=step, extra_metrics=extra_metrics
+            )
         finally:
             for module, training in modes:
                 module.training = training

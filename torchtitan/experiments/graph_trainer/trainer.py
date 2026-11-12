@@ -13,12 +13,11 @@ from typing import Any
 import torch
 
 from torchtitan.components.data.types import TrainingMicrobatch
-from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.distributed import maybe_apply_numa_binding
-from torchtitan.distributed.cuda_graph import (
-    cuda_graphs_supported,
-    NUM_CUDA_GRAPH_WARMUP_STEPS,
-    wrap_fwd_bwd_with_cuda_graph,
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
+from torchtitan.distributed.accelerator_graph import (
+    accelerator_graphs_supported,
+    NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
+    wrap_fwd_bwd_with_accelerator_graph,
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
@@ -33,11 +32,12 @@ from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
     PagedStashManager,
     PagedStashRunner,
 )
+from torchtitan.experiments.graph_trainer.passes import resolve_registered_graph_passes
 from torchtitan.models.base import BaseModel
 from torchtitan.models.common.linear import Linear
 from torchtitan.observability import structured_logger as sl
 from torchtitan.trainer import Trainer
-from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
+from torchtitan.training_engine import LossAndMetrics, TrainingEngine
 
 
 logger = logging.getLogger(__name__)
@@ -60,16 +60,17 @@ class GraphTrainingEngine(TrainingEngine):
         config: "GraphTrainer.Config",
         *,
         model_config: BaseModel.Config,
+        precision: PrecisionConfig,
         max_num_documents: int | None,
         output_dir: str,
     ) -> None:
-        if config.optim.enable_cuda_graph:
+        if config.optim.enable_accelerator_graph:
             raise ValueError("Optim CUDA graphs are not supported with GraphTrainer.")
-        if model_config.local_compile_regions:
+        if model_config.local_compile.regions:
             raise ValueError(
                 "GraphTrainer traces the whole step into one graph; set "
-                "model.local_compile_regions = [] "
-                f"(got {model_config.local_compile_regions})."
+                "model.local_compile.regions = [] "
+                f"(got {model_config.local_compile.regions})."
             )
         if config.parallelism.fsdp_symm_mem_scope is not None:
             raise ValueError(
@@ -77,24 +78,32 @@ class GraphTrainingEngine(TrainingEngine):
                 "parallelism.fsdp_symm_mem_scope; set it to None."
             )
         validate_memory_policy_config(config.compile)
+        # Fail before building the model rather than at trace time.
+        resolve_registered_graph_passes(config.compile.extra_passes)
         super().__init__(
             config,
             model_config=model_config,
+            precision=precision,
             max_num_documents=max_num_documents,
             output_dir=output_dir,
         )
         self._pinned_pool_ctx = None
 
-    def _parallelize_compile_kwargs(self) -> dict[str, Any]:
-        """Return the compile kwargs ``model.parallelize``/``model.pipeline`` expect for this engine's models.
+    def _parallelize_kwargs(self) -> dict[str, Any]:
+        """Return the extra kwargs ``model.parallelize``/``model.pipeline`` expect for this engine's models.
 
-        Regular models expect ``local_compile_regions`` (compiled regions); GraphTrainer overrides this to
-        return ``compile_config`` (whole-step compile).
+        GraphTrainer models expect ``compile_config`` (whole-step compile) instead of
+        ``local_compile``, and ``training`` in ``parallelize``: the token-budget check and
+        AutoParallel read it.
         """
         # TODO: apply local compile outside parallelize/pipeline (#5026 review). That needs
         # GraphTrainer to stop reading its compile config there first (apply_compile,
-        # EP-overlap chunking, enable_autoparallel, GraphPP runtime); then delete this hook.
-        return {"compile_config": self.config.compile}
+        # EP-overlap chunking, enable_autoparallel, GraphPP runtime).
+        kwargs: dict[str, Any] = {"compile_config": self.config.compile}
+        # The PP path already receives ``training`` from the core pipeline call.
+        if not self.parallelism_context.pp_enabled:
+            kwargs["training"] = self.config.training
+        return kwargs
 
     def _initialize_forward_backward(self) -> None:
         if self.config.parallelism.fsdp_defer_gradient_reduction:
@@ -129,7 +138,7 @@ class GraphTrainingEngine(TrainingEngine):
                     if graph_runtime is not None
                     else None
                 ),
-                wgrad_dtype=TORCH_DTYPE_MAP[self.config.training.mixed_precision_param],
+                wgrad_dtype=TORCH_DTYPE_MAP[self.precision.param_dtype],
             )
 
         if not self.parallelism_context.pp_enabled:
@@ -193,18 +202,20 @@ class GraphTrainingEngine(TrainingEngine):
                 defer_fsdp_gradient_reduction=False,
             )
 
-        if not self.config.training.disable_cuda_graphs and cuda_graphs_supported():
-            self._run_forward_backward = wrap_fwd_bwd_with_cuda_graph(
+        if (
+            not self.config.training.disable_accelerator_graphs
+            and accelerator_graphs_supported()
+        ):
+            self._run_forward_backward = wrap_fwd_bwd_with_accelerator_graph(
                 self._run_forward_backward,
                 parameters=(
                     parameter
                     for model_part in self.model_parts
                     for parameter in model_part.parameters()
                 ),
-                num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+                num_warmup_iterations=NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
+                annotation_config=self.config.profiler.maybe_cuda_graph_annotation_config(),
             )
-
-        maybe_apply_numa_binding(self.device.index, self.device.type)
 
         if self.config.compile.memory_policy == "sac_and_offload":
             from torch._functorch._activation_offloading.offload_ops import (
@@ -223,20 +234,30 @@ class GraphTrainingEngine(TrainingEngine):
         global_routing_token_counts: torch.Tensor,
     ) -> list[tuple[Any, ...]]:
         """Prepare GraphRuntime schedule inputs for AOT single-stage execution."""
+        # The traced loss only receives the shared loss arguments, on both the
+        # single-stage and the PP path.
+        if any(
+            microbatch.as_input_dict().get("loss_kwargs")
+            for microbatch_group in microbatch_groups
+            for microbatch in microbatch_group
+        ):
+            raise ValueError(
+                "Per-microbatch loss arguments are not supported with GraphRuntime yet."
+            )
         if self.parallelism_context.pp_enabled:
-            return super()._preprocess_microbatch_groups(
+            pp_microbatch_groups = super()._preprocess_microbatch_groups(
                 microbatch_groups,
                 global_routing_token_counts=global_routing_token_counts,
             )
+            # Drop the per-microbatch loss arguments, rejected above, so both
+            # paths return (arg_mbs, kwarg_mbs, target_mbs).
+            return [
+                (arg_mbs, kwarg_mbs, target_mbs)
+                for arg_mbs, kwarg_mbs, target_mbs, _ in pp_microbatch_groups
+            ]
 
         preprocessed_microbatch_groups: list[tuple[Any, ...]] = []
         for microbatch_group in microbatch_groups:
-            if any(microbatch.loss_kwargs() for microbatch in microbatch_group):
-                raise ValueError(
-                    "Per-microbatch loss arguments are not supported with "
-                    "GraphRuntime yet."
-                )
-
             # Calling convention:
             # The runtime receives one positional tuple, keyword dictionary,
             # and target per schedule microbatch.
@@ -244,19 +265,21 @@ class GraphTrainingEngine(TrainingEngine):
             kwarg_mbs: list[dict[str, Any]] = []
             target_mbs: list[torch.Tensor | tuple[torch.Tensor, ...]] = []
             for microbatch in microbatch_group:
+                self._forward_backward_num_flops += self.flops_estimator(
+                    microbatch.as_input_dict()
+                )
                 input_dict = microbatch.to_input_dict(self.device, non_blocking=True)
                 with (
                     sl.log_trace_span("preprocess_inputs"),
                     self.parallelism_context.activate_spmd(),
                 ):
-                    inputs_mb, labels_mb, extra_kwargs_mb = self.model_parts[
+                    inputs_mb, labels_mb, extra_kwargs_mb, _ = self.model_parts[
                         0
                     ].preprocess_inputs(
                         input_dict,
                         parallelism_context=self.parallelism_context,
                         parallelism=self.config.parallelism,
                         max_num_documents=self.max_num_documents,
-                        max_context_length=self.config.training.max_context_length,
                         global_routing_token_counts=global_routing_token_counts,
                         **self.preprocess_inputs_kwargs,
                     )
@@ -277,18 +300,20 @@ class GraphTrainingEngine(TrainingEngine):
         global_loss_token_counts: torch.Tensor,
         *,
         defer_fsdp_gradient_reduction: bool,
-    ) -> ForwardBackwardResult:
+    ) -> LossAndMetrics:
         """Run microbatch groups through GraphRuntime."""
         assert not defer_fsdp_gradient_reduction
         accumulated_loss: torch.Tensor | None = None
-        loss_metrics: list[dict[str, torch.Tensor]] = []
+        loss_metrics: list[list[dict[str, torch.Tensor]]] = []
         for inputs, model_kwargs, labels in microbatch_groups:
-            self.loss_metrics = {}
-            loss = self._pp_forward_backward_microbatch_group(
+            loss, group_loss_metrics = self._pp_forward_backward_microbatch_group(
                 inputs=inputs,
                 model_kwargs=model_kwargs,
                 labels=labels,
-                loss_kwargs={"global_loss_token_counts": global_loss_token_counts},
+                loss_kwargs=[
+                    {"global_loss_token_counts": global_loss_token_counts}
+                    for _ in model_kwargs
+                ],
                 finalize_gradients=True,
             )
             detached_loss = loss.detach()
@@ -296,15 +321,48 @@ class GraphTrainingEngine(TrainingEngine):
                 accumulated_loss = detached_loss.clone()
             else:
                 accumulated_loss.add_(detached_loss)
-            loss_metrics.append(
-                {
-                    key: value.detach().clone()
-                    for key, value in self.loss_metrics.items()
-                }
-            )
+            loss_metrics.append(group_loss_metrics)
 
         assert accumulated_loss is not None
-        return ForwardBackwardResult(accumulated_loss, loss_metrics)
+        return accumulated_loss, loss_metrics
+
+    def _pp_forward_backward_microbatch_group(
+        self,
+        *,
+        inputs: list[tuple[torch.Tensor, ...]] | None,
+        labels: list[torch.Tensor] | None,
+        model_kwargs: list[dict[str, Any]],
+        loss_kwargs: list[dict[str, Any]],
+        finalize_gradients: bool = True,
+    ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
+        """Run one microbatch group through the graph runtime.
+
+        The traced loss takes one set of loss arguments shared by every
+        microbatch and reports no loss metrics. Preprocessing rejects
+        per-microbatch loss arguments, so every microbatch carries the same
+        ones.
+        """
+        with self.parallelism_context.activate_spmd(
+            typechecking=self.config.debug.spmd_typechecking,
+        ):
+            losses = [] if self.pp_has_last_stage else None
+            self.pp_schedule.step(
+                arg_mbs=inputs,
+                kwarg_mbs=model_kwargs,
+                target_mbs=labels,
+                losses=losses,
+                loss_kwargs=loss_kwargs[0],
+                return_outputs=False,
+                finalize_gradients=finalize_gradients,
+            )
+
+        loss_metrics: list[dict[str, torch.Tensor]] = [{} for _ in loss_kwargs]
+        if self.pp_has_last_stage:
+            assert losses is not None
+            detached_losses = [loss.detach() for loss in losses]
+            losses.clear()
+            return torch.sum(torch.stack(detached_losses)).to(self.device), loss_metrics
+        return self._pp_loss_sentinel_on_non_last_stage, loss_metrics
 
     def _page_stashed_forward_backward_body(
         self,
@@ -312,7 +370,7 @@ class GraphTrainingEngine(TrainingEngine):
         global_loss_token_counts: torch.Tensor,
         *,
         defer_fsdp_gradient_reduction: bool,
-    ) -> ForwardBackwardResult:
+    ) -> LossAndMetrics:
         """``_forward_backward_body`` under the paged stash runner.
 
         Wraps every microbatch group of the optimizer step rather than one
@@ -362,11 +420,14 @@ class GraphTrainer(Trainer):
         compile: GraphTrainerCompileConfig = field(
             default_factory=GraphTrainerCompileConfig
         )
-        """Whole-step compile. GraphTrainer requires ``model.local_compile_regions`` to be empty."""
+        """Whole-step compile.
+
+        GraphTrainer requires ``model.local_compile.regions`` to be empty.
+        """
 
         def __post_init__(self) -> None:
             Trainer.Config.__post_init__(self)
-            if self.training.cuda_graph_per_microbatch_group:
+            if self.training.accelerator_graph_per_microbatch_group:
                 raise ValueError(
                     "Per-group CUDA graphs are not supported with GraphTrainer."
                 )
@@ -395,7 +456,10 @@ class GraphTrainer(Trainer):
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
-        if config.validator is not None and not config.training.disable_cuda_graphs:
+        if (
+            config.validator is not None
+            and not config.training.disable_accelerator_graphs
+        ):
             logger.warning("GraphTrainer validation runs without CUDA graphs.")
         if (
             not self.engine.parallelism_context.pp_enabled

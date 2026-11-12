@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 
@@ -16,11 +17,15 @@ from aiohttp import web
 
 from torchtitan.config import Configurable
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.rollout.types import GenerateFn
+from torchtitan.rl.rollout.types import GenerateFn, Prompt
 
 logger = logging.getLogger(__name__)
 
 _SESSION_ID_HEADER = "X-Session-ID"
+
+# Stands in for the logprobs content list; the handler splices the real list in.
+_LOGPROBS_CONTENT_PLACEHOLDER = "<logprobs content>"
+
 
 GROUP_ID_SAMPLING_PARAM = "torchtitan_group_id"
 """Sampling parameter carrying a request's rollout group id.
@@ -115,7 +120,7 @@ class GenerationServer(Configurable):
         app.router.add_get("/healthz", self._handle_health_request)
         app.router.add_get("/v1/models", self._handle_models_request)
         app.router.add_post("/inference/v1/generate", self._handle_generate_request)
-        runner = web.AppRunner(app)
+        runner = web.AppRunner(app, access_log_class=_DebugAccessLogger)
         await runner.setup()
         site = web.TCPSite(runner, self.host, self.requested_port)
         await site.start()
@@ -179,8 +184,8 @@ class GenerationServer(Configurable):
             prompt_token_ids = _validate_token_ids(
                 body.get("token_ids"), field_name="token_ids"
             )
-            # vLLM needs room for one output token. Verifiers reads this wording as an
-            # overlong prompt and ends the rollout as context_length.
+            # vLLM needs room for one output token. Keep vLLM's wording: Verifiers'
+            # harnesses match it as a context overflow.
             if len(prompt_token_ids) >= self.max_rollout_tokens:
                 raise ValueError(
                     f"This model's maximum context length is {self.max_rollout_tokens} "
@@ -207,7 +212,7 @@ class GenerationServer(Configurable):
         request_id = f"{session_id}/request={request_index}"
         try:
             completion = await self.generate_fn(
-                prompt_token_ids,
+                Prompt(token_ids=prompt_token_ids),
                 request_id=request_id,
                 group_id=group_id,
                 routing_session_id=session_id,
@@ -258,26 +263,22 @@ class GenerationServer(Configurable):
                 else [*previous.metrics, *completion.metrics]
             ),
         )
-        return web.json_response(
+        # Text, not one dict per token: 1.4x faster, and no GC pass every ~700 tokens.
+        # A finite Python float's repr is valid JSON; vLLM's logprobs are Python floats.
+        logprobs_content = ",".join(
+            f'{{"token":"token_id:{token_id}","logprob":{logprob!r}}}'
+            for token_id, logprob in zip(
+                completion.token_ids, completion.token_logprobs
+            )
+        )
+        response_text = json.dumps(
             {
                 "request_id": completion.request_id,
                 "choices": [
                     {
                         "index": 0,
                         "token_ids": completion.token_ids,
-                        "logprobs": {
-                            "content": [
-                                {
-                                    "token": f"token_id:{token_id}",
-                                    "logprob": logprob,
-                                }
-                                for token_id, logprob in zip(
-                                    completion.token_ids,
-                                    completion.token_logprobs,
-                                    strict=True,
-                                )
-                            ]
-                        },
+                        "logprobs": {"content": _LOGPROBS_CONTENT_PLACEHOLDER},
                         "finish_reason": completion.finish_reason,
                     }
                 ],
@@ -285,16 +286,45 @@ class GenerationServer(Configurable):
                 "kv_transfer_params": None,
             }
         )
+        head, _, tail = response_text.rpartition(
+            json.dumps(_LOGPROBS_CONTENT_PLACEHOLDER)
+        )
+        return web.Response(
+            text=f"{head}[{logprobs_content}]{tail}", content_type="application/json"
+        )
+
+
+class _DebugAccessLogger(web.AbstractAccessLogger):
+    """Log each request at DEBUG on the ``aiohttp.access`` logger.
+
+    aiohttp's default logs one INFO line per request, most of the process's log lines. To see them,
+    run with ``TITAN_LOG_LEVEL=DEBUG``: aiohttp checks the level once per connection, so it must be
+    set before the server starts.
+    """
+
+    @property
+    def enabled(self) -> bool:
+        # False skips the per-request timing and formatting.
+        return self.logger.isEnabledFor(logging.DEBUG)
+
+    def log(
+        self, request: web.BaseRequest, response: web.StreamResponse, time: float
+    ) -> None:
+        self.logger.debug(
+            "%s %s %d %.3fs session=%s",
+            request.method,
+            request.path,
+            response.status,
+            time,
+            request.headers.get(_SESSION_ID_HEADER),
+        )
 
 
 def _validate_token_ids(value: object, *, field_name: str) -> list[int]:
-    """Validate an untyped JSON value as integer token IDs and return a copy."""
-    if not isinstance(value, list) or any(
-        isinstance(token_id, bool) or not isinstance(token_id, int)
-        for token_id in value
-    ):
+    """Validate an untyped JSON value as integer token IDs and return it."""
+    if not isinstance(value, list) or not set(map(type, value)) <= {int}:
         raise ValueError(f"{field_name} must be a list of integer token IDs")
-    return list(value)
+    return value
 
 
 def _parse_sampling_config(value: object):
@@ -324,11 +354,15 @@ def _parse_sampling_config(value: object):
         value.get("stop_token_ids"),
         field_name="stop_token_ids",
     )
-    defaults = SamplingConfig()
+    # The rollouter always sends these. Without them the generator would silently use
+    # SamplingConfig's defaults (temperature 0.8, max_tokens 100).
+    missing = {"temperature", "top_p", "max_tokens"} - set(value)
+    if missing:
+        raise ValueError(f"sampling_params must include {sorted(missing)}")
     return SamplingConfig(
-        temperature=float(value.get("temperature", defaults.temperature)),
-        top_p=float(value.get("top_p", defaults.top_p)),
-        max_tokens=int(value.get("max_tokens", defaults.max_tokens)),
+        temperature=float(value["temperature"]),
+        top_p=float(value["top_p"]),
+        max_tokens=int(value["max_tokens"]),
         seed=value.get("seed"),
         stop_token_ids=stop_token_ids,
     )

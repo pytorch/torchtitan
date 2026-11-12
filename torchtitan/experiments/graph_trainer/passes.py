@@ -84,6 +84,7 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
 from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
     apply_paged_stash_pass,
 )
+from torchtitan.experiments.graph_trainer.registry import GRAPH_PASS_REGISTRY
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     canonicalize_graph_pass,
     eliminate_dead_code_pass,
@@ -142,6 +143,27 @@ def async_tensor_parallel_pass(
 def construct_mandatory_graph_passes() -> list[Callable]:
     """Return correctness passes that run even when optional passes are disabled."""
     return [remove_parameter_gradient_markers_pass]
+
+
+def resolve_registered_graph_passes(pass_names: list[str]) -> list[Callable]:
+    """Look up ``compile.extra_passes`` in ``GRAPH_PASS_REGISTRY``.
+
+    Raises ``ValueError`` for a name that is unregistered or repeated.
+    """
+    repeated = sorted({name for name in pass_names if pass_names.count(name) > 1})
+    if repeated:
+        raise ValueError(f"compile.extra_passes lists {repeated} more than once")
+    passes: list[Callable] = []
+    for name in pass_names:
+        pass_fn = GRAPH_PASS_REGISTRY.get(name)
+        if pass_fn is None:
+            raise ValueError(
+                f"compile.extra_passes entry {name!r} is not a registered graph pass. "
+                "Import the module that registers it with @register_graph_pass "
+                f"from the recipe. Registered: {sorted(GRAPH_PASS_REGISTRY)}"
+            )
+        passes.append(pass_fn)
+    return passes
 
 
 def compile_time_passes(
@@ -370,13 +392,18 @@ def compile_time_passes(
     if config.compile.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
+    # Registered passes (e.g. kernel fusions) run last on the joint graph,
+    # after memory policy, remat and collective scheduling, and before any
+    # GraphPP split or Inductor compilation.
+    passes.extend(resolve_registered_graph_passes(config.compile.extra_passes))
+
     if not include_inductor:
         return passes
 
     passes.extend(
         final_inductor_compile_passes(
             config.compile,
-            use_cuda_graph=not config.training.disable_cuda_graphs,
+            use_cuda_graph=not config.training.disable_accelerator_graphs,
         )
     )
     return passes

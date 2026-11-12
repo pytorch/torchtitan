@@ -55,7 +55,7 @@ if [[ "${GPU_ARCH_TYPE}" == "rocm" ]]; then
   echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
 fi
 
-USE_CPP=0 PIP_EXTRA_INDEX_URL= python -m pip install --pre torchao --index-url "${INDEX_URL}"
+USE_CPP=0 PIP_EXTRA_INDEX_URL= python -m pip install --pre -r .github/requirements-torchao.txt --index-url "${INDEX_URL}"
 # GPT-OSS production configs use PyTorch's FA3 backend.
 python -m pip install flash-attn-3 \
   --extra-index-url https://download.pytorch.org/whl/test/cu130
@@ -107,6 +107,13 @@ if [[ "${GPU_ARCH_TYPE}" != "rocm" ]]; then
   # The H100 CI image provides the pinned hybrid-ep installer used by the
   # existing HybridEP workflow.
   bash /install_deepep.sh
+  # Run remat tests after switching to HybridEP: its deep_ep API is incompatible
+  # with DeepEP v2, so the earlier pytest invocation skips the HybridEP tests.
+  if ! CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 python -m pytest \
+    tests/unit_tests/gpu/distributed/test_deepep_activation_checkpoint.py \
+    -v -k HybridEP; then
+    STATUS=1
+  fi
   if ! CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests \
     --test_suite h100 \
     --execution_mode real_pg \

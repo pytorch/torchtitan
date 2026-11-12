@@ -2,6 +2,8 @@ This note outlines the process of adding a new model in the `torchtitan` repo. I
 
 For offline explorations, we recommend the same steps, unless otherwise noted.
 
+For MoE models, see the [expert-parallel backend selection guide](common/moe/README.md).
+
 ## Adding the model
 
 Please refer to the [Llama 3 folder](llama3) as an example.
@@ -12,9 +14,18 @@ The folder should be organized as follows
   - NOTE: We prioritize readability over flexibility. The preferred style is to not share modules among different models, except for the most common and complicated ones.
   - Define a Model class inheriting from a base model (e.g. `Decoder` from `torchtitan/models/common/decoder.py`).
   - The model class should contain a nested `Config` dataclass (inheriting from the base model's `Config`) that holds all architecture hyperparameters.
-    - `get_nparams_and_flops()` will be used to understand model size and compute throughput.
+    - `get_parameter_counts()` reports total and active model size, and
+      `build_flops_estimator()` estimates work for each raw CPU microbatch.
+      `Decoder` subclasses inherit both methods; a new `BaseModel` family
+      implements them.
+    - `Decoder.Config.layers` is `list[TransformerBlock.Config]`. If the
+      flavor builders or model code use the model's own block or attention
+      config type, redeclare `layers` (and the block's `attention`) with that
+      type and `# pyrefly: ignore [bad-override]`, rather than narrowing with
+      `isinstance` at each read.
   - `__init__()` consumes the `Config` to build the model.
   - Parameter initialization is handled by the `param_init` system on each module's `Config`. Set `param_init` (a `dict[str, Callable]` mapping parameter names to init functions) on every sub-config in the model flavor builder. `init_states()` auto-recurses into all submodules, so manual recursive calls are not needed. Override `_init_self_buffers()` for device-aware buffer initialization (e.g., RoPE, MoE).
+  - List parameters whose numerics need master precision (e.g. ones the HF checkpoint stores in float32) in `preserve_dtype_params` on their module's `Config`; FSDP mixed precision, checkpoint export and RL weight sync never lower their precision. Default it on the component's `Config` when the component always needs it (e.g. GDN `A_log`), or set it in the flavor builder for one instance of a generic module (e.g. Qwen3.5's GDN `GatedRMSNorm`).
   - Add additional files to reduce the complexity of `model.py` if it grows too large or complex, e.g. moe.py to host the `MoE`, router, grouped-linear, and expert-activation modules.
 - `state_dict_adapter.py`
   - Inherit [`BaseStateDictAdapter`](/torchtitan/models/base/state_dict_adapter.py) to implement state dict mappings between `torchtitan` model definition and other model definitions (e.g. from HuggingFace so that we can save / load model checkpoints in HF formats).
@@ -69,3 +80,22 @@ The folder should be organized as follows
   - Including unit tests and integration tests, see [examples](/tests/).
   - If the model folder is under the experiments folder, put the tests under the model folder. Otherwise, put the tests under the `/tests` folder.
   - Add necessary GitHub [workflows](/.github/workflows/).
+
+### FLOPs estimation
+
+`Config.build_flops_estimator(model, seq_len=...)` returns a callable from a raw
+CPU microbatch dictionary to model-wide logical training FLOPs before sharding.
+Build it from the full model; runtime estimation should use CPU metadata and tensor
+shapes without device-to-host synchronization or retaining model modules.
+Native decoders use `Attention.Config.flops_per_token(seq_len)`. Multimodal models
+share encoder composition through `multimodal_encoder_fqns`. Muse overrides the
+estimator to add output-module work using encoder-owned output-token counts.
+`ForwardBackwardResult.num_flops` reports unreduced work for this DP rank's raw
+microbatches, covering the full logical model and replicated across CP ranks.
+Trainers average it over the DP mesh; CP ranks hold the same value.
+
+`Config.get_parameter_counts(model)` reports unique total and architecturally
+active parameters, including embeddings and encoders and weighting routed experts
+by their active ratio. FLOPs exclude lookup-only embeddings separately.
+Decoder attention uses configured sequence length rather than packed document
+lengths. Causal sparsity, recomputation, and elementwise operations are omitted.

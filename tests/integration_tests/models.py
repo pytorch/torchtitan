@@ -22,12 +22,14 @@ from torchtitan.distributed.activation_remat import (
 from torchtitan.distributed.context_parallel import PTRRFlexAttentionCPLoadBalancer
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
+    MLAAttention,
     SlidingWindowFlexInnerAttention,
 )
 from torchtitan.models.common.attention.cp_attention import (
     AllGatherKVFlexInnerAttention,
     AllGatherKVSlidingWindowFlexInnerAttention,
 )
+from torchtitan.models.common.attention.cp_mla import AllGatherKVMLAFlexAttention
 from torchtitan.models.common.moe import MoE
 from torchtitan.trainer import Trainer
 from torchtitan_recipes.tests import _set_spmd_typechecking
@@ -64,7 +66,7 @@ def _configure_fsdp_numerics(config: Trainer.Config) -> Trainer.Config:
     config.parallelism.pipeline_parallel_degree = 1
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -75,7 +77,7 @@ def llama3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return apply_transforms(
         config,
         [
@@ -107,7 +109,7 @@ def llama3_debugmodel_fsdp2_tp2_pp2() -> Trainer.Config:
     config.parallelism.pipeline_parallel_schedule = "1F1B"
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -119,10 +121,7 @@ def deepseek_v3_debugmodel_mtp_fsdp4_ep2() -> Trainer.Config:
     )
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 4
-    config.override.imports = [
-        "torchtitan_recipes.overrides.helion_rope.helion_complex_rope",
-    ]
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -136,12 +135,12 @@ def deepseek_v3_debugmodel_mtp_cp2(
     config.parallelism.context_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return apply_transforms(
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
+                inner_attention_map={MLAAttention: AllGatherKVMLAFlexAttention}
             )
         ],
     )
@@ -178,12 +177,12 @@ def deepseek_v3_debugmodel_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return apply_transforms(
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
+                inner_attention_map={MLAAttention: AllGatherKVMLAFlexAttention}
             )
         ],
     )
@@ -202,12 +201,12 @@ def deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4() -> Trainer.Config:
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.context_parallel_degree = 2
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return apply_transforms(
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
+                inner_attention_map={MLAAttention: AllGatherKVMLAFlexAttention}
             )
         ],
     )
@@ -222,24 +221,49 @@ def deepseek_v3_debugmodel_hsdp2x2_ep2() -> Trainer.Config:
     _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.data_parallel_replicate_degree = 2
     config.parallelism.data_parallel_shard_degree = 2
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
-def deepseek_v4_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
+def deepseek_v4_debugmodel_fsdp2_tp2_ep2_pp2() -> Trainer.Config:
     from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_debugmodel
 
     config = deepseek_v4_debugmodel(
         seq_len=512, parallelism=ParallelismConfig(expert_parallel_degree=2)
     )
+    config.optim.optimizer = OptimizersContainer.Config(
+        optimizers=[AdamW.Config(pattern=r".*", lr=8e-4, fused=False)]
+    )
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 1
+    config.parallelism.pipeline_parallel_degree = 2
+    # Interleaved1F1B gives four virtual stages over the four debug layers:
+    # one stage holds hash layer 1 without tok_embeddings, and the last holds
+    # only hc_head, norm and lm_head.
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.num_pp_microbatches = 4
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    config.training.steps = 10
+    config.training.disable_accelerator_graphs = True
+    return config
+
+
+def deepseek_v4_debugmodel_fsdp4_ep4() -> Trainer.Config:
+    from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_debugmodel
+
+    config = deepseek_v4_debugmodel(
+        seq_len=512, parallelism=ParallelismConfig(expert_parallel_degree=4)
+    )
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 4
+    config.parallelism.tensor_parallel_degree = 1
+    config.parallelism.context_parallel_degree = 1
     config.parallelism.pipeline_parallel_degree = 1
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -255,7 +279,7 @@ def deepseek_v3_debugmodel_fused_mla_swiglu_fsdp4_ep2() -> Trainer.Config:
         "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu",
     ]
     config.parallelism.data_parallel_shard_degree = 4
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -271,7 +295,7 @@ def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return apply_transforms(
         config,
         [
@@ -326,7 +350,7 @@ def qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4() -> Trainer.Config:
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 4
     _set_spmd_typechecking(config, typechecking=False)
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     set_rank_conditional_image_presence(config)
     return config
 
@@ -340,10 +364,10 @@ def qwen35_debugmodel_moe_fsdp4_tp2_ep4() -> Trainer.Config:
     config.parallelism.expert_parallel_degree = 4
     config.parallelism.pipeline_parallel_degree = 1
     config.training.num_tokens_per_microbatch_per_dp_rank = (
-        config.training.max_context_length
+        config.model.max_context_length
     )
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     set_rank_conditional_image_presence(config)
     return config
 
@@ -356,7 +380,7 @@ def qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac() -> Trainer.Config:
     config.parallelism.tensor_parallel_degree = 2
     config.activation_remat = DefaultActivationRematConfig()
     _set_spmd_typechecking(config, typechecking=False)
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     set_rank_conditional_image_presence(config)
     return config
 
@@ -371,7 +395,7 @@ def gpt_oss_debugmodel_fsdp4_tp2_ep4() -> Trainer.Config:
     config.parallelism.tensor_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -408,7 +432,7 @@ def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
     config.training.num_tokens_per_microbatch_per_dp_rank = 1024
     config.activation_remat = DefaultActivationRematConfig()
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     config.training.steps = 10
     return apply_transforms(
         config,
@@ -437,7 +461,7 @@ def gpt_oss_debugmodel_fsdp4_pp2_ep4_sac() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
     config.activation_remat = DefaultActivationRematConfig()
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -460,7 +484,7 @@ def kimi_k2_5_debugmodel_muon_fsdp2_pp2_ep2() -> Trainer.Config:
     # Four microbatches match the four virtual pipeline stages.
     config.parallelism.num_pp_microbatches = 4
     config.training.steps = 1
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     set_rank_conditional_image_presence(config)
     return config
 
@@ -473,7 +497,7 @@ def kimi_k2_5_debugmodel_muon_fsdp8_ep8() -> Trainer.Config:
     )
     config.parallelism.data_parallel_shard_degree = 8
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     set_rank_conditional_image_presence(config)
     return config
 
@@ -503,10 +527,10 @@ def muse_glimmer_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = (
-        config.training.max_context_length
+        config.model.max_context_length
     )
     config.training.steps = 10
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return apply_transforms(
         config,
         [
@@ -529,7 +553,7 @@ def muse_glimmer_debugmodel_mm_fsdp2_tp2() -> Trainer.Config:
     _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     set_rank_conditional_image_presence(config)
     return config
 
@@ -548,7 +572,7 @@ def muse_glimmer_debugmodel_mm_tp2_cp2_pp2() -> Trainer.Config:
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 2
     config.parallelism.pipeline_parallel_schedule = "1F1B"
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return apply_transforms(
         config,
         [
@@ -658,9 +682,6 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             test_descr="DeepSeek V3 MTP FSDP+EP",
             test_name="deepseek_v3_mtp_fsdp+ep",
             ngpu=4,
-            # The Helion fused RoPE kernels are CUDA-only and tuned for NVIDIA
-            # H100/GB200; skip on ROCm where they are unvalidated.
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[deepseek_v3_debugmodel_mtp_tp2_cp2],
@@ -703,19 +724,28 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
-            configs=[deepseek_v4_debugmodel_fsdp2_tp2_ep2],
-            test_descr="DeepSeek V4 FSDP+TP+EP",
-            test_name="deepseek_v4_fsdp+tp+ep",
+            configs=[deepseek_v4_debugmodel_fsdp2_tp2_ep2_pp2],
+            test_descr="DeepSeek V4 AdamW FSDP+TP+EP+PP",
+            test_name="deepseek_v4_fsdp+tp+ep+pp",
+            ngpu=8,
+            # Sparse attention / indexer kernels are CUDA-only and unvalidated
+            # on ROCm.
+            skip_rocm_test=True,
+            # Runs on a real PG: PP needs real send/recv, and under Fake PG
+            # this config's sequence-parallel collectives return activations
+            # that alias their inputs, which corrupts a saved-for-backward
+            # tensor and blows up grad_norm at step 1.
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[deepseek_v4_debugmodel_fsdp4_ep4],
+            test_descr="DeepSeek V4 DistMuon FSDP+EP",
+            test_name="deepseek_v4_dist_muon_fsdp+ep",
             ngpu=4,
             # Sparse attention / indexer kernels are CUDA-only and unvalidated
             # on ROCm.
             skip_rocm_test=True,
-            # Runs on a real PG. Under Fake PG this config's sequence-parallel
-            # collectives return activations that alias their inputs, which
-            # corrupts a saved-for-backward tensor and blows up grad_norm at
-            # step 1. The same config trains cleanly on a real 4-GPU PG
-            # (grad_norm ~3.8), so keep it on a real PG until the Fake PG
-            # collective aliasing under spmd_types is fixed.
+            # DistMuon optimizer-state redistribution requires real collectives.
             use_real_pg=True,
         ),
         # Integration Test Cases for Qwen3 dense and MoE model

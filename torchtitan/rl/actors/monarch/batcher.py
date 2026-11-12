@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from monarch.actor import Actor, endpoint
 
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.actors.monarch.rdma_microbatch import (
@@ -29,10 +30,12 @@ class _BatcherActorEndpoints:
         max_context_length: int,
         num_prompts_per_train_step: int,
         dp_degree: int,
+        num_pp_microbatches: int = 1,
         pad_id: int,
         temperature: float,
         output_dir: str,
         enable_structured_logging: bool,
+        vision_processor: VisionProcessor.Config | None = None,
     ) -> None:
         init_logger()
         sl.init_structured_logger(
@@ -49,9 +52,11 @@ class _BatcherActorEndpoints:
             max_context_length=max_context_length,
             num_prompts_per_train_step=num_prompts_per_train_step,
             dp_degree=dp_degree,
+            num_pp_microbatches=num_pp_microbatches,
             pad_id=pad_id,
             temperature=temperature,
             register_rdma_microbatch=MonarchRDMAMicrobatch.register,
+            vision_processor=vision_processor,
         )
 
     @endpoint

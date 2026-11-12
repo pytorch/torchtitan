@@ -12,25 +12,32 @@ import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
 
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
-from torchtitan.models.base.model import BaseModel
+from torchtitan.models.base.model import BaseModel, FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.attention import (
     Attention,
     AttentionMetadata,
     AttentionMetadataMap,
     InnerAttention,
+    SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
+from torchtitan.models.common.flops import (
+    active_parameter_flops_per_token,
+    get_parameter_counts,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.common.rope import RoPE
 from torchtitan.observability.logging import warn_once
 
 __all__ = ["Decoder", "TransformerBlock"]
@@ -76,20 +83,40 @@ class Decoder(BaseModel):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config):
-        max_context_length: int
         dim: int
         vocab_size: int
         lm_head: Linear.Config
         tok_embeddings: Embedding.Config
         norm: RMSNorm.Config
-        # TODO(fegin): revisit
-        # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3033849265
-        # and fix the typing here
-        layers: list  # list[TransformerBlock.Config] or subclass configs
+        layers: list[TransformerBlock.Config]
         # Tie ``tok_embeddings`` and ``lm_head`` to share one weight. Models
         # that support it set this True in their config factories; the tying
         # itself is handled by ``Decoder.__init__`` / ``Decoder.init_states``.
         enable_weight_tying: bool = False
+
+        def __post_init__(self) -> None:
+            sliding_window_sizes: dict[type[InnerAttention], int] = {}
+            for layer_config in self.layers:
+                for _, attention, _, _ in layer_config.traverse(Attention.Config):
+                    config = attention.inner_attention
+                    if not isinstance(
+                        config,
+                        (
+                            SlidingWindowFlexInnerAttention.Config,
+                            SlidingWindowVarlenInnerAttention.Config,
+                        ),
+                    ):
+                        continue
+                    backend = config._owner
+                    assert backend is not None and issubclass(backend, InnerAttention)
+                    window_size = sliding_window_sizes.setdefault(
+                        backend, config.sliding_window_size
+                    )
+                    if window_size != config.sliding_window_size:
+                        raise ValueError(
+                            f"{backend.__name__} layers must use the same "
+                            "sliding_window_size because they share attention metadata."
+                        )
 
         @property
         def first_full_attention(self) -> Attention.Config | None:
@@ -123,6 +150,27 @@ class Decoder(BaseModel):
                 None,
             )
 
+        def get_parameter_counts(self, model: Module) -> tuple[int, int]:
+            """Return total and architecturally active native decoder parameters."""
+            return get_parameter_counts(model)
+
+        def build_flops_estimator(
+            self,
+            model: Module,
+            *,
+            seq_len: int,
+            excluded_submodules: tuple[Module | None, ...] = (),
+        ) -> FlopsEstimator:
+            parameter_flops = active_parameter_flops_per_token(
+                model, excluded_submodules=excluded_submodules
+            )
+            attention_flops = sum(
+                attention.flops_per_token(seq_len)
+                for _, attention, _, _ in self.traverse(Attention.Config)
+            )
+            flops_per_token = parameter_flops + attention_flops
+            return lambda input_dict: flops_per_token * input_dict["input"].numel()
+
     # Set by the trainer when ChunkedLossWrapper is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().
     # TODO(#ISSUE): Remove after fixing PP backward to skip non-tensor
@@ -133,7 +181,7 @@ class Decoder(BaseModel):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
         from torchtitan.distributed.fsdp import (
@@ -147,16 +195,17 @@ class Decoder(BaseModel):
         apply_fsdp_to_decoder(
             self,
             dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
+            reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
             pp_enabled=parallelism_context.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
+            cpu_offload=parallelism.fsdp_enable_cpu_offloading,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             ep_degree=parallelism_context.ep,
             edp_mesh=edp_mesh,
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
             symm_mem_scope=parallelism.fsdp_symm_mem_scope,
+            unshard_in_current_stream=parallelism.fsdp_unshard_in_current_stream,
         )
 
     def __init__(self, config: Config):
@@ -211,6 +260,8 @@ class Decoder(BaseModel):
         if self.enable_weight_tying:
             self.tok_embeddings.weight = self.lm_head.weight
 
+        self._tie_rope_caches()
+
     def init_states(
         self,
         *,
@@ -224,6 +275,43 @@ class Decoder(BaseModel):
             assert self.tok_embeddings is not None and self.lm_head is not None
             self.tok_embeddings.weight = self.lm_head.weight
         super().init_states(buffer_device=buffer_device)
+        # ``to_empty()`` and ``RoPE._init_self_buffers()`` give every layer its
+        # own cache again; point identical RoPEs back at one tensor.
+        self._tie_rope_caches()
+
+    def _tie_rope_caches(self) -> None:
+        """Share one cache tensor across RoPE modules with equal configs.
+
+        Every attention layer builds its own ``(max_context_length, ...)`` fp32
+        RoPE cache, identical across layers with the same config; at long
+        context these add up to GiBs per rank. The cache is a non-persistent,
+        read-only buffer, so sharing it does not change numerics or checkpoints.
+
+        Sharing only holds after ``init_states``: any later ``_apply`` (e.g.
+        ``model.to(...)``) gives every RoPE its own copy again. That costs
+        memory but not correctness.
+        """
+        # TODO: this lowers steady-state memory only. ``to_empty()`` and each
+        # ``RoPE._init_self_buffers()`` still materialize one cache per RoPE
+        # before they are tied here. If init-time peak memory becomes a problem,
+        # have ``_init_self_buffers`` reuse a cache already built for an equal
+        # config during the same ``init_states`` pass.
+        representatives: list[RoPE] = []
+        for module in self.modules():
+            if not isinstance(module, RoPE):
+                continue
+            rep = next(
+                (
+                    r
+                    for r in representatives
+                    if type(r) is type(module) and r.config == module.config
+                ),
+                None,
+            )
+            if rep is None:
+                representatives.append(module)
+            else:
+                module.cache = rep.cache
 
     def forward(
         self,
@@ -276,16 +364,17 @@ class Decoder(BaseModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[
         torch.Tensor | tuple[torch.Tensor, ...],
         torch.Tensor | tuple[torch.Tensor, ...],
         dict[str, Any],
+        dict[str, Any],
     ]:
         """Build masks (flex/varlen), CP-shard, SPMD-wrap, and return the batch."""
         del kwargs
+        loss_kwargs = input_dict.pop("loss_kwargs", {})
         positions = input_dict.get("positions", None)
         padding_mask = input_dict.get("padding_mask", None)
         if positions is not None:
@@ -293,11 +382,12 @@ class Decoder(BaseModel):
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
             )
             input_dict["attention_metadata"] = attention_metadata
 
         input_shardings = decoder_input_sharding()
+        input_shardings.update(dict.fromkeys(loss_kwargs, input_shardings["labels"]))
+        input_dict.update(loss_kwargs)
         if parallelism_context.cp_enabled:
             input_dict = self._cp_shard(
                 input_dict,
@@ -309,11 +399,12 @@ class Decoder(BaseModel):
             parallelism_context, input_dict, input_shardings
         )
 
+        loss_kwargs = {name: input_dict.pop(name) for name in loss_kwargs}
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
         if next(self.config.traverse(AuxLoss.Config), None) is not None:
             input_dict["aux_loss_denominators"] = global_routing_token_counts
-        return inputs, labels, input_dict
+        return inputs, labels, input_dict, loss_kwargs
 
     def _cp_shard(
         self,
@@ -381,11 +472,11 @@ class Decoder(BaseModel):
         *,
         padding_mask: torch.Tensor | None = None,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
     ) -> AttentionMetadataMap:
         attention_metadata: dict[type[InnerAttention], AttentionMetadata] = {}
         for layer_config in self.config.layers:
-            for _, config, _, _ in layer_config.traverse(InnerAttention.Config):
+            for _, attention, _, _ in layer_config.traverse(Attention.Config):
+                config = attention.inner_attention
                 backend = config._owner
                 assert backend is not None and issubclass(backend, InnerAttention)
                 if backend in attention_metadata:
@@ -394,7 +485,7 @@ class Decoder(BaseModel):
                     positions,
                     padding_mask=padding_mask,
                     max_num_documents=max_num_documents,
-                    max_context_length=max_context_length,
+                    max_context_length=self.config.max_context_length,
                 )
                 if metadata is not None:
                     attention_metadata[backend] = metadata
