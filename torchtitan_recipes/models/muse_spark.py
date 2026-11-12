@@ -265,7 +265,6 @@ def muse_spark_816b_a42b(
         "816B-A42B",
         parallelism=parallelism,
         seq_len=seq_len,
-        moe_comm_backend="standard",
         attn_backend=attn_backend,
     )
     if parallelism.context_parallel_degree > 1:

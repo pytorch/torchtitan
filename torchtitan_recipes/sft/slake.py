@@ -229,7 +229,6 @@ def _muse_spark_816b_a42b_slake_sft(variant: _SlakeVariant) -> Trainer.Config:
         "816B-A42B_mm",
         parallelism=config.parallelism,
         seq_len=seq_len,
-        moe_comm_backend="standard",
         attn_backend="flex",
     )
     config.hf_assets_path = os.environ.get(

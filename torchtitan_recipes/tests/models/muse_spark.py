@@ -89,7 +89,6 @@ def muse_spark_debugmodel(
         "debugmodel",
         parallelism=parallelism,
         seq_len=seq_len,
-        moe_comm_backend="standard",
         attn_backend="flex",
     )
     config = Trainer.Config(
@@ -166,7 +165,6 @@ def muse_spark_debugmodel_dist_moe_mxfp8(
         "debugmodel",
         parallelism=config.parallelism,
         seq_len=seq_len,
-        moe_comm_backend="standard",
         attn_backend="flex",
         converters=[_muse_spark_mxfp8_linear_converter_config()],
     )
@@ -202,7 +200,6 @@ def muse_spark_debugmodel_mm(
         "debugmodel_mm",
         seq_len=seq_len,
         parallelism=config.parallelism,
-        moe_comm_backend="standard",
         attn_backend="flex",
     )
     config.model = model_config
