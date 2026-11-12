@@ -28,6 +28,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchtitan.distributed.spmd_types import disable_dense_sp
 from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 
@@ -426,6 +427,8 @@ class NaViTEncoder(Module):
         x_TD = self.ln_post(x_TD)
         return self._pixel_shuffle_downsample(x_TD, grid_h, grid_w)
 
+    # Vision activations are never sequence-sharded, so they stay TP-invariant.
+    @disable_dense_sp()
     def forward(
         self,
         pixel_values_NP: torch.Tensor,

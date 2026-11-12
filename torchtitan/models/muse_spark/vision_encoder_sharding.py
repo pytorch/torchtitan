@@ -57,5 +57,6 @@ def navit_encoder_sharding_config() -> ShardingConfig:
 
 def vision_rope_freq_sharding_config() -> ShardingConfig:
     return ShardingConfig(
-        state_shardings={"inv_freq": SpmdType({DP: spmd.R, CP: spmd.I, TP: spmd.I})},
+        # TP-replicated like the decoder RoPE cache.
+        state_shardings={"inv_freq": SpmdType({DP: spmd.R, CP: spmd.I, TP: spmd.R})},
     )
