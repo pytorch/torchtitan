@@ -262,32 +262,17 @@ class DistMuon(Optimizer):
             for group in self.param_groups
             for parameter in group["params"]
         ):
-            self.compile(compile_fn=compile_fn)
-
-    def compile(
-        self,
-        *,
-        compile_fn: Callable[[Callable[..., Tensor]], Callable[..., Tensor]]
-        | None = None,
-    ) -> None:
-        """Compile local updates with Inductor or an integration's transform."""
-        if any(
-            parameter.dtype not in (torch.float32, torch.bfloat16)
-            for group in self.param_groups
-            for parameter in group["params"]
-        ):
-            raise ValueError("DistMuon.compile() requires FP32 or BF16 storage")
-        if compile_fn is None:
-            compile_fn = partial(
-                torch.compile,
-                fullgraph=True,
-                dynamic=False,
-                recompile_limit=256,
-                options={"emulate_precision_casts": True},
-            )
-        self._prepare_input = compile_fn(_prepare_muon_input)
-        self._compute_direction = compile_fn(_compute_muon_direction)
-        self._apply_parameter_update = compile_fn(_apply_muon_update)
+            if any(
+                parameter.dtype not in (torch.float32, torch.bfloat16)
+                for group in self.param_groups
+                for parameter in group["params"]
+            ):
+                raise ValueError(
+                    "Compiled DistMuon updates require FP32 or BF16 storage"
+                )
+            self._prepare_input = compile_fn(self._prepare_input)
+            self._compute_direction = compile_fn(self._compute_direction)
+            self._apply_parameter_update = compile_fn(self._apply_parameter_update)
 
     @staticmethod
     def _resolve_ns_device(ns_device: str | None) -> torch.device | None:
@@ -1864,14 +1849,10 @@ def _prepare_muon_input(
     if torch.compiler.is_compiling():
         # Tensor weights retain FP32 scalar rounding under Inductor.
         gradient = gradient.float()
-        weight = torch.scalar_tensor(
-            1 - momentum, dtype=torch.float32, device=gradient.device
-        )
+        weight = gradient.new_tensor(1 - momentum)
         momentum_buffer.copy_(torch.lerp(momentum_buffer.float(), gradient, weight))
         if nesterov:
-            weight = torch.scalar_tensor(
-                momentum, dtype=torch.float32, device=gradient.device
-            )
+            weight = gradient.new_tensor(momentum)
             out.copy_(torch.lerp(gradient, momentum_buffer.float(), weight))
         else:
             out.copy_(momentum_buffer)

@@ -97,8 +97,7 @@ config.model.local_compile.regions.append("muon")
 ```
 
 Omit `"muon"` to keep eager updates. CPU-resident parameters retain eager updates.
-Compilation is lazy and redistribution stays eager. Standalone FlexShard users
-can call `optimizer.compile()` directly.
+Compilation is lazy and redistribution stays eager.
 
 ## Package boundary
 
