@@ -40,6 +40,7 @@ pipeline, context, and expert parallelism without rewriting the model.
 
 ## Latest news
 
+- **[2026/10]** [Zephon](https://github.com/datologyai/zephon), a dataloader from [DatologyAI](https://www.datologyai.com/), released its [TorchTitan integration](https://github.com/datologyai/torchtitan-zephon). Zephon keeps the same training batches in the same order even when your GPU count changes (elastic determinism). Check out the [blog post on pytorch.org](https://pytorch.org/blog/bringing-elastically-deterministic-data-loading-to-torchtitan-with-zephon/).
 - **[2026/08]** [TitanRL](torchtitan/rl) is a hackable RL stack for scaling and debugging. It reuses TorchTitan model definitions and kernels across training and vLLM generation and supports batch-invariant mode.
 - **[2025/11]** AMD released an [optimized fork](https://github.com/AMD-AGI/torchtitan-amd/tree/main) of `torchtitan` for AMD GPUs.
 - **[2025/10]** We released `torchtitan` [v0.2.0](https://github.com/pytorch/torchtitan/releases).
