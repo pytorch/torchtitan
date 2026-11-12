@@ -62,6 +62,7 @@ def _replace_vllm_layer_configs(model_config):
     """Replace inner-computation configs with vLLM generation variants."""
     from vllm.v1.attention.backends.flex_attention import causal_mask_mod
 
+    model_config.__post_init__()
     # These modules inspect the breakable-CUDA graph environment at import time.
     # Defer imports until vLLM constructs the model, after the generator has set
     # that environment. Import the GDN adapter only for hybrid models so other
@@ -90,6 +91,16 @@ def _replace_vllm_layer_configs(model_config):
             backend_cfg = attention_cfg.inner_attention
             is_mla = isinstance(backend_cfg, MLAAttention.Config)
             if uses_compressed_mla_cache(backend_cfg):
+                kernel_cfg = backend_cfg.inner_attention
+                if (
+                    isinstance(kernel_cfg, FlexInnerAttention.Config)
+                    and kernel_cfg.get_mask_mod() is not None
+                ):
+                    raise ValueError(
+                        f"layers[{layer_idx}]: custom Flex masks are not supported "
+                        "with vLLM's compressed MLA cache; its attention kernels "
+                        "only support causal masking."
+                    )
                 vllm_attention_cfg = VLLMMLAAttention.Config(
                     wkv_b=backend_cfg.wkv_b,
                     packed_kv_head_dim=backend_cfg.packed_kv_head_dim,

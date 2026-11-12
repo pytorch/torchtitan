@@ -20,6 +20,8 @@ import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch.export import register_dataclass
+from torch.fx import symbolic_trace
+from torch.fx.proxy import TraceError
 from torch.nn.attention import current_flash_attention_impl, sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _DEFAULT_SPARSE_BLOCK_SIZE,
@@ -680,6 +682,9 @@ class FlexInnerAttention(InnerAttention):
         block_size: int | tuple[int, int] = _DEFAULT_SPARSE_BLOCK_SIZE
         kernel_options: dict = field(default_factory=dict)
 
+        def __post_init__(self) -> None:
+            self.get_mask_mod_code()
+
         @property
         def is_full_attention(self) -> bool:
             return True
@@ -688,10 +693,41 @@ class FlexInnerAttention(InnerAttention):
             """Return an additional mask in document-local positions.
 
             Override in a model's inner-attention Config. Causal and document
-            masking are applied separately. The callable must depend only on
-            its arguments and fixed model configuration, not on batch contents.
+            masking are applied separately. The callable must be FX-traceable
+            and depend only on query/key positions and scalar configuration
+            constants, not on batch/head indices or captured tensors.
             """
             return None
+
+        def get_mask_mod_code(self) -> str | None:
+            """Validate the mask and return its traced expression for metadata sharing."""
+            mask_mod = self.get_mask_mod()
+            if mask_mod is None:
+                return None
+            try:
+                graph = symbolic_trace(mask_mod)
+            except (TraceError, TypeError) as error:
+                raise ValueError(
+                    "Custom Flex masks must be FX-traceable expressions of "
+                    "query/key positions, independent of batch/head indices."
+                ) from error
+            inputs = [node for node in graph.graph.nodes if node.op == "placeholder"]
+            for index_name, node in zip(("batch", "head"), inputs[:2], strict=True):
+                if node.users:
+                    raise ValueError(
+                        f"Custom Flex masks must not depend on {index_name} indices: "
+                        "attention metadata is shared across batches and heads."
+                    )
+            # Captured state is absent from graph.code, so it cannot establish
+            # that layers sharing metadata use the same mask.
+            if any(
+                node.op in ("get_attr", "call_module") for node in graph.graph.nodes
+            ):
+                raise ValueError(
+                    "Custom Flex masks must use scalar configuration constants; "
+                    "captured tensors and modules are unsupported."
+                )
+            return graph.code
 
         def _get_mask_mods(self, positions: torch.Tensor) -> list[_mask_mod_signature]:
             mask_mods = [

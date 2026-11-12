@@ -22,6 +22,7 @@ from torchtitan.models.common.attention import (
     Attention,
     AttentionMetadata,
     AttentionMetadataMap,
+    FlexInnerAttention,
     InnerAttention,
     SlidingWindowFlexInnerAttention,
     SlidingWindowVarlenInnerAttention,
@@ -96,7 +97,21 @@ class Decoder(BaseModel):
 
         def __post_init__(self) -> None:
             sliding_window_sizes: dict[type[InnerAttention], int] = {}
+            mask_mod_codes: dict[type, str | None] = {}
             for layer_config in self.layers:
+                for _, config, _, _ in layer_config.traverse(FlexInnerAttention.Config):
+                    backend = type(config)
+                    mask_code = config.get_mask_mod_code()
+                    if (
+                        backend in mask_mod_codes
+                        and mask_mod_codes[backend] != mask_code
+                    ):
+                        raise ValueError(
+                            f"{backend.__qualname__} layers must use the same custom "
+                            "Flex mask because they share attention metadata. "
+                            "Use a distinct inner-attention subclass for each mask."
+                        )
+                    mask_mod_codes[backend] = mask_code
                 for _, attention, _, _ in layer_config.traverse(Attention.Config):
                     config = attention.inner_attention
                     if not isinstance(
