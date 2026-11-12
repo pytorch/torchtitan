@@ -35,11 +35,11 @@ from torchtitan.tools.garbage_collector import GarbageCollector
 
 from .base import (
     BaseCheckpointManager,
+    build_model_views,
     EMA,
     export_state_dict,
     LR_SCHEDULER,
     MODEL,
-    ModelWrapper,
     OPTIMIZER,
     purge_thread,
 )
@@ -156,10 +156,13 @@ class CheckpointManager(BaseCheckpointManager):
         self._storage = _FilesystemCheckpointStorage()
 
         self._validate_extra_state_keys(extra_states)
+        model, self._resume_base_view, self._fresh_start_view = build_model_views(
+            model_parts, config
+        )
         self.states = dict(extra_states)
         self.states.update(
             {
-                MODEL: ModelWrapper(model_parts),
+                MODEL: model,
                 OPTIMIZER: optimizers,
                 LR_SCHEDULER: lr_schedulers,
             }
@@ -626,7 +629,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         checkpoint_id = self._create_last_step_id(curr_step)
         if self.last_save_model_only:
-            model = self.states[MODEL]
+            model = self._full_model()
             states = export_state_dict(
                 model.state_dict(), dtype=self.export_dtype, model_parts=model.model
             )
