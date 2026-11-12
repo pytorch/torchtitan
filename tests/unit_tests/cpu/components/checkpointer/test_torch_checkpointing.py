@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import queue
+import shutil
 import tempfile
 import unittest
 from concurrent.futures import Future
@@ -18,6 +19,7 @@ from typing import Any
 from unittest import mock
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 
 import torchtitan.components.checkpointer.torch_checkpointing as manager_module
@@ -52,6 +54,7 @@ from torchtitan.components.checkpointer.torch_checkpointing import (
     _async_save_config,
     _BackendCheckpointStorage,
     _default_backend_config,
+    _sync_save_config,
     TorchCheckpointingManager,
 )
 from torchtitan.config import CallableFunction
@@ -1365,3 +1368,135 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 backend_manager.load_calls[0][0],
             )
             manager.close()
+
+
+def _frozen_weight_linear(value: float) -> nn.Linear:
+    model = nn.Linear(2, 2)
+    model.weight.requires_grad_(False)
+    with torch.no_grad():
+        model.weight.fill_(value)
+        model.bias.fill_(value)
+    return model
+
+
+class TorchCheckpointingFrozenParamsTest(unittest.TestCase):
+    """Checkpoints after step 0 leave out frozen params; resume loads the base.
+
+    Uses the real backend with synchronous saves on a world-size-1 group.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._owns_pg = not dist.is_initialized()
+        if cls._owns_pg:
+            dist.init_process_group(
+                backend="gloo", store=dist.HashStore(), rank=0, world_size=1
+            )
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if cls._owns_pg:
+            dist.destroy_process_group()
+
+    def setUp(self) -> None:
+        self.base_folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.base_folder)
+        patcher = mock.patch.object(
+            manager_module, "_async_save_config", _sync_save_config
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _build_manager(
+        self, folder: str, model: nn.Module, initial_load_path: str | None = None
+    ) -> TorchCheckpointingManager:
+        config = TorchCheckpointingManager.Config(
+            folder=folder,
+            interval=1,
+            keep_latest_k=0,
+            last_save_model_only=False,
+            initial_load_path=initial_load_path,
+        )
+        return config.build(
+            model_parts=[model],
+            optimizers=_Stateful(torch.zeros(1)),
+            lr_schedulers=_Stateful(torch.zeros(1)),
+            ema=None,
+            extra_states={},
+            sd_adapter=None,
+            base_folder=self.base_folder,
+        )
+
+    def test_resume_loads_frozen_params_from_base(self) -> None:
+        # The seed keeps the frozen weight, so it can serve as the base.
+        seed_model = _frozen_weight_linear(1.0)
+        manager = self._build_manager("seed", seed_model)
+        manager.save(curr_step=0, last_step=True)
+        manager.close()
+        base = os.path.join(self.base_folder, "seed", "step-0")
+
+        model = _frozen_weight_linear(2.0)
+        manager = self._build_manager("run", model, initial_load_path=base)
+        manager.load()
+        self.assertTrue(torch.equal(model.weight, seed_model.weight))
+        with torch.no_grad():
+            model.bias.fill_(3.0)
+        manager.save(curr_step=1)
+        manager.close()
+
+        resumed = _frozen_weight_linear(4.0)
+        manager = self._build_manager("run", resumed, initial_load_path=base)
+        manager.load()
+        self.assertTrue(torch.equal(resumed.weight, seed_model.weight))
+        self.assertTrue(torch.equal(resumed.bias, model.bias))
+        # A load must not bring frozen params back into the save payload.
+        self.assertEqual({"bias"}, set(manager.states[MODEL].state_dict()))
+        manager.close()
+
+    def test_seed_in_folder_takes_frozen_params_from_base(self) -> None:
+        base_model = _frozen_weight_linear(1.0)
+        manager = self._build_manager("base", base_model)
+        manager.save(curr_step=0, last_step=True)
+        manager.close()
+        base = os.path.join(self.base_folder, "base", "step-0")
+
+        # The run folder holds its own seed, with a different frozen weight.
+        seed_model = _frozen_weight_linear(5.0)
+        manager = self._build_manager("run", seed_model)
+        manager.save(curr_step=0, last_step=True)
+        manager.close()
+
+        model = _frozen_weight_linear(2.0)
+        manager = self._build_manager("run", model, initial_load_path=base)
+        manager.load()
+        self.assertTrue(torch.equal(model.weight, base_model.weight))
+        self.assertTrue(torch.equal(model.bias, seed_model.bias))
+        manager.save(curr_step=1)
+        manager.close()
+
+        # A resume keeps the same frozen values as the run that started from the seed.
+        resumed = _frozen_weight_linear(4.0)
+        manager = self._build_manager("run", resumed, initial_load_path=base)
+        manager.load()
+        self.assertTrue(torch.equal(resumed.weight, base_model.weight))
+        self.assertTrue(torch.equal(resumed.bias, seed_model.bias))
+        manager.close()
+
+    def test_resume_raises_when_trained_param_is_frozen(self) -> None:
+        model = nn.Sequential(nn.Linear(2, 2))
+        manager = self._build_manager("seed", model)
+        manager.save(curr_step=0, last_step=True)
+        manager.close()
+        base = os.path.join(self.base_folder, "seed", "step-0")
+
+        manager = self._build_manager("run", model)
+        manager.save(curr_step=1)
+        manager.close()
+
+        model[0].weight.requires_grad_(False)
+        manager = self._build_manager("run", model, initial_load_path=base)
+        with self.assertRaisesRegex(
+            ValueError, r"stores parameters \['0.weight'\] that are frozen"
+        ):
+            manager.load()
+        manager.close()
