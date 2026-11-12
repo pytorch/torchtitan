@@ -10,6 +10,7 @@ from typing import Any, cast, Literal
 from unittest.mock import Mock, patch
 
 import pytest
+import spmd_types as spmd
 import torch
 
 dist_moe = pytest.importorskip(
@@ -33,9 +34,11 @@ from torchtitan.config.transform import (
 )
 from torchtitan.config.transform.dist_moe import DistMoeTransform
 from torchtitan.models.base.module import Module
+from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.activation import ClampedSwiGLU, SiTUGLU
 from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.config_utils import make_routed_experts_config
+from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.dist_moe import (
     DistMoeRoutedExperts,
     DistMoeRuntime,
@@ -44,6 +47,7 @@ from torchtitan.models.common.dist_moe import (
 from torchtitan.models.common.dist_moe.runtime import _DistMoeForwardContext
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import RoutedExperts
+from torchtitan.models.common.moe.sharding import replicated_param_placement_sparse
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
@@ -769,6 +773,25 @@ def test_forward_passes_native_postprocess_and_wgrad_policy() -> None:
     assert "output_postprocess.weight" in module.state_dict()
     assert remat_region.call_args.kwargs == {"recompute": False}
     recompute_needs_tensor.assert_called_once_with(out_TD)
+
+
+def test_transform_places_postprocess_on_dense_mesh() -> None:
+    """The token-owner postprocess moves from the expert mesh to the dense mesh."""
+    stock = _stock_config()
+    stock.output_postprocess = _NativePostprocess.Config(
+        dim=32,
+        sharding_config=ShardingConfig(
+            state_shardings={"weight": replicated_param_placement_sparse()}
+        ),
+    )
+    transformed = cast(DistMoeRoutedExperts.Config, DistMoeTransform().transform(stock))
+
+    assert transformed.output_postprocess is not None
+    sharding_config = transformed.output_postprocess.sharding_config
+    assert sharding_config is not None
+    assert sharding_config.state_shardings == {
+        "weight": dense_param_placement(tp=spmd.R)
+    }
 
 
 def test_eager_postprocess_callback_preserves_module_hooks_and_gradients() -> None:

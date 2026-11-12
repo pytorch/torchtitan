@@ -76,19 +76,19 @@ def _validate_declared_parallel_axes(
     that never mentions an axis is replicated over that axis, so a model
     that is only partly sharded must not pass.
 
-    Dense and sparse layouts get different treatment. When
-    ``expert_parallel_degree > 1``, layouts on ``routed_experts``
-    submodules (``w13``, ``w2``, postprocess, and Dist-MoE children)
-    live in the sparse ``{dp_replicate, edp_shard, ep}`` region.
-    When EP is off, those weights use the dense mesh, so they are
-    checked as dense layouts. Activation contracts on the
-    ``routed_experts`` container and all other modules always use the
-    dense ``{dp, cp, tp}`` mesh. For each enabled degree in that
-    region, every layout must name the axis explicitly.
+    Dense and sparse layouts get different treatment. As in
+    ``apply_fsdp_to_decoder``, when ``expert_parallel_degree > 1`` a
+    layout that names the ``ep`` axis lives in the sparse
+    ``{dp_replicate, edp_shard, ep}`` region, and every other layout
+    (including a Dist-MoE postprocess under ``routed_experts``) lives in
+    the dense ``{dp, cp, tp}`` region. For each enabled degree in its
+    region, a layout must name the axis explicitly.
 
-    A config built with ``expert_parallel_degree == 1`` gets dense expert
-    weight placements, so validating it at ``expert_parallel_degree > 1``
-    fails here instead of silently ignoring the EP degree at runtime.
+    With ``expert_parallel_degree > 1``, every ``routed_experts`` subtree
+    must declare ``ep`` on at least one layout. A config built with
+    ``expert_parallel_degree == 1`` gets dense expert weight placements,
+    so validating it at ``expert_parallel_degree > 1`` fails here instead
+    of silently ignoring the EP degree at runtime.
     """
     from torchtitan.distributed.parallelism_context import MeshAxisName
     from torchtitan.models.common.moe import MoE
@@ -106,27 +106,39 @@ def _validate_declared_parallel_axes(
         )
         if degree != 1
     ]
-    # The sparse region and the MoE check come from the same traversal, so
-    # Dist-MoE (which swaps the routed_experts config type) is covered too.
-    sparse_prefixes = tuple(
-        f"{fqn}.routed_experts." if fqn else "routed_experts."
-        for fqn, _, _, _ in model.traverse(MoE.Config)
-    )
+    layouts = _collect_model_layouts(model)
     sparse_required = []
     if p.expert_parallel_degree > 1:
-        if not sparse_prefixes:
+        # Dist-MoE swaps the routed_experts config type, so look for the
+        # routed experts through MoE.Config.
+        routed_experts_prefixes = [
+            f"{fqn}.routed_experts." if fqn else "routed_experts."
+            for fqn, _, _, _ in model.traverse(MoE.Config)
+        ]
+        if not routed_experts_prefixes:
             raise ValueError(
                 f"{model_name} has no routed experts; set "
                 "parallelism.expert_parallel_degree to 1 (got "
                 f"{p.expert_parallel_degree})."
             )
+        for prefix in routed_experts_prefixes:
+            if not any(
+                fqn.startswith(prefix) and MeshAxisName.EP in axes
+                for fqn, _, axes in layouts
+            ):
+                raise ValueError(
+                    f"{model_name} declares no 'ep' sharding in "
+                    f"{prefix.rstrip('.')}, but that mesh axis is active. Set "
+                    "its parallelism degree to 1, or declare the axis on the "
+                    "expert weights."
+                )
         # The mesh keeps edp_shard alive whenever EP is enabled.
         sparse_required = [MeshAxisName.EP, MeshAxisName.EDP_SHARD]
         if p.data_parallel_replicate_degree > 1:
             sparse_required.append(MeshAxisName.DP_REPLICATE)
 
-    for fqn, field, axes in _collect_model_layouts(model):
-        if p.expert_parallel_degree > 1 and fqn.startswith(sparse_prefixes):
+    for fqn, field, axes in layouts:
+        if p.expert_parallel_degree > 1 and MeshAxisName.EP in axes:
             required = sparse_required
         else:
             required = dense_required
