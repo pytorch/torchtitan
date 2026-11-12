@@ -7,7 +7,7 @@
 """Numerical parity between stock and Dist-MoE routed experts."""
 
 import unittest
-from typing import Any, cast
+from typing import Any, cast, Literal
 
 import pytest
 import torch
@@ -28,6 +28,7 @@ from torchtitan.distributed.spmd_types import (  # noqa: E402
     set_spmd_meshes,
 )
 from torchtitan.models.base.module import Module  # noqa: E402
+from torchtitan.models.common.activation import SiTUGLU  # noqa: E402
 from torchtitan.models.common.dist_moe import (  # noqa: E402
     DistMoeRoutedExperts,
     DistMoeRuntime,
@@ -63,6 +64,7 @@ def _stock_routed_experts(
     num_experts: int,
     w13_E2FD: torch.Tensor,
     w2_EDF: torch.Tensor,
+    activation_fn: Module.Config,
 ) -> RoutedExperts:
     """Build the production stock expert path with rank-local weights.
 
@@ -94,7 +96,7 @@ def _stock_routed_experts(
     with torch.no_grad():
         experts.w13.weight.copy_(w13_E2FD)
         experts.w2.weight.copy_(w2_EDF)
-    experts.activation_fn = FusedSwiGLU.Config().build()
+    experts.activation_fn = activation_fn.build()
     experts.output_postprocess = None
     experts.token_dispatcher = AllToAllTokenDispatcher.Config(
         num_experts=num_experts,
@@ -195,6 +197,17 @@ class TestDistMoeNumerics(DTensorTestBase):
     @with_comms
     def test_bf16_matches_stock_fused_swiglu(self) -> None:
         """Real EP2 forward and backward agree at BF16 accumulation tolerance."""
+        self._check_bf16_matches_stock(activation="swiglu")
+
+    @with_comms
+    def test_bf16_matches_stock_situglu(self) -> None:
+        """Real EP2 preserves SiTU-GLU outputs and all four gradient families."""
+        self._check_bf16_matches_stock(activation="situ_glu")
+
+    def _check_bf16_matches_stock(
+        self, *, activation: Literal["swiglu", "situ_glu"]
+    ) -> None:
+        """Compare the same routing and parameter layout under either activation."""
         (
             mesh,
             num_experts,
@@ -215,10 +228,20 @@ class TestDistMoeNumerics(DTensorTestBase):
             generator=generator,
         )
 
+        situ_glu_bounds = (
+            {"situ_glu_gate_beta": 4.0, "situ_glu_up_beta": 25.0}
+            if activation == "situ_glu"
+            else {}
+        )
         stock = _stock_routed_experts(
             num_experts=num_experts,
             w13_E2FD=w13_E2FD,
             w2_EDF=w2_EDF,
+            activation_fn=(
+                SiTUGLU.Config(beta=4.0, linear_beta=25.0)
+                if activation == "situ_glu"
+                else FusedSwiGLU.Config()
+            ),
         )
         stock_x_TD = x_TD.clone().requires_grad_()
         stock_scores_TK = topk_scores_TK.clone().requires_grad_()
@@ -241,6 +264,8 @@ class TestDistMoeNumerics(DTensorTestBase):
             device_scratch_capacity_factor=1.0,
             activation_slot_capacity_factor=1.0,
             num_activation_slots=1,
+            activation=activation,
+            **situ_glu_bounds,
         )
         context = dist_moe.create_context(
             group=torch.distributed.group.WORLD,
@@ -263,6 +288,8 @@ class TestDistMoeNumerics(DTensorTestBase):
                     ),
                     top_k=_K,
                     inplace_wgrad_accum=False,
+                    activation=activation,
+                    **situ_glu_bounds,
                 )
                 .build()
                 .to(device=device, dtype=torch.bfloat16)
@@ -417,7 +444,10 @@ class TestDistMoeNumerics(DTensorTestBase):
 
         def stock_out(w13: torch.Tensor, w2: torch.Tensor) -> torch.Tensor:
             stock = _stock_routed_experts(
-                num_experts=num_experts, w13_E2FD=w13, w2_EDF=w2
+                num_experts=num_experts,
+                w13_E2FD=w13,
+                w2_EDF=w2,
+                activation_fn=FusedSwiGLU.Config(),
             )
             with torch.no_grad(), set_current_spmd_mesh(mesh):
                 return stock(x_TD, *routing)

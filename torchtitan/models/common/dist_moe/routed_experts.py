@@ -29,13 +29,22 @@ from . import _dist_moe as dist_moe
 from .runtime import DistMoeRuntime
 
 
+# Parameters each Dist-MoE activation requires; every other one must be None.
+_ACTIVATION_PARAMETERS: dict[str, frozenset[str]] = {
+    "swiglu": frozenset(),
+    "swiglu_clamped": frozenset({"swiglu_alpha", "swiglu_limit"}),
+    "situ_glu": frozenset({"situ_glu_gate_beta", "situ_glu_up_beta"}),
+}
+
+
 class DistMoeRoutedExperts(Module):
     """BF16 routed experts executed by the standalone Dist-MoE backend.
 
     W13 and W2 remain ordinary TorchTitan modules so parameter, FSDP,
     optimizer, and checkpoint ownership does not change. Their module
     ``forward`` methods are not called: Dist-MoE consumes the weights directly
-    and owns dispatch, SwiGLU, expert GEMMs, and combine.
+    and owns dispatch, the configured gated activation, expert GEMMs, and
+    combine.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -59,6 +68,10 @@ class DistMoeRoutedExperts(Module):
                 SwiGLU; otherwise ``None``.
             swiglu_limit: Gate and up-projection bound when ``activation`` is
                 clamped SwiGLU; otherwise ``None``.
+            situ_glu_gate_beta: Tanh bound for the gate input when
+                ``activation`` is SiTU-GLU; otherwise ``None``.
+            situ_glu_up_beta: Tanh bound for the up input when ``activation``
+                is SiTU-GLU; otherwise ``None``.
         """
 
         w13: GroupedLinear.Config
@@ -67,9 +80,11 @@ class DistMoeRoutedExperts(Module):
         output_postprocess: Module.Config | None = None
         inplace_wgrad_accum: bool = True
         bf16_grouped_gemm_preset: dist_moe.Bf16GroupedGemmPreset | None = None
-        activation: Literal["swiglu", "swiglu_clamped"] = "swiglu"
+        activation: Literal["swiglu", "swiglu_clamped", "situ_glu"] = "swiglu"
         swiglu_alpha: float | None = None
         swiglu_limit: float | None = None
+        situ_glu_gate_beta: float | None = None
+        situ_glu_up_beta: float | None = None
 
         def __post_init__(self) -> None:
             """Validate expert dimensions consumed by the annex kernels."""
@@ -85,14 +100,19 @@ class DistMoeRoutedExperts(Module):
                 raise ValueError("w2 must contain one down projection")
             if self.top_k <= 0:
                 raise ValueError("top_k must be positive")
-            if self.activation == "swiglu":
-                if self.swiglu_alpha is not None or self.swiglu_limit is not None:
-                    raise ValueError("plain SwiGLU must not define clamp parameters")
-            elif self.activation == "swiglu_clamped":
-                if self.swiglu_alpha is None or self.swiglu_limit is None:
-                    raise ValueError("clamped SwiGLU requires alpha and limit")
-            else:
-                raise ValueError(f"unsupported activation {self.activation!r}")
+            required = _ACTIVATION_PARAMETERS.get(self.activation)
+            if required is None:
+                raise ValueError(f"unsupported Dist-MoE activation {self.activation!r}")
+            given = {
+                name
+                for name in frozenset().union(*_ACTIVATION_PARAMETERS.values())
+                if getattr(self, name) is not None
+            }
+            if given != required:
+                raise ValueError(
+                    f"activation={self.activation!r} requires exactly "
+                    f"{sorted(required)}; got {sorted(given)}"
+                )
             postprocess_config = self.output_postprocess
             owner = None if postprocess_config is None else postprocess_config._owner
             if postprocess_config is not None and not callable(
@@ -122,6 +142,8 @@ class DistMoeRoutedExperts(Module):
         self.activation = config.activation
         self.swiglu_alpha = config.swiglu_alpha
         self.swiglu_limit = config.swiglu_limit
+        self.situ_glu_gate_beta = config.situ_glu_gate_beta
+        self.situ_glu_up_beta = config.situ_glu_up_beta
         self._runtime: DistMoeRuntime | None = None
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
