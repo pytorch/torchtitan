@@ -4,15 +4,29 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Report-based Flash-Next optimizer configuration shared by training recipes."""
+"""Flash-Next training recipes and their report-based optimizer configuration."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 from torch.distributed.tensor import Shard
 
-from torchtitan.components.optim import Adam, AdamW, DistMuon, OptimizersContainer
+from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data.text_datasets import DATASETS
+from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
+from torchtitan.components.optim import (
+    Adam,
+    AdamW,
+    DistMuon,
+    LRSchedulersContainer,
+    Optim,
+    OptimizersContainer,
+)
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform import apply_transforms, TokenDispatcherTransform
+from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.distributed.flex_shard import (
     BlockShard,
     BucketConfig,
@@ -21,9 +35,13 @@ from torchtitan.distributed.flex_shard import (
 )
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.common.attention.gdn import GDN
-from torchtitan.models.qwen3_8_flash_next.attention import QSAAttention
+from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
+from torchtitan.models.qwen3_8_flash_next import build_model_config
+from torchtitan.models.qwen3_8_flash_next.attention import QSAAttention, QSAIndexerLoss
 from torchtitan.models.qwen3_8_flash_next.model import Qwen38FlashNextModel
 from torchtitan.trainer import Trainer
+
+from torchtitan_recipes.data import c4_document_capacity
 
 
 # The report specifies eight Polar Express iterations; coefficients are from
@@ -194,3 +212,79 @@ class FlashNextTrainerConfig(Trainer.Config):
                             f"DistMuon layout for {fqn} disagrees with expert parallelism; "
                             "build the optimizer and model with the same parallelism"
                         )
+
+
+def qwen38_flash_next_125b_hybridep() -> Trainer.Config:
+    """Train the released 125B-A6B from its HF checkpoint on 16 GB300s.
+
+    FSDP16 + EP16 places all 512 experts, 32 per rank, in one NVLink domain,
+    and HybridEP dispatches over it. The PLE table is row-sharded over the
+    same 16 DP ranks. Forward/backward replays as one accelerator graph, which
+    needs non-blocking HybridEP; capacity factor 1.0 sizes its buffers for
+    every token reaching every local expert, so no routed token is dropped.
+    Full remat runs at 4K tokens per rank with the model's local_compile
+    regions. The decoder loads from the multimodal checkpoint; the vision
+    encoder is not built.
+    """
+    seq_len = 4096
+    parallelism = ParallelismConfig(
+        data_parallel_shard_degree=16, expert_parallel_degree=16
+    )
+    # Text-only training drops the vision encoder: its dummy forward on text
+    # batches copies grid sizes to the host, which graph capture rejects.
+    model_config = replace(
+        build_model_config(
+            "125B-A6B",
+            seq_len=seq_len,
+            parallelism=parallelism,
+            indexer_loss=QSAIndexerLoss.Config(coeff=1.0, reduce_mesh="loss"),
+        ),
+        vision_encoder=None,
+    )
+    config = FlashNextTrainerConfig(
+        model=model_config,
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(global_vocab_size=model_config.vocab_size),
+        ),
+        hf_assets_path="./assets/hf/Qwen3.8-Flash-Next",
+        dataloader=GrainDataLoader.Config(
+            max_num_documents=c4_document_capacity(seq_len),
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+        ),
+        optim=Optim.Config(
+            optimizer=make_dist_muon_optimizer(
+                model_config, parallelism=parallelism, lr=1e-5
+            ),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=5,
+                decay_ratio=0.8,
+                decay_type="linear",
+                min_lr_factor=0.0,
+            ),
+        ),
+        training=TrainingConfig(
+            num_tokens_per_microbatch_per_dp_rank=seq_len,
+            steps=30,
+            # Enabled below, once HybridEP replaces the default dispatcher.
+            disable_accelerator_graphs=True,
+        ),
+        parallelism=parallelism,
+        # Loads the HF safetensors from hf_assets_path.
+        checkpointer=CheckpointManager.Config(
+            initial_load_model_only=True,
+            initial_load_in_hf=True,
+        ),
+        activation_remat=FullActivationRematConfig(),
+    )
+    # apply_transforms re-validates graphs against the HybridEP dispatcher.
+    config.training.disable_accelerator_graphs = False
+    return apply_transforms(
+        config,
+        [
+            TokenDispatcherTransform(
+                dispatcher=HybridEPTokenDispatcher,
+                num_max_tokens_per_rank=seq_len,
+                kwargs={"non_blocking_capacity_factor": 1.0},
+            )
+        ],
+    )

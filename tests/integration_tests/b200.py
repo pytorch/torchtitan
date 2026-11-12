@@ -25,6 +25,7 @@ from torchtitan_recipes.tests.models.multimodal import (
     set_rank_conditional_image_presence,
 )
 from torchtitan_recipes.tests.models.qwen3_8_flash_next import (
+    qwen38_flash_next_debugmodel,
     qwen38_flash_next_debugmodel_mm,
 )
 
@@ -163,6 +164,33 @@ def qwen38_flash_next_debugmodel_mm_checkpoint_load() -> Trainer.Config:
     )
 
 
+def qwen38_flash_next_debugmodel_dist_moe_fsdp2_ep2() -> Trainer.Config:
+    """Replay Flash-Next as one accelerator graph with row-sharded PLE and Dist-MoE.
+
+    Step 3 captures forward/backward and step 4 replays it, so capture fails
+    on any host synchronization and replay on any batch-dependent shape.
+    """
+    from torchtitan.config.transform import apply_transforms
+    from torchtitan.config.transform.dist_moe import DistMoeTransform
+    from torchtitan.distributed.activation_remat import FullActivationRematConfig
+    from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
+
+    config = qwen38_flash_next_debugmodel(
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=2, expert_parallel_degree=2
+        )
+    )
+    config.training.steps = 4
+    config.training.disable_accelerator_graphs = False
+    config.activation_remat = FullActivationRematConfig()
+    config.dist_moe_runtime = DistMoeRuntime.Config(
+        activation_slot_capacity_factor=1.0, scratch_capacity_factor=4.0
+    )
+    # Dist-MoE's autograd functions are not registered for SPMD typechecking;
+    # qwen3_8_flash_next_fsdp typechecks the model with the default dispatcher.
+    return apply_transforms(config, [DistMoeTransform()])
+
+
 def build_b200_tests_list() -> list[IntegrationTestDefinition]:
     """Build integration tests that require B200-class hardware."""
     return [
@@ -206,6 +234,16 @@ def build_b200_tests_list() -> list[IntegrationTestDefinition]:
             ],
             test_descr="Eager BF16, MXFP8, and VMM Dist-MoE with FSDP and EP",
             test_name="dist_moe_eager_fsdp_ep_accelerator_graph",
+            ngpu=2,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[qwen38_flash_next_debugmodel_dist_moe_fsdp2_ep2],
+            test_descr=(
+                "Qwen3.8-Flash-Next accelerator graph with FSDP, row-sharded PLE, "
+                "sparse attention and Dist-MoE"
+            ),
+            test_name="qwen3_8_flash_next_dist_moe_fsdp_ep_accelerator_graph",
             ngpu=2,
             use_real_pg=True,
         ),

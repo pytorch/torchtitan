@@ -18,6 +18,7 @@ tests/unit_tests/cpu/models/qwen3_8_flash_next/.
 import argparse
 import copy
 import json
+import re
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,6 +73,16 @@ class _Fixture:
     tokens_T: torch.Tensor  # noqa: N815
     positions_T: torch.Tensor  # noqa: N815
     patches_PF: torch.Tensor  # noqa: N815
+
+
+def _released_key_layout(
+    state_dict: dict[str, torch.Tensor]
+) -> dict[str, torch.Tensor]:
+    """Rename text-model keys to the released multimodal checkpoint layout."""
+    return {
+        re.sub(r"^model\.", "model.language_model.", k): v
+        for k, v in state_dict.items()
+    }
 
 
 def _reference_text_config() -> Any:
@@ -152,7 +163,9 @@ def _build_fixture(device: torch.device) -> _Fixture:
     native.to_empty(device=device).eval()
     adapter = Qwen38FlashNextStateDictAdapter(config, None)
     native.init_states(buffer_device=device)
-    native.load_state_dict(adapter.from_hf(reference.state_dict()), strict=True)
+    native.load_state_dict(
+        adapter.from_hf(_released_key_layout(reference.state_dict())), strict=True
+    )
 
     generator = torch.Generator(device="cpu").manual_seed(FIXTURE_SEED)
     tokens_T = torch.randint(0, 63, (39,), generator=generator).to(device)
@@ -434,11 +447,13 @@ def _check_decoder(
             bfloat16_compute=True,
         )
     expected_gradients = adapter.from_hf(
-        {
-            key: parameter.grad
-            for key, parameter in reference.named_parameters()
-            if parameter.grad is not None
-        }
+        _released_key_layout(
+            {
+                key: parameter.grad
+                for key, parameter in reference.named_parameters()
+                if parameter.grad is not None
+            }
+        )
     )
     return {
         "native_ce": float(loss.detach()),
