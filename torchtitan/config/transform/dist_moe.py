@@ -8,12 +8,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from torchtitan.models.base.module import Module
 
 from torchtitan.models.common.activation import ClampedSwiGLU, SwiGLU
+from torchtitan.models.common.decoder_sharding import replicated_state_sharding_config
 from torchtitan.models.common.dist_moe import (
     _dist_moe as dist_moe,
     DistMoeRoutedExperts,
@@ -63,13 +64,27 @@ def _replace_routed_experts(
                 "Dist-MoE requires the standard all-to-all source config; "
                 "the annex replaces its runtime dispatch and combine"
             )
+        # Dist-MoE runs the postprocess on the token owner. The routed-expert
+        # input is token-sharded over DP, CP, and TP, so the state gradients
+        # are partial over those axes and the states use the dense mesh.
+        output_postprocess = source.output_postprocess
+        if (
+            output_postprocess is not None
+            and (sharding_config := output_postprocess.sharding_config) is not None
+        ):
+            output_postprocess = replace(
+                output_postprocess,
+                sharding_config=replicated_state_sharding_config(
+                    *sharding_config.state_shardings
+                ),
+            )
         replacement = replacement_type.Config(
             param_init=source.param_init,
             sharding_config=source.sharding_config,
             w13=source.w13,
             w2=source.w2,
             top_k=source.token_dispatcher.top_k,
-            output_postprocess=source.output_postprocess,
+            output_postprocess=output_postprocess,
             activation=activation,
             swiglu_alpha=swiglu_alpha,
             swiglu_limit=swiglu_limit,
