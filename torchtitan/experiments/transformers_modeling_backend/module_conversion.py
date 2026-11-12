@@ -15,35 +15,18 @@ forward behavior, or state_dict keys. After conversion,
 ``model.parallelize()`` distributes parameters and wraps forwards.
 """
 
+import functools
 import logging
 
-import torch
 import torch.nn as nn
 
-from torchtitan.distributed.parallelism_context import MeshAxisName
-from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.base.module import Module
-
-from torchtitan.models.common.embedding import VocabParallelEmbedding
 
 logger = logging.getLogger(__name__)
 
 
-class _VocabShardEmbedding(VocabParallelEmbedding):
-    """Vocab-sharded lookup that returns the TP-``Partial`` output unreduced.
-
-    HF embeddings keep their ``(batch, sequence)`` layout, which
-    ``VocabParallelEmbedding``'s token-layout reduction does not cover, so the
-    embedding's sharding config owns the reduction instead.
-    """
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        if spmd_mesh_group(MeshAxisName.TP) is None:
-            return super().forward(input)
-        return self._lookup_vocab_shard(input)
-
-
 _module_class_cache: dict[type, type] = {}
+_forward_override_class_cache: dict[tuple[type, type], type] = {}
 
 
 def _make_module_class(nn_cls: type) -> type:
@@ -59,6 +42,33 @@ def _make_module_class(nn_cls: type) -> type:
     return new_cls
 
 
+def override_forward(module: nn.Module, override: type, **attrs: object) -> None:
+    """Run ``override.forward`` in place of ``module``'s forward.
+
+    ``override.forward`` reaches the original forward through ``super()``.
+    ``module`` is swapped to a cached subclass of its class, like
+    ``convert_hf_to_module`` does, so module state and state_dict keys are
+    unchanged. The new ``forward`` reports the HF signature: ``Module`` maps
+    positional inputs to its sharding config by parameter name. ``attrs`` are
+    set on the instance.
+    """
+    cls = type(module)
+    key = (override, cls)
+    if key not in _forward_override_class_cache:
+        override_fn = override.forward
+
+        @functools.wraps(cls.forward)
+        def forward(self, *args, **kwargs):
+            return override_fn(self, *args, **kwargs)
+
+        _forward_override_class_cache[key] = type(
+            cls.__name__, (override, cls), {"forward": forward}
+        )
+    module.__class__ = _forward_override_class_cache[key]
+    for name, value in attrs.items():
+        setattr(module, name, value)
+
+
 def convert_hf_to_module(model: nn.Module) -> None:
     """Convert all plain nn.Module children to Module protocol instances.
 
@@ -69,9 +79,13 @@ def convert_hf_to_module(model: nn.Module) -> None:
     Modules that are already ``Module`` instances (e.g., Titan MoE,
     ``HFTransformerModel`` itself) are skipped.
     """
+    from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
+        HFVocabParallelEmbedding,
+    )
+
     for child in model.children():
         if type(child) is nn.Embedding:
-            child.__class__ = _VocabShardEmbedding
+            child.__class__ = HFVocabParallelEmbedding
         elif not isinstance(child, Module):
             cls = type(child)
             if any("__slots__" in k.__dict__ for k in cls.__mro__[:-1]):
