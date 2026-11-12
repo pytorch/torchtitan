@@ -8,6 +8,7 @@
 
 from dataclasses import dataclass, field
 from typing import Any, cast
+from weakref import ref, ReferenceType
 
 import spmd_types as spmd
 import torch
@@ -24,6 +25,7 @@ from torchtitan.distributed.spmd_types import (
     spmd_dense_sp_enabled,
     spmd_local_context,
 )
+from torchtitan.models.base import BaseModel
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import AttentionMetadata, AttentionMetadataMap
 from torchtitan.models.common.decoder import TransformerBlock
@@ -39,7 +41,7 @@ from torchtitan.models.qwen3_5.model import Qwen35Model, Qwen35MultimodalModel
 from torchtitan.models.qwen3_5.vision_encoder import Qwen35VisionEncoder
 
 from .attention import QSAAttention, QSAIndexMetadata
-from .embedding import NGramTable, PLELayer
+from .embedding import NGramEmbedding, NGramTable, PLELayer
 from .norm import GroupedOffsetRMSNorm
 from .row_sharded_embedding import (
     prepare_row_sharded_embedding,
@@ -225,11 +227,26 @@ class Qwen38FlashNextModel(Qwen35Model):
                 raise ValueError("Flash-Next requires exactly one PLE layer")
 
     state_dict_adapter_cls = Qwen38FlashNextStateDictAdapter
+    pipeline_last_stage_module_fqns = ("hyper_connection_mixer",)
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.num_streams = config.num_streams
         self.hyper_connection_mixer = config.hyper_connection_mixer.build()
+        self._ple_embedding_ref: ReferenceType[NGramEmbedding] | None = None
+
+    def pipeline(self, **kwargs: Any) -> tuple[Any, list[BaseModel], bool, bool]:
+        """Partition into stages that pass all residual streams."""
+        from .pipeline_parallel import pipeline_flash_next
+
+        result, embedding = pipeline_flash_next(self, **kwargs)
+        if embedding is not None:
+            # The engine preprocesses on the first local part and keeps every
+            # part alive. A weak reference adds no parameters or checkpoint
+            # keys to the first part.
+            first = cast(Qwen38FlashNextModel, result[1][0])
+            first._ple_embedding_ref = ref(embedding)
+        return result
 
     def _apply_fsdp(
         self,
@@ -270,8 +287,8 @@ class Qwen38FlashNextModel(Qwen35Model):
         dict[str, Any],
         dict[str, Any],
     ]:
-        # PLE needs original token history; multimodal rotary coordinates cannot
-        # recover token IDs or one-dimensional document positions.
+        # PLE needs original token history, also on later PP stages; multimodal
+        # rotary coordinates cannot recover token IDs or document positions.
         lexical_inputs = {
             "ple_input_ids": input_dict["input"],
             "document_positions": input_dict["positions"],
@@ -287,11 +304,17 @@ class Qwen38FlashNextModel(Qwen35Model):
             lexical_inputs,
             {name: token_id_placement() for name in lexical_inputs},
         )
-        for module in self.layers.values():
-            layer = cast(Qwen38FlashNextBlock, module)
-            if layer.ple is None:
-                continue
-            embedding = layer.ple.ple_embedding
+        if self._ple_embedding_ref is not None:
+            embedding = self._ple_embedding_ref()
+            assert embedding is not None
+            embeddings = [embedding]
+        else:
+            embeddings = []
+            for module in self.layers.values():
+                layer = cast(Qwen38FlashNextBlock, module)
+                if layer.ple is not None:
+                    embeddings.append(layer.ple.ple_embedding)
+        for embedding in embeddings:
             table = embedding.ngram_embedding
             if table.row_mesh is not None:
                 with spmd.no_typecheck():
@@ -394,6 +417,9 @@ class Qwen38FlashNextModel(Qwen35Model):
                 padding_mask_T=padding_mask,
                 aux_loss_denominator=denominator,
             )
+        if self.hyper_connection_mixer is None:
+            # Non-final PP stages send all residual streams.
+            return x_TC
         # The vocab-sharded lm_head, or the chunked loss, needs TP-Replicate input.
         x_TD = maybe_gather_tp_input(
             self.norm, self.norm(self.hyper_connection_mixer(x_TC))
