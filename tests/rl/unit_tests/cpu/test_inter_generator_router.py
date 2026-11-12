@@ -64,27 +64,62 @@ def _router(actors, *, strategy=None, hot_swap=False) -> InterGeneratorRouter:
     )
 
 
-def _route(router, *, session_id: str | None = None) -> str:
+def _route(router, *, session_id: str | None = None, num_tokens: int = 1) -> str:
     """Route one generate call that finishes at once; return its generator's name."""
-    name = router.reserve("probe", routing_session_id=session_id).name
+    name = router.reserve(
+        "probe", routing_session_id=session_id, num_tokens=num_tokens
+    ).name
     router.release_reservation("probe")
     return name
 
 
 def test_least_loaded_routes_to_lowest_reserved_load():
     router = _router([_Actor("gen0"), _Actor("gen1")])
-    assert router.reserve("r0", routing_session_id=None).name == "gen0"
-    assert router.reserve("r1", routing_session_id=None).name == "gen1"
+    assert router.reserve("r0", routing_session_id=None, num_tokens=1).name == "gen0"
+    assert router.reserve("r1", routing_session_id=None, num_tokens=1).name == "gen1"
 
     # Releasing r1 frees gen1, the generator it reserved.
     router.release_reservation("r1")
     assert [h.reserved_load for h in router._generators] == [1, 0]
     # The tie-break alone would pick gen0 (least recently chosen); load picks idle gen1.
-    assert router.reserve("r2", routing_session_id=None).name == "gen1"
+    assert router.reserve("r2", routing_session_id=None, num_tokens=1).name == "gen1"
 
     router.release_reservation("r0")
     router.release_reservation("r2")
     assert [h.reserved_load for h in router._generators] == [0, 0]
+
+
+def test_load_counts_tokens_not_calls():
+    router = _router([_Actor("gen0"), _Actor("gen1")])
+    assert router.reserve("r0", routing_session_id=None, num_tokens=1000).name == "gen0"
+    # One unit per call would tie at [1, 1] and send r2 to gen0.
+    assert router.reserve("r1", routing_session_id=None, num_tokens=10).name == "gen1"
+    assert router.reserve("r2", routing_session_id=None, num_tokens=10).name == "gen1"
+    assert [h.reserved_load for h in router._generators] == [1000, 20]
+
+    for request_id in ("r0", "r1", "r2"):
+        router.release_reservation(request_id)
+    assert [h.reserved_load for h in router._generators] == [0, 0]
+
+
+def test_session_keeps_its_tokens_between_turns():
+    router = _router(
+        [_Actor("gen0"), _Actor("gen1")], strategy=StickySessionRoutingStrategy.Config()
+    )
+    # s0's 10k-token turn finished; its KV stays on gen0 between turns.
+    assert _route(router, session_id="s0", num_tokens=10_000) == "gen0"
+    assert (
+        router.reserve("r0", routing_session_id=None, num_tokens=2_000).name == "gen1"
+    )
+    # gen0 has no call in flight, yet it holds more KV: the new s1 goes to gen1.
+    assert _route(router, session_id="s1", num_tokens=1_000) == "gen1"
+    router.release_reservation("r0")
+    assert [h.reserved_load for h in router._generators] == [10_000, 1_000]
+
+    # gen0 holds 10k > 1.5 x mean 5.5k, but all of it is s0's: its next turn replaces
+    # that KV, so s0 stays instead of moving to gen1 and re-prefilling 11k tokens.
+    assert _route(router, session_id="s0", num_tokens=11_000) == "gen0"
+    assert [h.reserved_load for h in router._generators] == [11_000, 1_000]
 
 
 def test_least_loaded_tie_break_spreads_over_a_changing_candidate_set():
@@ -124,9 +159,10 @@ def test_sticky_session_reuses_generator_for_same_session():
         actors, strategy=StickySessionRoutingStrategy.Config(repin_load_ratio=None)
     )
 
-    assert router.reserve("r0", routing_session_id="s0").name == "gen0"
+    assert _route(router, session_id="s0") == "gen0"
     # gen0 is busier than idle gen1, yet s0's next call stays on gen0.
-    assert router.reserve("r1", routing_session_id="s0").name == "gen0"
+    router._generators[0].reserved_load += 5
+    assert _route(router, session_id="s0") == "gen0"
 
 
 def test_sticky_session_spreads_new_sessions_started_on_idle_generators():
@@ -152,12 +188,12 @@ def test_sticky_session_stays_on_its_draining_generator():
     # gen0 drains for a model state dict load, with 3 turns held back vs 0 on gen1:
     # overloaded by the default 1.5x ratio, yet s0's next turn still goes to gen0.
     router._generators[0].draining = True
-    router._generators[0].reserved_load = 3
+    router._generators[0].reserved_load += 3
     assert _route(router, session_id="s0") == "gen0"
 
     # s0 is still pinned to gen0 after the drain.
     router._generators[0].draining = False
-    router._generators[0].reserved_load = 0
+    router._generators[0].reserved_load -= 3
     assert _route(router, session_id="s0") == "gen0"
 
 
@@ -170,7 +206,8 @@ def test_new_sessions_spread_over_generators_that_all_drain():
 
     # Every generator drains, so new sessions go to them anyway, spread by load.
     chosen = [
-        router.reserve(f"r{i}", routing_session_id=f"s{i}").name for i in range(4)
+        router.reserve(f"r{i}", routing_session_id=f"s{i}", num_tokens=1).name
+        for i in range(4)
     ]
     assert sorted(chosen) == ["gen0", "gen0", "gen1", "gen1"]
 
@@ -183,11 +220,11 @@ def test_sticky_session_repins_off_an_overloaded_generator():
     assert _route(router, session_id="s0") == "gen0"
 
     # gen0 piles up 3 in-flight calls vs 0 on gen1: 3 > default ratio 1.5 * mean load 1.5.
-    router._generators[0].reserved_load = 3
+    router._generators[0].reserved_load += 3
     assert _route(router, session_id="s0") == "gen1"
 
     # The move is a re-pin: s0 stays on gen1 once gen0 recovers.
-    router._generators[0].reserved_load = 0
+    router._generators[0].reserved_load -= 3
     assert _route(router, session_id="s0") == "gen1"
 
 
@@ -225,11 +262,13 @@ def test_sticky_session_respects_max_sessions():
         ),
     )
 
-    assert router.reserve("r0", routing_session_id="s0").name == "gen0"
-    # s0 is pinned to gen0 and still in flight, so the least-loaded fallback
-    # assigns the new s1 session to gen1. Since max_sessions=1, s1 evicts s0.
+    assert _route(router, session_id="s0") == "gen0"
+    # s0's KV keeps gen0 busier, so the least-loaded fallback assigns the new s1
+    # session to gen1. Since max_sessions=1, s1 evicts s0.
     assert _route(router, session_id="s1") == "gen1"
-    # Evicted, s0 is a new session: least-loaded picks idle gen1 over busy gen0.
+    # gen0 gets busier than gen1. Pinned, s0 would stay on gen0; evicted, it is a
+    # new session, and least-loaded picks gen1.
+    router._generators[0].reserved_load += 5
     assert _route(router, session_id="s0") == "gen1"
 
 
@@ -239,13 +278,16 @@ def test_release_session_unpins_it_and_frees_its_kv_on_its_generator():
     router = _router(
         actors, strategy=StickySessionRoutingStrategy.Config(repin_load_ratio=None)
     )
-    assert router.reserve("r0", routing_session_id="s0").name == "gen0"
+    assert _route(router, session_id="s0", num_tokens=8) == "gen0"
+    # The finished call's KV stays on gen0 until the session ends.
+    assert [h.reserved_load for h in router._generators] == [8, 0]
 
     asyncio.run(router.release_session("s0"))
 
+    assert [h.reserved_load for h in router._generators] == [0, 0]
     assert actors[0].release_sessions.calls == [((["s0"],), {})]
     assert actors[1].release_sessions.calls == []
-    # Unpinned, s0 is a new session: least-loaded picks idle gen1 over busy gen0.
+    # Unpinned, s0 is a new session: the tie-break picks gen1, chosen less recently.
     assert _route(router, session_id="s0") == "gen1"
 
 
