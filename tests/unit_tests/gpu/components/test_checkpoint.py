@@ -7,8 +7,8 @@
 import os
 import tempfile
 import unittest
-from unittest import mock
 
+import fsspec
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -16,18 +16,15 @@ from fsspec.implementations.local import LocalFileSystem
 
 from torchtitan.components.checkpointer import CheckpointManager
 
-_uncached_ls = LocalFileSystem.ls
 
+class _ListingCachingLocalFileSystem(LocalFileSystem):
+    """``file://`` that caches directory listings, as gcsfs, s3fs and adlfs do."""
 
-def _listing_caching_ls(self, path, detail=True, **kwargs):
-    # Cache listings per instance, as object-store backends (gcsfs, s3fs,
-    # adlfs) do. Patched in the trainer process only; the save process lists
-    # nothing.
-    key = (self._strip_protocol(path), detail)
-    try:
-        return self.dircache[key]
-    except KeyError:
-        self.dircache[key] = listing = _uncached_ls(self, path, detail, **kwargs)
+    def ls(self, path, detail=True, **kwargs):
+        listing = self.dircache.get((path, detail))
+        if listing is None:
+            listing = super().ls(path, detail, **kwargs)
+            self.dircache[(path, detail)] = listing
         return listing
 
 
@@ -42,10 +39,19 @@ class _NoState:
 @unittest.skipUnless(torch.cuda.is_available(), "pinned-memory staging needs CUDA")
 class TestAsyncWithPinnedMemRetention(unittest.TestCase):
     def setUp(self):
-        self.folder = tempfile.mkdtemp()
+        self.folder = self.enterContext(tempfile.TemporaryDirectory())
         store = dist.FileStore(os.path.join(self.folder, "store"), 1)
         dist.init_process_group("nccl", store=store, rank=0, world_size=1)
         self.addCleanup(dist.destroy_process_group)
+        # Only this process lists the folder through the caching class. DCP's
+        # save process is spawned with a fresh fsspec registry, so it writes
+        # through the plain LocalFileSystem.
+        fsspec.register_implementation(
+            "file", _ListingCachingLocalFileSystem, clobber=True
+        )
+        self.addCleanup(
+            fsspec.register_implementation, "file", LocalFileSystem, clobber=True
+        )
 
     def test_keep_latest_k_purges_checkpoints_saved_by_the_save_process(self):
         # async_with_pinned_mem saves each checkpoint from a subprocess while
@@ -67,11 +73,10 @@ class TestAsyncWithPinnedMemRetention(unittest.TestCase):
             extra_states={},
             sd_adapter=None,
         )
-        with mock.patch.object(LocalFileSystem, "ls", _listing_caching_ls):
-            for step in range(1, 5):
-                manager.save(curr_step=step)
-                manager.maybe_wait_for_staging()
-            manager.close()
+        for step in range(1, 5):
+            manager.save(curr_step=step)
+            manager.maybe_wait_for_staging()
+        manager.close()
 
         self.assertEqual(
             sorted(os.listdir(f"{self.folder}/ckpt")), ["step-3", "step-4"]
