@@ -51,6 +51,7 @@ from torchtitan.models.common.multimodal import (
     gather_vision_embeds,
     get_vision_positions,
     MultimodalModel,
+    replicate_to_residual,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
@@ -708,6 +709,8 @@ class Qwen35Model(MultimodalModel):
                 {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
                 spmd.PartitionSpec(("dp", "cp"), None),
             )
+        if self.tok_embeddings is not None and self.vision_encoder is not None:
+            x = replicate_to_residual(x)
 
         # ``positions`` is 3D MRoPE (batch, seq, 3) for multimodal batches and
         # 2D (batch, seq) for text; ``preprocess_inputs`` resolved which one to

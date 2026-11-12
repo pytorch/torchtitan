@@ -59,7 +59,6 @@ from .sharding import (
     moonvit_encoder_sharding_config,
     moonvit_projector_sharding_config,
     moonvit_rotary_sharding_config,
-    sequence_parallel_first_layer_sharding_config,
 )
 
 from .vision_encoder import (
@@ -179,15 +178,6 @@ def _vl_layernorm(dim: int, eps: float = 1e-5) -> LayerNorm.Config:
     return LayerNorm.Config(
         normalized_shape=dim, eps=eps, sharding_config=invariant_norm_sharding_config()
     )
-
-
-def _first_layer_sharding(
-    *, enable_sp: bool, multimodal: bool
-) -> ShardingConfig | None:
-    """Resume SP at layer 0 after the ``Replicate`` multimodal scatter."""
-    if multimodal and enable_sp:
-        return sequence_parallel_first_layer_sharding_config()
-    return None
 
 
 def _vision_encoder_config(
@@ -346,9 +336,6 @@ def _debugmodel(
             beta_slow=1.0,
             original_seq_len=4096,
         ),
-        first_layer_sharding_config=_first_layer_sharding(
-            enable_sp=enable_sp, multimodal=True
-        ),
         enable_sp=enable_sp,
         enable_ep=parallelism.expert_parallel_degree > 1,
     )
@@ -405,7 +392,6 @@ def _moonlight_16b_a3b_config(
     dim = 2048
     vocab_size = 163840
     enable_sp = parallelism.enable_sequence_parallel
-    multimodal = vision_encoder is not None
     layers = _build_kimi_layers(
         n_layers=27,
         n_dense_layers=1,
@@ -430,9 +416,6 @@ def _moonlight_16b_a3b_config(
             dim=64,
             max_context_length=max_context_length,
             theta=rope_theta,
-        ),
-        first_layer_sharding_config=_first_layer_sharding(
-            enable_sp=enable_sp, multimodal=multimodal
         ),
         enable_sp=enable_sp,
         enable_ep=parallelism.expert_parallel_degree > 1,
@@ -566,9 +549,6 @@ def _kimi_k2_5(
             beta_fast=32.0,
             beta_slow=1.0,
             original_seq_len=4096,
-        ),
-        first_layer_sharding_config=_first_layer_sharding(
-            enable_sp=enable_sp, multimodal=True
         ),
         enable_sp=enable_sp,
         enable_ep=parallelism.expert_parallel_degree > 1,

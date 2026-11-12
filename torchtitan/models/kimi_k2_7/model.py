@@ -24,7 +24,6 @@ from torchtitan.distributed.parallelism_context import MeshAxisName, Parallelism
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     invariant_to_replicate,
-    spmd_dense_sp_enabled,
     spmd_local_context,
     spmd_mesh_size,
 )
@@ -36,6 +35,7 @@ from torchtitan.models.common.multimodal import (
     build_dummy_vision_inputs,
     get_vision_positions,
     MultimodalModel,
+    replicate_to_residual,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
@@ -183,8 +183,10 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         """
         inputs_embeds = self.tok_embeddings(tokens)
         # The vision scatter writes arbitrary positions, so every TP rank needs
-        # the full sequence. Without SP the stream already holds it.
-        if self.vision_encoder is not None and spmd_dense_sp_enabled():
+        # the full sequence. Without SP this is a type change to Replicate, so
+        # the vision rows' gradient is all-reduced once, by the encoder output's
+        # invariant_to_replicate, and not again by layer 0's input gather.
+        if self.vision_encoder is not None:
             inputs_embeds = maybe_gather_tp_input(self.tok_embeddings, inputs_embeds)
 
         modalities = []
@@ -291,10 +293,12 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
             else:
                 x = tokens
 
-        if spmd.is_type_checking():
-            # The scatter restores a token-aligned tensor, so text-model DP
-            # resumes as global batch sharding after the multimodal region.
-            spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
+        if self.tok_embeddings is not None and self.vision_encoder is not None:
+            if spmd.is_type_checking():
+                # The scatter restores a token-aligned tensor, so text-model DP
+                # resumes as global batch sharding after the multimodal region.
+                spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
+            x = replicate_to_residual(x)
 
         return self.forward_embeddings(
             x,
