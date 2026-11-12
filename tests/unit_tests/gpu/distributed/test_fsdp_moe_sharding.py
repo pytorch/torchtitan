@@ -7,6 +7,7 @@
 import unittest
 
 import pytest
+import spmd_types as spmd
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
@@ -25,6 +26,7 @@ from torchtitan.distributed.fsdp import (
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.utils import clip_grad_norm_
 from torchtitan.models.base.sharding import ShardingConfig
+from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe.sharding import replicated_param_placement_sparse
@@ -102,8 +104,10 @@ def _qwen3_moe_config(
     )
 
 
-def _build_qwen3_moe_model(num_experts: int = 8) -> Qwen3Model:
-    return Qwen3Model(_qwen3_moe_config(num_experts))
+def _build_qwen3_moe_model(
+    num_experts: int = 8, *, enable_ep: bool = False
+) -> Qwen3Model:
+    return Qwen3Model(_qwen3_moe_config(num_experts, enable_ep=enable_ep))
 
 
 def _get_expert_shard_dims(model: Qwen3Model) -> tuple[int | None, int | None]:
@@ -181,7 +185,8 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         dp_mesh = init_device_mesh(
             self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)
         )
-        model = _build_qwen3_moe_model(num_experts=4).to(self.device_type)
+        model = _build_qwen3_moe_model(num_experts=4, enable_ep=True)
+        model = model.to(self.device_type)
 
         apply_fsdp_to_decoder(
             model,
@@ -204,7 +209,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
             "debugmodel",
             seq_len=128,
             attn_backend="flex",
-            parallelism=ParallelismConfig(),
+            parallelism=ParallelismConfig(expert_parallel_degree=2),
         )
         for layer_config in config.layers:
             layer_config.feed_forward.routed_experts.w13.out_features = 16
@@ -235,7 +240,13 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
             )
 
     @with_comms
-    def test_with_ep_keeps_output_postprocess_on_sparse_mesh(self):
+    def test_with_ep_places_output_postprocess_by_declared_layout(self):
+        """FSDP puts the postprocess weight on the mesh its layout declares.
+
+        The regular MoE declares it on the sparse expert mesh. Dist-MoE
+        declares it on the dense mesh because it runs on the token owner.
+        Both layouts must reduce the same gradient.
+        """
         parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=self.world_size,
@@ -251,15 +262,18 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallelism_context)
         assert edp_mesh is not None
 
-        for num_experts in (4, 8):
-            with self.subTest(num_experts=num_experts):
-                config = _qwen3_moe_config(
-                    num_experts=num_experts, enable_sp=False, enable_ep=True
-                )
+        layouts = {
+            "sparse": (replicated_param_placement_sparse(), edp_mesh),
+            "dense": (dense_param_placement(tp=spmd.R), dp_mesh),
+        }
+        reference_grads = {}
+        for layout_name, (placement, postprocess_mesh) in layouts.items():
+            with self.subTest(layout=layout_name):
+                config = _qwen3_moe_config(enable_sp=False, enable_ep=True)
                 output_postprocess = RMSNorm.Config(
                     normalized_shape=config.dim,
                     sharding_config=ShardingConfig(
-                        state_shardings={"weight": replicated_param_placement_sparse()}
+                        state_shardings={"weight": placement}
                     ),
                 )
                 for layer_config in config.layers:
@@ -270,6 +284,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
                     # The bare model call below supplies no aux-loss
                     # denominator; this test only checks postprocess sharding.
                     layer_config.feed_forward.router.aux_loss = None
+                torch.manual_seed(0)
                 model = config.build().to(self.device_type)
                 model.init_states()
                 model._parallelize(parallelism_context)
@@ -295,7 +310,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
                     )
                     self.assertIs(routed_experts.w13.weight.device_mesh, edp_mesh)
                     self.assertIs(routed_experts.w2.weight.device_mesh, edp_mesh)
-                    self.assertIs(postprocess.weight.device_mesh, edp_mesh)
+                    self.assertIs(postprocess.weight.device_mesh, postprocess_mesh)
 
                 optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
                 tokens = (
@@ -320,6 +335,12 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
                         postprocess_grad.placements,
                         postprocess.weight.placements,
                     )
+                    grad = postprocess_grad.full_tensor()
+                    if layout_name == "sparse":
+                        # Clipping below scales the gradient in place.
+                        reference_grads[layer_id] = grad.clone()
+                    else:
+                        torch.testing.assert_close(grad, reference_grads[layer_id])
                     weight_key = (
                         f"layers.{layer_id}.feed_forward.routed_experts."
                         "output_postprocess.weight"
@@ -330,14 +351,14 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
                 for layer in model.layers.values():
                     postprocess = layer.feed_forward.routed_experts.output_postprocess
                     assert postprocess is not None
-                    local_weight = postprocess.weight.to_local()
+                    full_weight = postprocess.weight.full_tensor()
                     ep_replicas = [
-                        torch.empty_like(local_weight)
+                        torch.empty_like(full_weight)
                         for _ in range(edp_mesh["ep"].size())
                     ]
                     dist.all_gather(
                         ep_replicas,
-                        local_weight,
+                        full_weight,
                         group=edp_mesh["ep"].get_group(),
                     )
                     for replica in ep_replicas[1:]:

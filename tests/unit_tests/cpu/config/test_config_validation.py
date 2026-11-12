@@ -205,6 +205,32 @@ def test_ep_off_built_moe_rejects_ep_gt1() -> None:
         )
 
 
+def test_ep_dense_postprocess_under_routed_experts_passes() -> None:
+    # A Dist-MoE postprocess has a dense layout under routed_experts, and FSDP
+    # puts it on the dense mesh, so it is checked against the dense axes.
+    from torchtitan.models.common.decoder_sharding import (
+        replicated_state_sharding_config,
+    )
+    from torchtitan.models.common.moe import MoE
+    from torchtitan.models.common.nn_modules import RMSNorm
+
+    parallelism = ParallelismConfig(expert_parallel_degree=2)
+    config = deepseek_v3_debugmodel(parallelism=parallelism)
+    for _, moe_cfg, _, _ in config.model.traverse(MoE.Config):
+        moe_cfg.routed_experts.output_postprocess = RMSNorm.Config(
+            normalized_shape=8,
+            sharding_config=replicated_state_sharding_config("weight"),
+        )
+    validate_model_training_config(
+        config.model,
+        parallelism=parallelism,
+        training=config.training,
+        debug=config.debug,
+        activation_remat=config.activation_remat,
+        max_num_documents=config.dataloader.max_num_documents,
+    )
+
+
 def test_ep_off_routed_experts_checked_as_dense() -> None:
     # When EP is off, routed-expert weights live on the dense mesh, so a
     # layout under <moe>.routed_experts. that omits an active dense axis
