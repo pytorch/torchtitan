@@ -8,7 +8,6 @@ import os
 import tempfile
 import unittest
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 import fsspec
@@ -75,8 +74,8 @@ class TestLocalOps(unittest.TestCase):
 
 class _ListingCachingMemoryFileSystem(MemoryFileSystem):
     """Memory filesystem that caches listings per instance, as object-store
-    backends (gcsfs, s3fs, adlfs) do. fsspec gives every thread its own
-    instance, so one thread's cached listing misses another thread's changes."""
+    backends (gcsfs, s3fs, adlfs) do. Another process has its own instance, so
+    its writes never reach this process's cached listing."""
 
     protocol = "listingcachingmemory"
 
@@ -91,10 +90,6 @@ class _ListingCachingMemoryFileSystem(MemoryFileSystem):
         except KeyError:
             self.dircache[key] = listing = super().ls(path, detail=detail, **kwargs)
             return listing
-
-    def _rm(self, path):
-        super()._rm(path)
-        self.dircache.clear()  # an instance does see its own deletes
 
 
 class TestRemoteOps(unittest.TestCase):
@@ -136,23 +131,25 @@ class TestRemoteOps(unittest.TestCase):
         # otherwise a failed purge would kill the background purge thread.
         filesystem.rmtree(f"{self.root}/does-not-exist")
 
-    def test_listdir_sees_a_delete_made_by_another_thread(self):
-        # keep_latest_k lists the checkpoint folder on the main thread, and the
-        # purge thread deletes from it. Answered from fsspec's listing cache,
-        # retention kept re-deleting a checkpoint that was already gone and
-        # never deleted the next one.
+    def test_listdir_sees_a_checkpoint_written_by_another_process(self):
+        # With async_mode="async_with_pinned_mem" a subprocess writes each
+        # checkpoint, and keep_latest_k lists the folder in the trainer
+        # process. Answered from fsspec's listing cache, the new checkpoints
+        # never showed up, so retention stopped deleting old ones.
         fsspec.register_implementation(
             "listingcachingmemory", _ListingCachingMemoryFileSystem, clobber=True
         )
         root = f"listingcachingmemory://{self.name}"
         self._write(f"{root}/step-10/.metadata")
-        self._write(f"{root}/step-15/.metadata")
+        self.assertEqual(filesystem.listdir(root), ["step-10"])
+
+        # A separate instance has its own listing cache, like another process.
+        save_process_fs = fsspec.filesystem(
+            "listingcachingmemory", skip_instance_cache=True
+        )
+        save_process_fs.pipe(f"/{self.name}/step-15/.metadata", b"x")
+
         self.assertEqual(sorted(filesystem.listdir(root)), ["step-10", "step-15"])
-
-        with ThreadPoolExecutor(max_workers=1) as purge_thread:
-            purge_thread.submit(filesystem.rmtree, f"{root}/step-10").result()
-
-        self.assertEqual(filesystem.listdir(root), ["step-15"])
 
     def test_remote_filesystem_has_no_listing_cache(self):
         # The same guarantee, read off a real backend: the filesystem the

@@ -35,11 +35,11 @@ def _resolve(path: str | os.PathLike):
     missing backend driver (e.g. ``gcsfs`` for ``gs://``) surfaces fsspec's own
     ``ImportError`` at the point of use.
 
-    The filesystem is created with fsspec's listing cache off. The purge
-    thread, async saves and other ranks change a checkpoint folder while the
-    caller keeps probing it, fsspec keeps a separate filesystem instance per
-    thread, and its listing cache never expires by default, so a cached
-    listing would not show those changes.
+    The filesystem is created with fsspec's listing cache off. Async saves
+    (from another thread or process), the purge thread and other ranks change
+    a checkpoint folder while the caller keeps probing it. A cached listing
+    only sees changes made through the same filesystem instance and never
+    expires by default, so it would not show those changes.
     """
     from fsspec.core import url_to_fs
 
