@@ -11,12 +11,16 @@ Suffixes: T tokens, N blocks, D model dim.
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any, cast
 
 import torch
 from torch.distributed.fsdp import FSDPModule
-from torch.distributed.pipelining import PipelineStage
+from torch.distributed.pipelining import PipelineStage, PipelineStageInfo
 from torch.distributed.pipelining._utils import flatten_args
+from torch.utils.hooks import RemovableHandle
 
 from .cache import PPRankLocalCache
 from .layout import BlockLayoutTables
@@ -94,6 +98,29 @@ class AttnResPipelineStage(PipelineStage):
         # per micro-batch: the stack's block order and the blocks the delta carried in
         self._order: dict[int, list[int]] = {}
         self._delta_in: dict[int, list[int]] = {}
+        # OrderedDict, not dict: RemovableHandle holds a weak reference to it.
+        self._forward_context_factories: OrderedDict[
+            int, Callable[[PipelineStageInfo], AbstractContextManager[None]]
+        ] = OrderedDict()
+
+    def register_forward_context(
+        self,
+        context_factory: Callable[[PipelineStageInfo], AbstractContextManager[None]],
+    ) -> RemovableHandle:
+        """Wrap each forward of this stage in ``context_factory(info)``.
+
+        Same contract as ``PipelineStage.register_forward_context``. PyTorch enters
+        the context in the ``forward_one_chunk`` this class replaces, so the stage
+        keeps and enters it itself. Dynamic metadata inference does not enter it;
+        ``pipeline_kimi_k3`` always declares static metadata.
+        """
+        if self._forward_context_factories:
+            raise RuntimeError(
+                f"stage {self.stage_index}: a forward context is already registered"
+            )
+        handle = RemovableHandle(self._forward_context_factories)
+        self._forward_context_factories[handle.id] = context_factory
+        return handle
 
     def set_routing(self, layout: BlockLayoutTables, store: PPRankLocalCache) -> None:
         self._layout = layout
@@ -179,7 +206,17 @@ class AttnResPipelineStage(PipelineStage):
         if isinstance(self.submod, FSDPModule) and self.has_backward:
             self.submod.set_manual_backward_finalization(True)
 
-        output = self.forward_maybe_with_nosync(*composite_args, **composite_kwargs)
+        context_factory = next(iter(self._forward_context_factories.values()), None)
+        with (
+            nullcontext()
+            if context_factory is None
+            else context_factory(
+                PipelineStageInfo(
+                    stage_index=self.stage_index, microbatch_index=fwd_chunk_id
+                )
+            )
+        ):
+            output = self.forward_maybe_with_nosync(*composite_args, **composite_kwargs)
 
         if self.is_last:
             output_tuple = (

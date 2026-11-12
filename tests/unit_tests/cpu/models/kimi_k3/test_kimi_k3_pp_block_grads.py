@@ -15,6 +15,8 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
+from torchtitan.distributed.pipeline_parallel import DecoderStageIO
+from torchtitan.models.kimi_k3.pipeline_parallel import _build_attn_res_stage_metadata
 from torchtitan.models.kimi_k3.pipeline_parallel.cache import PPRankLocalCache
 
 from torchtitan.models.kimi_k3.pipeline_parallel.layout import infer_block_layout_tables
@@ -159,6 +161,7 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
         dtype: torch.dtype,
         cache: bool,
         eval_losses: list | None = None,
+        static_metadata: bool = False,
     ):
         num_stages, last = len(split), len(split) - 1
         mine = range(self.rank, num_stages, self.world_size)
@@ -166,8 +169,34 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
             _ExactStage(split[s], first=s == 0, last=s == last, dtype=dtype)
             for s in mine
         ]
+        # Interleaved1F1B places stage s on rank s % world_size.
+        layout = infer_block_layout_tables(
+            stage_to_rank={s: s % self.world_size for s in range(num_stages)},
+            n_layers=NUM_LAYERS,
+            layers_per_block=LAYERS_PER_BLOCK,
+            layer_to_stage={
+                layer: s for s, layers in enumerate(split) for layer in layers
+            },
+            cache=cache,
+        )
+        stage_metadata = {s: {} for s in mine}
+        if static_metadata:
+            # Toy decoder boundaries: a [T, 1] input, [T, DIM] hidden, [T] output.
+            def example(*shape: int) -> torch.Tensor:
+                return torch.empty(shape, dtype=dtype, device="meta")
+
+            stage_metadata = _build_attn_res_stage_metadata(
+                DecoderStageIO(
+                    decoder_input=example(TOKENS, 1),
+                    hidden=example(TOKENS, DIM).requires_grad_(),
+                    decoder_output=example(TOKENS).requires_grad_(),
+                ),
+                layout,
+            )
         stages = [
-            AttnResPipelineStage(module, s, num_stages, torch.device("cpu"))
+            AttnResPipelineStage(
+                module, s, num_stages, torch.device("cpu"), **stage_metadata[s]
+            )
             for module, s in zip(modules, mine, strict=True)
         ]
         schedule_stages: list[_PipelineStageBase] = list(stages)
@@ -177,15 +206,7 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
             loss_fn=_loss,
             scale_grads=False,
         )
-        layout = infer_block_layout_tables(
-            stage_to_rank=dict(stages[0].stage_index_to_group_rank),
-            n_layers=NUM_LAYERS,
-            layers_per_block=LAYERS_PER_BLOCK,
-            layer_to_stage={
-                layer: s for s, layers in enumerate(split) for layer in layers
-            },
-            cache=cache,
-        )
+        assert layout.stage_to_rank == dict(stages[0].stage_index_to_group_rank)
         store = PPRankLocalCache()
         for stage in stages:
             stage.set_routing(layout, store)
@@ -227,10 +248,19 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
                     reference = _run_single_device(split, dtype)
                     cached, cached_sent = self._run_pipeline(split, dtype, cache=True)
                     naive, naive_sent = self._run_pipeline(split, dtype, cache=False)
+                    # Declared metadata, as pipeline_kimi_k3 builds it, instead of
+                    # inferring it by running the stages.
+                    declared = [
+                        self._run_pipeline(
+                            split, dtype, cache=cache, static_metadata=True
+                        )[0]
+                        for cache in (True, False)
+                    ]
                     self.assertLess(cached_sent, naive_sent)
                     for step in range(STEPS):
                         ref_grads, ref_losses = reference[step]
-                        for grads, losses in (cached[step], naive[step]):
+                        runs = (cached, naive, *declared)
+                        for grads, losses in (run[step] for run in runs):
                             for block, grad in grads.items():
                                 expected = _expected_block_grad(block, dtype)
                                 torch.testing.assert_close(
