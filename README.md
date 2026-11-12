@@ -231,8 +231,8 @@ validated against; see [RELEASE.md](RELEASE.md).
   ```bash
   USE_CPP=0 pip install --pre -r .github/requirements-torchao.txt --index-url https://download.pytorch.org/whl/nightly/cu132
   ```
-- **RL:** `scripts/install_rl_env.sh` installs the vLLM, Monarch, and TorchStore
-  nightlies and the FlashAttention build for your GPU. See the
+- **RL:** `scripts/install_rl_env.sh` installs the PyTorch nightly, a vLLM
+  release, Monarch, TorchStore and the FlashAttention build for your GPU. See the
   [RL quick start](torchtitan/rl/README.md#quick-start).
 - **Extras** for vision, FLUX, RL, and development are also available as
   `pip install -e ".[vlm,flux,rl,dev]"`.

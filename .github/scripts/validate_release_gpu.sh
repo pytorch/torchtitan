@@ -103,18 +103,14 @@ install_release_candidate
 
 if [[ "${VALIDATION_SUITE}" == rl* ]]; then
   python -m pip install "pytest==7.3.2" "expecttest>=0.2.0" uv
-  vllm_requirement="vllm==${VLLM_VERSION}"
-  if [[ "${TORCH_VERSION}" == "2.15.0" && \
-        "${VLLM_VERSION}" == "1.0.0.dev20261005+cu132" && \
-        "${PYTORCH_INDEX_URL}" == "https://download.pytorch.org/whl/test/cu132" ]]; then
-    # Use the RC in place of this wheel's torch nightly dependency.
-    export UV_OVERRIDE="${RUNNER_TEMP}/release-vllm-torch-override.txt"
-    grep '^torch==' "${PIP_CONSTRAINT}" > "${UV_OVERRIDE}"
-    vllm_requirement="vllm @ https://download.pytorch.org/whl/nightly/cu132/vllm-1.0.0.dev20261005%2Bcu132-cp38-abi3-manylinux_2_28_x86_64.whl"
-  fi
-  uv pip install --constraint "${PIP_CONSTRAINT}" \
+  # Same override as scripts/install_rl_env.sh, with the release candidate's torch.
+  vllm_overrides="${RUNNER_TEMP}/release-vllm-overrides.txt"
+  grep -E '^(torch|torchvision)==' "${PIP_CONSTRAINT}" > "${vllm_overrides}"
+  printf '%s\n' 'torchaudio; sys_platform == "never"' \
+    'torchcodec; sys_platform == "never"' >> "${vllm_overrides}"
+  uv pip install --constraint "${PIP_CONSTRAINT}" --override "${vllm_overrides}" \
     --extra-index-url "${PYTORCH_INDEX_URL}" \
-    --index-strategy unsafe-best-match "${vllm_requirement}"
+    --index-strategy unsafe-best-match "vllm==${VLLM_VERSION}"
   python -m pip install --no-deps \
     "git+https://github.com/meta-pytorch/torchstore.git@main" \
     "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
