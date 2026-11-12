@@ -82,8 +82,8 @@ def test_replicated_policy_stats_do_not_infer_layout_from_spmd_context(monkeypat
     torch.testing.assert_close(actual, expected)
 
 
-def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
-    """The vLLM patch must retain the trainer's batch-invariant op sequence."""
+def test_vllm_sampler_patch_uses_trainer_ops(monkeypatch):
+    """vLLM's sampler computes logprobs and divides by the temperature as the trainer does."""
     # Import by path so this CPU test does not load the RL package initializer,
     # which intentionally requires the optional vLLM runtime.
     module_path = (
@@ -103,7 +103,11 @@ def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
         "vllm.v1.worker",
         "vllm.v1.worker.gpu",
         "vllm.v1.worker.gpu.sample",
+        "vllm.v1.worker.gpu.sample.gumbel",
         "vllm.v1.worker.gpu.sample.logprob",
+        "vllm.v1.worker.gpu.sample.prompt_logprob",
+        "vllm.v1.worker.gpu.sample.states",
+        "vllm.v1.worker.gpu.sample.new_importer",
     )
     modules = {name: ModuleType(name) for name in module_names}
     for name, module in modules.items():
@@ -113,6 +117,19 @@ def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
         if "." in name:
             parent_name, child_name = name.rsplit(".", 1)
             setattr(modules[parent_name], child_name, module)
+
+    # The vLLM functions the patch replaces, and the modules that import them by name.
+    def vllm_compute_token_logprobs(logits, token_ids):
+        raise AssertionError("vLLM's Triton logprob kernel ran")
+
+    def vllm_apply_temperature(logits, expanded_idx_mapping, temperature):
+        raise AssertionError("vLLM's Triton temperature kernel ran")
+
+    sample = "vllm.v1.worker.gpu.sample"
+    for name in ("logprob", "prompt_logprob"):
+        modules[f"{sample}.{name}"].compute_token_logprobs = vllm_compute_token_logprobs
+    for name in ("gumbel", "states", "new_importer"):
+        modules[f"{sample}.{name}"].apply_temperature = vllm_apply_temperature
 
     calls = []
     compute_logprobs = loss_module.compute_logprobs
@@ -129,7 +146,9 @@ def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
         dtype=torch.bfloat16,
     )
     token_ids = torch.tensor([[3, 0, 2], [2, 1, 3]], dtype=torch.int32)
-    actual = modules[module_names[-1]].compute_token_logprobs(logits, token_ids)
+    actual = modules[f"{sample}.prompt_logprob"].compute_token_logprobs(
+        logits, token_ids
+    )
     expected = torch.log_softmax(logits.float(), dim=-1).gather(
         -1, token_ids.to(torch.int64)
     )
@@ -140,3 +159,17 @@ def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
         assert call_logits is logits
         torch.testing.assert_close(call_labels, token_ids[:, column].to(torch.int64))
         assert call_kwargs == {"vocab_parallel_group": None}
+
+    # Temperature divides like the trainer's compute_logprobs; greedy rows stay unchanged.
+    logits = torch.randn(3, 5)
+    temperature = torch.tensor([0.0, 0.8, 0.7])  # per request
+    expanded_idx_mapping = torch.tensor([1, 0, 2])  # row -> request
+    scaled = logits.clone()
+    modules[f"{sample}.states"].apply_temperature(
+        scaled, expanded_idx_mapping, temperature
+    )
+    row_temperature = torch.tensor([0.8, 1.0, 0.7])
+    assert torch.equal(scaled, logits / row_temperature.unsqueeze(-1).expand_as(logits))
+    # Any vLLM module that imports a function by name gets the PyTorch version.
+    patched = modules[f"{sample}.gumbel"].apply_temperature
+    assert modules[f"{sample}.new_importer"].apply_temperature is patched

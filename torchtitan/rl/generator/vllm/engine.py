@@ -258,8 +258,8 @@ class VLLMEngine(GenerationEngine):
         )
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         if batch_invariant:
-            # The vLLM v2 logprob Triton kernel bypasses the batch-invariant aten
-            # overrides; route it through trainer's function to match the trainer exactly.
+            # vLLM's v2 logprob and temperature Triton kernels bypass the batch-invariant
+            # aten overrides; replace them with the trainer's PyTorch ops.
             force_trainer_logprobs_for_batch_invariance()
 
     def _build_engine_args(
