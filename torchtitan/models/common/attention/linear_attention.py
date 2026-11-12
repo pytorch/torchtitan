@@ -55,9 +55,7 @@ class LinearAttentionMetadata:
             self.varlen.annotate_spmd_types()
 
 
-# Linear-attention metadata crosses compiler and whole-step CUDA graph
-# boundaries. Expose its tensor fields so fresh sequence offsets are copied
-# on replay.
+# Expose tensor fields to pytree so CUDA graph replay copies fresh offsets.
 register_dataclass(LinearAttentionMetadata)
 
 

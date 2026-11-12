@@ -82,7 +82,7 @@ class ContextParallelLoadBalancer(Configurable, ABC):
     @property
     @abstractmethod
     def max_num_fragments(self) -> int:
-        """Bound contiguous token ranges per rank independently of the batch."""
+        """Upper bound on contiguous token ranges per rank, for any batch."""
         raise NotImplementedError
 
 
@@ -174,9 +174,7 @@ class PTRRFlexAttentionCPLoadBalancer(ContextParallelLoadBalancer):
 
     @property
     def max_num_fragments(self) -> int:
-        """PTRR assigns a fixed number of complete query blocks per rank."""
-        # PTRR validates divisibility before expanding each assigned block into
-        # ascending token indices. Adjacent blocks can merge, but never split.
+        """Query blocks per rank; adjacent blocks can merge but never split."""
         return self.block_mask.kv_num_blocks.shape[-1] // self.cp_size
 
 
