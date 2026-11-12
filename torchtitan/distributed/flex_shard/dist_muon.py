@@ -260,16 +260,16 @@ class DistMuon(Optimizer):
     def compile(self) -> None:
         """Compile local momentum, direction, and parameter updates.
 
-        This opt-in path supports FP32 storage and is independent of model
+        This opt-in path supports FP32 and BF16 storage and is independent of model
         compilation. Transport stays eager. Compilation is lazy; CUDA Graph
         capture is not requested because scratch storage is released each step.
         """
         if any(
-            parameter.dtype != torch.float32
+            parameter.dtype not in (torch.float32, torch.bfloat16)
             for group in self.param_groups
             for parameter in group["params"]
         ):
-            raise ValueError("DistMuon.compile() currently requires FP32 storage")
+            raise ValueError("DistMuon.compile() requires FP32 or BF16 storage")
         compile_fn = partial(
             torch.compile,
             fullgraph=True,
@@ -281,7 +281,7 @@ class DistMuon(Optimizer):
 
         @cache
         def lerp_coefficients(weight: float) -> tuple[bool, float]:
-            # Native CUDA FP32 lerp rounds weight before forming its complement.
+            # Native CUDA lerp uses FP32 arithmetic for FP32 and BF16 storage.
             weight = struct.unpack("f", struct.pack("f", weight))[0]
             from_start = abs(weight) < 0.5
             alpha = weight if from_start else weight - 1
@@ -1908,12 +1908,15 @@ def _prepare_muon_input_with_rounded_weights(
     nesterov: bool,
     out: Tensor,
 ) -> Tensor:
-    """Express native CUDA FP32 lerp with explicitly rounded scalar coefficients."""
-    base = momentum_buffer if update_from_start else gradient
-    torch.add(base, gradient - momentum_buffer, alpha=update_alpha, out=momentum_buffer)
+    """Preserve native CUDA lerp arithmetic and storage rounding."""
+    gradient = gradient.float()
+    previous = momentum_buffer.float()
+    base = previous if update_from_start else gradient
+    torch.add(base, gradient - previous, alpha=update_alpha, out=momentum_buffer)
     if nesterov:
-        base = gradient if nesterov_from_start else momentum_buffer
-        torch.add(base, momentum_buffer - gradient, alpha=nesterov_alpha, out=out)
+        updated = momentum_buffer.float()
+        base = gradient if nesterov_from_start else updated
+        torch.add(base, updated - gradient, alpha=nesterov_alpha, out=out)
     else:
         out.copy_(momentum_buffer)
     return out
