@@ -129,6 +129,9 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
+    # Decode is launch-latency bound (#5537). Generator only: the fused region is
+    # not bitwise-identical to eager, so the trainer keeps its default numerics.
+    generator_model.local_compile.regions.append("residual_rmsnorm")
     return Controller.Config(
         hf_assets_path="./assets/hf/Qwen3-0.6B",
         async_loop=AsyncLoopConfig(

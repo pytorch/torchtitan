@@ -18,6 +18,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.norm import residual_rms_norm
 from .state_dict_adapter import Qwen3StateDictAdapter
 
 
@@ -58,16 +59,16 @@ class Qwen3TransformerBlock(TransformerBlock):
         attn_out = self.attention(self.attention_norm(x), attention_metadata, positions)
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)
-        x = x + attn_out
+        x, ffn_input = residual_rms_norm(x, attn_out, self.ffn_norm)
 
         if isinstance(self.feed_forward, MoE):
             ffn_out = self.feed_forward(
-                self.ffn_norm(x),
+                ffn_input,
                 padding_mask_T=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
             )
         else:
-            ffn_out = self.feed_forward(self.ffn_norm(x))
+            ffn_out = self.feed_forward(ffn_input)
         # Trailing add, always saved: it saves nothing for backward, so replay skips
         # it and its inputs need no persisting, matching checkpoint early stop.
         return remat.region(
