@@ -18,10 +18,17 @@ from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple
 
 import torch
+
+# TODO: torch.distributed._transport, torch.cuda._pin_memory_utils,
+# torch.distributed.tensor._utils and placement_types._StridedShard are private
+# upstream APIs; switch to public ones once they exist (no upstream issue yet).
 import torch.cuda._pin_memory_utils as pin_memory_utils
 from torch.distributed._transport import new_transport, wait_all
 from torch.distributed.tensor import DTensor, Partial, Placement, Shard
-from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
+from torch.distributed.tensor._utils import (
+    _compute_local_shape_and_global_offset,
+    compute_local_shape_and_global_offset,
+)
 from torch.distributed.tensor.placement_types import _StridedShard
 
 from torchtitan.config import Configurable
@@ -96,24 +103,63 @@ def _global_offset_and_local_shape(
     return tuple(offset), tuple(shape)
 
 
-def _staged_placements(tensor: DTensor) -> tuple[Placement, ...]:
-    """The placements the trainer stages ``tensor`` in: its shards of later dims
-    moved to its first sharded dim.
+def _staged_placements(
+    tensor: DTensor, generator_shards: list[TensorShard]
+) -> tuple[Placement, ...] | None:
+    """The placements the trainer stages ``tensor`` in, or None for its own.
 
-    A staged box then spans every dim after that one, so each piece is one
-    contiguous run of a generator rank's local tensor per index of the dims
-    before it. E.g. a row-parallel weight (FSDP ``Shard(0)``, TP ``Shard(1)``)
-    is staged as ``(Shard(0), Shard(0))``, read at once; a stacked ``[2, F, D]``
-    weight sharded on dim 1 is kept, read in 2 runs.
+    A piece is read as one contiguous run per index of the dims before the last
+    one it does not span. A trainer box that cuts a generator box on a dim after
+    the first sharded dim multiplies the runs, so its shards of later dims are
+    then moved to the first sharded dim. E.g. a row-parallel weight (FSDP
+    ``Shard(0)``, TP ``Shard(1)``) read by generator ranks split on dim 0 is
+    staged as ``(Shard(0), Shard(0))``, read at once. If every trainer box
+    contains the generator boxes it overlaps on those dims (e.g. generator TP
+    on dim 1 matching the trainer's), the restage would not reduce the runs.
+
+    Decided from every trainer rank's box so all trainer ranks agree: a
+    redistribute is a collective.
     """
     dims = [p.dim for p in tensor.placements if isinstance(p, Shard)]
     if not dims:
-        return tensor.placements
-    dim = min(dims)
-    return tuple(
-        Shard(dim) if isinstance(p, Shard) and p.dim > dim else p
+        return None
+    first = min(dims)
+    staged = tuple(
+        Shard(first) if isinstance(p, (Shard, _StridedShard)) and p.dim > first else p
         for p in tensor.placements
     )
+    if staged == tensor.placements:
+        return None
+    # Only the axes sharding later dims change a trainer box on those dims.
+    axes = [
+        axis
+        for axis, p in enumerate(tensor.placements)
+        if isinstance(p, (Shard, _StridedShard)) and p.dim > first
+    ]
+    mesh_shape = tensor.device_mesh.shape
+    coordinate = [0] * len(mesh_shape)
+    later = range(first + 1, tensor.ndim)
+    for index in itertools.product(*(range(mesh_shape[axis]) for axis in axes)):
+        for axis, i in zip(axes, index):
+            coordinate[axis] = i
+        shape, offset = _compute_local_shape_and_global_offset(
+            tensor.shape, mesh_shape, coordinate, tensor.placements
+        )
+        for shard in generator_shards:
+            spans = [
+                (
+                    offset[d],
+                    offset[d] + shape[d],
+                    shard.offset[d],
+                    shard.offset[d] + shard.shape[d],
+                )
+                for d in later
+            ]
+            overlaps = all(lo < g_hi and g_lo < hi for lo, hi, g_lo, g_hi in spans)
+            contains = all(lo <= g_lo and g_hi <= hi for lo, hi, g_lo, g_hi in spans)
+            if overlaps and not contains:
+                return staged
+    return None
 
 
 def _pinned_buffer(nbytes: int) -> torch.Tensor:
@@ -376,11 +422,15 @@ class ModelStateDictTransport(Configurable):
                         f"{key}: the trainer sends {dtypes[key]}, the generator "
                         f"receives {layout[key].dtype}"
                     )
-            if isinstance(tensor, DTensor):
-                staged = _staged_placements(tensor)
-                if staged != tensor.placements:
-                    placements[key] = staged
-            boxes[key] = _global_offset_and_local_shape(tensor, placements.get(key))
+            boxes[key] = _global_offset_and_local_shape(tensor)
+            if not isinstance(tensor, DTensor):
+                continue
+            staged = _staged_placements(
+                tensor, [layout[key] for layout in rank_layouts if key in layout]
+            )
+            if staged is not None:
+                placements[key] = staged
+                boxes[key] = _global_offset_and_local_shape(tensor, staged)
 
         pieces, nbytes = _staged_pieces(boxes, rank_layouts)
         staging = _pinned_buffer(max(nbytes, 1))
