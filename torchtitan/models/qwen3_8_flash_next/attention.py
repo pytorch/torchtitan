@@ -128,7 +128,7 @@ def _selected_block_scores(query_QHK, key_GK, blocks_QB, *, scale):
     One dense Q x G GEMM, then a gather. Gathering Q x B keys instead turns the
     backward into a scatter-add into key_GK, about 30x slower at T=4096.
     """
-    scores_QHG = torch.einsum("qhk,gk->qhg", query_QHK.float(), key_GK.float())
+    scores_QHG = torch.einsum("qhk,gk->qhg", query_QHK, key_GK)
     scores_QG = scores_QHG.relu().sum(1) * scale
     return scores_QG.gather(-1, blocks_QB.clamp_min(0)).masked_fill(
         blocks_QB < 0, -torch.inf
@@ -207,7 +207,8 @@ class QSAIndexer(Module):
         q_layernorm: OffsetRMSNorm.Config
         k_layernorm: OffsetRMSNorm.Config
         rope: MRoPE.Config
-        chunk_size: int = 128
+        # Dense fp32 Q x H x G scores per chunk: 16 MiB at T=4096, 128 MiB at 32K.
+        chunk_size: int = 1024
 
         def __post_init__(self):
             if (
@@ -293,6 +294,7 @@ class QSAIndexer(Module):
             (tokens_TBR.flatten(-2), tail_indices_TR), -1
         ).int()
         selected_scores = []
+        query_THK, key_GK = query_THK.float(), key_GK.float()
         for start in range(0, num_tokens, self.chunk_size):
             stop = start + self.chunk_size
             # Checkpoint per chunk: saving dense Q x G scores is quadratic storage.
@@ -391,8 +393,8 @@ class QSAInnerAttention(InnerAttention):
     class Config(InnerAttention.Config):
         compress_ratio: int
         indexer_loss: QSAIndexerLoss.Config | None = None
-        # 128 queries bound the fp32 gathered keys to ~0.5 GiB at J=2051.
-        chunk_size: int = 128
+        # 512 queries bound the gathered bf16 keys to ~1 GiB at J=2051.
+        chunk_size: int = 512
 
         @property
         def is_full_attention(self) -> bool:
@@ -418,6 +420,63 @@ class QSAInnerAttention(InnerAttention):
         self.indexer_loss = (
             config.indexer_loss.build() if config.indexer_loss is not None else None
         )
+
+    def _teacher(self, query_THK, key_THK, selected_indices_TJ, num_blocks, *, scale):
+        """Head-mean softmax over the selected tokens, max-pooled per complete block.
+
+        Query head h reads KV head h // R. Per chunk, one gather of the selected
+        keys feeds one batched GEMM per KV head over strided views, without
+        replicating or transposing the gathered keys. On CUDA the GEMMs read bf16
+        and accumulate and write fp32, exact up to summation order. They
+        apply the scale and the mask: the fp32 minimum absorbs any finite
+        logit, so masked slots equal it exactly.
+        """
+        num_tokens, num_heads = query_THK.shape[:2]
+        num_kv_heads, num_selected = key_THK.shape[1], selected_indices_TJ.shape[1]
+        group_size = num_heads // num_kv_heads
+        logits_dtype = torch.promote_types(query_THK.dtype, torch.float32)
+        if not query_THK.is_cuda:
+            # CPU has no mixed-dtype baddbmm; the reference path casts first.
+            query_THK, key_THK = query_THK.to(logits_dtype), key_THK.to(logits_dtype)
+        query_TGRK = query_THK.unflatten(1, (num_kv_heads, group_size))
+        valid_TJ = selected_indices_TJ >= 0
+        mask_T1J = (
+            torch.zeros_like(valid_TJ, dtype=logits_dtype)
+            .masked_fill_(~valid_TJ, torch.finfo(logits_dtype).min)
+            .unsqueeze(1)
+        )
+        key_indices_TJ = selected_indices_TJ.clamp_min(0)
+        teacher_blocks = []
+        for start in range(0, num_tokens, self.chunk_size):
+            stop = min(start + self.chunk_size, num_tokens)
+            keys_QJGK = key_THK[key_indices_TJ[start:stop]]
+            logits_GQRJ = mask_T1J.new_empty(
+                num_kv_heads, stop - start, group_size, num_selected
+            )
+            for g in range(num_kv_heads):
+                gemm_args = (
+                    mask_T1J[start:stop],
+                    query_TGRK[start:stop, g],
+                    keys_QJGK[:, :, g].transpose(1, 2),
+                )
+                if query_THK.is_cuda:
+                    torch.baddbmm(
+                        *gemm_args,
+                        out_dtype=logits_dtype,
+                        alpha=scale,
+                        out=logits_GQRJ[g],
+                    )
+                else:
+                    torch.baddbmm(*gemm_args, alpha=scale, out=logits_GQRJ[g])
+            teacher_QJ = (
+                logits_GQRJ.softmax(-1).sum((0, 2)) / num_heads * valid_TJ[start:stop]
+            )
+            teacher_blocks.append(
+                teacher_QJ[:, : num_blocks * self.compress_ratio]
+                .unflatten(-1, (num_blocks, self.compress_ratio))
+                .amax(-1)
+            )
+        return torch.cat(teacher_blocks)
 
     def forward(
         self,
@@ -460,41 +519,16 @@ class QSAInnerAttention(InnerAttention):
             return output_THV
         assert self.indexer_loss is not None
         num_blocks = scores_TB.shape[-1]
-        # Empty ranks must participate in the indexer's FSDP gradient reduction.
-        # An empty slice is finite even when all selected scores are -inf.
-        raw_sum = scores_TB[..., :0].sum()
-        num_teacher_tokens = query_THK.shape[0] if num_blocks else 0
-        num_heads, num_kv_heads = query_THK.shape[1], key_THK.shape[1]
-        for start in range(0, num_teacher_tokens, self.chunk_size):
-            stop = start + self.chunk_size
-            indices_QJ = selected_indices_TJ[start:stop]
+        if num_blocks:
             with torch.no_grad():
-                valid_QJ = indices_QJ >= 0
-                # Query head h reads KV head h // R: one batched GEMM per KV
-                # head group, without replicating gathered keys R times.
-                query_QGRK = query_THK[start:stop].unflatten(
-                    1, (num_kv_heads, num_heads // num_kv_heads)
+                teacher_TB = self._teacher(
+                    query_THK, key_THK, selected_indices_TJ, num_blocks, scale=scale
                 )
-                keys_QJGK = key_THK[indices_QJ.clamp_min(0)]
-                logits_QGRJ = (
-                    torch.einsum(
-                        "qgrk,qjgk->qgrj", query_QGRK.float(), keys_QJGK.float()
-                    )
-                    * scale
-                )
-                logits_QGRJ = logits_QGRJ.masked_fill(
-                    ~valid_QJ[:, None, None], torch.finfo(torch.float32).min
-                )
-                teacher_QJ = logits_QGRJ.softmax(-1).sum((1, 2)) / num_heads
-                teacher_QJ = teacher_QJ * valid_QJ
-                teacher_QB = (
-                    teacher_QJ[:, : num_blocks * self.compress_ratio]
-                    .unflatten(-1, (num_blocks, self.compress_ratio))
-                    .amax(-1)
-                )
-            raw_sum = raw_sum + self.indexer_loss.block_kl(
-                scores_TB[start:stop], teacher_QB
-            )
+            raw_sum = self.indexer_loss.block_kl(scores_TB, teacher_TB)
+        else:
+            # Empty ranks must participate in the indexer's FSDP gradient
+            # reduction; an empty sum is finite and keeps the graph edge.
+            raw_sum = scores_TB.sum()
         return self.indexer_loss.inject(
             raw_sum, carrier=output_THV, denominator=aux_loss_denominator
         )
