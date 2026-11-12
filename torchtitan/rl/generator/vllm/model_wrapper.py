@@ -16,6 +16,7 @@ import dataclasses
 from typing import cast
 
 import torch
+import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -24,6 +25,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import supports_multimodal
 from vllm.utils import torch_utils as _torch_utils
+from vllm.utils.math_utils import cdiv
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
@@ -39,7 +41,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.dist_moe import DistMoeRuntime
+from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.model import (
     build_dist_moe_runtime,
@@ -286,6 +288,7 @@ class VLLMModelWrapper(Module):
 
         model_config = copy.deepcopy(model_config)
         self.config = _replace_vllm_layer_configs(model_config)
+        self._expert_sequence_parallel_size = parallelism.expert_sequence_parallel_size
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
         if vllm_config.model_config.dtype != TORCH_DTYPE_MAP[precision.param_dtype]:
@@ -303,8 +306,7 @@ class VLLMModelWrapper(Module):
             # Text-only generators drop the vision encoder; VLLMMultimodalModelWrapper keeps it.
             keep_vision_encoder=supports_multimodal(self),
         )
-        # TorchTitanGPUModelRunner pads a step to a multiple of TP when TP shards the
-        # routed tokens.
+        # forward pads a step to a multiple of TP when TP shards the routed tokens.
         token_multiple = parallelism.expert_sequence_parallel_size
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         validate_ep_token_dispatcher_capacity(
@@ -337,10 +339,10 @@ class VLLMModelWrapper(Module):
     def set_num_valid_tokens(self, num_valid_tokens: int) -> None:
         """Publish how many of this step's tokens are real, for the padding mask.
 
-        vLLM pads a step (tensor-parallel rounding, CUDA-graph capture size,
-        data-parallel equalization) before the model runs. The runner calls this
-        with the unpadded count. It is a device write with no host sync, so it
-        can run before every graph replay. A no-op for models without Dist-MoE.
+        vLLM pads a step (CUDA-graph capture size, data-parallel equalization)
+        before the model runs. The runner calls this with the unpadded count. It
+        is a device write with no host sync, so it can run before every graph
+        replay. A no-op for models without Dist-MoE.
         """
         if self._num_valid_tokens is not None:
             self._num_valid_tokens.fill_(num_valid_tokens)
@@ -348,13 +350,11 @@ class VLLMModelWrapper(Module):
     def _dist_moe_num_local_input_tokens(self, num_tokens: int) -> int:
         """Return the Dist-MoE row count every EP rank passes in this step.
 
-        Every EP rank must pass the same count, and the routed tokens are split
-        evenly over TP, so this is the step's token count over TP.
+        Every EP rank must pass the same count. ``forward`` pads each step to a
+        multiple of TP and the MoE splits it evenly over TP, so this is the largest
+        step's token count over TP, rounded up: DP counts [5, 3] at TP 4 -> 2 rows.
         """
         tp = self.parallelism_context.tp
-        # TorchTitanGPUModelRunner pads every step to a multiple of TP when TP
-        # shards the routed tokens, and every DP replica does the same.
-        assert num_tokens % tp == 0, f"TP={tp} does not divide {num_tokens} tokens"
         dp_metadata = get_forward_context().dp_metadata
         if dp_metadata is not None:
             # vLLM DP > 1: vLLM builds DP metadata for every MoE forward (real
@@ -364,10 +364,9 @@ class VLLMModelWrapper(Module):
             # - with CUDA graphs, vLLM already padded every replica to the graph
             #   size outside the model forward, so the max equals this count.
             num_tokens = int(dp_metadata.num_tokens_across_dp_cpu.max())
-            assert num_tokens % tp == 0, f"TP={tp} does not divide {num_tokens} tokens"
         # Otherwise DP = 1: the EP group is the TP group, which shares this
         # step's batch, so this rank's own count is every EP rank's count.
-        return num_tokens // tp
+        return cdiv(num_tokens, tp)
 
     def _initialize_dist_moe_runtime(
         self,
@@ -377,6 +376,17 @@ class VLLMModelWrapper(Module):
     ) -> None:
         """Build the Dist-MoE runtime (see ``build_dist_moe_runtime``) and the
         device scalar of each step's real token count."""
+        tp = self.parallelism_context.tp
+        if self._expert_sequence_parallel_size != tp and any(
+            isinstance(module, DistMoeRoutedExperts) for module in self.model.modules()
+        ):
+            # Dist-MoE splits each step's tokens over TP, but forward pads eager steps
+            # to a multiple of TP only with EP (expert_sequence_parallel_size).
+            raise ValueError(
+                "Dist-MoE in the generator needs expert_parallel_degree > 1 when "
+                f"tensor_parallel_degree > 1; got tensor_parallel_degree={tp}, "
+                f"expert_parallel_degree={self.parallelism_context.ep}."
+            )
         self._dist_moe_runtime = build_dist_moe_runtime(
             self.model,
             runtime_config,
@@ -451,6 +461,15 @@ class VLLMModelWrapper(Module):
         if input_ids is None:
             raise ValueError("Either input_ids or inputs_embeds must be provided")
 
+        # With EP, the MoE splits its tokens evenly over TP, but vLLM runs eager
+        # steps of any size. Round the step up: attention reads only the real rows
+        # (its metadata's token count), and the extra rows are dropped on return.
+        num_tokens = input_ids.shape[0]
+        num_padding_rows = -num_tokens % self._expert_sequence_parallel_size
+        if num_padding_rows:
+            input_ids = F.pad(input_ids, (0, num_padding_rows))
+            positions = F.pad(positions, (0, num_padding_rows))
+
         with self.parallelism_context.activate_spmd():
             h = self.model(
                 input_ids,
@@ -458,17 +477,16 @@ class VLLMModelWrapper(Module):
                 positions=positions,
                 **self._prepare_step_kwargs(input_ids.shape[0]),
             )
-        return h
+        return h[:num_tokens]
 
     def _prepare_step_kwargs(self, num_tokens: int) -> dict[str, torch.Tensor]:
         """Set this step's Dist-MoE token count and return the layers' padding-mask kwarg.
 
         Call once per forward.
         """
-        # Rows past the real token count are padding that vLLM added (true
-        # for padding). Only the MoE reads this mask: Dist-MoE routes those
-        # rows to expert -1. Attention takes its metadata from vLLM, which
-        # already excludes padding.
+        # Rows past the real token count are padding (true for padding). Only
+        # the MoE reads this mask: Dist-MoE routes those rows to expert -1.
+        # Attention takes its metadata from vLLM, which already excludes padding.
         if self._dist_moe_runtime is None:
             return {}
         assert self._num_valid_tokens is not None

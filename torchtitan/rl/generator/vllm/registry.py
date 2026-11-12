@@ -47,6 +47,7 @@ from torchtitan.models.qwen3_5.rope import MRoPE
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.model import get_attention_dimensions
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.tools.utils import has_cuda_capability
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -66,7 +67,7 @@ TORCHTITAN_CONFIG_FORMAT = "torchtitan"
 # registered below.
 TORCHTITAN_MODEL_TYPE = "torchtitan"
 
-# Selects the experiment-owned runner that pads tokens for dense and expert SP.
+# Selects TorchTitan's worker, whose runner adds FULL decode graphs to FULL mode.
 TORCHTITAN_WORKER_CLS = "torchtitan.rl.generator.vllm.worker.TorchTitanGPUWorker"
 
 
@@ -108,6 +109,30 @@ def vllm_attention_backend(cfg: Decoder.Config) -> AttentionBackendEnum | None:
         "Only varlen and flex attention backends, or MLA with a compressed "
         "cache, are supported."
     )
+
+
+def vllm_block_size(cfg: Decoder.Config) -> int | None:
+    """Return the KV cache block size to pass vLLM for ``cfg``, or ``None`` for vLLM's default.
+
+    Example:
+        flex with a pinned BLOCK_N (batch-invariant mode) -> BLOCK_N (16)
+        any other model, GPU older than SM90 (FA2)        -> 256
+        any other model, SM90 or newer                    -> None
+    """
+    kernel_config = cfg.first_full_attention.inner_attention
+    if isinstance(kernel_config, MLAAttention.Config):
+        kernel_config = kernel_config.inner_attention
+    if (
+        isinstance(kernel_config, FlexInnerAttention.Config)
+        and "BLOCK_N" in kernel_config.kernel_options
+    ):
+        # vLLM's flex backend tiles keys by the KV block size (vLLM main's default is
+        # 64). The trainer's pinned BLOCK_N needs blocks of that size to match bitwise.
+        return kernel_config.kernel_options["BLOCK_N"]
+    if not has_cuda_capability(9, 0):
+        # FA2 requires block_size to be a multiple of 256.
+        return 256
+    return None
 
 
 def model_config_to_hf_config_dict(
@@ -281,14 +306,9 @@ def register_to_vllm(
         # be contiguous in vLLM's convolution state cache.
         os.environ["VLLM_SSM_CONV_STATE_LAYOUT"] = "SD"
 
+    from transformers import PreTrainedConfig
     from vllm.model_executor.models.registry import ModelRegistry
-
-    # Pull ``PretrainedConfig`` through vLLM's transformers re-export rather
-    # than from ``transformers`` directly. vLLM already depends on
-    # transformers internally, so this keeps torchtitan free of a direct
-    # ``transformers`` import — when vLLM eventually drops it, this path
-    # disappears with it.
-    from vllm.transformers_utils.config import PretrainedConfig, register_config_parser
+    from vllm.transformers_utils.config import register_config_parser
     from vllm.transformers_utils.config_parser_base import ConfigParserBase
     from vllm.transformers_utils.model_arch_config_convertor import (
         MODEL_ARCH_CONFIG_CONVERTORS,
@@ -364,7 +384,7 @@ def register_to_vllm(
             config_dict = model_config_to_hf_config_dict(
                 model_config, serves_images=vision_processor is not None
             )
-            return config_dict, PretrainedConfig.from_dict(config_dict)
+            return config_dict, PreTrainedConfig.from_dict(config_dict)
 
     # vLLM's default is_deepseek_mla only recognizes a hardcoded list of model
     # types, which excludes model_type="torchtitan", so is_mla would be False.

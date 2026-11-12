@@ -202,8 +202,6 @@ class SGLangEngine(GenerationEngine):
                 "SGLangEngine supports data_parallel_degree=1 only; run more "
                 "generators to scale out"
             )
-        if parallelism.enable_sequence_parallel:
-            raise ValueError("SGLangEngine does not support sequence parallelism")
         if config.extra_server_args.get("enable_hierarchical_cache") and any(
             isinstance(layer.attention, KDA.Config) for layer in model.layers
         ):

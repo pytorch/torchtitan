@@ -234,8 +234,6 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
             "fp8"
         ), "FP8 KV cache not supported yet."
 
-        assert not attn_metadata.use_cascade, "Cascade not supported yet."
-
         assert self.dcp_world_size == 1, "DCP not supported yet."
 
         if not attn_metadata.causal:

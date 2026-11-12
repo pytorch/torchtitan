@@ -32,9 +32,9 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonPrefillMetadata,
     QueryLenSupport,
 )
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionLayer, MultipleOf
 from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache, KVCacheSpec
 
 from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig
@@ -130,7 +130,10 @@ class TorchTitanMLABackend(MLACommonBackend):
         return TorchTitanMLAMetadataBuilder
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(
+        kv_cache_spec: KVCacheSpec | None = None,
+    ) -> list[int | MultipleOf]:
+        # Any multiple of 16, whatever the layer's KV cache spec.
         return [MultipleOf(16)]
 
 
