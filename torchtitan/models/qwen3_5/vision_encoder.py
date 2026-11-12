@@ -19,6 +19,7 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.distributed.spmd_types import disable_dense_sp
 from torchtitan.models.base.model import FlopsEstimator
@@ -30,6 +31,7 @@ from torchtitan.models.common.nn_modules import GELU, LayerNorm
 from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
+    create_padded_block_diagonal_mask,
     get_packed_vision_grids,
     VisionTransformerBlock,
 )
@@ -474,9 +476,7 @@ class Qwen35VisionEncoder(Module):
                 f"describes {expected_tokens}."
             )
 
-        x = self.patch_embed(pixel_values)
         learned_pos, rope_cache = self.compute_position_embeddings(grids)
-        x = x + learned_pos
 
         # BlockMask creation and use in FlexInnerAttention are blackboxed from
         # typechecking.
@@ -484,9 +484,58 @@ class Qwen35VisionEncoder(Module):
             attention_mask = create_block_diagonal_mask(
                 segment_lengths,
                 total_tokens,
-                x.device,
+                pixel_values.device,
             )
+        return self._encode(
+            pixel_values,
+            learned_pos=learned_pos,
+            rope_cache=rope_cache,
+            attention_mask=attention_mask,
+        )
 
+    def forward_padded(
+        self,
+        pixel_values: torch.Tensor,
+        *,
+        learned_pos: torch.Tensor,
+        rope_cache: torch.Tensor,
+        segment_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """`forward` on patches padded to a fixed count, for CUDA graphs.
+
+        Reads nothing back to the host, so a graph captured for one padded count replays
+        for any items that fit. The caller computes the positions
+        (`compute_position_embeddings`) and pads every input to the same patch count with
+        zeros, except ``segment_ids``: each patch's item index, -1 for padding.
+
+        Args:
+            pixel_values: ``(num_padded_patches, patch_dim)``.
+            learned_pos: ``(num_padded_patches, dim)``.
+            rope_cache: ``(num_padded_patches, 1, head_dim * 2)``.
+            segment_ids: ``(num_padded_patches,)`` int32.
+
+        Returns:
+            Merged features ``(num_padded_patches // spatial_merge_unit, out_hidden_size)``:
+            the items' merged tokens first, in order, then rows for the padding.
+        """
+        with spmd.no_typecheck():
+            attention_mask = create_padded_block_diagonal_mask(segment_ids)
+        return self._encode(
+            pixel_values,
+            learned_pos=learned_pos,
+            rope_cache=rope_cache,
+            attention_mask=attention_mask,
+        )
+
+    def _encode(
+        self,
+        pixel_values: torch.Tensor,
+        *,
+        learned_pos: torch.Tensor,
+        rope_cache: torch.Tensor,
+        attention_mask: BlockMask,
+    ) -> torch.Tensor:
+        x = self.patch_embed(pixel_values) + learned_pos
         for layer in self.layers.values():
             x = layer(
                 x,
@@ -494,5 +543,4 @@ class Qwen35VisionEncoder(Module):
                 rope_apply=CosSinRoPE.apply_rotary_emb,
                 attention_mask=attention_mask,
             )
-
         return self.merger(x)

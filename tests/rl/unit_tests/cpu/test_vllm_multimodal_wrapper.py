@@ -31,6 +31,7 @@ from torchtitan.rl.generator.vllm.multimodal_wrapper import (
     _ImageMultiModalProcessor,
     _ImageProcessingInfo,
     _largest_patch_grid,
+    _pad_segment_ids,
     image_prompt_to_engine_input,
     keep_prefix_cached_image_data,
     VLLMMultimodalModelWrapper,
@@ -330,3 +331,53 @@ def test_controller_rejects_a_vision_processor_without_a_vision_encoder():
             ),
             vision_processor=VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS),
         )
+
+
+def test_encoder_cudagraph_rejects_a_vision_encoder_without_a_padded_forward():
+    # E.g. Muse Spark's NaViT encoder: vLLM asks for the graph config at startup.
+    wrapper = SimpleNamespace(model=SimpleNamespace(vision_encoder=torch.nn.Identity()))
+
+    with pytest.raises(NotImplementedError, match="Qwen3.5's vision encoder only"):
+        VLLMMultimodalModelWrapper.get_encoder_cudagraph_config(wrapper)
+
+
+def test_encoder_cudagraph_packs_images_and_pads_segments_with_no_image():
+    wrapper = SimpleNamespace(_vision_processor=PROCESSOR)
+    pixel_values = [
+        torch.full((num_patches, 1), float(index))
+        for index, num_patches in enumerate((16, 24, 64))
+    ]
+    mm_kwargs = {
+        "pixel_values": pixel_values,
+        "image_grid_thw": torch.tensor([[1, 4, 4], [1, 4, 6], [1, 8, 8]]),
+    }
+
+    specs = VLLMMultimodalModelWrapper.get_encoder_cudagraph_item_specs(
+        wrapper, mm_kwargs
+    )
+    selected = VLLMMultimodalModelWrapper.select_encoder_cudagraph_items(
+        wrapper, mm_kwargs, [2, 0]
+    )
+    budgets = VLLMMultimodalModelWrapper.get_encoder_cudagraph_budget_range(
+        wrapper,
+        SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=2048),
+            model_config=SimpleNamespace(max_model_len=4096),
+        ),
+    )
+    # A graph's buffer holds stale ids past the batch; padding must join no image.
+    buffer = torch.full((6,), 7, dtype=torch.int32)
+    _pad_segment_ids(buffer, torch.tensor([0, 0, 1], dtype=torch.int32))
+
+    assert [(spec.input_size, spec.output_tokens) for spec in specs] == [
+        (16, 4),
+        (24, 6),
+        (64, 16),
+    ]
+    assert selected["image_grid_thw"] == [[1, 8, 8], [1, 4, 4]]
+    assert [
+        value is pixel_values[i] for value, i in zip(selected["pixel_values"], (2, 0))
+    ] == [True, True]
+    # PROCESSOR's 32 x 32-pixel minimum is one merged token.
+    assert budgets == (1, 2048)
+    assert buffer.tolist() == [0, 0, 1, -1, -1, -1]
