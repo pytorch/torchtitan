@@ -147,7 +147,8 @@ def get_local_device() -> torch.device:
 
 # hardcoded BF16 type peak flops for NVIDIA A100, H20, H100, H200, B200 GPU,
 # AMD MI250, MI300X, MI325X, MI350X, MI355X, Intel PVC, and AWS Trainium/Inferentia
-def get_peak_flops(device_name: str) -> float:
+def get_peak_flops(device_name: str) -> float | None:
+    """Return the dense BF16 peak FLOPS per device, or None if it is unknown."""
     try:
         # Run the lspci command and capture the output
         result = subprocess.run(["lspci"], stdout=subprocess.PIPE, text=True)
@@ -262,13 +263,13 @@ def get_peak_flops(device_name: str) -> float:
             return 2307e12 / 2
         else:
             logger.warning(
-                f"Peak flops undefined for TPU: {device_name}, fallback to A100"
+                f"Peak FLOPS unknown for {device_name}. MFU is not reported."
             )
-            return 312e12
+            return None
 
-    else:  # for other GPU types, assume A100
-        logger.warning(f"Peak flops undefined for: {device_name}, fallback to A100")
-        return 312e12
+    else:
+        logger.warning(f"Peak FLOPS unknown for {device_name}. MFU is not reported.")
+        return None
 
 
 @contextlib.contextmanager

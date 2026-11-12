@@ -55,7 +55,7 @@ if [[ "${GPU_ARCH_TYPE}" == "rocm" ]]; then
   echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
 fi
 
-USE_CPP=0 PIP_EXTRA_INDEX_URL= python -m pip install --pre torchao --index-url "${INDEX_URL}"
+USE_CPP=0 PIP_EXTRA_INDEX_URL= python -m pip install --pre -r .github/requirements-torchao.txt --index-url "${INDEX_URL}"
 # GPT-OSS production configs use PyTorch's FA3 backend.
 python -m pip install flash-attn-3 \
   --extra-index-url https://download.pytorch.org/whl/test/cu130
@@ -78,7 +78,7 @@ STATUS=0
 if ! CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests \
   --test_suite h100 \
   --execution_mode real_pg \
-  --exclude qwen3_fsdp+deepep,deepseek_v3_fsdp+hybridep \
+  --exclude qwen3_fsdp+deepep,fsdp+hybridep \
   --gpu_arch_type "${GPU_ARCH_TYPE}" \
   --gpu_arch h100 \
   --ngpu 8 \
@@ -117,7 +117,7 @@ if [[ "${GPU_ARCH_TYPE}" != "rocm" ]]; then
   if ! CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests \
     --test_suite h100 \
     --execution_mode real_pg \
-    --test_name deepseek_v3_fsdp+hybridep \
+    --test_name fsdp+hybridep \
     --gpu_arch_type "${GPU_ARCH_TYPE}" \
     --ngpu 8 \
     "${ARTIFACTS}/h100/hybrid_ep"; then

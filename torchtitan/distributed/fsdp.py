@@ -19,6 +19,7 @@ from torch.distributed.fsdp import (
 )
 from torch.distributed.tensor import Shard
 
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import FSDPSymmMemScope
 from torchtitan.distributed.fsdp_lifecycle import complete_fsdp_grouped_forward
 from torchtitan.distributed.parallelism_context import ParallelismContext
@@ -37,6 +38,7 @@ __all__ = [
     "mixed_precision_policy",
     "resolve_fsdp_mesh",
     "resolve_sparse_fsdp_mesh",
+    "maybe_store_frozen_params_in_param_dtype_",
 ]
 
 logger = logging.getLogger(__name__)
@@ -259,6 +261,33 @@ def mixed_precision_policy(
     )
 
 
+def maybe_store_frozen_params_in_param_dtype_(
+    module: Module, precision: PrecisionConfig
+) -> None:
+    """Store the frozen parameters of ``module`` in ``precision.param_dtype`` when
+    it is narrower than ``precision.dtype``.
+
+    A frozen parameter is never updated and FSDP computes it in ``param_dtype``,
+    so a wider dtype only costs memory. Parameters listed in
+    ``preserve_dtype_params`` keep their dtype. Each tensor is
+    swapped rather than assigned to ``param.data``, because setting ``.data`` would
+    leave a quantized tensor subclass's inner tensor in the old dtype. Parameter
+    identity (tied weights) and attributes (e.g. the SPMD type) are kept. Call
+    before ``fully_shard``, which records parameter dtypes.
+    """
+    param_dtype = TORCH_DTYPE_MAP[precision.param_dtype]
+    if param_dtype.itemsize >= TORCH_DTYPE_MAP[precision.dtype].itemsize:
+        return
+    preserved = {param for _, param in module.named_preserve_dtype_params()}
+    for param in module.parameters():
+        if param.requires_grad or param in preserved or param.dtype == param_dtype:
+            continue
+        new_param = nn.Parameter(param.detach().to(param_dtype), requires_grad=False)
+        for name, value in param.__dict__.items():
+            new_param.__dict__.setdefault(name, value)
+        torch.utils.swap_tensors(param, new_param)
+
+
 def apply_fsdp_to_multimodal_encoder(
     encoder: Module,
     dp_mesh: DeviceMesh,
@@ -269,6 +298,7 @@ def apply_fsdp_to_multimodal_encoder(
     cpu_offload: bool = False,
     *,
     dp_mesh_dims: DataParallelMeshDims | None = None,
+    unshard_in_current_stream: bool = False,
 ) -> None:
     """Apply FSDP to a multimodal encoder as a single unit.
 
@@ -283,6 +313,13 @@ def apply_fsdp_to_multimodal_encoder(
     "attempting to assign a gradient with device type 'cuda' to a tensor with
     device type 'cpu'".
     """
+    if unshard_in_current_stream:
+        # The explicit prefetching chain in apply_fsdp_to_decoder does not
+        # cover encoders, so their all-gathers would not overlap with compute.
+        raise ValueError(
+            "parallelism.fsdp_unshard_in_current_stream is not supported for models "
+            "with multimodal encoders."
+        )
     mp_policy = mixed_precision_policy(
         encoder, param_dtype=param_dtype, reduce_dtype=reduce_dtype
     )
@@ -313,6 +350,8 @@ def apply_fsdp_to_decoder(
     dp_mesh_dims: "DataParallelMeshDims | None" = None,
     edp_mesh_dims: "DataParallelMeshDims | None" = None,
     symm_mem_scope: FSDPSymmMemScope = None,
+    *,
+    unshard_in_current_stream: bool = False,
 ):
     """
     Apply data parallelism (via FSDP2) to a decoder-style transformer model.
@@ -321,7 +360,8 @@ def apply_fsdp_to_decoder(
     gpt_oss, qwen3_vl, ...). The MoE handling is a strict superset of the dense
     case: a dense model leaves ``ep_degree=1`` / ``edp_mesh=None`` and has no
     MoE blocks, so every transformer block is sharded as a single
-    FSDP unit and the expert-parallel prefetching below is skipped.
+    FSDP unit and the explicit prefetching below is skipped unless
+    ``unshard_in_current_stream`` is set.
 
     Args:
         model (Decoder): The model to apply data parallelism to.
@@ -353,6 +393,9 @@ def apply_fsdp_to_decoder(
         edp_mesh_dims: Sibling of ``dp_mesh_dims`` for the sparse SPMD mesh
             used by routed experts.
         symm_mem_scope: Which FSDP modules use symmetric-memory communication.
+        unshard_in_current_stream: Whether to issue pre-forward/pre-backward
+            all-gathers on the current (compute) stream via
+            ``FSDPModule.set_unshard_in_current_stream``.
     """
     mp_policy = mixed_precision_policy(
         model,
@@ -531,11 +574,13 @@ def apply_fsdp_to_decoder(
         logger.info("Applied CPU Offloading to the model")
 
     # NOTE: set up explicit prefetching when EP is enabled, as D2H syncs
-    # in EP could interfere with implicit prefetching in FSDP
-    if ep_degree == 1:
+    # in EP could interfere with implicit prefetching in FSDP, and when
+    # unsharding in the current stream, as all-gathers issued on the compute
+    # stream only overlap with compute if they are issued ahead of time
+    if ep_degree == 1 and not unshard_in_current_stream:
         return
 
-    # set up explicit prefetching when EP is enabled for forward
+    # set up explicit prefetching for forward
     transformer_blocks = list(model.layers.values())
     next_transformer_blocks = transformer_blocks[1:] + [None]
 
@@ -554,7 +599,7 @@ def apply_fsdp_to_decoder(
                 [model.norm, model.lm_head]
             )
 
-    # set up explicit prefetching when EP is enabled for backward
+    # set up explicit prefetching for backward
     # pyrefly: ignore [no-matching-overload]
     reversed_transformer_blocks = list(reversed(model.layers.values()))
     prev_transformer_blocks = reversed_transformer_blocks[1:] + [None]
@@ -571,3 +616,7 @@ def apply_fsdp_to_decoder(
         elif model.tok_embeddings is not None:
             # pyrefly: ignore [missing-attribute]
             transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
+
+    if unshard_in_current_stream:
+        assert isinstance(model, FSDPModule)
+        model.set_unshard_in_current_stream(True)

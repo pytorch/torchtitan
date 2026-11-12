@@ -33,21 +33,24 @@ def test_attention_region_matches_eager(region, layer_id):
     attention = layer.attention.build().cuda()
     num_tokens, num_heads, num_kv_heads = 64, attention.n_heads, attention.n_kv_heads
     head_dim = attention.head_dim
-    query_TNH = torch.randn(
-        num_tokens, num_heads, head_dim, device="cuda", dtype=torch.bfloat16
-    )
     if region == "muse_spark_attention_qk":
         positions_T = torch.arange(num_tokens, device="cuda")
 
-        def fn(query_TNH, key_TKH):
-            return attention._prepare_query_and_key(query_TNH, key_TKH, positions_T)
+        def fn(qkv):
+            return attention._prepare_query_key_value(qkv, positions_T)
 
-        key_TKH = torch.randn(
-            num_tokens, num_kv_heads, head_dim, device="cuda", dtype=torch.bfloat16
+        qkv = torch.randn(
+            num_tokens,
+            (num_heads + 2 * num_kv_heads) * head_dim,
+            device="cuda",
+            dtype=torch.bfloat16,
         )
-        inputs_ = (query_TNH, key_TKH)
+        inputs_ = (qkv,)
     else:
         fn = attention._flatten_attention_output
+        query_TNH = torch.randn(
+            num_tokens, num_heads, head_dim, device="cuda", dtype=torch.bfloat16
+        )
         gate_TO = torch.randn(
             num_tokens, num_heads * head_dim, device="cuda", dtype=torch.bfloat16
         )
