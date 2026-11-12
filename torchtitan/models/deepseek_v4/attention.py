@@ -72,12 +72,23 @@ class DSV4InnerAttention(InnerAttention):
             max_context_length: int | None = None,
         ) -> VarlenAttentionMetadata:
             """Build document offsets shared by DSV4 sparse attention components."""
-            return create_varlen_metadata_for_document(
+            metadata = create_varlen_metadata_for_document(
                 positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
                 max_context_length=max_context_length,
             )
+            if self.compress_ratio > 1:
+                # Compression groups regroup the packed stream, so every segment
+                # must end on a ratio boundary. The data loader guarantees it by
+                # padding each segment to the document alignment.
+                torch._assert_async(
+                    (metadata.cu_seq_q % self.compress_ratio == 0).all(),
+                    "DeepSeek V4 requires document-aligned packing: every packed "
+                    "segment length must be a multiple of compress_ratio "
+                    f"({self.compress_ratio}).",
+                )
+            return metadata
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -419,16 +430,15 @@ class DeepSeekV4Attention(Attention):
         q = torch.cat([q_nope, q_rope], dim=-1)
         kv = torch.cat([kv_nope, kv_rope.squeeze(1)], dim=-1)
 
-        cu_seqlens = _packed_cu_seqlens(attention_metadata)
         cmp_k = idx_q = idx_k = idx_w = None
         if self.compress_ratio > 1 and hasattr(self, "indexer"):
             idx_q, idx_k, idx_w = self.indexer(
-                x.detach(), qr.detach(), positions=positions, cu_seqlens=cu_seqlens
+                x.detach(), qr.detach(), positions=positions
             )
         if self.compress_ratio == 4:
-            cmp_k = self.compressor(x, positions=positions, cu_seqlens=cu_seqlens)
+            cmp_k = self.compressor(x, positions=positions)
         elif self.compress_ratio > 1:
-            cmp_k = self.compressor_128(x, positions=positions, cu_seqlens=cu_seqlens)
+            cmp_k = self.compressor_128(x, positions=positions)
 
         attn_sink_param = self.attn_sink.weight.squeeze(-1)
         if self.compress_ratio == 4:

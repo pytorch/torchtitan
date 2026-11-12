@@ -62,9 +62,11 @@ class TestDSVPackedDocuments(unittest.TestCase):
         self.enterContext(patch.dict(AuxLoss.group_acc, clear=True))
 
     def test_get_attention_metadata_builds_document_offsets(self):
-        # Documents start where positions reset; the padding tail is its own segment.
-        positions = torch.tensor([0, 1, 2, 0, 1, 2, 3, 4, 0, 1])
-        padding_mask = torch.tensor([False] * 8 + [True] * 2)
+        # Documents start where positions reset and are aligned to the
+        # compression ratio; the padding tail is its own segment.
+        positions = torch.arange(128).repeat(4)
+        padding_mask = torch.zeros(512, dtype=torch.bool)
+        padding_mask[384:] = True
         with torch.device("meta"):
             config = config_registry.deepseek_v4_debugmodel(seq_len=128)
             model = config.model.build()
@@ -72,16 +74,16 @@ class TestDSVPackedDocuments(unittest.TestCase):
         self.assertTrue(metadata)
         for value in metadata.values():
             self.assertIsInstance(value, VarlenAttentionMetadata)
-            self.assertEqual(value.cu_seq_q.tolist(), [0, 3, 8, 10])
+            self.assertEqual(value.cu_seq_q.tolist(), [0, 128, 256, 384, 512])
 
     def test_preprocess_inputs_passes_document_offsets(self):
         with torch.device("meta"):
             config = config_registry.deepseek_v4_debugmodel(seq_len=128)
             model = config.model.build()
         input_dict = {
-            "input": torch.zeros(128, dtype=torch.long),
-            "labels": torch.zeros(128, dtype=torch.long),
-            "positions": torch.arange(64).repeat(2),
+            "input": torch.zeros(256, dtype=torch.long),
+            "labels": torch.zeros(256, dtype=torch.long),
+            "positions": torch.arange(128).repeat(2),
         }
         # SPMD annotation needs a device mesh; this checks only the plumbing.
         with patch(
@@ -98,7 +100,7 @@ class TestDSVPackedDocuments(unittest.TestCase):
         metadata = kwargs["attention_metadata"]
         self.assertTrue(metadata)
         for value in metadata.values():
-            self.assertEqual(value.cu_seq_q.tolist(), [0, 64, 128])
+            self.assertEqual(value.cu_seq_q.tolist(), [0, 128, 256])
 
     def test_packed_attention_matches_each_document_alone(self):
         """Packed documents must not see each other through the sliding window,
@@ -115,11 +117,11 @@ class TestDSVPackedDocuments(unittest.TestCase):
         # breaks ties by layout; let CSA select every causal candidate instead
         # (the longest document below has 384 // 4 compressed entries).
         attention_configs[4].inner_attention.index_topk = 96
-        # Group-aligned lengths also compare against the unpacked path; the
-        # others cover partial groups and documents shorter than a group.
+        # Documents are packed aligned to the largest compression ratio, so
+        # every segment ends on a group boundary.
         for lengths, reference in (
             ([256, 128, 384], "unpacked"),
-            ([300, 37, 150, 5], "packed alone"),
+            ([384, 128, 256], "packed alone"),
         ):
             positions = torch.cat([torch.arange(n) for n in lengths])
             for attention_config in attention_configs.values():
@@ -160,6 +162,18 @@ class TestDSVPackedDocuments(unittest.TestCase):
                             )
                         )
                     torch.testing.assert_close(packed, torch.cat(docs))
+
+    def test_unaligned_documents_are_rejected(self):
+        # A segment length that no compression ratio divides would let a
+        # compressed group straddle a document boundary.
+        model_config = config_registry.deepseek_v4_debugmodel(seq_len=128).model
+        inner = next(
+            layer.attention.inner_attention
+            for layer in model_config.layers
+            if layer.attention.compress_ratio == 128
+        )
+        with self.assertRaisesRegex(RuntimeError, "document-aligned"):
+            inner.build_attention_metadata(torch.arange(129))
 
 
 if __name__ == "__main__":

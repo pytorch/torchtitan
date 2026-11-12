@@ -7,6 +7,7 @@
 # Shape suffixes: T = tokens, M = HC branches (hc_mult), D = hidden width.
 
 from dataclasses import dataclass, field
+from math import lcm
 from typing import Any, cast, TYPE_CHECKING
 
 import spmd_types as spmd
@@ -208,6 +209,31 @@ class DeepSeekV4Model(Decoder):
         norm_eps: float = 1e-6
         hc_head: HcHead.Config
         mtp_layers: list["MTPBlock.Config"] | None = None
+
+        @property
+        def document_alignment(self) -> int | None:
+            """Multiple every packed document segment must have, if any.
+
+            Compression groups are ``compress_ratio`` tokens wide, so a document
+            segment has to end on a boundary every variant respects. None means
+            no layer compresses and packing needs no alignment.
+            """
+            alignment = lcm(
+                *(
+                    max(1, layer.attention.compress_ratio)
+                    for layer in (*self.layers, *(self.mtp_layers or ()))
+                )
+            )
+            return None if alignment == 1 else alignment
+
+        def __post_init__(self) -> None:
+            Decoder.Config.__post_init__(self)
+            alignment = self.document_alignment
+            if alignment is not None and self.max_context_length % alignment != 0:
+                raise ValueError(
+                    f"document alignment ({alignment}) must divide "
+                    f"max_context_length ({self.max_context_length})."
+                )
 
         def build_flops_estimator(
             self,

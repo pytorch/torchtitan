@@ -7,7 +7,7 @@
 """DeepSeek V4 model configurations used by tests."""
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch.distributed.tensor import Shard
@@ -275,6 +275,24 @@ def _dist_muon_optimizer(
 class _DeepSeekV4TrainerConfig(Trainer.Config):
     def __post_init__(self) -> None:
         Trainer.Config.__post_init__(self)
+        # Packed documents must end on compression-group boundaries; the model
+        # owns the alignment and the loader pads each document segment to it.
+        alignment = cast(DeepSeekV4Model.Config, self.model).document_alignment
+        if alignment is not None:
+            for loader in (
+                self.dataloader,
+                self.validator.dataloader if self.validator is not None else None,
+            ):
+                if loader is None:
+                    continue
+                if not isinstance(loader, GrainDataLoader.Config):
+                    raise ValueError(
+                        "DeepSeek V4 requires GrainDataLoader for document "
+                        "alignment."
+                    )
+                loader.document_alignment = alignment
+                if loader.max_num_documents is None:
+                    loader.max_num_documents = 64
         if (
             self.parallelism.tensor_parallel_degree > 1
             or self.parallelism.pipeline_parallel_degree > 1
