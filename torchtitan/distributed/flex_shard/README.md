@@ -89,15 +89,10 @@ recipes.
 
 ## Local optimizer compilation
 
-Call `compile()` on a `DistMuon` to compile its local momentum preparation,
-Newton-Schulz and direction writeback, and parameter update with Inductor:
-
-```python
-optimizer.compile()
-```
-
-Compilation is opt-in and independent of model compilation. Redistribution stays
-eager.
+For accelerator-resident parameters, `DistMuon` compiles its local momentum
+preparation, Newton-Schulz and direction writeback, and parameter update with
+Inductor by default. CPU-resident parameters retain eager updates. Compilation
+is lazy and independent of model compilation. Redistribution stays eager.
 
 ## Package boundary
 

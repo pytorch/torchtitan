@@ -255,11 +255,17 @@ class DistMuon(Optimizer):
             compute_sharding_by_fqn=compute_sharding_by_fqn,
             bucket_configs=bucket_configs,
         )
+        if all(
+            parameter.device.type != "cpu"
+            for group in self.param_groups
+            for parameter in group["params"]
+        ):
+            self.compile()
 
     def compile(self) -> None:
         """Compile local momentum, direction, and parameter updates.
 
-        This opt-in path supports FP32 and BF16 storage and is independent of model
+        This path supports FP32 and BF16 storage and is independent of model
         compilation. Transport stays eager. Compilation is lazy; CUDA Graph
         capture is not requested because scratch storage is released each step.
         """
