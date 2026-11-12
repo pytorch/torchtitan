@@ -15,12 +15,8 @@ otherwise. `[TODO]` marks gaps to fill before posting.
 - GPU time per training step: **-13.8%** on DSv3 671B, **-29.8%** on Qwen3 30B-A3B and **-15.7%** on GPT-OSS
   120B. Tokens/s: +13.5%, +41.8% and +24.0%. These are one-GPU, fake-process-group numbers, so they are
   upper bounds. On 2 real GB300 nodes, Qwen3 30B-A3B's kernels saved the same 2.24 s per step as on one GPU
-  in the same benchmark: **-27.6%** step time instead of -32.6%.
-- **Warm start:** seeding the loop with a sibling model's verified kernels cut the wall clock from ~13 h to
-  **2 h 41 min** (Qwen3 30B-A3B -> 235B-A22B). Every kernel was accepted on its first trial, but no kernel
-  file ran unchanged: they all hard-code their shapes. A controlled study with a cold arm (DSv3 671B,
-  microbatch doubled, 3 runs per arm) reached 90% of the best gain **2.7x sooner** warm, with a third fewer
-  GPU-hours, and the warm kernels ended as fast or faster.
+  in the same benchmark: **-27.6%** step time instead of -32.6%. Over 300 steps there, with deterministic
+  attention, GraphTrainer with the kernels stayed bitwise identical to eager.
 - **Integration: a graph pass instead of a model rewrite.** The patterns are glue between GEMMs, attention
   and collectives, and most of the saving crosses module boundaries (59-87%). Eager reached **93-101%** of
   the graph's saving, bitwise, by calling the same kernels from autograd.Functions, but only by rewriting the
@@ -31,6 +27,11 @@ otherwise. `[TODO]` marks gaps to fill before posting.
   regions save **76%** of the graph's saving on Qwen3 30B-A3B, mostly RoPE and the loss, and **12%** on
   DSv3 671B, whose hand-written fused kernels leave them little. Unlike the loop's kernels, these regions
   are not bitwise.
+- **Warm start:** seeding the loop with a sibling model's verified kernels cut the wall clock from ~13 h to
+  **2 h 41 min** (Qwen3 30B-A3B -> 235B-A22B). Every kernel was accepted on its first trial, but no kernel
+  file ran unchanged: they all hard-code their shapes. A controlled study with a cold arm (DSv3 671B,
+  microbatch doubled, 3 runs per arm) reached 90% of the best gain **2.7x sooner** warm, with a third fewer
+  GPU-hours, and the warm kernels ended as fast or faster.
 - **The hard parts are time and trust.** Verification is about 75% of a warm-start loop. Bitwise gates can
   be passed by kernels that silently fall back to the reference, and per-kernel speedups can be inflated
   by harness settings and slow baselines.
@@ -87,7 +88,7 @@ recipe --> 1 capture --> 2 plan --> 3 run <-------------------+ --> 5 package
 5. **Package.** The regions, the verified kernels and the expected call counts become a pip-installable
    kernel pack ([graph-trainer-kernel-packs](https://github.com/SherlockNoMad/graph-trainer-kernel-packs)).
    The pack checks the environment, the kernel hashes and every call count, and raises on any mismatch
-   (sec. 6d).
+   (sec. 5d).
 
 **Rules for every loop:**
 - Bitwise: a run passes only if loss, grad_norm and the MoE load-balance loss are bitwise equal to the
@@ -170,7 +171,7 @@ real cluster; the last part of this section measures one model on real hardware.
 | DSv3 671B DistMoE MXFP8, FSDP 256 x EP 64 | 20 (13) | 583.9 -> 503.4 ms (**-13.8%**) | 6,141 -> 6,968 (**+13.5%**) | bitwise |
 | Qwen3 30B-A3B DistMoE MXFP8, FSDP 8 x EP 8 | 15 (15) | 967.9 -> 679.6 ms (**-29.8%**) | 34,702 -> 49,214 (**+41.8%**) | bitwise |
 | GPT-OSS 120B MXFP8, FSDP 64 x EP 16 | 16 (14) | 1992.3 -> 1679.2 ms per microbatch (**-15.7%**) | 7,638 -> 9,468 (**+24.0%**) | bitwise |
-| Qwen3 235B-A22B DistMoE MXFP8, FSDP 256 x EP 32 (warm start, sec. 5) | 19 | 1036.4 -> 737.7 ms (**-28.8%**) | 7,698 -> 10,631 (**+38.1%**) | bitwise |
+| Qwen3 235B-A22B DistMoE MXFP8, FSDP 256 x EP 32 (warm start, sec. 6a) | 19 | 1036.4 -> 737.7 ms (**-28.8%**) | 7,698 -> 10,631 (**+38.1%**) | bitwise |
 
 Sources: `dsv3_671b_distmoe_mxfp8/`, `qwen3_30b_a3b_distmoe_mxfp8/`, `gpt_oss_120b_mxfp8_64gpu/`,
 `qwen3_235b_a22b_distmoe_mxfp8/`, and the packs' READMEs. The DSv3 and Qwen3 30B tokens/s come from the eager
@@ -209,15 +210,18 @@ per call is the verifier's measurement of the original aten ops against the kern
   is only a few kernels. It still adds up, since it runs in every layer.
 - **Most cross a boundary:** 6 of the 8 cross a module, library or layer boundary, and 5 run in the
   backward.
-- **The same families recur across models** (sec. 5): router and aux loss, RMSNorm with add and
+- **The same families recur across models** (sec. 6a): router and aux loss, RMSNorm with add and
   quantization, the loss, RoPE glue and MXFP8 weight preparation.
 
 ### Qwen3 30B-A3B on a real cluster
 
-A separate run took the Qwen3 30B-A3B loop's 16 lift passes and its kernels (18 kernels, cache keys remapped
-to this benchmark) to 2 GB300 nodes with real communication. The benchmark differs from the table above: 8
-microbatches of 32K tokens per step (2,097,152 tokens), 50 steps, median step time over steps 11-50. The same
-benchmark also ran on one GB300 with the fake process group. Source:
+Two separate runs took the Qwen3 30B-A3B loop's 16 lift passes and its kernels (18 kernels, cache keys
+remapped to this benchmark) to 2 GB300 nodes (8 GPUs, FSDP 8 x EP 8) with real communication. Both use the
+same benchmark, which differs from the table above: 8 microbatches of 32K tokens per step (2,097,152 tokens).
+The first measured throughput over 50 steps; the second trained 300 steps to compare loss with eager.
+
+**Throughput, 50 steps.** Median step time over steps 11-50. The same benchmark also ran on one GB300 with
+the fake process group. Source:
 [Qwen3 30B-A3B: eager vs GraphTrainer + kernels](https://artifacts.internalmeta.com/a/1158072533227800).
 
 | Step time, median | 1 GB300, fake process group | 2 GB300 nodes (8 GPUs), real communication |
@@ -243,99 +247,47 @@ benchmark also ran on one GB300 with the fake process group. Source:
   - four lift passes contained bucketing glue that doesn't exist before deferred bucketing (R2 in `TODO.md`
     item 1).
 
-## 5. Result 2: warm start
+**Loss parity with eager, 300 steps.** Seed 0 and the same data order for every run. Source:
+[Qwen3 30B-A3B: eager vs GraphTrainer are bitwise identical for 300
+steps](https://artifacts.internalmeta.com/a/1151430804545666). Eager is unchanged. GraphTrainer carries three
+fixes from a parity investigation, which are not in this branch yet:
+- **Gradient accumulation.** Eager reduce-scatters every microbatch and accumulates the shards in float32.
+  GraphTrainer accumulated unsharded bf16 gradients and reduced once. Fix: reduce every microbatch (8
+  reduce-scatters per step) into float32 accumulators.
+- **Chunked-loss LM head.** Eager sums the chunks' unsharded weight gradients in place (`mm`, then
+  `addmm(out=grad)`) and reduce-scatters once; GraphTrainer reduce-scattered each chunk. Fix: merge the
+  multi-use reduce-scatters, with an in-place `addmm_`.
+- **Logged loss.** `torch.sum` over a stack vs a sequential add. Fix: a sequential sum.
 
-**Why retuning is the common case.** Today's kernels are specialized to their shapes: each hard-codes its
-sizes, grid splits and reduction order. Any change of model variant (hidden size, number of experts) or of
-sharding (FSDP or EP degree, which sets each rank's local shapes and bucket layout) needs the kernels
-tuned again. Even the microbatch size changes most input shapes: doubling it changed 25 of DSv3's 29 kernel
-specs (the controlled study below). Warm start makes that retuning cheaper by seeding it with the kernels
-already verified for a nearby configuration.
+| | Loss at step 300, deterministic attention | Step time (s), deterministic attention | Step time (s), cuDNN attention | Tokens/s per GPU, cuDNN attention |
+|---|---|---:|---:|---:|
+| Eager | 2.15474 | 8.895 | 8.684 | 30,186 |
+| GraphTrainer | 2.15474, bitwise equal to eager at all 300 steps | 8.656 | 8.465 | 30,968 |
+| GraphTrainer + kernels | 2.15474, bitwise equal to eager at all 300 steps | 6.417 | 6.221 | 42,142 |
+| Eager + `local_compile` | 2.00271, differs from step 1 | 7.189 | 6.980 | 37,555 |
 
-**Setup.** The 235B loop started from everything the 30B loop produced: its regions, its plan, and each
-kernel with its design notes and verifier checklist in the writer's and verifier's prompts. Source:
-`qwen3_235b_a22b_distmoe_mxfp8/reuse_report.md`.
+- **Bitwise for 300 steps, against eager.** With FA4's deterministic attention backward, eager,
+  GraphTrainer and GraphTrainer + kernels have the same loss and grad_norm at every step. All 1,472 region
+  calls ran on the kernels. The investigation found no other numerical difference.
+- **The saving held:** 2.239 s per step with deterministic attention (-25.9%) and 2.244 s with cuDNN
+  attention (-26.5%), the same 2.24 s as the 50-step run. With cuDNN attention, GraphTrainer + kernels is
+  10.9% faster per step than eager with `local_compile`. The three configurations that also ran in the
+  50-step run are each 0.34-0.35 s slower here. That includes eager with `local_compile`, which the parity
+  fixes don't touch, so the shift comes from the measurement (this run reports a mean and logs the loss
+  every step), not from the fixes.
+- **With production attention, loss curves cannot validate kernels.** Two runs of the identical eager
+  configuration with cuDNN attention matched at step 1, diverged from step 2, and ended 0.22 apart at step
+  300 (2.1964 vs 1.9762; largest per-step gap 0.454). The cuDNN and flash attention backward kernels
+  accumulate dQ with atomic adds whose order varies from run to run, even under
+  `torch.use_deterministic_algorithms`. All four configurations' curves fall inside that band (about
+  0.2-0.25 at step 300), so a curve comparison only catches errors larger than the band. `local_compile`
+  shows how much training amplifies a small difference: it is deterministic and differs from eager by
+  compiled-region rounding (about 6e-6 relative at step 1), yet ends 0.15 lower at step 300.
 
-| | Qwen3 30B-A3B, cold | Qwen3 235B-A22B, warm |
-|---|---|---|
-| Wall clock to a validated result | ~13 h | **2 h 41 min** |
-| Plans / training iterations | 4 / 7 | 2 / 3 |
-| Kernels accepted | 15 | 19 (15 ported, 4 new) |
-| Trials per accepted kernel | typically 2-14, up to 30 | **1 for every kernel** |
-| Verifier FAILs | at least 2 | **0** |
-| GPU time saved per step | -29.8% | -28.8% |
-
-**How much was reused:**
-
-| Artifact | Reused? |
-|---|---|
-| Region matchers | 13 of 16 lifted the expected sites unchanged; 3 broke on a decomposition change or a different parameter-producer chain |
-| Patterns (`l1` keys) | 6 of 13 identical to 30B; only the input specialization differed |
-| Kernel files as is | **0 of 13**: every kernel hard-codes its shapes |
-| Kernel source | 15 of 19 kernels ported, at 0.76-1.00 source similarity (near-identical patterns rewritten from scratch in earlier loops: 0.30-0.39) |
-| Kernel speed | kept: e.g. attention forward glue 14.3x -> 14.2x, router backward 31.7x -> 36x; launch-bound kernels lose some with 4x fewer tokens per call |
-
-**Where reuse stops:**
-- The finder still had to run on the new model: one layout-specific region (expert-gradient bucket pack)
-  saved 31.7 ms/step, as much as the six ported router and loss kernels together.
-- The real porting cost was reduction orders that depend on shape. A bitwise kernel must add in the same
-  order as the backend, and quack's RMSNorm and torch's reductions choose their order from the sizes.
-- Verification did not get cheaper (sec. 7a).
-
-Across all three packs, the same families recur: router and aux loss (all three models), RMSNorm with add and
-MXFP8 quantization (fused forward and backward), cross-entropy loss (GPT-OSS and Qwen3 share an identical
-`reference.py`), RoPE glue, and MXFP8 weight preparation.
-
-### Controlled: DSv3 671B at twice the microbatch
-
-An independent study by Yidi measured the warm-start effect alone, with a cold arm and repeats. Source:
-[Whole-config warm start: re-tuning every kernel for mbs8k](https://artifacts.internalmeta.com/a/2198296197707549).
-
-**Setup:**
-- **Configs:** DSv3 671B, FSDP 256 x EP 64. The microbatch goes from 4,096 to 8,192 tokens per rank, which
-  changes the input shapes of 25 of the 29 kernel specs (21 patterns).
-- **Workers:** one kernel-tuning worker per pattern, each on one GB300 with a 120-minute active budget.
-- **Arms:**
-  - **cold:** every pattern from scratch;
-  - **warm:** the 3 specs whose shapes didn't change reuse the old kernel as is; every other pattern starts
-    from the old config's kernels for it, or for a near-duplicate pattern.
-- **Repeats:** 3 runs per arm.
-- **Scoring:** every promoted kernel is re-gated on held-out seeds and re-timed against `reference.py`, with
-  both arms of a pattern on the same GPU.
-- **Per-step kernel time:** the sum over specs of calls per step x kernel time, using each run's best exact
-  kernel at that point. With no kernels it is 291.7 ms; with the best kernel of any run for every spec,
-  169.4 ms (1.72x).
-
-| | Warm, 3 runs | Cold, 3 runs |
-|---|---|---|
-| Patterns tuned | 18 (+3 specs reused) | 21 |
-| Median time to a first verified kernel, per spec | **12.3 min** | 32.3 min |
-| Time to 90% of the best config-level gain | **16 / 25 / 28 min** | 59 / 67 / 95 min |
-| Per-step kernel time at 30 min | 178.1-180.6 ms | 220.8-255.9 ms |
-| Per-step kernel time at 120 min | 173.0-175.4 ms | 178.9-181.0 ms |
-| GPU-hours | 15.0-17.0 | 22.5-25.8 |
-| Output tokens | 1.03-1.15M | 1.58-1.66M |
-
-- **Warm reached 90% of the gain about 2.7x sooner** (median 25 vs 67 min), with about a third fewer
-  GPU-hours and tokens.
-- **Warm kernels ended as fast or faster.**
-  - Warm set the best kernel on 17 of 29 specs. On the other 12, cold's best is within 0-3.8% of warm's,
-    which is run-to-run noise.
-  - Warm's largest leads were 34%, 19%, 13% and 11%: starting from the old kernel found faster kernels
-    than 120 minutes from scratch.
-- **Where warm didn't help:** GEMM-bound patterns with little headroom (best 1.04-1.25x) sit at noise in
-  both arms, and the two patterns with no old kernel ran cold in both.
-- **Isolation needed more than the prompt.** Three runs leaked: agents searched the machine for earlier
-  work, read another pattern's tuned cache, and guessed a sibling run's path. Those runs restarted from
-  scratch, and the folders holding answers were made unreadable.
-
-This complements the Qwen3 235B warm start, which had no cold arm (sec. 7a). The two are different
-transfers: a shape change within one model here, a larger model of the same family there.
-
-## 6. Result 3: integrating the kernels, a graph pass vs an eager rewrite
+## 5. Result 2: integrating the kernels, a graph pass vs an eager rewrite
 
 The loop's kernels are specialized to one model, layout, GPU and torch build; each hard-codes its shapes
-(sec. 7a). They still have to get into the training step, and there are two ways:
+(sec. 6a). They still have to get into the training step, and there are two ways:
 - **eager:** rewrite model code so it calls the kernels from autograd.Functions;
 - **graph:** a pass that swaps the matched subgraphs for the kernels.
 
@@ -475,8 +427,8 @@ each kernel called exactly as often as in the verified run? ---- no  -> raise
 
 **Limits:**
 - A pack hits only with the pack's deterministic and Inductor settings: for static shapes, the input key is
-  the AOTAutograd cache key, which includes them (sec. 8).
-- Kernels are pinned to one torch build and GPU (sec. 7b). A torch upgrade means re-verifying or regenerating
+  the AOTAutograd cache key, which includes them (sec. 7).
+- Kernels are pinned to one torch build and GPU (sec. 6b). A torch upgrade means re-verifying or regenerating
   the pack.
 - Until `substitute_kernels` lands, packs need the `agentic_compiler` branch.
 
@@ -575,17 +527,106 @@ the graph the pattern occurs and swaps only those nodes.
 rewriting the transformer blocks around them. The graph integrates them as a pass that leaves the model code
 alone, with each kernel's contract written down as `reference.py`.
 
-## 7. Hard problems
+## 6. Hard problems
 
 ### a. Optimization time and reuse
 
-- **Cold start ~13 h, warm start 2 h 41 min** (Qwen3 30B -> 235B). There was no controlled cold 235B run, so
-  the 5x also includes a more mature process. The controlled DSv3 study (sec. 5) isolates the warm-start
-  effect: 2.7x sooner to 90% of the best gain.
-- **Verification is the critical path.** In the warm start, writers handed off 18 of 19 candidates within
-  26 min; verification took about 2 h. Each verifier ran the full suite (40-100 min), even for ports that
-  changed only constants (4-25 lines). About 40 min were lost to coordination: a GPU lock held through JIT
-  compiles, and a cap on concurrent agents.
+**Why retuning is the common case.** Today's kernels are specialized to their shapes: each hard-codes its
+sizes, grid splits and reduction order. Any change of model variant (hidden size, number of experts) or of
+sharding (FSDP or EP degree, which sets each rank's local shapes and bucket layout) needs the kernels
+tuned again. Even the microbatch size changes most input shapes: doubling it changed 25 of DSv3's 29 kernel
+specs (the controlled study below). Warm start makes that retuning cheaper by seeding it with the kernels
+already verified for a nearby configuration.
+
+#### Warm start: Qwen3 30B-A3B -> 235B-A22B
+
+**Setup.** The 235B loop started from everything the 30B loop produced: its regions, its plan, and each
+kernel with its design notes and verifier checklist in the writer's and verifier's prompts. Source:
+`qwen3_235b_a22b_distmoe_mxfp8/reuse_report.md`. There was no cold 235B run, so the ~5x shorter wall clock
+also includes a more mature process; the controlled study below isolates the warm-start effect.
+
+| | Qwen3 30B-A3B, cold | Qwen3 235B-A22B, warm |
+|---|---|---|
+| Wall clock to a validated result | ~13 h | **2 h 41 min** |
+| Plans / training iterations | 4 / 7 | 2 / 3 |
+| Kernels accepted | 15 | 19 (15 ported, 4 new) |
+| Trials per accepted kernel | typically 2-14, up to 30 | **1 for every kernel** |
+| Verifier FAILs | at least 2 | **0** |
+| GPU time saved per step | -29.8% | -28.8% |
+
+**How much was reused:**
+
+| Artifact | Reused? |
+|---|---|
+| Region matchers | 13 of 16 lifted the expected sites unchanged; 3 broke on a decomposition change or a different parameter-producer chain |
+| Patterns (`l1` keys) | 6 of 13 identical to 30B; only the input specialization differed |
+| Kernel files as is | **0 of 13**: every kernel hard-codes its shapes |
+| Kernel source | 15 of 19 kernels ported, at 0.76-1.00 source similarity (near-identical patterns rewritten from scratch in earlier loops: 0.30-0.39) |
+| Kernel speed | kept: e.g. attention forward glue 14.3x -> 14.2x, router backward 31.7x -> 36x; launch-bound kernels lose some with 4x fewer tokens per call |
+
+**Where reuse stops:**
+- The finder still had to run on the new model: one layout-specific region (expert-gradient bucket pack)
+  saved 31.7 ms/step, as much as the six ported router and loss kernels together.
+- The real porting cost was reduction orders that depend on shape. A bitwise kernel must add in the same
+  order as the backend, and quack's RMSNorm and torch's reductions choose their order from the sizes.
+- Verification did not get cheaper (below).
+
+Across all three packs, the same families recur: router and aux loss (all three models), RMSNorm with add and
+MXFP8 quantization (fused forward and backward), cross-entropy loss (GPT-OSS and Qwen3 share an identical
+`reference.py`), RoPE glue, and MXFP8 weight preparation.
+
+#### Controlled: DSv3 671B at twice the microbatch
+
+An independent study by Yidi measured the warm-start effect alone, with a cold arm and repeats. Source:
+[Whole-config warm start: re-tuning every kernel for mbs8k](https://artifacts.internalmeta.com/a/2198296197707549).
+
+**Setup:**
+- **Configs:** DSv3 671B, FSDP 256 x EP 64. The microbatch goes from 4,096 to 8,192 tokens per rank, which
+  changes the input shapes of 25 of the 29 kernel specs (21 patterns).
+- **Workers:** one kernel-tuning worker per pattern, each on one GB300 with a 120-minute active budget.
+- **Arms:**
+  - **cold:** every pattern from scratch;
+  - **warm:** the 3 specs whose shapes didn't change reuse the old kernel as is; every other pattern starts
+    from the old config's kernels for it, or for a near-duplicate pattern.
+- **Repeats:** 3 runs per arm.
+- **Scoring:** every promoted kernel is re-gated on held-out seeds and re-timed against `reference.py`, with
+  both arms of a pattern on the same GPU.
+- **Per-step kernel time:** the sum over specs of calls per step x kernel time, using each run's best exact
+  kernel at that point. With no kernels it is 291.7 ms; with the best kernel of any run for every spec,
+  169.4 ms (1.72x).
+
+| | Warm, 3 runs | Cold, 3 runs |
+|---|---|---|
+| Patterns tuned | 18 (+3 specs reused) | 21 |
+| Median time to a first verified kernel, per spec | **12.3 min** | 32.3 min |
+| Time to 90% of the best config-level gain | **16 / 25 / 28 min** | 59 / 67 / 95 min |
+| Per-step kernel time at 30 min | 178.1-180.6 ms | 220.8-255.9 ms |
+| Per-step kernel time at 120 min | 173.0-175.4 ms | 178.9-181.0 ms |
+| GPU-hours | 15.0-17.0 | 22.5-25.8 |
+| Output tokens | 1.03-1.15M | 1.58-1.66M |
+
+- **Warm reached 90% of the gain about 2.7x sooner** (median 25 vs 67 min), with about a third fewer
+  GPU-hours and tokens.
+- **Warm kernels ended as fast or faster.**
+  - Warm set the best kernel on 17 of 29 specs. On the other 12, cold's best is within 0-3.8% of warm's,
+    which is run-to-run noise.
+  - Warm's largest leads were 34%, 19%, 13% and 11%: starting from the old kernel found faster kernels
+    than 120 minutes from scratch.
+- **Where warm didn't help:** GEMM-bound patterns with little headroom (best 1.04-1.25x) sit at noise in
+  both arms, and the two patterns with no old kernel ran cold in both.
+- **Isolation needed more than the prompt.** Three runs leaked: agents searched the machine for earlier
+  work, read another pattern's tuned cache, and guessed a sibling run's path. Those runs restarted from
+  scratch, and the folders holding answers were made unreadable.
+
+This complements the Qwen3 235B warm start, which had no cold arm. The two are different transfers: a shape
+change within one model here, a larger model of the same family there.
+
+#### What stays hard
+
+- **Verification is the critical path.** In the 235B warm start, writers handed off 18 of 19 candidates
+  within 26 min; verification took about 2 h. Each verifier ran the full suite (40-100 min), even for ports
+  that changed only constants (4-25 lines). About 40 min were lost to coordination: a GPU lock held through
+  JIT compiles, and a cap on concurrent agents.
 - **Kernels are not reusable as files.** They encode sizes, grid splits and reduction orders. What would
   help:
   - shape-generic kernels with explicit raises;
@@ -623,11 +664,11 @@ What the gate caught, or what got past a weaker gate, across the four loops:
   measured a slow deterministic baseline (sec. 4). Report the non-deterministic baseline and attribute the
   gain per kernel.
 
-## 8. Caveats and next steps
+## 7. Caveats and next steps
 
 - **Fake process group, one GPU, rank 0, for every loop.** No communication overlap and no other rank's
-  graph. The one real-cluster check so far (Qwen3 30B-A3B, 2 GB300 nodes, sec. 4) kept the full absolute
-  saving. Larger layouts are untested: next, GPT-OSS on 64 GPUs, then DSv3 on 256 (`TODO.md` item 4).
+  graph. The real-cluster runs so far (Qwen3 30B-A3B, 2 GB300 nodes, sec. 4) kept the full absolute saving
+  and, over 300 steps, bitwise parity with eager. Larger layouts are untested: next, GPT-OSS on 64 GPUs, then DSv3 on 256 (`TODO.md` item 4).
 - **Deterministic mode only:** packs hit only in deterministic mode today, because one cache key includes the
   deterministic flag.
 - **Workflow:** the loop is three tools plus per-model glue (`TODO.md` item 3, `WORKFLOW.md`).
@@ -655,8 +696,9 @@ What the gate caught, or what got past a weaker gate, across the four loops:
 | Loop reports (plans, regions, kernel caches, audit reports) | `dsv3_671b_distmoe_mxfp8/`, `gpt_oss_120b_mxfp8_64gpu/`, `qwen3_30b_a3b_distmoe_mxfp8/`, `qwen3_235b_a22b_distmoe_mxfp8/` |
 | GEMM vs glue split and glue roofline (sec. 3) | `glue_roofline/` |
 | Warm-start report | `qwen3_235b_a22b_distmoe_mxfp8/reuse_report.md` |
-| Controlled warm-start study (DSv3 671B, sec. 5) | [artifact 2198296197707549](https://artifacts.internalmeta.com/a/2198296197707549) |
-| Real-cluster run (Qwen3 30B-A3B, sec. 4) | [artifact 1158072533227800](https://artifacts.internalmeta.com/a/1158072533227800) |
+| Controlled warm-start study (DSv3 671B, sec. 6a) | [artifact 2198296197707549](https://artifacts.internalmeta.com/a/2198296197707549) |
+| Real-cluster throughput run (Qwen3 30B-A3B, sec. 4) | [artifact 1158072533227800](https://artifacts.internalmeta.com/a/1158072533227800) |
+| Real-cluster 300-step loss parity with eager (Qwen3 30B-A3B, sec. 4) | [artifact 1151430804545666](https://artifacts.internalmeta.com/a/1151430804545666) |
 | Eager studies | `qwen3_30b_eager_study/`, `dsv3_671b_eager_study/` |
 | Eager vs graph finder study (source of the GEMM efficiency numbers in sec. 3) | `finder_substrate_study/` (protocol, prompts, scoring, both arms' regions and reports, judgements) |
 | Kernel packs and their runtime | [github.com/SherlockNoMad/graph-trainer-kernel-packs](https://github.com/SherlockNoMad/graph-trainer-kernel-packs) |
