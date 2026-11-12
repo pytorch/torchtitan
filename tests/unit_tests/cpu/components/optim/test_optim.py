@@ -117,7 +117,9 @@ def test_optim_builds_owned_components(enable_accelerator_graph: bool) -> None:
         optim = Optim(
             config,
             model_parts=[model],
-            parallelism_context=MagicMock(),
+            parallelism_context=MagicMock(
+                get_optional_mesh=MagicMock(return_value=None)
+            ),
             training_steps=10,
             pp_has_last_stage=True,
         )
@@ -125,6 +127,7 @@ def test_optim_builds_owned_components(enable_accelerator_graph: bool) -> None:
     optimizer_config.build.assert_called_once_with(
         model_parts=[model],
         enable_accelerator_graph=enable_accelerator_graph,
+        pp_group=None,
     )
     config.lr_scheduler.build.assert_called_once_with(
         optimizers=optimizers,
@@ -175,7 +178,9 @@ def test_optim_accelerator_graph_falls_back_for_unsupported_device(
         optim = Optim(
             config,
             model_parts=[model],
-            parallelism_context=MagicMock(),
+            parallelism_context=MagicMock(
+                get_optional_mesh=MagicMock(return_value=None)
+            ),
             training_steps=10,
             pp_has_last_stage=True,
         )
@@ -183,6 +188,7 @@ def test_optim_accelerator_graph_falls_back_for_unsupported_device(
     optimizer_build.assert_called_once_with(
         model_parts=[model],
         enable_accelerator_graph=False,
+        pp_group=None,
     )
     gradient_clipper_config.build.assert_called_once_with()
     wrap.assert_not_called()
