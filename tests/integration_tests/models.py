@@ -10,7 +10,6 @@ Each configuration function is selected by module and name in the launched
 training process, so it must stay importable from this module.
 """
 
-from dataclasses import replace
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import GrainDataLoader
@@ -50,9 +49,6 @@ from torchtitan_recipes.tests.models.multimodal import (
 from torchtitan_recipes.tests.models.qwen3 import (
     qwen3_debugmodel,
     qwen3_debugmodel_moe_param_groups,
-)
-from torchtitan_recipes.tests.models.qwen3_8_flash_next import (
-    qwen38_flash_next_debugmodel_mm,
 )
 
 from tests.integration_tests import IntegrationTestDefinition
@@ -645,30 +641,6 @@ def muse_spark_debugmodel_mm_fsdp2_tp2_cp2_ep4() -> Trainer.Config:
     return config
 
 
-def qwen38_flash_next_debugmodel_mm_checkpoint_save() -> Trainer.Config:
-    config = qwen38_flash_next_debugmodel_mm()
-    return replace(
-        config,
-        training=replace(config.training, steps=5),
-        optim=replace(
-            config.optim,
-            # Keep the ten-step LR schedule across the save/load split.
-            lr_scheduler=replace(config.optim.lr_scheduler, total_steps=10),
-        ),
-        checkpointer=CheckpointManager.Config(interval=5, last_save_model_only=False),
-    )
-
-
-def qwen38_flash_next_debugmodel_mm_checkpoint_load() -> Trainer.Config:
-    config = qwen38_flash_next_debugmodel_mm_checkpoint_save()
-    assert config.checkpointer is not None
-    return replace(
-        config,
-        training=replace(config.training, steps=10),
-        checkpointer=replace(config.checkpointer, load_step=5),
-    )
-
-
 def build_model_tests_list() -> list[IntegrationTestDefinition]:
     """
     Build the list of model parallelism test configurations.
@@ -677,20 +649,6 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
     models.
     """
     return [
-        IntegrationTestDefinition(
-            configs=[
-                qwen38_flash_next_debugmodel_mm_checkpoint_save,
-                qwen38_flash_next_debugmodel_mm_checkpoint_load,
-            ],
-            test_descr=(
-                "Qwen3.8-Flash-Next FSDP, EP, image fusion, PLE, sparse attention "
-                "and checkpoint resume"
-            ),
-            test_name="qwen3_8_flash_next_fsdp",
-            ngpu=2,
-            use_real_pg=True,
-            skip_rocm_test=True,
-        ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_fsdp2_tp2_cp2],
             test_descr="Llama 3 FSDP+TP+CP",

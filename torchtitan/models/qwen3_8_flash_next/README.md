@@ -116,32 +116,46 @@ shard. CPU offload and deferred FSDP reduction for PLE are unsupported.
 
 ## Numerical Parity and Tests
 
+QSA attention uses Attention Gym's fused `gather_attn` kernel on CUDA. With
+separate values and grouped KV heads it supports only SM100/SM103 (Blackwell)
+in BF16; other GPUs raise in Attention Gym. The GPU integration test therefore
+runs in the B200 suite, and CPU tests use Attention Gym's reference kernels.
+
 Results for reduced models using identical weights, measured on GB300 with the
 [HF parity script](../../../scripts/checkpoint_conversion/numerical_tests_qwen3_8_flash_next.py):
 
 | Comparison | Max output error | Parameter gradient cosine |
 | --- | ---: | ---: |
-| Text, BF16 | `3.97e-3` | `0.999923` |
+| Text, BF16 | `4.15e-3` | `0.999929` |
 | Vision, FP32 | `3.35e-7` | `>0.999999999999` |
-| Image/video, BF16 decoder + FP32 vision | `3.91e-3` | `0.999946` |
+| Image/video, BF16 decoder + FP32 vision | `3.91e-3` | `0.999952` |
 
-Offline GB300 comparisons also verified unsharded versus `FSDP=2, EP=1/2`
-forward/backward parity for packed text and image/video inputs, with QSA chunk
-size 1 for text.
+One of 2,496 text logits exceeds the script's forward bound (`4.15e-3` versus
+`4.03e-3`). Against an FP32 copy of the HF model, that logit's error is
+`7.5e-4` for torchtitan and `3.34e-3` for the BF16 HF reference; with
+`gather_attn` forced to Attention Gym's reference kernel, every bound passes.
+
+Offline GB300 comparisons of unsharded versus `FSDP=2, EP=1/2` (same
+checkpoint and inputs) match routing and QSA selections exactly. Image/video
+logits match bitwise (gradient cosine `0.9999984`). Text logits exceed the
+forward bound in 182 of 159,744 entries: fused `gather_attn` rounds a query's
+output differently depending on its row in the packed batch (one BF16 ulp
+across a 64-query tile boundary), and the unsharded layout places the same
+tokens at different rows. With the reference kernel, text logits match bitwise
+(gradient cosine `0.9999977`).
 
 CPU tests cover indexer gradients with no complete blocks; the multimodal
 integration does not explicitly force that imbalance across ranks.
 
-A full-checkpoint save/load check on two GB300s restored model and optimizer
-tensors bitwise. Resumed training's maximum loss/gradient-norm differences are
-`1.80e-4` / `5.27e-4`; the first observed difference is in vision gradients.
+Uninterrupted training is bitwise reproducible. Resuming from a step-5
+checkpoint matches it through step 8; from step 9 the loss and gradient norm
+differ by up to `9.9e-4` and `6.3e-3`. The cause is not yet identified.
 
 ## TODO
 
-- Replace QSA's chunked reference attention and teacher with shared kernels/loss
-  after [Attention Gym's grouped training path](https://github.com/meta-pytorch/attention-gym/pull/702)
-  and [the shared teacher](https://github.com/pytorch/torchtitan/pull/5863) land.
-  Current checkpoints bound saved activations per chunk, but indexer ranking
-  still performs quadratic work; released-length throughput is unqualified.
+- Replace the model-local indexer teacher with
+  [the shared teacher](https://github.com/pytorch/torchtitan/pull/5863) once it
+  lands.
+- Find why resumed training diverges from uninterrupted training at step 9.
 - Qualify released-model capacity and throughput, including table offload and
   longer-context attention.
