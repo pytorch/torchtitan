@@ -159,7 +159,7 @@ class Optim(Configurable):
         if self._is_first_step_call and device_type != "xpu":
             # Finish GPU work before freeing cached memory for NCCL buffers.
             # https://github.com/pytorch/torchtitan/issues/5019
-            # The sync is skipped while a lazily initialized device (CUDA, XPU)
+            # The sync is skipped while a lazily initialized device (CUDA)
             # is untouched, so a model on CPU never creates a device context.
             # torch.mps has no is_initialized(): MPS is not lazily initialized.
             if torch.accelerator.is_available() and (
