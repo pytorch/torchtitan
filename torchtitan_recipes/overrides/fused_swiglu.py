@@ -47,7 +47,7 @@ def _silu_and_mul_forward_kernel(
     up,
     out,
     offsets,
-    NUM_ROWS: tl.constexpr,
+    NUM_ROWS,  # Not constexpr: routed row counts change every step.
     NUM_COLS: tl.constexpr,
     NUM_OFFSETS: tl.constexpr,
     HAS_OFFSETS: tl.constexpr,
@@ -98,7 +98,7 @@ def _silu_and_mul_backward_kernel(
     grad_gate,
     grad_up,
     offsets,
-    NUM_ROWS: tl.constexpr,
+    NUM_ROWS,  # Not constexpr: routed row counts change every step.
     NUM_COLS: tl.constexpr,
     NUM_OFFSETS: tl.constexpr,
     HAS_OFFSETS: tl.constexpr,
