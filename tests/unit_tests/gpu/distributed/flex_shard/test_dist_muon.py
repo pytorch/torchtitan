@@ -960,8 +960,9 @@ class TestDistMuonMatchesUnshardedMuon(DTensorTestBase):
         ``a_replicated`` is TP-replicated: each region is received from one
         holder but returned to every TP holder. It sorts first in the bucket, so
         returned fragments written in place would overwrite the later
-        parameters' unread input. Experts keep their DP ownership and use their
-        own bucket.
+        parameters' unread input; the shared bucket must match per-parameter
+        buckets exactly. Experts keep their DP ownership and use their own
+        bucket.
         """
         torch.manual_seed(42)
         block_rows = (8, 4)
@@ -1020,13 +1021,19 @@ class TestDistMuonMatchesUnshardedMuon(DTensorTestBase):
             "c_heads": head_placements,
             "d_experts": (Shard(0), Shard(1)),
         }
-        parameters = {
-            fqn: nn.Parameter(distribute_tensor(value.clone(), mesh, placements[fqn]))
-            for fqn, value in values.items()
-        }
-        param_groups = [
-            {"params": list(parameters.values()), "param_names": list(parameters)}
-        ]
+
+        def make_parameters():
+            return {
+                fqn: nn.Parameter(
+                    distribute_tensor(value.clone(), mesh, placements[fqn])
+                )
+                for fqn, value in values.items()
+            }
+
+        parameters = make_parameters()
+        # One bucket per parameter keeps every compute input unshared, so it is
+        # the exact, GEMM-schedule-independent reference for the shared bucket.
+        separate_parameters = make_parameters()
         transport_axes = dist_muon_module.redistribution_mesh_axes(
             "b_whole", parameters["b_whole"], owned
         )
@@ -1035,14 +1042,24 @@ class TestDistMuonMatchesUnshardedMuon(DTensorTestBase):
         )
         dense_patterns = ("a_replicated", "b_whole", "c_heads")
 
-        def build(dense_mesh):
+        def build(dense_mesh, parameters=parameters, separate=False):
+            dense_buckets = (
+                [
+                    BucketConfig(patterns=(fqn,), mesh=dense_mesh)
+                    for fqn in dense_patterns
+                ]
+                if separate
+                else [BucketConfig(patterns=dense_patterns, mesh=dense_mesh)]
+            )
             return DistMuon(
-                param_groups,
-                compute_sharding_by_fqn=compute_sharding_by_fqn,
-                bucket_configs=[
-                    BucketConfig(patterns=dense_patterns, mesh=dense_mesh),
-                    BucketConfig(patterns=("d_experts",)),
+                [
+                    {
+                        "params": list(parameters.values()),
+                        "param_names": list(parameters),
+                    }
                 ],
+                compute_sharding_by_fqn=compute_sharding_by_fqn,
+                bucket_configs=[*dense_buckets, BucketConfig(patterns=("d_experts",))],
                 **hyperparameters,
             )
 
@@ -1058,6 +1075,9 @@ class TestDistMuonMatchesUnshardedMuon(DTensorTestBase):
                 with self.assertRaisesRegex(ValueError, "explicit BucketConfig.mesh"):
                     build(None)
             optimizer = build(transport_mesh)
+            separate_optimizer = build(
+                transport_mesh, parameters=separate_parameters, separate=True
+            )
 
         def split(fqn, tensor):
             if fqn == "c_heads":
@@ -1075,24 +1095,37 @@ class TestDistMuonMatchesUnshardedMuon(DTensorTestBase):
             **hyperparameters,
         )
         for step_gradients in gradients:
-            for fqn, parameter in parameters.items():
-                parameter.grad = distribute_tensor(
-                    step_gradients[fqn].clone(), mesh, placements[fqn]
-                )
+            for fqn in values:
+                for parameter in (parameters[fqn], separate_parameters[fqn]):
+                    parameter.grad = distribute_tensor(
+                        step_gradients[fqn].clone(), mesh, placements[fqn]
+                    )
                 for reference, gradient in zip(
                     references[fqn], split(fqn, step_gradients[fqn]), strict=True
                 ):
                     reference.grad = gradient.clone()
             optimizer.step()
+            separate_optimizer.step()
             reference_optimizer.step()
 
         for fqn, parameter in parameters.items():
+            torch.testing.assert_close(
+                parameter.full_tensor(),
+                separate_parameters[fqn].full_tensor(),
+                rtol=0,
+                atol=0,
+                msg=f"{fqn} differs between shared and per-parameter buckets",
+            )
             expected = [reference.detach() for reference in references[fqn]]
+            # Head blocks and experts run batched BF16 Newton-Schulz, which can
+            # differ from per-matrix calls across GEMM schedules: allow 2e-2 of
+            # the lr-normalized update per step, as the tests above do.
+            batched = fqn in ("c_heads", "d_experts")
             torch.testing.assert_close(
                 parameter.full_tensor(),
                 torch.stack(expected) if fqn == "d_experts" else torch.cat(expected),
                 rtol=0,
-                atol=0,
+                atol=len(gradients) * 2e-2 * hyperparameters["lr"] if batched else 0,
                 msg=fqn,
             )
 
