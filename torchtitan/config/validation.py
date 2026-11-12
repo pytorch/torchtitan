@@ -26,36 +26,52 @@ __all__ = [
 ]
 
 
-def _declared_spmd_axes(model: Module.Config) -> set[MeshAxisName]:
-    """Collect the mesh axes declared by the model's sharding configs.
+def _collect_model_layouts(
+    model: Module.Config,
+) -> list[tuple[str, str, set[MeshAxisName]]]:
+    """Collect every SPMD layout declared by the model's sharding configs.
 
-    Each module declares the mesh axes it shards over in its
-    ``sharding_config``; a model that never mentions an axis does not
-    implement that form of parallelism.
+    Returns ``(fqn, field, axes)`` triples, where ``fqn`` mirrors the module
+    FQN ``build()`` would produce and ``field`` names the ShardingConfig
+    field holding the layout.
     """
     from torchtitan.distributed.spmd_types import spmd_axes
     from torchtitan.models.base.module import Module
 
-    declared = set()
+    layouts = []
     # recurse=True: the root config itself is a Module.Config, and the
     # default stops descending into a matching subtree.
-    for _, cfg, _, _ in model.traverse(Module.Config, recurse=True):
+    for fqn, cfg, _, _ in model.traverse(Module.Config, recurse=True):
         sharding = cfg.sharding_config
         if sharding is None:
             continue
-        layouts = list(sharding.state_shardings.values())
+        fields = [
+            (f"state_shardings[{key}]", layout)
+            for key, layout in sharding.state_shardings.items()
+        ]
         if sharding.in_src_shardings is not None:
-            layouts.extend(sharding.in_src_shardings.values())
+            fields.extend(
+                (f"in_src_shardings[{key}]", layout)
+                for key, layout in sharding.in_src_shardings.items()
+            )
         if sharding.in_dst_shardings is not None:
-            layouts.extend(sharding.in_dst_shardings.values())
+            fields.extend(
+                (f"in_dst_shardings[{key}]", layout)
+                for key, layout in sharding.in_dst_shardings.items()
+            )
         out_src = sharding.out_src_shardings
         if out_src is not None:
-            layouts.extend(out_src if isinstance(out_src, tuple) else (out_src,))
+            fields.extend(
+                (f"out_src_shardings[{i}]", layout)
+                for i, layout in enumerate(
+                    out_src if isinstance(out_src, tuple) else (out_src,)
+                )
+            )
         if sharding.out_dst_shardings is not None:
-            layouts.append(sharding.out_dst_shardings)
-        for layout in layouts:
-            declared.update(spmd_axes(layout))
-    return declared
+            fields.append(("out_dst_shardings", sharding.out_dst_shardings))
+        for field, layout in fields:
+            layouts.append((fqn, field, set(spmd_axes(layout))))
+    return layouts
 
 
 def _validate_declared_parallel_axes(
@@ -63,41 +79,79 @@ def _validate_declared_parallel_axes(
 ) -> None:
     """Reject parallelism degrees the model cannot run.
 
-    Tensor parallelism is derived from the sharding configs: a model that
-    shards no tensor over TP cannot run with ``tensor_parallel_degree > 1``
-    (the degree would be silently ignored). TP placements are unconditional,
-    so this does not depend on how the model config was built.
+    The check runs per layout, not over the union of all layouts: a layout
+    that never mentions an axis is replicated over that axis, so a model
+    that is only partly sharded must not pass.
 
-    Expert parallelism cannot be derived the same way: MoE weight placements
-    only name the EP axis when the model config was built with EP enabled,
-    so a config built with ``expert_parallel_degree == 1`` would look
-    EP-incapable even for a genuine MoE model. Instead, EP support follows
-    from the presence of MoE layers: a model with no MoE layers cannot run
-    with ``expert_parallel_degree > 1``.
+    Dense and sparse layouts get different treatment. Layouts under a
+    ``RoutedExperts.Config`` live in the sparse EP/EDP region, so TP/CP
+    need not appear there. Every other layout is dense: with
+    ``tensor_parallel_degree > 1`` each dense layout must name TP.
+
+    Expert parallelism is checked on the routed-expert weights themselves
+    (the ``w13``/``w2`` configs under each ``RoutedExperts.Config``): with
+    ``expert_parallel_degree > 1`` every one of them must name EP, and a
+    model with no routed experts at all is rejected. A config built with
+    ``expert_parallel_degree == 1`` gets dense ``{DP, CP, TP: R}`` expert
+    weight placements, so it is rejected here instead of silently ignoring
+    the EP degree at runtime.
+
+    CP is intentionally not checked per layout: Kimi K3's layer-0
+    ``block_residual`` boundary omits CP (``multimodal_first_layer_sharding_config``;
+    the tensor is empty at layer 0 and no later layer declares it), while
+    Kimi K3 with ``context_parallel_degree == 2`` is a working,
+    integration-tested configuration. CP stays covered by the structural
+    ``validate_context_parallel`` check below.
     """
     from torchtitan.distributed.parallelism_context import MeshAxisName
-    from torchtitan.models.common.moe import MoE
+    from torchtitan.distributed.spmd_types import spmd_axes
+    from torchtitan.models.common.moe import RoutedExperts
 
-    model_cls = type(model)._owner
-    model_name = (
-        model_cls.__name__ if model_cls is not None else type(model).__qualname__
-    )
-    if (
-        parallelism.tensor_parallel_degree > 1
-        and MeshAxisName.TP not in _declared_spmd_axes(model)
-    ):
-        raise ValueError(
-            f"{model_name} declares no 'tp' sharding, but "
-            "parallelism.tensor_parallel_degree is "
-            f"{parallelism.tensor_parallel_degree}. Set tensor_parallel_degree "
-            "to 1, or use a model that shards over 'tp'."
+    model_name = type(model).__qualname__
+    tp = parallelism.tensor_parallel_degree
+    ep = parallelism.expert_parallel_degree
+
+    # The routed-expert (sparse) region lives under RoutedExperts.Config.
+    sparse_prefixes = [fqn for fqn, _, _, _ in model.traverse(RoutedExperts.Config)]
+
+    def _is_sparse(fqn: str) -> bool:
+        return any(
+            fqn == prefix or fqn.startswith(f"{prefix}.") for prefix in sparse_prefixes
         )
-    if parallelism.expert_parallel_degree > 1 and not list(model.traverse(MoE.Config)):
-        raise ValueError(
-            f"{model_name} has no MoE layers; set "
-            f"parallelism.expert_parallel_degree to 1 (got "
-            f"{parallelism.expert_parallel_degree})."
-        )
+
+    if tp > 1:
+        for fqn, field, axes in _collect_model_layouts(model):
+            if _is_sparse(fqn) or MeshAxisName.TP in axes:
+                continue
+            raise ValueError(
+                f"{model_name} declares no 'tp' sharding in {fqn} ({field}), "
+                "but parallelism.tensor_parallel_degree is "
+                f"{tp}. Set tensor_parallel_degree to 1, or use a model that "
+                "shards over 'tp'."
+            )
+
+    if ep > 1:
+        if not sparse_prefixes:
+            raise ValueError(
+                f"{model_name} has no routed experts; set "
+                "parallelism.expert_parallel_degree to 1 (got "
+                f"{ep})."
+            )
+        for fqn, experts, _, _ in model.traverse(RoutedExperts.Config):
+            for sub in ("w13", "w2"):
+                sub_cfg = getattr(experts, sub, None)
+                if sub_cfg is None or sub_cfg.sharding_config is None:
+                    continue
+                for key, layout in sub_cfg.sharding_config.state_shardings.items():
+                    if MeshAxisName.EP in spmd_axes(layout):
+                        continue
+                    raise ValueError(
+                        f"{model_name} routed-expert weights declare no 'ep' "
+                        f"sharding in {fqn}.{sub} (state_shardings[{key}]), "
+                        "but parallelism.expert_parallel_degree is "
+                        f"{ep}. Build the model with expert_parallel_degree "
+                        f"{ep} so the routed experts are EP-sharded."
+                    )
 
 
 def validate_model_training_config(
