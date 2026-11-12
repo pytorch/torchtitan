@@ -764,7 +764,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         if not torch.cuda.is_available():
             raise unittest.SkipTest("CUDA is unavailable")
 
-        from attn_gym.linear.kda.bwd.triton.l2norm_bwd import l2norm_bwd_kernel
+        from attn_gym._backends.triton import tune as triton_tune
 
         torch.manual_seed(42)
         kernel = GDNKernel.Config().build()
@@ -800,10 +800,13 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
                             "is_in_batch_invariant_mode",
                             return_value=batch_invariant,
                         ),
+                        # Deterministic mode pins every tuned Attention Gym kernel. A
+                        # tuned Triton launch calls run_tunable before any winner-cache
+                        # lookup, so a warm cache cannot hide one.
                         mock.patch.object(
-                            l2norm_bwd_kernel,
-                            "run",
-                            side_effect=RuntimeError("Normalization autotuner ran"),
+                            triton_tune,
+                            "run_tunable",
+                            side_effect=RuntimeError("An autotuner ran"),
                         ) as autotuner,
                     ):
                         output_LHV = kernel(
@@ -920,8 +923,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
                 scale=key_dim**-0.5,
                 state_indices=torch.tensor([3], device="cuda", dtype=torch.int32),
                 has_initial_state=torch.tensor([False], device="cuda"),
-                autotune=False,
-                kernel_options={"batch_invariant": True},
+                kernel_options={"batch_invariant": True, "autotune": False},
             )
 
         state_indices = torch.tensor([3, 1], device="cuda", dtype=torch.int32)
@@ -943,8 +945,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
                 scale=key_dim**-0.5,
                 state_indices=state_indices,
                 has_initial_state=has_initial_state,
-                autotune=False,
-                kernel_options={"batch_invariant": True},
+                kernel_options={"batch_invariant": True, "autotune": False},
             )
         expected = torch.cat(
             (prefix_output, remaining_output),
