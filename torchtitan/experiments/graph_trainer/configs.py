@@ -16,6 +16,9 @@ from torchtitan.experiments.graph_trainer.chunked_loss import (
 from torchtitan.experiments.graph_trainer.common_utils import (
     disable_inplace_wgrad_accum,
 )
+from torchtitan.experiments.graph_trainer.programmable_fusion import (
+    ProgrammableFusionConfig,
+)
 from torchtitan.models.base.model import BaseModel
 from torchtitan.trainer import Trainer
 
@@ -305,6 +308,10 @@ class GraphTrainerCompileConfig:
     enable_autoparallel: bool = False
     """Use AutoParallelGraph (ILP solver-based SPMD sharding) instead of
     manual TP/FSDP/EP."""
+
+    programmable_fusion: ProgrammableFusionConfig | None = None
+    """Fusion regions the recipe names by op path (``programmable_fusion.py``),
+    outlined and replaced by cached kernels. None disables it."""
 
 
 def validate_ep_overlap_config(
