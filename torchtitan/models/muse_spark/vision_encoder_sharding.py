@@ -51,7 +51,6 @@ def navit_encoder_sharding_config() -> ShardingConfig:
     return ShardingConfig(
         state_shardings={"positional_embedding_vlm": parameter_invariant},
         out_src_shardings=activation_invariant,
-        out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I}),
     )
 
 

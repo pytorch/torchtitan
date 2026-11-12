@@ -753,8 +753,13 @@ class MuseSparkModel(MultimodalModel):
         assert vision_projection is not None and perception_emb_norm is not None
         tok_embeddings = self.tok_embeddings
         assert tok_embeddings is not None
+        # The encoder output is CP-invariant; each CP rank consumes it for its own
+        # token shard, so its gradient is summed across CP.
         vision_features_TO = vision_adapter(
-            vision_encoder(pixel_values_TP, grid_thw=grid_thw_I3)
+            maybe_invariant_to_replicate(
+                vision_encoder(pixel_values_TP, grid_thw=grid_thw_I3),
+                MeshAxisName.CP,
+            )
         )
         vision_embeds_TD = perception_emb_norm(vision_projection(vision_features_TO))
         if spmd_dense_sp_enabled():
@@ -779,6 +784,11 @@ class MuseSparkModel(MultimodalModel):
         audio_features_TD = audio_encoder(
             waveforms_SC,
             waveform_padded_lengths_N=waveform_padded_lengths_N,
+        )
+        # The encoder output is CP-invariant; each CP rank consumes it for its own
+        # token shard, so its gradient is summed across CP.
+        audio_features_TD = maybe_invariant_to_replicate(
+            audio_features_TD, MeshAxisName.CP
         )
         audio_embeds_TD = perception_emb_norm(audio_features_TD)
         if spmd_dense_sp_enabled():

@@ -529,8 +529,12 @@ class MuseGlimmerModel(MultimodalModel):
                 f"grid_thw describes {num_patches} patches, but pixel_values contains "
                 f"{pixel_values.shape[0]}"
             )
+        # The encoder output is CP-invariant; each CP rank consumes it for its own
+        # token shard, so its gradient is summed across CP.
         vision_features_VD = self.vision_adapter(
-            self.vision_encoder(pixel_values, grid_thw=grid_thw)
+            maybe_invariant_to_replicate(
+                self.vision_encoder(pixel_values, grid_thw=grid_thw), MeshAxisName.CP
+            )
         )
         vision_embeds_VD = self.perception_emb_norm(
             self.vision_projection(vision_features_VD)

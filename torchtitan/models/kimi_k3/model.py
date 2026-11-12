@@ -385,9 +385,11 @@ class KimiK3Model(MultimodalModel):
 
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
         vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
-        # The encoder output is TP-invariant; the decoder consumes it in
-        # TP-sharded computation, so its gradient is summed across TP.
+        # The encoder output is TP- and CP-invariant; the decoder consumes it in
+        # TP-sharded computation on CP-sharded tokens, so its gradient is summed
+        # across both. Converting TP first reduces CP first in backward.
         vision_embeds = maybe_invariant_to_replicate(vision_embeds, MeshAxisName.TP)
+        vision_embeds = maybe_invariant_to_replicate(vision_embeds, MeshAxisName.CP)
         if is_dummy:
             return add_zero_vision_dependency(embeddings_TD, vision_embeds)
 
