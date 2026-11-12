@@ -33,7 +33,6 @@ from torchtitan.components.optim.utils import (
     init_optim_state,
     load_flat_optim_state_dict,
 )
-from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.flex_shard import (
     BlockShard,
     BucketConfig,
@@ -50,7 +49,6 @@ from torchtitan.distributed.flex_shard.dist_muon import (
 )
 
 from torchtitan.distributed.utils import build_transport_meshes
-from torchtitan_recipes.tests.models.kimi_k2_7 import _per_expert_compute_layout
 
 
 pytestmark = pytest.mark.multi_gpu
@@ -834,12 +832,9 @@ class TestDistMuonTensorParallelCudaGraph(DTensorTestBase):
                     },
                     compute_dtype=torch.bfloat16,
                 ),
-                "layers.0.experts": _per_expert_compute_layout(
-                    ParallelismConfig(
-                        data_parallel_shard_degree=mesh["dp_shard"].size(),
-                        tensor_parallel_degree=mesh["tp"].size(),
-                        expert_parallel_degree=1,
-                    )
+                "layers.0.experts": ComputeLayout(
+                    shardings_by_mesh_axis={"dp_shard": Shard(0), "tp": Shard(0)},
+                    compute_dtype=torch.bfloat16,
                 ),
             },
             bucket_configs=[

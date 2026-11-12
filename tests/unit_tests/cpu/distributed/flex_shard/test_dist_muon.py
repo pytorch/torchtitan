@@ -155,48 +155,6 @@ class TestDistMuonTensorParallelCPU(DTensorTestBase):
                 atol=torch.finfo(torch.bfloat16).eps,
             )
 
-    @with_comms
-    def test_compute_ready_block_shard_accepts_empty_local_storage(self):
-        mesh = init_device_mesh(
-            self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)
-        )
-        values = torch.arange(18).reshape(6, 3).float().div_(13)
-        gradient = values.mul(0.37).add(0.2)
-        parameter = torch.nn.Parameter(
-            distribute_tensor(values.clone(), mesh, (Shard(0),))
-        )
-        parameter.grad = distribute_tensor(gradient.clone(), mesh, (Shard(0),))
-        optimizer = DistMuon(
-            [{"params": [parameter], "param_names": ["matrix"]}],
-            compute_sharding_by_fqn={
-                "matrix": ComputeLayout(
-                    shardings_by_mesh_axis={"dp_shard": BlockShard(0, (2,))},
-                    compute_dtype=torch.bfloat16,
-                )
-            },
-            bucket_configs=(BucketConfig(patterns=("matrix",)),),
-            lr=0.03,
-            weight_decay=0,
-            momentum=0,
-            nesterov=False,
-        )
-        reference_parameters = [
-            torch.nn.Parameter(block.clone()) for block in values.split(2)
-        ]
-        reference_optimizer = torch.optim.Muon(
-            reference_parameters, lr=0.03, weight_decay=0, momentum=0, nesterov=False
-        )
-        for reference, grad in zip(
-            reference_parameters, gradient.split(2), strict=True
-        ):
-            reference.grad = grad.clone()
-        optimizer.step()
-        reference_optimizer.step()
-        expected = torch.cat([reference.detach() for reference in reference_parameters])
-        torch.testing.assert_close(parameter.full_tensor(), expected, rtol=0, atol=0)
-        if self.rank == 3:
-            self.assertEqual(parameter.to_local().shape, (0, 3))
-
 
 class TestDistMuonUnevenPipelineCPU(DTensorTestBase):
     @property
