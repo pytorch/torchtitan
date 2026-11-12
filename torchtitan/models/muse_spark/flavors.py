@@ -69,7 +69,6 @@ from torchtitan.models.common.nn_modules import Conv1d, GELU, LayerNorm, RMSNorm
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
-    InvariantRowParallelLinear,
     VisionAttention,
     VisionMLP,
     VisionTransformerBlock,
@@ -630,7 +629,7 @@ def _muse_spark_navit_attention_config(
             bias=True,
             sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
         ),
-        proj=InvariantRowParallelLinear.Config(
+        proj=RowParallelLinear.Config(
             in_features=latent_dim,
             out_features=latent_dim,
             bias=True,
@@ -652,7 +651,7 @@ def _muse_spark_navit_mlp_config(
             bias=True,
             sharding_config=vision_colwise_sharding_config(),
         ),
-        fc2=InvariantRowParallelLinear.Config(
+        fc2=RowParallelLinear.Config(
             in_features=mlp_hidden_dim,
             out_features=latent_dim,
             bias=True,

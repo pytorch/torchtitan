@@ -25,6 +25,7 @@ from torchtitan.models.common import (
     Embedding,
     Linear,
     RMSNorm,
+    RowParallelLinear,
     Sigmoid,
     Softmax,
 )
@@ -37,7 +38,6 @@ from torchtitan.models.common.decoder_sharding import (
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.common.vision_encoder import (
-    InvariantRowParallelLinear,
     VisionAttention,
     VisionMLP,
     VisionTransformerBlock,
@@ -153,8 +153,8 @@ def _vl_linear(
 
 def _vision_row_parallel_linear(
     in_features: int, out_features: int
-) -> InvariantRowParallelLinear.Config:
-    return InvariantRowParallelLinear.Config(
+) -> RowParallelLinear.Config:
+    return RowParallelLinear.Config(
         in_features=in_features,
         out_features=out_features,
         bias=True,

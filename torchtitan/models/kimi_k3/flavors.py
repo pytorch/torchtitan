@@ -62,7 +62,6 @@ from torchtitan.models.common.moe.sharding import (
 )
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
 from torchtitan.models.common.vision_encoder import (
-    InvariantRowParallelLinear,
     VisionAttention,
     VisionMLP,
     VisionTransformerBlock,
@@ -196,8 +195,8 @@ def _vision_row_parallel_linear(
     out_features: int,
     *,
     param_init: dict[str, Callable] | None = None,
-) -> InvariantRowParallelLinear.Config:
-    return InvariantRowParallelLinear.Config(
+) -> RowParallelLinear.Config:
+    return RowParallelLinear.Config(
         in_features=in_features,
         out_features=out_features,
         bias=False,

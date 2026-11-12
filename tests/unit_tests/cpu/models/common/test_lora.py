@@ -45,10 +45,7 @@ from torchtitan.models.common.linear import (
     RowParallelLinear,
 )
 from torchtitan.models.common.moe.sharding import expert_param_placement_sparse
-from torchtitan.models.common.vision_encoder import (
-    InvariantRowParallelLinear,
-    VisionMLP,
-)
+from torchtitan.models.common.vision_encoder import VisionMLP
 from torchtitan.models.common.vision_encoder_sharding import (
     vision_colwise_sharding_config,
     vision_invariant_linear_sharding_config,
@@ -461,26 +458,6 @@ def test_lora_matches_linear_config_subclass():
     assert model.lora_b.weight.requires_grad
 
 
-@pytest.mark.parametrize("parallel_cls", [InvariantRowParallelLinear])
-def test_lora_preserves_specialized_row_parallel_linear(parallel_cls):
-    config = parallel_cls.Config(
-        in_features=4,
-        out_features=3,
-        bias=True,
-    )
-    transformed = LoRATransform(
-        rank=2,
-        alpha=4.0,
-    ).transform(config)
-    linear = transformed.build()
-
-    assert isinstance(linear, parallel_cls)
-    x = torch.randn(5, 4)
-    expected = F.linear(x, linear.weight, linear.bias)
-    expected += 2 * linear.lora_b(linear.lora_a(x))
-    torch.testing.assert_close(linear(x), expected)
-
-
 def test_lora_transform_targets_full_fqn_suffix():
     model_config = LoRATransform(
         rank=2,
@@ -816,7 +793,7 @@ class TestLoRATensorParallelTypecheck(DTensorTestBase):
                 bias=True,
                 sharding_config=vision_colwise_sharding_config(),
             ),
-            fc2=InvariantRowParallelLinear.Config(
+            fc2=RowParallelLinear.Config(
                 in_features=32,
                 out_features=16,
                 # With a bias, the forward skips SPMD type checking.

@@ -153,18 +153,18 @@ def vision_attention_sharding_config(
     *,
     rope_cache_dp: spmd.PerMeshAxisSpmdType,
 ) -> ShardingConfig:
-    """Vision attention boundary: gather ``x`` and ``rope_cache`` across TP."""
+    """Vision attention boundary: gather ``x`` across TP.
+
+    The rope cache is already TP-``Replicate`` (like the decoder's), so it
+    combines with the head-sharded q/k.
+    """
     return ShardingConfig(
         in_src_shardings={
             "x": _vision_activation_placement(),
-            "rope_cache": _vision_activation_placement(dp=rope_cache_dp),
+            "rope_cache": _vision_activation_placement(dp=rope_cache_dp, tp=spmd.R),
         },
         in_dst_shardings={
             "x": _vision_activation_placement(tp=spmd.R),
-            "rope_cache": _vision_activation_placement(
-                dp=rope_cache_dp,
-                tp=spmd.R,
-            ),
         },
     )
 

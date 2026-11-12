@@ -25,6 +25,7 @@ from torchtitan.distributed.parallelism_context import MeshAxisName, Parallelism
 setattr(spmd.PartitionSpec, "__deepcopy__", lambda self, memo: self)  # noqa: B010
 
 __all__ = [
+    "disable_dense_sp",
     "annotate_input_spmd_types",
     "annotate_replicated_parameters",
     "current_spmd_mesh",
@@ -81,6 +82,24 @@ def spmd_dense_mesh() -> DeviceMesh:
 def spmd_dense_sp_enabled() -> bool:
     """Return whether sequence parallelism is enabled in the dense region."""
     return getattr(_MESH_TLS, "dense_sp_enabled", False)
+
+
+@contextlib.contextmanager
+def disable_dense_sp() -> Iterator[None]:
+    """Treat the dense region as having no sequence parallelism.
+
+    For regions whose activations are never sequence-sharded even when the
+    decoder uses SP, e.g. vision encoders, whose activations stay
+    TP-``Invariant``. Inside, ``spmd_dense_sp_enabled()`` is False, so helpers
+    that follow the decoder residual layout (``maybe_gather_tp_input``,
+    ``RowParallelLinear``) use the non-SP ``Invariant`` layout.
+    """
+    previous = spmd_dense_sp_enabled()
+    _MESH_TLS.dense_sp_enabled = False
+    try:
+        yield
+    finally:
+        _MESH_TLS.dense_sp_enabled = previous
 
 
 def spmd_sparse_mesh() -> DeviceMesh | None:

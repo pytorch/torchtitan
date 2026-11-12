@@ -58,7 +58,6 @@ from torchtitan.models.common.moe.sharding import shared_experts_sharding_config
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
 from torchtitan.models.common.vision_encoder import (
-    InvariantRowParallelLinear,
     VisionAttention,
     VisionMLP,
     VisionTransformerBlock,
@@ -184,8 +183,8 @@ def _linear(
 
 def _vision_row_parallel_linear(
     in_features: int, out_features: int
-) -> InvariantRowParallelLinear.Config:
-    return InvariantRowParallelLinear.Config(
+) -> RowParallelLinear.Config:
+    return RowParallelLinear.Config(
         in_features=in_features,
         out_features=out_features,
         bias=True,
