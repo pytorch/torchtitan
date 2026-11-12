@@ -149,7 +149,7 @@ class ContextParallelInnerKDA(
         permutation: torch.Tensor | None,
         max_num_fragments: int,
     ) -> ContextParallelLinearAttentionMetadata:
-        """Build local routing with the padded global KDA sequence capacity."""
+        """Build rank-local routing from global KDA sequence metadata."""
         return prepare_cp_linear_attention_metadata(
             attention_metadata,
             permutation=permutation,

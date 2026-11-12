@@ -96,12 +96,11 @@ class ContextParallelLinearAttentionMetadata(LinearAttentionMetadata):
                 spmd.assert_type(value, self._ROUTING_SPMD_TYPE)
 
 
-# Every concrete metadata type must expose its tensors for graph input copying;
-# pytree registration of the base dataclass does not cover its subclasses.
+# pytree registration is per class; subclasses are not covered by the base.
 register_dataclass(UlyssesLinearAttentionMetadata)
 register_dataclass(ContextParallelLinearAttentionMetadata)
-# TODO(attention-gym): register ContextParallelRouting upstream, since its
-# docstring promises CUDA-graph replay; delete this once attn_gym does.
+# TODO: delete once Attention Gym registers ContextParallelRouting:
+# https://github.com/meta-pytorch/attention-gym/issues/850
 if not is_missing_kernel(ContextParallelRouting):
     register_dataclass(ContextParallelRouting)
 
@@ -115,9 +114,8 @@ def prepare_cp_linear_attention_metadata(
 ) -> ContextParallelLinearAttentionMetadata:
     """Build rank-local routing from global linear-attention sequence metadata.
 
-    ``max_num_fragments`` is the load balancer's batch-independent per-rank
-    bound, or 1 for contiguous sharding. Along with padded global document
-    offsets it fixes every routing tensor's shape across graph replays.
+    ``max_num_fragments`` bounds token ranges per rank for any batch; with
+    padded document offsets it keeps routing shapes fixed across batches.
     ``family`` names the attention (e.g. "KDA") in error messages.
     """
     if attention_metadata.varlen is None:
@@ -138,18 +136,15 @@ def prepare_cp_linear_attention_metadata(
             f"{family} metadata preparation requires an active multi-rank CP "
             "mesh axis."
         )
-    fragments = get_token_fragments(
-        cu_seqlens_global[-1],
-        cp_size=group.size(),
-        permutation=permutation,
-    )
-    # Local document cuts vary even when the global offsets are padded.
-    # Each extra fragment can add one local subsequence. The load balancer's
-    # fixed bound, not the actual fragment count, sets both routing capacities.
+    # Each fragment boundary can split one document into two subsequences.
     max_subsequences = len(cu_seqlens_global) - 1 + max_num_fragments - 1
     routing = ContextParallelRouting.from_fragments(
         cu_seqlens_global=cu_seqlens_global,
-        fragments=fragments,
+        fragments=get_token_fragments(
+            cu_seqlens_global[-1],
+            cp_size=group.size(),
+            permutation=permutation,
+        ),
         cp_rank=dist.get_rank(group),
         device=device,
         slots=max_num_fragments,
