@@ -85,7 +85,12 @@ _LORA_VISION_TARGETS = [
     "vision_adapter.c_proj",
     "vision_projection",
 ]
-_SlakeVariant = Literal["lora_decoder", "lora_vision_decoder"]
+# The whole vision tower: encoder (patch embedding included), adapter and
+# projection.
+_VISION_MODULES = ["vision_encoder", "vision_adapter", "vision_projection"]
+_SlakeVariant = Literal[
+    "lora_decoder", "lora_vision_decoder", "full_vision_lora_decoder"
+]
 # SLAKE answers are single words or short phrases. Without this LLaVA 1.5 prompt
 # the model answers in full sentences, so the end-of-turn token after a one-word
 # label is very unlikely. Eval and RL prompts must use the same text. RL that keeps
@@ -223,8 +228,8 @@ def _use_muse_spark_slake_sft_data(config: Trainer.Config) -> None:
     )
 
 
-def _slake_lora_optim() -> Optim.Config:
-    return Optim.Config(
+def _slake_lora_optim(variant: _SlakeVariant) -> Optim.Config:
+    optim = Optim.Config(
         optimizer=OptimizersContainer.Config(
             optimizers=[
                 AdamW.Config(
@@ -243,15 +248,29 @@ def _slake_lora_optim() -> Optim.Config:
             min_lr_factor=0.1,
         ),
     )
+    if variant == "full_vision_lora_decoder":
+        # lr 1e-5 is an untuned starting point, lower than the LoRA lr.
+        optimizers = optim.optimizer.optimizers
+        vision_pattern = rf"^({'|'.join(_VISION_MODULES)})\."
+        optimizers.insert(0, replace(optimizers[0], pattern=vision_pattern, lr=1e-5))
+    return optim
 
 
 def _slake_lora_transform(
     variant: _SlakeVariant, *, decoder_targets: list[str]
 ) -> LoRATransform:
     targets = list(decoder_targets)
+    trainable_modules = []
     if variant == "lora_vision_decoder":
         targets += _LORA_VISION_TARGETS
-    return LoRATransform(rank=8, alpha=16.0, target_modules=targets)
+    elif variant == "full_vision_lora_decoder":
+        trainable_modules = list(_VISION_MODULES)
+    return LoRATransform(
+        rank=8,
+        alpha=16.0,
+        target_modules=targets,
+        trainable_modules=trainable_modules,
+    )
 
 
 def _muse_spark_816b_a42b_slake_sft(variant: _SlakeVariant) -> Trainer.Config:
@@ -293,7 +312,7 @@ def _muse_spark_816b_a42b_slake_sft(variant: _SlakeVariant) -> Trainer.Config:
     config.metrics.loggers = [TensorBoardLogger.Config()]
     _use_muse_spark_slake_sft_data(config)
     # LoRA freezes the router gates that the default optimizer groups match.
-    config.optim = _slake_lora_optim()
+    config.optim = _slake_lora_optim(variant)
     use_flex_flash_attention(config.model)
     checkpointer = config.checkpointer
     assert isinstance(checkpointer, TorchCheckpointingManager.Config)
@@ -310,6 +329,10 @@ def muse_spark_816b_a42b_slake_lora_decoder_sft() -> Trainer.Config:
 
 def muse_spark_816b_a42b_slake_lora_vision_decoder_sft() -> Trainer.Config:
     return _muse_spark_816b_a42b_slake_sft("lora_vision_decoder")
+
+
+def muse_spark_816b_a42b_slake_full_vision_lora_decoder_sft() -> Trainer.Config:
+    return _muse_spark_816b_a42b_slake_sft("full_vision_lora_decoder")
 
 
 def _muse_glimmer_30b_slake_sft(variant: _SlakeVariant) -> Trainer.Config:
@@ -352,7 +375,7 @@ def _muse_glimmer_30b_slake_sft(variant: _SlakeVariant) -> Trainer.Config:
     config.training.disable_accelerator_graphs = True
     config.metrics.log_freq = 1
     config.metrics.loggers = [TensorBoardLogger.Config()]
-    config.optim = _slake_lora_optim()
+    config.optim = _slake_lora_optim(variant)
     config.checkpointer = cast(
         CheckpointManager.Config,
         TorchCheckpointingManager.Config(

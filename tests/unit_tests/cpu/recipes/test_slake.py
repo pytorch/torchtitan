@@ -6,6 +6,7 @@
 
 import pytest
 import torch
+from torchtitan.components.optim import OptimizersContainer
 from torchtitan.config.transform import transform_model_config_
 
 from torchtitan_recipes.models.muse_spark import MUSE_SPARK_LORA_DECODER_TARGETS
@@ -61,3 +62,31 @@ def test_slake_lora_trainable_split(debugmodel_mm, decoder_targets, variant):
     else:
         assert expected_vision <= adapted_vision
         assert not any("conv1" in name for name in adapted_vision)
+
+
+def test_slake_full_vision_optimizer_groups():
+    # Groups are first-match-wins and the LoRA group matches ".*", so a vision
+    # param that the vision pattern misses would silently train at the LoRA lr.
+    config = slake.muse_spark_816b_a42b_slake_full_vision_lora_decoder_sft()
+    transform = slake._slake_lora_transform(
+        "full_vision_lora_decoder", decoder_targets=MUSE_SPARK_LORA_DECODER_TARGETS
+    )
+    model_config = transform_model_config_(
+        muse_spark_debugmodel_mm().model, [transform]
+    )
+    with torch.device("meta"):
+        model = model_config.build()
+        # The container raises unless every trainable param is in exactly one group.
+        container = OptimizersContainer(config.optim.optimizer, model_parts=[model])
+    vision_group, lora_group = (
+        optimizer.param_groups[0] for optimizer in container.optimizers
+    )
+    vision = {
+        name
+        for name, _ in model.named_parameters()
+        if name.startswith(_VISION_PREFIXES)
+    }
+    assert vision_group["lr"] == 1e-5
+    assert set(vision_group["param_names"]) == vision
+    assert lora_group["param_names"]
+    assert all(".lora_" in name for name in lora_group["param_names"])
