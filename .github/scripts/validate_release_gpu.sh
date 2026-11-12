@@ -501,7 +501,7 @@ PY
   model_path="$(download_rl_model)"
   export RL_TEST_DUMP_FOLDER="${ARTIFACTS}/rl_unit"
   local test_class
-  for test_class in TestBitwiseParityVarlen TestBitwiseParityFlex; do
+  for test_class in TestBitwiseParityVarlen TestBitwiseParityFlex TestBitwiseParityStridedFlex; do
     HF_ASSETS_PATH="${model_path}" python -m torch.distributed.run \
       --standalone --nproc-per-node=2 -m pytest \
       "tests/rl/unit_tests/gpu/test_bitwise_parity.py::${test_class}" -v

@@ -28,6 +28,9 @@ Run each backend in a separate torchrun invocation:
 
     torchrun --nproc_per_node=2 -m pytest \
         tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityFlex -v
+
+    torchrun --nproc_per_node=2 -m pytest \
+        tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityStridedFlex -v
 """
 
 import copy
@@ -85,8 +88,6 @@ from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-
-from tests.rl.unit_tests.flex_attention import StridedFlexInnerAttention
 
 logger = logging.getLogger(__name__)
 
@@ -871,21 +872,39 @@ class TestBitwiseParityVarlen(BitwiseParityTestBase):
     attn_backend = "varlen"
 
 
+class _StridedFlexInnerAttention(FlexInnerAttention):
+    """Exercise a mask that depends on document-local key positions."""
+
+    @dataclasses.dataclass(kw_only=True, slots=True)
+    class Config(FlexInnerAttention.Config):
+        def get_mask_mod(self):
+            # Three does not divide the packed-document alignment (128).
+            def strided_mask(b, h, q_idx, kv_idx):
+                return (kv_idx % 3 == 0) | (q_idx == kv_idx)
+
+            return strided_mask
+
+
 class TestBitwiseParityFlex(BitwiseParityTestBase):
-    """Bitwise parity for custom Flex masks in packed training and paged generation."""
+    """Run the shared parity tests with the selected Flex attention config."""
 
     __test__ = True
     attn_backend = "flex"
+    inner_attention_cls = FlexInnerAttention
 
-    @staticmethod
-    def config_fn():
+    @classmethod
+    def config_fn(cls):
         config = rl_grpo_qwen3_0_6b_flex_batch_invariant()
         for model in (config.trainer.model, config.generator.model):
             for layer in model.layers:
                 layer.attention.inner_attention = convert_config_type(
-                    layer.attention.inner_attention, StridedFlexInnerAttention
+                    layer.attention.inner_attention, cls.inner_attention_cls
                 )
         return config
+
+
+class TestBitwiseParityStridedFlex(TestBitwiseParityFlex):
+    inner_attention_cls = _StridedFlexInnerAttention
 
 
 class TestBitwiseParityQwen35Varlen(BitwiseParityTestBase):

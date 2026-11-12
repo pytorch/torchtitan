@@ -105,9 +105,11 @@ jobs:
         RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
           HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
           tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityVarlen -v
-        RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
-          HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
-          tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityFlex -v
+        for test_class in TestBitwiseParityFlex TestBitwiseParityStridedFlex; do
+          RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
+            HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
+            "tests/rl/unit_tests/gpu/test_bitwise_parity.py::$test_class" -v
+        done
         RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
           torchrun --nproc-per-node=2 -m pytest \
           tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityQwen35DebugVarlen -v

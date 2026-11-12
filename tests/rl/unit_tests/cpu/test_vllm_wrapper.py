@@ -16,7 +16,11 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
 from torch.nn.attention.flex_attention import create_mask
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.attention import InnerAttention, MLAAttention
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    InnerAttention,
+    MLAAttention,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.deepseek_v3 import build_model_config as build_deepseek_config
 from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_config
@@ -35,16 +39,28 @@ from torchtitan.rl.generator.vllm.attention.mla import (
 from torchtitan.rl.generator.vllm.model_wrapper import _replace_vllm_layer_configs
 from vllm.model_executor.layers.attention import MLAAttention as VLLMNativeMLAAttention
 
-from tests.rl.unit_tests.flex_attention import StridedFlexInnerAttention
 
+@pytest.mark.parametrize("stride", [None, 3], ids=["causal", "strided"])
+def test_flex_mask_uses_document_positions(stride):
+    """Packed training and generation must agree for default and custom masks."""
 
-def test_custom_flex_mask_uses_document_positions():
-    """Packed training and generation must agree on a non-translation-invariant mask."""
+    class MaskedFlexInnerAttention(FlexInnerAttention):
+        @dataclasses.dataclass(kw_only=True, slots=True)
+        class Config(FlexInnerAttention.Config):
+            def get_mask_mod(self):
+                if stride is None:
+                    return None
+
+                def strided_mask(b, h, q_idx, kv_idx):
+                    return (kv_idx % stride == 0) | (q_idx == kv_idx)
+
+                return strided_mask
+
     model_config = build_qwen3_config(
         "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
     )
     for layer in model_config.layers:
-        layer.attention.inner_attention = StridedFlexInnerAttention.Config()
+        layer.attention.inner_attention = MaskedFlexInnerAttention.Config()
     vllm_config = _replace_vllm_layer_configs(model_config)
     logical_mask = vllm_config.layers[0].attention.inner_attention.logical_mask_mod
     assert all(
@@ -64,9 +80,10 @@ def test_custom_flex_mask_uses_document_positions():
         mask = create_mask(logical_mask, 1, 1, length, length, device="cpu")[0, 0]
         q_idx = torch.arange(length)[:, None]
         kv_idx = torch.arange(length)[None, :]
-        torch.testing.assert_close(
-            mask, (kv_idx <= q_idx) & ((kv_idx % 3 == 0) | (q_idx == kv_idx))
-        )
+        expected_mask = kv_idx <= q_idx
+        if stride is not None:
+            expected_mask &= (kv_idx % stride == 0) | (q_idx == kv_idx)
+        torch.testing.assert_close(mask, expected_mask)
         expected[offset : offset + length, offset : offset + length] = mask
         offset += length
     torch.testing.assert_close(actual, expected)
