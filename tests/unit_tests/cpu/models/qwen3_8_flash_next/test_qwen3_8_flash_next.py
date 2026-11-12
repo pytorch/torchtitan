@@ -252,18 +252,23 @@ def test_qsa_selection_matches_document_local_block_oracle(config):
     selected, scores = indexer(
         x, positions=positions, document_positions_T=positions, padding_mask_T=padding
     )
-    metadata = QSAIndexMetadata.from_inputs(
-        positions, padding_mask_T=padding, compress_ratio=4
-    )
-    cached_selected, cached_scores = indexer(
-        x,
-        positions=positions,
-        document_positions_T=positions,
-        padding_mask_T=padding,
-        metadata=metadata,
-    )
-    torch.testing.assert_close(cached_selected, selected, atol=0, rtol=0)
-    torch.testing.assert_close(cached_scores, scores, atol=0, rtol=0)
+    # Capacity 2 is exact; capacity 5 leaves empty document slots.
+    for max_num_documents in (None, 2, 5):
+        metadata = QSAIndexMetadata.from_inputs(
+            positions,
+            padding_mask_T=padding,
+            compress_ratio=4,
+            max_num_documents=max_num_documents,
+        )
+        cached_selected, cached_scores = indexer(
+            x,
+            positions=positions,
+            document_positions_T=positions,
+            padding_mask_T=padding,
+            metadata=metadata,
+        )
+        torch.testing.assert_close(cached_selected, selected, atol=0, rtol=0)
+        torch.testing.assert_close(cached_scores, scores, atol=0, rtol=0)
     projection = indexer.index_qk_proj(x)
     queries = indexer._rotate(
         indexer.q_layernorm(projection[:, :256].unflatten(-1, (4, 64))), positions
