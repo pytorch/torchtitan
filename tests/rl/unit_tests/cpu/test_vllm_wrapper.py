@@ -14,7 +14,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
-
+from torch.nn.attention.flex_attention import create_mask
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import InnerAttention, MLAAttention
 from torchtitan.models.common.linear import Linear
@@ -34,6 +34,42 @@ from torchtitan.rl.generator.vllm.attention.mla import (
 )
 from torchtitan.rl.generator.vllm.model_wrapper import _replace_vllm_layer_configs
 from vllm.model_executor.layers.attention import MLAAttention as VLLMNativeMLAAttention
+
+from tests.rl.unit_tests.flex_attention import StridedFlexInnerAttention
+
+
+def test_custom_flex_mask_uses_document_positions():
+    """Packed training and generation must agree on a non-translation-invariant mask."""
+    model_config = build_qwen3_config(
+        "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
+    )
+    for layer in model_config.layers:
+        layer.attention.inner_attention = StridedFlexInnerAttention.Config()
+    vllm_config = _replace_vllm_layer_configs(model_config)
+    logical_mask = vllm_config.layers[0].attention.inner_attention.logical_mask_mod
+    assert all(
+        layer.attention.inner_attention.logical_mask_mod is logical_mask
+        for layer in vllm_config.layers
+    )
+
+    lengths = [5, 7]
+    positions = torch.cat([torch.arange(length) for length in lengths])
+    metadata = model_config.layers[
+        0
+    ].attention.inner_attention.build_attention_metadata(positions)
+    actual = create_mask(metadata.mask_mod, 1, 1, 12, 12, device="cpu")[0, 0]
+    expected = torch.zeros_like(actual)
+    offset = 0
+    for length in lengths:
+        mask = create_mask(logical_mask, 1, 1, length, length, device="cpu")[0, 0]
+        q_idx = torch.arange(length)[:, None]
+        kv_idx = torch.arange(length)[None, :]
+        torch.testing.assert_close(
+            mask, (kv_idx <= q_idx) & ((kv_idx % 3 == 0) | (q_idx == kv_idx))
+        )
+        expected[offset : offset + length, offset : offset + length] = mask
+        offset += length
+    torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.parametrize(

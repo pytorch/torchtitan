@@ -50,10 +50,10 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 from torch.distributed.tensor import distribute_tensor, DTensor
-
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import compute_logprobs, IGNORE_INDEX
 from torchtitan.config import apply_overrides, CommConfig, TORCH_DTYPE_MAP
+from torchtitan.config.transform import convert_config_type
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.batch_invariant import (
     is_in_batch_invariant_mode,
@@ -85,6 +85,8 @@ from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+from tests.rl.unit_tests.flex_attention import StridedFlexInnerAttention
 
 logger = logging.getLogger(__name__)
 
@@ -870,11 +872,20 @@ class TestBitwiseParityVarlen(BitwiseParityTestBase):
 
 
 class TestBitwiseParityFlex(BitwiseParityTestBase):
-    """Bitwise parity tests using flex attention."""
+    """Bitwise parity for custom Flex masks in packed training and paged generation."""
 
     __test__ = True
-    config_fn = staticmethod(rl_grpo_qwen3_0_6b_flex_batch_invariant)
     attn_backend = "flex"
+
+    @staticmethod
+    def config_fn():
+        config = rl_grpo_qwen3_0_6b_flex_batch_invariant()
+        for model in (config.trainer.model, config.generator.model):
+            for layer in model.layers:
+                layer.attention.inner_attention = convert_config_type(
+                    layer.attention.inner_attention, StridedFlexInnerAttention
+                )
+        return config
 
 
 class TestBitwiseParityQwen35Varlen(BitwiseParityTestBase):

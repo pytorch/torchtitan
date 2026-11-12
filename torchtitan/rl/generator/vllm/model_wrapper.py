@@ -17,6 +17,7 @@ from typing import cast
 
 import torch
 from torch.distributed.tensor import DTensor
+from torch.nn.attention.flex_attention import and_masks
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_reduce
@@ -59,6 +60,8 @@ logger = init_logger(__name__)
 
 def _replace_vllm_layer_configs(model_config):
     """Replace inner-computation configs with vLLM generation variants."""
+    from vllm.v1.attention.backends.flex_attention import causal_mask_mod
+
     # These modules inspect the breakable-CUDA graph environment at import time.
     # Defer imports until vLLM constructs the model, after the generator has set
     # that environment. Import the GDN adapter only for hybrid models so other
@@ -70,6 +73,7 @@ def _replace_vllm_layer_configs(model_config):
     )
 
     new_layers = []
+    logical_mask_mods = {}
     for layer_idx, layer_cfg in enumerate(model_config.layers):
         new_layer_cfg = layer_cfg
 
@@ -108,6 +112,20 @@ def _replace_vllm_layer_configs(model_config):
                         "does not support the flex attention backend in the "
                         "TorchTitan vLLM wrapper yet; use varlen."
                     )
+                logical_mask_mod = None
+                if isinstance(kernel_cfg, FlexInnerAttention.Config):
+                    # Decoder shares training metadata by backend class. Reuse
+                    # one callable per class here too: vLLM compares identity
+                    # when building metadata before CUDA graph capture.
+                    backend = kernel_cfg._owner
+                    if backend not in logical_mask_mods:
+                        custom_mask_mod = kernel_cfg.get_mask_mod()
+                        logical_mask_mods[backend] = (
+                            causal_mask_mod
+                            if custom_mask_mod is None
+                            else and_masks(causal_mask_mod, custom_mask_mod)
+                        )
+                    logical_mask_mod = logical_mask_mods[backend]
                 vllm_attention_cfg = VLLMInnerAttention.Config(
                     hidden_size=model_config.dim,
                     num_heads=num_heads,
@@ -118,6 +136,7 @@ def _replace_vllm_layer_configs(model_config):
                     sliding_window_size=getattr(
                         attention_cfg, "sliding_window_size", None
                     ),
+                    logical_mask_mod=logical_mask_mod,
                     sharding_config=kernel_cfg.sharding_config,
                 )
                 if is_mla:

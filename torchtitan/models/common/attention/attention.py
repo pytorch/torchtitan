@@ -684,6 +684,31 @@ class FlexInnerAttention(InnerAttention):
         def is_full_attention(self) -> bool:
             return True
 
+        def get_mask_mod(self) -> _mask_mod_signature | None:
+            """Return an additional mask in document-local positions.
+
+            Override in a model's inner-attention Config. Causal and document
+            masking are applied separately. The callable must depend only on
+            its arguments and fixed model configuration, not on batch contents.
+            """
+            return None
+
+        def _get_mask_mods(self, positions: torch.Tensor) -> list[_mask_mod_signature]:
+            mask_mods = [
+                get_causal_mask_mod(),
+                get_efficient_causal_mask_mod_for_packed_document(positions),
+            ]
+            mask_mod = self.get_mask_mod()
+            if mask_mod is None:
+                return mask_mods
+            logical_mask_mod = mask_mod
+
+            def document_local_mask(b, h, q_idx, kv_idx):
+                return logical_mask_mod(b, h, positions[q_idx], positions[kv_idx])
+
+            mask_mods.append(document_local_mask)
+            return mask_mods
+
         def build_attention_metadata(
             self,
             positions: torch.Tensor,
@@ -696,10 +721,7 @@ class FlexInnerAttention(InnerAttention):
             del padding_mask, max_num_documents, max_context_length
             seq_len = positions.shape[0]
             return create_attention_mask(
-                and_masks(
-                    get_causal_mask_mod(),
-                    get_efficient_causal_mask_mod_for_packed_document(positions),
-                ),
+                and_masks(*self._get_mask_mods(positions)),
                 1,
                 None,
                 seq_len,
@@ -879,8 +901,7 @@ class SlidingWindowFlexInnerAttention(FlexInnerAttention):
             seq_len = positions.shape[0]
             return create_attention_mask(
                 and_masks(
-                    get_causal_mask_mod(),
-                    get_efficient_causal_mask_mod_for_packed_document(positions),
+                    *self._get_mask_mods(positions),
                     get_sliding_window_mask_mod(self.sliding_window_size),
                 ),
                 1,

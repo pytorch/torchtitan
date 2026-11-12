@@ -12,6 +12,7 @@ import spmd_types as spmd
 
 import torch
 from torch.nn.attention import current_flash_attention_impl
+from torch.nn.attention.flex_attention import _mask_mod_signature
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionType, MultipleOf
@@ -25,6 +26,7 @@ from vllm.v1.attention.backends.flash_attn_diffkv import (
     FlashAttentionDiffKVBackend,
     FlashAttentionDiffKVImpl,
 )
+from vllm.v1.attention.backends.flex_attention import FlexAttentionBackend
 from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
@@ -379,6 +381,7 @@ class VLLMInnerAttention(InnerAttention):
         scale: float | None = None
         sliding_window_size: int | None = None
         """Causal sliding-window size (``None`` => full attention)."""
+        logical_mask_mod: _mask_mod_signature | None = None
 
         @property
         def is_full_attention(self) -> bool:
@@ -455,6 +458,10 @@ class VLLMInnerAttention(InnerAttention):
                 **diff_kv_kwargs,
             )
         _exclude_vllm_attn_scales_from_state_dict(self.vllm_attn)
+        if config.logical_mask_mod is not None:
+            if self.vllm_attn.get_attn_backend() is not FlexAttentionBackend:
+                raise ValueError("Custom logical masks require vLLM FlexAttention.")
+            self.vllm_attn.logical_mask_mod = config.logical_mask_mod
         # Set sharding config for the inner vLLM attention module, which has scale
         # buffers that need to be replicated on all ranks in the dense mesh
         replicated_dense = dense_param_placement(tp=spmd.R)
