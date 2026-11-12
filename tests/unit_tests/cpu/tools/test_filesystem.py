@@ -4,16 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import multiprocessing
 import os
 import tempfile
 import unittest
 import uuid
-from concurrent.futures import ProcessPoolExecutor
 from unittest import mock
 
 import fsspec
-from fsspec.implementations.local import LocalFileSystem
 
 from torchtitan.tools import filesystem
 
@@ -74,25 +71,6 @@ class TestLocalOps(unittest.TestCase):
             filesystem.rmtree(step)
 
 
-class _ListingCachingLocalFileSystem(LocalFileSystem):
-    """Local filesystem behind a remote-style URI that caches listings per
-    instance, as object-store backends (gcsfs, s3fs, adlfs) do."""
-
-    protocol = "listingcachinglocal"
-
-    @classmethod
-    def _strip_protocol(cls, path):
-        return super()._strip_protocol(str(path).removeprefix(f"{cls.protocol}://"))
-
-    def ls(self, path, detail=True, **kwargs):
-        key = (self._strip_protocol(path), detail)
-        try:
-            return self.dircache[key]
-        except KeyError:
-            self.dircache[key] = listing = super().ls(path, detail=detail, **kwargs)
-            return listing
-
-
 class TestRemoteOps(unittest.TestCase):
     """Exercise the fsspec path with the in-memory backend (no gcsfs/network)."""
 
@@ -132,29 +110,10 @@ class TestRemoteOps(unittest.TestCase):
         # otherwise a failed purge would kill the background purge thread.
         filesystem.rmtree(f"{self.root}/does-not-exist")
 
-    def test_listdir_sees_a_checkpoint_written_by_another_process(self):
-        # With async_mode="async_with_pinned_mem" a subprocess writes each
-        # checkpoint, and keep_latest_k lists the folder in the trainer
-        # process. Answered from fsspec's listing cache, the new checkpoints
-        # never showed up, so retention stopped deleting old ones.
-        fsspec.register_implementation(
-            "listingcachinglocal", _ListingCachingLocalFileSystem, clobber=True
-        )
-        with tempfile.TemporaryDirectory() as folder:
-            root = f"listingcachinglocal://{folder}"
-            os.makedirs(f"{folder}/step-10")
-            self.assertEqual(filesystem.listdir(root), ["step-10"])
-
-            # spawn, not fork: forking a multi-threaded test process can deadlock.
-            spawn = multiprocessing.get_context("spawn")
-            with ProcessPoolExecutor(1, mp_context=spawn) as save_process:
-                save_process.submit(os.makedirs, f"{folder}/step-15").result()
-
-            self.assertEqual(sorted(filesystem.listdir(root)), ["step-10", "step-15"])
-
     def test_remote_filesystem_has_no_listing_cache(self):
-        # The same guarantee, read off a real backend: the filesystem the
-        # helpers get has fsspec's listing cache switched off.
+        # Catches use_listings_cache=False being dropped from _resolve. The
+        # behavior it prevents is tested on GPU in
+        # tests/unit_tests/gpu/components/test_checkpoint.py.
         fs, _ = filesystem._resolve(self.root)
         self.assertFalse(fs.dircache.use_listings_cache)
 
