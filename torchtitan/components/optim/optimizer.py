@@ -14,6 +14,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, cast, Literal, overload
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch import Tensor
 from torch.distributed.checkpoint.stateful import Stateful
@@ -28,6 +29,7 @@ from torchtitan.distributed.flex_shard import (
     DistMuon as FlexShardDistMuon,
 )
 from torchtitan.distributed.utils import build_alternative_fsdp_mesh
+from torchtitan.tools.utils import device_type
 
 from .utils import (
     get_flat_optim_state_dict,
@@ -343,8 +345,8 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
         model: nn.Module,
         optimizer_config: BaseOptimizer.Config,
         claimed: set[str],
-    ) -> dict[str, Any]:
-        """Build one named PyTorch parameter group from an optimizer config."""
+    ) -> dict[str, Any] | None:
+        """Build one named parameter group, or ``None`` if nothing matches."""
         try:
             pattern = re.compile(optimizer_config.pattern)
         except re.error as error:
@@ -361,10 +363,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
                 claimed.add(name)
 
         if not params:
-            raise ValueError(
-                f"Optimizer pattern {optimizer_config.pattern!r} matched no parameters"
-            )
-
+            return None
         return {"params": params, "param_names": param_names}
 
     def __init__(
@@ -378,14 +377,20 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
         self.optimizers = []
         self.model_parts = model_parts
 
+        num_matched_params = [0] * len(config.optimizers)
         for part_idx, model in enumerate(self.model_parts):
             claimed: set[str] = set()
-            for optimizer_config in config.optimizers:
+            for config_idx, optimizer_config in enumerate(config.optimizers):
                 param_group = self._build_param_group(
                     model,
                     optimizer_config,
                     claimed,
                 )
+                # Pipeline stages hold different layers, so a pattern may
+                # match nothing in a model part or on a whole PP rank.
+                if param_group is None:
+                    continue
+                num_matched_params[config_idx] += len(param_group["params"])
                 optimizer = optimizer_config.build(params=[param_group])
                 if enable_accelerator_graph:
                     if any(
@@ -422,6 +427,24 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
                 all_params.extend(param_group["params"])
 
         self._validate_params(all_params)
+        # Under PP a pattern may match only on the ranks that hold its layers,
+        # so a pattern that matches nothing is an error only on every rank.
+        if dist.is_initialized():
+            # Parameters may live on CPU (seed checkpoint), so communicate on
+            # the accelerator.
+            num_matched_params_tensor = torch.tensor(
+                num_matched_params, dtype=torch.int64, device=device_type
+            )
+            dist.all_reduce(num_matched_params_tensor)
+            num_matched_params = num_matched_params_tensor.tolist()
+        for optimizer_config, count in zip(
+            config.optimizers, num_matched_params, strict=True
+        ):
+            if count == 0:
+                raise ValueError(
+                    f"Optimizer pattern {optimizer_config.pattern!r} matched no "
+                    "parameters"
+                )
         self._post_init(all_params)
 
     def _log_optimizer(self, optimizer: Optimizer, part_idx: int, pattern: str) -> None:

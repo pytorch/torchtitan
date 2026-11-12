@@ -137,11 +137,12 @@ The multimodal recipe keeps vision on AdamW.
 | FSDP | Per-layer backbone sharding; persistent row ownership for PLE |
 | TP / SP | QSA heads and PLE feature columns; requires SP and a text-only flavor; degree must divide the 2 QSA KV heads |
 | EP | Existing routed-expert placements; all-to-all dispatcher by default, Dist-MoE with accelerator graphs in the 125B recipe and the B200 graph test |
+| PP | Real process groups; stages exchange all four residual streams; zero-bubble and CSV schedules are rejected |
 
 EP shards experts independently of PLE: at FSDP8/EP4 each rank owns one eighth
 of the PLE rows and one fourth of the experts, with FSDP2 within each expert
-shard. CPU offload and deferred FSDP reduction for PLE are unsupported. PP and
-CP are rejected at config time.
+shard. CPU offload and deferred FSDP reduction for PLE are unsupported. CP is
+rejected at config time.
 
 TP requires SP and text-only flavors. The residual streams are sequence-sharded
 over TP; PLE and the QSA indexer gather their inputs to Replicate. TP shards
@@ -153,6 +154,30 @@ TP ranks.
 ```bash
 NGPU=4 MODULE=torchtitan_recipes.tests.models.qwen3_8_flash_next \
   CONFIG=qwen38_flash_next_debugmodel_fsdp2_tp2_ep2 ./run_train.sh
+```
+
+Non-final PP stages send `[T, 4 * D]` and the final stage owns the stream mixer
+and LM head. Every stage receives the original token IDs and document positions,
+so PLE can live on any stage. The engine preprocesses inputs on a rank's first
+local model part, which reaches the PLE table through a weak reference when the
+table belongs to a later local part (interleaved schedules); only the owning
+part registers its parameters and checkpoint keys. The DistMuon policy works
+under PP: model parts and PP ranks without a pattern's parameters skip that
+optimizer. Fake process
+groups are rejected because their static stage metadata assumes `[T, D]`.
+Zero-bubble and CSV schedules are rejected: under full remat a split
+weight-gradient pass fails in the shared MoE routing region. Multimodal flavors
+are rejected under PP. The text model is verified with Interleaved1F1B.
+
+```
+PP rank 0: [tok_embeddings] [layers.1-3, incl. PLE]
+PP rank 1: [layers.0]       [layers.4-7, mixer, norm, lm_head]
+            local part 0     local part 1
+```
+
+```bash
+NGPU=8 MODULE=torchtitan_recipes.tests.models.qwen3_8_flash_next \
+  CONFIG=qwen38_flash_next_debugmodel_fsdp2_tp2_ep4_pp2 ./run_train.sh
 ```
 
 ## Numerical Parity and Tests
