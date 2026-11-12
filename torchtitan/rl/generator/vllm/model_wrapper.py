@@ -306,8 +306,7 @@ class VLLMModelWrapper(Module):
             # Text-only generators drop the vision encoder; VLLMMultimodalModelWrapper keeps it.
             keep_vision_encoder=supports_multimodal(self),
         )
-        # TorchTitanGPUModelRunner pads a step to a multiple of TP when TP shards the
-        # routed tokens.
+        # forward pads a step to a multiple of TP when TP shards the routed tokens.
         token_multiple = parallelism.expert_sequence_parallel_size
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         validate_ep_token_dispatcher_capacity(

@@ -54,6 +54,7 @@ from typing import Any, ClassVar
 
 import renderers
 import torch
+import torch.nn.functional as F
 from vllm.inputs import mm_input, MultiModalInput
 from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -395,6 +396,12 @@ class VLLMMultimodalModelWrapper(VLLMModelWrapper, SupportsMultiModal, SupportsM
             inputs_embeds: ``(num_tokens, dim)`` from `embed_input_ids`.
         """
         assert inputs_embeds is not None and positions is not None
+        # Pad the step to a multiple of TP with EP, as `VLLMModelWrapper.forward` does.
+        num_tokens = inputs_embeds.shape[0]
+        num_padding_rows = -num_tokens % self._expert_sequence_parallel_size
+        if num_padding_rows:
+            inputs_embeds = F.pad(inputs_embeds, (0, 0, 0, num_padding_rows))
+            positions = F.pad(positions, (0, num_padding_rows))
         # TorchTitan's MRoPE takes (num_tokens, 3).
         positions = positions.transpose(0, 1)
         with self.parallelism_context.activate_spmd():
@@ -405,7 +412,7 @@ class VLLMMultimodalModelWrapper(VLLMModelWrapper, SupportsMultiModal, SupportsM
             for layer in self.model.layers.values():
                 h = layer(h, None, positions, **layer_kwargs)
             h = self.model.norm(h)
-        return h
+        return h[:num_tokens]
 
     def get_mrope_input_positions(
         self,
