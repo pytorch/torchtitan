@@ -8,11 +8,9 @@
 
 from __future__ import annotations
 
-import itertools
-import math
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Any, cast, Literal
 
 from renderers import Message, ToolSpec
@@ -29,7 +27,6 @@ from torchtitan.components.data import (
     IndexedJsonlSource,
     SingleDatasetConfig,
 )
-from torchtitan.components.data.multimodal.vision_processor import ResizeRule
 from torchtitan.components.data.text_datasets import ChatProcessor, DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
@@ -75,7 +72,7 @@ from torchtitan.models.common.moe import (
     TokenChoiceTopKRouter,
 )
 
-from torchtitan.models.muse_spark import build_model_config
+from torchtitan.models.muse_spark import build_model_config, MUSE_SPARK_SPECIAL_TOKENS
 from torchtitan.models.muse_spark.model import MuseSparkModel
 from torchtitan.models.muse_spark.renderer import MuseSparkRendererConfig
 from torchtitan.models.muse_spark.tokenizer import MuseSparkTokenizer
@@ -86,7 +83,6 @@ from torchtitan.trainer import Trainer
 _TRAINING_LR = 5e-5
 _ROUTER_LR_MULTIPLIER = 0.125
 _MUSE_SPARK_HF_ASSETS_PATH = "./assets/hf/Muse-Spark-Open-816B-A42B"
-_MUSE_GLIMMER_MAX_IMAGE_TOKENS = 4096
 _MUSE_SPARK_FUSED_SWIGLU_OVERRIDE = (
     "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"
 )
@@ -118,23 +114,6 @@ def _muse_spark_kv_all_gather_context_parallel_transform() -> ContextParallelTra
             ),
         },
     )
-
-
-# TODO: Add production Muse Spark Open video and audio datasets. Muse Spark Open encodes images as
-# <|image_start|> + repeated <|patch|> + <|image_end|>; videos as <|vid_start|>
-# + timestamped runs of <|video|>, separated by <|vid_frame_separator|>, then
-# <|vid_end|>; and audio as <|soft_audio_start|> + repeated <|audio|> +
-# <|soft_audio_end|>.
-MUSE_SPARK_SPECIAL_TOKENS = {
-    "image_token": "<|patch|>",
-    "video_token": "<|video|>",
-    "vision_start_token": "<|image_start|>",
-    "vision_end_token": "<|image_end|>",
-    "audio_token": "<|audio|>",
-    "audio_start_token": "<|soft_audio_start|>",
-    "audio_end_token": "<|soft_audio_end|>",
-    "pad_token": "<|finetune_right_pad|>",
-}
 
 
 def _with_dist_moe(
@@ -206,7 +185,7 @@ def _use_forced_balanced_routing(model_config: MuseSparkModel.Config) -> None:
         setattr(parent, attr, replacement)
 
 
-def _use_flex_flash_attention(model_config: MuseSparkModel.Config) -> None:
+def use_flex_flash_attention(model_config: MuseSparkModel.Config) -> None:
     """Select FA4 and layer-appropriate block-mask geometry under CP."""
     for layer in model_config.layers:
         attention = layer.attention
@@ -229,79 +208,8 @@ def _use_flex_flash_attention(model_config: MuseSparkModel.Config) -> None:
         attention.inner_attention = inner_attention
 
 
-class MuseGlimmerPatchGridResize(ResizeRule):
-    """Select the closest-aspect-ratio merged-patch grid under the token cap."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ResizeRule.Config):
-        max_image_tokens: int
-        """Cap on the merged-patch grid size, i.e. the placeholder tokens of
-        one image or frame."""
-
-    def __init__(self, config: Config) -> None:
-        self.max_image_tokens = config.max_image_tokens
-
-    def __call__(
-        self, height: int, width: int, *, patch_size: int, merge_size: int
-    ) -> tuple[int, int, int, int]:
-        max_image_tokens = self.max_image_tokens
-        merged_patch_size = patch_size * merge_size
-        ideal_grid_h = height / merged_patch_size
-        ideal_grid_w = width / merged_patch_size
-        aspect_ratio = ideal_grid_w / ideal_grid_h if ideal_grid_h > 0 else 1.0
-        if ideal_grid_h * ideal_grid_w > max_image_tokens:
-            ideal_grid_h = math.sqrt(max_image_tokens / aspect_ratio)
-            ideal_grid_w = ideal_grid_h * aspect_ratio
-
-        candidates = list(
-            set(
-                itertools.product(
-                    [math.floor(ideal_grid_h), math.ceil(ideal_grid_h)],
-                    [math.floor(ideal_grid_w), math.ceil(ideal_grid_w)],
-                )
-            )
-        )
-        candidates = [
-            (grid_h, grid_w)
-            for grid_h, grid_w in candidates
-            if grid_h >= 1 and grid_w >= 1 and grid_h * grid_w <= max_image_tokens
-        ]
-        if not candidates:
-            candidates = [(max(1, round(ideal_grid_h)), max(1, round(ideal_grid_w)))]
-
-        grid_h, grid_w = min(
-            candidates,
-            key=lambda grid: abs(grid[0] / grid[1] - height / width),
-        )
-        return (
-            grid_h * merged_patch_size,
-            grid_w * merged_patch_size,
-            0,
-            0,
-        )
-
-
-# ``VisionProcessor.Config`` fields, used like the special tokens:
-# ``VisionProcessor.Config(**MUSE_SPARK_VISION_PROCESSOR_KWARGS)``. The patch
-# sizes match the NaViT encoder (``patch_size``, ``patch_temporal``,
-# ``downsample_factor``). Video applies the image settings to every frame.
-MUSE_SPARK_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
-    "patch_size": 14,
-    "temporal_patch_size": 2,
-    "spatial_merge_size": 2,
-    "image_mean": (0.5, 0.5, 0.5),
-    "image_std": (0.5, 0.5, 0.5),
-    "resize": MuseGlimmerPatchGridResize.Config(
-        max_image_tokens=_MUSE_GLIMMER_MAX_IMAGE_TOKENS
-    ),
-    "patch_order": "raster",
-    "video_resize": MuseGlimmerPatchGridResize.Config(
-        max_image_tokens=_MUSE_GLIMMER_MAX_IMAGE_TOKENS
-    ),
-}
-
-
-def _muse_spark_mm_dataloader(
+# TODO: Add production Muse Spark Open video and audio datasets.
+def muse_spark_mm_dataloader(
     model_config: MuseSparkModel.Config,
     dataset: SingleDatasetConfig,
 ) -> GrainDataLoader.Config:
@@ -328,13 +236,15 @@ def _muse_spark_mm_dataloader(
     )
 
 
-def _muse_spark_816b_a42b(
+def muse_spark_816b_a42b(
     seq_len: int | None = None,
     *,
     parallelism: ParallelismConfig | None = None,
     attn_backend: str = "flex",
 ) -> Trainer.Config:
     """Configure full-parameter text continuation from the Muse Spark Open checkpoint.
+
+    Base config for derived recipes; it is not verified as a recipe on its own.
 
     Stage ``meta-models/Muse-Spark-Open-816B-A42B`` locally at ``hf_assets_path``.
     To load weights from a separate directory, set
@@ -355,7 +265,6 @@ def _muse_spark_816b_a42b(
         "816B-A42B",
         parallelism=parallelism,
         seq_len=seq_len,
-        moe_comm_backend="standard",
         attn_backend=attn_backend,
     )
     if parallelism.context_parallel_degree > 1:
@@ -492,7 +401,7 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     # path while exposing TP communication. Keep MXFP8 coverage in the debug
     # recipe until those two execution paths exist.
     config = _with_dist_moe(
-        _muse_spark_816b_a42b(seq_len=seq_len),
+        muse_spark_816b_a42b(seq_len=seq_len),
         expert_precision="bf16",
         activation_slot_capacity_factor=1.0,
         scratch_capacity_factor=32.0,
@@ -556,7 +465,7 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     # sequence available to Flex-Flash. This preserves Muse global/sliding
     # attention semantics without a query all-to-all; the global and sliding
     # layers use independently tuned block-mask geometry.
-    _use_flex_flash_attention(cast(MuseSparkModel.Config, config.model))
+    use_flex_flash_attention(cast(MuseSparkModel.Config, config.model))
     if not fake_backend and tensor_parallel_degree > 1:
         config = apply_transforms(
             config,
@@ -729,11 +638,45 @@ def _ultradata_lora_sft_optim(*, warmup_steps: int) -> Optim.Config:
     )
 
 
+# The router gate is not a target.
+MUSE_SPARK_LORA_DECODER_TARGETS = ["wqkv", "wo", "output_gate", "w13", "w2"]
+
+
 def _ultradata_lora_sft_transform() -> LoRATransform:
     return LoRATransform(
         rank=8,
         alpha=16.0,
-        target_modules=["wqkv", "wo", "output_gate", "w13", "w2"],
+        target_modules=list(MUSE_SPARK_LORA_DECODER_TARGETS),
+    )
+
+
+def apply_gb300_lora_dist_moe(
+    config: Trainer.Config, lora: LoRATransform
+) -> Trainer.Config:
+    """Apply the GB300 BF16 Dist-MoE settings and ``lora`` for LoRA SFT.
+
+    Sets local compile of the loss only, remat that saves the Dist-MoE save
+    regions, the Dist-MoE runtime budgets and 1800 s comm timeouts, drops the
+    fused SwiGLU override import, then applies the Dist-MoE and LoRA transforms.
+    """
+    from torchtitan.config.transform.dist_moe import DistMoeTransform
+    from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
+
+    config.model.local_compile.regions = ["loss"]
+    config.activation_remat = ActivationRematConfig(
+        save_regions=list(_MUSE_SPARK_DIST_MOE_SAVE_REGIONS),
+    )
+    config.dist_moe_runtime = DistMoeRuntime.Config(
+        activation_slot_capacity_factor=0.25,
+        scratch_capacity_factor=16.0,
+        vmm_capacity_factor=None,
+    )
+    config.comm.init_timeout_seconds = 1800
+    config.comm.train_timeout_seconds = 1800
+    config.override.imports = []
+    return apply_transforms(
+        config,
+        [DistMoeTransform(expert_precision="bf16", inplace_wgrad_accum=False), lora],
     )
 
 
@@ -765,12 +708,9 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
     Use the environment overrides above for paths; edit or derive this recipe
     for other configuration changes.
     """
-    from torchtitan.config.transform.dist_moe import DistMoeTransform
-    from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
-
     seq_len = 131_072
 
-    config = _muse_spark_816b_a42b(
+    config = muse_spark_816b_a42b(
         seq_len=seq_len,
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=1,
@@ -803,19 +743,7 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
     config.precision = PrecisionConfig(
         dtype="bfloat16", param_dtype="bfloat16", reduce_dtype="float32"
     )
-    config.comm.init_timeout_seconds = 1800
-    config.comm.train_timeout_seconds = 1800
-    config.model.local_compile.regions = ["loss"]
     config.debug.seed = 42
-    config.activation_remat = ActivationRematConfig(
-        save_regions=list(_MUSE_SPARK_DIST_MOE_SAVE_REGIONS),
-    )
-    config.dist_moe_runtime = DistMoeRuntime.Config(
-        activation_slot_capacity_factor=0.25,
-        scratch_capacity_factor=16.0,
-        vmm_capacity_factor=None,
-    )
-    config.override.imports = []
     config.checkpointer = cast(
         CheckpointManager.Config,
         TorchCheckpointingManager.Config(
@@ -834,13 +762,7 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
             export_dtype="bfloat16",
         ),
     )
-    config = apply_transforms(
-        config,
-        [
-            DistMoeTransform(expert_precision="bf16", inplace_wgrad_accum=False),
-            _ultradata_lora_sft_transform(),
-        ],
-    )
+    config = apply_gb300_lora_dist_moe(config, _ultradata_lora_sft_transform())
     # VarlenInnerAttention defaults to cuDNN first; on the 128k global layers it is ~13% slower than FA4.
     for _, inner_attention, _, _ in config.model.traverse(VarlenInnerAttention.Config):
         inner_attention.sdpa_backends = ["FLASH_ATTENTION"]

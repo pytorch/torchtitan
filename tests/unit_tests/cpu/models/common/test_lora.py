@@ -93,8 +93,14 @@ def test_qwen35_moe_lora_model_config():
     }
 
 
-def test_lora_model_builds():
-    """LoRA debug model builds, has trainable adapters and frozen base."""
+@pytest.mark.parametrize(
+    "trainable_modules", [[], ["tok_embeddings", "layers.1.feed_forward"]]
+)
+def test_lora_model_builds(trainable_modules):
+    """LoRA debug model builds, has trainable adapters and frozen base.
+
+    Parameters under ``trainable_modules`` stay trainable.
+    """
     model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
     model_config = transform_model_config_(
         model_config,
@@ -103,6 +109,7 @@ def test_lora_model_builds():
                 rank=8,
                 alpha=16.0,
                 target_modules=["wqkv", "wo"],
+                trainable_modules=trainable_modules,
             )
         ],
     )
@@ -141,7 +148,11 @@ def test_lora_model_builds():
         for n, p in model.named_parameters()
         if p.requires_grad and "lora_a" not in n and "lora_b" not in n
     }
-    assert non_lora_trainable == set()
+    assert non_lora_trainable == {
+        n
+        for n, _ in model.named_parameters()
+        if any(n.startswith(f"{root}.") for root in trainable_modules)
+    }
 
 
 def test_lora_forward():
@@ -580,6 +591,39 @@ def test_lora_allows_other_targets_with_weight_tying():
 
     assert not hasattr(transformed.lm_head, "rank")
     assert all(hasattr(layer.attention.wo, "rank") for layer in transformed.layers)
+
+
+@pytest.mark.parametrize(
+    ("target_modules", "trainable_modules", "share_feed_forward", "tie", "error"),
+    [
+        (["wo"], ["layers.0.attention"], False, False, "inside trainable module"),
+        (None, ["layers.0"], False, False, "target_modules=None targets every"),
+        (["wo"], ["layers.0.attn"], False, False, "match no module config"),
+        (["wo"], ["layers.0.feed_forward"], True, False, "shared config"),
+        # A list container has no config of its own but matches its children.
+        (["lm_head"], ["layers"], False, False, None),
+        (["wo"], ["tok_embeddings"], False, True, "share a weight under weight"),
+        (["wo"], ["tok_embeddings", "lm_head"], False, True, None),
+    ],
+)
+def test_lora_validates_trainable_modules(
+    target_modules, trainable_modules, share_feed_forward, tie, error
+):
+    model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
+    model_config.enable_weight_tying = tie
+    if share_feed_forward:
+        model_config.layers[1].feed_forward = model_config.layers[0].feed_forward
+
+    transform = LoRATransform(
+        rank=2,
+        target_modules=target_modules,
+        trainable_modules=trainable_modules,
+    )
+    if error is None:
+        transform.transform(model_config)
+    else:
+        with pytest.raises(ValueError, match=error):
+            transform.transform(model_config)
 
 
 def test_lora_rank_validation():

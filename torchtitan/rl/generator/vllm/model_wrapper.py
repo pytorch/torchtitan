@@ -15,16 +15,15 @@ import copy
 import dataclasses
 from typing import cast
 
-import spmd_types as spmd
-
 import torch
 import torch.nn.functional as F
-from torch.distributed.tensor import DTensor, Replicate
+from torch.distributed.tensor import DTensor
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.models.interfaces import supports_multimodal
 from vllm.utils import torch_utils as _torch_utils
 from vllm.utils.math_utils import cdiv
 
@@ -32,7 +31,6 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
-from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
     Attention,
@@ -46,9 +44,13 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.model import (
+    build_dist_moe_runtime,
     build_inference_model,
+    compute_logits,
     get_attention_dimensions,
     ModelStateDictLoader,
+    route_tp_all_reduce,
+    validate_ep_token_dispatcher_capacity,
 )
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.vllm.registry import uses_compressed_mla_cache
@@ -201,64 +203,27 @@ def _dtensor_safe_weak_ref_tensor(tensor):
 _torch_utils.weak_ref_tensor = _dtensor_safe_weak_ref_tensor
 
 
-# Process-global: install the op swap at most once even if the generator is
-# re-initialized in the same process (re-wrapping would chain shims).
-_tp_all_reduce_patched = False
-
-
 def _patch_vllm_all_reduce() -> None:
     """Route the generator's tensor-parallel all-reduce through vLLM's custom
-    one-shot/multimem AR instead of DTensor's NCCL ring redistribute (applied
-    when batch-invariant mode is off). Idempotent. Two changes:
+    one-shot/multimem AR instead of NCCL's ring (``route_tp_all_reduce``; applied
+    when batch-invariant mode is off).
 
-    1. Swap torch.ops._c10d_functional.all_reduce (the op every DTensor
-       Partial -> Replicate redistribute calls) for
-       tensor_model_parallel_all_reduce, which reuses vLLM's TP GroupCoordinator
-       -- the same ranks, but the group that owns the custom-AR shared buffers.
-       DTensor wraps the synchronous result in an AsyncCollectiveTensor whose
-       wait_tensor is a no-op. Only sum reductions are routed (the custom AR is
-       sum-only); others fall through to the original op. No-op at world_size 1.
+    ``tensor_model_parallel_all_reduce`` reuses vLLM's TP GroupCoordinator: the
+    same ranks as DTensor's TP mesh group, but the group that owns the custom-AR
+    shared buffers. It guards world_size == 1 and on CUDA dispatches to
+    torch.ops.vllm.all_reduce.
 
-    2. Force the custom AR onto its registered=False path so CUDA graph capture
-       works. registered=True records graph buffers and calls cudaIpcGetMemHandle
-       on them, which fails for the expandable_segments (VMM) memory the RL stack
-       enables for Monarch RDMA. registered=False reduces via the init-time
-       buffer_ptrs (raw cudaMalloc, IPC-able), records no graph buffers, at the
-       cost of one staging copy per AR.
-
-    3. (spmd_types) spmd.redistribute issues an in-place dist.all_reduce that the
-       point-1 swap can't see, so route its Partial -> {R,I} reduce straight to
-       the same custom AR. Guarded on no-grad: the generator is inference-only and
-       the custom AR is sum-only/forward-only; under grad we keep spmd.redistribute
-       (its dst-dependent backward is correct).
-
-    TODO: this is a stopgap to close the generator's TP all-reduce perf gap.
-    Improve our native (DTensor) all-reduce path and remove this patch.
+    The custom AR is also forced onto its registered=False path so CUDA graph
+    capture works. registered=True records graph buffers and calls
+    cudaIpcGetMemHandle on them, which fails for the expandable_segments (VMM)
+    memory the RL stack enables for Monarch RDMA. registered=False reduces via the
+    init-time buffer_ptrs (raw cudaMalloc, IPC-able), records no graph buffers, at
+    the cost of one staging copy per AR.
     """
-    global _tp_all_reduce_patched
-    if _tp_all_reduce_patched:
-        return
-
     from vllm.distributed import get_tp_group
 
-    c10d = torch.ops._c10d_functional
-    # Op schema: all_reduce(Tensor input, str reduce_op, Any group_name) -> Tensor.
-    original_all_reduce = c10d.all_reduce
+    route_tp_all_reduce(tensor_model_parallel_all_reduce)
 
-    def all_reduce(input, reduce_op, group_name):
-        if reduce_op == "sum":
-            # Use vLLM's helper rather than the incoming group_name: the custom-AR
-            # kernel is bound to vLLM's TP GroupCoordinator and the shared buffers
-            # it registered, so the reduction must run on vLLM's TP group, not
-            # DTensor's TP mesh PG (a different PG over the same ranks -> rank-for-
-            # rank equivalent). The helper resolves that group, guards
-            # world_size==1, and on CUDA dispatches to torch.ops.vllm.all_reduce.
-            return tensor_model_parallel_all_reduce(input)
-        return original_all_reduce(input, reduce_op, group_name)
-
-    c10d.all_reduce = all_reduce
-
-    # Force vLLM's TP custom AR onto its registered=False path (see point 2).
     device_comm = get_tp_group().device_communicator
     ca = getattr(device_comm, "ca_comm", None) if device_comm is not None else None
     if ca is not None and not ca.disabled:
@@ -271,26 +236,20 @@ def _patch_vllm_all_reduce() -> None:
 
         ca.custom_all_reduce = custom_all_reduce
 
-    original_redistribute = spmd.redistribute
-
-    def redistribute(x, group, *, src, dst, **kwargs):
-        if src == spmd.P and dst in (spmd.R, spmd.I) and not torch.is_grad_enabled():
-            return tensor_model_parallel_all_reduce(x)
-        return original_redistribute(x, group, src=src, dst=dst, **kwargs)
-
-    spmd.redistribute = redistribute
-
-    _tp_all_reduce_patched = True
-    logger.info(
-        "vllm_allreduce: routed _c10d_functional.all_reduce (TP sum reductions) "
-        "through vLLM custom all-reduce (registered=False, CUDA-graph-safe)"
-    )
-
 
 @support_torch_compile(
+    # The forward arguments whose size follows the step's number of tokens, and which of
+    # their dims that is. vLLM marks that dim dynamic for torch.compile, so one compiled
+    # graph serves every step size.
     dynamic_arg_dims={
+        # (num_tokens,)
         "input_ids": 0,
-        "positions": 0,
+        # (num_tokens,) for 1D RoPE; (3, num_tokens) for M-RoPE models serving image prompts
+        # (temporal, height and width positions). The token dim is the last one in both,
+        # hence -1, as in vLLM's Qwen2-VL.
+        "positions": -1,
+        # (num_tokens, dim): what vLLM passes multimodal models instead of input_ids.
+        "inputs_embeds": 0,
     }
 )
 class VLLMModelWrapper(Module):
@@ -310,7 +269,6 @@ class VLLMModelWrapper(Module):
 
     is_text_generation_model = True  # Required for vLLM runner validation
     supports_pp = False  # Pipeline parallelism not supported yet
-    supports_multimodal = False
 
     def __init__(
         self,
@@ -341,12 +299,25 @@ class VLLMModelWrapper(Module):
             )
         device = cast(torch.device, vllm_config.device_config.device)
         self.model, self.parallelism_context = build_inference_model(
-            self.config, parallelism=parallelism, precision=precision, device=device
+            self.config,
+            parallelism=parallelism,
+            precision=precision,
+            device=device,
+            # Text-only generators drop the vision encoder; VLLMMultimodalModelWrapper keeps it.
+            keep_vision_encoder=supports_multimodal(self),
+        )
+        # TorchTitanGPUModelRunner pads a step to a multiple of TP when TP shards the
+        # routed tokens.
+        token_multiple = parallelism.expert_sequence_parallel_size
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        validate_ep_token_dispatcher_capacity(
+            self.config,
+            parallelism=parallelism,
+            max_num_tokens_per_step=-(-max_num_batched_tokens // token_multiple)
+            * token_multiple,
         )
         self._initialize_dist_moe_runtime(
-            dist_moe_runtime,
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            device,
+            dist_moe_runtime, max_num_batched_tokens, device
         )
         maybe_apply_numa_binding(torch.cuda.current_device(), "cuda")
         # Loads the initial weights, then unshards the model, so vLLM profiles GPU
@@ -404,40 +375,12 @@ class VLLMModelWrapper(Module):
         max_num_batched_tokens: int,
         device: torch.device,
     ) -> None:
-        """Give the generator's Dist-MoE experts their annex context.
-
-        Dist-MoE experts refuse to run without a runtime. The trainer
-        gets one from ``TrainingEngine``; vLLM constructs this model directly,
-        so the wrapper builds the generator's. The context is built once, before
-        any CUDA-graph capture, so no per-forward Python work runs under
-        capture or replay.
-        """
-        self._dist_moe_runtime = None
-        self._num_valid_tokens: torch.Tensor | None = None
-        if not any(
+        """Build the Dist-MoE runtime (see ``build_dist_moe_runtime``) and the
+        device scalar of each step's real token count."""
+        tp = self.parallelism_context.tp
+        if self._expert_sequence_parallel_size != tp and any(
             isinstance(module, DistMoeRoutedExperts) for module in self.model.modules()
         ):
-            if runtime_config is not None:
-                logger.warning(
-                    "Ignoring dist_moe_runtime: the generator model has no "
-                    "Dist-MoE routed experts."
-                )
-            return
-        if runtime_config is None:
-            raise ValueError(
-                "The generator model uses Dist-MoE routed experts but no "
-                "dist_moe_runtime was registered. Pass a "
-                "DistMoeRuntime.Config(inference=True) to register_to_vllm()."
-            )
-        if not runtime_config.inference:
-            raise ValueError(
-                "dist_moe_runtime must set inference=True; got "
-                f"{runtime_config!r}. The generator runs no "
-                "backward, so a training context's activation slots would reserve "
-                "memory it can never use."
-            )
-        tp = self.parallelism_context.tp
-        if self._expert_sequence_parallel_size != tp:
             # Dist-MoE splits each step's tokens over TP, but forward pads eager steps
             # to a multiple of TP only with EP (expert_sequence_parallel_size).
             raise ValueError(
@@ -445,20 +388,23 @@ class VLLMModelWrapper(Module):
                 f"tensor_parallel_degree > 1; got tensor_parallel_degree={tp}, "
                 f"expert_parallel_degree={self.parallelism_context.ep}."
             )
-        self._dist_moe_runtime = runtime_config.build(
-            model_parts=[self.model],
+        self._dist_moe_runtime = build_dist_moe_runtime(
+            self.model,
+            runtime_config,
             parallelism_context=self.parallelism_context,
             device=device,
-            num_tokens_per_microbatch_per_dp_rank=max_num_batched_tokens,
-            pp_schedule=None,
+            max_num_tokens_per_step=max_num_batched_tokens,
         )
-        # The runner writes each step's real token count here before the forward
-        # runs, and forward builds the padding mask from it on the device, so
-        # CUDA-graph replay sees the current count. The address must stay fixed
-        # from before capture. Until a step publishes, every token counts as real.
-        self._num_valid_tokens = torch.full(
-            (), torch.iinfo(torch.int32).max, dtype=torch.int32, device=device
-        )
+        self._num_valid_tokens: torch.Tensor | None = None
+        if self._dist_moe_runtime is not None:
+            # The runner writes each step's real token count here before the
+            # forward runs, and forward builds the padding mask from it on the
+            # device, so CUDA-graph replay sees the current count. The address must
+            # stay fixed from before capture. Until a step publishes, every token
+            # counts as real.
+            self._num_valid_tokens = torch.full(
+                (), torch.iinfo(torch.int32).max, dtype=torch.int32, device=device
+            )
 
     # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:
@@ -526,28 +472,34 @@ class VLLMModelWrapper(Module):
             positions = F.pad(positions, (0, num_padding_rows))
 
         with self.parallelism_context.activate_spmd():
-            # Rows past the real token count are padding (true for padding). Only
-            # the MoE reads this mask: Dist-MoE routes those rows to expert -1.
-            # Attention takes its metadata from vLLM, which already excludes padding.
-            model_kwargs = {}
-            if self._dist_moe_runtime is not None:
-                assert self._num_valid_tokens is not None
-                model_kwargs["padding_mask"] = (
-                    torch.arange(input_ids.shape[0], device=input_ids.device)
-                    >= self._num_valid_tokens
-                )
-                self._dist_moe_runtime.set_num_local_input_tokens_per_call(
-                    self._dist_moe_num_local_input_tokens(input_ids.shape[0])
-                )
             h = self.model(
-                input_ids, attention_metadata=None, positions=positions, **model_kwargs
+                input_ids,
+                attention_metadata=None,
+                positions=positions,
+                **self._prepare_step_kwargs(input_ids.shape[0]),
             )
-        # Inference disables sequence parallelism, so final hidden states should
-        # already be replicated before returning to vLLM.
-        if isinstance(h, DTensor):
-            assert all(isinstance(p, Replicate) for p in h.placements)
-            h = h._local_tensor
         return h[:num_tokens]
+
+    def _prepare_step_kwargs(self, num_tokens: int) -> dict[str, torch.Tensor]:
+        """Set this step's Dist-MoE token count and return the layers' padding-mask kwarg.
+
+        Call once per forward.
+        """
+        # Rows past the real token count are padding (true for padding). Only
+        # the MoE reads this mask: Dist-MoE routes those rows to expert -1.
+        # Attention takes its metadata from vLLM, which already excludes padding.
+        if self._dist_moe_runtime is None:
+            return {}
+        assert self._num_valid_tokens is not None
+        self._dist_moe_runtime.set_num_local_input_tokens_per_call(
+            self._dist_moe_num_local_input_tokens(num_tokens)
+        )
+        return {
+            "padding_mask": torch.arange(
+                num_tokens, device=self._num_valid_tokens.device
+            )
+            >= self._num_valid_tokens
+        }
 
     def compute_logits(
         self,
@@ -557,23 +509,7 @@ class VLLMModelWrapper(Module):
         """vLLM required API.
         Compute logits from hidden states."""
 
-        with self.parallelism_context.activate_spmd():
-            logits = self.model.lm_head(hidden_states)
-
-            # lm_head returns vocab-sharded logits under TP; gather to the
-            # full local logits tensor that vLLM expects.
-            if self.parallelism_context.tp_enabled:
-                mesh = current_spmd_mesh()
-                assert mesh is not None
-                logits = spmd.redistribute(
-                    logits,
-                    mesh.get_group("tp"),
-                    src=spmd.S(-1),
-                    dst=spmd.R,
-                    backward_options={"op_dtype": logits.dtype},
-                )
-
-        return logits
+        return compute_logits(self.model, hidden_states, self.parallelism_context)
 
     def load_weights(self, weights_iter):
         """
