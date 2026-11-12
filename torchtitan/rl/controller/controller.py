@@ -1367,10 +1367,16 @@ class Controller(Configurable):
                     # before the corresponding optimizer step is durable. The
                     # batcher includes every consumed group ID here, including
                     # metric-only zero-std groups excluded from model inputs.
-                    self._rollouter.commit_training_sample_ids(packed.group_ids)
+                    # Off the event loop: both wait for an in-flight sample read to finish.
+                    await asyncio.to_thread(
+                        self._rollouter.commit_training_sample_ids,
+                        packed.group_ids,
+                    )
                     optimizer_result = self._get_rank_0_value(
                         await self.trainer.all_ranks.optim_step.call(
-                            resume_state=self._rollouter.state_dict(),
+                            resume_state=await asyncio.to_thread(
+                                self._rollouter.state_dict
+                            ),
                             last_step=(step == num_training_steps),
                         )
                     )
