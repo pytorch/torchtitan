@@ -10,6 +10,7 @@ Each configuration function is selected by module and name in the launched
 training process, so it must stay importable from this module.
 """
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.trainer import Trainer
 from torchtitan_recipes.tests import _set_spmd_typechecking
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel_hybridep
@@ -40,6 +41,25 @@ def deepseek_v3_debugmodel_hybridep_fsdp4_ep2() -> Trainer.Config:
     config = deepseek_v3_debugmodel_hybridep(seq_len=2048)
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.expert_parallel_degree = 2
+    return config
+
+
+def muse_spark_debugmodel_hybridep_fsdp2_tp2_ep2() -> Trainer.Config:
+    from torchtitan_recipes.tests.models.muse_spark import (
+        muse_spark_debugmodel_hybridep,
+    )
+
+    config = muse_spark_debugmodel_hybridep(
+        seq_len=512,
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=2,
+            tensor_parallel_degree=2,
+            expert_parallel_degree=2,
+            enable_sequence_parallel=True,
+        ),
+    )
+    # SPMD type checking turns off local compile, and this run covers the
+    # compiled moe_masked_output_postprocess region.
     return config
 
 
@@ -187,9 +207,13 @@ def build_h100_tests_list() -> list[IntegrationTestDefinition]:
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
-            configs=[deepseek_v3_debugmodel_hybridep_fsdp4_ep2],
-            test_descr="DeepSeek V3 FSDP+HybridEP",
-            test_name="deepseek_v3_fsdp+hybridep",
+            configs=[
+                deepseek_v3_debugmodel_hybridep_fsdp4_ep2,
+                muse_spark_debugmodel_hybridep_fsdp2_tp2_ep2,
+            ],
+            test_descr="FSDP+HybridEP: DeepSeek V3 (FSDP4, EP2) and Muse Spark "
+            "(FSDP2, TP2 with SP, EP2)",
+            test_name="fsdp+hybridep",
             ngpu=4,
             # deep_ep/NVSHMEM is CUDA-only, so skip on ROCm.
             skip_rocm_test=True,

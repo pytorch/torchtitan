@@ -185,7 +185,7 @@ def _use_forced_balanced_routing(model_config: MuseSparkModel.Config) -> None:
         setattr(parent, attr, replacement)
 
 
-def _use_flex_flash_attention(model_config: MuseSparkModel.Config) -> None:
+def use_flex_flash_attention(model_config: MuseSparkModel.Config) -> None:
     """Select FA4 and layer-appropriate block-mask geometry under CP."""
     for layer in model_config.layers:
         attention = layer.attention
@@ -209,7 +209,7 @@ def _use_flex_flash_attention(model_config: MuseSparkModel.Config) -> None:
 
 
 # TODO: Add production Muse Spark Open video and audio datasets.
-def _muse_spark_mm_dataloader(
+def muse_spark_mm_dataloader(
     model_config: MuseSparkModel.Config,
     dataset: SingleDatasetConfig,
 ) -> GrainDataLoader.Config:
@@ -236,13 +236,15 @@ def _muse_spark_mm_dataloader(
     )
 
 
-def _muse_spark_816b_a42b(
+def muse_spark_816b_a42b(
     seq_len: int | None = None,
     *,
     parallelism: ParallelismConfig | None = None,
     attn_backend: str = "flex",
 ) -> Trainer.Config:
     """Configure full-parameter text continuation from the Muse Spark Open checkpoint.
+
+    Base config for derived recipes; it is not verified as a recipe on its own.
 
     Stage ``meta-models/Muse-Spark-Open-816B-A42B`` locally at ``hf_assets_path``.
     To load weights from a separate directory, set
@@ -263,7 +265,6 @@ def _muse_spark_816b_a42b(
         "816B-A42B",
         parallelism=parallelism,
         seq_len=seq_len,
-        moe_comm_backend="standard",
         attn_backend=attn_backend,
     )
     if parallelism.context_parallel_degree > 1:
@@ -400,7 +401,7 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     # path while exposing TP communication. Keep MXFP8 coverage in the debug
     # recipe until those two execution paths exist.
     config = _with_dist_moe(
-        _muse_spark_816b_a42b(seq_len=seq_len),
+        muse_spark_816b_a42b(seq_len=seq_len),
         expert_precision="bf16",
         activation_slot_capacity_factor=1.0,
         scratch_capacity_factor=32.0,
@@ -464,7 +465,7 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     # sequence available to Flex-Flash. This preserves Muse global/sliding
     # attention semantics without a query all-to-all; the global and sliding
     # layers use independently tuned block-mask geometry.
-    _use_flex_flash_attention(cast(MuseSparkModel.Config, config.model))
+    use_flex_flash_attention(cast(MuseSparkModel.Config, config.model))
     if not fake_backend and tensor_parallel_degree > 1:
         config = apply_transforms(
             config,
@@ -637,11 +638,45 @@ def _ultradata_lora_sft_optim(*, warmup_steps: int) -> Optim.Config:
     )
 
 
+# The router gate is not a target.
+MUSE_SPARK_LORA_DECODER_TARGETS = ["wqkv", "wo", "output_gate", "w13", "w2"]
+
+
 def _ultradata_lora_sft_transform() -> LoRATransform:
     return LoRATransform(
         rank=8,
         alpha=16.0,
-        target_modules=["wqkv", "wo", "output_gate", "w13", "w2"],
+        target_modules=list(MUSE_SPARK_LORA_DECODER_TARGETS),
+    )
+
+
+def apply_gb300_lora_dist_moe(
+    config: Trainer.Config, lora: LoRATransform
+) -> Trainer.Config:
+    """Apply the GB300 BF16 Dist-MoE settings and ``lora`` for LoRA SFT.
+
+    Sets local compile of the loss only, remat that saves the Dist-MoE save
+    regions, the Dist-MoE runtime budgets and 1800 s comm timeouts, drops the
+    fused SwiGLU override import, then applies the Dist-MoE and LoRA transforms.
+    """
+    from torchtitan.config.transform.dist_moe import DistMoeTransform
+    from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
+
+    config.model.local_compile.regions = ["loss"]
+    config.activation_remat = ActivationRematConfig(
+        save_regions=list(_MUSE_SPARK_DIST_MOE_SAVE_REGIONS),
+    )
+    config.dist_moe_runtime = DistMoeRuntime.Config(
+        activation_slot_capacity_factor=0.25,
+        scratch_capacity_factor=16.0,
+        vmm_capacity_factor=None,
+    )
+    config.comm.init_timeout_seconds = 1800
+    config.comm.train_timeout_seconds = 1800
+    config.override.imports = []
+    return apply_transforms(
+        config,
+        [DistMoeTransform(expert_precision="bf16", inplace_wgrad_accum=False), lora],
     )
 
 
@@ -673,12 +708,9 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
     Use the environment overrides above for paths; edit or derive this recipe
     for other configuration changes.
     """
-    from torchtitan.config.transform.dist_moe import DistMoeTransform
-    from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
-
     seq_len = 131_072
 
-    config = _muse_spark_816b_a42b(
+    config = muse_spark_816b_a42b(
         seq_len=seq_len,
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=1,
@@ -711,19 +743,7 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
     config.precision = PrecisionConfig(
         dtype="bfloat16", param_dtype="bfloat16", reduce_dtype="float32"
     )
-    config.comm.init_timeout_seconds = 1800
-    config.comm.train_timeout_seconds = 1800
-    config.model.local_compile.regions = ["loss"]
     config.debug.seed = 42
-    config.activation_remat = ActivationRematConfig(
-        save_regions=list(_MUSE_SPARK_DIST_MOE_SAVE_REGIONS),
-    )
-    config.dist_moe_runtime = DistMoeRuntime.Config(
-        activation_slot_capacity_factor=0.25,
-        scratch_capacity_factor=16.0,
-        vmm_capacity_factor=None,
-    )
-    config.override.imports = []
     config.checkpointer = cast(
         CheckpointManager.Config,
         TorchCheckpointingManager.Config(
@@ -742,13 +762,7 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
             export_dtype="bfloat16",
         ),
     )
-    config = apply_transforms(
-        config,
-        [
-            DistMoeTransform(expert_precision="bf16", inplace_wgrad_accum=False),
-            _ultradata_lora_sft_transform(),
-        ],
-    )
+    config = apply_gb300_lora_dist_moe(config, _ultradata_lora_sft_transform())
     # VarlenInnerAttention defaults to cuDNN first; on the 128k global layers it is ~13% slower than FA4.
     for _, inner_attention, _, _ in config.model.traverse(VarlenInnerAttention.Config):
         inner_attention.sdpa_backends = ["FLASH_ATTENTION"]

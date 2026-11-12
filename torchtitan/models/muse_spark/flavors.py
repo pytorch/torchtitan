@@ -805,7 +805,6 @@ def _muse_spark_config(
     load_balance_coeff: float | None,
     expert_bias_init: float,
     attn_backend: str,
-    moe_comm_backend: str,
     parallelism: ParallelismConfig,
     dataset_modalities: tuple[Literal["vision", "audio"], ...],
     audio_encoder: MuseSparkAudioEncoder.Config,
@@ -817,8 +816,6 @@ def _muse_spark_config(
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)
     if attn_backend not in {"flex", "varlen"}:
         raise ValueError("Muse Spark supports only attn_backend='flex' or 'varlen'")
-    if moe_comm_backend != "standard":
-        raise ValueError("Muse Spark supports only moe_comm_backend='standard'")
 
     assert len(post_norm_gain_centers) == num_layers
 
@@ -974,7 +971,6 @@ def _muse_spark_config(
 
 def _debugmodel(
     attn_backend: str,
-    moe_comm_backend: str,
     *,
     seq_len: int,
     parallelism: ParallelismConfig,
@@ -1037,7 +1033,6 @@ def _debugmodel(
         load_balance_coeff=None,
         expert_bias_init=0.125,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
         dataset_modalities=dataset_modalities,
         audio_encoder=audio_encoder,
         vision_encoder=vision_encoder,
@@ -1048,7 +1043,6 @@ def _debugmodel(
 
 def _muse_spark_816b_a42b(
     attn_backend: str,
-    moe_comm_backend: str,
     *,
     seq_len: int,
     parallelism: ParallelismConfig,
@@ -1091,7 +1085,6 @@ def _muse_spark_816b_a42b(
         load_balance_coeff=1e-3,
         expert_bias_init=0.0,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
         dataset_modalities=dataset_modalities,
         audio_encoder=audio_encoder,
         vision_encoder=vision_encoder,
@@ -1133,7 +1126,6 @@ def build_model_config(
     *,
     parallelism: ParallelismConfig | None = None,
     seq_len: int | None = None,
-    moe_comm_backend: str = "standard",
     attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> MuseSparkModel.Config:
@@ -1153,7 +1145,6 @@ def build_model_config(
         )
     config = get_config(
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
         seq_len=context_len,
         parallelism=ParallelismConfig() if parallelism is None else parallelism,
     )

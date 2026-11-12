@@ -42,7 +42,11 @@ from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 
-from .token_dispatcher import DeepEPDispatchMetadata, LocalTokenDispatcher
+from .token_dispatcher import (
+    DeepEPDispatchMetadata,
+    HybridEPTokenDispatcher,
+    LocalTokenDispatcher,
+)
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
@@ -57,6 +61,24 @@ from .token_dispatcher import DeepEPDispatchMetadata, LocalTokenDispatcher
 #       (roles, not model dims: the _grouped_mm seam takes the expert
 #        weight in its stored (E, O, I) orientation, which is (E, F, D)
 #        for the up/gate projections and (E, D, F) for the down one)
+
+
+@local_compile("moe_masked_output_postprocess", batch_invariant=False)
+def _masked_output_postprocess(
+    postprocess: Module, routed_output_RD: torch.Tensor, offsets_E: torch.Tensor
+) -> torch.Tensor:
+    """Run ``postprocess`` on non-blocking HybridEP output with capacity rows.
+
+    HybridEP sizes the routed rows to its capacity. Rows past the last offset
+    are never written: not by w2 in forward, and not by the combine backward.
+    Mask them around the postprocess so its forward stays finite and its
+    parameters get no gradient from them. ``torch.where`` also drops NaN
+    garbage. Compiling the region fuses both masks into the postprocess kernels.
+    """
+    row_ids_R = torch.arange(routed_output_RD.shape[0], device=offsets_E.device)
+    valid_R1 = (row_ids_R < offsets_E[-1]).unsqueeze(-1)
+    routed_output_RD = postprocess(torch.where(valid_R1, routed_output_RD, 0))
+    return torch.where(valid_R1, routed_output_RD, 0)
 
 
 class RoutedExperts(Module):
@@ -168,7 +190,16 @@ class RoutedExperts(Module):
                 remat.recompute_needs_tensor(routed_output_RD)
             routed_output_RD = routed_output_RD.type_as(routed_input_RD)
             if self.output_postprocess is not None:
-                routed_output_RD = self.output_postprocess(routed_output_RD)
+                # Non-blocking HybridEP leaves rows past offsets_E[-1] unwritten.
+                if (
+                    isinstance(self.token_dispatcher, HybridEPTokenDispatcher)
+                    and self.token_dispatcher.non_blocking_capacity_factor is not None
+                ):
+                    routed_output_RD = _masked_output_postprocess(
+                        self.output_postprocess, routed_output_RD, offsets_E
+                    )
+                else:
+                    routed_output_RD = self.output_postprocess(routed_output_RD)
                 if isinstance(metadata, DeepEPDispatchMetadata):
                     # A nonlinear postprocess must run before score multiplication.
                     remat.recompute_needs_tensor(routed_output_RD, metadata.scores_R)
