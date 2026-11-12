@@ -21,7 +21,7 @@ from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.graph_trainer.substitute_kernels import (
-    _load_run,
+    _load_module,
     cache_keys,
     substitute_with_kernels_pass,
 )
@@ -123,16 +123,18 @@ class TestSubstituteWithKernelsPass(TestCase):
         return sorted(p for p in self.cache.iterdir() if p.is_dir())
 
     def _spec_text(self, l1, l2):
-        """The spec of ``(l1, l2)``, with the torch-dependent hash redacted."""
-        return (
-            (self.cache / l1 / f"specialization_{l2}.json")
-            .read_text()
-            .strip()
-            .replace(l2, "<l2>")
-        )
+        """The ``SPEC`` header of ``<l1>/<l2>.py``."""
+        text = (self.cache / l1 / f"{l2}.py").read_text()
+        return text.split('SPEC = json.loads(r"""\n', 1)[1].split('\n""")', 1)[0]
+
+    def _reference_text(self, path):
+        """The imports and ``reference`` function of the specialization file ``path``."""
+        text = path.read_text()
+        imports = text[text.index("import json") : text.index("SPEC =")]
+        return f"{imports.strip()}\n\n{text[text.index('def reference') : text.index('def impl')].strip()}"
 
     def _run_in_fresh_process(self, reference, args):
-        """Run ``reference.py`` on ``args`` in a new interpreter."""
+        """Run the specialization file ``reference`` on ``args`` in a new interpreter."""
         inputs, output = self.cache / "inputs.pt", self.cache / "output.pt"
         torch.save(args, inputs)
         script = (
@@ -207,7 +209,24 @@ class TestSubstituteWithKernelsPass(TestCase):
         self.assertEqual(spec["inputs"][0]["shape"], ["N0", 16])
         self.assertEqual(spec["outputs"]["shape"], ["N0", 16])
 
-    def test_miss_keeps_call_module_and_writes_reference_and_specialization(self):
+    def test_symbolic_sizes_keep_literals_in_specialization(self):
+        # The pattern ignores literals, so with symbolic sizes the specialization
+        # must still tell `* 2` from `* 3`.
+        def silu_times(c):
+            def fn(x, w1, w2):
+                return torch.nn.functional.silu(x) * c
+
+            return fn
+
+        shape_env = ShapeEnv()
+        with FakeTensorMode(shape_env=shape_env):
+            x = torch.empty(shape_env.create_unbacked_symint(), 16)
+            w = torch.empty(16, 16)
+        keys = [cache_keys(_layer(silu_times(c)), [x, w, w])[:2] for c in (2, 3)]
+        self.assertEqual(keys[0][0], keys[1][0])
+        self.assertNotEqual(keys[0][1], keys[1][1])
+
+    def test_miss_keeps_call_module_and_writes_specialization_file(self):
         args = _inputs()
         gm = _parent([_layer(), _layer(name_suffix="_17")], args)
         ((_, l2), _) = _keys(gm)
@@ -217,19 +236,24 @@ class TestSubstituteWithKernelsPass(TestCase):
         self.assertEqual(len(gm.graph.find_nodes(op="call_module")), 2)
         self.assertEqual(gm(*args), expected)
         (pattern,) = self._patterns()
-        self.assertEqual(
-            sorted(p.name for p in pattern.iterdir()),
-            ["reference.py", f"specialization_{l2}.json"],
-        )
+        self.assertEqual(sorted(p.name for p in pattern.iterdir()), [f"{l2}.py"])
+        module = _load_module(pattern / f"{l2}.py")
+        self.assertIs(module.run, module.reference)
+        self.assertEqual(module.reference(*args), _swiglu(*args))
         self.assertExpectedInline(
-            (pattern / f"specialization_{l2}.json")
-            .read_text()
-            .strip()
-            .replace(l2, "<l2>"),
+            (pattern / f"{l2}.py").read_text().strip(),
             """\
+\"\"\"One specialization of a substitute_kernels pattern.
+
+SPEC and reference are generated: do not edit them. Write the kernel in
+impl, then set ``run = impl``.
+\"\"\"
+
+import json
+import torch
+
+SPEC = json.loads(r\"\"\"
 {
-  "kernel_name": "<l2>.py",
-  "reference": "reference.py",
   "signature": "def run(in0, in1, in2)",
   "inputs": [
     {
@@ -257,26 +281,23 @@ class TestSubstituteWithKernelsPass(TestCase):
     "dtype": "float32",
     "device": "cpu"
   }
-}""",
-        )
-        self.assertEqual(_load_run(pattern / "reference.py")(*args), _swiglu(*args))
-        self.assertExpectedInline(
-            (pattern / "reference.py").read_text().strip(),
-            """\
-import torch
+}
+\"\"\")
 
 
-class Reference(torch.nn.Module):
-    def forward(self, in0, in1, in2):
-        v3 = torch.ops.aten.mm.default(in0, in1);  in1 = None
-        v4 = torch.ops.aten.silu.default(v3);  v3 = None
-        v5 = torch.ops.aten.mm.default(in0, in2);  in0 = in2 = None
-        v6 = torch.ops.aten.mul.Tensor(v4, v5);  v4 = v5 = None
-        return v6
+def reference(in0, in1, in2):
+    v3 = torch.ops.aten.mm.default(in0, in1);  in1 = None
+    v4 = torch.ops.aten.silu.default(v3);  v3 = None
+    v5 = torch.ops.aten.mm.default(in0, in2);  in0 = in2 = None
+    v6 = torch.ops.aten.mul.Tensor(v4, v5);  v4 = v5 = None
+    return v6
 
 
-def run(*args):
-    return Reference()(*args)""",
+def impl(in0, in1, in2):
+    raise NotImplementedError
+
+
+run = reference""",
         )
 
     def test_reference_imports_only_fx_builtins_it_uses(self):
@@ -290,26 +311,21 @@ def run(*args):
         substitute_with_kernels_pass(gm, cache_dir=self.cache)
 
         (pattern,) = self._patterns()
-        reference = pattern / "reference.py"
+        (reference,) = pattern.iterdir()
         self.assertExpectedInline(
-            reference.read_text().strip(),
+            self._reference_text(reference),
             """\
+import json
 from math import inf
 from torch import device
 import torch
 
-
-class Reference(torch.nn.Module):
-    def forward(self, in0, in1, in2):
-        v3 = torch.ops.aten.gt.Scalar(in0, 0)
-        v4 = torch.ops.aten.masked_fill.Scalar(in0, v3, -inf);  in0 = v3 = None
-        v5 = torch.ops.aten.ones.default([8, 16], device = device(type='cpu'), pin_memory = False)
-        v6 = torch.ops.aten.add.Tensor(v4, v5);  v4 = v5 = None
-        return v6
-
-
-def run(*args):
-    return Reference()(*args)""",
+def reference(in0, in1, in2):
+    v3 = torch.ops.aten.gt.Scalar(in0, 0)
+    v4 = torch.ops.aten.masked_fill.Scalar(in0, v3, -inf);  in0 = v3 = None
+    v5 = torch.ops.aten.ones.default([8, 16], device = device(type='cpu'), pin_memory = False)
+    v6 = torch.ops.aten.add.Tensor(v4, v5);  v4 = v5 = None
+    return v6""",
         )
         self.assertEqual(self._run_in_fresh_process(reference, args), expected)
 
@@ -332,21 +348,6 @@ def run(*args):
         self.assertFalse(hasattr(gm, "layer0") or hasattr(gm, "layer1"))
         self.assertEqual(gm(*args), torch.full((8, 16), 42.0))
 
-    def test_specialization_kernel_name_selects_kernel_file(self):
-        args = _inputs()
-        make_gm = lambda: _parent([_layer()], args)  # noqa: E731
-        substitute_with_kernels_pass(make_gm(), cache_dir=self.cache)  # writes spec
-        ((l1, l2),) = _keys(make_gm())
-        spec_path = self.cache / l1 / f"specialization_{l2}.json"
-        spec = json.loads(spec_path.read_text())
-        spec["kernel_name"] = "swiglu_fast.py"
-        spec_path.write_text(json.dumps(spec))
-        self._write_kernel(self.cache / l1 / f"{l2}.py", 1.0)  # ignored now
-        self._write_kernel(self.cache / l1 / "swiglu_fast.py", 7.0)
-
-        gm = substitute_with_kernels_pass(make_gm(), cache_dir=self.cache)
-        self.assertEqual(gm(*args), torch.full((8, 16), 7.0))
-
     def test_shape_and_dtype_change_specialization_not_pattern(self):
         keys = []
         for args in (_inputs(m=8), _inputs(m=32), _inputs(dtype=torch.float64)):
@@ -359,8 +360,6 @@ def run(*args):
             self._spec_text(*keys[2]),
             """\
 {
-  "kernel_name": "<l2>.py",
-  "reference": "reference.py",
   "signature": "def run(in0, in1, in2)",
   "inputs": [
     {
@@ -410,20 +409,12 @@ def run(*args):
         (pattern,) = self._patterns()
         self.assertEqual(
             sorted(p.name for p in pattern.iterdir()),
-            sorted(
-                [
-                    "reference.py",
-                    f"specialization_{l2_a}.json",
-                    f"specialization_{l2_b}.json",
-                ]
-            ),
+            sorted([f"{l2_a}.py", f"{l2_b}.py"]),
         )
         self.assertExpectedInline(
             self._spec_text(l1_b, l2_b),
             """\
 {
-  "kernel_name": "<l2>.py",
-  "reference": "reference.py",
   "signature": "def run(in0, in1, in2)",
   "inputs": [
     {
@@ -454,10 +445,35 @@ def run(*args):
 }""",
         )
 
-    def test_scalar_constant_in_submodule_changes_pattern(self):
+    def test_scalar_constant_changes_specialization_not_pattern(self):
         args = _inputs()
-        keys = [_keys(_parent([_layer(_scaled_swiglu(s))], args)) for s in (2.0, 3.0)]
-        self.assertNotEqual(keys[0][0][0], keys[1][0][0])
+        keys = [
+            _keys(_parent([_layer(_scaled_swiglu(s))], args))[0] for s in (2.0, 3.0)
+        ]
+        self.assertEqual(keys[0][0], keys[1][0])
+        self.assertNotEqual(keys[0][1], keys[1][1])
+
+    def test_view_position_changes_specialization_not_pattern(self):
+        # Moving an independent view also reorders the inputs by first use; the
+        # pattern ignores both, the specialization does not.
+        def view_first(w, x):
+            v = w.view(16, 16)
+            return torch.ops.aten.mm.default(x + 1, v)
+
+        def view_last(x, w):
+            s = x + 1
+            return torch.ops.aten.mm.default(s, w.view(16, 16))
+
+        def other_op(x, w):
+            return torch.ops.aten.mm.default(x - 1, w.view(16, 16))
+
+        x, w = torch.randn(8, 16), torch.randn(256)
+        first = cache_keys(make_fx(view_first)(w, x), [w, x])[:2]
+        last = cache_keys(make_fx(view_last)(x, w), [x, w])[:2]
+        other = cache_keys(make_fx(other_op)(x, w), [x, w])[:2]
+        self.assertEqual(first[0], last[0])
+        self.assertNotEqual(first[1], last[1])
+        self.assertNotEqual(first[0], other[0])
 
     def test_submodule_with_tensor_attribute_is_skipped(self):
         args = _inputs()
@@ -478,15 +494,12 @@ def run(*args):
 
         ((l1, l2),) = _keys(gm)
         self.assertEqual(
-            sorted(p.name for p in (self.cache / l1).iterdir()),
-            ["reference.py", f"specialization_{l2}.json"],
+            sorted(p.name for p in (self.cache / l1).iterdir()), [f"{l2}.py"]
         )
         self.assertExpectedInline(
             self._spec_text(l1, l2),
             """\
 {
-  "kernel_name": "<l2>.py",
-  "reference": "reference.py",
   "signature": "def run(in0, in1, in2, in3)",
   "inputs": [
     {
@@ -522,7 +535,7 @@ def run(*args):
   }
 }""",
         )
-        run = _load_run(self.cache / l1 / "reference.py")
+        run = _load_module(self.cache / l1 / f"{l2}.py").reference
         for value in (2.0, 3.0):
             c = torch.full((16,), value)
             self.assertEqual(run(*args, c), _swiglu(*args) * value)
@@ -539,8 +552,6 @@ def run(*args):
             self._spec_text(l1, l2),
             """\
 {
-  "kernel_name": "<l2>.py",
-  "reference": "reference.py",
   "signature": "def run(in0, in1, in2)",
   "inputs": [
     {
@@ -597,26 +608,21 @@ def run(*args):
         substitute_with_kernels_pass(gm, cache_dir=self.cache)
 
         (pattern,) = self._patterns()
-        reference = pattern / "reference.py"
+        (reference,) = pattern.iterdir()
         self.assertExpectedInline(
-            reference.read_text().strip(),
+            self._reference_text(reference),
             """\
+import json
 import torch
 import torchtitan.experiments.graph_trainer.tests._substitute_kernels_ops  # sk_test::scale
 
-
-class Reference(torch.nn.Module):
-    def forward(self, in0, in1, in2):
-        v3 = torch.ops.aten.mm.default(in0, in1);  in1 = None
-        v4 = torch.ops.aten.silu.default(v3);  v3 = None
-        v5 = torch.ops.aten.mm.default(in0, in2);  in0 = in2 = None
-        v6 = torch.ops.aten.mul.Tensor(v4, v5);  v4 = v5 = None
-        v7 = torch.ops.sk_test.scale.default(v6, 2.0);  v6 = None
-        return v7
-
-
-def run(*args):
-    return Reference()(*args)""",
+def reference(in0, in1, in2):
+    v3 = torch.ops.aten.mm.default(in0, in1);  in1 = None
+    v4 = torch.ops.aten.silu.default(v3);  v3 = None
+    v5 = torch.ops.aten.mm.default(in0, in2);  in0 = in2 = None
+    v6 = torch.ops.aten.mul.Tensor(v4, v5);  v4 = v5 = None
+    v7 = torch.ops.sk_test.scale.default(v6, 2.0);  v6 = None
+    return v7""",
         )
         self.assertEqual(self._run_in_fresh_process(reference, args), expected)
 
@@ -631,7 +637,7 @@ def run(*args):
         substitute_with_kernels_pass(gm, cache_dir=self.cache)
 
         (pattern,) = self._patterns()
-        reference = pattern / "reference.py"
+        (reference,) = pattern.iterdir()
         self.assertIn(
             "import torchtitan.experiments.graph_trainer.tests._substitute_kernels_ops"
             "  # sk_test::add",

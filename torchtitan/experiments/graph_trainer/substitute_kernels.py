@@ -11,33 +11,43 @@ target is an ``fx.GraphModule`` and replaces it with a cached kernel if one
 exists::
 
     <cache_dir>/
-      pat_<l1>/                   # level 1: the submodule's generated code
-        reference.py              # standalone eager implementation
-        specialization_<l2>.json  # level 2: spec of one specialization
-        <l2>.py                   # optimized kernel for that specialization
+      pat_<l1>/    # level 1: the submodule's structure (see pattern_key)
+        <l2>.py    # level 2: one specialization (spec, reference, kernel)
 
-The level-2 key is the AOTAutograd cache key of the submodule on its inputs.
-Inputs with symbolic sizes (e.g. the routed-row count of a token dispatcher)
-are keyed by their description instead, with the symbols renamed ``N0``,
-``N1``, ... in order of first appearance: the AOTAutograd key would include the
-enclosing graph's symbol names, which differ at every call site. Neither key
-depends on the device index, so every rank finds the same kernels.
-``specialization_<l2>.json`` is written when a specialization is first seen::
+The level-1 key ignores literal values and view ops, so submodules that only
+differ in values baked into op arguments (shapes, scalars, dtypes) or in the
+position of views share a pattern. The level-2 key is the AOTAutograd cache
+key of the exact submodule on its inputs, so a kernel only runs on the code
+and inputs it was written for. Inputs with symbolic sizes (e.g. the routed-row
+count of a token dispatcher) are keyed by the submodule's code and their
+description instead, with the symbols renamed ``N0``, ``N1``, ... in order of
+first appearance: the AOTAutograd key would include the enclosing graph's
+symbol names, which differ at every call site. Neither key depends on the
+device index, so every rank finds the same kernels. ``<l2>.py`` is written
+when a specialization is first seen::
 
+    SPEC = json.loads(r\"\"\"
     {
-      "kernel_name": "<l2>.py",
-      "reference": "reference.py",
       "signature": "def run(in0, in1, in2)",
       "inputs": [{"shape": [8, 16], "stride": [16, 1],
                   "dtype": "float32", "device": "cpu"}, ...],
       "outputs": {"shape": [8, 16], "stride": [16, 1], ...}
     }
+    \"\"\")
 
-To provide a kernel, write ``kernel_name`` next to it, defining ``run`` with
-that signature: it receives inputs as described by ``inputs`` and must return
-outputs as described by ``outputs``, computing what ``reference.py``
-computes. Without that file the ``call_module`` is left untouched, i.e. it
-runs exactly ``reference.py``.
+    def reference(in0, in1, in2):  # the exact submodule code
+        ...
+
+    def impl(in0, in1, in2):
+        raise NotImplementedError
+
+    run = reference
+
+To provide a kernel, write it in ``impl`` and set ``run = impl``: it receives
+inputs as described by ``inputs`` and must return outputs as described by
+``outputs``, computing what ``reference`` computes. While ``run`` is
+``reference``, the ``call_module`` is left untouched, i.e. it runs exactly the
+reference. ``SPEC`` and ``reference`` are generated and must not be edited.
 
 Submodules must not read attributes: tensor constants have to be passed as
 ``call_module`` arguments, so that patterns do not depend on their values and
@@ -45,8 +55,8 @@ the cache stores no tensors. Higher-order ops with subgraphs (``get_attr`` of
 a GraphModule) are not supported yet.
 
 Custom ops must be defined with ``torch.library.custom_op`` or ``triton_op``
-in an importable module. ``reference.py`` imports those modules so it runs in
-a fresh process, and their source is part of the level-1 key. Submodules
+in an importable module. ``<l2>.py`` imports those modules so it runs in a
+fresh process, and their source is part of the level-1 key. Submodules
 calling any other non-torch op are not cacheable.
 """
 
@@ -54,27 +64,24 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import importlib.util
 import inspect
 import json
 import logging
+import operator
 import os
 import re
 import sys
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import sympy
 import torch
 import torch._guards
-from torch._functorch._aot_autograd.autograd_cache import (
-    autograd_cache_key,
-    sanitize_gm_for_cache,
-)
+from torch._functorch._aot_autograd.autograd_cache import autograd_cache_key
 from torch._functorch._aot_autograd.schemas import AOTConfig
-from torch._inductor.codecache import FxGraphCachePickler
 from torch._inductor.runtime.cache_dir_utils import cache_dir as inductor_cache_dir
 from torch._library import simple_registry
 from torch._library.custom_ops import OPDEFS
@@ -228,9 +235,52 @@ def custom_op_deps(gm: torch.fx.GraphModule) -> OpDeps:
 
 
 def pattern_key(gm: torch.fx.GraphModule, op_deps: OpDeps = ()) -> str:
-    """Level-1 key: generated code and custom op sources."""
-    with sanitize_gm_for_cache(gm):
-        return "pat_" + FxGraphCachePickler(gm).get_hash((gm, op_deps))
+    """Level-1 key: the submodule's structure, ignoring literal values and views.
+
+    Calls to view ops (``OpOverload.is_view``: view, reshape, permute, expand,
+    ...) are skipped, and their users read the viewed tensor instead. Every
+    other node contributes its op and its arguments, with nodes referenced by
+    position, inputs numbered by first use and non-tensor literals replaced by
+    their type. Custom op sources are part of the key.
+    """
+    names: dict[torch.fx.Node, str] = {}
+    viewed: dict[torch.fx.Node, torch.fx.Node] = {}
+    num_inputs = 0
+    structure = []
+
+    def key_arg(a: Any) -> Any:
+        nonlocal num_inputs
+        if isinstance(a, torch.fx.Node):
+            a = viewed.get(a, a)
+            if a not in names:  # a placeholder, numbered by first use
+                names[a] = f"in{num_inputs}"
+                num_inputs += 1
+            return names[a]
+        if isinstance(a, (list, tuple)):
+            return [key_arg(x) for x in a]
+        if isinstance(a, dict):
+            return {k: key_arg(v) for k, v in a.items()}
+        return None if a is None else type(a).__name__
+
+    for node in gm.graph.nodes:
+        if node.op == "placeholder":
+            continue
+        source = node.args[0] if node.args else None
+        if (
+            node.op == "call_function"
+            and isinstance(source, torch.fx.Node)
+            and (
+                (isinstance(node.target, torch._ops.OpOverload) and node.target.is_view)
+                # An element of a multi-output view such as split.
+                or (node.target is operator.getitem and source in viewed)
+            )
+        ):
+            viewed[node] = viewed.get(source, source)
+            continue
+        args = key_arg((node.args, node.kwargs))
+        names[node] = f"v{len(structure)}"
+        structure.append((node.op, str(node.target), args))
+    return "pat_" + hashlib.sha256(repr((structure, op_deps)).encode()).hexdigest()
 
 
 def _symbol_names(values: list[Any]) -> dict[sympy.Symbol, str]:
@@ -271,10 +321,10 @@ def spec_key(gm: torch.fx.GraphModule, example_inputs: list[Any]) -> str:
     """Level-2 key: the AOTAutograd cache key for ``gm`` on ``example_inputs``.
 
     Inputs are keyed on device index 0, so every rank computes the same key
-    (``normalize_names`` drops the index of device literals). Inputs with
-    symbolic sizes are keyed by their description (see the module docstring)
-    and the deterministic-algorithms flag, which the AOTAutograd key also
-    includes.
+    (``normalize_names`` drops the index of device literals). With symbolic
+    input sizes the key is a hash of ``gm``'s code (the level-1 key ignores
+    literals), the inputs' description (see the module docstring) and the
+    deterministic-algorithms flag, which the AOTAutograd key also includes.
     """
     names = _symbol_names(example_inputs)
     if names:
@@ -283,7 +333,8 @@ def spec_key(gm: torch.fx.GraphModule, example_inputs: list[Any]) -> str:
             if isinstance(d, dict) and "device" in d:
                 d["device"] = torch.device(d["device"]).type
         payload = json.dumps(
-            [described, torch.are_deterministic_algorithms_enabled()], sort_keys=True
+            [gm.code, described, torch.are_deterministic_algorithms_enabled()],
+            sort_keys=True,
         )
         digest = base64.b32encode(hashlib.sha256(payload.encode()).digest())
         return "d" + digest.decode().lower().rstrip("=")[:51]
@@ -306,7 +357,10 @@ def spec_key(gm: torch.fx.GraphModule, example_inputs: list[Any]) -> str:
     return key
 
 
-def reference_source(gm: torch.fx.GraphModule, op_deps: OpDeps = ()) -> str:
+def kernel_source(
+    gm: torch.fx.GraphModule, op_deps: OpDeps, spec: dict[str, Any]
+) -> str:
+    """Source of ``<l2>.py``: ``spec``, the reference and an empty ``impl``."""
     python_code = gm.recompile()
     code = python_code.src
     used_globals = {
@@ -322,14 +376,23 @@ def reference_source(gm: torch.fx.GraphModule, op_deps: OpDeps = ()) -> str:
     op_imports = "".join(
         f"import {module}  # {', '.join(ops)}\n" for module, _, ops in op_deps
     )
-    body = "\n".join("    " + line for line in gm.code.strip().splitlines())
+    reference = re.sub(
+        r"def forward\(self(, )?", "def reference(", gm.code.strip(), count=1
+    )
+    names = ", ".join(n.name for n in gm.graph.find_nodes(op="placeholder"))
     return (
+        '"""One specialization of a substitute_kernels pattern.\n\n'
+        "SPEC and reference are generated: do not edit them. Write the kernel in\n"
+        "impl, then set ``run = impl``.\n"
+        '"""\n\n'
+        "import json\n"
         f"{imports}\n"
-        f"{op_imports}\n\n"
-        "class Reference(torch.nn.Module):\n"
-        f"{body}\n\n\n"
-        "def run(*args):\n"
-        "    return Reference()(*args)\n"
+        f"{op_imports}\n"
+        f'SPEC = json.loads(r"""\n{_spec_json(spec)}\n""")\n\n\n'
+        f"{reference}\n\n\n"
+        f"def impl({names}):\n"
+        "    raise NotImplementedError\n\n\n"
+        "run = reference\n"
     )
 
 
@@ -367,54 +430,23 @@ def _spec_json(spec: dict[str, Any]) -> str:
     return re.sub(r"\[[\d\s,.-]*\]", lambda m: json.dumps(json.loads(m.group())), text)
 
 
-def _ensure_spec(
-    pattern_dir: Path,
-    l2: str,
-    gm: torch.fx.GraphModule,
-    inputs: list[Any],
-    output: Any,
-) -> dict[str, Any]:
-    """Return the spec of specialization ``l2``, writing it if it is new."""
-    path = pattern_dir / f"specialization_{l2}.json"
-    if path.exists():
-        return json.loads(path.read_text())
-    params = [n.name for n in gm.graph.find_nodes(op="placeholder")]
-    # Output-only symbols (sizes computed inside the region) continue the numbering.
-    names = _symbol_names([*inputs, output])
-    spec = {
-        "kernel_name": f"{l2}.py",
-        "reference": "reference.py",
-        "signature": f"def run({', '.join(params)})",
-        "inputs": [_describe(v, names) for v in inputs],
-        "outputs": _describe(output, names),
-    }
-    _atomic_write(path, _spec_json(spec) + "\n")
-    return spec
-
-
-def _write_reference(
-    pattern_dir: Path, gm: torch.fx.GraphModule, op_deps: OpDeps
-) -> None:
-    pattern_dir.mkdir(parents=True, exist_ok=True)
-    _atomic_write(pattern_dir / "reference.py", reference_source(gm, op_deps))
-
-
-def _load_run(path: Path) -> Callable[..., Any]:
-    # One module per file content: every call site of a pattern shares it, and a
-    # replaced file is loaded anew.
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+def _load_module(path: Path) -> ModuleType:
+    # One module per file content: every call site of a specialization shares
+    # it, and a replaced file is loaded anew. Executed without the import
+    # system, which would write __pycache__ into the cache directory.
+    text = path.read_text()
+    digest = hashlib.sha256(text.encode()).hexdigest()[:16]
     name = f"_substitute_kernels_{path.parent.name}_{path.stem}_{digest}"
     if name not in sys.modules:
-        spec = importlib.util.spec_from_file_location(name, path)
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
+        module = ModuleType(name)
+        module.__file__ = str(path)
         sys.modules[name] = module
         try:
-            spec.loader.exec_module(module)
+            exec(compile(text, path, "exec"), module.__dict__)
         except BaseException:
             del sys.modules[name]
             raise
-    return sys.modules[name].run
+    return sys.modules[name]
 
 
 def cache_keys(
@@ -434,8 +466,7 @@ def lookup(
 ) -> Callable[..., Any] | None:
     """Return the cached kernel for ``submod``, or None to keep the reference.
 
-    Writes ``reference.py`` the first time a pattern is seen and
-    ``specialization_<l2>.json`` the first time a specialization is seen.
+    Writes ``<l2>.py`` the first time a specialization is seen.
     """
     try:
         l1, l2, gm, op_deps = cache_keys(submod, example_inputs)
@@ -443,17 +474,24 @@ def lookup(
         logger.warning("substitute_kernels: submodule is not cacheable", exc_info=True)
         return None
 
-    pattern_dir = cache_dir / l1
-    if not (pattern_dir / "reference.py").exists():
-        _write_reference(pattern_dir, gm, op_deps)
-
-    spec = _ensure_spec(pattern_dir, l2, gm, example_inputs, example_output)
-    impl = pattern_dir / spec["kernel_name"]
-    if not impl.exists():
-        logger.info("substitute_kernels miss: %s", impl)
+    path = cache_dir / l1 / f"{l2}.py"
+    if not path.exists():
+        params = [n.name for n in gm.graph.find_nodes(op="placeholder")]
+        # Output-only symbols (sizes computed inside the region) continue the numbering.
+        names = _symbol_names([*example_inputs, example_output])
+        spec = {
+            "signature": f"def run({', '.join(params)})",
+            "inputs": [_describe(v, names) for v in example_inputs],
+            "outputs": _describe(example_output, names),
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(path, kernel_source(gm, op_deps, spec))
+    module = _load_module(path)
+    if module.run is getattr(module, "reference", None):
+        logger.info("substitute_kernels miss: %s", path)
         return None
-    logger.info("substitute_kernels hit: %s", impl)
-    return _load_run(impl)
+    logger.info("substitute_kernels hit: %s", path)
+    return module.run
 
 
 def _example_inputs(node: torch.fx.Node) -> list[Any] | None:
