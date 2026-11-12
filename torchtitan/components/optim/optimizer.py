@@ -235,12 +235,11 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         All-to-all opens connection buffers for every peer and channel. A lower
         CTA cap reduces this connection state on dedicated transport communicators,
         including combined DP/TP groups, while FSDP keeps its original
-        communicators. Each child adds fixed workspace memory, and fewer CTAs
-        may reduce all-to-all bandwidth.
+        communicators. Each capped communicator adds fixed workspace memory, and
+        fewer CTAs may reduce all-to-all bandwidth.
 
-        A positive value requires NCCL on the transport axes. Other backends
-        raise ``ValueError``; fake warns and keeps the storage groups without
-        modeling the cap.
+        A positive value requires NCCL. Other backends raise ``ValueError``;
+        fake warns and builds the transport meshes without the cap.
 
         TODO: Replace this temporary all-to-all connection-memory workaround
         with lower-memory redistribution, such as a pull-based symmetric-memory
@@ -268,7 +267,7 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         if max_ctas is not None and dist.get_backend() == "fake":
             warnings.warn(
                 "Redistribution max_ctas is not modeled by the fake process "
-                "group; using the storage-mesh process group",
+                "group; building transport meshes without the cap",
                 stacklevel=2,
             )
             max_ctas = None
@@ -276,6 +275,11 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         # that needs redistribution; FlexShard rejects mixed transports.
         transports = []
         for bucket in config.bucket_configs:
+            if bucket.mesh is not None:
+                raise ValueError(
+                    f"BucketConfig {bucket.patterns} sets mesh; the TorchTitan "
+                    "DistMuon wrapper builds every bucket's transport mesh"
+                )
             transport = None
             for fqn, param in named_parameters:
                 layout = config.compute_sharding_by_fqn.get(fqn)

@@ -1048,8 +1048,11 @@ class TestDistMuonMatchesUnshardedMuon(DTensorTestBase):
 
         # FlexShard only consumes caller-created groups: neither the
         # missing-mesh error nor construction may create one.
-        with mock.patch.object(
-            DeviceMesh, "_flatten", side_effect=AssertionError("caller owns groups")
+        caller_owns_groups = AssertionError("caller owns groups")
+        with (
+            mock.patch.object(DeviceMesh, "_flatten", side_effect=caller_owns_groups),
+            mock.patch.object(dist, "new_group", side_effect=caller_owns_groups),
+            mock.patch.object(dist, "split_group", side_effect=caller_owns_groups),
         ):
             if len(transport_axes) > 1:
                 with self.assertRaisesRegex(ValueError, "explicit BucketConfig.mesh"):

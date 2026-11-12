@@ -79,19 +79,26 @@ same ranks in storage order, named by joining the axes.
 Which axes a transport spans follows from FlexShard's resolution rules (e.g.
 `Owned` on a replicated axis still transports over it, and `BlockShard` rows
 already aligned with storage do not), so callers cannot derive them on their
-own. `redistribution_mesh_axes` answers from the same code `DistMuon` plans
-with, so the caller's mesh always matches the plan. It reads metadata only
-and validates the layout, so a bad layout fails before any group is created:
+own. `redistribution_mesh_axes` resolves the axes with the same rules
+`DistMuon`'s planner uses, so the caller's mesh always matches the plan. It
+reads metadata only:
 
 ```python
 axes = redistribution_mesh_axes("matrix", parameter, compute_layout)  # ("dp_shard", "tp")
 ranks = parameter.device_mesh[axes].mesh.flatten().tolist()
 group = dist.new_group(ranks)  # collective over WORLD
 mesh = DeviceMesh.from_group(
-    group, "cuda", mesh=torch.tensor(ranks), mesh_dim_names=("_".join(axes),)
+    group,
+    parameter.device_mesh.device_type,
+    mesh=torch.tensor(ranks),
+    mesh_dim_names=("_".join(axes),),
 )
 bucket = BucketConfig(patterns=("matrix",), mesh=mesh)
 ```
+
+`dist.new_group` must be called by every rank in the same order. When ranks
+need different transports (e.g. pipeline stages), create the union of all
+ranks' groups on every rank, as `build_transport_meshes` does.
 
 TorchTitan's `DistMuon` wrapper builds these meshes for every bucket with
 `torchtitan.distributed.utils.build_transport_meshes`.

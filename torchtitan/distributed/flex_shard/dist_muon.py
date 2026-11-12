@@ -63,9 +63,10 @@ def redistribution_mesh_axes(
 ) -> tuple[str, ...]:
     """Return the ordered storage-axis names needed for this Muon transition.
 
-    This construction-time query validates the same layout contract as DistMuon
-    without allocating buffers or creating communicators. An empty tuple means
-    storage already contains complete compute matrices.
+    This construction-time query resolves the transport axes with the same
+    rules as DistMuon's planner, without allocating buffers or creating
+    communicators. An empty tuple means storage already contains complete
+    compute matrices.
     """
     resolved = _resolve_storage_to_compute_transition(fqn, param, compute_layout)
     mesh_axis_names = param.device_mesh.mesh_dim_names
