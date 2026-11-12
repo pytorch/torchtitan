@@ -237,6 +237,9 @@ class Qwen38FlashNextModel(Qwen35Model):
                         hashes_TN,
                         num_embeddings=table.num_embeddings,
                         row_mesh=table.row_mesh,
+                        max_ids_per_owner=embedding.max_ids_per_owner(
+                            hashes_TN.shape[0], num_owners=table.row_mesh.size()
+                        ),
                     )
                 with set_current_spmd_mesh(parallelism_context.spmd_dense_mesh()):
                     spmd.assert_type(

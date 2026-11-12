@@ -16,28 +16,41 @@ from torchtitan.models.qwen3_8_flash_next.row_sharded_embedding import (
     row_sharded_embedding,
 )
 
-# Once per microbatch, before model forward:
+# Once per microbatch, before model forward. max_ids_per_owner bounds the
+# distinct IDs this rank sends to any one owner.
 routing = prepare_row_sharded_embedding(
-    input_ids, num_embeddings=num_global_rows, row_mesh=row_mesh
+    input_ids,
+    num_embeddings=num_global_rows,
+    row_mesh=row_mesh,
+    max_ids_per_owner=max_ids_per_owner,
 )
 
 # Forward: local master rows, selected vectors returned in the compute dtype.
 embeddings = row_sharded_embedding(weight_RD, routing, dtype=torch.bfloat16)
 ```
 
-For an eight-row table on two owners, owner 0 stores rows 0-3 and owner 1
-stores rows 4-7. Requests `[6,1,6]` become sorted unique IDs `[1,6]`, which
-are already grouped by owner. Owner 0 reads local row 1; owner 1 reads local
-row 2. Returned vectors expand to `[E6,E1,E6]` in the original request order.
+Every requester sends each owner a fixed slot of `C = max_ids_per_owner`
+distinct IDs, so shapes and all-to-all splits do not depend on the IDs. This
+keeps the lookup capturable in a CUDA graph and keeps counts off the host.
+
+For an eight-row table on two owners with `C=2`, owner 0 stores rows 0-3 and
+owner 1 stores rows 4-7. Requests `[6,1,6]` become sorted distinct IDs `[1,6]`,
+which are already grouped by owner, and fill slots `[[1,-],[6,-]]`. Owner 0
+reads local row 1; owner 1 reads local row 2; unused slots read local row 0
+and are never gathered. Returned vectors expand to `[E6,E1,E6]` in the
+original request order.
 
 | Phase | Tensors and communication |
 | --- | --- |
-| Prepare | Deduplicate IDs, exchange counts and unique IDs. Owners receive local row indices `[M]`. |
-| Forward | Read `[M,D]` vectors from local weights, cast selected vectors, return with all-to-all, expand duplicates. |
-| Backward | Sum duplicate gradients on requesters, reverse the vector exchange, accumulate into owner-local row gradients. |
+| Prepare | Sort and deduplicate IDs, exchange `[P,C]` request slots. Owners receive local row indices `[P*C]`. |
+| Forward | Read `[P*C,D]` vectors from local weights, cast them, return with an equal-split all-to-all, expand duplicates. |
+| Backward | Sum duplicate gradients on requesters, reverse the vector exchange, accumulate into owner-local row gradients. Unused slots carry zero gradient. |
 
 The result has shape `[*input_ids.shape, D]`, where `D` is the local feature
-width. Only requested vectors and their gradients cross the row mesh.
+width. Each exchange moves `P*C` IDs or vectors per rank, so a tight `C` keeps
+traffic close to the requested vectors. Callers derive it from their ID
+layout; for example, Flash-Next's hash heads each own a contiguous row range,
+so an owner receives at most one ID per token from each head meeting its rows.
 
 ## Precision and Optimizer Semantics
 
@@ -59,10 +72,12 @@ parameter from FSDP gathers. The weight is a `Shard(0)` DTensor over the row
 mesh. Its gradient retains that placement, so existing clipping, optimizers and
 native DCP can consume it.
 
-Preparation performs one count-dependent device-to-host synchronization
-before forward. The prepared metadata can be reused during recomputation.
-Every owner participates, including ranks with no input IDs.
-Invalid IDs fail on every owner before request/response exchanges begin.
+Preparation performs no device-to-host synchronization. The prepared
+metadata can be reused during recomputation, and is a registered pytree so
+CUDA graph replay refreshes its tensors. Every owner participates, including
+ranks with no input IDs. Each requester's slots carry a validity flag; IDs
+outside the table or more than `C` distinct IDs for an owner fail an
+asynchronous assertion on every owner after the request exchange.
 
 All owners must replay response collectives together. Nonreentrant PyTorch
 checkpointing must disable early stopping so one rank cannot skip a
@@ -72,7 +87,9 @@ collective that another rank replays.
 
 Four-rank CPU/Gloo tests compare values, accumulated gradients and optimizer
 updates with a dense reference. Cases include duplicate IDs, BF16
-cancellation, ranks with no input IDs, integer dtypes and recomputation.
+cancellation, ranks with no input IDs, integer dtypes, recomputation and a
+bound equal to the request count. Invalid IDs and capacity overflow fail on
+every owner.
 
 ```bash
 pytest tests/unit_tests/cpu/models/qwen3_8_flash_next/test_row_sharded_embedding.py -q
