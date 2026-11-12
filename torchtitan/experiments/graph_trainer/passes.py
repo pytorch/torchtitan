@@ -84,6 +84,9 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
 from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
     apply_paged_stash_pass,
 )
+from torchtitan.experiments.graph_trainer.programmable_fusion import (
+    programmable_fusion_pass,
+)
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     canonicalize_graph_pass,
     eliminate_dead_code_pass,
@@ -369,6 +372,13 @@ def compile_time_passes(
 
     if config.compile.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
+
+    if config.compile.programmable_fusion is not None:
+        passes.append(
+            functools.partial(
+                programmable_fusion_pass, config=config.compile.programmable_fusion
+            )
+        )
 
     if not include_inductor:
         return passes
