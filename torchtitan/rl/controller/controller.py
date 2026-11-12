@@ -413,12 +413,6 @@ class Controller(Configurable):
                 raise ValueError(
                     f"num_generators must be at least 1, got {self.num_generators}"
                 )
-            if self.generator.checkpointer is not None:
-                raise ValueError(
-                    "Generator checkpoint must be disabled in the RL loop "
-                    "(weights are synced from the trainer via TorchStore). "
-                    "Set generator.checkpointer=None."
-                )
             if (
                 self.trainer.dist_moe_runtime is not None
                 and self.precision.param_dtype != "bfloat16"
@@ -810,7 +804,9 @@ class Controller(Configurable):
         with sl.log_trace_span("generator_start_engine_loop"):
             await self.generator_router.start_engine_loop.call_one()
 
-        # Initial push and pull: only the trainer loads weights; generators pull them at start_step.
+        # Initial push and pull: generators pull the trainer's trainable weights at
+        # start_step; they load the frozen ones (e.g. a LoRA base) from
+        # `generator.checkpointer`.
         with sl.log_trace_span("trainer_push_model_state_dict"):
             await self.trainer.all_ranks.push_model_state_dict.call()
         with sl.log_trace_span("generator_pull_model_state_dict"):
