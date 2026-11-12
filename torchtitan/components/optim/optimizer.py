@@ -195,7 +195,7 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
     Note:
         The CTA cap is disabled by default because it is a workload-dependent
         memory/performance tradeoff. Enabling it builds explicit redistribution
-        meshes backed by resource-independent NCCL child communicators and
+        meshes backed by separate, resource-independent NCCL communicators and
         passes them through ``BucketConfig``. Each communicator adds fixed
         memory and may reduce throughput; the cap benefits workloads only when
         the reduction in all-peer connection state outweighs that overhead.
@@ -287,11 +287,7 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
                     transport = (param.device_mesh, axes)
                     break
             transports.append(transport)
-        meshes = build_transport_meshes(
-            transports,
-            max_ctas=max_ctas,
-            storage_meshes={param.device_mesh for _, param in named_parameters},
-        )
+        meshes = build_transport_meshes(transports, max_ctas=max_ctas)
         bucket_configs = tuple(
             bucket if mesh is None else replace(bucket, mesh=mesh)
             for bucket, mesh in zip(config.bucket_configs, meshes, strict=True)

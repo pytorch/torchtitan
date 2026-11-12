@@ -153,7 +153,7 @@ class TestDistMuon(DTensorTestBase):
             mesh_dim_names=("dp_replicate", "dp_shard"),
         )
         (redistribution_mesh,) = build_transport_meshes(
-            [(mesh, ("dp_shard",))], max_ctas=8, storage_meshes={mesh}
+            [(mesh, ("dp_shard",))], max_ctas=8
         )
         redistribution_group = redistribution_mesh.get_group()
         device = torch.device(self.device_type, self.rank)
@@ -810,7 +810,7 @@ class TestDistMuonTensorParallelCudaGraph(DTensorTestBase):
             ComputeLayout(shardings_by_mesh_axis={"dp_shard": Owned(), "tp": Owned()}),
         )
         (transport_mesh,) = build_transport_meshes(
-            [(mesh, transport_axes)], max_ctas=None, storage_meshes={mesh}
+            [(mesh, transport_axes)], max_ctas=None
         )
         optimizer = DistMuon(
             [
@@ -1036,7 +1036,7 @@ class TestDistMuonMatchesUnshardedMuon(DTensorTestBase):
             "b_whole", parameters["b_whole"], owned
         )
         (transport_mesh,) = build_transport_meshes(
-            [(mesh, transport_axes)], max_ctas=None, storage_meshes={mesh}
+            [(mesh, transport_axes)], max_ctas=None
         )
         dense_patterns = ("a_replicated", "b_whole", "c_heads")
 

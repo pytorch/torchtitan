@@ -304,7 +304,6 @@ def _dist_muon_optimizer(
     owned = ComputeLayout(
         shardings_by_mesh_axis={
             MeshAxisName.DP_SHARD.value: Owned(),
-            f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": Owned(),
             MeshAxisName.TP.value: Owned(),
         },
         compute_dtype=torch.bfloat16,
@@ -315,11 +314,7 @@ def _dist_muon_optimizer(
         return ComputeLayout(
             shardings_by_mesh_axis={
                 axis_name: BlockShard(dim=0, block_sizes=num_rows)
-                for axis_name in (
-                    MeshAxisName.DP_SHARD.value,
-                    f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}",
-                    MeshAxisName.TP.value,
-                )
+                for axis_name in (MeshAxisName.DP_SHARD.value, MeshAxisName.TP.value)
             },
             compute_dtype=torch.bfloat16,
         )
@@ -350,7 +345,6 @@ def _dist_muon_optimizer(
         "w13": ComputeLayout(
             shardings_by_mesh_axis={
                 MeshAxisName.DP_SHARD.value: Shard(0),
-                f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": Shard(0),
                 MeshAxisName.TP.value: Shard(0),
             },
             compute_dtype=torch.bfloat16,

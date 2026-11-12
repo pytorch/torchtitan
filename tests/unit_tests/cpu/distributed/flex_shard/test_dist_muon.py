@@ -83,7 +83,7 @@ class TestDistMuonTensorParallelCPU(DTensorTestBase):
         gradient = values.mul(0.37).add(0.2).sin()
         lr = 0.03
         (transport_mesh,) = build_transport_meshes(
-            [(mesh, ("dp_shard", "tp"))], max_ctas=None, storage_meshes={mesh}
+            [(mesh, ("dp_shard", "tp"))], max_ctas=None
         )
         for storage_placements in (
             (Shard(0), Shard(0)),
@@ -208,49 +208,23 @@ class TestDistMuonUnevenPipelineCPU(DTensorTestBase):
         return "cpu"
 
     @with_comms
-    def test_missing_transport_view_fails_collectively(self):
-        """An expert-free stage rejects unavailable views before group creation."""
-        root = init_device_mesh("cpu", (8,), mesh_dim_names=("world",))
-        dense_mesh = root._unflatten(
-            0, (2, 2, 2), mesh_dim_names=("pp", "dp_shard", "tp")
-        )["dp_shard", "tp"]
-        expert_mesh = root._unflatten(
-            0, (2, 2, 2), mesh_dim_names=("pp", "edp_shard", "ep")
-        )["edp_shard", "ep"]
-        mesh = dense_mesh if self.rank < 4 else expert_mesh
-        axes = mesh.mesh_dim_names
-        parameter = torch.nn.Parameter(
-            distribute_tensor(torch.ones(4, 4), mesh, (Shard(0), Shard(1)))
-        )
-        with self.assertRaisesRegex(ValueError, "have no storage mesh on some ranks"):
-            ConfigurableDistMuon.Config(
-                pattern=".*",
-                compute_sharding_by_fqn={
-                    "matrix": ComputeLayout(
-                        {axis: Owned() for axis in axes},
-                        compute_dtype=torch.bfloat16,
-                    )
-                },
-                bucket_configs=[BucketConfig(patterns=("matrix",))],
-            ).build(params=[{"params": [parameter], "param_names": ["matrix"]}])
-        group = dist.new_group(
-            ranks=list(range(self.world_size)), timeout=timedelta(seconds=5)
-        )
-        total = torch.ones(1)
-        dist.all_reduce(total, group=group)
-        self.assertEqual(total.item(), self.world_size)
-        dist.destroy_process_group(group)
-
-    @with_comms
     def test_uneven_pipeline_transport_creation_and_muon_parity(self):
-        """Missing PP buckets do not desynchronize WORLD group creation."""
+        """Stages with different buckets and storage meshes create every group.
+
+        Stage 0 holds only a dense matrix on (dp_shard, tp); stage 1 holds only
+        experts on (edp_shard, ep), so neither has the other's storage mesh.
+        """
         world_mesh = init_device_mesh(
             "cpu", (self.world_size,), mesh_dim_names=("world",)
         )
-        mesh = world_mesh._unflatten(
+        dense_mesh = world_mesh._unflatten(
             0, (2, 2, 2), mesh_dim_names=("pp", "dp_shard", "tp")
         )["dp_shard", "tp"]
+        expert_mesh = world_mesh._unflatten(
+            0, (2, 2, 2), mesh_dim_names=("pp", "edp_shard", "ep")
+        )["edp_shard", "ep"]
         name = "dense" if self.rank < 4 else "experts"
+        mesh = dense_mesh if name == "dense" else expert_mesh
         value = (
             torch.arange(16).reshape(4, 4).float().div_(32)
             if name == "dense"
@@ -269,7 +243,8 @@ class TestDistMuonUnevenPipelineCPU(DTensorTestBase):
                     {"dp_shard": Owned(), "tp": Owned()}, compute_dtype=torch.bfloat16
                 ),
                 "experts": ComputeLayout(
-                    {"dp_shard": Shard(0), "tp": Shard(0)}, compute_dtype=torch.bfloat16
+                    {"edp_shard": Shard(0), "ep": Shard(0)},
+                    compute_dtype=torch.bfloat16,
                 ),
             },
             bucket_configs=[

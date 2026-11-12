@@ -85,7 +85,11 @@ and validates the layout, so a bad layout fails before any group is created:
 
 ```python
 axes = redistribution_mesh_axes("matrix", parameter, compute_layout)  # ("dp_shard", "tp")
-mesh = parameter.device_mesh[axes]._flatten("_".join(axes))  # collective over WORLD
+ranks = parameter.device_mesh[axes].mesh.flatten().tolist()
+group = dist.new_group(ranks)  # collective over WORLD
+mesh = DeviceMesh.from_group(
+    group, "cuda", mesh=torch.tensor(ranks), mesh_dim_names=("_".join(axes),)
+)
 bucket = BucketConfig(patterns=("matrix",), mesh=mesh)
 ```
 
