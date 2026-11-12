@@ -104,14 +104,7 @@ class MultiModalCollator(Collator):
         # resizes and packing buffers hold uint8 images (4x fewer bytes than
         # float32). That needs VisionProcessor to expose resize and normalize as
         # separate steps.
-        results = [processor.patchify(img) for img in all_images]
-        all_patches = [r[0] for r in results]
-        grid_thw_list = [r[1] for r in results]
-
-        packed_patches = torch.cat(all_patches, dim=0)
-        grid_thw = torch.stack(grid_thw_list, dim=0)  # (num_images, 3)
-
-        return packed_patches, grid_thw
+        return processor.patchify_all(all_images)
 
     def collate_text(
         self,

@@ -4,7 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Text-only Muse Spark Open renderer for supervised fine-tuning and generation."""
+"""Muse Spark Open renderer for supervised fine-tuning and generation.
+
+Content parts may be text or images. Each image renders as one ``<|patch|>`` token.
+"""
 
 from __future__ import annotations
 
@@ -35,6 +38,7 @@ from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 START_STR, MESSAGE_STR = "<|start|>", "<|message|>"
 EOM_STR, EOT_STR = "<|eom|>", "<|eot|>"
+IMAGE_STR = "<|patch|>"
 
 START_ID = 200022
 MESSAGE_ID = 200023
@@ -165,8 +169,12 @@ def _render_content(content: Any) -> str:
     rendered: list[str] = []
     for part in content:
         kind = part.get("type", "")
+        if kind == "image":
+            # One image token per image; the processor expands it, as in
+            # transformers' MuseSparkProcessor.
+            rendered.append(IMAGE_STR)
+            continue
         if kind in {
-            "image",
             "input_image",
             "image_url",
             "video",
@@ -176,7 +184,9 @@ def _render_content(content: Any) -> str:
             "input_audio",
             "audio_url",
         }:
-            raise ValueError("Muse Spark SFT rendering supports text-only content.")
+            raise ValueError(
+                f"Muse Spark rendering does not support {kind!r} content parts."
+            )
         if kind in {"text", "input_text", "output_text"}:
             rendered.append(_escape(part.get("text", "")))
     return "".join(rendered)

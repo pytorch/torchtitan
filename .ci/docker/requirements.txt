@@ -10,10 +10,11 @@ safetensors
 einops
 pillow
 spmd_types == 0.3.1
-# TODO: pin a release once attn-gym publishes one with
-# https://github.com/meta-pytorch/attention-gym/pull/704 (batch-invariant
-# recurrent scan), which GDN batch-invariant mode needs. PyPI rejects direct
-# URL dependencies, so torchtitan can't publish a release until then.
-attn-gym[linear,cudnn] @ git+https://github.com/meta-pytorch/attention-gym.git@26beb363c6d1328851bfc5c9c8691fa2066bd1fa
-torch_remat == 0.2.2
+# TODO: pin the PyPI release once attn-gym publishes v0.0.19 there (the git
+# pin is its tag). PyPI rejects direct URL dependencies, so torchtitan can't
+# publish a release until then.
+attn-gym[linear,cudnn] @ git+https://github.com/meta-pytorch/attention-gym.git@0d0197fb36d95695dccef03436bb0649f985b32d
+# TODO: pin a release once torch_remat publishes one with SavedTensorInfo.region
+# (meta-pytorch/remat 6c05e8d), which per-region activation offload needs.
+torch_remat @ git+https://github.com/meta-pytorch/remat.git@6c05e8d8d6895a60dcc02674af0774b28155b5af
 torch_checkpointing == 0.1.1
