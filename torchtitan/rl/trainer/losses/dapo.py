@@ -12,7 +12,8 @@ from dataclasses import dataclass
 
 import torch
 
-from torchtitan.components.loss import BaseLoss, compute_logprobs
+from torchtitan.components.loss import compute_logprobs, Loss
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
 # Clamp |log(pi_theta/pi_old)| before exp() so a large generator/trainer
@@ -37,7 +38,7 @@ def _normalize(
     return value * global_loss_token_count.clamp_min(1).reciprocal()
 
 
-class DAPOLoss(BaseLoss):
+class DAPOLoss(Loss[torch.Tensor]):
     """Per-token clipped surrogate loss with DAPO-style "clip-higher".
 
     The same PPO clip as GRPO, but the importance ratio's lower and upper bounds are
@@ -53,7 +54,7 @@ class DAPOLoss(BaseLoss):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseLoss.Config):
+    class Config(Loss.Config):
         ratio_clip_low: float = 0.2
         """Lower clip: the importance ratio is clamped to ``>= 1 - ratio_clip_low``."""
 
@@ -70,6 +71,7 @@ class DAPOLoss(BaseLoss):
         self.ratio_clip_high = config.ratio_clip_high
         self.global_vocab_size = config.global_vocab_size
 
+    @local_compile("loss", batch_invariant=False)
     def __call__(
         self,
         logits: torch.Tensor,
@@ -84,7 +86,7 @@ class DAPOLoss(BaseLoss):
         """Compute the per-token clip-higher surrogate loss.
 
         Args:
-            logits: [T, V] current-policy output.
+            logits: [T, V] current-policy logits.
             labels: [T] pre-shifted target token ids.
             generator_logprobs: [T] logprobs from the sampling policy.
             temperature: [T] temperature each token was sampled at.
@@ -97,15 +99,14 @@ class DAPOLoss(BaseLoss):
             (loss, metrics) where loss is a scalar tensor and metrics is a dict of
             scalar tensors pre-normalized for SUM reduction across DP ranks.
         """
-        # Score tokens under the distribution vLLM sampled from. Dividing by a per-token fp32
-        # tensor matches vLLM's op, so batch-invariant runs stay bitwise equal to the generator.
-        logits = logits / temperature.unsqueeze(-1)
+        # Score tokens under the distribution vLLM sampled from.
         trainer_logprobs, token_entropy = compute_logprobs(
             logits,
             labels,
             vocab_parallel_group=spmd_mesh_group("tp"),
             return_entropy=True,
             global_vocab_size=self.global_vocab_size,
+            temperature=temperature,
         )
         # A non-finite generator logprob (notably under CUDA graph) has no valid
         # old-policy reference, so DROP that token from the loss + denominator (cleaner

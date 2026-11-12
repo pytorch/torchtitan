@@ -23,7 +23,7 @@ from torchtitan.components.optim import (
     Optim,
     OptimizersContainer,
 )
-from torchtitan.config import OverrideConfig, TrainingConfig
+from torchtitan.config import OverrideConfig, PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
@@ -35,7 +35,12 @@ from torchtitan.distributed.activation_remat import (
     FullActivationRematConfig,
 )
 from torchtitan.models.common.config_utils import decoder_vocab_size
-from torchtitan.models.muse_spark import build_model_config
+from torchtitan.models.muse_spark import (
+    build_model_config,
+    MUSE_SPARK_DEBUG_SPECIAL_TOKENS,
+    MUSE_SPARK_SPECIAL_TOKENS,
+    MUSE_SPARK_VISION_PROCESSOR_KWARGS,
+)
 from torchtitan.models.muse_spark.flavors import _MUSE_SPARK_816B_VOCAB_SIZE
 from torchtitan.models.muse_spark.model import MuseSparkModel
 from torchtitan.models.muse_spark.tokenizer import MuseSparkTokenizer
@@ -45,14 +50,12 @@ from torchtitan.trainer import Trainer
 from torchtitan_recipes.models.muse_spark import (
     _muse_spark_context_parallel_transform,
     _MUSE_SPARK_FUSED_SWIGLU_OVERRIDE,
-    _MUSE_SPARK_HELION_ROPE_OVERRIDE,
     _MUSE_SPARK_HF_ASSETS_PATH,
-    _muse_spark_mm_dataloader,
     _ultradata_lora_sft_optim,
     _ultradata_lora_sft_transform,
     _ultradata_sft_dataloader,
     _with_dist_moe,
-    MUSE_SPARK_SPECIAL_TOKENS,
+    muse_spark_mm_dataloader,
 )
 
 
@@ -61,20 +64,6 @@ _MUSE_SPARK_MXFP8_LINEAR_FQNS = [
     "feed_forward.pooler",
     "feed_forward.unpooler",
 ]
-
-
-# TODO: Add the Muse Spark Open tokens to tests/assets/tokenizer and remove
-# this debug-only mapping.
-MUSE_SPARK_DEBUG_SPECIAL_TOKENS = {
-    "image_token": "<|image_pad|>",
-    "video_token": "<|video_pad|>",
-    "vision_start_token": "<|vision_start|>",
-    "vision_end_token": "<|vision_end|>",
-    "audio_token": "<|media_pad|>",
-    "audio_start_token": "<|media_begin|>",
-    "audio_end_token": "<|media_end|>",
-    "pad_token": "<|endoftext|>",
-}
 
 
 def _muse_spark_mxfp8_linear_converter_config() -> MXFP8LinearConverter.Config:
@@ -100,7 +89,6 @@ def muse_spark_debugmodel(
         "debugmodel",
         parallelism=parallelism,
         seq_len=seq_len,
-        moe_comm_backend="standard",
         attn_backend="flex",
     )
     config = Trainer.Config(
@@ -128,23 +116,19 @@ def muse_spark_debugmodel(
             ),
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
+        precision=PrecisionConfig(
+            dtype="float32", param_dtype="bfloat16", reduce_dtype="float32"
+        ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
-            dtype="float32",
-            mixed_precision_param="bfloat16",
-            mixed_precision_reduce="float32",
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=None,
         activation_remat=DefaultActivationRematConfig(),
         override=OverrideConfig(
-            imports=[
-                _MUSE_SPARK_FUSED_SWIGLU_OVERRIDE,
-                _MUSE_SPARK_HELION_ROPE_OVERRIDE,
-            ],
+            imports=[_MUSE_SPARK_FUSED_SWIGLU_OVERRIDE],
         ),
     )
     return config
@@ -181,7 +165,6 @@ def muse_spark_debugmodel_dist_moe_mxfp8(
         "debugmodel",
         parallelism=config.parallelism,
         seq_len=seq_len,
-        moe_comm_backend="standard",
         attn_backend="flex",
         converters=[_muse_spark_mxfp8_linear_converter_config()],
     )
@@ -204,6 +187,7 @@ def muse_spark_debugmodel_mm(
         MM_DATASETS,
         MMSamplePackingConfig,
     )
+    from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 
     from torchtitan_recipes.tests.datasets.synthetic_multimodal import (
         _audio_token_count,
@@ -216,15 +200,17 @@ def muse_spark_debugmodel_mm(
         "debugmodel_mm",
         seq_len=seq_len,
         parallelism=config.parallelism,
-        moe_comm_backend="standard",
         attn_backend="flex",
     )
     config.model = model_config
     config.tokenizer = MuseSparkTokenizer.Config(**MUSE_SPARK_DEBUG_SPECIAL_TOKENS)
-    image_dataset = _muse_spark_mm_dataloader(
+    config.vision_processor = VisionProcessor.Config(
+        **MUSE_SPARK_VISION_PROCESSOR_KWARGS
+    )
+    image_dataset = muse_spark_mm_dataloader(
         model_config, MM_DATASETS["cc12m-test"]
     ).dataset
-    video_loader = _muse_spark_mm_dataloader(
+    video_loader = muse_spark_mm_dataloader(
         model_config, SYNTHETIC_MM_DATASETS["synthetic-video-text"]
     )
     audio_encoder = model_config.audio_encoder
@@ -238,7 +224,7 @@ def muse_spark_debugmodel_mm(
             expected_num_channels=audio_encoder.input_channels,
             target_sample_rate=24_000,
             max_audio_samples=audio_encoder.patch_size
-            * config.training.max_context_length
+            * config.model.max_context_length
             // 2,
             audio_token_count_fn=partial(
                 _audio_token_count, samples_per_audio_token=audio_encoder.patch_size
@@ -290,12 +276,11 @@ def muse_spark_debugmodel_ultradata_lora_sft() -> Trainer.Config:
     config.training = TrainingConfig(
         num_tokens_per_microbatch_per_dp_rank=32_768,
         num_tokens_per_train_step=65_536,
-        max_context_length=32_768,
         steps=10,
-        dtype="bfloat16",
-        mixed_precision_param="bfloat16",
-        mixed_precision_reduce="float32",
-        disable_cuda_graphs=True,
+        disable_accelerator_graphs=True,
+    )
+    config.precision = PrecisionConfig(
+        dtype="bfloat16", param_dtype="bfloat16", reduce_dtype="float32"
     )
     config.parallelism = ParallelismConfig(
         data_parallel_replicate_degree=1,
@@ -309,6 +294,6 @@ def muse_spark_debugmodel_ultradata_lora_sft() -> Trainer.Config:
     )
     config.comm.train_timeout_seconds = 1800
     config.activation_remat = FullActivationRematConfig()
-    config.model.local_compile_regions = ["loss"]
+    config.model.local_compile.regions = ["loss"]
     config.debug.seed = 42
     return apply_transforms(config, [_ultradata_lora_sft_transform()])

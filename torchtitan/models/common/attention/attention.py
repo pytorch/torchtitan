@@ -13,16 +13,14 @@
 #   K = query/key head dimension, V = value head dimension.
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING, TypeAlias
+from dataclasses import dataclass, field, replace
+from typing import Any, ClassVar, Generic, Literal, TYPE_CHECKING, TypeAlias
 
 import spmd_types as spmd
 import torch
 import torch_remat as remat
-from torch.nn.attention import (
-    activate_flash_attention_impl,
-    current_flash_attention_impl,
-)
+from torch.export import register_dataclass
+from torch.nn.attention import current_flash_attention_impl, sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _DEFAULT_SPARSE_BLOCK_SIZE,
     _mask_mod_signature,
@@ -37,26 +35,31 @@ from torch.nn.attention.varlen import (
     AuxRequest as VarlenAuxRequest,
     varlen_attn as _varlen_attn,
 )
+from typing_extensions import TypeVar
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.distributed.local_compile import compile
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
-from torchtitan.tools.utils import round_up
+from torchtitan.ops.varlen_attn import deterministic_varlen_attn
+from torchtitan.tools.utils import activate_cuda_flash_attention_impl, round_up
 
 if TYPE_CHECKING:
     from . import AttentionMetadata
 
 __all__ = [
     "Attention",
+    "DeterministicVarlenInnerAttention",
     "FlexAttentionMetadata",
     "FlexInnerAttention",
     "GQAttention",
     "InnerAttention",
     "QKVLinear",
     "SlidingWindowFlexInnerAttention",
+    "SlidingWindowVarlenInnerAttention",
     "VarlenInnerAttention",
     "VarlenAttentionMetadata",
     "create_attention_mask",
@@ -112,6 +115,10 @@ class Attention(Module):
 
         def __post_init__(self):
             assert self.n_heads > 0, "n_heads must be > 0"
+
+        def flops_per_token(self, seq_len: int) -> int:
+            """Training attention contractions, excluding parameter-based work."""
+            raise NotImplementedError(type(self).__qualname__)
 
 
 class QKVLinear(Module):
@@ -221,6 +228,30 @@ class GQAttention(Attention):
                     f"n_kv_heads ({n_kv_heads})"
                 )
 
+        def flops_per_token(self, seq_len: int) -> int:
+            from torchtitan.models.common.flops import (
+                quadratic_attention_flops_per_token,
+            )
+
+            head_dim = self.head_dim or self.dim // self.n_heads
+            return quadratic_attention_flops_per_token(
+                num_heads=self.n_heads,
+                qk_head_dim=head_dim,
+                v_head_dim=head_dim,
+                seq_len=seq_len,
+                sliding_window_size=(
+                    self.inner_attention.sliding_window_size
+                    if isinstance(
+                        self.inner_attention,
+                        (
+                            SlidingWindowFlexInnerAttention.Config,
+                            SlidingWindowVarlenInnerAttention.Config,
+                        ),
+                    )
+                    else None
+                ),
+            )
+
     def __init__(self, config: Config):
         super().__init__()
         self.n_heads = config.n_heads
@@ -290,20 +321,31 @@ class GQAttention(Attention):
         return self.wo(out_TD)
 
 
-class VarlenAttentionMetadata(NamedTuple):
-    """
-    Cumulative sequence positions for queries and keys/values.
-
-    """
+@dataclass(frozen=True, slots=True, kw_only=True)
+class VarlenAttentionMetadata:
+    """Packed document offsets and attention window limits."""
 
     cu_seq_q: torch.Tensor
     cu_seq_k: torch.Tensor
     max_q: int
     max_k: int
+    window_size: tuple[int, int] = (-1, 0)
+    """``window_size=(left, right)`` controls the attention window relative to
+    each query position. ``left`` is how many tokens before the query to attend
+    to, and ``right`` is how many tokens after. A value of -1 means unlimited.
+
+    - ``(-1, 0)``: Causal attention. Each token attends to all previous tokens
+      and itself, but no future tokens. Equivalent to ``is_causal=True``.
+    - ``(-1, -1)``: Full bidirectional attention (no masking). Equivalent to
+      ``is_causal=False``.
+    - ``(W, 0)``: Sliding-window causal attention. Attend to at most W previous
+      tokens and the current token.
+    """
 
     _OFFSETS_SPMD_TYPE = spmd.SpmdType(
         {
             MeshAxisName.DP: spmd.V,
+            MeshAxisName.CP: spmd.R,
             MeshAxisName.TP: spmd.R,
         },
         partition_spec=spmd.PartitionSpec(MeshAxisName.DP),
@@ -316,24 +358,48 @@ class VarlenAttentionMetadata(NamedTuple):
             spmd.assert_type(self.cu_seq_k, self._OFFSETS_SPMD_TYPE)
 
 
-class VarlenInnerAttention(InnerAttention):
+def _varlen_attn_dtype(value_dtype: torch.dtype) -> torch.dtype:
+    """Return the dtype varlen attention runs in for a value of ``value_dtype``.
+
+    FP16/BF16 values keep their dtype; full-precision values run in BF16.
+    """
+    if value_dtype in (torch.float16, torch.bfloat16):
+        return value_dtype
+    return torch.bfloat16
+
+
+# Register as a pytree so CUDA Graph input updates can copy document offsets.
+register_dataclass(VarlenAttentionMetadata)
+
+_VarlenMetadataT = TypeVar(
+    "_VarlenMetadataT", bound=VarlenAttentionMetadata, default=VarlenAttentionMetadata
+)
+
+# SDPBackend member names that varlen_attn selects between.
+_VarlenSDPBackendName: TypeAlias = Literal["CUDNN_ATTENTION", "FLASH_ATTENTION"]
+
+
+def _default_varlen_sdpa_backends() -> list[_VarlenSDPBackendName]:
+    return ["CUDNN_ATTENTION", "FLASH_ATTENTION"]
+
+
+class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
     @dataclass(kw_only=True, slots=True)
     class Config(InnerAttention.Config):
-        window_size: tuple[int, int] = (-1, 0)
-        """ window_size=(left, right) controls the attention window relative to each
-            query position. 'left' is how many tokens before the query to attend to,
-            and 'right' is how many tokens after. A value of -1 means unlimited.
-
-              - (-1, 0): Causal attention - each token attends to all previous tokens
-                         and itself, but no future tokens. Equivalent to is_causal=True.
-              - (-1, -1): Full bidirectional attention (no masking). Equivalent to
-                          is_causal=False.
-              - (W, 0): Sliding window causal - attend to at most W previous tokens.
+        sdpa_backends: list[_VarlenSDPBackendName] = field(
+            default_factory=_default_varlen_sdpa_backends
+        )
+        """ Backend priority order for varlen_attn, as ``SDPBackend`` member
+            names, applied via ``sdpa_kernel(..., set_priority=True)``.
+            Names keep the config plain data: ``SDPBackend`` is a pybind11
+            enum, which ``pprint`` (``--print-config``) cannot format.
+            Deterministic mode skips cuDNN, whose backward is not
+            deterministic.
         """
 
         @property
         def is_full_attention(self) -> bool:
-            return self.window_size[0] == -1 and self.window_size[1] in (-1, 0)
+            return True
 
         def build_attention_metadata(
             self,
@@ -353,18 +419,54 @@ class VarlenInnerAttention(InnerAttention):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        self.window_size = config.window_size
+        self.sdpa_backends = [
+            getattr(SDPBackend, name) for name in config.sdpa_backends
+        ]
 
-        from torchtitan.tools.utils import get_cuda_flash_attention_impl
-
-        flash_attention_impl = get_cuda_flash_attention_impl()
-        if (
-            flash_attention_impl is not None
-            and current_flash_attention_impl() != flash_attention_impl
-        ):
-            activate_flash_attention_impl(flash_attention_impl)
+        activate_cuda_flash_attention_impl()
 
     def forward(
+        self,
+        q_THK: torch.Tensor,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
+        *,
+        attention_metadata: _VarlenMetadataT,
+        scale: float | None = None,
+        out_transform: (
+            Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None
+        ) = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Run varlen attention with this module's metadata type.
+
+        Args:
+            q_THK: Q with shape ``[T, H, K]``.
+            k_THK: K with shape ``[T, H, K]``.
+            v_THV: V with shape ``[T, H, V]``.
+            attention_metadata: Document offsets, length bounds, and window.
+            scale: Softmax scale. ``None`` uses the kernel default.
+            out_transform: Optional function applied to the output and LSE.
+            **kwargs: Additional attention arguments, including ``enable_gqa``.
+
+        Returns:
+            Attention output, optionally processed by ``out_transform``.
+        """
+        assert isinstance(attention_metadata, VarlenAttentionMetadata), (
+            "Varlen attention requires VarlenAttentionMetadata, "
+            f"but got {type(attention_metadata).__name__}."
+        )
+        return self._forward_varlen(
+            q_THK,
+            k_THK,
+            v_THV,
+            attention_metadata=attention_metadata,
+            scale=scale,
+            out_transform=out_transform,
+            **kwargs,
+        )
+
+    def _forward_varlen(
         self,
         q_THK: torch.Tensor,
         k_THK: torch.Tensor,
@@ -377,10 +479,7 @@ class VarlenInnerAttention(InnerAttention):
         ) = None,
         **kwargs,
     ) -> torch.Tensor:
-        assert isinstance(
-            attention_metadata, VarlenAttentionMetadata
-        ), f"attention_metadata must be instance of VarlenAttentionMetadata but got {type(attention_metadata)}"
-
+        """Run the varlen kernel with query and K/V document offsets."""
         cu_seq_q = attention_metadata.cu_seq_q
         cu_seq_k = attention_metadata.cu_seq_k
         max_q = attention_metadata.max_q
@@ -407,24 +506,37 @@ class VarlenInnerAttention(InnerAttention):
 
         varlen_attn_fn = varlen_attn if out_transform is None else varlen_attn_with_lse
 
-        # Align Q/K with V while preserving its FP16/BF16 projection dtype.
-        attn_dtype = v_THV.dtype
-        if attn_dtype not in (torch.float16, torch.bfloat16):
-            # Preserve the legacy BF16 conversion for full-precision callers.
-            attn_dtype = torch.bfloat16
+        attn_dtype = _varlen_attn_dtype(v_THV.dtype)
 
-        result = varlen_attn_fn(
-            q_THK.to(attn_dtype),
-            k_THK.to(attn_dtype),
-            v_THV.to(attn_dtype),
-            cu_seq_q,
-            cu_seq_k,
-            max_q,
-            max_k,
-            scale=scale,
-            window_size=self.window_size,
-            **varlen_kwargs,
-        )
+        sdpa_backends = self.sdpa_backends
+        if torch.are_deterministic_algorithms_enabled():
+            # TODO: Remove once the cuDNN varlen backward honors
+            # use_deterministic_algorithms (upstream issue not filed yet). It
+            # neither raises nor runs deterministically, so repeated runs differ.
+            sdpa_backends = [
+                backend
+                for backend in sdpa_backends
+                if backend != SDPBackend.CUDNN_ATTENTION
+            ]
+            if not sdpa_backends:
+                raise ValueError(
+                    "Deterministic mode needs a varlen backend other than cuDNN. "
+                    'Add "FLASH_ATTENTION" to sdpa_backends.'
+                )
+
+        with sdpa_kernel(sdpa_backends, set_priority=True):
+            result = varlen_attn_fn(
+                q_THK.to(attn_dtype),
+                k_THK.to(attn_dtype),
+                v_THV.to(attn_dtype),
+                cu_seq_q,
+                cu_seq_k,
+                max_q,
+                max_k,
+                scale=scale,
+                window_size=attention_metadata.window_size,
+                **varlen_kwargs,
+            )
 
         # varlen_attn returns the packed output (T, H, V), plus the LSE when an
         # out_transform epilogue was requested.
@@ -438,7 +550,117 @@ class VarlenInnerAttention(InnerAttention):
         return out_transform(out_THV, lse_TH)
 
 
+class SlidingWindowVarlenInnerAttention(VarlenInnerAttention[_VarlenMetadataT]):
+    """Varlen attention with a causal sliding window."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(VarlenInnerAttention.Config):
+        sliding_window_size: int
+        """Maximum visible tokens, including the current token.
+
+        This matches SlidingWindowFlexInnerAttention. A value of 4 becomes
+        ``(3, 0)`` in VarlenAttentionMetadata.
+        """
+
+        def __post_init__(self) -> None:
+            if (
+                not isinstance(self.sliding_window_size, int)
+                or self.sliding_window_size < 1
+            ):
+                raise ValueError("sliding_window_size must be an integer >= 1.")
+
+        @property
+        def is_full_attention(self) -> bool:
+            return False
+
+        def build_attention_metadata(
+            self,
+            positions: torch.Tensor,
+            *,
+            padding_mask: torch.Tensor | None = None,
+            max_num_documents: int | None = None,
+            max_context_length: int | None = None,
+        ) -> VarlenAttentionMetadata:
+            """Build packed document metadata with a causal sliding window."""
+            metadata = VarlenInnerAttention.Config.build_attention_metadata(
+                self,
+                positions,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
+            return replace(metadata, window_size=(self.sliding_window_size - 1, 0))
+
+
+class DeterministicVarlenInnerAttention(InnerAttention):
+    """Flash varlen attention whose backward is deterministic in any mode.
+
+    Runs ``torchtitan::deterministic_varlen_attn``, so it always uses Flash and
+    has no ``sdpa_backends``. It has no metadata builder: the caller builds the
+    ``VarlenAttentionMetadata``.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(InnerAttention.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        activate_cuda_flash_attention_impl()
+
+    def forward(
+        self,
+        q_THK: torch.Tensor,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
+        *,
+        attention_metadata: VarlenAttentionMetadata,
+        scale: float | None = None,
+    ) -> torch.Tensor:
+        attn_dtype = _varlen_attn_dtype(v_THV.dtype)
+        query_THK = q_THK.to(attn_dtype)
+        key_THK = k_THK.to(attn_dtype)
+        value_THV = v_THV.to(attn_dtype)
+        # ROCm's _flash_attention_forward rejects num_splits entirely.
+        num_splits = (
+            1 if is_in_batch_invariant_mode() and torch.version.hip is None else None
+        )
+        with spmd.no_typecheck():
+            out_THV = deterministic_varlen_attn(
+                query_THK,
+                key_THK,
+                value_THV,
+                attention_metadata.cu_seq_q,
+                attention_metadata.cu_seq_k,
+                attention_metadata.max_q,
+                attention_metadata.max_k,
+                scale,
+                list(attention_metadata.window_size),
+                num_splits,
+            )[0]
+        if spmd.is_type_checking():
+            # The output keeps the query's token and head layout.
+            spmd.assert_type(
+                out_THV,
+                spmd.get_local_type(query_THK),
+                spmd.get_partition_spec(query_THK),
+            )
+        return out_THV.to(q_THK.dtype)
+
+
 FlexAttentionMetadata: TypeAlias = BlockMask
+
+
+def _needs_dq_write_order(kernel_options: dict) -> bool:
+    """Whether the BlockMask needs dQ write-order metadata.
+
+    Only the deterministic FLASH backward reads it, and it requires it. Call this
+    when the mask is built: set_determinism runs after the config is built.
+    """
+    return (
+        kernel_options.get("BACKEND") == "FLASH"
+        and torch.are_deterministic_algorithms_enabled()
+    )
 
 
 class FlexInnerAttention(InnerAttention):
@@ -490,6 +712,7 @@ class FlexInnerAttention(InnerAttention):
                 # on the particular batch
                 # for batch invariance, we disable this optimization
                 separate_full_blocks=not is_in_batch_invariant_mode(),
+                compute_dq_write_order=_needs_dq_write_order(self.kernel_options),
             )
 
     inductor_configs: ClassVar[dict[str, bool]] = {
@@ -508,10 +731,13 @@ class FlexInnerAttention(InnerAttention):
         "triton.cudagraphs": False,
     }
 
-    # pyrefly: ignore[no-matching-overload]
-    _compiled_flex_attn: ClassVar[Callable] = torch.compile(
+    # fullgraph=True: a graph break or a 17th graph raises, instead of silently running flex eagerly.
+    # recompile_limit=16: one compile serves every layer; Muse Spark needs 10 graphs (default 8).
+    _compiled_flex_attn: ClassVar[Callable] = compile(
         flex_attention,
+        fullgraph=True,
         options=inductor_configs,
+        recompile_limit=16,
     )
 
     def __init__(self, config: Config) -> None:
@@ -633,7 +859,8 @@ class SlidingWindowFlexInnerAttention(FlexInnerAttention):
 
     @dataclass(kw_only=True, slots=True)
     class Config(FlexInnerAttention.Config):
-        window_size: int
+        sliding_window_size: int
+        """Maximum visible tokens, including the current token."""
 
         @property
         def is_full_attention(self) -> bool:
@@ -654,7 +881,7 @@ class SlidingWindowFlexInnerAttention(FlexInnerAttention):
                 and_masks(
                     get_causal_mask_mod(),
                     get_efficient_causal_mask_mod_for_packed_document(positions),
-                    get_sliding_window_mask_mod(self.window_size),
+                    get_sliding_window_mask_mod(self.sliding_window_size),
                 ),
                 1,
                 None,
@@ -668,6 +895,7 @@ class SlidingWindowFlexInnerAttention(FlexInnerAttention):
                 # on the particular batch
                 # for batch invariance, we disable this optimization
                 separate_full_blocks=not is_in_batch_invariant_mode(),
+                compute_dq_write_order=_needs_dq_write_order(self.kernel_options),
             )
 
 
@@ -847,7 +1075,7 @@ def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:
     return sliding_window_mod
 
 
-_compiled_create_block_mask = torch.compile(create_block_mask)
+_compiled_create_block_mask = compile(create_block_mask)
 
 
 def create_attention_mask(*args, **kwargs):

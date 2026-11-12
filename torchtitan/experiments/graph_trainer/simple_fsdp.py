@@ -470,7 +470,6 @@ class ReplicateComputation(Module):
             return self._forward(x)
 
     def _forward(self, x: DTensor) -> torch.Tensor:
-        global _active_parametrization
         # This should never be set to true during forward, only outside for model
         # inspection / debugging / initialization
         # model initialization can be done now through
@@ -533,7 +532,10 @@ def data_parallel(
         raise ValueError(f"Unsupported mode {mode}")
 
     if param_shard_placements is None:
-        param_shard_placements = linear_param_shard_placements(model)
+        # An earlier data_parallel call may have parametrized submodules such
+        # as EP experts. Inspect raw parameters without running ReplicateComputation.
+        with disable_active_parametrization():
+            param_shard_placements = linear_param_shard_placements(model)
 
     def get_param_sharding(param: nn.Parameter) -> tuple[Placement, ...]:
         if mode == "replicate":

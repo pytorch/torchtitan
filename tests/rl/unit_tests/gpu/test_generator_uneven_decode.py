@@ -24,9 +24,9 @@ from vllm import SamplingParams
 from vllm.sampling_params import RequestOutputKind
 
 from tests.rl.unit_tests.gpu.test_bitwise_parity import (
-    _make_prompt_tokens,
     _run_engine,
     build_inference_engine,
+    make_prompt_tokens,
 )
 
 # Runs under a four-GPU torchrun launch.
@@ -60,12 +60,14 @@ def test_vllm_uneven_decode_tp_padding():
     register_to_vllm(
         config.generator.model,
         parallelism=config.generator.parallelism,
+        precision=config.precision,
         checkpointer_config=None,
+        model_state_dict_load_mode="cpu_prefetch",
     )
 
     engine = build_inference_engine(config)
     try:
-        prompt_ids = _make_prompt_tokens(3, 100, engine.get_tokenizer())
+        prompt_ids = make_prompt_tokens(3, 100, engine.get_tokenizer())
         outputs = _run_engine(
             engine,
             "uneven_decode",

@@ -179,9 +179,6 @@ def denoise(
     latents = generate_noise_latent(bsz, img_height, img_width, device, dtype)
     _, latent_channels, latent_height, latent_width = latents.shape
 
-    # create denoising schedule
-    timesteps = get_schedule(denoising_steps, latent_height * latent_width, shift=True)
-
     if enable_classifier_free_guidance:
         if empty_t5_encodings is None or empty_clip_encodings is None:
             raise ValueError(
@@ -203,6 +200,9 @@ def denoise(
 
     # convert img-like latents into sequences of patches
     latents = pack_latents(latents)
+
+    # create denoising schedule; the shift depends on the packed sequence length
+    timesteps = get_schedule(denoising_steps, latents.shape[1], shift=True)
 
     # this is ignored for schnell
     for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):

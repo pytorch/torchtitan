@@ -36,17 +36,16 @@ from vllm.config import AttentionConfig
 from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
 from vllm.logger import init_logger
 from vllm.sampling_params import RequestOutputKind
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import apply_overrides, ConfigLoader
 from torchtitan.distributed.batch_invariant import set_batch_invariance
-from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.rl.generator.vllm.engine import add_extra_vllm_engine_args, VLLMEngine
 from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
+    vllm_attention_backend,
 )
 from torchtitan.tools import filesystem
 from torchtitan.tools.utils import has_cuda_capability
@@ -121,22 +120,15 @@ def generate() -> None:
     register_to_vllm(
         model_config,
         parallelism=gen_config.parallelism,
+        precision=config.precision,
         checkpointer_config=CheckpointManager.Config(
             initial_load_in_hf=True,
             initial_load_path=model_path,
         ),
         dist_moe_runtime=gen_config.dist_moe_runtime,
+        model_state_dict_load_mode="cpu_prefetch",
     )
     logger.info("Registered TorchTitan model with vLLM")
-
-    attention = model_config.first_full_attention
-    if attention is None:
-        raise ValueError("No full attention layer found in the model spec.")
-    inner_attention_config = attention.inner_attention
-    if not isinstance(
-        inner_attention_config, (VarlenInnerAttention.Config, FlexInnerAttention.Config)
-    ):
-        raise ValueError("Only varlen and flex attention backends are supported.")
 
     os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
     set_batch_invariance(gen_config.debug.batch_invariant)
@@ -155,7 +147,7 @@ def generate() -> None:
         model=model_path,
         trust_remote_code=True,
         config_format=TORCHTITAN_CONFIG_FORMAT,
-        dtype=gen_config.model_dtype,
+        dtype=config.precision.param_dtype,
         # Parallelism configuration
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
         data_parallel_size=gen_config.parallelism.data_parallel_degree,
@@ -168,11 +160,7 @@ def generate() -> None:
         gpu_memory_utilization=gen_config.gpu_memory_limit,
         enforce_eager=engine_config.cuda_graph.mode == "NONE",
         attention_config=AttentionConfig(
-            backend=(
-                AttentionBackendEnum.FLEX_ATTENTION
-                if isinstance(inner_attention_config, FlexInnerAttention.Config)
-                else AttentionBackendEnum.CUSTOM
-            ),
+            backend=vllm_attention_backend(model_config),
         ),
         disable_log_stats=False,
     )
@@ -180,11 +168,13 @@ def generate() -> None:
     engine_kwargs["max_num_seqs"] = max_num_seqs
     if gen_config.max_num_batched_tokens is not None:
         engine_kwargs["max_num_batched_tokens"] = gen_config.max_num_batched_tokens
+    engine_kwargs["watermark"] = engine_config.watermark
     if not has_cuda_capability(9, 0):
         engine_kwargs["block_size"] = 256
     expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
     vllm_compilation_config = engine_config.cuda_graph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
+        max_model_len=model_config.max_context_length,
         max_num_batched_tokens=gen_config.max_num_batched_tokens,
         expert_sequence_parallel_size=expert_sequence_parallel_size,
         enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,

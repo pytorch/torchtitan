@@ -4,13 +4,25 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""CPU tests for fixed-bin LPT packing and its FFD fallback."""
+"""CPU tests for batcher packing (fixed-bin LPT, FFD fallback) and image microbatches."""
 
+import dataclasses
 import random
+from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
-from torchtitan.rl.rollout.types import RolloutTurnID
+from PIL import Image
+from renderers import PlaceholderRange
+from torchtitan.components.data.multimodal.mrope import get_mrope_positions
+from torchtitan.components.data.multimodal.vision_processor import (
+    PixelBudgetResize,
+    VisionProcessor,
+)
+from torchtitan.components.renderer import hash_image_file
+from torchtitan.models.qwen3_5 import QWEN3_5_VISION_PROCESSOR_KWARGS
+from torchtitan.rl.rollout.types import PromptImage, RolloutTurnID
 
 from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.training_sample_builder import TrainingSample
@@ -232,6 +244,247 @@ def test_microbatch_carries_the_sampling_temperature_into_the_loss() -> None:
     )
     microbatch = batcher._pack_training_samples(_make_samples([3]))
 
-    temperature = microbatch.loss_kwargs()["temperature"]
+    temperature = microbatch.as_input_dict()["loss_kwargs"]["temperature"]
     assert temperature.dtype == torch.float32
     assert temperature.tolist() == [0.5] * 8
+
+
+def test_microbatch_moves_loss_kwargs_with_the_model_inputs() -> None:
+    batcher = Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=8,
+        max_context_length=8,
+        num_prompts_per_train_step=1,
+        dp_degree=1,
+        pad_id=0,
+        temperature=1.0,
+    )
+    microbatch = batcher._pack_training_samples(_make_samples([3]))
+
+    input_dict = microbatch.to_input_dict("meta")
+
+    assert input_dict["input"].device.type == "meta"
+    assert set(input_dict["loss_kwargs"]) == {
+        "generator_logprobs",
+        "temperature",
+        "loss_mask",
+        "advantages",
+    }
+    for value in input_dict["loss_kwargs"].values():
+        assert value.device.type == "meta"
+
+
+_VISION_PROCESSOR = dataclasses.replace(
+    VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS),
+    resize=PixelBudgetResize.Config(min_pixels=32 * 32, max_pixels=64 * 64),
+)
+
+
+@pytest.fixture
+def image_paths(tmp_path) -> list[str]:
+    rng = np.random.default_rng(0)
+    paths = []
+    for name, (width, height) in (("a.png", (64, 32)), ("b.png", (32, 64))):
+        path = tmp_path / name
+        Image.fromarray(
+            rng.integers(0, 256, size=(height, width, 3), dtype=np.uint8)
+        ).save(path)
+        paths.append(str(path))
+    return paths
+
+
+def _prompt_image(path: str, offset: int) -> tuple[PromptImage, PlaceholderRange]:
+    """The image and placeholders the image-reference renderer gives the file at ``path``."""
+    processor = _VISION_PROCESSOR.build()
+    data = Path(path).read_bytes()
+    width, height = Image.open(path).size
+    grid_thw = processor.grid_thw(height, width)
+    image = PromptImage(
+        hash_value=hash_image_file(data),
+        source_path=path,
+        grid_thw=grid_thw,
+        data=data,
+    )
+    length = processor.num_placeholder_tokens(grid_thw)
+    return image, PlaceholderRange(offset=offset, length=length)
+
+
+def _token_grid(image: PromptImage) -> tuple[int, int, int]:
+    """``image``'s grid after the 2x2 spatial merge, as `get_mrope_positions` takes it."""
+    t, h, w = image.grid_thw
+    return t, h // 2, w // 2
+
+
+def _image_sample(
+    index: int, images: list[tuple[PromptImage, PlaceholderRange]], length: int
+) -> TrainingSample:
+    [sample] = _make_samples([length])
+    return dataclasses.replace(
+        sample,
+        rollout_id=RolloutTurnID(group_id=0, rollout_id=index, turn_id=0),
+        images=tuple(image for image, _ in images),
+        image_placeholders=tuple(placeholder for _, placeholder in images),
+    )
+
+
+def test_microbatch_encodes_each_distinct_image_once(image_paths) -> None:
+    batcher = Batcher.Config(build_mrope_positions=True).build(
+        num_tokens_per_microbatch_per_dp_rank=64,
+        max_context_length=32,
+        num_prompts_per_train_step=1,
+        dp_degree=1,
+        pad_id=0,
+        temperature=1.0,
+        vision_processor=_VISION_PROCESSOR,
+    )
+    image_a, placeholder_a = _prompt_image(image_paths[0], offset=1)
+    image_b, placeholder_b = _prompt_image(
+        image_paths[1], offset=2 + placeholder_a.length
+    )
+    # Two samples of one group show image a; the second also shows image b; a third is text.
+    samples = [
+        _image_sample(0, [(image_a, placeholder_a)], 12),
+        _image_sample(1, [(image_a, placeholder_a), (image_b, placeholder_b)], 16),
+        _image_sample(2, [], 5),
+    ]
+
+    microbatch = batcher._pack_training_samples(samples)
+    kwargs = microbatch.model_kwargs
+
+    # The batcher ships the image files once each; moving the inputs to the trainer's
+    # device turns them into the model's pixel_values.
+    processor = _VISION_PROCESSOR.build()
+    pixel_values = torch.cat(
+        [
+            processor.patchify(processor.resize_and_normalize(image.data)[0])[0]
+            for image in (image_a, image_b)
+        ]
+    )
+    grid_thw = torch.tensor([image_a.grid_thw, image_b.grid_thw])
+    assert bytes(kwargs["image_files"].numpy()) == image_a.data + image_b.data
+    assert kwargs["image_file_sizes"].tolist() == [
+        len(image_a.data),
+        len(image_b.data),
+    ]
+    input_dict = microbatch.preprocess_images().as_input_dict()
+    assert "image_files" not in input_dict and "image_file_sizes" not in input_dict
+    assert torch.equal(input_dict["pixel_values"], pixel_values)
+    assert torch.equal(kwargs["grid_thw"], grid_thw)
+    rows = kwargs["image_vision_bank_indices_T"].tolist()
+    a_rows = list(range(placeholder_a.length))
+    b_rows = list(
+        range(placeholder_a.length, placeholder_a.length + placeholder_b.length)
+    )
+    expected = [-1] * 64
+    expected[1 : 1 + placeholder_a.length] = a_rows
+    expected[13 : 13 + placeholder_a.length] = a_rows
+    start_b = 12 + placeholder_b.offset
+    expected[start_b : start_b + placeholder_b.length] = b_rows
+    assert rows == expected
+    expected_mrope = torch.cat(
+        [
+            get_mrope_positions(12, [(1, _token_grid(image_a))]),
+            get_mrope_positions(
+                16,
+                [
+                    (1, _token_grid(image_a)),
+                    (placeholder_b.offset, _token_grid(image_b)),
+                ],
+            ),
+            torch.arange(5).unsqueeze(1).expand(5, 3),
+            (torch.arange(64 - 33) % 32).unsqueeze(1).expand(64 - 33, 3),
+        ]
+    )
+    assert torch.equal(kwargs["mrope_positions"], expected_mrope)
+
+
+def _image_batcher(
+    num_tokens: int = 16, *, build_mrope_positions: bool = True
+) -> Batcher:
+    return Batcher.Config(build_mrope_positions=build_mrope_positions).build(
+        num_tokens_per_microbatch_per_dp_rank=num_tokens,
+        max_context_length=num_tokens,
+        num_prompts_per_train_step=1,
+        dp_degree=1,
+        pad_id=0,
+        temperature=1.0,
+        vision_processor=_VISION_PROCESSOR,
+    )
+
+
+def test_text_microbatch_with_a_vision_processor_has_no_image_inputs() -> None:
+    batcher = _image_batcher()
+
+    microbatch = batcher._pack_training_samples(_make_samples([5]))
+
+    # The model uses the 1D positions and runs its dummy vision forward, as on every
+    # rank without images.
+    assert microbatch.model_kwargs == {}
+
+
+def test_image_microbatch_without_mrope_positions(image_paths) -> None:
+    """Without build_mrope_positions (a model whose image tokens take 1D positions, e.g.
+    Muse Spark), an image microbatch carries no mrope_positions: the model uses positions."""
+    image, placeholder = _prompt_image(image_paths[0], offset=1)
+    batcher = _image_batcher(num_tokens=64, build_mrope_positions=False)
+
+    microbatch = batcher._pack_training_samples(
+        [_image_sample(0, [(image, placeholder)], 12)]
+    )
+
+    assert "mrope_positions" not in microbatch.model_kwargs
+    assert "image_vision_bank_indices_T" in microbatch.model_kwargs
+
+
+def test_image_grid_must_match_the_resized_image(image_paths) -> None:
+    image, placeholder = _prompt_image(image_paths[0], offset=1)
+    t, h, w = image.grid_thw
+    # The renderer had another vision processor: another grid (and its placeholder
+    # count) for the same image.
+    image = dataclasses.replace(image, grid_thw=(t, h + 2, w))
+    placeholder = PlaceholderRange(offset=1, length=t * (h + 2) * w // 4)
+    batcher = _image_batcher(num_tokens=64)
+    microbatch = batcher._pack_training_samples(
+        [_image_sample(0, [(image, placeholder)], 12)]
+    )
+
+    # The trainer resizes the file and finds the batcher's vision processor's grid.
+    with pytest.raises(ValueError, match="same vision processor"):
+        microbatch.preprocess_images()
+
+
+def test_placeholder_count_must_match_the_grid(image_paths) -> None:
+    image, placeholder = _prompt_image(image_paths[0], offset=1)
+    # Embedding rows follow the placeholder count, the vision encoder's embeddings the grid.
+    placeholder = PlaceholderRange(offset=1, length=placeholder.length - 1)
+    batcher = _image_batcher(num_tokens=64)
+
+    with pytest.raises(ValueError, match="placeholders"):
+        batcher._pack_training_samples([_image_sample(0, [(image, placeholder)], 12)])
+
+
+def test_packing_keeps_samples_of_an_image_together(image_paths) -> None:
+    # Two groups of three samples, one image per group: each group fits one microbatch.
+    batcher = Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=64,
+        max_context_length=64,
+        num_prompts_per_train_step=1,
+        dp_degree=2,
+        pad_id=0,
+        temperature=1.0,
+        vision_processor=_VISION_PROCESSOR,
+    )
+    images = [_prompt_image(path, offset=1) for path in image_paths]
+    samples = []
+    for group, image in enumerate(images):
+        samples += [
+            _image_sample(3 * group + index, [image], 18 + index * 2 - group)
+            for index in range(3)
+        ]
+
+    [row] = batcher._assign_training_samples_to_microbatches(samples)
+
+    hashes_per_microbatch = sorted(
+        sorted({image.hash_value for sample in bin_ for image in sample.images})
+        for bin_ in row
+    )
+    assert hashes_per_microbatch == sorted([[image.hash_value] for image, _ in images])

@@ -27,6 +27,8 @@ _MODULE_DIR = tempfile.TemporaryDirectory(prefix="torchtitan_checkpoint_config_"
 _MODULE_SOURCE = r"""
 import os
 
+from torchtitan.observability.metrics import TensorBoardLogger
+
 from torchtitan.components.checkpointer import CheckpointManager
 
 
@@ -67,12 +69,20 @@ def checkpoint_test_config():
         trainer_config.training.steps = int(steps)
         trainer_config.debug.deterministic = True
         trainer_config.debug.seed = 42
-        trainer_config.metrics.enable_tensorboard = True
+        # This module also runs in revisions before configurable loggers.
+        if hasattr(trainer_config.metrics, "loggers"):
+            if not any(
+                isinstance(logger_config, TensorBoardLogger.Config)
+                for logger_config in trainer_config.metrics.loggers
+            ):
+                trainer_config.metrics.loggers.append(TensorBoardLogger.Config())
+        else:
+            trainer_config.metrics.enable_tensorboard = True
         trainer_config.metrics.log_freq = 1
         trainer_config.metrics.save_tb_folder = os.environ["TORCHTITAN_TEST_TB_FOLDER"]
     total_steps = os.environ.get("TORCHTITAN_TEST_LR_TOTAL_STEPS")
     if total_steps is not None:
-        trainer_config.lr_scheduler.total_steps = int(total_steps)
+        trainer_config.optim.lr_scheduler.total_steps = int(total_steps)
 
     mode = os.environ.get("TORCHTITAN_CHECKPOINT_MODE")
     if mode is None:

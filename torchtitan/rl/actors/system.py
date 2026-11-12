@@ -40,8 +40,8 @@ class TrainerHandle(ServiceHandle):
     """Handles to the trainer's actors, also grouped by data-parallel rank."""
 
     by_dp_rank: list[Any]
-    """``by_dp_rank[i]`` reaches the cp * tp actors at DP rank ``i``, which train the
-    batcher's column ``i``, e.g. ``by_dp_rank[i].forward_backward.call(...)``."""
+    """``by_dp_rank[i]`` reaches the pp * cp * tp actors at DP rank ``i``, which train
+    the batcher's column ``i``, e.g. ``by_dp_rank[i].forward_backward.call(...)``."""
 
 
 class ActorSystem(Configurable, abc.ABC):

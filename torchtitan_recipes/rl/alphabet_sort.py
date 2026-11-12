@@ -12,6 +12,7 @@ Each function returns a complete ``Controller.Config``, discoverable by
 """
 
 import dataclasses
+from typing import TYPE_CHECKING
 
 from renderers import GptOssRendererConfig, Qwen3RendererConfig
 
@@ -24,7 +25,12 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.components.renderer import from_renderers
-from torchtitan.config import DebugConfig, OverrideConfig, TrainingConfig
+from torchtitan.config import (
+    DebugConfig,
+    OverrideConfig,
+    PrecisionConfig,
+    TrainingConfig,
+)
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     BatchInvariantFlexConverter,
@@ -32,11 +38,14 @@ from torchtitan.config.transform import (
     MXFP8LinearConverter,
 )
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss_model_config
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.models.qwen3_5 import build_model_config as build_qwen3_5_model_config
+
+from torchtitan.observability.metrics import WandBLogger
 from torchtitan.rl.controller.controller import (
     AsyncLoopConfig,
     Controller,
@@ -51,13 +60,16 @@ from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
-from torchtitan.rl.rollout.data import IterableRLDataLoader
+from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.trainer.losses import GRPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
+
+if TYPE_CHECKING:
+    from torchtitan.rl.actors.monarch.launcher.base import MonarchControllerWithLauncher
 
 _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
 
@@ -67,7 +79,7 @@ _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
 
 def _alphabet_sort_rollouter_config() -> Rollouter.Config:
     return Rollouter.Config(
-        training_dataloader=IterableRLDataLoader.Config(
+        training_dataloader=IterableRolloutDataLoader.Config(
             dataset=AlphabetSortDataset.Config(seed=42)
         ),
         validation_dataset=AlphabetSortDataset.Config(seed=99),
@@ -127,7 +139,7 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -140,9 +152,8 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -159,7 +170,6 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -173,7 +183,17 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
 def rl_grpo_qwen3_0_6b_varlen_no_compile(*, seq_len: int = 2048) -> Controller.Config:
     config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
     for model_config in (config.trainer.model, config.generator.model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
+    return config
+
+
+def rl_grpo_qwen3_0_6b_varlen_sglang(*, seq_len: int = 2048) -> Controller.Config:
+    """``rl_grpo_qwen3_0_6b_varlen`` with the SGLang engine (6 GPUs: 4 gen + 2 train)."""
+    # Imported here so the other recipes do not depend on SGLang.
+    from torchtitan.rl.generator.sglang.engine import SGLangEngine
+
+    config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
+    config.generator.engine = SGLangEngine.Config()
     return config
 
 
@@ -206,7 +226,8 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
+        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -219,10 +240,8 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
-                dtype="bfloat16",
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -239,7 +258,6 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -247,6 +265,40 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
                 max_tokens=100,
             ),
         ),
+    )
+
+
+def rl_grpo_qwen3_0_6b_flex_slurm() -> "MonarchControllerWithLauncher.Config":
+    """Example of running ``rl_grpo_qwen3_0_6b_flex`` on SLURM with
+    ``SlurmLauncher``, with the cluster's default account and partition. The
+    Launchers section of ``torchtitan/rl/actors/monarch/README.md`` uses it as its
+    example, so keep it.
+
+    Layout with ``gpus_per_node = 4`` (2 nodes)::
+
+        node | mesh    | roles                          | GPUs
+        -----+---------+--------------------------------+-----
+        0    | trainer | trainer (TP=2 x FSDP=2)        | 4
+        1    | node_0  | generator_0..3 (1 GPU each)    | 4
+    """
+    # Imported lazily so this module loads without Monarch.
+    from torchtitan.rl.actors.monarch.launcher.base import MonarchControllerWithLauncher
+    from torchtitan.rl.actors.monarch.launcher.slurm import SlurmLauncher
+
+    # Set to your nodes' GPU count; the trainer and generator sizes follow it.
+    gpus_per_node = 4
+    config = rl_grpo_qwen3_0_6b_flex()
+    # Qwen3's model configs don't depend on the TP or FSDP degree, so changing
+    # them here needs no model config rebuild.
+    trainer_parallelism = config.trainer.parallelism
+    # Fill node 0: the trainer's world size is TP x FSDP.
+    trainer_parallelism.data_parallel_shard_degree = (
+        gpus_per_node // trainer_parallelism.tensor_parallel_degree
+    )
+    config.generator.parallelism.tensor_parallel_degree = 1
+    config.num_generators = gpus_per_node
+    return MonarchControllerWithLauncher.Config.from_controller_config(
+        config, launcher=SlurmLauncher.Config(gpus_per_node=gpus_per_node)
     )
 
 
@@ -266,7 +318,7 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     for bitwise-identical numerics between trainer and generator (4 GPUs: 2 gen + 2 train).
 
     Trainer keeps fp32 master weights; FSDP mixed precision
-    (mixed_precision_param="bfloat16", the default) casts them to bf16 for the
+    (precision.param_dtype="bfloat16", the default) casts them to bf16 for the
     forward (even at data_parallel_shard_degree=1), matching the bf16 generator.
     """
     config = rl_grpo_qwen3_0_6b_flex()
@@ -274,11 +326,11 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     # latest weights before generating so trainer/generator logprobs stay
     # bitwise-identical (bit_wise/logprob_diff == 0) every step, not just step 1.
     config.async_loop.target_offpolicy_steps = 0
+    # fp32 master weights; FSDP mixed precision casts to bf16 for the forward.
+    config.precision = dataclasses.replace(config.precision, dtype="float32")
     config.trainer = dataclasses.replace(
         config.trainer,
         debug=_BATCH_INVARIANT_DEBUG,
-        # fp32 master weights; FSDP mixed precision casts to bf16 for the forward.
-        training=dataclasses.replace(config.trainer.training, dtype="float32"),
         parallelism=dataclasses.replace(
             config.trainer.parallelism, enable_sequence_parallel=False
         ),
@@ -290,7 +342,7 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     )
     config.trainer.model, config.generator.model = _qwen3_rl_model_configs(
         "0.6B",
-        seq_len=config.trainer.training.max_context_length,
+        seq_len=config.trainer.model.max_context_length,
         attn_backend="flex",
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
@@ -298,8 +350,10 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     )
     # Local compile regions do not support batch-invariant mode.
     for model_config in (config.trainer.model, config.generator.model):
-        model_config.local_compile_regions = []
-    block_size = config.trainer.model.layers[0].attention.inner_attention.block_size
+        model_config.local_compile.regions = []
+    inner_attention = config.trainer.model.layers[0].attention.inner_attention
+    assert isinstance(inner_attention, FlexInnerAttention.Config)
+    block_size = inner_attention.block_size
     config.async_loop.batcher = dataclasses.replace(
         config.async_loop.batcher, per_sample_pad_multiple=block_size
     )
@@ -310,8 +364,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
     """GRPO training config for GPT-OSS-20B with varlen attention.
 
     GPT-OSS uses alternating attention: even layers apply a sliding window, odd
-    layers use full causal attention; the per-layer window is baked into each
-    ``VarlenInnerAttention.window_size``.
+    layers use full causal attention. Metadata carries the per-layer window.
     """
     num_samples_per_prompt = 8
     seq_len = 2048
@@ -343,7 +396,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(GptOssRendererConfig(reasoning_effort="low")),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -356,9 +409,8 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -375,7 +427,6 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             # TODO: use FULL CUDA graphs once a CUDA-graph-compatible
             # distributed MoE token dispatcher is enabled for GPT-OSS.
@@ -418,7 +469,7 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -431,9 +482,8 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -450,7 +500,6 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -490,7 +539,8 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
+        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -503,10 +553,8 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
-                dtype="bfloat16",
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -523,7 +571,6 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -572,7 +619,8 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
+        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -585,10 +633,8 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
-                dtype="bfloat16",
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -605,7 +651,6 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             parallelism=generator_parallelism,
             checkpointer=None,
@@ -634,6 +679,9 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     config.override = OverrideConfig(
         imports=["torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"]
     )
+    # Validation beside training would change the step times this recipe measures: validate at the end.
+    config.async_loop.validation.validate_at_step_0 = False
+    config.async_loop.validation.validate_after_training = True
     return config
 
 
@@ -645,7 +693,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
     Enables deterministic + batch-invariant mode for true on-policy RL training.
 
     Trainer keeps fp32 master weights; FSDP mixed precision
-    (mixed_precision_param="bfloat16", the default) casts them to bf16 for the
+    (precision.param_dtype="bfloat16", the default) casts them to bf16 for the
     forward (the cast happens even at data_parallel_shard_degree=1, where FSDP
     wraps the model purely as a mixed-precision boundary), so the trainer
     forward is bitwise identical to the bf16 generator.
@@ -670,7 +718,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
     )
     # Local compile regions do not support batch-invariant mode.
     for model_config in (trainer_model, generator_model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     return Controller.Config(
         hf_assets_path="./assets/hf/Qwen3-0.6B",
         num_generators=3,
@@ -685,7 +733,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -698,9 +746,8 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -718,7 +765,6 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -783,7 +829,8 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
+        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -796,10 +843,8 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
                 ),
             ),
             training=TrainingConfig(
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
-                max_context_length=seq_len,
-                dtype="bfloat16",
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -816,7 +861,6 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             parallelism=generator_parallelism,
             checkpointer=None,
@@ -849,13 +893,13 @@ def rl_grpo_qwen3_5_9b_varlen_batch_invariant() -> Controller.Config:
     )
     config.trainer.model, config.generator.model = _qwen3_5_rl_model_configs(
         "9B",
-        seq_len=config.trainer.training.max_context_length,
+        seq_len=config.trainer.model.max_context_length,
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
     )
     # Local compile regions do not support batch-invariant mode.
     for model_config in (config.trainer.model, config.generator.model):
-        model_config.local_compile_regions = []
+        model_config.local_compile.regions = []
     return config
 
 
@@ -910,10 +954,16 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
                 ],
             ),
         ),
+        training=dataclasses.replace(
+            config.trainer.training, num_tokens_per_microbatch_per_dp_rank=seq_len
+        ),
         activation_remat=FullActivationRematConfig(),
         parallelism=trainer_parallelism,
     )
     config.generator = dataclasses.replace(
         config.generator, model=generator_model, parallelism=generator_parallelism
     )
+    # Validation beside training would change the step times this recipe measures: validate at the end.
+    config.async_loop.validation.validate_at_step_0 = False
+    config.async_loop.validation.validate_after_training = True
     return config

@@ -83,6 +83,8 @@ jobs:
           RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded/rl" \
             torchrun --nproc-per-node=1 -m pytest \
             tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityKimiK3DebugVarlen \
+            tests/rl/unit_tests/gpu/test_generator_dist_moe_mxfp8.py \
+            tests/rl/unit_tests/gpu/test_vllm_mla_backends.py \
             tests/rl/unit_tests/cpu/test_rl_dist_moe_recipe.py \
             -v
 
@@ -97,6 +99,41 @@ jobs:
           python -m tests.integration_tests.run_tests \
             "$RUNNER_TEMP/artifacts-to-be-uploaded/rl/integration" --ngpu 8 \
             --test_suite rl_b200
+
+      # SGLang is installed on top of the RL environment, so its tests run after
+      # the others. The engine has been verified only on Blackwell GPUs.
+      - name: SGLang generator tests
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: |
+          set -eux
+          source .venv/bin/activate
+          export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+
+          bash scripts/install_rl_env.sh --skip-base --flash-attn none --sglang
+          MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
+
+          # Each class runs in its own torchrun launch, one process per TP rank.
+          # Only TestSGLangBitwiseParityVarlen loads HF weights; the debug-model
+          # classes read the repo's test tokenizer. Every class runs even if one
+          # fails, so one failure does not hide the others.
+          failed_classes=()
+          HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
+            tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParityVarlen -v \
+            || failed_classes+=(Varlen)
+          for test_class in MoEEP GDN SlidingWindow MLA DistMoE; do
+            torchrun --nproc-per-node=2 -m pytest \
+              "tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParity${test_class}" -v \
+              || failed_classes+=("$test_class")
+          done
+          for test_class in KDA; do
+            torchrun --nproc-per-node=1 -m pytest \
+              "tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParity${test_class}" -v \
+              || failed_classes+=("$test_class")
+          done
+          if (( ${#failed_classes[@]} )); then
+            echo "Failed SGLang test classes: ${failed_classes[*]}"
+            exit 1
+          fi
 
       - name: Upload artifacts
         if: always()

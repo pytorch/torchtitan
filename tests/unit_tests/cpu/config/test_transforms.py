@@ -7,11 +7,12 @@
 """Model config transforms."""
 
 import copy
-import inspect
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from torchtitan.config import ParallelismConfig
+import spmd_types as spmd
+
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     AsyncTensorParallelTransform,
@@ -23,18 +24,28 @@ from torchtitan.config.transform import (
     transform_model_config_,
     TransformRelations,
 )
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
+    Attention,
     FlexInnerAttention,
+    MLAAttention,
     SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.attention.cp_attention import (
     AllGatherKVFlexInnerAttention,
     AllGatherKVSlidingWindowFlexInnerAttention,
+    AllGatherKVSlidingWindowVarlenInnerAttention,
+    AllGatherKVVarlenInnerAttention,
     UlyssesFlexInnerAttention,
     UlyssesSlidingWindowFlexInnerAttention,
-    UlyssesVarlenInnerAttention,
 )
+from torchtitan.models.common.attention.cp_mla import (
+    AllGatherKVMLAFlexAttention,
+    UlyssesMLAAttention,
+)
+from torchtitan.models.common.decoder_sharding import mla_kv_projection_sharding_config
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
@@ -61,7 +72,6 @@ def _llama3_cp_ready():
         "debugmodel", attn_backend="flex", seq_len=512, parallelism=ParallelismConfig()
     )
     config.parallelism.context_parallel_degree = 2
-    config.training.max_context_length = 512
     return config
 
 
@@ -170,15 +180,6 @@ class TestConvertConfigType(unittest.TestCase):
         existing = AllGatherKVFlexInnerAttention.Config()
         with self.assertRaisesRegex(ValueError, "must inherit"):
             convert_config_type(existing, FlexInnerAttention)
-
-
-class TestPublicApi(unittest.TestCase):
-    def test_relation_graph_is_not_caller_configurable(self):
-        self.assertNotIn("relations", inspect.signature(apply_transforms).parameters)
-        self.assertNotIn(
-            "relations",
-            inspect.signature(transform_model_config_).parameters,
-        )
 
 
 class TestOrdering(unittest.TestCase):
@@ -472,8 +473,9 @@ class TestTransformModel(unittest.TestCase):
     def test_preserves_muse_glimmer_sliding_window_backend(self):
         from torchtitan.models.muse_glimmer import build_model_config
 
-        for transform, expected_backends in (
+        for attn_backend, transform, expected_backends in (
             (
+                "flex",
                 ContextParallelTransform(
                     inner_attention_map={
                         FlexInnerAttention: AllGatherKVFlexInnerAttention,
@@ -488,6 +490,7 @@ class TestTransformModel(unittest.TestCase):
                 },
             ),
             (
+                "flex",
                 ContextParallelTransform(
                     inner_attention_map={
                         FlexInnerAttention: UlyssesFlexInnerAttention,
@@ -501,16 +504,38 @@ class TestTransformModel(unittest.TestCase):
                     UlyssesSlidingWindowFlexInnerAttention.Config,
                 },
             ),
+            (
+                "varlen",
+                ContextParallelTransform(
+                    inner_attention_map={
+                        VarlenInnerAttention: AllGatherKVVarlenInnerAttention,
+                        SlidingWindowVarlenInnerAttention: (
+                            AllGatherKVSlidingWindowVarlenInnerAttention
+                        ),
+                    }
+                ),
+                {
+                    AllGatherKVVarlenInnerAttention.Config,
+                    AllGatherKVSlidingWindowVarlenInnerAttention.Config,
+                },
+            ),
         ):
             model = build_model_config(
                 "debugmodel",
-                attn_backend="flex",
+                attn_backend=attn_backend,
                 seq_len=128,
                 parallelism=ParallelismConfig(),
             )
             self.assertEqual(
                 {type(layer.attention.inner_attention) for layer in model.layers},
-                {FlexInnerAttention.Config, SlidingWindowFlexInnerAttention.Config},
+                (
+                    {FlexInnerAttention.Config, SlidingWindowFlexInnerAttention.Config}
+                    if attn_backend == "flex"
+                    else {
+                        VarlenInnerAttention.Config,
+                        SlidingWindowVarlenInnerAttention.Config,
+                    }
+                ),
             )
 
             transform.transform(model)
@@ -534,7 +559,7 @@ class TestTransformModel(unittest.TestCase):
 
         ContextParallelTransform(
             inner_attention_map={
-                FlexInnerAttention: AllGatherKVFlexInnerAttention,
+                MLAAttention: AllGatherKVMLAFlexAttention,
                 InnerKDA: ContextParallelInnerKDA,
             }
         ).transform(model)
@@ -545,12 +570,67 @@ class TestTransformModel(unittest.TestCase):
             FlexInnerAttention.Config,
         )
         for layer in model.layers:
-            self.assertIsInstance(
-                layer.attention.inner_attention,
-                ContextParallelInnerKDA.Config
-                if isinstance(layer.attention, KDA.Config)
-                else AllGatherKVFlexInnerAttention.Config,
-            )
+            if not isinstance(layer.attention, KDA.Config):
+                self.assertIsInstance(
+                    layer.attention.inner_attention,
+                    AllGatherKVMLAFlexAttention.Config,
+                )
+            else:
+                self.assertIsInstance(
+                    layer.attention.inner_attention,
+                    ContextParallelInnerKDA.Config,
+                )
+
+    def test_mla_projection_sharding_matches_cp_backend(self):
+        @dataclass(kw_only=True, slots=True)
+        class ModelConfig(Module.Config):
+            layers: list[Attention.Config]
+            mtp_layers: list[Attention.Config]
+
+        for backend, cp in (
+            (AllGatherKVMLAFlexAttention, spmd.R),
+            (UlyssesMLAAttention, spmd.S(0)),
+        ):
+            with self.subTest(backend=backend.__name__):
+                original_sharding = mla_kv_projection_sharding_config(cp=spmd.S(0))
+                original_projection = Linear.Config(
+                    in_features=32,
+                    out_features=128,
+                    sharding_config=original_sharding,
+                )
+                original_attention = MLAAttention.Config(
+                    wkv_b=original_projection,
+                    packed_kv_head_dim=32,
+                    inner_attention=FlexInnerAttention.Config(),
+                )
+                model = ModelConfig(
+                    layers=[
+                        Attention.Config(n_heads=4, inner_attention=original_attention)
+                    ],
+                    mtp_layers=[
+                        Attention.Config(n_heads=4, inner_attention=original_attention)
+                    ],
+                )
+                ContextParallelTransform(
+                    inner_attention_map={MLAAttention: backend}
+                ).transform(model)
+
+                for attention in model.layers + model.mtp_layers:
+                    converted = attention.inner_attention
+                    self.assertIsInstance(converted, backend.Config)
+                    self.assertIsNot(converted.wkv_b, original_projection)
+                    self.assertEqual(
+                        converted.wkv_b,
+                        replace(
+                            original_projection,
+                            sharding_config=mla_kv_projection_sharding_config(cp=cp),
+                        ),
+                    )
+                self.assertIs(original_attention.wkv_b, original_projection)
+                self.assertEqual(
+                    original_projection.sharding_config,
+                    mla_kv_projection_sharding_config(cp=spmd.S(0)),
+                )
 
     def test_transforms_mtp_layers(self):
         from torchtitan.models.deepseek_v3.mtp import MTPDecoder
@@ -558,12 +638,12 @@ class TestTransformModel(unittest.TestCase):
             deepseek_v3_debugmodel_mtp,
         )
 
-        model = deepseek_v3_debugmodel_mtp().model
+        model = deepseek_v3_debugmodel_mtp(attn_backend="flex").model
         assert isinstance(model, MTPDecoder.Config)
 
         ContextParallelTransform(
             inner_attention_map={
-                VarlenInnerAttention: UlyssesVarlenInnerAttention,
+                MLAAttention: AllGatherKVMLAFlexAttention,
             }
         ).transform(model)
 
@@ -572,7 +652,7 @@ class TestTransformModel(unittest.TestCase):
             for layer in layers:
                 self.assertIsInstance(
                     layer.attention.inner_attention,
-                    UlyssesVarlenInnerAttention.Config,
+                    AllGatherKVMLAFlexAttention.Config,
                 )
 
     def test_lora_runs_after_context_parallelism(self):

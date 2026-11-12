@@ -4,22 +4,39 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import math
 from dataclasses import dataclass
 from typing import cast
+from unittest.mock import patch
 
 import pytest
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
+from spmd_types import SpmdType
+from spmd_types.checker import typecheck
+from torch.testing._internal.common_utils import (
+    instantiate_parametrized_tests,
+    parametrize,
+)
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import LoRATransform, transform_model_config_
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
 from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.config_utils import make_ffn_config
-from torchtitan.models.common.decoder_sharding import dense_param_placement
+from torchtitan.models.common.decoder_sharding import (
+    dense_param_placement,
+    residual_activation_placement,
+)
 from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
@@ -28,11 +45,23 @@ from torchtitan.models.common.linear import (
     RowParallelLinear,
 )
 from torchtitan.models.common.moe.sharding import expert_param_placement_sparse
-from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
+from torchtitan.models.common.vision_encoder import (
+    InvariantRowParallelLinear,
+    VisionMLP,
+)
+from torchtitan.models.common.vision_encoder_sharding import (
+    vision_colwise_sharding_config,
+    vision_invariant_linear_sharding_config,
+    vision_rowwise_sharding_config,
+)
 from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 from torchtitan.models.llama3 import build_model_config
 from torchtitan.models.qwen3_5.model import Qwen35Model
 from torchtitan_recipes.tests.models.qwen3_5 import qwen35_debugmodel_moe_lora
+
+DP = MeshAxisName.DP
+CP = MeshAxisName.CP
+TP = MeshAxisName.TP
 
 
 def test_qwen35_moe_lora_model_config():
@@ -64,8 +93,14 @@ def test_qwen35_moe_lora_model_config():
     }
 
 
-def test_lora_model_builds():
-    """LoRA debug model builds, has trainable adapters and frozen base."""
+@pytest.mark.parametrize(
+    "trainable_modules", [[], ["tok_embeddings", "layers.1.feed_forward"]]
+)
+def test_lora_model_builds(trainable_modules):
+    """LoRA debug model builds, has trainable adapters and frozen base.
+
+    Parameters under ``trainable_modules`` stay trainable.
+    """
     model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
     model_config = transform_model_config_(
         model_config,
@@ -74,6 +109,7 @@ def test_lora_model_builds():
                 rank=8,
                 alpha=16.0,
                 target_modules=["wqkv", "wo"],
+                trainable_modules=trainable_modules,
             )
         ],
     )
@@ -112,7 +148,11 @@ def test_lora_model_builds():
         for n, p in model.named_parameters()
         if p.requires_grad and "lora_a" not in n and "lora_b" not in n
     }
-    assert non_lora_trainable == set()
+    assert non_lora_trainable == {
+        n
+        for n, _ in model.named_parameters()
+        if any(n.startswith(f"{root}.") for root in trainable_modules)
+    }
 
 
 def test_lora_forward():
@@ -553,6 +593,39 @@ def test_lora_allows_other_targets_with_weight_tying():
     assert all(hasattr(layer.attention.wo, "rank") for layer in transformed.layers)
 
 
+@pytest.mark.parametrize(
+    ("target_modules", "trainable_modules", "share_feed_forward", "tie", "error"),
+    [
+        (["wo"], ["layers.0.attention"], False, False, "inside trainable module"),
+        (None, ["layers.0"], False, False, "target_modules=None targets every"),
+        (["wo"], ["layers.0.attn"], False, False, "match no module config"),
+        (["wo"], ["layers.0.feed_forward"], True, False, "shared config"),
+        # A list container has no config of its own but matches its children.
+        (["lm_head"], ["layers"], False, False, None),
+        (["wo"], ["tok_embeddings"], False, True, "share a weight under weight"),
+        (["wo"], ["tok_embeddings", "lm_head"], False, True, None),
+    ],
+)
+def test_lora_validates_trainable_modules(
+    target_modules, trainable_modules, share_feed_forward, tie, error
+):
+    model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
+    model_config.enable_weight_tying = tie
+    if share_feed_forward:
+        model_config.layers[1].feed_forward = model_config.layers[0].feed_forward
+
+    transform = LoRATransform(
+        rank=2,
+        target_modules=target_modules,
+        trainable_modules=trainable_modules,
+    )
+    if error is None:
+        transform.transform(model_config)
+    else:
+        with pytest.raises(ValueError, match=error):
+            transform.transform(model_config)
+
+
 def test_lora_rank_validation():
     """LoRA rank must be positive."""
     with pytest.raises(ValueError, match="rank must be positive"):
@@ -703,3 +776,159 @@ def test_lora_preserves_frozen_config_type_checks():
     assert not model.proj.weight.requires_grad
     assert model.proj.lora_a.weight.requires_grad
     assert model.proj.lora_b.weight.requires_grad
+
+
+class TestLoRATensorParallelTypecheck(DTensorTestBase):
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    @parametrize("enable_sp", [True, False])
+    @with_comms
+    def test_row_parallel_adapters_typecheck(self, enable_sp: bool):
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
+            tp=self.world_size,
+            pp=1,
+            ep=1,
+            world_size=self.world_size,
+            enable_sequence_parallel=enable_sp,
+        )
+        with patch(
+            "torchtitan.distributed.parallelism_context.device_type", self.device_type
+        ):
+            parallelism_context.build_mesh()
+        init = {"weight": torch.nn.init.normal_}
+        ffn_config = make_ffn_config(
+            dim=16,
+            hidden_dim=32,
+            w13_param_init=init,
+            w2_param_init=init,
+            enable_sp=enable_sp,
+        )
+        feed_forward = (
+            LoRATransform(rank=2, alpha=4.0)
+            .transform(ffn_config)
+            .build()
+            .to(self.device_type)
+        )
+        feed_forward._parallelize(parallelism_context)
+
+        x_local = torch.randn(8, 16, device=self.device_type)
+        mesh = parallelism_context.spmd_dense_mesh()
+        set_spmd_meshes(
+            dense_mesh=mesh,
+            sparse_mesh=None,
+            dense_sp_enabled=parallelism_context.sp_enabled,
+        )
+        residual = residual_activation_placement(enable_sp=enable_sp)
+        with set_current_spmd_mesh(mesh), typecheck(local=False):
+            spmd.assert_type(x_local, residual)
+            output = feed_forward(x_local)
+            spmd.assert_type(output, residual)
+            output.sum().backward()
+
+        self.assertEqual(output.shape, x_local.shape)
+        self.assertIsNotNone(feed_forward.w2.lora_b.weight.grad)
+
+    @with_comms
+    def test_vision_adapters_match_unsharded(self):
+        """TP2 LoRA output and adapter grads match a TP1 run of the same weights.
+
+        Vision linears are CP-invariant; the vision adapter is also TP-invariant.
+        """
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
+            tp=self.world_size,
+            pp=1,
+            ep=1,
+            world_size=self.world_size,
+            enable_sequence_parallel=False,
+        )
+        with patch(
+            "torchtitan.distributed.parallelism_context.device_type", self.device_type
+        ):
+            parallelism_context.build_mesh()
+        vision_config = VisionMLP.Config(
+            fc1=Linear.Config(
+                in_features=16,
+                out_features=32,
+                bias=True,
+                sharding_config=vision_colwise_sharding_config(),
+            ),
+            fc2=InvariantRowParallelLinear.Config(
+                in_features=32,
+                out_features=16,
+                # With a bias, the forward skips SPMD type checking.
+                bias=False,
+                sharding_config=vision_rowwise_sharding_config(),
+            ),
+        )
+        adapter_config = Linear.Config(
+            in_features=16,
+            out_features=16,
+            sharding_config=vision_invariant_linear_sharding_config(),
+        )
+        torch.manual_seed(0)
+        unsharded = [
+            LoRATransform(rank=2, alpha=4.0)
+            .transform(config)
+            .build()
+            .to(self.device_type)
+            for config in (vision_config, adapter_config)
+        ]
+        for module in unsharded:
+            for param in module.parameters():
+                torch.nn.init.normal_(param)
+        sharded = copy.deepcopy(unsharded)
+        x_local = torch.randn(8, 16, device=self.device_type)
+
+        expected = x_local
+        for module in unsharded:
+            expected = module(expected)
+        expected.sum().backward()
+
+        for module in sharded:
+            module._parallelize(parallelism_context)
+        mesh = parallelism_context.spmd_dense_mesh()
+        set_spmd_meshes(dense_mesh=mesh, sparse_mesh=None, dense_sp_enabled=False)
+        layout = SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I})
+        with set_current_spmd_mesh(mesh), typecheck(local=False):
+            spmd.assert_type(x_local, layout)
+            output = x_local
+            for module in sharded:
+                output = module(output)
+            spmd.assert_type(output, layout)
+            output.sum().backward()
+
+        # Explicit tolerance: TP2 sums fp32 partial products in a different order.
+        tolerance = {"atol": 1e-4, "rtol": 1e-4}
+        torch.testing.assert_close(output, expected, **tolerance)
+        for module, reference in zip(sharded, unsharded, strict=True):
+            for name, param in module.named_parameters():
+                if "lora_" not in name:
+                    assert param.grad is None, name
+                    continue
+                expected_grad = reference.get_parameter(name).grad
+                adapter = module.get_submodule(name.rsplit(".", 1)[0])
+                tp_type = adapter._sharding_config.state_shardings["weight"].local_type[
+                    TP
+                ]
+                grad = param.grad
+                # Without FSDP the TP-replicated grad stays partial. In training,
+                # FSDP redistributes the non-DP Partial grad to Replicate (TP
+                # all-reduce).
+                if tp_type == spmd.R:
+                    torch.distributed.all_reduce(grad)
+                elif isinstance(tp_type, spmd.Shard):
+                    shards = [torch.empty_like(grad) for _ in range(self.world_size)]
+                    torch.distributed.all_gather(shards, grad.contiguous())
+                    grad = torch.cat(shards, dim=tp_type.dim)
+                torch.testing.assert_close(grad, expected_grad, **tolerance, msg=name)
+
+
+instantiate_parametrized_tests(TestLoRATensorParallelTypecheck)

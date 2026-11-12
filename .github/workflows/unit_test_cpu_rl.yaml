@@ -53,36 +53,37 @@ jobs:
         bash scripts/install_rl_env.sh --skip-base --flash-attn none \
           --constraint torchtitan/rl/examples/dapo_math/requirements.txt
 
-        # The shared HF cache is read-only and does not contain this tokenizer.
-        # Fetch only tokenizer files into a writable cache (no model weights).
-        export MUSE_GLIMMER_TOKENIZER="$(python -c '
+        # The shared HF cache is read-only and lacks these tokenizers. Fetch only their
+        # tokenizer files (no model weights) into a writable cache and export each path.
+        TOKENIZER_EXPORTS="$(python -c '
         import os
         from huggingface_hub import snapshot_download
 
-        print(snapshot_download(
-            "meta-models/Muse-Glimmer-30B",
-            cache_dir=os.path.join(os.environ["RUNNER_TEMP"], "rl-hf-cache"),
-            allow_patterns=["config.json", "tokenizer*.json", "chat_template.jinja"],
-        ))
+        for env_var, repo in [
+            ("MUSE_GLIMMER_TOKENIZER", "meta-models/Muse-Glimmer-30B"),
+            ("QWEN3_5_TOKENIZER", "Qwen/Qwen3.5-0.8B"),
+        ]:
+            path = snapshot_download(
+                repo,
+                cache_dir=os.path.join(os.environ["RUNNER_TEMP"], "rl-hf-cache"),
+                allow_patterns=["config.json", "tokenizer*.json", "chat_template.jinja"],
+            )
+            print(f"export {env_var}={path}")
         ')"
+        eval "${TOKENIZER_EXPORTS}"
 
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"
         pytest tests/rl/unit_tests/cpu --strict-markers --durations=20 -vv
 
-        # Cover the optional Verifiers example last, without installing it for all
-        # RL jobs. Verifiers 0.3.1 requires mcp<2 while current vLLM nightlies
-        # require mcp>=2, so resolving them together falls back to an old vLLM
-        # nightly that pins an old torch. Keep the nightlies installed above and
-        # let Verifiers downgrade its own dependencies (e.g. mcp) for these tests.
+        # Cover the optional Verifiers examples last, without installing them for all
+        # RL jobs. Keep the nightlies installed above and let Verifiers move only its
+        # own pinned dependencies (e.g. mcp, openai) for these tests.
         python -c '
         from importlib.metadata import version
         for name in ("torch", "torchvision", "vllm"):
             print(f"{name}=={version(name)}")
         ' > "${RUNNER_TEMP}/nightly-constraints.txt"
         uv pip install -r torchtitan/rl/examples/verifiers/dapo_math/requirements.txt \
+          -r torchtitan/rl/examples/verifiers/terminal_bench/requirements.txt \
           --constraint "${RUNNER_TEMP}/nightly-constraints.txt"
-        pytest tests/rl/unit_tests/cpu/test_verifiers.py \
-          tests/rl/unit_tests/cpu/test_verifiers_example.py \
-          "tests/rl/unit_tests/cpu/test_verifiers_terminal_bench.py::test_env_server_workers_skip_the_trainer_imports" \
-          "tests/rl/unit_tests/cpu/test_model_defaults.py::test_rl_recipes_get_model_defaults" \
-          --strict-markers --durations=20 -vv
+        pytest tests/rl/unit_tests/cpu --strict-markers --durations=20 -vv

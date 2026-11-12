@@ -30,10 +30,12 @@ _RECIPE_MODULES = [
 ]
 # Reward packages that some recipe modules import (dapo_math, the verifiers recipes).
 _OPTIONAL_PACKAGES = {"math_verify", "verifiers"}
-# Recipes that need an optional package: torchao nightly (MXFP8) and dist_moe.
+# Recipes that need an optional package: torchao nightly (MXFP8), dist_moe and SGLang.
 _OPTIONAL_PACKAGE_RECIPES = {
     "rl_grpo_qwen3_0_6b_varlen_mxfp8",
+    "rl_grpo_qwen3_0_6b_varlen_sglang",
     "rl_grpo_moe_debug_dist_moe_tp2_ep4",
+    "rl_dapo_qwen3_30b_a3b_math_8k_mxfp8",
 }
 # SoftCappedLinear head: LMHeadFP32OutputConverter can't convert it (see the recipe's TODO).
 _BF16_HEAD_RECIPES = {
@@ -72,21 +74,20 @@ def test_rl_recipes_get_model_defaults(module_name: str) -> None:
             assert is_fp32_head == (name not in _BF16_HEAD_RECIPES), name
             moe_configs = [moe for _, moe, _, _ in model.traverse(MoE.Config)]
             assert all(moe.freeze_expert_bias for moe in moe_configs), name
-            assert all(moe.router.freeze_gate for moe in moe_configs), name
+            assert not any(moe.router.freeze_gate for moe in moe_configs), name
             assert all(moe.router.aux_loss is None for moe in moe_configs), name
 
 
-def test_build_rl_model_configs_freeze_moe_routing_false_trains_moe_router() -> None:
+def test_build_rl_model_configs_keeps_moe_load_balancing_when_asked() -> None:
     # DeepSeek-V3 builds a load-balancing aux loss on every MoE router.
     for model in build_rl_model_configs(
         build_deepseek_v3_model_config,
         "debugmodel",
         trainer_parallelism=ParallelismConfig(),
         generator_parallelism=InferenceParallelismConfig(),
-        freeze_moe_routing=False,
+        disable_moe_load_balancing=False,
     ):
         moe_configs = [moe for _, moe, _, _ in model.traverse(MoE.Config)]
         assert moe_configs
         assert not any(moe.freeze_expert_bias for moe in moe_configs)
-        assert not any(moe.router.freeze_gate for moe in moe_configs)
         assert all(moe.router.aux_loss is not None for moe in moe_configs)
