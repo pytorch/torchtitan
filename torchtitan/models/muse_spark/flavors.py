@@ -37,7 +37,6 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.common.decoder_sharding import (
     colwise_sharding_config,
-    dense_sequence_parallel_placement,
     gqa_attention_sharding_config,
     head_norm_sharding_config,
     inner_attention_local_spmd_sharding_config,
@@ -520,7 +519,6 @@ def _moe_config(
 ) -> MuseSparkMoE.Config:
     grouped_linear_init = _grouped_linear_init(layer_id)
     experts_sharding = routed_experts_sharding_config()
-    experts_sharding.out_dst_shardings = dense_sequence_parallel_placement()
     return MuseSparkMoE.Config(
         num_experts=num_experts,
         router=TokenChoiceTopKRouter.Config(

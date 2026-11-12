@@ -380,10 +380,8 @@ def test_grouped_lora_adapters_follow_expert_sharding():
         assert adapter._sharding_config is not None
         assert adapter._sharding_config is not base_sharding
         assert adapter._sharding_config.state_shardings == {"weight": expert_placement}
-        assert adapter._sharding_config.in_src_shardings is None
-        assert adapter._sharding_config.in_dst_shardings is None
-        assert adapter._sharding_config.out_src_shardings is None
-        assert adapter._sharding_config.out_dst_shardings is None
+        assert adapter._sharding_config.input_shardings is None
+        assert adapter._sharding_config.output_shardings is None
 
 
 def test_grouped_lora_rejects_feature_axis_sharding():
@@ -431,10 +429,8 @@ def test_stacked_lora_adapter_does_not_repeat_base_redistribution():
     assert lora_b_sharding.state_shardings["weight"] == dense_param_placement(
         tp=spmd.S(1)
     )
-    assert lora_b_sharding.in_src_shardings is None
-    assert lora_b_sharding.in_dst_shardings is None
-    assert lora_b_sharding.out_src_shardings is None
-    assert lora_b_sharding.out_dst_shardings is None
+    assert lora_b_sharding.input_shardings is None
+    assert lora_b_sharding.output_shardings is None
 
 
 def test_lora_class_is_reused_for_the_same_parent():

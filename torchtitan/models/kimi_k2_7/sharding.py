@@ -41,14 +41,14 @@ def moonvit_encoder_sharding_config() -> ShardingConfig:
     """
     return ShardingConfig(
         state_shardings={"pos_embed": _moonvit_state_placement()},
-        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I}),
+        output_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I}),
     )
 
 
 def moonvit_projector_sharding_config() -> ShardingConfig:
     """Projector output: TP- and CP-invariant."""
     return ShardingConfig(
-        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I}),
+        output_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I}),
     )
 
 
@@ -57,5 +57,5 @@ def moonvit_rotary_sharding_config() -> ShardingConfig:
     state_placement = SpmdType({DP: spmd.R, CP: spmd.I, TP: spmd.R})
     return ShardingConfig(
         state_shardings={"inv_freq": state_placement},
-        out_src_shardings=state_placement,
+        output_shardings=state_placement,
     )

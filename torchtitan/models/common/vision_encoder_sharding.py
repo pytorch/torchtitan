@@ -59,14 +59,10 @@ def invariant_norm_sharding_config() -> ShardingConfig:
             "weight": _vision_state_placement(tp=spmd.I, cp=spmd.I),
             "bias": _vision_state_placement(tp=spmd.I, cp=spmd.I),
         },
-        in_src_shardings={
+        input_shardings={
             "input": _vision_activation_placement(),
         },
-        in_dst_shardings={
-            "input": _vision_activation_placement(),
-        },
-        out_src_shardings=_vision_activation_placement(),
-        out_dst_shardings=_vision_activation_placement(),
+        output_shardings=_vision_activation_placement(),
     )
 
 
@@ -77,14 +73,10 @@ def vision_invariant_linear_sharding_config() -> ShardingConfig:
             "weight": _vision_state_placement(tp=spmd.I, cp=spmd.I),
             "bias": _vision_state_placement(tp=spmd.I, cp=spmd.I),
         },
-        in_src_shardings={
+        input_shardings={
             "input": _vision_activation_placement(),
         },
-        in_dst_shardings={
-            "input": _vision_activation_placement(),
-        },
-        out_src_shardings=_vision_activation_placement(),
-        out_dst_shardings=_vision_activation_placement(),
+        output_shardings=_vision_activation_placement(),
     )
 
 
@@ -104,10 +96,10 @@ def vision_colwise_sharding_config(
             "weight": _vision_state_placement(tp=spmd.S(0), cp=spmd.I),
             "bias": _vision_state_placement(tp=spmd.S(0), cp=spmd.I),
         },
-        in_src_shardings={
+        input_shardings={
             "input": _vision_activation_placement(tp=input_tp),
         },
-        out_src_shardings=_vision_activation_placement(tp=spmd.S(-1)),
+        output_shardings=_vision_activation_placement(tp=spmd.S(-1)),
     )
 
 
@@ -119,13 +111,10 @@ def vision_rowwise_sharding_config() -> ShardingConfig:
             "weight": _vision_state_placement(tp=spmd.S(1), cp=spmd.I),
             "bias": _vision_state_placement(tp=spmd.I, cp=spmd.I),
         },
-        in_src_shardings={
+        input_shardings={
             "input": input_layout,
         },
-        in_dst_shardings={
-            "input": input_layout,
-        },
-        out_src_shardings=_vision_activation_placement(),
+        output_shardings=_vision_activation_placement(),
     )
 
 
@@ -140,7 +129,7 @@ def vision_attention_sharding_config(
     head-sharded q/k.
     """
     return ShardingConfig(
-        in_src_shardings={
+        input_shardings={
             "x": _vision_activation_placement(),
             "rope_cache": _vision_activation_placement(dp=rope_cache_dp, tp=spmd.R),
         },
@@ -151,16 +140,11 @@ def vision_inner_attention_sharding_config() -> ShardingConfig:
     """Local-SPMD vision attention kernel with heads sharded across TP."""
     attention_layout = _vision_activation_placement(tp=spmd.S(1))
     return ShardingConfig(
-        in_src_shardings={
+        input_shardings={
             "q_THK": attention_layout,
             "k_THK": attention_layout,
             "v_THV": attention_layout,
         },
-        in_dst_shardings={
-            "q_THK": attention_layout,
-            "k_THK": attention_layout,
-            "v_THV": attention_layout,
-        },
-        out_src_shardings=attention_layout,
+        output_shardings=attention_layout,
         local_spmd=True,
     )

@@ -21,8 +21,8 @@ def attention_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     layout = residual_activation_placement(enable_sp=enable_sp)
     return ShardingConfig(
         state_shardings={"sinks": dense_param_placement(tp=spmd.S(0))},
-        in_src_shardings={"x": layout},
-        out_src_shardings=layout,
+        input_shardings={"x": layout},
+        output_shardings=layout,
     )
 
 

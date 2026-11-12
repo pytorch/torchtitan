@@ -70,7 +70,7 @@ def _hf_colwise_sharding_config() -> ShardingConfig:
             "weight": dense_param_placement(tp=spmd.S(0)),
             "bias": dense_param_placement(tp=spmd.S(0)),
         },
-        out_src_shardings=_hf_activation_placement(tp=spmd.S(-1)),
+        output_shardings=_hf_activation_placement(tp=spmd.S(-1)),
     )
 
 
@@ -79,7 +79,7 @@ def _hf_rowwise_sharding_config(*, output_sp: bool = False) -> ShardingConfig:
 
     The output layout is after the reduction that ``_set_row_parallel`` adds.
     """
-    out_dst = (
+    out_layout = (
         _hf_sequence_parallel_placement()
         if output_sp
         else _hf_activation_placement(tp=spmd.I)
@@ -89,7 +89,7 @@ def _hf_rowwise_sharding_config(*, output_sp: bool = False) -> ShardingConfig:
             "weight": dense_param_placement(tp=spmd.S(1)),
             "bias": dense_param_placement(tp=spmd.R),
         },
-        out_src_shardings=out_dst,
+        output_shardings=out_layout,
     )
 
 
@@ -234,8 +234,8 @@ def set_hf_sharding_configs(
             emb_state[buf_name] = dense_param_placement(tp=spmd.R)
         model.tok_embeddings._sharding_config = ShardingConfig(
             state_shardings=emb_state,
-            in_src_shardings={"input": _hf_activation_placement(tp=spmd.R)},
-            out_src_shardings=_sp_activation(enable_sp=enable_sp),
+            input_shardings={"input": _hf_activation_placement(tp=spmd.R)},
+            output_shardings=_sp_activation(enable_sp=enable_sp),
         )
         model.tok_embeddings._tp_output_dst = spmd.S(1) if enable_sp else spmd.R
 
@@ -253,7 +253,7 @@ def set_hf_sharding_configs(
                 "weight": dense_param_placement(tp=spmd.S(0)),
                 "bias": dense_param_placement(tp=spmd.S(0)),
             },
-            in_src_shardings={
+            input_shardings={
                 "input": lm_head_input,
             },
             # Vocab-shard the lm_head output S(-1) unconditionally, mirroring
@@ -261,7 +261,7 @@ def set_hf_sharding_configs(
             # no-op when TP is absent from the runtime mesh, so no flag is
             # needed: core cross_entropy_loss detects the vocab-sharded pred
             # (spmd_types: tp mesh size > 1) and runs vocab-parallel CE.
-            out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
+            output_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
         )
         if enable_sp:
             _set_gather_input(model.lm_head, src=spmd.S(0))
@@ -324,17 +324,12 @@ def _attach_flex_kernel(attn: nn.Module) -> None:
     heads_out = SpmdType({DP: spmd.R, CP: spmd.S(1), TP: spmd.S(2)})
     attn._titan_flex_kernel = HFFlexKernel.Config(
         sharding_config=ShardingConfig(
-            in_src_shardings={
+            input_shardings={
                 "query": heads_in,
                 "key": heads_in,
                 "value": heads_in,
             },
-            in_dst_shardings={
-                "query": heads_in,
-                "key": heads_in,
-                "value": heads_in,
-            },
-            out_src_shardings=heads_out,
+            output_shardings=heads_out,
             local_spmd=True,
         )
     ).build()
@@ -371,7 +366,7 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
 
     # Gather input from SP layout to Replicate at the attention boundary.
     attn._sharding_config = ShardingConfig(
-        in_src_shardings={
+        input_shardings={
             "hidden_states": _sp_activation(enable_sp=enable_sp),
         },
     )
@@ -444,7 +439,7 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
 
         mlp_arg = _first_forward_arg(mlp)
         mlp._sharding_config = ShardingConfig(
-            in_src_shardings={mlp_arg: _sp_activation(enable_sp=enable_sp)},
+            input_shardings={mlp_arg: _sp_activation(enable_sp=enable_sp)},
         )
         if enable_sp:
             _set_gather_input(mlp, src=spmd.S(1))
@@ -499,10 +494,8 @@ def _hf_norm_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     sp_layout = _hf_sequence_parallel_placement()
     return ShardingConfig(
         state_shardings=state,
-        in_src_shardings={"hidden_states": sp_layout},
-        in_dst_shardings={"hidden_states": sp_layout},
-        out_src_shardings=sp_layout,
-        out_dst_shardings=sp_layout,
+        input_shardings={"hidden_states": sp_layout},
+        output_shardings=sp_layout,
     )
 
 
@@ -528,12 +521,11 @@ def _rope_sharding_config(module: nn.Module, *, enable_sp: bool) -> ShardingConf
     buffer is replicated so the computed cos/sin have matching SPMD types in
     ``apply_rotary_pos_emb``.
 
-    Core's input redistribution requires ``in_src_shardings`` to match the
-    incoming placement exactly. Under SP the hidden-states arg arrives sharded
-    on the sequence dim (the embedding output layout), so declare the first arg
-    with the SP activation placement; the remaining (plain) args are wrapped as
-    Replicate. ``in_dst`` mirrors ``in_src`` -- the rotary embedding only reads
-    hidden_states for dtype/device, so there is no need to redistribute it.
+    ``input_shardings`` must match the incoming placement exactly. Under SP
+    the hidden-states arg arrives sharded on the sequence dim (the embedding
+    output layout), so declare the first arg with the SP activation placement;
+    the remaining (plain) args are wrapped as Replicate. The rotary embedding
+    only reads hidden_states for dtype/device, so it is never redistributed.
     """
     state_shardings: dict = {}
     for name, _ in module.named_parameters(recurse=False):
@@ -552,8 +544,7 @@ def _rope_sharding_config(module: nn.Module, *, enable_sp: bool) -> ShardingConf
         )
     return ShardingConfig(
         state_shardings=state_shardings,
-        in_src_shardings=in_shardings,
-        in_dst_shardings=in_shardings,
+        input_shardings=in_shardings,
     )
 
 

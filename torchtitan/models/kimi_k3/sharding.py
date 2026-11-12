@@ -39,7 +39,7 @@ def tp_unsharded_weight_sharding_config(*, token_sharded: bool) -> ShardingConfi
 def mla_attention_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """MLA input boundary in the residual layout."""
     return ShardingConfig(
-        in_src_shardings={"x_TD": residual_activation_placement(enable_sp=enable_sp)},
+        input_shardings={"x_TD": residual_activation_placement(enable_sp=enable_sp)},
     )
 
 
@@ -68,10 +68,8 @@ def inner_kda_sharding_config() -> ShardingConfig:
         "dt_bias_HK": parameter_placement,
     }
     return ShardingConfig(
-        in_src_shardings=kernel_inputs,
-        in_dst_shardings=kernel_inputs,
-        out_src_shardings=head_placement,
-        out_dst_shardings=head_placement,
+        input_shardings=kernel_inputs,
+        output_shardings=head_placement,
         local_spmd=True,
     )
 
@@ -87,7 +85,7 @@ def kda_sharding_config(*, enable_sp: bool) -> ShardingConfig:
             "A_log": parameter_placement,
             "dt_bias": parameter_placement,
         },
-        in_src_shardings={"x_TD": residual_activation_placement(enable_sp=enable_sp)},
+        input_shardings={"x_TD": residual_activation_placement(enable_sp=enable_sp)},
     )
 
 
@@ -95,12 +93,12 @@ def latent_routed_down_sharding_config() -> ShardingConfig:
     """Down-projection into the routed experts' token-sharded latent space."""
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-        in_src_shardings={"input": dense_sequence_parallel_placement()},
+        input_shardings={"input": dense_sequence_parallel_placement()},
     )
 
 
 def latent_routed_up_sharding_config() -> ShardingConfig:
     """Up-projection out of the token-sharded latent space."""
     routed_up = tp_unsharded_weight_sharding_config(token_sharded=True)
-    routed_up.out_src_shardings = dense_sequence_parallel_placement()
+    routed_up.output_shardings = dense_sequence_parallel_placement()
     return routed_up
