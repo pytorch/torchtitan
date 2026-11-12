@@ -135,6 +135,7 @@ def test_worker_executes_group_without_actor_mesh() -> None:
             message_env=_MessageEnvConfig(),
             token_env=token_env_config,
             advantage=_Config(_AdvantageEstimator()),
+            rollout_timeout_s=None,
         )
         worker = _CustomWorker(worker_config)
         released = []
@@ -315,6 +316,7 @@ def test_a_failed_rollout_is_kept_but_left_out_of_the_advantage(
                 message_env=_MessageEnvConfig(),
                 token_env=_TokenEnvConfig(),
                 advantage=AdvantageEstimator.Config(),
+                rollout_timeout_s=None,
             )
         )
         worker.fails_in = fails_in
@@ -351,6 +353,7 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
             message_env=None,
             token_env=None,
             advantage=_Config(None),
+            rollout_timeout_s=None,
         )
     )
     builder = TrainingSampleBuilder.Config().build()
@@ -429,6 +432,7 @@ def test_rollout_sends_and_records_prompt_images() -> None:
             message_env=None,
             token_env=None,
             advantage=_Config(None),
+            rollout_timeout_s=None,
         )
     )
     generate_fn = _GenerateFn()
@@ -449,3 +453,137 @@ def test_rollout_sends_and_records_prompt_images() -> None:
     assert generate_fn.calls[0][0].images == (image,)
     assert rollout.turns[0].prompt_delta_images == (image,)
     assert rollout.turns[0].prompt_delta_image_placeholders == (placeholder,)
+
+
+def _bare_worker(rollout_timeout_s: float | None = None) -> MessageEnvRolloutWorker:
+    return MessageEnvRolloutWorker(
+        SimpleNamespace(
+            rubric=_Config(None),
+            message_env=None,
+            token_env=None,
+            advantage=_Config(None),
+            rollout_timeout_s=rollout_timeout_s,
+        )
+    )
+
+
+class _TwoTurnTokenEnv(_TokenEnv):
+    async def step(self, completion: Completion) -> TokenEnvOutput:
+        if completion.request_id.endswith("turn=1"):
+            return await super().step(completion)
+        return TokenEnvOutput(
+            next_prompt=Prompt(token_ids=[1, 2, 4, 5]),
+            status=RolloutStatus.ONGOING,
+            completion_message={"role": "assistant", "content": "call a tool"},
+        )
+
+
+async def _hang() -> Completion:
+    await asyncio.Event().wait()
+
+
+async def _raise_timeout() -> Completion:
+    raise TimeoutError("connect timed out")
+
+
+@pytest.mark.parametrize(
+    "turn_that_stalls, stall, expected_status, expected_num_turns",
+    [
+        # Past rollout_timeout_s before the first finished turn: no tokens to train, so ERROR_INFRA.
+        (0, _hang, RolloutStatus.ERROR_INFRA, 0),
+        # Past rollout_timeout_s after a turn: ERROR_TIMEOUT, which trains.
+        (1, _hang, RolloutStatus.ERROR_TIMEOUT, 1),
+        # A TimeoutError from the generate call before the deadline is an error of the code.
+        (1, _raise_timeout, RolloutStatus.ERROR_INFRA, 1),
+    ],
+)
+def test_rollout_timeout(
+    turn_that_stalls, stall, expected_status, expected_num_turns
+) -> None:
+    generate_fn, released = _GenerateFn(), []
+
+    async def generate_then_stall(prompt, **kwargs) -> Completion:
+        if kwargs["request_id"].endswith(f"turn={turn_that_stalls}"):
+            return await stall()
+        return await generate_fn(prompt, **kwargs)
+
+    async def release_session_fn(**kwargs) -> None:
+        released.append(kwargs)
+
+    rollout = asyncio.run(
+        asyncio.wait_for(
+            _bare_worker(rollout_timeout_s=0.1)._run_single_rollout(
+                generate_fn=generate_then_stall,
+                release_session_fn=release_session_fn,
+                env=_TwoTurnTokenEnv(),
+                sampling=SamplingConfig(),
+                group_id=7,
+                rollout_id=0,
+            ),
+            timeout=10,
+        )
+    )
+
+    assert (rollout.status, len(rollout.turns)) == (
+        expected_status,
+        expected_num_turns,
+    )
+    # Every ERROR_INFRA rollout records why.
+    assert (rollout.status is RolloutStatus.ERROR_INFRA) == ("error" in rollout.logs)
+    assert released == [{"routing_session_id": "group=7/rollout=0"}]
+
+
+class _StepHangsTokenEnv(_TokenEnv):
+    def __init__(self, hang_in_turn: int) -> None:
+        super().__init__()
+        self.hang_in_turn = hang_in_turn
+
+    async def step(self, completion: Completion) -> TokenEnvOutput:
+        if not completion.request_id.endswith(f"turn={self.hang_in_turn}"):
+            return TokenEnvOutput(
+                next_prompt=Prompt(token_ids=[1, 2, 4, 5]),
+                status=RolloutStatus.ONGOING,
+                completion_message={"role": "assistant", "content": "call a tool"},
+                env_messages=[{"role": "tool", "content": "done"}],
+                env_rewards={"tool_ok": 1.0},
+            )
+        await asyncio.Event().wait()
+        raise AssertionError("rollout_timeout_s should cut this step")
+
+
+@pytest.mark.parametrize("hang_in_turn", [0, 1])
+def test_a_rollout_timeout_in_an_env_step_drops_the_cut_turn(
+    hang_in_turn: int,
+) -> None:
+    # The policy's command never returns: the cut turn has no parsed message yet, so it is
+    # dropped. With no finished turn the rollout is ERROR_INFRA, else ERROR_TIMEOUT.
+    async def release_session_fn(**kwargs) -> None:
+        pass
+
+    rollout = asyncio.run(
+        asyncio.wait_for(
+            _bare_worker(rollout_timeout_s=0.1)._run_single_rollout(
+                generate_fn=_GenerateFn(),
+                release_session_fn=release_session_fn,
+                env=_StepHangsTokenEnv(hang_in_turn),
+                sampling=SamplingConfig(),
+                group_id=7,
+                rollout_id=0,
+            ),
+            timeout=10,
+        )
+    )
+
+    assert rollout.status is (
+        RolloutStatus.ERROR_TIMEOUT if hang_in_turn else RolloutStatus.ERROR_INFRA
+    )
+    # Each finished turn keeps its env reply; the cut turn is gone.
+    finished_turn = (
+        {"role": "assistant", "content": "call a tool"},
+        [{"role": "tool", "content": "done"}],
+        {"tool_ok": 1.0},
+    )
+    assert [
+        (turn.completion_message, turn.env_messages, turn.env_rewards)
+        for turn in rollout.turns
+    ] == [finished_turn] * hang_in_turn

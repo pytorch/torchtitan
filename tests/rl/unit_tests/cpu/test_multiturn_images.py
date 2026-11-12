@@ -175,6 +175,7 @@ def test_rollout_keeps_each_image_on_its_placeholders(
             message_env=None,
             token_env=None,
             advantage=_Config(None),
+            rollout_timeout_s=None,
         )
     )
     env = TokenEnv.Config(max_rollout_tokens=1024).build(

@@ -445,10 +445,29 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
         token_env: TokenEnv.Config
         """`TokenEnv` wraps the `MessageEnv` in `make_env_group`."""
 
+        rollout_timeout_s: float | None = None
+        """Wall-clock limit of one rollout: env init and every turn, not `score_group`. None: no
+        limit. A cut can't tell who hung, so the status depends on whether a turn finished (its
+        env step returned):
+
+            past it after >= 1 finished turn   ERROR_TIMEOUT; the finished turns are scored and trained
+            past it before any finished turn   ERROR_INFRA; no turn to train
+
+        The policy can cause the hang (e.g. a command that never returns), so a cut after a
+        finished turn counts as its failure. The turn being cut is dropped: before its env step
+        returns it has no parsed message, so the rubric would score an empty reply. So a hang in
+        the first env step is `ERROR_INFRA` only because no turn is left to train. `TokenEnv`'s
+        `step_timeout_s` fires after the parse and keeps that turn as `ERROR_TIMEOUT`: set it
+        below this limit to train hung env steps. The deadline counts generation time too, so a
+        loaded generator can cut healthy rollouts. The generator still finishes the request the
+        rollout stopped waiting for. Set it well above the p99 rollout time: a cut biases training
+        toward short rollouts."""
+
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         self._message_env_config = config.message_env
         self._token_env_config = config.token_env
+        self._rollout_timeout_s = config.rollout_timeout_s
         self._renderer: Renderer
 
     async def setup_async(
@@ -556,7 +575,8 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
     ) -> Rollout:
         """Produce a single rollout, alternating between env and generator calls,
         until the env is terminal (env `done`, truncation, errors). An exception ends it as
-        `ERROR_INFRA`, which keeps it out of scoring and training.
+        `ERROR_INFRA`, which keeps it out of scoring and training. A `rollout_timeout_s`
+        expiry after the first finished turn ends it as `ERROR_TIMEOUT` instead (see that field).
 
         For custom logic, users can override this method.
 
@@ -581,71 +601,96 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
         turns: list[RolloutTurn] = []
         status = RolloutStatus.ERROR
         logs: dict[str, Any] = {}
+        # TODO(monarch): a cut generate call is still answered later, at the latest when the
+        # generators close (e.g. a call on a hung generator). If that answer reaches a worker that
+        # already stopped, Monarch fails the generator and the job exits 130
+        # (https://github.com/meta-pytorch/monarch/issues/5301).
+        deadline = asyncio.timeout(self._rollout_timeout_s)
         try:
-            env_step = await env.init()
-            while not env_step.status.is_terminal():
-                turn_rollout_id = RolloutTurnID(
-                    group_id=group_id,
-                    rollout_id=rollout_id,
-                    turn_id=len(turns),
-                )
-
-                # generator call
-                completion = await generate_fn(
-                    prompt=env_step.next_prompt,
-                    request_id=turn_rollout_id.to_string(),
-                    group_id=group_id,
-                    routing_session_id=routing_session_id,
-                    sampling_config=sampling,
-                )
-
-                # env call
-                next_env_step = await env.step(completion)
-
-                # this turn from a token and message perspective
-                turns.append(
-                    RolloutTurn(
-                        rollout_id=turn_rollout_id,
-                        prompt_prefix_len=env_step.next_prompt_prefix_len,
-                        prompt_delta_token_ids=env_step.next_prompt_delta_token_ids,
-                        prompt_delta_images=env_step.next_prompt_delta_images,
-                        prompt_delta_image_placeholders=(
-                            env_step.next_prompt_delta_image_placeholders
-                        ),
-                        prompt_messages=env_step.next_prompt_messages or [],
-                        completion_token_ids=np.asarray(
-                            completion.token_ids, dtype=np.int32
-                        ),
-                        completion_logprobs=np.asarray(
-                            completion.token_logprobs, dtype=np.float32
-                        ),
-                        completion_message=next_env_step.completion_message,
-                        env_messages=next_env_step.env_messages,
-                        env_rewards=next_env_step.env_rewards,
-                        min_policy_version=completion.min_policy_version,
-                        max_policy_version=completion.max_policy_version,
-                        metrics=completion.metrics,
+            async with deadline:
+                env_step = await env.init()
+                while not env_step.status.is_terminal():
+                    turn_rollout_id = RolloutTurnID(
+                        group_id=group_id,
+                        rollout_id=rollout_id,
+                        turn_id=len(turns),
                     )
-                )
 
-                # holds the input for next generation call
-                env_step = next_env_step
+                    # generator call
+                    completion = await generate_fn(
+                        prompt=env_step.next_prompt,
+                        request_id=turn_rollout_id.to_string(),
+                        group_id=group_id,
+                        routing_session_id=routing_session_id,
+                        sampling_config=sampling,
+                    )
+
+                    # env call
+                    next_env_step = await env.step(completion)
+
+                    # this turn from a token and message perspective
+                    turns.append(
+                        RolloutTurn(
+                            rollout_id=turn_rollout_id,
+                            prompt_prefix_len=env_step.next_prompt_prefix_len,
+                            prompt_delta_token_ids=env_step.next_prompt_delta_token_ids,
+                            prompt_delta_images=env_step.next_prompt_delta_images,
+                            prompt_delta_image_placeholders=(
+                                env_step.next_prompt_delta_image_placeholders
+                            ),
+                            prompt_messages=env_step.next_prompt_messages or [],
+                            completion_token_ids=np.asarray(
+                                completion.token_ids, dtype=np.int32
+                            ),
+                            completion_logprobs=np.asarray(
+                                completion.token_logprobs, dtype=np.float32
+                            ),
+                            completion_message=next_env_step.completion_message,
+                            env_messages=next_env_step.env_messages,
+                            env_rewards=next_env_step.env_rewards,
+                            min_policy_version=completion.min_policy_version,
+                            max_policy_version=completion.max_policy_version,
+                            metrics=completion.metrics,
+                        )
+                    )
+
+                    # holds the input for next generation call
+                    env_step = next_env_step
 
             status = env_step.status
         except Exception as error:
-            # An exception is read as a failure outside the policy: `TokenEnv` turns the policy's
-            # failures into statuses (e.g. ERROR_PARSE), and an env answers bad output instead of
-            # raising (`MessageEnv.step`).
-            # TODO: at shutdown, every rollout still generating lands here with a ~40-line remote
-            # traceback. Raise a typed error on generator close and log it at info, without the traceback.
-            logger.exception(
-                "rollout %s/rollout=%d failed after %d turn(s); marking ERROR_INFRA",
-                group_id,
-                rollout_id,
-                len(turns),
-            )
-            status = RolloutStatus.ERROR_INFRA
-            logs["error"] = repr(error)
+            if deadline.expired():
+                # With no turn there are no tokens to train. As ERROR_TIMEOUT it would get a reward,
+                # and the sample builder would drop its whole group for having no completion tokens.
+                status = (
+                    RolloutStatus.ERROR_TIMEOUT if turns else RolloutStatus.ERROR_INFRA
+                )
+                if not turns:
+                    logs[
+                        "error"
+                    ] = "rollout_timeout_s passed before the first finished turn"
+                logger.warning(
+                    "rollout %s/rollout=%d timed out after %d turn(s); marking %s",
+                    group_id,
+                    rollout_id,
+                    len(turns),
+                    status.name,
+                )
+            else:
+                # An exception is read as a failure outside the policy: `TokenEnv` turns the
+                # policy's failures into statuses (e.g. ERROR_PARSE), and an env answers bad output
+                # instead of raising (`MessageEnv.step`).
+                # TODO: at shutdown, every rollout still generating lands here with a ~40-line
+                # remote traceback. Raise a typed error on generator close and log it at info,
+                # without the traceback.
+                logger.exception(
+                    "rollout %s/rollout=%d failed after %d turn(s); marking ERROR_INFRA",
+                    group_id,
+                    rollout_id,
+                    len(turns),
+                )
+                status = RolloutStatus.ERROR_INFRA
+                logs["error"] = repr(error)
 
         try:
             await release_session_fn(routing_session_id=routing_session_id)
