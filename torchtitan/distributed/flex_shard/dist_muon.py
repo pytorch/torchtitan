@@ -230,6 +230,8 @@ class DistMuon(Optimizer):
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
         ns_device: Literal["accelerator"] | None = None,
+        compile_fn: Callable[[Callable[..., Tensor]], Callable[..., Tensor]]
+        | None = None,
     ) -> None:
         self._ns_device = self._resolve_ns_device(ns_device)
         self._prepare_input = _prepare_muon_input
@@ -255,33 +257,34 @@ class DistMuon(Optimizer):
             compute_sharding_by_fqn=compute_sharding_by_fqn,
             bucket_configs=bucket_configs,
         )
-        if all(
+        if compile_fn is not None and all(
             parameter.device.type != "cpu"
             for group in self.param_groups
             for parameter in group["params"]
         ):
-            self.compile()
+            self.compile(compile_fn=compile_fn)
 
-    def compile(self) -> None:
-        """Compile local momentum, direction, and parameter updates.
-
-        This path supports FP32 and BF16 storage and is independent of model
-        compilation. Transport stays eager. Compilation is lazy; CUDA Graph
-        capture is not requested because scratch storage is released each step.
-        """
+    def compile(
+        self,
+        *,
+        compile_fn: Callable[[Callable[..., Tensor]], Callable[..., Tensor]]
+        | None = None,
+    ) -> None:
+        """Compile local updates with Inductor or an integration's transform."""
         if any(
             parameter.dtype not in (torch.float32, torch.bfloat16)
             for group in self.param_groups
             for parameter in group["params"]
         ):
             raise ValueError("DistMuon.compile() requires FP32 or BF16 storage")
-        compile_fn = partial(
-            torch.compile,
-            fullgraph=True,
-            dynamic=False,
-            recompile_limit=256,
-            options={"emulate_precision_casts": True},
-        )
+        if compile_fn is None:
+            compile_fn = partial(
+                torch.compile,
+                fullgraph=True,
+                dynamic=False,
+                recompile_limit=256,
+                options={"emulate_precision_casts": True},
+            )
         self._prepare_input = compile_fn(_prepare_muon_input)
         self._compute_direction = compile_fn(_compute_muon_direction)
         self._apply_parameter_update = compile_fn(_apply_muon_update)
