@@ -23,6 +23,7 @@ from torchtitan.config.transform import (
 )
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
+    ColumnParallelLinear,
     Conv1d,
     DenseFeedForward,
     GatedRMSNorm,
@@ -185,6 +186,21 @@ def _linear(
         bias=bias,
         param_init=param_init or _LINEAR_INIT,
         sharding_config=sharding_config,
+    )
+
+
+def _vision_column_parallel_linear(
+    in_features: int,
+    out_features: int,
+    *,
+    param_init: dict[str, Callable] | None = None,
+) -> ColumnParallelLinear.Config:
+    return ColumnParallelLinear.Config(
+        in_features=in_features,
+        out_features=out_features,
+        bias=False,
+        param_init=param_init or _LINEAR_INIT,
+        sharding_config=vision_colwise_sharding_config(),
     )
 
 
@@ -501,11 +517,8 @@ def _vision_encoder_config(
             sharding_config=vision_attention_sharding_config(rope_cache_dp=spmd.V),
         ),
         mlp=VisionMLP.Config(
-            fc1=_linear(
-                dim,
-                hidden_dim,
-                param_init=_fan_in_linear_init(dim),
-                sharding_config=vision_colwise_sharding_config(),
+            fc1=_vision_column_parallel_linear(
+                dim, hidden_dim, param_init=_fan_in_linear_init(dim)
             ),
             fc2=_vision_row_parallel_linear(
                 hidden_dim, dim, param_init=_fan_in_linear_init(hidden_dim)
@@ -532,11 +545,8 @@ def _vision_encoder_config(
         block=block,
         final_norm=vision_norm,
         projector=KimiK3VisionProjector.Config(
-            linear_1=_linear(
-                merged_dim,
-                merged_dim,
-                param_init=_fan_in_linear_init(merged_dim),
-                sharding_config=vision_colwise_sharding_config(),
+            linear_1=_vision_column_parallel_linear(
+                merged_dim, merged_dim, param_init=_fan_in_linear_init(merged_dim)
             ),
             linear_2=_vision_row_parallel_linear(
                 merged_dim,

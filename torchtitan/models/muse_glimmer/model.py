@@ -18,9 +18,11 @@ from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
-from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
+    invariant_to_replicate,
+    spmd_dense_sp_enabled,
     spmd_local_context,
 )
 from torchtitan.models.base.model import FlopsEstimator
@@ -527,10 +529,20 @@ class MuseGlimmerModel(MultimodalModel):
                 f"grid_thw describes {num_patches} patches, but pixel_values contains "
                 f"{pixel_values.shape[0]}"
             )
+        # The encoder output is CP-invariant; each CP rank consumes it for its own
+        # token shard, so its gradient is summed across CP.
         vision_features_VD = self.vision_adapter(
-            self.vision_encoder(pixel_values, grid_thw=grid_thw)
+            invariant_to_replicate(
+                self.vision_encoder(pixel_values, grid_thw=grid_thw), MeshAxisName.CP
+            )
         )
-        return self.perception_emb_norm(self.vision_projection(vision_features_VD))
+        vision_embeds_VD = self.perception_emb_norm(
+            self.vision_projection(vision_features_VD)
+        )
+        if spmd_dense_sp_enabled():
+            # Each rank selects vision rows for its own token shard.
+            vision_embeds_VD = invariant_to_replicate(vision_embeds_VD, MeshAxisName.TP)
+        return vision_embeds_VD
 
     def _prepare_multimodal_embeds(
         self,

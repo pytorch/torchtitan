@@ -29,6 +29,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from torchtitan.distributed.spmd_types import disable_dense_sp
+
 from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 
