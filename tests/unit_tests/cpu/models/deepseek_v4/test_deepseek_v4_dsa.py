@@ -123,7 +123,10 @@ class TestDSVPackedDocuments(unittest.TestCase):
         ):
             positions = torch.cat([torch.arange(n) for n in lengths])
             for attention_config in attention_configs.values():
-                attention = attention_config.build().double()
+                with torch.device("meta"):
+                    attention = attention_config.build().double()
+                attention.to_empty(device="cpu")
+                attention.init_states(buffer_device=torch.device("cpu"))
                 metadata = attention_config.inner_attention.build_attention_metadata(
                     positions
                 )

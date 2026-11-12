@@ -89,8 +89,8 @@ class AttentionResidual(Function[torch.Tensor]):
         keys_TND = values_float * torch.rsqrt(variance + norm.eps)
         score_weight_D = norm.weight.float() * projection.weight.squeeze(0).float()
         scores_TN = (keys_TND * score_weight_D).sum(dim=-1)
-        probs_T1N = torch.softmax(scores_TN, dim=-1).unsqueeze(1)
-        output_TD = torch.matmul(probs_T1N, values_float).squeeze(1)
+        probs_TN1 = torch.softmax(scores_TN, dim=-1).unsqueeze(-1)
+        output_TD = (probs_TN1 * values_float).sum(dim=1)
         return output_TD.to(values_TND.dtype)
 
 
@@ -211,6 +211,7 @@ class KimiK3Model(MultimodalModel):
 
     @dataclass(kw_only=True, slots=True)
     class Config(MultimodalModel.Config):
+        # pyrefly: ignore [bad-override]
         layers: list[KimiK3TransformerBlock.Config]
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
@@ -226,6 +227,7 @@ class KimiK3Model(MultimodalModel):
                     "fused_binary_activation",
                     "fp32_to_bf16_split",
                     "attention_residual",
+                    "mla_kv",
                 ]
             )
         )

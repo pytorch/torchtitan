@@ -113,7 +113,7 @@ and [`torchtitan_recipes`](torchtitan_recipes/README.md) for the verified recipe
 | [Kimi K2.7](torchtitan/models/kimi_k2_7) | Moonlight-16B-A3B, Kimi-VL-A3B, K2.5 | Text, vision | | |
 | [Kimi K3](torchtitan/models/kimi_k3) | K3 | Text, vision | | Soon |
 | [Muse Glimmer](torchtitan/models/muse_glimmer) | 30B | Text, vision | `muse_glimmer_30b` | ✅ |
-| [Muse-Spark-Open](torchtitan/models/muse_spark) | 816B-A42B | Text, vision, audio | `muse_spark_816b_a42b` | ✅ text |
+| [Muse-Spark-Open](torchtitan/models/muse_spark) | 816B-A42B | Text, vision, audio | `muse_spark_816b_a42b_dist_moe_bf16_spmd_256` | ✅ text |
 | [FLUX](torchtitan/models/flux) | dev, schnell | Text-to-image | `flux_dev`, `flux_schnell` | |
 
 Every model has debug configurations exercised in CI. Verified recipes have
@@ -225,11 +225,11 @@ validated against; see [RELEASE.md](RELEASE.md).
 <details>
 <summary><b>Optional dependencies</b></summary>
 
-- **Low precision (MXFP8, NVFP4):** install a `torchao` nightly matching your
-  `torch` build. It is not in `requirements.txt` so it cannot be resolved
-  against a different `torch`:
+- **Low precision (MXFP8, NVFP4):** install the `torchao` nightly CI pins, from
+  the index matching your `torch` build. It is not in `requirements.txt` so it
+  cannot be resolved against a different `torch`:
   ```bash
-  USE_CPP=0 pip install --pre --upgrade torchao --index-url https://download.pytorch.org/whl/nightly/cu132
+  USE_CPP=0 pip install --pre -r .github/requirements-torchao.txt --index-url https://download.pytorch.org/whl/nightly/cu132
   ```
 - **RL:** `scripts/install_rl_env.sh` installs the vLLM, Monarch, and TorchStore
   nightlies and the FlashAttention build for your GPU. See the

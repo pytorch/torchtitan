@@ -18,6 +18,11 @@ The folder should be organized as follows
       `build_flops_estimator()` estimates work for each raw CPU microbatch.
       `Decoder` subclasses inherit both methods; a new `BaseModel` family
       implements them.
+    - `Decoder.Config.layers` is `list[TransformerBlock.Config]`. If the
+      flavor builders or model code use the model's own block or attention
+      config type, redeclare `layers` (and the block's `attention`) with that
+      type and `# pyrefly: ignore [bad-override]`, rather than narrowing with
+      `isinstance` at each read.
   - `__init__()` consumes the `Config` to build the model.
   - Parameter initialization is handled by the `param_init` system on each module's `Config`. Set `param_init` (a `dict[str, Callable]` mapping parameter names to init functions) on every sub-config in the model flavor builder. `init_states()` auto-recurses into all submodules, so manual recursive calls are not needed. Override `_init_self_buffers()` for device-aware buffer initialization (e.g., RoPE, MoE).
   - List parameters whose numerics need master precision (e.g. ones the HF checkpoint stores in float32) in `preserve_dtype_params` on their module's `Config`; FSDP mixed precision, checkpoint export and RL weight sync never lower their precision. Default it on the component's `Config` when the component always needs it (e.g. GDN `A_log`), or set it in the flavor builder for one instance of a generic module (e.g. Qwen3.5's GDN `GatedRMSNorm`).

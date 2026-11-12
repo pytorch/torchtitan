@@ -18,6 +18,51 @@ from torchtitan.models.base.module import Module
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 
 
+@spmd.register_local_autograd_function
+class _PermuteRows(torch.autograd.Function):
+    """Reorder rows, ``out[i] = x[perm[i]]``, where ``perm`` lists every row once.
+
+    Forward and backward are both gathers.
+
+    Example, 3 rows:
+        perm     = [2, 0, 1]                        out row 0 takes x row 2, and so on
+        x        = [a, b, c]
+        out      = x[perm]        = [c, a, b]       forward
+        grad_out = [gc, ga, gb]                     gc is row c's grad
+        grad_x   = grad_out[inv]  = [ga, gb, gc]    backward, inv = [1, 2, 0]
+
+    Why not plain ``x[perm]``:
+    1. Its backward can't assume ``perm`` is a permutation, so it adds the grads into
+       a zero-filled tensor: a sort, a fill and an accumulate.
+    2. A permutation moves each row once, so gathering by ``inv`` gives the same grads.
+    """
+
+    @staticmethod
+    def forward(  # pyrefly: ignore[bad-override]
+        ctx, x_RD: torch.Tensor, perm_R: torch.Tensor
+    ) -> torch.Tensor:
+        ctx.save_for_backward(perm_R)
+        return x_RD[perm_R]
+
+    @staticmethod
+    def backward(ctx, grad_RD: torch.Tensor):  # pyrefly: ignore[bad-override]
+        (perm_R,) = ctx.saved_tensors
+        return grad_RD[_inverse_permutation(perm_R)], None
+
+
+def _inverse_permutation(perm_R: torch.Tensor) -> torch.Tensor:
+    """Return the permutation that undoes ``perm_R``: ``x[perm_R][inv_R] == x``.
+
+    Example:
+        perm_R = [2, 0, 1]     row 2 moved to position 0, so inv_R[2] = 0
+        inv_R  = [1, 2, 0]
+    """
+    positions_R = torch.arange(
+        perm_R.shape[0], device=perm_R.device, dtype=perm_R.dtype
+    )
+    return torch.empty_like(perm_R).scatter_(0, perm_R, positions_R)
+
+
 @dataclass(frozen=True, kw_only=True)
 class LocalDispatchMetadata:
     """Metadata returned by LocalTokenDispatcher.dispatch() for use in combine()."""
@@ -52,6 +97,15 @@ class LocalTokenDispatcher(Module):
         super().__init__()
         self.num_experts = config.num_experts
         self.top_k = config.top_k
+        # Expert ids are sorted as keys on the narrowest integer type that holds
+        # [0, num_experts): the CUDA radix sort's passes scale with key width, so int64
+        # ids take 8x the passes of uint8 ids. Same order.
+        if config.num_experts <= 256:
+            self._expert_ids_sort_dtype = torch.uint8
+        elif config.num_experts <= 2**15:
+            self._expert_ids_sort_dtype = torch.int16
+        else:
+            self._expert_ids_sort_dtype = torch.int64
 
     def init_buffer(self) -> None:
         """Initialize backend communication buffers, if any."""
@@ -80,7 +134,7 @@ class LocalTokenDispatcher(Module):
         """
         # Reorder the token indices to match the order of the experts where N = T*K
         token_indices_experts_sorted_N = torch.argsort(
-            topk_expert_ids_TK.view(-1), stable=True
+            topk_expert_ids_TK.view(-1).to(self._expert_ids_sort_dtype), stable=True
         )
         topk_scores_experts_sorted_N = topk_scores_TK.view(-1)[
             token_indices_experts_sorted_N
@@ -561,16 +615,20 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
 
         num_global_tokens_per_local_expert_e = t_mat.sum(0)
         return (
-            routed_input_RD[permuted_indices, :],
+            _PermuteRows.apply(routed_input_RD, permuted_indices),
             permuted_indices,
             num_global_tokens_per_local_expert_e,
         )
 
     def _unpermute(self, routed_output_RD, input_shape, permuted_indices):
         """Reverse expert-major reordering."""
-        out_unpermuted_RD = routed_output_RD.new_empty(input_shape)
-        out_unpermuted_RD[permuted_indices, :] = routed_output_RD
-        return out_unpermuted_RD
+        # Undo _permute with a gather by the inverse permutation: the same rows as the
+        # scatter out[permuted_indices] = y, and faster (see _PermuteRows).
+        # input_shape is unused because the gather keeps every row; TorchAO's padded
+        # override of this method needs it.
+        return _PermuteRows.apply(
+            routed_output_RD, _inverse_permutation(permuted_indices)
+        )
 
     # pyrefly: ignore [bad-override]
     def combine(
@@ -801,6 +859,13 @@ class EPDispatchMetadata:
     state: object  # Backend-specific dispatch state.
 
 
+@dataclass(frozen=True, kw_only=True)
+class DeepEPDispatchMetadata(EPDispatchMetadata):
+    """DeepEP dispatch state and per-row router scores."""
+
+    scores_R: torch.Tensor  # noqa: N815
+
+
 class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     """Token dispatcher using DeepEP v2's unified ``ElasticBuffer`` dispatch/combine.
 
@@ -809,11 +874,10 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     from its deduplicated output into expert-major order; expand dispatch already returns
     the static expert-major layout. Combine is synchronized before returning its result.
 
-    Dispatch and combine share one remat policy (``ep_communication``) because combine
-    consumes the handle produced by dispatch. A remat policy replays both unless
-    ``ep_communication`` is saved (the full policy never saves it); a replay
-    must receive rows in the forward's order, so ``init_buffer`` then makes the buffer
-    deterministic (a sort per dispatch).
+    Dispatch replay follows the ``ep_communication`` policy. A replay must receive
+    rows in the forward's order, so ``init_buffer`` makes the buffer deterministic
+    when dispatch is replayed (a sort per dispatch). Combine is a pure reduction
+    and is never replayed.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -850,7 +914,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         from torchtitan.distributed.deepep import deepep  # noqa: F401
 
     def _replays_communication(self) -> bool:
-        """Whether activation remat replays dispatch/combine during backward."""
+        """Whether activation remat replays dispatch during backward."""
         # Without activation remat the regions have no fqn and do not affect execution
         # (remat_should_recompute is then True, since nothing is saved).
         return bool(self._remat_module_fqn) and self.remat_should_recompute(
@@ -861,7 +925,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         """Eagerly create the DeepEP buffer.
 
         Runs after activation checkpointing is applied, so it can make the buffer
-        deterministic when activation remat replays dispatch/combine.
+        deterministic when activation remat replays dispatch.
         """
         ep_group = _ep_process_group()
         assert ep_group is not None
@@ -884,7 +948,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
         routing_map_TE: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, EPDispatchMetadata]:
+    ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
         """Dispatch through the preallocated ElasticBuffer."""
         # Ignore input routing_map_TE. DeepEP returns the number
         # of global routed tokens for every local expert using other inputs.
@@ -898,7 +962,12 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
 
         from torchtitan.distributed.deepep.deepep import dispatch_tokens
 
-        hidden_states_RD, num_global_tokens_per_local_expert_e, state = dispatch_tokens(
+        (
+            hidden_states_RD,
+            num_global_tokens_per_local_expert_e,
+            scores_R,
+            state,
+        ) = dispatch_tokens(
             x_TD,
             topk_expert_ids_TK,
             topk_scores_TK,
@@ -910,29 +979,29 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             cuda_graph_compatible=self.cuda_graph_compatible,
         )
 
-        metadata = EPDispatchMetadata(state=state)
+        metadata = DeepEPDispatchMetadata(state=state, scores_R=scores_R)
         return hidden_states_RD, num_global_tokens_per_local_expert_e, metadata
 
     # pyrefly: ignore [bad-override]
     def combine(
         self,
         routed_output_RD: torch.Tensor,
-        metadata: EPDispatchMetadata,
+        metadata: DeepEPDispatchMetadata,
         x_TD: torch.Tensor,
     ) -> torch.Tensor:
-        """Combine tokens via DeepEP and wait for completion."""
+        """Combine scored tokens via DeepEP and wait for completion."""
         del x_TD
         from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
 
-        # combine_tokens applies routing scores with bare ops.
-        remat.recompute_needs_tensor(routed_output_RD)
-
-        combined_TD = combine_tokens(
-            routed_output_RD,
-            metadata.state,  # pyrefly: ignore [bad-argument-type]
-            remat_region_name=self.remat_region_name("ep_communication.combine"),
-            recompute=self._replays_communication(),
-        )
+        # Replaying unpermute requires retaining or rebuilding W2's output. Wrap
+        # all of combine_tokens in one SAVE region to avoid that replay, saving
+        # only R int64 routing indices for unpermute backward: 8R bytes
+        # (~256 KiB at R=32768).
+        combined_TD = remat.region(
+            combine_tokens,
+            self.remat_region_name("ep_communication.combine"),
+            recompute=False,
+        )(routed_output_RD, metadata.state)
         sync_combine()
         return combined_TD
 

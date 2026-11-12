@@ -61,11 +61,13 @@ def _validator(*, schedule=None, first=True, last=True):
         dp_enabled=False,
         dp_cp_enabled=False,
         activate_spmd=lambda: nullcontext(),
+        get_optional_mesh=lambda axes: None,
     )
     validator.dl_config = SimpleNamespace(max_num_documents=None)
     validator.dp_world_size = 1
     validator.dp_rank = 0
     validator.tokenizer = None
+    validator.vision_processor = None
     validator.seq_len = 8
     validator.num_tokens_per_microbatch = 8
     validator.metrics_processor = SimpleNamespace(
@@ -94,8 +96,8 @@ def _validate_loss(validator, model_parts, prepared, *, step):
     ]
     validator.dl_config.build = lambda **kwargs: _EvalLoader(rows)
     losses = []
-    validator.metrics_processor.log_validation = lambda *, loss, step: losses.append(
-        loss
+    validator.metrics_processor.log_validation = (
+        lambda *, loss, step, extra_metrics: losses.append(loss)
     )
     with patch.object(
         model_parts[0],
@@ -335,7 +337,7 @@ def test_varlen_eval_replays_different_document_counts():
                 metadata = prepared[0][2]["attention_metadata"][VarlenInnerAttention]
                 assert metadata.cu_seq_q.shape == (6,)
                 assert metadata.max_q == metadata.max_k == 8
-                expected = validator._validate_body([model], prepared).clone()
+                expected = validator._validate_body([model], prepared)[0].clone()
                 actual = _validate_loss(
                     validator, [model], prepared, step=step + 1
                 ).clone()
@@ -461,7 +463,11 @@ def _run_pp_train_eval(rank, port, schedule_name, reshard, csv_path):
                     group=mesh["pp"].get_group(),
                 )
             )
-        loss_fn = lambda output, target: (output - target).square().sum()
+        # Accepts loss_metrics like the trainer's _scalar_loss_fn, which the
+        # validator fills through the schedule's per-microbatch loss kwargs.
+        loss_fn = lambda output, target, loss_metrics=None: (
+            (output - target).square().sum()
+        )
         schedule = schedule_cls(
             stages if num_local > 1 else stages[0],
             n_microbatches=4,

@@ -7,11 +7,13 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from monarch.actor import Actor, concurrent_endpoint
+from monarch.actor import Actor, concurrent_endpoint, current_rank
 
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
@@ -28,7 +30,12 @@ class RolloutWorkerActor(Actor):
         *,
         worker_config: RolloutWorker.Config,
         num_threads: int,
+        structured_logger_init_fn: functools.partial[None] | None,
     ) -> None:
+        if structured_logger_init_fn is not None:
+            structured_logger_init_fn(
+                source="rl_rollout_worker", rank=current_rank().rank
+            )
         asyncio.get_running_loop().set_default_executor(
             ThreadPoolExecutor(max_workers=num_threads)
         )
@@ -41,11 +48,13 @@ class RolloutWorkerActor(Actor):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
+        vision_processor_config: VisionProcessor.Config | None = None,
     ) -> None:
         await self._worker.setup_async(
             tokenizer_config=tokenizer_config,
             renderer_config=renderer_config,
             hf_assets_path=hf_assets_path,
+            vision_processor_config=vision_processor_config,
         )
 
     @concurrent_endpoint

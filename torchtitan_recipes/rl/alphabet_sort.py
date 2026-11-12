@@ -38,6 +38,7 @@ from torchtitan.config.transform import (
     MXFP8LinearConverter,
 )
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss_model_config
@@ -183,6 +184,16 @@ def rl_grpo_qwen3_0_6b_varlen_no_compile(*, seq_len: int = 2048) -> Controller.C
     config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
     for model_config in (config.trainer.model, config.generator.model):
         model_config.local_compile.regions = []
+    return config
+
+
+def rl_grpo_qwen3_0_6b_varlen_sglang(*, seq_len: int = 2048) -> Controller.Config:
+    """``rl_grpo_qwen3_0_6b_varlen`` with the SGLang engine (6 GPUs: 4 gen + 2 train)."""
+    # Imported here so the other recipes do not depend on SGLang.
+    from torchtitan.rl.generator.sglang.engine import SGLangEngine
+
+    config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
+    config.generator.engine = SGLangEngine.Config()
     return config
 
 
@@ -340,7 +351,9 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     # Local compile regions do not support batch-invariant mode.
     for model_config in (config.trainer.model, config.generator.model):
         model_config.local_compile.regions = []
-    block_size = config.trainer.model.layers[0].attention.inner_attention.block_size
+    inner_attention = config.trainer.model.layers[0].attention.inner_attention
+    assert isinstance(inner_attention, FlexInnerAttention.Config)
+    block_size = inner_attention.block_size
     config.async_loop.batcher = dataclasses.replace(
         config.async_loop.batcher, per_sample_pad_multiple=block_size
     )
@@ -666,6 +679,9 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     config.override = OverrideConfig(
         imports=["torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"]
     )
+    # Validation beside training would change the step times this recipe measures: validate at the end.
+    config.async_loop.validation.validate_at_step_0 = False
+    config.async_loop.validation.validate_after_training = True
     return config
 
 
@@ -947,4 +963,7 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
     config.generator = dataclasses.replace(
         config.generator, model=generator_model, parallelism=generator_parallelism
     )
+    # Validation beside training would change the step times this recipe measures: validate at the end.
+    config.async_loop.validation.validate_at_step_0 = False
+    config.async_loop.validation.validate_after_training = True
     return config
