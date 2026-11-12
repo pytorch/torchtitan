@@ -369,3 +369,31 @@ def test_clip_grad_norm_combines_gradients_on_different_meshes(
             )
     finally:
         dist.destroy_process_group()
+
+
+def test_build_transport_meshes_reuses_single_axis_and_flattens_once() -> None:
+    import torch.distributed as dist
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.testing._internal.distributed.fake_pg import FakeStore
+
+    dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=4)
+    try:
+        mesh = init_device_mesh("cpu", (2, 2), mesh_dim_names=("dp_shard", "tp"))
+        both_axes = (mesh, ("dp_shard", "tp"))
+        transports = [None, (mesh, ("tp",)), both_axes, both_axes]
+
+        meshes = dist_utils.build_transport_meshes(
+            transports, max_ctas=None, storage_meshes={mesh}
+        )
+
+        assert meshes[0] is None
+        assert meshes[1].get_group() is mesh.get_group("tp")
+        assert meshes[2] is meshes[3]
+        assert meshes[2].mesh_dim_names == ("dp_shard_tp",)
+        assert meshes[2].mesh.tolist() == mesh.mesh.flatten().tolist()
+        with pytest.raises(ValueError, match="max_ctas requires NCCL"):
+            dist_utils.build_transport_meshes(
+                transports, max_ctas=4, storage_meshes={mesh}
+            )
+    finally:
+        dist.destroy_process_group()

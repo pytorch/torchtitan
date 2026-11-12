@@ -31,8 +31,7 @@ def kimi_k3_debugmodel_mm() -> Trainer.Config:
     config = kimi_k3_debugmodel(
         attn_backend="flex", parallelism=ParallelismConfig(expert_parallel_degree=2)
     )
-    # DistMuon rejects TP-produced _StridedShard storage, so the TP coverage
-    # keeps AdamW; kimi_k3_debugmodel_mm_muon covers the default optimizer.
+    # AdamW TP baseline; kimi_k3_debugmodel_mm_muon covers the default optimizer.
     config.optim.optimizer = OptimizersContainer.Config(
         optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
     )
