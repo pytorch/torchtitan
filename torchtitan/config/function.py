@@ -41,7 +41,7 @@ class CallableFunction(Function[R]):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Function.Config):
-        fn: Callable[..., R]
+        fn: Callable[..., Any]
 
     def __init__(self, config: Config) -> None:
         self.fn = config.fn

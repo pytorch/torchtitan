@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import queue
+import shutil
 import tempfile
 import unittest
 import uuid
@@ -19,6 +20,7 @@ from unittest import mock
 
 import fsspec
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 
 import torchtitan.components.checkpointer.torch_checkpointing as manager_module
@@ -39,6 +41,10 @@ from torch_checkpointing.hf.metadata import (
     HuggingFaceSafetensorsDistributedMetadataFormat,
 )
 from torch_checkpointing.logging_utils import checkpoint_logging_context
+from torch_checkpointing.metadata_serialization import (
+    load_distributed_metadata,
+    TorchDistributedMetadataFormat,
+)
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.storage.filesystem import LocalFileSystemStorageConfig
 from torch_checkpointing.storage.fsspec_storage import FsspecStorageConfig
@@ -54,9 +60,11 @@ from torchtitan.components.checkpointer.base import FilesystemCheckpointStorage
 from torchtitan.components.checkpointer.torch_checkpointing import (
     _async_save_config,
     _default_backend_config,
+    _sync_save_config,
     TorchCheckpointingManager,
 )
 from torchtitan.config import CallableFunction
+from torchtitan.config.transform import LoRATransform
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.nn_modules import RMSNorm
 
@@ -1576,3 +1584,125 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 backend_manager.load_calls[0][0],
             )
             manager.close()
+
+
+class _TinyLoRA(nn.Module):
+    """A frozen projection, a trained pretrained projection, an optional
+    adapter, and a buffer."""
+
+    def __init__(self, *, lora: bool = True) -> None:
+        super().__init__()
+        self.proj = nn.Linear(2, 2)
+        self.proj.requires_grad_(False)
+        self.vision = nn.Linear(2, 2)
+        if lora:
+            self.lora_a = nn.Linear(2, 2, bias=False)
+        self.register_buffer("count", torch.rand(1))
+
+
+class TorchCheckpointingModelKeyLocationTest(unittest.TestCase):
+    """Real backend save/load with model_key_location on a world-size-1 group."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._owns_pg = not dist.is_initialized()
+        if cls._owns_pg:
+            dist.init_process_group(
+                backend="gloo", store=dist.HashStore(), rank=0, world_size=1
+            )
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if cls._owns_pg:
+            dist.destroy_process_group()
+
+    def setUp(self) -> None:
+        self.base_folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.base_folder)
+        patcher = mock.patch.object(
+            manager_module, "_async_save_config", _sync_save_config
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _build_manager(
+        self,
+        folder: str,
+        model: nn.Module,
+        *,
+        model_key_location=None,
+        initial_load_path: str | None = None,
+    ) -> TorchCheckpointingManager:
+        config = TorchCheckpointingManager.Config(
+            folder=folder,
+            interval=1,
+            keep_latest_k=0,
+            last_save_model_only=False,
+            initial_load_path=initial_load_path,
+        )
+        if model_key_location is not None:
+            config.model_key_location = CallableFunction.Config(fn=model_key_location)
+        return config.build(
+            model_parts=[model],
+            optimizers=_Stateful(torch.zeros(1)),
+            lr_schedulers=_Stateful(torch.zeros(1)),
+            ema=None,
+            extra_states={},
+            sd_adapter=None,
+            base_folder=self.base_folder,
+        )
+
+    def _saved_model_keys(self, checkpoint_id: str) -> set[str]:
+        metadata = load_distributed_metadata(
+            checkpoint_id,
+            LocalFileSystemStorageConfig().create_storage(),
+            formats=[TorchDistributedMetadataFormat],
+        )
+        assert metadata is not None
+        paths = metadata.metadata[MODEL].nested_path_to_metadata
+        return {".".join(map(str, path)) for path in paths}
+
+    def test_resume_reads_base_then_checkpoint(self) -> None:
+        # A native base without LoRA keys.
+        base_model = _TinyLoRA(lora=False)
+        manager = self._build_manager("base", base_model)
+        manager.save(curr_step=0, last_step=True)
+        manager.close()
+        base = os.path.join(self.base_folder, "base", "step-0")
+
+        location = LoRATransform(trainable_modules=["vision"]).model_key_location
+        model = _TinyLoRA()
+        lora_init = model.lora_a.weight.clone()
+        manager = self._build_manager(
+            "run", model, model_key_location=location, initial_load_path=base
+        )
+        # A fresh start reads the "base" and "checkpoint" params and buffers
+        # from the base; the "new" adapter keeps its initial value.
+        self.assertTrue(manager.load())
+        self.assertTrue(torch.equal(model.proj.weight, base_model.proj.weight))
+        self.assertTrue(torch.equal(model.vision.weight, base_model.vision.weight))
+        self.assertTrue(torch.equal(model.count, base_model.count))
+        self.assertTrue(torch.equal(model.lora_a.weight, lora_init))
+        with torch.no_grad():
+            model.vision.weight.add_(1.0)
+            model.lora_a.weight.add_(1.0)
+            model.count.add_(1.0)
+        manager.save(curr_step=1)
+        manager.close()
+        step_1 = os.path.join(self.base_folder, "run", "step-1")
+        self.assertEqual(
+            {"vision.weight", "vision.bias", "lora_a.weight", "count"},
+            self._saved_model_keys(step_1),
+        )
+
+        resumed = _TinyLoRA()
+        manager = self._build_manager(
+            "run", resumed, model_key_location=location, initial_load_path=base
+        )
+        self.assertTrue(manager.load())
+        self.assertTrue(torch.equal(resumed.proj.weight, base_model.proj.weight))
+        self.assertTrue(torch.equal(resumed.proj.bias, base_model.proj.bias))
+        self.assertTrue(torch.equal(resumed.vision.weight, model.vision.weight))
+        self.assertTrue(torch.equal(resumed.lora_a.weight, model.lora_a.weight))
+        self.assertTrue(torch.equal(resumed.count, model.count))
+        manager.close()

@@ -36,7 +36,12 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.config import OverrideConfig, PrecisionConfig, TrainingConfig
+from torchtitan.config import (
+    CallableFunction,
+    OverrideConfig,
+    PrecisionConfig,
+    TrainingConfig,
+)
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
@@ -695,7 +700,8 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
     or override the pattern with ``MUSE_SPARK_ULTRADATA_JSONL_PATTERN``.
 
     Native torch_checkpointing checkpoints retain LoRA adapters and training state;
-    HF export (``last_save_in_hf``) raises for LoRA models. The default
+    HF export (``last_save_in_hf``) raises for LoRA models. Checkpoints leave
+    out the frozen base, so a resume also loads the HF base. The default
     checkpoint folder is ``muse_spark_ultradata_lora_cp16_128k`` under
     ``--output-dir`` (default: ``outputs``). ``MUSE_SPARK_CHECKPOINT_FOLDER`` overrides it and accepts
     an absolute path. Existing native checkpoints take precedence over
@@ -762,7 +768,11 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
             export_dtype="bfloat16",
         ),
     )
-    config = apply_gb300_lora_dist_moe(config, _ultradata_lora_sft_transform())
+    lora = _ultradata_lora_sft_transform()
+    config.checkpointer.model_key_location = CallableFunction.Config(
+        fn=lora.model_key_location
+    )
+    config = apply_gb300_lora_dist_moe(config, lora)
     # VarlenInnerAttention defaults to cuDNN first; on the 128k global layers it is ~13% slower than FA4.
     for _, inner_attention, _, _ in config.model.traverse(VarlenInnerAttention.Config):
         inner_attention.sdpa_backends = ["FLASH_ATTENTION"]
