@@ -554,8 +554,6 @@ def build_model_config(
     The checkpoint reference defines selection but supplies no KL coefficient.
     Training recipes select that objective independently of the architecture.
     """
-    if parallelism.pipeline_parallel_degree > 1:
-        raise ValueError("Flash-Next does not support pipeline parallelism")
     if parallelism.context_parallel_degree > 1:
         raise ValueError("Flash-Next QSA and PLE do not support context parallelism")
     if parallelism.fsdp_enable_cpu_offloading:
