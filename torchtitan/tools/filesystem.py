@@ -34,10 +34,16 @@ def _resolve(path: str | os.PathLike):
     Imported lazily so pure-local environments never need fsspec, and so a
     missing backend driver (e.g. ``gcsfs`` for ``gs://``) surfaces fsspec's own
     ``ImportError`` at the point of use.
+
+    The filesystem is created with fsspec's listing cache off. The purge
+    thread, async saves and other ranks change a checkpoint folder while the
+    caller keeps probing it, fsspec keeps a separate filesystem instance per
+    thread, and its listing cache never expires by default, so a cached
+    listing would not show those changes.
     """
     from fsspec.core import url_to_fs
 
-    return url_to_fs(path)
+    return url_to_fs(path, use_listings_cache=False)
 
 
 def exists(path: str | os.PathLike) -> bool:

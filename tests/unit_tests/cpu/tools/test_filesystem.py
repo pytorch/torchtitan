@@ -8,9 +8,11 @@ import os
 import tempfile
 import unittest
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 import fsspec
+from fsspec.implementations.memory import MemoryFileSystem
 
 from torchtitan.tools import filesystem
 
@@ -71,6 +73,30 @@ class TestLocalOps(unittest.TestCase):
             filesystem.rmtree(step)
 
 
+class _ListingCachingMemoryFileSystem(MemoryFileSystem):
+    """Memory filesystem that caches listings per instance, as object-store
+    backends (gcsfs, s3fs, adlfs) do. fsspec gives every thread its own
+    instance, so one thread's cached listing misses another thread's changes."""
+
+    protocol = "listingcachingmemory"
+
+    @classmethod
+    def _strip_protocol(cls, path):
+        return super()._strip_protocol(str(path).removeprefix(f"{cls.protocol}://"))
+
+    def ls(self, path, detail=True, **kwargs):
+        key = (self._strip_protocol(path), detail)
+        try:
+            return self.dircache[key]
+        except KeyError:
+            self.dircache[key] = listing = super().ls(path, detail=detail, **kwargs)
+            return listing
+
+    def _rm(self, path):
+        super()._rm(path)
+        self.dircache.clear()  # an instance does see its own deletes
+
+
 class TestRemoteOps(unittest.TestCase):
     """Exercise the fsspec path with the in-memory backend (no gcsfs/network)."""
 
@@ -109,6 +135,30 @@ class TestRemoteOps(unittest.TestCase):
         # A missing remote path must not raise (parity with local rmtree),
         # otherwise a failed purge would kill the background purge thread.
         filesystem.rmtree(f"{self.root}/does-not-exist")
+
+    def test_listdir_sees_a_delete_made_by_another_thread(self):
+        # keep_latest_k lists the checkpoint folder on the main thread, and the
+        # purge thread deletes from it. Answered from fsspec's listing cache,
+        # retention kept re-deleting a checkpoint that was already gone and
+        # never deleted the next one.
+        fsspec.register_implementation(
+            "listingcachingmemory", _ListingCachingMemoryFileSystem, clobber=True
+        )
+        root = f"listingcachingmemory://{self.name}"
+        self._write(f"{root}/step-10/.metadata")
+        self._write(f"{root}/step-15/.metadata")
+        self.assertEqual(sorted(filesystem.listdir(root)), ["step-10", "step-15"])
+
+        with ThreadPoolExecutor(max_workers=1) as purge_thread:
+            purge_thread.submit(filesystem.rmtree, f"{root}/step-10").result()
+
+        self.assertEqual(filesystem.listdir(root), ["step-15"])
+
+    def test_remote_filesystem_has_no_listing_cache(self):
+        # The same guarantee, read off a real backend: the filesystem the
+        # helpers get has fsspec's listing cache switched off.
+        fs, _ = filesystem._resolve(self.root)
+        self.assertFalse(fs.dircache.use_listings_cache)
 
 
 class TestListdirDirectoryMarker(unittest.TestCase):
