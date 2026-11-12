@@ -49,6 +49,7 @@ from torchtitan.config.transform import (
 from torchtitan.config.transform.base import convert_config_type
 from torchtitan.distributed.activation_remat import (
     ActivationRematConfig,
+    BlockRematOverride,
     DefaultActivationRematConfig,
 )
 from torchtitan.models.common.activation import ClampedSwiGLU
@@ -61,8 +62,8 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.attention.cp_attention import (
     AllGatherKVFlexInnerAttention,
     AllGatherKVSlidingWindowFlexInnerAttention,
-    AllGatherKVSlidingWindowVarlenInnerAttention,
     AllGatherKVVarlenInnerAttention,
+    SelectiveGatherKVSlidingWindowVarlenInnerAttention,
     UlyssesFlexInnerAttention,
     UlyssesSlidingWindowFlexInnerAttention,
     UlyssesSlidingWindowVarlenInnerAttention,
@@ -94,8 +95,15 @@ _MUSE_SPARK_FUSED_SWIGLU_OVERRIDE = (
     "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"
 )
 _MUSE_SPARK_DIST_MOE_SAVE_REGIONS = [
-    "attention.inner_attention",
+    # The wildcard also saves regions nested in attention, such as the
+    # selective-gather K/V assembly.
+    "attention.inner_attention*",
     "feed_forward.routed_experts.dist_moe",
+]
+_MUSE_SPARK_MOE_PROJECTION_REGIONS = [
+    "feed_forward.pooler.*",
+    "feed_forward.unpooler.*",
+    "feed_forward.router.*",
 ]
 
 
@@ -112,7 +120,9 @@ def _muse_spark_context_parallel_transform() -> ContextParallelTransform:
     )
 
 
-def _muse_spark_kv_all_gather_context_parallel_transform() -> ContextParallelTransform:
+def _muse_spark_kv_gather_context_parallel_transform() -> ContextParallelTransform:
+    """All-gather K/V, except that sliding-window varlen layers gather only the
+    remote blocks their window reads."""
     return ContextParallelTransform(
         inner_attention_map={
             FlexInnerAttention: AllGatherKVFlexInnerAttention,
@@ -121,7 +131,7 @@ def _muse_spark_kv_all_gather_context_parallel_transform() -> ContextParallelTra
             ),
             VarlenInnerAttention: AllGatherKVVarlenInnerAttention,
             SlidingWindowVarlenInnerAttention: (
-                AllGatherKVSlidingWindowVarlenInnerAttention
+                SelectiveGatherKVSlidingWindowVarlenInnerAttention
             ),
         },
     )
@@ -503,10 +513,10 @@ def _muse_spark_816b_dist_moe_spmd(
     if context_parallel_degree > 1:
         config = apply_transforms(
             config,
-            [_muse_spark_kv_all_gather_context_parallel_transform()],
+            [_muse_spark_kv_gather_context_parallel_transform()],
         )
-    # KV all-gather keeps queries sequence-sharded while making the complete KV
-    # sequence available to attention. This preserves Muse global/sliding
+    # KV gather keeps queries sequence-sharded while making the KV each query
+    # reads available to attention. This preserves Muse global/sliding
     # attention semantics without a query all-to-all. With Flex-Flash, the
     # global and sliding layers use independently tuned block-mask geometry.
     if attn_backend == "flex":
@@ -528,22 +538,27 @@ def _muse_spark_816b_dist_moe_spmd(
 
 
 def _muse_spark_816b_dist_moe_spmd_64(
-    *, fake_backend: bool, expert_precision: Literal["bf16", "mxfp8"]
+    *,
+    fake_backend: bool,
+    expert_precision: Literal["bf16", "mxfp8"],
+    context_parallel_degree: int,
 ) -> Trainer.Config:
-    """Configure 32K Dist-MoE SPMD on 64 GPUs: DP8, CP8, EP64.
+    """Configure 32K Dist-MoE SPMD on 64 GPUs: FSDP over 64 / CP ranks, CP, EP64.
 
-    It uses FA4 varlen attention with K/V all-gather CP, shards the token
+    It uses FA4 varlen attention with K/V all-gather CP for global layers and
+    selective K/V gather for sliding-window layers, shards the token
     embedding and lm_head vocab over CP, and keeps the Adam moments in pinned
-    host memory.
+    host memory. Selective gather needs the ranks of each CP group in one
+    NVLink domain.
     """
     config = _muse_spark_816b_dist_moe_spmd(
         seq_len=32 * 1024,
         global_batch_size=64,
-        data_parallel_shard_degree=8,
+        data_parallel_shard_degree=64 // context_parallel_degree,
         # TorchTitan has no asynchronous MXFP8 TP path, so MXFP8 with TP would
         # expose TP communication.
         tensor_parallel_degree=1,
-        context_parallel_degree=8,
+        context_parallel_degree=context_parallel_degree,
         expert_parallel_degree=64,
         fake_backend=fake_backend,
         attn_backend="varlen",
@@ -556,9 +571,7 @@ def _muse_spark_816b_dist_moe_spmd_64(
         remat_save_regions=[
             *_MUSE_SPARK_DIST_MOE_SAVE_REGIONS,
             "attention.*",
-            "feed_forward.pooler.*",
-            "feed_forward.unpooler.*",
-            "feed_forward.router.*",
+            *_MUSE_SPARK_MOE_PROJECTION_REGIONS,
         ],
         expert_precision=expert_precision,
     )
@@ -591,25 +604,142 @@ def _muse_spark_816b_dist_moe_spmd_64(
 def muse_spark_816b_a42b_dist_moe_bf16_spmd_64() -> Trainer.Config:
     """Configure 32K BF16 Dist-MoE SPMD with varlen attention on 64 GPUs."""
     return _muse_spark_816b_dist_moe_spmd_64(
-        fake_backend=False, expert_precision="bf16"
+        fake_backend=False, expert_precision="bf16", context_parallel_degree=8
     )
 
 
 def muse_spark_816b_a42b_dist_moe_bf16_spmd_64_fake() -> Trainer.Config:
     """Validate the logical-64 BF16 SPMD recipe with FakePG."""
-    return _muse_spark_816b_dist_moe_spmd_64(fake_backend=True, expert_precision="bf16")
+    return _muse_spark_816b_dist_moe_spmd_64(
+        fake_backend=True, expert_precision="bf16", context_parallel_degree=8
+    )
 
 
 def muse_spark_816b_a42b_dist_moe_mxfp8_spmd_64() -> Trainer.Config:
     """Configure 32K MXFP8 Dist-MoE SPMD with varlen attention on 64 GPUs."""
     return _muse_spark_816b_dist_moe_spmd_64(
-        fake_backend=False, expert_precision="mxfp8"
+        fake_backend=False, expert_precision="mxfp8", context_parallel_degree=8
     )
 
 
 def muse_spark_816b_a42b_dist_moe_mxfp8_spmd_64_fake() -> Trainer.Config:
     """Validate the logical-64 MXFP8 SPMD recipe with FakePG."""
     return _muse_spark_816b_dist_moe_spmd_64(
+        fake_backend=True, expert_precision="mxfp8", context_parallel_degree=8
+    )
+
+
+def _muse_spark_816b_dist_moe_spmd_64_benchmark(
+    *, fake_backend: bool, expert_precision: Literal["bf16", "mxfp8"]
+) -> Trainer.Config:
+    """Configure the fastest 64-GPU settings we measured. Benchmark only.
+
+    Forced balanced routing replaces the token-choice routers, so this does not
+    train a usable model. It runs DP32, CP2, and EP64 with 2 microbatches per
+    step, selective K/V gather in the sliding-window layers, activation
+    offload, FSDP symmetric memory, and a CUDA graph for the optimizer step.
+    Init is random. Data is c4_test, tokenized with the Muse Spark Open
+    tokenizer: stage its files at ``./assets/hf/Muse-Spark-Open-816B-A42B``.
+
+    Launch:
+    - Set ``NCCL_NVLS_ENABLE=1``. FSDP symmetric memory uses NVLS.
+    - Set ``PYTORCH_ALLOC_CONF=pinned_max_round_threshold_mb:1``, so pinned
+      host buffers above 1 MiB are not rounded up to a power of two.
+    - Put each CP group in one NVLink domain. Selective gather copies K/V
+      blocks between the GPUs of a CP group with copy engines.
+    - With FSDP symmetric memory and EP, ``destroy_process_group`` can hang
+      after training ends (an NCCL issue). Skip it. Our launcher wrapped
+      ``Trainer.close`` to call ``os._exit(0)`` after a successful close.
+
+    Dependencies:
+    - PyTorch nightly from 2026-11-20 or later. It has pytorch/pytorch#205180,
+      which activation offload calls, and #204942 (without it step 1 ran out
+      of memory at DP8/CP8), #204750, and #204752.
+    - attention-gym with meta-pytorch/attention-gym#651.
+    - torch_remat and dist_moe at their latest versions (dist_moe with its
+      MXFP8 fix).
+    """
+    config = _muse_spark_816b_dist_moe_spmd_64(
+        fake_backend=fake_backend,
+        expert_precision=expert_precision,
+        context_parallel_degree=2,
+    )
+    # The fake recipe already forces routing.
+    if not fake_backend:
+        _use_forced_balanced_routing(cast(MuseSparkModel.Config, config.model))
+    # Forced routing balances the EP load, so 2x scratch is enough.
+    config.dist_moe_runtime = replace(
+        config.dist_moe_runtime,
+        activation_slot_capacity_factor=0.0,
+        scratch_capacity_factor=2.0,
+    )
+    # The fastest policies we measured: save and offload the attention
+    # regions, and with MXFP8 also the MoE projections.
+    offload_regions = ["attention.*"]
+    if expert_precision == "mxfp8":
+        offload_regions += _MUSE_SPARK_MOE_PROJECTION_REGIONS
+    # Keep the last block on GPU: only the loss runs between its forward and
+    # its backward, so its copies could not overlap compute.
+    num_layers = len(cast(MuseSparkModel.Config, config.model).layers)
+    config.activation_remat = ActivationRematConfig(
+        save_regions=[*_MUSE_SPARK_DIST_MOE_SAVE_REGIONS, *offload_regions],
+        offload_block_input=True,
+        offload_regions=offload_regions,
+        block_overrides=[
+            BlockRematOverride(
+                blocks=[f"layers.{num_layers - 1}"],
+                offload_block_input=False,
+                offload_regions=[],
+            ),
+        ],
+    )
+    # Keep the Adam moments on the GPU. The optimizer CUDA graph fits only with
+    # training.accelerator_graph_per_microbatch_group; a whole-step graph runs
+    # out of memory.
+    config.optim.optimizer.optimizers = [
+        replace(cast(AdamW.Config, optimizer), moment_cpu_offload_fraction=0.0)
+        for optimizer in config.optim.optimizer.optimizers
+    ]
+    config.optim.enable_accelerator_graph = True
+    config.debug.seed = 42
+    if fake_backend:
+        # FakePG has no NCCL communicator for symmetric memory.
+        return config
+    config.parallelism.fsdp_symm_mem_scope = "all"
+    config.checkpointer = None
+    config.dataloader = replace(
+        config.dataloader,
+        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        shuffle=False,
+    )
+    config.training.steps = 100
+    return config
+
+
+def muse_spark_816b_a42b_dist_moe_bf16_spmd_64_benchmark() -> Trainer.Config:
+    """Benchmark 32K BF16 Dist-MoE on 64 GPUs with forced routing."""
+    return _muse_spark_816b_dist_moe_spmd_64_benchmark(
+        fake_backend=False, expert_precision="bf16"
+    )
+
+
+def muse_spark_816b_a42b_dist_moe_bf16_spmd_64_benchmark_fake() -> Trainer.Config:
+    """Validate the logical-64 BF16 benchmark recipe with FakePG."""
+    return _muse_spark_816b_dist_moe_spmd_64_benchmark(
+        fake_backend=True, expert_precision="bf16"
+    )
+
+
+def muse_spark_816b_a42b_dist_moe_mxfp8_spmd_64_benchmark() -> Trainer.Config:
+    """Benchmark 32K MXFP8 Dist-MoE on 64 GPUs with forced routing."""
+    return _muse_spark_816b_dist_moe_spmd_64_benchmark(
+        fake_backend=False, expert_precision="mxfp8"
+    )
+
+
+def muse_spark_816b_a42b_dist_moe_mxfp8_spmd_64_benchmark_fake() -> Trainer.Config:
+    """Validate the logical-64 MXFP8 benchmark recipe with FakePG."""
+    return _muse_spark_816b_dist_moe_spmd_64_benchmark(
         fake_backend=True, expert_precision="mxfp8"
     )
 
