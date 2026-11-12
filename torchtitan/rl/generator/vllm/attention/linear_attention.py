@@ -14,10 +14,11 @@ each family supplies its state shapes, dtypes and copy functions.
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from enum import auto, Enum
-from typing import Any, TypeVar
+from typing import Any, TYPE_CHECKING, TypeVar
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -27,8 +28,14 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+from vllm.v1.worker.utils import AttentionGroup
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+
+if TYPE_CHECKING:
+    from torchtitan.rl.generator.vllm.worker import TorchTitanCudaGraphManager
 
 
 class LinearAttentionExecutionPath(Enum):
@@ -47,6 +54,37 @@ class TorchTitanLinearAttentionMetadata(GDNAttentionMetadata):
     # Read by packed steps only: the decode requests' slots for the decode kernel;
     # the chunk kernel reads the inherited prefill_* fields (see `_stage_decode_split`).
     decode_state_indices: torch.Tensor | None = None
+
+
+def get_linear_attention_metadata(
+    prefix: str,
+) -> TorchTitanLinearAttentionMetadata | None:
+    """Return this step's metadata for the GDN/KDA layer ``prefix``, or None if vLLM built none.
+
+    vLLM's warmup runs build no attention metadata, and its kernel-autotune runs
+    (``is_profile`` dummy runs) build none for any linear-attention layer:
+
+      no metadata at all                          -> None
+      no linear-attention layer has metadata      -> None
+      other linear-attention layers have it       -> RuntimeError
+    """
+    attn_metadata = get_forward_context().attn_metadata
+    if attn_metadata is None:
+        return None
+    assert isinstance(attn_metadata, dict)
+    if prefix not in attn_metadata:
+        if any(
+            isinstance(metadata, TorchTitanLinearAttentionMetadata)
+            for metadata in attn_metadata.values()
+        ):
+            raise RuntimeError(
+                f"No attention metadata for {prefix}, but other "
+                "linear-attention layers have it."
+            )
+        return None
+    metadata = attn_metadata[prefix]
+    assert isinstance(metadata, TorchTitanLinearAttentionMetadata)
+    return metadata
 
 
 class TorchTitanLinearAttentionBackend(AttentionBackend):
@@ -78,12 +116,12 @@ class TorchTitanLinearAttentionMetadataBuilder(
         cls, vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec
     ) -> AttentionCGSupport:
         parallel = vllm_config.parallel_config
-        # DP>1 keeps FULL: TorchTitanCudagraphDispatcher.dispatch replays the mixed
+        # DP>1 keeps FULL: TorchTitanCudaGraphManager.dispatch replays the mixed
         # graph for padded decode ranks. Not in batch-invariant mode: the packed kernels
         # with cached state don't match the decode kernels bitwise (measured for GDN;
         # KDA assumed).
         # TODO: once they match, drop the batch-invariant clauses here and in
-        # TorchTitanCudagraphDispatcher.dispatch.
+        # TorchTitanCudaGraphManager.dispatch.
         if parallel.data_parallel_size != 1 and is_in_batch_invariant_mode():
             return AttentionCGSupport.UNIFORM_BATCH
         return AttentionCGSupport.ALWAYS
@@ -135,7 +173,7 @@ class TorchTitanLinearAttentionMetadataBuilder(
         self.zero_state_block_column = torch.zeros(
             self.num_reqs_capacity, 1, device=device, dtype=torch.long
         )
-        # TorchTitanGPUModelRunner sets this before each build: True when the step
+        # TorchTitanHybridModelState sets this before each build: True when the step
         # replays a FULL graph captured for packed batches.
         self.replays_packed_graph = False
 
@@ -162,7 +200,7 @@ class TorchTitanLinearAttentionMetadataBuilder(
                     "Linear attention (GDN/KDA) sequence length exceeds the state "
                     f"block-table capacity; got {m.max_seq_len} and "
                     f"{max_state_seq_len}. A request is at most max_model_len long, "
-                    "and TorchTitanGPUModelRunner._dummy_run caps capture requests there."
+                    "and vLLM splits a capture's tokens evenly over its requests."
                 )
         # vLLM's `mamba_get_block_table_tensor`, one column: "align" keeps the
         # running state in the request's last block, "none" in its only one.
@@ -329,6 +367,59 @@ class TorchTitanLinearAttentionMetadataBuilder(
         return metadata
 
 
+class TorchTitanHybridModelState(MambaHybridModelState):
+    """vLLM's hybrid model state, telling the GDN/KDA builders which FULL graph replays.
+
+    A FULL replay must build the path its graph was captured with. vLLM captures each
+    graph with its widest query as ``max_query_len``, and the builder picks from it:
+
+      decode graph, n requests     max_query_len 1    single-token path
+      mixed graph, 1 token         max_query_len 1    single-token path
+      mixed graph, n > 1 tokens    max_query_len n    packed path
+
+    Example: 3 decodes padded into the 8-token mixed graph have ``max_query_len`` 1, but
+    that graph runs the packed kernels. This state sets ``replays_packed_graph``, so the
+    builders build packed.
+
+    TODO: drop once vLLM passes the replayed graph's descriptor to
+    ModelState.prepare_attn (today it passes only the CUDA-graph mode).
+    """
+
+    # Set by TorchTitanGPUModelRunner.initialize_kv_cache, before the first FULL replay.
+    cudagraph_manager: "TorchTitanCudaGraphManager"
+
+    def prepare_attn(
+        self,
+        input_batch: InputBatch,
+        cudagraph_mode: CUDAGraphMode,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+        attn_groups: list[list[AttentionGroup]],
+        *args,
+        **kwargs,
+    ) -> dict[str, Any]:
+        replays_packed_graph = False
+        if cudagraph_mode == CUDAGraphMode.FULL:
+            graph = self.cudagraph_manager.last_dispatched_descriptor
+            replays_packed_graph = (
+                graph.uniform_token_count is None and graph.num_tokens > 1
+            )
+        for groups in attn_groups:
+            for group in groups:
+                if group.backend is TorchTitanLinearAttentionBackend:
+                    for builder in group.metadata_builders:
+                        builder.replays_packed_graph = replays_packed_graph
+        return super().prepare_attn(
+            input_batch,
+            cudagraph_mode,
+            block_tables,
+            slot_mappings,
+            attn_groups,
+            *args,
+            **kwargs,
+        )
+
+
 _StateShapeT = TypeVar("_StateShapeT", bound=tuple)
 
 
@@ -365,6 +456,7 @@ def configure_hybrid_state(
         return {mamba_type: copy_funcs for mamba_type in mamba_types}
 
     model_cls.is_hybrid = True
+    model_cls.get_model_state_cls = classmethod(lambda cls: TorchTitanHybridModelState)
     model_cls.get_mamba_state_shape_from_config = classmethod(
         lambda cls, vllm_config: get_state_shape(vllm_config)
     )

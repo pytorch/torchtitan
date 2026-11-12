@@ -269,6 +269,7 @@ def test_vllm_native_mla_decode_weights_follow_weight_sync(tmp_path) -> None:
         attention.is_aiter_triton_fp4_bmm_enabled = False
         attention.is_aiter_triton_fp8_bmm_enabled = False
         attention.dcp_q_replicate = False
+        attention.dcp_manager = None
         attention.quant_config = None
         attention.kv_lora_rank = 5
         attention.num_heads = 2
@@ -279,7 +280,8 @@ def test_vllm_native_mla_decode_weights_follow_weight_sync(tmp_path) -> None:
             attention.register_buffer(name, torch.tensor(0.0), persistent=False)
         block.vllm_mla = attention
 
-        attention.process_weights_after_loading(torch.bfloat16)
+        attention.act_dtype = torch.bfloat16
+        attention.process_weights_after_loading()
 
         assert not attention.state_dict()
         assert {"W_UK_T", "W_UV"} <= {name for name, _ in attention.named_buffers()}
@@ -307,11 +309,11 @@ def test_vllm_native_mla_rejects_copied_decode_weights() -> None:
     torch.nn.Module.__init__(attention)
     attention.kv_b_proj = _VLLMKVBProj(wkv_b)
 
-    def copy_decode_weights(self, act_dtype) -> None:
+    def copy_decode_weights(self) -> None:
         self.W_UK_T = nn.Parameter(torch.zeros(2, 3, 5), requires_grad=False)
         self.W_UV = nn.Parameter(torch.zeros(2, 5, 4), requires_grad=False)
 
     with mock.patch.object(
         VLLMNativeMLAAttention, "process_weights_after_loading", copy_decode_weights
     ), pytest.raises(AssertionError, match="must be a view of wkv_b.weight"):
-        attention.process_weights_after_loading(torch.bfloat16)
+        attention.process_weights_after_loading()

@@ -9,7 +9,6 @@ from dataclasses import dataclass
 import torch
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     is_conv_state_dim_first,
@@ -36,9 +35,9 @@ from torchtitan.rl.generator.attention.kda import (
 )
 from torchtitan.rl.generator.vllm.attention.linear_attention import (
     configure_hybrid_state,
+    get_linear_attention_metadata,
     LinearAttentionExecutionPath,
     TorchTitanLinearAttentionBackend,
-    TorchTitanLinearAttentionMetadata,
     unique_state_shape,
 )
 
@@ -193,12 +192,9 @@ class VLLMInnerKDA(InnerAttention, MambaBase):
         dt_bias_HK: torch.Tensor,
         output_THK: torch.Tensor,
     ) -> None:
-        attn_metadata = get_forward_context().attn_metadata
-        if attn_metadata is None:
+        metadata = get_linear_attention_metadata(self.prefix)
+        if metadata is None:
             return
-        assert isinstance(attn_metadata, dict)
-        metadata = attn_metadata[self.prefix]
-        assert isinstance(metadata, TorchTitanLinearAttentionMetadata)
 
         num_actual_tokens = metadata.num_actual_tokens
         if num_actual_tokens == 0:

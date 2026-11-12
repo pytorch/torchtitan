@@ -24,6 +24,7 @@ import torch
 
 import torchtitan.rl.generator.generator as generator_module
 import torchtitan.rl.generator.vllm.engine as vllm_engine_module
+import vllm.v1.worker.gpu.cudagraph_utils as cudagraph_utils
 from renderers import PlaceholderRange
 from torchstore import RankRole
 from torchtitan.components.optim import AdamW
@@ -49,7 +50,7 @@ from torchtitan.rl.generator.vllm.engine import (
 )
 from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.generator.vllm.worker import (
-    TorchTitanCudagraphDispatcher,
+    TorchTitanCudaGraphManager,
     TorchTitanGPUWorker,
 )
 from torchtitan.rl.observability import metrics as m
@@ -771,7 +772,6 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dic
     monkeypatch.setattr(vllm_engine_module, "EngineArgs", engine_args)
     monkeypatch.setattr(vllm_engine_module, "LLMEngine", Mock())
     monkeypatch.setattr(vllm_engine_module, "register_to_vllm", Mock())
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     config.engine.build(
         model=config.model,
         parallelism=config.parallelism,
@@ -847,7 +847,8 @@ def test_expert_sequence_parallel_padding_filters_cuda_graph_sizes():
         expert_sequence_parallel_size=parallelism.expert_sequence_parallel_size,
     )
 
-    assert cfg.cudagraph_capture_sizes == [4, 8]
+    assert cfg.prefill_cudagraph_capture_token_sizes == [4, 8]
+    assert cfg.decode_cudagraph_capture_request_sizes == [4, 8]
 
 
 def test_expert_sequence_parallel_padding_keeps_small_cuda_graph_batches():
@@ -857,8 +858,10 @@ def test_expert_sequence_parallel_padding_keeps_small_cuda_graph_batches():
         expert_sequence_parallel_size=8,
     )
 
-    assert cfg.cudagraph_capture_sizes[0] == 8
-    assert all(size % 8 == 0 for size in cfg.cudagraph_capture_sizes)
+    assert cfg.prefill_cudagraph_capture_token_sizes[0] == 8
+    assert all(size % 8 == 0 for size in cfg.prefill_cudagraph_capture_token_sizes)
+    # max_num_seqs is 1, not a multiple of 8: no decode graph.
+    assert cfg.decode_cudagraph_capture_request_sizes == []
 
 
 def test_expert_sequence_parallel_padding_rejects_no_valid_cuda_graph_sizes():
@@ -881,33 +884,22 @@ def test_expert_sequence_parallel_padding_disabled_without_ep():
     assert parallelism.expert_sequence_parallel_size == 1
 
 
-@pytest.mark.parametrize(
-    "num_tokens,valid_modes,batch_invariant,expected",
-    [
-        (2, None, False, (CUDAGraphMode.FULL, True)),
-        # 3 decodes pad to 8, past the largest decode graph (2): mixed graph.
-        (3, None, False, (CUDAGraphMode.FULL, False)),
-        # Batch-invariant runs keep them eager on the decode kernels.
-        (3, None, True, (CUDAGraphMode.NONE, False)),
-        # DP sync pads a decoding rank to a peer's batch and allows only FULL:
-        # a decode graph up to the largest one, else the mixed graph.
-        (2, {CUDAGraphMode.FULL}, False, (CUDAGraphMode.FULL, True)),
-        (16, {CUDAGraphMode.FULL}, True, (CUDAGraphMode.FULL, False)),
-    ],
-)
-def test_full_mode_decode_dispatch(
-    monkeypatch, num_tokens, valid_modes, batch_invariant, expected
-):
+def _full_mode_graph_manager(monkeypatch) -> TorchTitanCudaGraphManager:
+    """A FULL-mode manager on CPU: mixed graphs of 1, 2, 8, 16 tokens, decode graphs of
+    1 and 2 requests, marked captured so ``dispatch`` returns graphs."""
+    # vLLM's manager reads its pipeline stage; CPU tests set up no process groups.
     monkeypatch.setattr(
-        "torchtitan.rl.generator.vllm.worker.is_in_batch_invariant_mode",
-        lambda: batch_invariant,
+        cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
     )
     # An explicit device: CPU CI has no platform for vLLM to infer one from.
     config = VllmConfig(device_config=DeviceConfig(device="cpu"))
     config.compilation_config = CompilationConfig(
         mode=CompilationMode.NONE,
         cudagraph_mode=CUDAGraphMode.FULL,
-        cudagraph_capture_sizes=[1, 2, 8, 16],
+        prefill_cudagraph_capture_token_sizes=[1, 2, 8, 16],
+        decode_cudagraph_capture_request_sizes=[1, 2],
         max_cudagraph_capture_size=16,
     )
     config.scheduler_config = SchedulerConfig(
@@ -916,13 +908,58 @@ def test_full_mode_decode_dispatch(
         max_num_batched_tokens=16,
         is_encoder_decoder=False,
     )
-    dispatcher = TorchTitanCudagraphDispatcher(config)
-    dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)
-
-    mode, descriptor = dispatcher.dispatch(
-        num_tokens, uniform_decode=True, valid_modes=valid_modes
+    manager = TorchTitanCudaGraphManager(
+        config, torch.device("cpu"), CUDAGraphMode.FULL, decode_query_lens={1: 4}
     )
-    assert (mode, descriptor.uniform) == expected
+    manager._graphs_captured = True
+    return manager
+
+
+def test_full_mode_captures_decode_graphs_next_to_mixed_graphs(monkeypatch):
+    manager = _full_mode_graph_manager(monkeypatch)
+    captured = [
+        (descriptor.num_tokens, descriptor.uniform_token_count)
+        for descriptor in manager._capture_descs[CUDAGraphMode.FULL]
+    ]
+    # Widest first. uniform_token_count 1 marks a decode graph.
+    assert captured == [(16, None), (8, None), (2, 1), (2, None), (1, 1), (1, None)]
+
+
+@pytest.mark.parametrize(
+    "num_reqs,num_tokens,uniform_token_count,batch_invariant,expected",
+    [
+        (2, 2, 1, False, (CUDAGraphMode.FULL, 2, 1)),
+        # 3 decodes are past the largest decode graph (2): the 8-token mixed graph.
+        (3, 3, 1, False, (CUDAGraphMode.FULL, 8, None)),
+        # Batch-invariant runs keep them eager on the decode kernels.
+        (3, 3, 1, True, (CUDAGraphMode.NONE, 3, None)),
+        # DP pads 1 decode to a peer's 2: the 2-request decode graph.
+        (1, 2, 1, False, (CUDAGraphMode.FULL, 2, 1)),
+        # A prefill takes a mixed graph, batch-invariant or not.
+        (1, 5, None, True, (CUDAGraphMode.FULL, 8, None)),
+    ],
+)
+def test_full_mode_decode_dispatch(
+    monkeypatch, num_reqs, num_tokens, uniform_token_count, batch_invariant, expected
+):
+    monkeypatch.setattr(
+        "torchtitan.rl.generator.vllm.worker.is_in_batch_invariant_mode",
+        lambda: batch_invariant,
+    )
+    manager = _full_mode_graph_manager(monkeypatch)
+    # With DP, vLLM dispatches again after the ranks agree on a size, so the
+    # model state must read the last dispatch: run a different one first.
+    manager.dispatch(1, 1, 1, num_active_loras=0)
+
+    descriptor = manager.dispatch(
+        num_reqs, num_tokens, uniform_token_count, num_active_loras=0
+    )
+    assert (
+        descriptor.cg_mode,
+        descriptor.num_tokens,
+        descriptor.uniform_token_count,
+    ) == expected
+    assert manager.last_dispatched_descriptor is descriptor
 
 
 def test_only_weights_use_cumem_allocator(monkeypatch):
@@ -970,7 +1007,7 @@ def test_cuda_graph_decode_only_capture_sizes_cover_max_num_seqs():
         max_model_len=4096,
         expert_sequence_parallel_size=1,
     )
-    sizes = cfg.cudagraph_capture_sizes
+    sizes = cfg.decode_cudagraph_capture_request_sizes
     assert 40 in sizes  # 34 sequences pad to 40, not 64
     assert sizes[-1] == 500  # a full decode batch has its own graph
 
@@ -984,10 +1021,11 @@ def test_cuda_graph_full_mode_extends_capture_sizes_to_chunk():
         expert_sequence_parallel_size=1,
         max_num_batched_tokens=16384,
     )
-    sizes = cfg.cudagraph_capture_sizes
+    sizes = cfg.prefill_cudagraph_capture_token_sizes
     assert 40 in sizes  # 34 sequences pad to 40, not 64
-    assert 500 in sizes  # a full decode batch has its own graph
     assert sizes[-1] == 16384  # the largest prefill chunk is graphed
+    # Decode graphs stop at a full decode batch, which has its own graph.
+    assert cfg.decode_cudagraph_capture_request_sizes[-1] == 500
 
 
 def test_cuda_graph_full_mode_caps_sizes_at_the_largest_step():
@@ -999,10 +1037,10 @@ def test_cuda_graph_full_mode_caps_sizes_at_the_largest_step():
     )
     # Packed prefills reach the 2048-token budget, so it is graphed.
     cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(**kwargs)
-    assert cfg.cudagraph_capture_sizes[-2:] == [1536, 2048]
+    assert cfg.prefill_cudagraph_capture_token_sizes[-2:] == [1536, 2048]
     one_request = {**kwargs, "max_num_seqs": 1}
     cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(**one_request)
-    assert cfg.cudagraph_capture_sizes[-2:] == [992, 1000]
+    assert cfg.prefill_cudagraph_capture_token_sizes[-2:] == [992, 1000]
     with pytest.raises(ValueError, match="no step reaches"):
         VLLMCudaGraphConfig(
             mode="FULL", capture_sizes=[512, 2048]
@@ -1010,7 +1048,7 @@ def test_cuda_graph_full_mode_caps_sizes_at_the_largest_step():
     cfg = VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY").get_vllm_compilation_config(
         **{**kwargs, "max_num_seqs": 1500}
     )
-    assert cfg.cudagraph_capture_sizes[-1] == 1500
+    assert cfg.decode_cudagraph_capture_request_sizes[-1] == 1500
 
 
 def test_cuda_graph_rejects_nonpositive_max_num_seqs():

@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -246,7 +245,7 @@ class VLLMEngine(GenerationEngine):
         vision_processor: VisionProcessor.Config | None,
     ) -> None:
         """Process-wide vLLM setup before the engine build: register the TorchTitan model
-        and config parser with vLLM, and select vLLM's model runner."""
+        and config parser with vLLM."""
         register_to_vllm(
             model,
             parallelism=parallelism,
@@ -256,7 +255,6 @@ class VLLMEngine(GenerationEngine):
             model_state_dict_load_mode=model_state_dict_load_mode,
             vision_processor=vision_processor,
         )
-        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         if batch_invariant:
             # vLLM's v2 logprob and temperature Triton kernels bypass the batch-invariant
             # aten overrides; replace them with the trainer's PyTorch ops.
