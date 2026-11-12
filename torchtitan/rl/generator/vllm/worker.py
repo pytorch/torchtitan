@@ -158,23 +158,13 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
                 key for key in keys[CUDAGraphMode.FULL] if not key.uniform
             }
 
-    def _determine_batch_execution_and_padding(self, num_tokens: int, *args, **kwargs):
-        """Tell the model how many of this step's tokens are real, before padding.
+    def _determine_batch_execution_and_padding(self, *args, **kwargs):
+        """Tell the linear attention (GDN/KDA) builders whether the step replays a packed FULL graph.
 
-        vLLM calls this once before every forward: from ``execute_model`` for a
-        real step, and from ``_dummy_run`` for profiling, warm-up, CUDA-graph
-        capture and an idle DP rank's dummy batch (whose rows all count as
-        real). ``num_tokens`` is the unpadded count; vLLM applies every padding
-        source inside this call (CUDA-graph capture size, DP equalization). The
-        model turns the count into a padding mask, which keeps those rows off
-        Dist-MoE's network; graph replay reads the value published for the real
-        step. Linear attention (GDN/KDA) builders then learn whether the step
-        replays a packed FULL graph.
+        vLLM calls this once before every forward, real or dummy, and picks the
+        step's CUDA graph inside it.
         """
-        self.get_model().set_num_valid_tokens(num_tokens)
-        result = super()._determine_batch_execution_and_padding(
-            num_tokens, *args, **kwargs
-        )
+        result = super()._determine_batch_execution_and_padding(*args, **kwargs)
         # TODO: drop once vLLM passes the dispatched (cudagraph_mode, batch_descriptor)
         # to AttentionMetadataBuilder.build.
         cudagraph_mode, batch_descriptor = result[:2]
