@@ -1,0 +1,4 @@
+interface:
+  display_name: "Autokernel"
+  short_description: "Coordinate CuTe DSL kernel tuning with bitwise parity"
+  default_prompt: "Use $autokernel to coordinate agents optimizing this kernel problem set in CuTe DSL on available GPUs while preserving bitwise parity and the complete input/output contract."
