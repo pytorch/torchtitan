@@ -171,16 +171,18 @@ class VerifiersRollouter(Rollouter):
         )
 
     async def close(self) -> None:
-        """Stop the rollout workers, then the EnvServer.
+        """Stop the EnvServer, then the rollout workers.
 
-        Workers first: `Rollouter.close` waits for each running group, and a group waits for its
-        episodes' results from the EnvServer. A stopped EnvServer never sends them, so each group
-        would wait out `_RUN_GROUP_DRAIN_TIMEOUT_S`.
+        EnvServer first: no episode can then start a model call while `Rollouter.close` waits for
+        the workers' generate calls. Every group is done or cancelled by now (`Controller.run`
+        cancels them before `close`), so none waits on the EnvServer, and it shuts down faster while
+        its client workers are still alive. A group whose `cancel_group` failed waits out the drain
+        timeout.
         """
         try:
-            await super().close()
-        finally:
             await self._verifiers_env_server.close()
+        finally:
+            await super().close()
 
 
 class VerifiersRolloutWorker(BaseRolloutWorker):
@@ -329,9 +331,10 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
         # `run` returned, so this rollout starts no new calls. For each trace, release its routing
         # session (Verifiers sends the trace id as X-Session-ID) and take its generation metadata,
         # so another agent's trace (a judge, a simulated user) leaves nothing on the server.
-        # TODO: an attempt Verifiers retried has no trace here, so its held KV waits for the
-        # group's release and its routing pin for the router's `max_sessions` LRU. The generation
-        # server could record each rollout's session ids and release those too.
+        # TODO: an attempt Verifiers retried has no trace here, and a cancelled rollout never gets here,
+        # so their held KV waits for the group's release and their routing pins for the router's
+        # `max_sessions` LRU. The generation server could record each rollout's session ids and
+        # release those too.
         generation_metadata_by_session = {
             trace.id: self._generation_server.pop_generation_metadata(trace.id)
             for trace in verifiers_episode.traces

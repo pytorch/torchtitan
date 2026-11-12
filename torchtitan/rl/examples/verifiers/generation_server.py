@@ -206,10 +206,6 @@ class GenerationServer(Configurable):
         request_index = self.request_counts.get(session_id, 0)
         self.request_counts[session_id] = request_index + 1
         request_id = f"{session_id}/request={request_index}"
-        # TODO(monarch): when Verifiers gives up on a call (e.g. its rollout timeout), `run_group`
-        # returns and `Rollouter.close` doesn't wait for this handler. Cancelling the handler wouldn't
-        # help: the generator still answers, and an answer that reaches a worker that already stopped
-        # fails the generator, so the job exits 130 (https://github.com/meta-pytorch/monarch/issues/5301).
         try:
             completion = await self.generate_fn(
                 Prompt(token_ids=prompt_token_ids),

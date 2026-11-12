@@ -837,22 +837,24 @@ class Controller(Configurable):
         # Each id is used once, so validations that run at the same time never share one.
         group_ids = [next(self._validation_group_ids) for _ in samples]
         # TODO(naming): reserve "sample" for TrainingSample; rename the rollouter's raw-prompt "sample" -> "prompt"/"data_input".
-        group_results = await asyncio.gather(
-            *(
-                self._rollouter.run_group_rollouts(
-                    generate_fn=generate,
-                    release_session_fn=release_session_fn,
-                    sample=sample,
-                    group_id=group_id,
-                    group_size=1,
-                    sampling=sampling,
-                )
-                for group_id, sample in zip(group_ids, samples, strict=True)
-            ),
-            return_exceptions=True,
-        )
-        # Drop the generators' pinned cache salts and held KV for these groups.
-        await self.generator_router.release_groups.call_one(group_ids)
+        try:
+            group_results = await asyncio.gather(
+                *(
+                    self._rollouter.run_group_rollouts(
+                        generate_fn=generate,
+                        release_session_fn=release_session_fn,
+                        sample=sample,
+                        group_id=group_id,
+                        group_size=1,
+                        sampling=sampling,
+                    )
+                    for group_id, sample in zip(group_ids, samples, strict=True)
+                ),
+                return_exceptions=True,
+            )
+        finally:
+            # Drop the generators' pinned cache salts and held KV for these groups.
+            await self.generator_router.release_groups.call_one(group_ids)
 
         # Keep the groups that succeeded; log + count the ones that raised.
         rollout_groups: list[RolloutGroup] = []
@@ -1048,10 +1050,8 @@ class Controller(Configurable):
             # Then cancel covers anything blocked on the queue (which close does not wake); gather awaits all.
             # Cancel the validations too: `_validation_tasks` holds every validation not logged yet. On a
             # healthy end, a validation that already ended keeps its result for the call after training. A
-            # cancelled validation is never logged, and its groups stay pinned in the generators. Its rollouts
-            # keep running until close() if the rollouter shields them (the base Rollouter does).
-            # TODO: abort a cancelled validation's rollouts and release its groups. The generators have no abort
-            # path yet.
+            # cancelled validation is never logged: its groups stop on their workers (see
+            # `Rollouter.run_group_rollouts`), and `_collect_validation_rollouts` still releases them.
             await self._group_buffer.close()
             for task in (*background_tasks, trainer_task, *self._validation_tasks):
                 task.cancel()
@@ -1202,8 +1202,9 @@ class Controller(Configurable):
                     rollouts=[],
                     metrics=[m.Metric("rollout/group_failures", m.Sum(1.0))],
                 )
-            # The group makes no more generation calls, so its cache salts can go.
-            await self.generator_router.release_groups.call_one([work.group_id])
+            finally:
+                # The group makes no more generation calls, so its cache salts can go.
+                await self.generator_router.release_groups.call_one([work.group_id])
             await group_buffer.finalize_work(group)
 
             # Drop both refs (work.rollout_group is the group too): held groups made every full GC slow.
