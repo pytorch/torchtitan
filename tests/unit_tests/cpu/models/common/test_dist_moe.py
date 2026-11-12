@@ -21,6 +21,7 @@ import torchtitan.config.transform as transform_api
 import torchtitan.config.transform.quantization as quantization_transform
 import torchtitan_recipes.models.deepseek_v3 as eager_production_recipes
 import torchtitan_recipes.tests.models.deepseek_v3 as eager_test_recipes
+import torchtitan_recipes.tests.models.kimi_k3 as kimi_k3_test_recipes
 from torch.distributed.pipelining import PipelineStageInfo
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optim import AdamW
@@ -248,7 +249,7 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
     engine.parallelism_context = SimpleNamespace(pp_enabled=True)
     runtime_schedule = SimpleNamespace()
     engine.pp_schedule = runtime_schedule
-    engine.device = torch.device("cuda")
+    engine.device = torch.device("cpu")
     engine._dist_moe_runtime = None
     engine._forward_backward_body = Mock()
 
@@ -359,14 +360,43 @@ def test_transform_propagates_plain_swiglu_to_annex_config() -> None:
     assert context_config.activation == "swiglu"
 
 
-def test_transform_rejects_unsupported_source_activation() -> None:
-    """Unsupported source semantics fail instead of silently changing."""
-    source = replace(
-        _stock_config(dim=64),
-        activation_fn=SiTUGLU.Config(),
+@pytest.mark.parametrize("expert_precision", ["bf16", "mxfp8"])
+@pytest.mark.parametrize("gate_beta, up_beta", [(4.0, 25.0), (3.5, 20.0)])
+def test_transform_preserves_situglu_configuration(
+    expert_precision: Literal["bf16", "mxfp8"],
+    gate_beta: float,
+    up_beta: float,
+) -> None:
+    """Both expert paths translate model bounds to the public SiTU-GLU API."""
+    stock = _stock_config(dim=64)
+    stock.activation_fn = SiTUGLU.Config(beta=gate_beta, linear_beta=up_beta)
+
+    transformed = DistMoeTransform(expert_precision=expert_precision).transform(stock)
+    assert isinstance(transformed, DistMoeRoutedExperts.Config)
+    assert transformed.activation == "situ_glu"
+    assert transformed.situ_glu_gate_beta == gate_beta
+    assert transformed.situ_glu_up_beta == up_beta
+
+    module = cast(DistMoeRoutedExperts, transformed.build())
+    context_config = _runtime()._resolve_context_config(
+        module,
+        max_num_local_input_tokens=128,
+        max_live_activation_slots=1,
+        max_moe_layers_per_activation_slot=2,
     )
-    with pytest.raises(TypeError, match="supports SwiGLU.Config or ClampedSwiGLU"):
-        DistMoeTransform().transform(source)
+    assert context_config.activation == "situ_glu"
+    assert context_config.situ_glu_gate_beta == gate_beta
+    assert context_config.situ_glu_up_beta == up_beta
+    assert (context_config.block_scaled is not None) == (expert_precision == "mxfp8")
+
+
+def test_transform_rejects_unbounded_situglu_up_projection() -> None:
+    """The annex SiTU-GLU contract requires both clipping bounds."""
+    stock = _stock_config()
+    stock.activation_fn = SiTUGLU.Config(beta=4.0, linear_beta=None)
+
+    with pytest.raises(ValueError, match="requires linear_beta"):
+        DistMoeTransform().transform(stock)
 
 
 @pytest.mark.parametrize("targets", [("w13",), ("w2",), ("w13", "w2")])
@@ -1022,6 +1052,38 @@ def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
         for layer in model_config.layers
     )
     assert config.dataloader.max_num_documents == max_documents
+
+
+@pytest.mark.parametrize(
+    ("factory", "expected_type"),
+    [
+        (
+            kimi_k3_test_recipes.kimi_k3_debugmodel_dist_moe_bf16,
+            DistMoeRoutedExperts.Config,
+        ),
+        (
+            kimi_k3_test_recipes.kimi_k3_debugmodel_dist_moe_mxfp8,
+            MXFP8DistMoeRoutedExperts.Config,
+        ),
+    ],
+)
+def test_kimi_k3_dist_moe_recipes_preserve_situglu(factory, expected_type) -> None:
+    """Kimi recipes select varlen attention and preserve SiTU-GLU bounds."""
+    config = factory(seq_len=128)
+    experts = list(config.model.traverse(DistMoeRoutedExperts.Config))
+
+    assert len(experts) == 16
+    assert all(type(expert) is expected_type for _, expert, _, _ in experts)
+    assert all(expert.activation == "situ_glu" for _, expert, _, _ in experts)
+    assert all(expert.situ_glu_gate_beta == 4.0 for _, expert, _, _ in experts)
+    assert all(expert.situ_glu_up_beta == 25.0 for _, expert, _, _ in experts)
+    assert isinstance(config.dist_moe_runtime, DistMoeRuntime.Config)
+    assert config.dist_moe_runtime.scratch_capacity_factor == 1.0
+    assert isinstance(
+        config.model.first_full_attention.inner_attention.inner_attention,
+        VarlenInnerAttention.Config,
+    )
+    assert config.activation_remat is None
 
 
 def test_eager_dist_moe_recipe_supports_accelerator_graphs_with_pipeline_parallelism():
