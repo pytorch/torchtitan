@@ -39,7 +39,7 @@ pipeline, context, and expert parallelism without rewriting the model.
 > recent PyTorch nightly.
 
 ## Latest news
-
+- **[2026/10]** TorchTitan is now optimized for TPUs using TorchTPU - a fork is available [here](https://github.com/google-pytorch/torchtitan) and is being actively updated and maintained by Google.
 - **[2026/08]** [TitanRL](torchtitan/rl) is a hackable RL stack for scaling and debugging. It reuses TorchTitan model definitions and kernels across training and vLLM generation and supports batch-invariant mode.
 - **[2025/11]** AMD released an [optimized fork](https://github.com/AMD-AGI/torchtitan-amd/tree/main) of `torchtitan` for AMD GPUs.
 - **[2025/10]** We released `torchtitan` [v0.2.0](https://github.com/pytorch/torchtitan/releases).
