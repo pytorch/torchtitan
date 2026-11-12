@@ -15,7 +15,7 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn.functional as F
-from sglang.srt.distributed import tensor_model_parallel_all_reduce
+from sglang.srt.layers.dp_attention import attn_tp_all_reduce
 from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_executor.runner_utils.forward_batch import set_forward_batch
@@ -212,8 +212,9 @@ class _DecoderBody(Module):
     wrapper's eager forward, which keeps the LM head and logits processing eager.
 
     With expert parallelism, the MoE layers shard the step's tokens over TP, so the
-    body pads them to a multiple of the TP degree; ``SGLangInnerAttention`` runs on the
-    rows SGLang scheduled only.
+    body pads them to a multiple of the TP degree, and an idle attention-DP rank to one
+    row per TP rank, as it still joins the step's EP collectives;
+    ``SGLangInnerAttention`` runs on the rows SGLang scheduled only.
     """
 
     def __init__(
@@ -259,7 +260,7 @@ class _DecoderBody(Module):
     ) -> torch.Tensor:
         # The attention layers read forward_batch from SGLang's context variable too.
         num_tokens = input_ids.shape[0]
-        num_padding = -num_tokens % self._token_multiple
+        num_padding = round_up(max(num_tokens, 1), self._token_multiple) - num_tokens
         if num_padding:
             input_ids = F.pad(input_ids, (0, num_padding))
             positions = F.pad(positions, (0, num_padding))
@@ -275,15 +276,23 @@ class _DecoderBody(Module):
             padding_mask = F.pad(
                 forward_batch.out_cache_loc == 0, (0, num_padding), value=True
             )
-            # Every EP rank passes the same count: the EP group is the TP group, which
-            # shares the step, and the MoE splits its tokens evenly over TP. The count
-            # is fixed per captured graph, so it is set at capture.
+            # Every EP rank passes the same count, and the MoE splits a step's tokens
+            # evenly over TP. Under attention DP the EP group spans the DP ranks, so
+            # the count is the largest DP rank's step (SGLang's global_num_tokens,
+            # set at capture too); otherwise the EP group is the TP group, which
+            # shares the step. The count is fixed per captured graph.
             tp = self._parallelism_context.tp
+            dp_num_tokens = forward_batch.global_num_tokens_cpu
+            step_num_tokens = (
+                input_ids.shape[0]
+                if dp_num_tokens is None
+                else round_up(max(*dp_num_tokens, 1), tp)
+            )
             assert (
-                input_ids.shape[0] % tp == 0
-            ), f"TP={tp} does not divide {input_ids.shape[0]} tokens"
+                step_num_tokens % tp == 0
+            ), f"TP={tp} does not divide {step_num_tokens} tokens"
             self._dist_moe_runtime.set_num_local_input_tokens_per_call(
-                input_ids.shape[0] // tp
+                step_num_tokens // tp
             )
         with self._parallelism_context.activate_spmd():
             # Keywords: some models' forward (e.g. Qwen3.5's) takes them only so.
@@ -366,10 +375,10 @@ class SGLangModelWrapper(Module):
             hf_assets_path=hf_assets_path,
         )
         # SGLang's TP all-reduce picks its algorithm by message size, which breaks
-        # batch invariance. It sends every sum all-reduce to the TP group, so it comes
-        # after the initial load.
+        # batch invariance. It sends every sum all-reduce to the attention TP group
+        # (the TP group without attention DP), so it comes after the initial load.
         if self.parallelism_context.tp_enabled and not is_in_batch_invariant_mode():
-            route_tp_all_reduce(tensor_model_parallel_all_reduce)
+            route_tp_all_reduce(attn_tp_all_reduce)
         self.model = _DecoderBody(
             decoder,
             self.parallelism_context,

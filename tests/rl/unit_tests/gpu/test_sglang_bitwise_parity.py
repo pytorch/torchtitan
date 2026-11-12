@@ -36,8 +36,9 @@ Debug models with random weights start from the trainer's weights, loaded throug
 same in-place model state dict load.
 
 Runs in the B200 RL CI job.
-Run each class in its own launch, with as many processes as its TP degree (one for
-TestSGLangBitwiseParityKDA, else two), with the SGLang environment (see
+Run each class in its own launch, with as many processes as its DP x TP degree (one
+for TestSGLangBitwiseParityKDA, four for TestSGLangBitwiseParityMoEDPEP, else two),
+with the SGLang environment (see
 torchtitan/rl/generator/sglang/README.md; the Dist-MoE class also needs the dist_moe
 package):
     torchrun --nproc_per_node=2 -m pytest \
@@ -439,6 +440,37 @@ class TestSGLangBitwiseParityMoEEP(SGLangBitwiseParityTestBase):
     sync_weights_from_trainer = True
     # The all-to-all token dispatcher syncs the host for its split sizes.
     cuda_graph = "none"
+
+
+class TestSGLangBitwiseParityMoEDPEP(SGLangBitwiseParityTestBase):
+    """Qwen3 MoE debug model with random weights, DP 2 x TP 2 with EP 4 across the DP
+    ranks (SGLang's attention DP), on 4 GPUs. The base tests give both DP ranks the
+    same requests; test_dp_ranks_with_different_requests gives them different ones."""
+
+    __test__ = True
+    config_fn = staticmethod(rl_grpo_qwen3_moe_debug_varlen_batch_invariant)
+    sync_weights_from_trainer = True
+    # The all-to-all token dispatcher syncs the host for its split sizes.
+    cuda_graph = "none"
+
+    def test_dp_ranks_with_different_requests(self):
+        # DP rank 1 finishes first and runs idle steps while DP rank 0 decodes; each
+        # DP rank's results still match the trainer.
+        dp_rank = self.engine.data_parallel_rank
+        self.assertEqual(self.engine.data_parallel_size, 2)
+        prompt_ids = self.prompt_ids if dp_rank == 0 else self.prompt_ids[:1]
+        results = self._generate(prompt_ids)
+        sequences = [
+            prompt + result.token_ids
+            for prompt, result in zip(prompt_ids, results, strict=True)
+        ]
+        trainer_lps = self._trainer_logprobs(sequences)
+        for i, (prompt, result) in enumerate(zip(prompt_ids, results)):
+            self._assert_bitwise_equal(
+                f"DP rank {dp_rank} seq {i}: trainer prefill vs SGLang decode",
+                trainer_lps[i][len(prompt) - 1 :],
+                result.token_logprobs,
+            )
 
 
 class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):

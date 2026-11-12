@@ -37,7 +37,7 @@ from sglang.srt.managers.scheduler import (
     Scheduler,
 )
 from sglang.srt.model_executor.model_runner import ModelRunner
-from sglang.srt.runtime_context import publish, SpawnRanks
+from sglang.srt.runtime_context import get_parallel, publish, SpawnRanks
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils.common import next_power_of_2
@@ -82,6 +82,7 @@ _TORCHTITAN_SERVER_ARGS = frozenset(
         "skip_tokenizer_init",
         "dtype",
         "tp_size",
+        "attn_dp_size",
         "mem_fraction_static",
         "max_running_requests",
         "context_length",
@@ -194,14 +195,6 @@ class SGLangEngine(GenerationEngine):
                 "SGLangEngine serves text prompts only; image prompts "
                 "(Controller.Config.vision_processor) need VLLMEngine."
             )
-        if parallelism.data_parallel_degree != 1:
-            # TODO(https://github.com/sgl-project/sglang/issues/48476): SGLang builds
-            # one torch world per data-parallel replica; run DP replicas in one world by
-            # building SGLang's TP groups over it.
-            raise ValueError(
-                "SGLangEngine supports data_parallel_degree=1 only; run more "
-                "generators to scale out"
-            )
         if parallelism.enable_sequence_parallel:
             raise ValueError("SGLangEngine does not support sequence parallelism")
         if config.extra_server_args.get("enable_hierarchical_cache") and any(
@@ -245,11 +238,14 @@ class SGLangEngine(GenerationEngine):
             # MASTER_PORT); SGLang then builds its groups over this world.
             torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
             dist.init_process_group(init_method="env://")
-        if dist.get_world_size() != parallelism.tensor_parallel_degree:
+        self._dp_size = parallelism.data_parallel_degree
+        self._dp_rank = rank // parallelism.tensor_parallel_degree
+        world_size = self._dp_size * parallelism.tensor_parallel_degree
+        if dist.get_world_size() != world_size:
             raise ValueError(
-                f"SGLangEngine needs one process per TP rank, got world size "
-                f"{dist.get_world_size()} for tensor_parallel_degree "
-                f"{parallelism.tensor_parallel_degree}"
+                f"SGLangEngine needs one process per DP and TP rank, got world size "
+                f"{dist.get_world_size()} for data_parallel_degree {self._dp_size} "
+                f"and tensor_parallel_degree {parallelism.tensor_parallel_degree}"
             )
 
         # TODO(https://github.com/sgl-project/sglang/issues/48460): importing SGLang
@@ -370,12 +366,19 @@ class SGLangEngine(GenerationEngine):
             # Token-in-token-out: prompts and outputs are token ids.
             skip_tokenizer_init=True,
             dtype=param_dtype,
-            tp_size=parallelism.tensor_parallel_degree,
+            # Data parallelism runs as SGLang's attention DP: one SGLang instance whose
+            # TP group is the world, with a TP-wide attention group per DP rank. SGLang
+            # steps every DP rank together, an idle one with an empty batch, as the
+            # EP collectives across DP ranks need.
+            tp_size=parallelism.data_parallel_degree
+            * parallelism.tensor_parallel_degree,
+            attn_dp_size=parallelism.data_parallel_degree,
             # SGLang sizes weights and the KV pool to this fraction and leaves activations
             # little room on top: at 0.8, Qwen3-0.6B (TP 2) peaks at 81% of GPU memory,
             # as with vLLM's gpu_memory_utilization=0.8.
             mem_fraction_static=gpu_memory_limit,
-            max_running_requests=max_num_seqs,
+            # SGLang splits these over its DP ranks; the engine's are per DP rank.
+            max_running_requests=max_num_seqs * parallelism.data_parallel_degree,
             context_length=model.max_context_length + CONTEXT_LENGTH_MARGIN,
             attention_backend=TORCHTITAN_VARLEN_ATTENTION_BACKEND,
             # SGLang's default for this backend (its 128-token pages are for its own
@@ -412,7 +415,9 @@ class SGLangEngine(GenerationEngine):
         else:
             server_kwargs["disable_prefill_cuda_graph"] = True
         if max_num_batched_tokens is not None:
-            server_kwargs["chunked_prefill_size"] = max_num_batched_tokens
+            server_kwargs["chunked_prefill_size"] = (
+                max_num_batched_tokens * parallelism.data_parallel_degree
+            )
         if debug.seed is not None:
             server_kwargs["random_seed"] = debug.seed
             # SGLang samples with each request's seed only in deterministic mode,
@@ -449,11 +454,11 @@ class SGLangEngine(GenerationEngine):
 
     @property
     def data_parallel_size(self) -> int:
-        return 1
+        return self._dp_size
 
     @property
     def data_parallel_rank(self) -> int:
-        return 0
+        return self._dp_rank
 
     @property
     def prefetched_model_state_dict(self) -> dict[str, torch.Tensor] | None:
@@ -607,13 +612,24 @@ class SGLangEngine(GenerationEngine):
         return params
 
     def has_unfinished_requests(self) -> bool:
-        """Whether any admitted request is still running or held, or finished and not
-        yet returned by ``step()``."""
-        return (
+        """Whether any admitted request of any DP rank is still running or held, or
+        finished and not yet returned by ``step()``.
+
+        With data parallelism, a collective over all ranks: each ``step()`` is one, so
+        every DP rank steps until all are done, as vLLM's DP engines do.
+        """
+        unfinished = (
             bool(self._finished)
             or bool(self._awaiting_prefill)
             or not self._scheduler.is_fully_idle()
         )
+        if self._dp_size == 1:
+            return unfinished
+        flag = torch.tensor([unfinished], dtype=torch.int32)
+        dist.all_reduce(
+            flag, op=dist.ReduceOp.MAX, group=get_parallel().tp_group.cpu_group
+        )
+        return bool(flag.item())
 
     def step(self) -> list[FinishedRequest]:
         """Run one iteration of SGLang's event loop, a TP collective, and return the

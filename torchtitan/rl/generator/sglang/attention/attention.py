@@ -185,7 +185,7 @@ class SGLangInnerAttention(InnerAttention):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        tp_size = get_parallel().tp_size
+        tp_size = get_parallel().attn_tp_size
         for name in ("num_heads", "num_kv_heads"):
             if getattr(config, name) % tp_size != 0:
                 raise ValueError(
@@ -255,6 +255,9 @@ class SGLangInnerAttention(InnerAttention):
         forward_batch = get_forward_batch()
         # The rows SGLang scheduled, which own a KV cache slot each.
         num_tokens = forward_batch.out_cache_loc.shape[0]
+        if num_tokens == 0:
+            # An idle attention-DP rank: only padding rows, and no attention metadata.
+            return q_THK.new_zeros(*q_THK.shape[:2], self.value_head_dim)
         num_padding = q_THK.shape[0] - num_tokens
         # MLA's V is a strided view of its per-head KV projection, and SGLang's KV
         # cache stores V rows flat. A no-op for a contiguous V.
