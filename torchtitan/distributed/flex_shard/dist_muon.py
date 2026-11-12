@@ -9,10 +9,9 @@
 from __future__ import annotations
 
 import math
-import struct
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from functools import cache, partial
+from functools import partial
 from typing import Any, cast, Literal, NoReturn, overload
 
 import torch
@@ -277,38 +276,7 @@ class DistMuon(Optimizer):
             recompile_limit=256,
             options={"emulate_precision_casts": True},
         )
-        compiled_prepare = compile_fn(_prepare_muon_input_with_rounded_weights)
-
-        @cache
-        def lerp_coefficients(weight: float) -> tuple[bool, float]:
-            # Native CUDA lerp uses FP32 arithmetic for FP32 and BF16 storage.
-            weight = struct.unpack("f", struct.pack("f", weight))[0]
-            from_start = abs(weight) < 0.5
-            alpha = weight if from_start else weight - 1
-            return from_start, struct.unpack("f", struct.pack("f", alpha))[0]
-
-        def prepare(
-            gradient: Tensor,
-            momentum_buffer: Tensor,
-            *,
-            momentum: float,
-            nesterov: bool,
-            out: Tensor,
-        ) -> Tensor:
-            update_from_start, update_alpha = lerp_coefficients(1 - momentum)
-            nesterov_from_start, nesterov_alpha = lerp_coefficients(momentum)
-            return compiled_prepare(
-                gradient,
-                momentum_buffer,
-                update_from_start=update_from_start,
-                update_alpha=update_alpha,
-                nesterov_from_start=nesterov_from_start,
-                nesterov_alpha=nesterov_alpha,
-                nesterov=nesterov,
-                out=out,
-            )
-
-        self._prepare_input = prepare
+        self._prepare_input = compile_fn(_prepare_muon_input)
         self._compute_direction = compile_fn(_compute_muon_direction)
         self._apply_parameter_update = compile_fn(_apply_muon_update)
 
@@ -1884,6 +1852,21 @@ def _prepare_muon_input(
     out: Tensor,
 ) -> Tensor:
     """Update momentum and prepare the Tensor passed to Muon computation."""
+    if torch.compiler.is_compiling():
+        # Tensor weights retain FP32 scalar rounding under Inductor.
+        gradient = gradient.float()
+        weight = torch.scalar_tensor(
+            1 - momentum, dtype=torch.float32, device=gradient.device
+        )
+        momentum_buffer.copy_(torch.lerp(momentum_buffer.float(), gradient, weight))
+        if nesterov:
+            weight = torch.scalar_tensor(
+                momentum, dtype=torch.float32, device=gradient.device
+            )
+            out.copy_(torch.lerp(gradient, momentum_buffer.float(), weight))
+        else:
+            out.copy_(momentum_buffer)
+        return out
     momentum_buffer.lerp_(gradient, 1 - momentum)
     if nesterov:
         torch.lerp(
@@ -1892,31 +1875,6 @@ def _prepare_muon_input(
             momentum,
             out=out,
         )
-    else:
-        out.copy_(momentum_buffer)
-    return out
-
-
-def _prepare_muon_input_with_rounded_weights(
-    gradient: Tensor,
-    momentum_buffer: Tensor,
-    *,
-    update_from_start: bool,
-    update_alpha: float,
-    nesterov_from_start: bool,
-    nesterov_alpha: float,
-    nesterov: bool,
-    out: Tensor,
-) -> Tensor:
-    """Preserve native CUDA lerp arithmetic and storage rounding."""
-    gradient = gradient.float()
-    previous = momentum_buffer.float()
-    base = previous if update_from_start else gradient
-    torch.add(base, gradient - previous, alpha=update_alpha, out=momentum_buffer)
-    if nesterov:
-        updated = momentum_buffer.float()
-        base = gradient if nesterov_from_start else updated
-        torch.add(base, updated - gradient, alpha=nesterov_alpha, out=out)
     else:
         out.copy_(momentum_buffer)
     return out
