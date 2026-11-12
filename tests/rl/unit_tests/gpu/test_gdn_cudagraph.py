@@ -24,6 +24,7 @@ from torchtitan.distributed.batch_invariant import (
     set_batch_invariance,
 )
 from torchtitan.models.qwen3_5 import build_model_config
+from torchtitan.rl.generator.attention import gdn as paged_gdn
 from torchtitan.rl.generator.vllm import registry
 from torchtitan.rl.generator.vllm.attention import gdn
 from torchtitan.rl.generator.vllm.attention.linear_attention import (
@@ -31,7 +32,7 @@ from torchtitan.rl.generator.vllm.attention.linear_attention import (
     TorchTitanLinearAttentionMetadata,
 )
 from torchtitan.rl.generator.vllm.batch_invariance import (
-    patch_vllm_logprob_and_temperature_kernels,
+    force_trainer_logprobs_for_batch_invariance,
 )
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.forward_context import (
@@ -182,6 +183,9 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
 )
 def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -> None:
     monkeypatch.setattr(gdn, "is_in_batch_invariant_mode", lambda: batch_invariant)
+    monkeypatch.setattr(
+        paged_gdn, "is_in_batch_invariant_mode", lambda: batch_invariant
+    )
     torch.manual_seed(42)
     device = torch.device("cuda")
     # Qwen3.5-0.8B's local TP=1 shapes, with padding between physical slots.
@@ -210,7 +214,6 @@ def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -
     layer.prefix = "gdn"
     layer.local_num_k_heads = layer.local_num_v_heads = 16
     layer.head_k_dim = layer.head_v_dim = 128
-    layer.local_key_dim = 2048
     pools = [
         torch.randn(6, torch.Size(shape).numel() + 128, device=device, dtype=dtype)
         for shape, dtype in zip(shapes, (torch.bfloat16, torch.float32))
@@ -270,12 +273,12 @@ def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -
             # Bypass mask handling in the already-clean reference, so an
             # accidental reset of continuing slots cannot affect both sides.
             with monkeypatch.context() as unmasked:
-                for name in (
-                    "causal_conv1d_decode",
-                    "recurrent_gdn_decode",
-                    "recurrent_gdn",
+                for module, name in (
+                    (gdn, "causal_conv1d_decode"),
+                    (gdn, "recurrent_gdn_decode"),
+                    (paged_gdn, "recurrent_gdn"),
                 ):
-                    unmasked.setattr(gdn, name, without_mask(getattr(gdn, name)))
+                    unmasked.setattr(module, name, without_mask(getattr(module, name)))
                 expected = forward()
             layer.kv_cache = cache_views(pools)
             has_initial_state.copy_(
@@ -305,7 +308,7 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
     enable_batch_invariant_mode()
     set_batch_invariance(batch_invariant)
     if batch_invariant:
-        patch_vllm_logprob_and_temperature_kernels()
+        force_trainer_logprobs_for_batch_invariance()
         torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
@@ -313,7 +316,7 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
     torch.manual_seed(42)
     recurrent_calls = []
     kernel_name = "recurrent_gdn" if batch_invariant else "paged_chunk_gdn"
-    original_recurrent = getattr(gdn, kernel_name)
+    original_recurrent = getattr(paged_gdn, kernel_name)
 
     def recurrent(*args, **kwargs):
         metadata = next(
@@ -326,7 +329,7 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
         )
         return original_recurrent(*args, **kwargs)
 
-    setattr(gdn, kernel_name, recurrent)
+    setattr(paged_gdn, kernel_name, recurrent)
     model = os.environ[MODEL_ENV]
     model_config = build_model_config(
         "0.8B", seq_len=256, attn_backend="varlen", parallelism=ParallelismConfig()

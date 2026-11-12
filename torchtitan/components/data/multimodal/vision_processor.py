@@ -41,6 +41,7 @@ imported only where images are decoded and resized: model flavors configure
 the resize rules, and the trainer types its processor, without it.
 """
 
+import itertools
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
@@ -160,6 +161,58 @@ class NaViTPatchGridResize(ResizeRule):
         return h, w, pad_h, pad_w
 
 
+class MuseGlimmerPatchGridResize(ResizeRule):
+    """Select the closest-aspect-ratio merged-patch grid under the token cap."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ResizeRule.Config):
+        max_image_tokens: int
+        """Cap on the merged-patch grid size, i.e. the placeholder tokens of
+        one image or frame."""
+
+    def __init__(self, config: Config) -> None:
+        self.max_image_tokens = config.max_image_tokens
+
+    def __call__(
+        self, height: int, width: int, *, patch_size: int, merge_size: int
+    ) -> tuple[int, int, int, int]:
+        max_image_tokens = self.max_image_tokens
+        merged_patch_size = patch_size * merge_size
+        ideal_grid_h = height / merged_patch_size
+        ideal_grid_w = width / merged_patch_size
+        aspect_ratio = ideal_grid_w / ideal_grid_h if ideal_grid_h > 0 else 1.0
+        if ideal_grid_h * ideal_grid_w > max_image_tokens:
+            ideal_grid_h = math.sqrt(max_image_tokens / aspect_ratio)
+            ideal_grid_w = ideal_grid_h * aspect_ratio
+
+        candidates = list(
+            set(
+                itertools.product(
+                    [math.floor(ideal_grid_h), math.ceil(ideal_grid_h)],
+                    [math.floor(ideal_grid_w), math.ceil(ideal_grid_w)],
+                )
+            )
+        )
+        candidates = [
+            (grid_h, grid_w)
+            for grid_h, grid_w in candidates
+            if grid_h >= 1 and grid_w >= 1 and grid_h * grid_w <= max_image_tokens
+        ]
+        if not candidates:
+            candidates = [(max(1, round(ideal_grid_h)), max(1, round(ideal_grid_w)))]
+
+        grid_h, grid_w = min(
+            candidates,
+            key=lambda grid: abs(grid[0] / grid[1] - height / width),
+        )
+        return (
+            grid_h * merged_patch_size,
+            grid_w * merged_patch_size,
+            0,
+            0,
+        )
+
+
 class VisionProcessor(Configurable):
     """Turns images and video frames into a model's vision-encoder inputs."""
 
@@ -246,6 +299,22 @@ class VisionProcessor(Configurable):
             )
         frames_TCHW = self._resize(frames.permute(0, 3, 1, 2), self.video_resize)
         return self._normalize(frames_TCHW)
+
+    def process_images(
+        self, images: Sequence[str | bytes | Image.Image]
+    ) -> tuple[list[torch.Tensor], list[int]]:
+        """Resize and normalize ``images`` and count each one's placeholder tokens.
+
+        Raises on an image that cannot be processed; the caller decides whether to
+        drop the sample.
+        """
+        pixels: list[torch.Tensor] = []
+        num_tokens: list[int] = []
+        for image in images:
+            image_pixels, grid_thw = self.resize_and_normalize(image)
+            pixels.append(image_pixels)
+            num_tokens.append(self.num_placeholder_tokens(grid_thw))
+        return pixels, num_tokens
 
     def num_placeholder_tokens(self, grid_thw: Sequence[int] | torch.Tensor) -> int:
         """Placeholder tokens of an item with patch grid ``grid_thw``
@@ -384,6 +453,16 @@ class VisionProcessor(Configurable):
 
         grid_thw = torch.tensor([T_patches, H_patches, W_patches])
         return patches, grid_thw
+
+    def patchify_all(
+        self, items_THWC: Sequence[torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """`patchify` each item and pack them as the vision encoder takes a batch:
+        ``(total_num_patches, patch_dim)`` patches and ``(num_items, 3)`` grids, in
+        item order. ``grid_thw.prod(-1)`` gives each item's length in the patches.
+        """
+        patches, grids = zip(*(self.patchify(item) for item in items_THWC))
+        return torch.cat(patches), torch.stack(grids)
 
     def grid_thw(self, height: int, width: int) -> tuple[int, int, int]:
         """The patch grid ``(1, H, W)`` that ``resize_and_normalize`` gives a

@@ -148,7 +148,7 @@ def _raise_for(error: ModuleNotFoundError | None) -> NoReturn:
         "Attention Gym kernels require attn_gym. "
         "Install it with: python -m pip install 'attn-gym[linear,cudnn] @ "
         "git+https://github.com/meta-pytorch/attention-gym.git"
-        "@26beb363c6d1328851bfc5c9c8691fa2066bd1fa'.",
+        "@0d0197fb36d95695dccef03436bb0649f985b32d'.",
         name="attn_gym",
     )
 

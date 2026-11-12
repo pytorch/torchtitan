@@ -10,7 +10,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Any
 
-from renderers import create_renderer, Renderer
+from renderers import create_renderer, Message, Renderer
 from renderers.configs import RendererConfig as PrimeRendererConfig
 
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
@@ -137,6 +137,27 @@ class RenderersConfigAdapter(RendererConfig):
 def from_renderers(config: PrimeRendererConfig) -> RendererConfig:
     """Adapt a `renderers` config to TorchTitan's renderer config interface."""
     return RenderersConfigAdapter(renderers_config=config)
+
+
+TEXT_CONTENT_TYPES = frozenset({"text", "input_text", "output_text", "thinking"})
+
+
+def require_content_types(
+    messages: list[Message], allowed_types: frozenset[str]
+) -> None:
+    """Raise if a message has a content part whose type is not in ``allowed_types``.
+
+    Renderers may render a media part as a placeholder token with no data behind
+    it, or skip an unknown part. A part with no type key counts as text.
+    """
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            kind = part.get("type", "text")
+            if kind not in allowed_types:
+                raise ValueError(f"Unsupported {kind!r} content part.")
 
 
 class RendererTokenizerWrapper:

@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # TODO: delete once vLLM's batch-invariant mode runs the V2 sampler's logprob and
 # temperature kernels as PyTorch ops.
-def patch_vllm_logprob_and_temperature_kernels() -> None:
+def force_trainer_logprobs_for_batch_invariance() -> None:
     """Replace the Triton logprob and temperature kernels of vLLM's v2 sampler with PyTorch ops.
 
     The v2 GPU sampler computes per-token logprobs with a fused Triton kernel

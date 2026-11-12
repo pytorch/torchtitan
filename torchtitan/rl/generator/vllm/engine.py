@@ -17,14 +17,18 @@ import torch
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig
 from vllm.exceptions import VLLMClientError
+from vllm.inputs import EngineInput
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
+from vllm.utils.cache import LRUCache
 
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.config import DebugConfig, PrecisionConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
+from torchtitan.rl.generator.model import validate_ep_token_dispatchers
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import (
     EngineRequest,
@@ -33,9 +37,10 @@ from torchtitan.rl.generator.types import (
     SamplingConfig,
 )
 from torchtitan.rl.generator.vllm.batch_invariance import (
-    patch_vllm_logprob_and_temperature_kernels,
+    force_trainer_logprobs_for_batch_invariance,
 )
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
+from torchtitan.rl.generator.vllm.multimodal_wrapper import image_prompt_to_engine_input
 from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
@@ -50,6 +55,9 @@ from torchtitan.rl.generator.vllm.stat_logger import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Byte budget of `VLLMEngine`'s pixel values cache: ~400 Geometry3K images (2.4 MB each).
+_PIXEL_VALUES_LRU_CACHE_BYTES = 1 << 30
 
 
 def add_extra_vllm_engine_args(
@@ -91,7 +99,8 @@ class VLLMEngine(GenerationEngine):
     """The generator's vLLM ``LLMEngine``, behind the calls the engine loop makes.
 
     See ``GenerationEngine`` for the build arguments and the threading contract;
-    ``LLMEngine`` is not thread-safe.
+    ``LLMEngine`` is not thread-safe. With an ``vision_processor`` it also serves image
+    prompts (M-RoPE models such as Qwen3.5; see ``vllm/multimodal_wrapper.py``).
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -146,6 +155,7 @@ class VLLMEngine(GenerationEngine):
         debug: DebugConfig,
         reset_kv_cache_on_model_state_dict_load: bool,
         model_state_dict_load_mode: ModelStateDictLoadMode,
+        vision_processor: VisionProcessor.Config | None,
         rank: int,
         generator_name: str,
         output_dir: str,
@@ -158,6 +168,12 @@ class VLLMEngine(GenerationEngine):
                 "session_kv_holder needs reset_kv_cache_on_model_state_dict_load=False: vLLM "
                 "cannot reset the prefix cache while blocks are held"
             )
+        validate_ep_token_dispatchers(
+            model,
+            parallelism=parallelism,
+            cuda_graph=config.cuda_graph.mode != "NONE",
+            deterministic=debug.deterministic,
+        )
         self.config = config
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load
@@ -170,6 +186,16 @@ class VLLMEngine(GenerationEngine):
             dist_moe_runtime=dist_moe_runtime,
             batch_invariant=debug.batch_invariant,
             model_state_dict_load_mode=model_state_dict_load_mode,
+            vision_processor=vision_processor,
+        )
+        self._vision_processor: VisionProcessor | None = (
+            vision_processor.build() if vision_processor is not None else None
+        )
+        # Pixel values by image hash: a group's samples and later turns resend the same
+        # images, and preprocessing one takes ~6.5 ms on the engine loop thread.
+        self._pixel_values_lru_cache: LRUCache[str, torch.Tensor] = LRUCache(
+            _PIXEL_VALUES_LRU_CACHE_BYTES,
+            getsizeof=lambda pixel_values: pixel_values.nbytes,
         )
         engine_args = self._build_engine_args(
             model,
@@ -180,6 +206,7 @@ class VLLMEngine(GenerationEngine):
             gpu_memory_limit=gpu_memory_limit,
             max_num_batched_tokens=max_num_batched_tokens,
             seed=debug.seed,
+            serves_images=vision_processor is not None,
         )
         tp_degree = parallelism.tensor_parallel_degree
         stat_loggers = None
@@ -215,6 +242,7 @@ class VLLMEngine(GenerationEngine):
         dist_moe_runtime: DistMoeRuntime.Config | None,
         batch_invariant: bool,
         model_state_dict_load_mode: ModelStateDictLoadMode,
+        vision_processor: VisionProcessor.Config | None,
     ) -> None:
         """Process-wide vLLM setup before the engine build: register the TorchTitan model
         and config parser with vLLM."""
@@ -225,11 +253,12 @@ class VLLMEngine(GenerationEngine):
             checkpointer_config=checkpointer,
             dist_moe_runtime=dist_moe_runtime,
             model_state_dict_load_mode=model_state_dict_load_mode,
+            vision_processor=vision_processor,
         )
         if batch_invariant:
             # vLLM's v2 logprob and temperature Triton kernels bypass the batch-invariant
             # aten overrides; replace them with the trainer's PyTorch ops.
-            patch_vllm_logprob_and_temperature_kernels()
+            force_trainer_logprobs_for_batch_invariance()
 
     def _build_engine_args(
         self,
@@ -242,8 +271,10 @@ class VLLMEngine(GenerationEngine):
         gpu_memory_limit: float,
         max_num_batched_tokens: int | None,
         seed: int | None,
+        serves_images: bool,
     ) -> EngineArgs:
-        """Build the vLLM ``EngineArgs`` (see ``GenerationEngine`` for the arguments)."""
+        """Build the vLLM ``EngineArgs`` (see ``GenerationEngine`` for the arguments;
+        ``serves_images``: the engine has a vision processor)."""
         enable_ep = parallelism.expert_parallel_degree > 1
         engine_kwargs = dict(
             # ``model`` is the path to the HF checkpoint directory. The
@@ -292,7 +323,9 @@ class VLLMEngine(GenerationEngine):
         engine_kwargs["watermark"] = self.config.watermark
         # Smaller `priority` runs first and is preempted last; we pass `EngineRequest.group_id`
         # (-1 for all validation), so older groups have higher priority (see its docstring).
-        # TODO: validation (priority -1) runs before training. Revisit once validation overlaps training.
+        # TODO: validation requests (priority -1) are admitted before training requests, also while a
+        # validation runs beside training. Measure the step-time cost of a validation; consider a priority
+        # between training groups.
         engine_kwargs["scheduling_policy"] = "priority"
         # Which sliding-window / Mamba (GDN) state blocks are hashed into the prefix
         # cache; full-attention groups hash every block regardless.
@@ -317,6 +350,9 @@ class VLLMEngine(GenerationEngine):
             engine_kwargs["compilation_config"] = vllm_compilation_config
         if seed is not None:
             engine_kwargs["seed"] = seed
+        if serves_images:
+            # Image prompts bypass vLLM's processor, so its cache would only hold copies.
+            engine_kwargs["mm_processor_cache_gb"] = 0
         add_extra_vllm_engine_args(engine_kwargs, self.config.extra_engine_args)
         return EngineArgs(**engine_kwargs)
 
@@ -368,27 +404,20 @@ class VLLMEngine(GenerationEngine):
         vLLM rejected."""
         rejected_requests: list[tuple[str, Exception]] = []
         for request in requests:
-            prompt = {"prompt_token_ids": request.prompt_token_ids}
-            if not self._reset_kv_cache_on_model_state_dict_load:
-                # Salt by the pinned version so a request only reuses KV
-                # computed under that version.
-                prompt["cache_salt"] = str(request.min_policy_version)
-            # vLLM validates a request (prompt length, sampling params, token ids) as it
-            # admits it: render_cmpl and InputProcessor.process_inputs raise
-            # VLLMClientError (e.g. VLLMValidationError, not a ValueError subclass) or
-            # ValueError before LLMEngine.add_request registers the request with the
-            # output processor and engine core, so a rejected request leaves no engine
-            # state (recheck on a vLLM upgrade). The checks are deterministic, so every TP
-            # rank of this replica rejects the same requests.
+            # Rejected, not raised: the request's `generate` call fails and the engine keeps
+            # serving. Both checks run before LLMEngine.add_request registers the request,
+            # so a rejection leaves no engine state:
+            #   - `_preprocess_images`: no vision processor, or an image file does not decode;
+            #   - vLLM's validation (prompt length, sampling params, token ids): render_cmpl
+            #     and InputProcessor.process_inputs raise VLLMClientError (not a ValueError
+            #     subclass) or ValueError (recheck on a vLLM upgrade).
+            # Both are deterministic and rank 0 broadcasts the same requests to every TP
+            # rank, so all ranks reject the same ones; otherwise their collectives hang.
             try:
-                # render_cmpl is vLLM's input pipeline (tokenize is a no-op for tokenized
-                # prompts); the high-level entry stays resilient to vLLM internals vs
-                # vllm.inputs.tokens_input.
-                [engine_input] = self._engine.renderer.render_cmpl([prompt])
                 # vLLM appends a random suffix to the id; the scheduler knows only that one.
                 internal_request_id = self._engine.add_request(
                     request_id=request.request_id,
-                    prompt=engine_input,
+                    prompt=self._prompt_to_engine_input(request),
                     params=_build_sampling_params(request.sampling),
                     arrival_time=request.arrival_time,
                     priority=max(request.group_id, -1),
@@ -402,6 +431,58 @@ class VLLMEngine(GenerationEngine):
             except (ValueError, VLLMClientError) as exc:
                 rejected_requests.append((request.request_id, exc))
         return rejected_requests
+
+    def _prompt_to_engine_input(self, request: EngineRequest) -> EngineInput:
+        """vLLM's engine input for ``request``: its token ids, plus the pixel values of an
+        image prompt."""
+        # Salt by the pinned version so a request only reuses KV computed under that version.
+        cache_salt = (
+            None
+            if self._reset_kv_cache_on_model_state_dict_load
+            else str(request.min_policy_version)
+        )
+        if request.prompt.images:
+            return image_prompt_to_engine_input(
+                request.prompt, self._preprocess_images(request), cache_salt=cache_salt
+            )
+        prompt = {"prompt_token_ids": request.prompt.token_ids}
+        if cache_salt is not None:
+            prompt["cache_salt"] = cache_salt
+        # render_cmpl is vLLM's input pipeline (tokenize is a no-op for tokenized prompts);
+        # the high-level entry stays resilient to vLLM internals vs vllm.inputs.tokens_input.
+        [engine_input] = self._engine.renderer.render_cmpl([prompt])
+        return engine_input
+
+    def _preprocess_images(self, request: EngineRequest) -> list[torch.Tensor]:
+        """Each of ``request``'s images as ``(num_patches, patch_dim)`` pixel values
+        (`VisionProcessor.resize_and_normalize`, then `patchify`), cached by image hash.
+
+        Raises:
+            ValueError: No vision processor, or an image file does not decode;
+                `add_requests` rejects the request.
+        """
+        if self._vision_processor is None:
+            raise ValueError(
+                f"{request.request_id} has images; set Controller.Config.vision_processor "
+                "to serve image prompts."
+            )
+        pixel_values = []
+        for image in request.prompt.images:
+            image_pixel_values = self._pixel_values_lru_cache.get(image.hash_value)
+            if image_pixel_values is None:
+                try:
+                    pixels, _ = self._vision_processor.resize_and_normalize(image.data)
+                except RuntimeError as error:
+                    # torchvision raises RuntimeError for a truncated or non-image file, which
+                    # gets past rendering (it reads only the header): fail just its rollout.
+                    raise ValueError(
+                        f"{request.request_id}: image file {image.source_path} does not "
+                        f"decode: {error}"
+                    ) from error
+                image_pixel_values, _ = self._vision_processor.patchify(pixels)
+                self._pixel_values_lru_cache.put(image.hash_value, image_pixel_values)
+            pixel_values.append(image_pixel_values)
+        return pixel_values
 
     def has_unfinished_requests(self) -> bool:
         """Whether any admitted request is still running."""
@@ -432,7 +513,7 @@ class VLLMEngine(GenerationEngine):
         self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
     ) -> None:
         """Fetch the model state dict into the model's weights one FSDP group at a time, and
-        reset the KV cache when configured."""
+        reset the KV cache (and, for image prompts, vLLM's encoder cache) when configured."""
         self._get_model().model_state_dict_loader.load(fetch)
         if self._reset_kv_cache_on_model_state_dict_load:
             # Always reset running requests too: the only reason to reset is a strict
@@ -441,6 +522,11 @@ class VLLMEngine(GenerationEngine):
             self._engine.reset_prefix_cache(
                 reset_running_requests=True,
             )
+            if self._vision_processor is not None:
+                # Unsalted image hashes carry no policy version: drop the old vision weights'
+                # encoder outputs too. vLLM's warning here about queued requests is about its
+                # processor caches, which image prompts turn off.
+                self._engine.reset_encoder_cache()
 
     def shutdown(self) -> None:
         """Close renderer-local resources.

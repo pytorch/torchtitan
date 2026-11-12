@@ -22,16 +22,17 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import InnerAttention, LinearAttentionMetadata
 from torchtitan.models.common.attention.kda import KDA
-from torchtitan.models.common.attention.linear_attention import chunk_kernel_options
 from torchtitan.models.common.attn_gym import (
-    bound_gate,
     causal_conv1d_decode,
-    l2norm,
     paged_causal_conv1d,
-    paged_chunk_kda,
     recurrent_kda_decode,
 )
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.rl.generator.attention.kda import (
+    paged_kda,
+    REPLAY_STATE_DTYPES,
+    replay_state_shapes,
+)
 from torchtitan.rl.generator.vllm.attention.linear_attention import (
     configure_hybrid_state,
     get_linear_attention_metadata,
@@ -43,30 +44,6 @@ from torchtitan.rl.generator.vllm.attention.linear_attention import (
 # Shape suffixes:
 # T = packed tokens, C = projection channels, H = attention heads,
 # K = query/key/value head dimension, W = convolution kernel width.
-
-_CHUNK_SIZE = 64
-_REPLAY_STATE_DTYPES = (
-    torch.bfloat16,
-    torch.bfloat16,
-    torch.bfloat16,
-    torch.float32,
-    torch.float32,
-    torch.int32,
-)
-
-
-def _replay_state_shapes(
-    local_num_heads: int, head_dim: int
-) -> tuple[tuple[int, ...], ...]:
-    """Return Attention Gym's per-slot q, k, v, gate, beta, and count shapes."""
-    return (
-        (_CHUNK_SIZE, local_num_heads, head_dim),
-        (_CHUNK_SIZE, local_num_heads, head_dim),
-        (_CHUNK_SIZE, local_num_heads, head_dim),
-        (_CHUNK_SIZE, local_num_heads, head_dim),
-        (_CHUNK_SIZE, local_num_heads),
-        (1,),
-    )
 
 
 class VLLMInnerKDA(InnerAttention, MambaBase):
@@ -120,9 +97,7 @@ class VLLMInnerKDA(InnerAttention, MambaBase):
         # vLLM replaces these placeholders after allocating its paged state cache.
         self.kv_cache = tuple(
             torch.tensor([])
-            for _ in range(
-                2 + len(_REPLAY_STATE_DTYPES) if self.use_chunk_replay else 2
-            )
+            for _ in range(2 + len(REPLAY_STATE_DTYPES) if self.use_chunk_replay else 2)
         )
 
         # vLLM keys per-layer metadata and the state cache by this name.
@@ -150,7 +125,7 @@ class VLLMInnerKDA(InnerAttention, MambaBase):
         )
         if not self.use_chunk_replay:
             return shapes
-        return (*shapes, *_replay_state_shapes(self.local_num_heads, self.head_dim))
+        return (*shapes, *replay_state_shapes(self.local_num_heads, self.head_dim))
 
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         dtypes = MambaStateDtypeCalculator.kda_state_dtype(
@@ -159,7 +134,7 @@ class VLLMInnerKDA(InnerAttention, MambaBase):
         )
         if not self.use_chunk_replay:
             return dtypes
-        return (*dtypes, *_REPLAY_STATE_DTYPES)
+        return (*dtypes, *REPLAY_STATE_DTYPES)
 
     def forward(
         self,
@@ -258,24 +233,18 @@ class VLLMInnerKDA(InnerAttention, MambaBase):
                     out=output_THK[:num_decode_rows].unsqueeze(0),
                 )
                 return
-            query_B1HK, key_B1HK, value_B1HK = (
-                tensor.reshape(-1, 1, self.local_num_heads, self.head_dim)
-                for tensor in convolved_BC.chunk(3, dim=-1)
-            )
-            output_B1HK = paged_chunk_kda(
-                l2norm(query_B1HK),
-                l2norm(key_B1HK),
-                value_B1HK,
-                bound_gate(
-                    raw_gate_THK[:num_decode_rows].unsqueeze(1),
-                    *gate_args,
-                    lower_bound=self.lower_bound,
-                ),
-                raw_beta_TH[:num_decode_rows].unsqueeze(1).float().sigmoid(),
+            output_B1HK = paged_kda(
+                convolved_BC.unsqueeze(1),
+                raw_gate_THK[:num_decode_rows].unsqueeze(1),
+                raw_beta_TH[:num_decode_rows].unsqueeze(1),
+                *gate_args,
                 recurrent_state,
                 state_indices,
+                cu_seqlens=None,
                 has_initial_state=has_initial_state,
                 replay_state=tuple(replay_state),
+                head_dim=self.head_dim,
+                lower_bound=self.lower_bound,
             )
             output_THK[:num_decode_rows].copy_(output_B1HK[:, 0])
             return
@@ -289,26 +258,18 @@ class VLLMInnerKDA(InnerAttention, MambaBase):
             cu_seqlens=cu_seqlens,
             has_initial_state=has_initial_state,
         )
-        query_1THK, key_1THK, value_1THK = (
-            tensor.reshape(1, -1, self.local_num_heads, self.head_dim)
-            for tensor in convolved_1TC.chunk(3, dim=-1)
-        )
-        output_1THK = paged_chunk_kda(
-            l2norm(query_1THK),
-            l2norm(key_1THK),
-            value_1THK,
-            bound_gate(
-                raw_gate_THK[:num_actual_tokens].unsqueeze(0),
-                *gate_args,
-                lower_bound=self.lower_bound,
-            ),
-            raw_beta_TH[:num_actual_tokens].unsqueeze(0).float().sigmoid(),
+        output_1THK = paged_kda(
+            convolved_1TC,
+            raw_gate_THK[:num_actual_tokens].unsqueeze(0),
+            raw_beta_TH[:num_actual_tokens].unsqueeze(0),
+            *gate_args,
             recurrent_state,
             state_indices,
             cu_seqlens=cu_seqlens,
             has_initial_state=has_initial_state,
             replay_state=tuple(replay_state) if self.use_chunk_replay else None,
-            kernel_options=chunk_kernel_options(query_1THK),
+            head_dim=self.head_dim,
+            lower_bound=self.lower_bound,
         )
         output_THK[:num_actual_tokens].copy_(output_1THK[0])
 
@@ -344,7 +305,7 @@ def maybe_configure_kda_hybrid_model(
         if not is_in_batch_invariant_mode():
             return shapes
         local_num_heads = num_heads // vllm_config.parallel_config.tensor_parallel_size
-        return (*shapes, *_replay_state_shapes(local_num_heads, head_dim))
+        return (*shapes, *replay_state_shapes(local_num_heads, head_dim))
 
     def get_state_dtype(vllm_config):
         dtypes = MambaStateDtypeCalculator.kda_state_dtype(
@@ -353,13 +314,13 @@ def maybe_configure_kda_hybrid_model(
         )
         if not is_in_batch_invariant_mode():
             return dtypes
-        return (*dtypes, *_REPLAY_STATE_DTYPES)
+        return (*dtypes, *REPLAY_STATE_DTYPES)
 
     def get_state_copy_func():
         copy_funcs = MambaStateCopyFuncCalculator.kda_state_copy_func()
         if not is_in_batch_invariant_mode():
             return copy_funcs
-        return (*copy_funcs, *(copy_funcs[1] for _ in _REPLAY_STATE_DTYPES))
+        return (*copy_funcs, *(copy_funcs[1] for _ in REPLAY_STATE_DTYPES))
 
     configure_hybrid_state(
         model_cls,

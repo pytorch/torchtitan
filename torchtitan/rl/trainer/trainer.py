@@ -21,7 +21,7 @@ from torchstore import RankRole
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable, PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.validation import validate_model_training_config
-from torchtitan.distributed import maybe_apply_numa_binding, utils as dist_utils
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.base.model import BaseModel
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
@@ -128,7 +128,6 @@ class Trainer(Configurable):
         )
         engine = self.engine
         self._resume_state = MirroredState()
-        maybe_apply_numa_binding(engine.device.index, engine.device.type)
 
         # Send parameters in the dtype the generator computes with, as FSDP casts
         # them for the trainer's forward. Only cast when it differs.
@@ -317,6 +316,11 @@ class Trainer(Configurable):
             # and broadcast it, to cut the trainer's reads by cp * tp. Needs a per-replica group.
             # The controller rejects RDMA with PP, so every group holds one microbatch.
             microbatch_groups = RDMAMicrobatchPrefetcher(microbatches)
+        else:
+            microbatch_groups = [
+                [microbatch.preprocess_images() for microbatch in group]
+                for group in microbatch_groups
+            ]
         result = engine.forward_backward(
             microbatch_groups=microbatch_groups,
             global_loss_token_counts=global_loss_token_counts,

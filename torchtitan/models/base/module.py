@@ -121,7 +121,8 @@ class Module(nn.Module, Configurable):
         preserve_dtype_params: tuple[str, ...] = ()
         """Names of this module's own parameters that bulk casts never lower in
         precision: FSDP's mixed precision ``param_dtype`` and the checkpoint
-        ``export_dtype`` keep a parameter's own dtype when it is wider, and the RL
+        ``export_dtype`` keep a parameter's own dtype when it is wider, frozen
+        parameters keep it instead of moving to ``param_dtype`` storage, and the RL
         weight sync sends it in its own dtype. For parameters whose numerics
         need master precision, e.g. a linear-attention decay that the reference
         checkpoint stores in float32."""

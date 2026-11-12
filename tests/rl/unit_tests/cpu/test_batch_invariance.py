@@ -139,7 +139,7 @@ def test_vllm_sampler_patch_uses_trainer_ops(monkeypatch):
         return compute_logprobs(logits, labels, **kwargs)
 
     monkeypatch.setattr(loss_module, "compute_logprobs", recording_compute_logprobs)
-    batch_invariance.patch_vllm_logprob_and_temperature_kernels()
+    batch_invariance.force_trainer_logprobs_for_batch_invariance()
 
     logits = torch.tensor(
         [[1.0, -0.5, 0.25, 2.0], [-1.0, 0.0, 1.5, 0.5]],
