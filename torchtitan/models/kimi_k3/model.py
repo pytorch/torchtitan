@@ -272,7 +272,9 @@ class KimiK3Model(MultimodalModel):
             if activation_remat is not None:
                 activation_remat.apply(self)
                 if self.vision_encoder is not None:
-                    activation_remat.apply(self.vision_encoder)
+                    activation_remat.apply(
+                        self.vision_encoder, module_fqn="vision_encoder"
+                    )
             self._apply_fsdp(
                 parallelism_context=parallelism_context,
                 precision=precision,

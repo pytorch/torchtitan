@@ -84,14 +84,14 @@ class MultimodalModel(Decoder):
         with parallelism_context.activate_spmd():
             self._parallelize(parallelism_context)
             encoders = [
-                encoder
+                (encoder_fqn, encoder)
                 for encoder_fqn in self.multimodal_encoder_fqns
                 if (encoder := getattr(self, encoder_fqn)) is not None
             ]
             if activation_remat is not None:
                 activation_remat.apply(self)
-                for encoder in encoders:
-                    activation_remat.apply(encoder)
+                for encoder_fqn, encoder in encoders:
+                    activation_remat.apply(encoder, module_fqn=encoder_fqn)
 
             self._apply_fsdp(
                 parallelism_context=parallelism_context,
