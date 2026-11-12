@@ -10,19 +10,25 @@ from torchtitan.config.transform import transform_model_config_
 
 from torchtitan_recipes.models.muse_spark import MUSE_SPARK_LORA_DECODER_TARGETS
 from torchtitan_recipes.sft import slake
+from torchtitan_recipes.tests.models.muse_glimmer import muse_glimmer_debugmodel_mm
 from torchtitan_recipes.tests.models.muse_spark import muse_spark_debugmodel_mm
 
 
 _VISION_PREFIXES = ("vision_encoder.", "vision_adapter.", "vision_projection.")
 
 
+@pytest.mark.parametrize(
+    "debugmodel_mm, decoder_targets",
+    [
+        (muse_spark_debugmodel_mm, MUSE_SPARK_LORA_DECODER_TARGETS),
+        (muse_glimmer_debugmodel_mm, slake._MUSE_GLIMMER_LORA_DECODER_TARGETS),
+    ],
+)
 @pytest.mark.parametrize("variant", ["lora_decoder", "lora_vision_decoder"])
-def test_slake_lora_trainable_split(variant):
+def test_slake_lora_trainable_split(debugmodel_mm, decoder_targets, variant):
     # LoRA only warns on unmatched targets; this catches a renamed module.
-    model_config = muse_spark_debugmodel_mm().model
-    model_config = transform_model_config_(
-        model_config, [slake._slake_lora_transform(variant)]
-    )
+    transform = slake._slake_lora_transform(variant, decoder_targets=decoder_targets)
+    model_config = transform_model_config_(debugmodel_mm().model, [transform])
     with torch.device("meta"):
         model = model_config.build()
     trainable = {
@@ -49,7 +55,7 @@ def test_slake_lora_trainable_split(variant):
         if name.startswith("layers.")
     }
     # Every decoder target must match a decoder module.
-    assert decoder == set(MUSE_SPARK_LORA_DECODER_TARGETS)
+    assert decoder == set(decoder_targets)
     if variant == "lora_decoder":
         assert not vision
     else:
