@@ -564,7 +564,7 @@ _FILLER_TEXT = (
 )
 
 
-def _make_prompt_tokens(batch_size, prompt_length, tokenizer):
+def make_prompt_tokens(batch_size, prompt_length, tokenizer):
     """Create token ID sequences of the given prompt_length.
 
     For batch_size > 1, varies lengths across the batch (first seq at max,
@@ -695,7 +695,7 @@ class BitwiseParityTestBase(unittest.TestCase):
             _sync_trainer_weights_to_vllm(cls.model, cls.engine)
 
         tokenizer = cls.engine.get_tokenizer()
-        cls.prompt_ids = _make_prompt_tokens(
+        cls.prompt_ids = make_prompt_tokens(
             cls.BATCH_SIZE, cls.PROMPT_LENGTH, tokenizer
         )
 
@@ -894,7 +894,7 @@ class TestBitwiseParityQwen35Varlen(BitwiseParityTestBase):
     min_world_size = 2
 
 
-def _qwen3_5_debug_bitwise_config() -> Controller.Config:
+def qwen3_5_debug_bitwise_config() -> Controller.Config:
     """Build a two-GPU random-weight Qwen3.5 parity configuration."""
     config = rl_grpo_qwen3_5_debug_varlen_batch_invariant()
     config.trainer = dataclasses.replace(
@@ -911,7 +911,7 @@ class TestBitwiseParityQwen35DebugVarlen(BitwiseParityTestBase):
     """Qwen3.5 GDN parity with random weights and matched TP=2."""
 
     __test__ = True
-    config_fn = staticmethod(_qwen3_5_debug_bitwise_config)
+    config_fn = staticmethod(qwen3_5_debug_bitwise_config)
     attn_backend = "varlen"
     min_world_size = 2
     sync_weights_from_trainer = True
@@ -997,7 +997,7 @@ class KimiK3BitwiseParityTestBase(BitwiseParityTestBase):
         cls.model.train()
 
 
-def _kimi_k3_debug_bitwise_config() -> Controller.Config:
+def kimi_k3_debug_bitwise_config() -> Controller.Config:
     """Build a one-GPU random-weight Kimi K3 parity configuration."""
     config = rl_grpo_kimi_k3_debug_varlen_batch_invariant()
     config.trainer = dataclasses.replace(
@@ -1014,7 +1014,7 @@ class TestBitwiseParityKimiK3DebugVarlen(KimiK3BitwiseParityTestBase):
     """Kimi K3 KDA/MLA parity with random weights and matched TP=1."""
 
     __test__ = True
-    config_fn = staticmethod(_kimi_k3_debug_bitwise_config)
+    config_fn = staticmethod(kimi_k3_debug_bitwise_config)
     attn_backend = "varlen"
     sync_weights_from_trainer = True
     BATCH_SIZE = 3
