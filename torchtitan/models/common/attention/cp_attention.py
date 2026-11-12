@@ -10,13 +10,14 @@ Tensor suffixes: ``T`` tokens, ``H`` heads, ``K`` qk head dim, ``V`` v head dim.
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Generic, Literal, NamedTuple, TypeVar
+from dataclasses import dataclass, fields
+from typing import Generic, Literal, TypeVar
 
 import spmd_types as spmd
 
 import torch
 import torch.distributed as dist
+from torch.export import register_dataclass
 
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.context_parallel import cp_all_gather_tensors
@@ -195,6 +196,8 @@ class AllGatherKVFlex(CPInnerAttention[FlexAttentionMetadata, FlexAttentionMetad
             BLOCK_SIZE=block_mask.BLOCK_SIZE,
             # Preserve whether the global mask stores full blocks separately.
             separate_full_blocks=block_mask.full_kv_num_blocks is not None,
+            # Preserve the dQ write-order metadata of the deterministic FLASH backward.
+            compute_dq_write_order=block_mask.dq_write_order is not None,
         )
 
 
@@ -259,11 +262,14 @@ class AllGatherKVSlidingWindowFlexInnerAttention(
         return super().forward(q_THK, k_THK, v_THV, **kwargs)
 
 
-class AllGatherKVVarlenAttentionMetadata(NamedTuple):
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AllGatherKVVarlenAttentionMetadata(VarlenAttentionMetadata):
     """Global document offsets and optional K/V reordering indices."""
 
-    varlen_metadata: VarlenAttentionMetadata
     inverse_permutation: torch.Tensor | None
+
+
+register_dataclass(AllGatherKVVarlenAttentionMetadata)
 
 
 class AllGatherKVVarlen(
@@ -294,25 +300,25 @@ class AllGatherKVVarlen(
             raise ValueError("K/V all-gather varlen CP requires a causal window.")
         if attention_metadata.cu_seq_k is not attention_metadata.cu_seq_q:
             raise ValueError("Varlen K/V all-gather CP supports only self-attention.")
-        if permutation is None:
-            return AllGatherKVVarlenAttentionMetadata(
-                varlen_metadata=attention_metadata, inverse_permutation=None
+        inverse_permutation = None
+        if permutation is not None:
+            # A permutation must come from global head-tail load balancing.
+            if permutation.ndim != 2 or permutation.shape[0] != 1:
+                raise ValueError(
+                    "Head-tail varlen CP requires a permutation with shape (1, seq_len)."
+                )
+            seq_len = permutation.shape[1]
+            inverse_permutation = torch.empty_like(permutation[0])
+            inverse_permutation[permutation[0]] = torch.arange(
+                seq_len,
+                device=permutation.device,
+                dtype=permutation.dtype,
             )
-        # A permutation must come from global head-tail load balancing.
-        if permutation.ndim != 2 or permutation.shape[0] != 1:
-            raise ValueError(
-                "Head-tail varlen CP requires a permutation with shape (1, seq_len)."
-            )
-
-        seq_len = permutation.shape[1]
-        inverse_permutation = torch.empty_like(permutation[0])
-        inverse_permutation[permutation[0]] = torch.arange(
-            seq_len,
-            device=permutation.device,
-            dtype=permutation.dtype,
-        )
         return AllGatherKVVarlenAttentionMetadata(
-            varlen_metadata=attention_metadata,
+            **{
+                field.name: getattr(attention_metadata, field.name)
+                for field in fields(VarlenAttentionMetadata)
+            },
             inverse_permutation=inverse_permutation,
         )
 
@@ -355,9 +361,7 @@ class AllGatherKVVarlen(
         k_THK: torch.Tensor,
         v_THV: torch.Tensor,
         *,
-        attention_metadata: (
-            VarlenAttentionMetadata | AllGatherKVVarlenAttentionMetadata
-        ),
+        attention_metadata: AllGatherKVVarlenAttentionMetadata,
         **kwargs,
     ) -> torch.Tensor:
         if not isinstance(attention_metadata, AllGatherKVVarlenAttentionMetadata):
@@ -365,29 +369,28 @@ class AllGatherKVVarlen(
                 f"{type(self).__name__} requires AllGatherKVVarlenAttentionMetadata, "
                 f"but got {type(attention_metadata).__name__}."
             )
-        varlen_metadata = attention_metadata.varlen_metadata
+        assert isinstance(self, VarlenInnerAttention)
         k_THK, v_THV = cp_all_gather_tensors(
             (k_THK, v_THV),
             reduce_dtype=self.reduce_dtype,
         )
 
-        left = varlen_metadata.window_size[0]
+        left = attention_metadata.window_size[0]
         # A chunk needs at most one document length of earlier keys.
-        max_document_length = varlen_metadata.max_k
+        max_document_length = attention_metadata.max_k
         max_lookback = (
             max_document_length if left == -1 else min(left, max_document_length)
         )
         cp_group = spmd_mesh_group(MeshAxisName.CP)
         assert cp_group is not None
         cp_rank = dist.get_rank(cp_group)
-
-        varlen_forward = super().forward
+        varlen_forward = self._forward_varlen
 
         def run_chunk(q_chunk_THK: torch.Tensor, q_start: int) -> torch.Tensor:
             end = q_start + q_chunk_THK.shape[0]
             kv_start = max(0, q_start - max_lookback)
             metadata = self._chunk_metadata(
-                varlen_metadata,
+                attention_metadata,
                 q_start=q_start,
                 end=end,
                 kv_start=kv_start,
@@ -432,7 +435,7 @@ class AllGatherKVVarlen(
 
 class AllGatherKVVarlenInnerAttention(
     AllGatherKVVarlen,
-    VarlenInnerAttention,
+    VarlenInnerAttention[AllGatherKVVarlenAttentionMetadata],
 ):
     """Varlen attention with sharded Q and all-gathered K/V."""
 
@@ -451,7 +454,7 @@ class AllGatherKVVarlenInnerAttention(
 
 class AllGatherKVSlidingWindowVarlenInnerAttention(
     AllGatherKVVarlen,
-    SlidingWindowVarlenInnerAttention,
+    SlidingWindowVarlenInnerAttention[AllGatherKVVarlenAttentionMetadata],
 ):
     """Sliding-window varlen attention with sharded Q and all-gathered K/V."""
 

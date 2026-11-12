@@ -5,39 +5,42 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
-from torchtitan.config import ParallelismConfig
-from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.muse_glimmer import build_model_config
 from torchtitan.models.muse_glimmer.state_dict_adapter import (
     MuseGlimmerStateDictAdapter,
 )
 
 
-def cpu_flex_attention(q, k, v, **kwargs):
-    """Evaluate the FlexAttention block mask with CPU SDPA."""
-    indices = torch.arange(q.shape[-2], device=q.device)
-    mask = kwargs["block_mask"].mask_mod(
-        torch.tensor(0, device=q.device),
-        torch.tensor(0, device=q.device),
-        indices[:, None],
-        indices[None, :],
-    )
-    return (
-        F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=mask,
-            scale=kwargs["scale"],
-            enable_gqa=kwargs["enable_gqa"],
-        ),
-        SimpleNamespace(),
-    )
+def cpu_varlen_attention(
+    q_THK,
+    k_THK,
+    v_THV,
+    cu_seq_q,
+    cu_seq_k,
+    max_q,
+    max_k,
+    scale,
+    window_size,
+    num_splits,
+):
+    """Full attention within each packed segment with CPU SDPA."""
+    cu_seqlens = cu_seq_q.tolist()
+    outputs = []
+    for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:]):
+        q, k, v = (t[start:end].transpose(0, 1) for t in (q_THK, k_THK, v_THV))
+        outputs.append(
+            F.scaled_dot_product_attention(q, k, v, scale=scale).transpose(0, 1)
+        )
+    return (torch.cat(outputs),)
+
+
+# The NaViT vision attention kernel; it has no CPU implementation.
+_VARLEN_ATTN = "torchtitan.models.common.attention.attention.deterministic_varlen_attn"
 
 
 class TestMuseGlimmerConditionalVision(unittest.TestCase):
@@ -80,7 +83,7 @@ class TestMuseGlimmerConditionalVision(unittest.TestCase):
             4, model.vision_encoder.conv1_linear.in_features, requires_grad=True
         )
         grid = torch.tensor([[1, 2, 2]])
-        with patch.object(FlexInnerAttention, "compiled_flex_attn", cpu_flex_attention):
+        with patch(_VARLEN_ATTN, cpu_varlen_attention):
             features = model._get_vision_features(pixels, grid)
             features.sum().backward()
         self.assertEqual(features.shape, (1, model.config.dim))
@@ -115,11 +118,7 @@ class TestMuseGlimmerConditionalVision(unittest.TestCase):
         encoder_outputs = []
         assert model.vision_encoder is not None
         assert model.vision_adapter is not None
-        with patch.object(
-            FlexInnerAttention,
-            "compiled_flex_attn",
-            cpu_flex_attention,
-        ):
+        with patch(_VARLEN_ATTN, cpu_varlen_attention):
             handle = model.vision_encoder.register_forward_hook(
                 lambda _module, _args, output: encoder_outputs.append(output)
             )

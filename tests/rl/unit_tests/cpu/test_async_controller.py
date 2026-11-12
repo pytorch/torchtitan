@@ -8,15 +8,16 @@
 the consume-time staleness invariant, the metrics timer drain, and RolloutTurnID."""
 
 import asyncio
+import itertools
 import json
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
 import pytest
 import torch
-from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.controller.controller import Controller, ValidationConfig
 from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
@@ -26,9 +27,15 @@ from torchtitan.rl.controller.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
 )
+from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
-from torchtitan.rl.rollout.types import RolloutTurnID
+from torchtitan.rl.rollout.types import (
+    Rollout,
+    RolloutStatus,
+    RolloutTurn,
+    RolloutTurnID,
+)
 
 from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.training_sample_builder import (
@@ -52,7 +59,7 @@ def test_controller_config_maybe_log(tmp_path, caplog) -> None:
     assert "Running with configs:" in caplog.text
     with open(tmp_path / "config.json") as file:
         saved_config = json.load(file)
-    assert saved_config["trainer"]["training"]["max_context_length"] == 128
+    assert saved_config["trainer"]["model"]["max_context_length"] == 128
 
 
 def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:
@@ -793,8 +800,19 @@ async def _block_forever(*args, **kwargs) -> None:
     await asyncio.Event().wait()
 
 
-def _run_with_generator_watcher(watcher) -> None:
-    """Run Controller.run with every stage but the engine-loop watcher stubbed to block."""
+async def _train_one_step(*args, **kwargs) -> None:
+    await asyncio.sleep(0)
+
+
+def _run_with_generator_watcher(
+    watcher,
+    *,
+    trainer_loop=_block_forever,
+    validate=None,
+    validation=None,
+    on_close=None,
+) -> Controller:
+    """Run Controller.run with stub loops: `watcher` waits on the engine loops, `trainer_loop` trains, the rest block."""
     controller = object.__new__(Controller)
     controller.config = SimpleNamespace(
         async_loop=SimpleNamespace(
@@ -806,16 +824,20 @@ def _run_with_generator_watcher(watcher) -> None:
             max_offpolicy_steps=None,
             num_prompts_per_train_step=1,
             group_buffer=SimpleNamespace(
-                build=lambda **kwargs: SimpleNamespace(close=AsyncMock())
+                build=lambda **kwargs: SimpleNamespace(
+                    close=AsyncMock(side_effect=on_close)
+                )
             ),
+            validation=validation or ValidationConfig(),
         ),
         trainer=SimpleNamespace(
-            training=SimpleNamespace(
-                num_tokens_per_microbatch_per_dp_rank=8, max_context_length=8
-            )
+            training=SimpleNamespace(num_tokens_per_microbatch_per_dp_rank=8)
         ),
     )
     controller.start_step = 0
+    controller._validation_tasks = []
+    controller._has_pending_validation = False
+    controller.metrics_processor = Mock()
     controller.trainer = None
     controller.trainer_dp_degree = 1
     controller.tokenizer = SimpleNamespace(eos_id=0)
@@ -826,15 +848,16 @@ def _run_with_generator_watcher(watcher) -> None:
     with (
         patch.multiple(
             Controller,
-            _validate_and_log=AsyncMock(return_value={}),
-            _make_generate_fn=lambda self, metrics_prefix: None,
+            validate=validate or AsyncMock(return_value=[]),
+            _make_generate_fn=lambda self: None,
             _data_input_loop=_block_forever,
             _rollout_loop=_block_forever,
             _batcher_loop=_block_forever,
-            _trainer_loop=_block_forever,
+            _trainer_loop=trainer_loop,
         ),
     ):
         asyncio.run(asyncio.wait_for(controller.run(), timeout=10))
+    return controller
 
 
 def test_run_fails_when_an_engine_loop_crashes() -> None:
@@ -853,3 +876,183 @@ def test_run_fails_when_the_engine_loops_exit_mid_run() -> None:
         RuntimeError, match="generator_wait_engine_loop exited unexpectedly"
     ):
         _run_with_generator_watcher(exited)
+
+
+@pytest.mark.parametrize(
+    "step_0_validation, validate_after_training, started_steps, logged_steps",
+    [
+        # Ends before training does: the call after training logs it at step 1.
+        ("ends", False, [0], [1]),
+        # Ends while run()'s finally awaits group_buffer.close(): also logged at step 1.
+        ("ends_during_close", False, [0], [1]),
+        # Still running: run() cancels it (else run() hangs) and logs nothing.
+        ("runs", False, [0], []),
+        # Cancelled, then the validation after training runs and is logged at step 1.
+        ("runs", True, [0, 1], [1]),
+        # Failed: the call after training raises its error.
+        ("fails", False, [0], None),
+    ],
+)
+def test_run_ends_validation(
+    step_0_validation, validate_after_training, started_steps, logged_steps
+) -> None:
+    """1 training step: what run() does with the step-0 validation and the validation after training."""
+    started = []
+    close_started = asyncio.Event()
+
+    async def validate(self, *, step: int) -> list[m.Metric]:
+        started.append(step)
+        if step == 0 and step_0_validation == "ends_during_close":
+            await close_started.wait()
+        if step == 0 and step_0_validation == "runs":
+            await asyncio.Event().wait()
+        if step == 0 and step_0_validation == "fails":
+            raise RuntimeError("validation failed")
+        return [m.Metric(f"started_{step}", m.Mean(1.0))]
+
+    async def close() -> None:
+        close_started.set()
+        await asyncio.sleep(0)  # the validation returns
+
+    def run() -> Controller:
+        return _run_with_generator_watcher(
+            _block_forever,
+            trainer_loop=_train_one_step,
+            validate=validate,
+            validation=ValidationConfig(
+                validate_after_training=validate_after_training
+            ),
+            on_close=close,
+        )
+
+    if step_0_validation == "fails":
+        with pytest.raises(RuntimeError, match="validation failed"):
+            run()
+    else:
+        controller = run()
+        assert [
+            call.kwargs["step"]
+            for call in controller.metrics_processor.log.call_args_list
+        ] == logged_steps
+    assert started == started_steps
+
+
+@pytest.mark.parametrize(
+    "start_step, validate_at_step_0, defer_new_if_not_finished, started_steps, logged",
+    [
+        # The validation started at 3 came due at 2; the one started at 6 covers steps 4 and 6.
+        (0, True, True, [0, 3, 6], [(3, "started_0"), (6, "started_3")]),
+        (
+            0,
+            True,
+            False,
+            [0, 2, 4, 6],
+            [(3, "started_0"), (5, "started_2"), (7, "started_4")],
+        ),
+        (0, False, True, [2, 5], [(5, "started_2"), (8, "started_5")]),
+        # Resumed at step 2, a multiple of freq: a validation starts there. validate_at_step_0 is for step 0 only.
+        (2, False, True, [2, 5], [(5, "started_2"), (8, "started_5")]),
+        # Resumed at step 3: the first validation starts at 4, also with validate_at_step_0.
+        (3, True, True, [4, 7], [(7, "started_4")]),
+    ],
+)
+def test_validation_schedule(
+    start_step, validate_at_step_0, defer_new_if_not_finished, started_steps, logged
+) -> None:
+    """freq=2, 8 steps, each validation ends 3 steps after it starts and is logged at that step.
+
+    No validation starts at step 8, the last step.
+    """
+    end_events: dict[int, asyncio.Event] = {}
+
+    async def validate(*, step: int) -> list[m.Metric]:
+        end_events[step] = asyncio.Event()
+        await end_events[step].wait()
+        return [m.Metric(f"started_{step}", m.Mean(1.0))]
+
+    controller = object.__new__(Controller)
+    controller.config = SimpleNamespace(
+        async_loop=SimpleNamespace(
+            num_training_steps=8,
+            validation=ValidationConfig(
+                freq=2,
+                validate_at_step_0=validate_at_step_0,
+                defer_new_if_not_finished=defer_new_if_not_finished,
+            ),
+        )
+    )
+    controller._validation_tasks = []
+    controller._has_pending_validation = False
+    controller.validate = validate
+    controller.metrics_processor = Mock()
+
+    async def run_steps() -> None:
+        for step in range(start_step, 9):
+            if step - 3 in end_events:
+                end_events[step - 3].set()
+                await asyncio.sleep(0)  # the validation returns
+            controller._maybe_start_validation(step=step)
+            await asyncio.sleep(0)  # a new validation starts
+
+    asyncio.run(run_steps())
+
+    assert list(end_events) == started_steps
+    assert [
+        (call.kwargs["step"], call.kwargs["metrics"][0].key)
+        for call in controller.metrics_processor.log.call_args_list
+    ] == logged
+
+
+def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
+    """Validation prefixes its turns' metrics with `validation_` (`generator/x` -> `validation_generator/x`,
+    `math_verify/x` -> `validation_math_verify/x`). Two validations never share a group id."""
+
+    async def run_group_rollouts(*, group_id: int, **kwargs) -> RolloutGroup:
+        turn = RolloutTurn(
+            rollout_id=RolloutTurnID(group_id=group_id, rollout_id=0, turn_id=0),
+            prompt_prefix_len=0,
+            prompt_delta_token_ids=np.array([1], dtype=np.int32),
+            completion_token_ids=np.array([2], dtype=np.int32),
+            completion_logprobs=np.array([-0.1], dtype=np.float32),
+            min_policy_version=0,
+            max_policy_version=0,
+            metrics=[
+                m.Metric("generator/queue_time_ms", m.Mean(2.0)),
+                m.Metric("math_verify/timeouts", m.Sum(1.0)),
+            ],
+        )
+        rollout = Rollout(
+            group_id=group_id,
+            rollout_id=0,
+            status=RolloutStatus.COMPLETED,
+            reward=0.0,
+            turns=[turn],
+        )
+        return RolloutGroup(group_id=group_id, rollouts=[rollout])
+
+    controller = object.__new__(Controller)
+    controller._validation_group_ids = itertools.count(start=-1, step=-1)
+    controller._make_generate_fn = lambda: None
+    controller._make_release_session_fn = lambda: None
+    controller._rollouter = SimpleNamespace(run_group_rollouts=run_group_rollouts)
+    release_groups = AsyncMock()
+    controller.generator_router = SimpleNamespace(
+        release_groups=SimpleNamespace(call_one=release_groups)
+    )
+
+    async def run_two_validations() -> list[m.Metric]:
+        for step in (0, 2):
+            _, metrics = await controller._collect_validation_rollouts(
+                samples=["prompt 1", "prompt 2"], sampling=SamplingConfig(), step=step
+            )
+        return metrics
+
+    keys = m.MetricsProcessor._aggregate_metrics(asyncio.run(run_two_validations()))
+    assert [call.args[0] for call in release_groups.call_args_list] == [
+        [-1, -2],
+        [-3, -4],
+    ]
+    assert keys["validation_generator/queue_time_ms/mean"] == 2.0
+    assert keys["validation_math_verify/timeouts/sum"] == 2.0
+    assert "generator/queue_time_ms/mean" not in keys
+    assert "math_verify/timeouts/sum" not in keys

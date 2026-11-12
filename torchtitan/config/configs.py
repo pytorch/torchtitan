@@ -49,9 +49,6 @@ class TrainingConfig:
     data-parallel degree`.
     """
 
-    max_context_length: int = 2048
-    """Maximum logical context length used for training."""
-
     def __post_init__(self) -> None:
         if self.num_tokens_per_microbatch_per_dp_rank <= 0:
             raise ValueError(
@@ -59,16 +56,9 @@ class TrainingConfig:
             )
         if self.num_tokens_per_train_step != -1 and self.num_tokens_per_train_step <= 0:
             raise ValueError("num_tokens_per_train_step must be -1 or greater than 0.")
-        if self.max_context_length <= 0:
-            raise ValueError("max_context_length must be greater than 0.")
 
     steps: int = 10000
     """How many train steps to run"""
-
-    enable_cpu_offload: bool = False
-    """
-    Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP
-    """
 
     disable_accelerator_graphs: bool = False
     """
@@ -103,14 +93,26 @@ class TrainingConfig:
     during training. Requires ``disable_accelerator_graphs=True`` and no SDC replay.
     """
 
-    dtype: Literal["bfloat16", "float32"] = "float32"
-    """
-    torch dtype for training. In contrast to mixed precision training, setting training_dtype=bfloat16 will
-    put all parameters, gradients, and optimizer states in bfloat16, without an extra copy of fp32 weights.
-    In the case of full bf16 training, RoPE calculations and logits will still be in fp32.
+
+@dataclass(kw_only=True, slots=True)
+class PrecisionConfig:
+    """Parameter, compute, and gradient-reduction dtypes of the model.
+
+    Owned by the root config of a job (``Trainer.Config``, RL ``Controller.Config``)
+    and passed to the training engine.
     """
 
-    mixed_precision_param: Literal["bfloat16", "float32"] = "bfloat16"
+    dtype: Literal["bfloat16", "float32"] = "float32"
+    """
+    torch dtype of parameters, gradients, and optimizer states. In contrast to mixed
+    precision training, setting dtype=bfloat16 will put all parameters, gradients, and
+    optimizer states in bfloat16, without an extra copy of fp32 weights.
+    In the case of full bf16 training, RoPE calculations and logits will still be in fp32.
+    Frozen parameters, except preserve_dtype_params, are stored in param_dtype when
+    it is narrower than dtype.
+    """
+
+    param_dtype: Literal["bfloat16", "float32"] = "bfloat16"
     """
     torch dtype to use for parameters when applying mixed precision via fully_shard or torch.autocast.
     This feature takes effect via fully_shard when data_parallel_shard_degree > 1 or
@@ -118,11 +120,17 @@ class TrainingConfig:
     and no other parallelism is enabled, i.e. under DDP or single-device training.
     """
 
-    mixed_precision_reduce: Literal["bfloat16", "float32"] = "float32"
+    reduce_dtype: Literal["bfloat16", "float32"] = "float32"
     """
     torch dtype to use for reductions when applying mixed precision via FSDP.
     This feature only takes effect when data_parallel_shard_degree > 1
     """
+
+    def __post_init__(self) -> None:
+        if self.dtype == "bfloat16" and self.param_dtype == "float32":
+            raise ValueError(
+                "fp32 compute needs fp32 parameters. Set precision.dtype='float32'."
+            )
 
 
 @dataclass(kw_only=True, slots=True)

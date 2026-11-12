@@ -31,6 +31,7 @@ import os
 from typing import Any, TYPE_CHECKING
 
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.config import PrecisionConfig
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
@@ -42,10 +43,15 @@ from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
+from torchtitan.models.qwen3_5.rope import MRoPE
+from torchtitan.rl.generator.engine import ModelStateDictLoadMode
+from torchtitan.rl.generator.model import get_attention_dimensions
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +87,8 @@ def uses_compressed_mla_cache(inner_attention: InnerAttention.Config) -> bool:
 def vllm_attention_backend(cfg: Decoder.Config) -> AttentionBackendEnum | None:
     """Return the vLLM attention backend for ``cfg``'s full attention layers.
 
-    Returns ``None`` for MLA with a compressed cache: vLLM auto-selects one of
-    its MLA backends for the hardware, since vLLM's MLA kernel runs on that path
-    rather than a TorchTitan inner attention.
+    Returns ``None`` for MLA with a compressed cache: each compressed MLA layer
+    passes TorchTitan's decode and prefill backends to vLLM directly.
     """
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -105,7 +110,9 @@ def vllm_attention_backend(cfg: Decoder.Config) -> AttentionBackendEnum | None:
     )
 
 
-def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
+def model_config_to_hf_config_dict(
+    cfg: Decoder.Config, *, serves_images: bool = False
+) -> dict[str, Any]:
     """Build the HF-shaped config dict that vLLM's engine init reads.
 
     Field names match HF conventions because vLLM's engine reads them by
@@ -121,6 +128,9 @@ def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
          vLLM helpers may ``getattr`` against, but the values are not
          consumed in our flow (V1 engine, ``TorchTitanCausalLM`` model
          class, no KV transfer, no MFU metrics, no multimodal).
+
+    ``serves_images``: the generator serves image prompts (see ``vllm/multimodal_wrapper.py``), which
+    needs M-RoPE attention (`MRoPE.Config`, e.g. Qwen3.5); raises ValueError without it.
     """
     if not cfg.layers:
         raise ValueError(f"Model config {type(cfg).__qualname__} has no layers")
@@ -132,10 +142,6 @@ def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
         )
     ffn = cfg.first_feed_forward
     moe = cfg.first_moe
-
-    from torchtitan.rl.generator.vllm.attention.attention import (
-        get_attention_dimensions,
-    )
 
     n_heads, n_kv_heads, head_dim, _ = get_attention_dimensions(attn, cfg.dim)
     rope = getattr(attn, "rope", None)
@@ -189,6 +195,21 @@ def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
         hf["decoder_sparse_step"] = 1
         hf.setdefault("norm_topk_prob", True)
 
+    if serves_images:
+        if not isinstance(rope, MRoPE.Config):
+            raise ValueError(
+                "Image prompts need a generator model whose attention uses MRoPE.Config "
+                f"(Qwen3.5); got {type(rope).__qualname__}."
+            )
+        # Presence required: an mrope_section switches vLLM to 3D M-RoPE positions, which it
+        # gets from the model's get_mrope_input_positions. Text-only generators keep 1D
+        # positions, even for M-RoPE models: text tokens have equal positions on all 3 axes.
+        hf["rope_parameters"] = {
+            "rope_type": "default",
+            "rope_theta": rope.theta,
+            "mrope_section": list(rope.mrope_section),
+        }
+
     return hf
 
 
@@ -196,18 +217,23 @@ def register_to_vllm(
     model_config: Decoder.Config,
     *,
     parallelism: InferenceParallelismConfig,
+    precision: PrecisionConfig,
     checkpointer_config: CheckpointManager.Config | None,
     dist_moe_runtime: DistMoeRuntime.Config | None = None,
+    model_state_dict_load_mode: ModelStateDictLoadMode,
+    vision_processor: VisionProcessor.Config | None = None,
 ) -> None:
     """Register the TorchTitan model class and the TorchTitan config parser with vLLM.
 
     Single entry point for vLLM integration. Must be called before creating
     a vLLM engine that uses a TorchTitan model. Registers three things:
 
-      1. ``VLLMModelFromSpec`` (subclass of ``VLLMModelWrapper``)
+      1. ``VLLMModelFromSpec`` (subclass of ``VLLMModelWrapper``, or of
+         ``VLLMMultimodalModelWrapper`` with a vision processor attached when
+         ``vision_processor`` is set)
          with vLLM's ``ModelRegistry`` under the name ``VLLM_MODEL_NAME``.
          The dynamic subclass closes over
-         ``model_config``/``parallelism``/``checkpointer_config``
+         ``model_config``/``parallelism``/``precision``/``checkpointer_config``
          and forwards them when vLLM constructs the model.
       2. ``TorchTitanConfigParser`` (subclass of ``ConfigParserBase``)
          with vLLM's parser registry under ``TORCHTITAN_CONFIG_FORMAT``. This
@@ -230,11 +256,19 @@ def register_to_vllm(
             ``ParallelismContext``; the caller is responsible for translating the
             relevant fields (TP, EP) to ``EngineArgs`` so vLLM's own world
             layout matches.
+        precision: The trainer's dtypes, which the wrapper's model mirrors. The
+            caller passes ``precision.param_dtype`` as ``EngineArgs.dtype``.
         checkpointer_config: Optional CheckpointManager configuration for
             initial weight loading. Pass ``None`` for the RL loop, where
             weights arrive from TorchStore.
         dist_moe_runtime: ``DistMoeRuntime.Config(inference=True)`` for models
             with Dist-MoE routed experts; ``None`` otherwise.
+        model_state_dict_load_mode: ``Generator.Config``'s field; ``"cpu_prefetch"``
+            allocates the pinned CPU copy model state dicts are prefetched into.
+        vision_processor: Serve image prompts preprocessed with it: registers
+            ``VLLMMultimodalModelWrapper`` (keeps the vision encoder), an image
+            processor for vLLM's startup, and M-RoPE in the HF config. ``None``: text
+            only.
     """
     has_gdn = any(
         isinstance(layer.attention, GDN.Config) for layer in model_config.layers
@@ -263,16 +297,31 @@ def register_to_vllm(
 
     from torchtitan.rl.generator.vllm.model_wrapper import VLLMModelWrapper
 
+    wrapper_cls = VLLMModelWrapper
+    wrapper_kwargs = {}
+    processor = None
+    if vision_processor is not None:
+        from torchtitan.rl.generator.vllm.multimodal_wrapper import (
+            VLLMMultimodalModelWrapper,
+        )
+
+        processor = vision_processor.build()
+        wrapper_cls = VLLMMultimodalModelWrapper
+        wrapper_kwargs["vision_processor"] = processor
+
     # Dynamic model class capturing torchtitan config in the closure.
-    class VLLMModelFromSpec(VLLMModelWrapper):
+    class VLLMModelFromSpec(wrapper_cls):
         def __init__(self, *, vllm_config, prefix=""):
             super().__init__(
                 model_config=model_config,
                 parallelism=parallelism,
+                precision=precision,
                 checkpointer_config=checkpointer_config,
                 vllm_config=vllm_config,
                 prefix=prefix,
                 dist_moe_runtime=dist_moe_runtime,
+                model_state_dict_load_mode=model_state_dict_load_mode,
+                **wrapper_kwargs,
             )
 
     VLLMModelFromSpec.__name__ = VLLM_MODEL_NAME
@@ -291,6 +340,12 @@ def register_to_vllm(
         )
 
         maybe_configure_kda_hybrid_model(VLLMModelFromSpec, model_config)
+    if processor is not None:
+        from torchtitan.rl.generator.vllm.multimodal_wrapper import (
+            register_multimodal_processor,
+        )
+
+        register_multimodal_processor(VLLMModelFromSpec, processor)
     ModelRegistry.register_model(VLLM_MODEL_NAME, VLLMModelFromSpec)
 
     # Dynamic config parser class capturing the model config in the closure. This
@@ -306,7 +361,9 @@ def register_to_vllm(
             code_revision=None,
             **kwargs,
         ):
-            config_dict = model_config_to_hf_config_dict(model_config)
+            config_dict = model_config_to_hf_config_dict(
+                model_config, serves_images=vision_processor is not None
+            )
             return config_dict, PretrainedConfig.from_dict(config_dict)
 
     # vLLM's default is_deepseek_mla only recognizes a hardcoded list of model

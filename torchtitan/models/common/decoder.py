@@ -5,20 +5,18 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
-from torch import nn
 
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
-from torchtitan.models.base.model import BaseModel
+from torchtitan.models.base.model import BaseModel, FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.attention import (
     Attention,
@@ -32,6 +30,10 @@ from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
+from torchtitan.models.common.flops import (
+    active_parameter_flops_per_token,
+    get_parameter_counts,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -81,16 +83,12 @@ class Decoder(BaseModel):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config):
-        max_context_length: int
         dim: int
         vocab_size: int
         lm_head: Linear.Config
         tok_embeddings: Embedding.Config
         norm: RMSNorm.Config
-        # TODO(fegin): revisit
-        # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3033849265
-        # and fix the typing here
-        layers: list  # list[TransformerBlock.Config] or subclass configs
+        layers: list[TransformerBlock.Config]
         # Tie ``tok_embeddings`` and ``lm_head`` to share one weight. Models
         # that support it set this True in their config factories; the tying
         # itself is handled by ``Decoder.__init__`` / ``Decoder.init_states``.
@@ -152,25 +150,38 @@ class Decoder(BaseModel):
                 None,
             )
 
+        def get_parameter_counts(self, model: Module) -> tuple[int, int]:
+            """Return total and architecturally active native decoder parameters."""
+            return get_parameter_counts(model)
+
+        def build_flops_estimator(
+            self,
+            model: Module,
+            *,
+            seq_len: int,
+            excluded_submodules: tuple[Module | None, ...] = (),
+        ) -> FlopsEstimator:
+            parameter_flops = active_parameter_flops_per_token(
+                model, excluded_submodules=excluded_submodules
+            )
+            attention_flops = sum(
+                attention.flops_per_token(seq_len)
+                for _, attention, _, _ in self.traverse(Attention.Config)
+            )
+            flops_per_token = parameter_flops + attention_flops
+            return lambda input_dict: flops_per_token * input_dict["input"].numel()
+
     # Set by the trainer when ChunkedLossWrapper is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().
     # TODO(#ISSUE): Remove after fixing PP backward to skip non-tensor
     # inputs (bool kwargs cause 'has no attribute requires_grad' errors).
     _skip_lm_head: bool = False
 
-    # FSDP's per-parameter dtype override (``param_dtype_override_fn``); None casts every
-    # parameter to ``training.mixed_precision_param``. The generator sets it.
-    # TODO: remove once parameters carry a per-FQN dtype, so FSDP keeps A_log/dt_bias
-    # in float32 without a model attribute.
-    _fsdp_param_dtype_override_fn: Callable[
-        [nn.Parameter], torch.dtype | None
-    ] | None = None
-
     def _apply_fsdp(
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
         from torchtitan.distributed.fsdp import (
@@ -184,17 +195,17 @@ class Decoder(BaseModel):
         apply_fsdp_to_decoder(
             self,
             dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
+            reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
             pp_enabled=parallelism_context.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
+            cpu_offload=parallelism.fsdp_enable_cpu_offloading,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             ep_degree=parallelism_context.ep,
             edp_mesh=edp_mesh,
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
             symm_mem_scope=parallelism.fsdp_symm_mem_scope,
-            param_dtype_override_fn=self._fsdp_param_dtype_override_fn,
+            unshard_in_current_stream=parallelism.fsdp_unshard_in_current_stream,
         )
 
     def __init__(self, config: Config):
@@ -353,7 +364,6 @@ class Decoder(BaseModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[
@@ -372,7 +382,6 @@ class Decoder(BaseModel):
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
             )
             input_dict["attention_metadata"] = attention_metadata
 
@@ -463,7 +472,6 @@ class Decoder(BaseModel):
         *,
         padding_mask: torch.Tensor | None = None,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
     ) -> AttentionMetadataMap:
         attention_metadata: dict[type[InnerAttention], AttentionMetadata] = {}
         for layer_config in self.config.layers:
@@ -477,7 +485,7 @@ class Decoder(BaseModel):
                     positions,
                     padding_mask=padding_mask,
                     max_num_documents=max_num_documents,
-                    max_context_length=max_context_length,
+                    max_context_length=self.config.max_context_length,
                 )
                 if metadata is not None:
                     attention_metadata[backend] = metadata

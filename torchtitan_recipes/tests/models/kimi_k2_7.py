@@ -18,11 +18,8 @@ from torchtitan.components.data import (
     SingleDatasetConfig,
 )
 from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
-from torchtitan.components.data.multimodal.mm_datasets import (
-    MM_DATASETS,
-    VisionProcessor,
-)
-from torchtitan.components.data.multimodal.utils.image import resize_to_navit_patch_grid
+from torchtitan.components.data.multimodal.mm_datasets import MM_DATASETS
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
@@ -55,6 +52,7 @@ from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 from torchtitan.models.kimi_k2_7 import (
     build_model_config,
     KIMI_K2_5_SPECIAL_TOKENS,
+    KIMI_K2_5_VISION_PROCESSOR_KWARGS,
     KimiK25Model,
 )
 from torchtitan.observability.metrics import MetricsProcessor
@@ -64,32 +62,10 @@ from torchtitan.trainer import Trainer
 def _kimi_multimodal_dataloader(
     dataset: SingleDatasetConfig,
 ) -> GrainDataLoader.Config:
-    processor = dataset.processor
-    if not isinstance(processor, VisionProcessor.Config):
-        raise ValueError("Kimi multimodal data requires VisionProcessor.Config")
-
-    processor = VisionProcessor.Config(
-        sample_processor=processor.sample_processor,
-        patch_size=14,
-        temporal_patch_size=1,
-        spatial_merge_size=2,
-        min_pixels=65_536,
-        max_pixels=16_777_216,
-        image_mean=(0.5, 0.5, 0.5),
-        image_std=(0.5, 0.5, 0.5),
-        resize_fn=resize_to_navit_patch_grid,
-        max_patches=16_384,
-        max_patches_per_side=512,
-    )
-
     return GrainDataLoader.Config(
-        dataset=replace(dataset, processor=processor),
+        dataset=dataset,
         collator=MultiModalCollator.Config(
             max_images_per_microbatch=128,
-            patch_size=processor.patch_size,
-            temporal_patch_size=processor.temporal_patch_size,
-            spatial_merge_size=processor.spatial_merge_size,
-            patch_order="raster",
             build_mrope_positions=False,
         ),
     )
@@ -115,6 +91,7 @@ def kimi_k2_5_debugmodel(
         tokenizer=MultiModalTokenizer.Config(**KIMI_K2_5_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
+        vision_processor=VisionProcessor.Config(**KIMI_K2_5_VISION_PROCESSOR_KWARGS),
         dataloader=_kimi_multimodal_dataloader(MM_DATASETS["cc12m-test"]),
         optim=Optim.Config(
             optimizer=_dist_muon_optimizer(
@@ -132,7 +109,6 @@ def kimi_k2_5_debugmodel(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
             disable_accelerator_graphs=True,
         ),
@@ -180,7 +156,6 @@ def moonlight_16b_a3b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10000,
             disable_accelerator_graphs=True,
         ),
@@ -213,6 +188,7 @@ def kimi_vl_a3b(seq_len: int | None = None) -> Trainer.Config:
         model=model_config,
         # Kimi-VL is a compatibility flavor; resizing intentionally follows
         # Kimi-K2.5 per-side scaling instead of legacy Kimi-VL's side rejection.
+        vision_processor=VisionProcessor.Config(**KIMI_K2_5_VISION_PROCESSOR_KWARGS),
         dataloader=_kimi_multimodal_dataloader(MM_DATASETS["cc12m"]),
         optim=Optim.Config(
             optimizer=_dist_muon_optimizer(
@@ -230,7 +206,6 @@ def kimi_vl_a3b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10000,
             disable_accelerator_graphs=True,
         ),
@@ -277,7 +252,6 @@ def kimi_k2_5(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10000,
             disable_accelerator_graphs=True,
         ),

@@ -8,10 +8,12 @@
 
 from collections.abc import Callable
 from functools import partial
+from typing import Any
 
 import spmd_types as spmd
 import torch.nn as nn
 
+from torchtitan.components.data.multimodal.vision_processor import NaViTPatchGridResize
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
@@ -25,7 +27,6 @@ from torchtitan.models.common import (
     RMSNorm,
     Sigmoid,
     Softmax,
-    TransformerBlock,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.decoder_sharding import (
@@ -51,6 +52,7 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_rowwise_sharding_config,
 )
 from torchtitan.models.deepseek_v3.flavors import build_mla_moe_layers
+from torchtitan.models.deepseek_v3.model import DeepSeekV3TransformerBlock
 from .model import KimiK25Model
 from .qk_clip import QKClipFlexInnerAttention
 from .sharding import (
@@ -74,6 +76,7 @@ __all__ = [
     "build_model_config",
     "MODEL_FLAVORS",
     "KIMI_K2_5_SPECIAL_TOKENS",
+    "KIMI_K2_5_VISION_PROCESSOR_KWARGS",
 ]
 
 
@@ -83,6 +86,24 @@ KIMI_K2_5_SPECIAL_TOKENS = {
     "vision_start_token": "<|media_begin|>",
     "vision_end_token": "<|media_end|>",
     "pad_token": "[PAD]",
+}
+
+# ``VisionProcessor.Config`` fields, used like the special tokens:
+# ``VisionProcessor.Config(**KIMI_K2_5_VISION_PROCESSOR_KWARGS)``. The values match
+# ``media_proc_cfg`` in the Hugging Face ``preprocessor_config.json``
+# (``in_patch_limit``, ``patch_limit_on_one_side``, ``merge_kernel_size``);
+# MoonViT3d patches one frame at a time (``temporal_patch_size=1``). Two fields
+# are not in the Hugging Face config: ``resize`` reimplements the NaViT
+# patch-grid resize in the processor's code, and ``patch_order`` is the raster
+# layout MoonViT3d expects.
+KIMI_K2_5_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
+    "patch_size": 14,
+    "temporal_patch_size": 1,
+    "spatial_merge_size": 2,
+    "image_mean": (0.5, 0.5, 0.5),
+    "image_std": (0.5, 0.5, 0.5),
+    "resize": NaViTPatchGridResize.Config(max_patches=16_384, max_patches_per_side=512),
+    "patch_order": "raster",
 }
 
 
@@ -263,7 +284,7 @@ def _qk_clip_attention_config(
     return QKClipFlexInnerAttention.Config()
 
 
-def _build_kimi_layers(**kwargs) -> list[TransformerBlock.Config]:
+def _build_kimi_layers(**kwargs) -> list[DeepSeekV3TransformerBlock.Config]:
     """Build MLA/MoE layers with the Kimi-family parameter initializers."""
     return build_mla_moe_layers(
         **kwargs,

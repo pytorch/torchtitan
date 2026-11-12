@@ -9,10 +9,12 @@
 import dataclasses
 from collections.abc import Callable
 from functools import partial
+from typing import Any
 
 import spmd_types as spmd
 import torch.nn as nn
 
+from torchtitan.components.data.multimodal.vision_processor import PixelBudgetResize
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
@@ -94,6 +96,7 @@ __all__ = [
     "Qwen35Model",
     "MODEL_FLAVORS",
     "QWEN3_5_SPECIAL_TOKENS",
+    "QWEN3_5_VISION_PROCESSOR_KWARGS",
     "build_model_config",
 ]
 
@@ -103,6 +106,27 @@ QWEN3_5_SPECIAL_TOKENS = {
     "vision_start_token": "<|vision_start|>",
     "vision_end_token": "<|vision_end|>",
     "pad_token": "<|endoftext|>",
+}
+
+# ``VisionProcessor.Config`` fields, used like the special tokens:
+# ``VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS)``. The values match the
+# Hugging Face ``preprocessor_config.json`` shared by every Qwen3.5, Qwen3.6 and
+# Qwen3.8 vision checkpoint, and the vision encoder's patch sizes. Two fields
+# are not in the Hugging Face config: ``resize`` reimplements the resize in
+# ``Qwen2VLImageProcessor``'s code, and ``patch_order`` is the patch layout this
+# vision encoder expects.
+QWEN3_5_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
+    "patch_size": 16,
+    "temporal_patch_size": 2,
+    "spatial_merge_size": 2,
+    "image_mean": (0.5, 0.5, 0.5),
+    "image_std": (0.5, 0.5, 0.5),
+    "resize": PixelBudgetResize.Config(min_pixels=65_536, max_pixels=16_777_216),
+    "patch_order": "block",
+    # TODO: the Hugging Face ``video_preprocessor_config.json`` budgets the
+    # whole clip (4,096 to 25,165,824 pixels); this keeps the per-frame image
+    # budget the multimodal dataloader has used for video so far.
+    "video_resize": PixelBudgetResize.Config(min_pixels=65_536, max_pixels=16_777_216),
 }
 
 
@@ -432,6 +456,7 @@ def _qwen35_deltanet_config(
             eps=1e-6,
             activation_fn=SiLU.Config(),
             param_init={"weight": nn.init.ones_},
+            preserve_dtype_params=("weight",),
             sharding_config=gated_rms_norm_sharding_config(),
         ),
         # RowParallelLinear reduce-scatters with SP and all-reduces otherwise.

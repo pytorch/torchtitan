@@ -8,10 +8,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,18 +22,19 @@ import torchstore as ts
 from torchstore import RankRole
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import Configurable, DebugConfig
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
+from torchtitan.config import Configurable, DebugConfig, PrecisionConfig
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.generator.dispatcher import RequestDispatcher
-from torchtitan.rl.generator.engine import GenerationEngine
+from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
 from torchtitan.rl.generator.engine_loop import EngineLoop, EngineLoopThread
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
-from torchtitan.rl.rollout.types import Completion
+from torchtitan.rl.rollout.types import Completion, Prompt
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 
 logger = logging.getLogger(__name__)
@@ -60,15 +62,20 @@ class Generator(Configurable):
       model state dict loads on every rank;
     - `RequestDispatcher` (`dispatcher.py`): routes requests across data-parallel replicas and
       resolves each call's reply when its request finishes;
-    - `GenerationEngine` (`engine.py`): the inference engine interface, implemented for vLLM by
-      `VLLMEngine` (`vllm/engine.py`) and selected by `Config.engine`.
+    - `GenerationEngine` (`engine.py`): the inference engine interface, implemented by
+      `VLLMEngine` (`vllm/engine.py`) and `SGLangEngine` (`sglang/engine.py`) and selected by
+      `Config.engine`.
 
     `prefetch_model_state_dict` runs on the caller's event loop and writes the staging buffers the
     engine loop reads on a load: the router awaits it before `load_model_state_dict`, and the
     controller awaits that load before the trainer's next push, so the two never overlap.
+    With ``model_state_dict_load_mode="gpu_fetch"``, the prefetch is a no-op and the load reads
+    the StorageVolume snapshot directly into the engine's weights; it resolves only after every
+    rank finishes reading, so the trainer's next push cannot overwrite it mid-read.
 
     Args:
         config: Generator-specific configuration, including its model.
+        precision: The trainer's dtypes, which the generator's model mirrors.
         model_path: Path to the HF model checkpoint.
         max_num_seqs: The engine's upper bound on concurrently scheduled sequences (it may admit
             fewer if KV is tight).
@@ -79,6 +86,8 @@ class Generator(Configurable):
             adapter supplies ``Channel.open``; standalone runtimes can supply
             an equivalent transport. It is unused when data parallelism is
             disabled.
+        vision_processor: How the model turns an image into vision tokens; the engine
+            preprocesses image prompts' files with it. None: text only.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -117,9 +126,6 @@ class Generator(Configurable):
         ``Trainer.Config.dist_moe_runtime``: the generator plans scratch-only execution
         over its own, smaller, expert-parallel mesh."""
 
-        model_dtype: str = "bfloat16"
-        """Data type for model weights, passed to the engine (auto, float16, bfloat16, float32)."""
-
         gpu_memory_limit: float = 0.9
         """Fraction of GPU memory to use for the engine (0.0 to 1.0)."""
 
@@ -152,7 +158,25 @@ class Generator(Configurable):
         later turns reuse its KV across model state dict loads, while new groups use the current
         version.
         Enable this to clear prefix-cache entries and preempt running requests; the engine
-        then recomputes their KV under the new weights when they resume."""
+        then recomputes their KV under the new weights when they resume. With image
+        prompts it also clears vLLM's encoder cache (image embeddings from the old vision
+        weights); without it, image embeddings are salted by the pinned version like the
+        KV."""
+
+        model_state_dict_load_mode: ModelStateDictLoadMode = "cpu_prefetch"
+        """How a model state dict load moves the StorageVolume snapshot into the engine's weights.
+
+        - ``"cpu_prefetch"``: `prefetch_model_state_dict` reads the snapshot into pinned CPU
+          buffers while generation continues, and the load copies them to the GPU. Costs one
+          full copy of the weights in generator host memory.
+        - ``"gpu_fetch"``: the load reads the snapshot directly into the GPU weights, one FSDP
+          group at a time, with no CPU copy. For hosts with little CPU memory, e.g. GB300. The
+          transfer happens while the engine is paused: with hot_swap, in-flight requests stall
+          for it; without it, the generator stays drained for it. Quantized parameters are not
+          supported.
+
+        A failed load leaves the weights partially loaded, so it stops the engine loop on every
+        generator rank."""
 
         def __post_init__(self):
             # The generator runs full expert parallelism: the engine forms the EP
@@ -187,12 +211,14 @@ class Generator(Configurable):
         self,
         config: Config,
         *,
+        precision: PrecisionConfig,
         model_path: str,
         max_num_seqs: int,
         output_dir: str,
         rank: int | None = None,
         generator_name: str = "generator",
         open_result_channel: Callable[[], tuple[Any, Any]] | None = None,
+        vision_processor: VisionProcessor.Config | None = None,
     ):
         init_logger()
         # TODO: Quiet torchstore's per-op transport-resolve INFO spam (very noisy in CI).
@@ -226,7 +252,7 @@ class Generator(Configurable):
                     parallelism=config.parallelism,
                     model_path=model_path,
                     max_num_seqs=max_num_seqs,
-                    model_dtype=config.model_dtype,
+                    precision=precision,
                     gpu_memory_limit=config.gpu_memory_limit,
                     max_num_batched_tokens=config.max_num_batched_tokens,
                     checkpointer=config.checkpointer,
@@ -235,6 +261,8 @@ class Generator(Configurable):
                     reset_kv_cache_on_model_state_dict_load=(
                         config.reset_kv_cache_on_model_state_dict_load
                     ),
+                    model_state_dict_load_mode=config.model_state_dict_load_mode,
+                    vision_processor=vision_processor,
                     rank=self._rank,
                     generator_name=generator_name,
                     output_dir=output_dir,
@@ -273,6 +301,8 @@ class Generator(Configurable):
             )
 
         self._prefetched_model_state_dict = engine.prefetched_model_state_dict
+        # Set by `initialize_torchstore_client`: the event loop TorchStore reads run on.
+        self._torchstore_loop: asyncio.AbstractEventLoop | None = None
 
         broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
         # The engine loop owns the engine from here on and releases it on exit, so this
@@ -293,6 +323,11 @@ class Generator(Configurable):
             broadcast_group=broadcast_group,
             max_engine_steps_between_decisions=config.max_engine_steps_between_decisions,
             reset_kv_cache_on_model_state_dict_load=config.reset_kv_cache_on_model_state_dict_load,
+            fetch_model_state_dict=(
+                self._copy_prefetched_model_state_dict
+                if config.model_state_dict_load_mode == "cpu_prefetch"
+                else self._fetch_model_state_dict_from_storage_volume
+            ),
         )
 
         logger.info("Generator initialized")
@@ -340,13 +375,12 @@ class Generator(Configurable):
     @sl.log_trace_span("generate")
     async def generate(
         self,
-        prompt_token_ids: list[int],
+        prompt: Prompt,
         *,
         request_id: str,
         group_id: int,
         routing_session_id: str,
         sampling_config: SamplingConfig | None = None,
-        metrics_prefix: str = "generator",
     ) -> Completion:
         """Generates one completion for one prompt.
 
@@ -359,7 +393,8 @@ class Generator(Configurable):
         `VLLMValidationError` or `ValueError`).
 
         Args:
-            prompt_token_ids: One tokenized prompt `[token_ids]`.
+            prompt: One prompt: its tokens and images, with their files' bytes (the engine
+                preprocesses the images).
             request_id: Unique id for this request, echoed on the `Completion`.
             group_id: Rollout group id. Requests of one group share a prefix cache
                 salt; `release_groups` drops it. Also sets the vLLM priority; see
@@ -367,14 +402,11 @@ class Generator(Configurable):
             routing_session_id: Stable session key for in-mesh DP routing.
             sampling_config: Optional per-call override for the generator's
                 default SamplingConfig.
-            metrics_prefix: Namespace prepended to every metric key on the returned
-                `Completion` (default ``"generator"``). Callers that need to keep streams
-                separate, e.g. ``"validation/generator"``, can override it.
 
         Example:
 
             completion = await generator.slice(hosts=0, gpus=0).generate.call_one(
-                [1, 2, 3],
+                Prompt(token_ids=[1, 2, 3]),
                 request_id="step=3/group=0/sample=0/turn=0",
                 group_id=0,
                 routing_session_id="group=0/rollout=0",
@@ -389,13 +421,12 @@ class Generator(Configurable):
         return await self._engine_loop.generate(
             EngineRequest(
                 request_id=request_id,
-                prompt_token_ids=prompt_token_ids,
+                prompt=prompt,
                 sampling=sampling,
                 group_id=group_id,
                 routing_session_id=routing_session_id,
                 arrival_time=time.time(),
-            ),
-            metrics_prefix=metrics_prefix,
+            )
         )
 
     async def release_groups(self, group_ids: list[int]) -> None:
@@ -422,26 +453,33 @@ class Generator(Configurable):
             requester_index: Index used to namespace this generator mesh.
         """
         await ts.client(role=RankRole.REQUESTER, group=requester_index)
+        self._torchstore_loop = asyncio.get_running_loop()
 
     @sl.log_trace_span("load_model_state_dict")
-    async def load_model_state_dict(self, version: int) -> None:
+    async def load_model_state_dict(self, version: int, *, drain: bool) -> None:
         """Queues a model state dict load for `version` and blocks until the engine loop has finished loading.
         Loads queued together are applied once, at the highest version.
 
-        The network transfer has already completed and this load applies the
-        prefetched weights to the GPU.
-
-        NOTE: In-flight requests are NOT drained here — the endpoint never drains; a caller that wants
-        an idle engine holds off new `generate` calls until the queue drains, then calls this.
+        With ``model_state_dict_load_mode="cpu_prefetch"``, the network transfer has already
+        completed and this load copies the prefetched weights to the GPU. With
+        ``"gpu_fetch"``, this load reads the weights from the StorageVolume.
 
         Args:
             version: Policy version to load
+            drain: If True, finish every admitted request before loading, and hold back
+                `generate` calls that arrive meanwhile until the load is applied. If False,
+                load mid-flight ("hot swap").
         """
-        await self._engine_loop.load_model_state_dict(version)
+        await self._engine_loop.load_model_state_dict(version, drain=drain)
 
     @sl.log_trace_span("prefetch_model_state_dict")
     async def prefetch_model_state_dict(self) -> None:
-        """Fetch weights into pinned CPU memory without interrupting generation."""
+        """Fetch weights into pinned CPU memory without interrupting generation.
+
+        A no-op with ``model_state_dict_load_mode="gpu_fetch"``: the load reads the weights.
+        """
+        if self.config.model_state_dict_load_mode == "gpu_fetch":
+            return
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
         await ts.get_state_dict(
@@ -450,6 +488,41 @@ class Generator(Configurable):
             strict=False,
             direct_rdma=False,
         )
+
+    def _copy_prefetched_model_state_dict(
+        self, state_dict: dict[str, torch.Tensor]
+    ) -> Iterable[str]:
+        """Copy `state_dict`'s weights in place from the prefetched pinned CPU buffers.
+
+        Called on the engine loop thread during a load.
+        """
+        with torch.no_grad():
+            for key, tensor in state_dict.items():
+                tensor.copy_(self._prefetched_model_state_dict[key])
+        return state_dict.keys()
+
+    def _fetch_model_state_dict_from_storage_volume(
+        self, state_dict: dict[str, torch.Tensor]
+    ) -> Iterable[str]:
+        """Read `state_dict`'s weights in place from the StorageVolume snapshot.
+
+        Returns the keys read; strict=False skips unpublished keys.
+
+        Called on the engine loop thread during a load; blocks it while the read runs
+        on the TorchStore client's event loop.
+        """
+        # The read writes outside the current stream; wait for queued work that
+        # still uses state_dict's storage, e.g. its reallocation.
+        torch.accelerator.current_stream().synchronize()
+        return asyncio.run_coroutine_threadsafe(
+            ts.get_state_dict(
+                "model_state_dict",
+                user_state_dict=state_dict,
+                strict=False,
+                direct_rdma=False,
+            ),
+            self._torchstore_loop,
+        ).result()
 
     async def close(self) -> None:
         """Stop the engine loop, which releases the dispatcher and the engine on exit."""

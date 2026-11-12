@@ -78,7 +78,7 @@ jobs:
           echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
         fi
 
-        USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
+        USE_CPP=0 python -m pip install --pre -r .github/requirements-torchao.txt --index-url ${{ matrix.index-url }}
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"

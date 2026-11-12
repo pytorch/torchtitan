@@ -13,7 +13,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import FSDPModule, fully_shard
+from torch.distributed.fsdp import fully_shard
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import InnerAttention, MLAAttention
@@ -22,7 +22,8 @@ from torchtitan.models.deepseek_v3 import build_model_config as build_deepseek_c
 from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_config
 from torchtitan.models.qwen3 import build_model_config as build_qwen3_config
 from torchtitan.models.qwen3_5 import build_model_config
-from torchtitan.rl.generator.vllm import model_wrapper, registry
+from torchtitan.rl.generator.model import ModelStateDictLoader
+from torchtitan.rl.generator.vllm import registry
 from torchtitan.rl.generator.vllm.attention.attention import VLLMInnerAttention
 
 from torchtitan.rl.generator.vllm.attention.mla import (
@@ -31,10 +32,7 @@ from torchtitan.rl.generator.vllm.attention.mla import (
     VLLMMLAAttention,
     VLLMMLAInnerAttention,
 )
-from torchtitan.rl.generator.vllm.model_wrapper import (
-    _replace_vllm_layer_configs,
-    VLLMModelWrapper,
-)
+from torchtitan.rl.generator.vllm.model_wrapper import _replace_vllm_layer_configs
 from vllm.model_executor.layers.attention import MLAAttention as VLLMNativeMLAAttention
 
 
@@ -153,89 +151,6 @@ def test_vllm_replacement_preserves_attention_sharding(build_config) -> None:
             assert vllm_sharding.state_shardings[name] is layout
 
 
-class _Wrapper:
-    """Stand-in `self` for VLLMModelWrapper's real model state dict load methods (no vLLM)."""
-
-    load_state_dict = VLLMModelWrapper.load_state_dict
-
-    def __init__(self, model: nn.Module):
-        self.model = model
-
-
-def test_load_state_dict_allocates_one_fsdp_group_at_a_time(
-    tmp_path, monkeypatch
-) -> None:
-    """Load new weights with at most two FSDP groups' sharded buffers allocated at once.
-
-    Guards that each group's sharded buffers are allocated before its copy, even when
-    FSDP's own load pre-hook already resharded the group (tok_embeddings here).
-    """
-    dist.init_process_group(
-        "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
-    )
-    try:
-        # The generator's layout: a tied [tok_embeddings, norm, lm_head] group, one per block.
-        model = nn.Module()
-        model.tok_embeddings = nn.Embedding(32, 16)
-        model.layers = nn.ModuleList(
-            nn.Sequential(nn.Linear(16, 16), nn.Linear(16, 16)) for _ in range(3)
-        )
-        model.norm = nn.LayerNorm(16)
-        model.lm_head = nn.Linear(16, 32, bias=False)
-        model.lm_head.weight = model.tok_embeddings.weight
-        mesh = init_device_mesh("cpu", (1,))
-        fully_shard([model.tok_embeddings, model.norm, model.lm_head], mesh=mesh)
-        for block in model.layers:
-            fully_shard(block, mesh=mesh)
-        fully_shard(model, mesh=mesh)
-        model.set_keep_unsharded_storage(True)
-        new_state_dict = {k: v.detach() + 1.0 for k, v in model.state_dict().items()}
-        groups = [
-            group
-            for module in (model.tok_embeddings, *model.layers)
-            for group in module._get_fsdp_state()._fsdp_param_groups
-        ]
-
-        def is_allocated(group) -> bool:
-            return all(
-                p._sharded_param_data.untyped_storage().size() > 0
-                for p in group.fsdp_params
-            )
-
-        wrapper = _Wrapper(model)
-        max_allocated_groups = 0
-
-        restore_sharded_params = model_wrapper._restore_sharded_params
-
-        def checked_restore_sharded_params(module) -> None:
-            nonlocal max_allocated_groups
-            restore_sharded_params(module)
-            # The load copies into these buffers next, so freed ones would be overrun.
-            assert all(map(is_allocated, module._get_fsdp_state()._fsdp_param_groups))
-            max_allocated_groups = max(
-                max_allocated_groups, sum(map(is_allocated, groups))
-            )
-
-        monkeypatch.setattr(
-            model_wrapper, "_restore_sharded_params", checked_restore_sharded_params
-        )
-        for module in model.modules():  # as after the initial load
-            if isinstance(module, FSDPModule):
-                model_wrapper._unshard_and_free_sharded_params(module)
-        wrapper.load_state_dict(new_state_dict)
-
-        assert max_allocated_groups <= 2
-        assert all(
-            p._sharded_param_data.untyped_storage().size() == 0
-            for group in groups
-            for p in group.fsdp_params
-        )
-        for name, param in model.named_parameters(remove_duplicate=False):
-            assert param.equal(new_state_dict[name].to_local()), name
-    finally:
-        dist.destroy_process_group()
-
-
 @pytest.mark.parametrize(
     "compressed", [True, False], ids=["compressed", "batch_invariant"]
 )
@@ -325,8 +240,7 @@ def test_vllm_mla_inner_attention_matches_vllm_mla_shapes():
     assert torch.equal(out_THV, vllm_mla.return_value.view(8, 4, 3))
 
 
-@pytest.mark.parametrize("fsdp", [False, True], ids=["plain", "fully_shard"])
-def test_vllm_native_mla_decode_weights_follow_weight_sync(tmp_path, fsdp) -> None:
+def test_vllm_native_mla_decode_weights_follow_weight_sync(tmp_path) -> None:
     """vLLM's decode weights are views of wkv_b, so weight sync updates them."""
     dist.init_process_group(
         "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
@@ -339,15 +253,14 @@ def test_vllm_native_mla_decode_weights_follow_weight_sync(tmp_path, fsdp) -> No
         torch.nn.init.normal_(block.wkv_b.weight)
         model = nn.Module()
         model.layers = nn.ModuleList([block])
-        if fsdp:
-            mesh = init_device_mesh("cpu", (1,))
-            fully_shard(block, mesh=mesh)
-            fully_shard(model, mesh=mesh)
-            model.set_keep_unsharded_storage(True)
+        mesh = init_device_mesh("cpu", (1,))
+        fully_shard(block, mesh=mesh)
+        fully_shard(model, mesh=mesh)
+        model.set_keep_unsharded_storage(True)
         new_state_dict = {k: 3.0 * v.detach() for k, v in model.state_dict().items()}
-        for module in model.modules():  # as after the initial load
-            if isinstance(module, FSDPModule):
-                model_wrapper._unshard_and_free_sharded_params(module)
+        loader = ModelStateDictLoader(
+            model, checkpointer_config=None, model_state_dict_load_mode="gpu_fetch"
+        )
 
         attention = _VLLMNativeMLAAttention.__new__(_VLLMNativeMLAAttention)
         torch.nn.Module.__init__(attention)
@@ -370,11 +283,16 @@ def test_vllm_native_mla_decode_weights_follow_weight_sync(tmp_path, fsdp) -> No
 
         assert not attention.state_dict()
         assert {"W_UK_T", "W_UV"} <= {name for name, _ in attention.named_buffers()}
-        _Wrapper(model).load_state_dict(new_state_dict)
 
-        new_weight = new_state_dict["layers.0.wkv_b.weight"]
-        if fsdp:
-            new_weight = new_weight.to_local()
+        def copy(state_dict: dict[str, torch.Tensor]) -> list[str]:
+            with torch.no_grad():
+                for key, tensor in state_dict.items():
+                    tensor.copy_(new_state_dict[key])
+            return list(state_dict)
+
+        loader.load(copy)
+
+        new_weight = new_state_dict["layers.0.wkv_b.weight"].to_local()
         w_uk, w_uv = new_weight.T.view(5, 2, 7).split([3, 4], dim=-1)
         assert torch.equal(attention.W_UK_T, w_uk.permute(1, 2, 0))
         assert torch.equal(attention.W_UV, w_uv.transpose(0, 1))

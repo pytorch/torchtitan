@@ -23,7 +23,11 @@ from torchtitan.components.data.sources import (
 )
 from torchtitan.components.data.types import DatasetBuildContext
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.components.renderer import RendererConfig
+from torchtitan.components.renderer import (
+    RendererConfig,
+    require_content_types,
+    TEXT_CONTENT_TYPES,
+)
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 
@@ -150,6 +154,7 @@ class ChatProcessor(SampleProcessor):
         """
         del rng
         messages = self._messages_fn(sample)
+        require_content_types(messages, TEXT_CONTENT_TYPES)
         if self._renderer is not None:
             tools = self._tools_fn(sample) if self._tools_fn is not None else None
             return self._tokenize_with_renderer(
@@ -198,8 +203,6 @@ class ChatProcessor(SampleProcessor):
             tools=tools,
             ensure_final_stop=True,
         )
-        if rendered.multi_modal_data is not None:
-            raise ValueError("ChatProcessor supports text-only samples.")
 
         sequence = self._create_sequence(rendered.token_ids)
         if sequence is None:

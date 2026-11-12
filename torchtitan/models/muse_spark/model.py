@@ -23,21 +23,19 @@ from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     spmd_local_context,
 )
+from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     FlexAttentionMetadata,
     GQAttention,
+    QKVLinear,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
-from torchtitan.models.common.flops import (
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
-)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import MoE
@@ -82,6 +80,71 @@ def build_dummy_audio_inputs(
     return waveforms_SC, waveform_padded_lengths_N
 
 
+class MuseSparkQKVLinear(Module):
+    """Fused q/k/v projection that returns the packed ``wqkv`` output.
+
+    ``MuseSparkAttention`` splits it inside its compiled q/k region, so the head copies fuse
+    into the q/k norms. The Config subclasses ``QKVLinear.Config``: the HF state-dict adapter
+    and the quantization transform find fused projections by that type.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(QKVLinear.Config):
+        pass
+
+    def __init__(self, config: Config):
+        super().__init__()
+        if config.n_heads % config.n_kv_heads != 0:
+            raise ValueError(
+                f"n_heads ({config.n_heads}) must be divisible by "
+                f"n_kv_heads ({config.n_kv_heads}) for fused QKV"
+            )
+        self.wqkv = config.wqkv.build()
+        self.head_dim = config.head_dim
+        self.heads_per_kv = config.n_heads // config.n_kv_heads
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        qkv = self.wqkv(x_TD)
+        # The split in MuseSparkAttention._prepare_query_key_value copies qkv with bare ops.
+        remat.recompute_needs_tensor(qkv)
+        return qkv
+
+
+@spmd.local_map(
+    out_types=(
+        (
+            {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
+            spmd.PartitionSpec(("dp", "cp"), "tp", None),
+        ),
+    )
+    * 3
+)
+def _split_qkv(
+    qkv: torch.Tensor, *, heads_per_kv: int, head_dim: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Split the packed ``wqkv`` output into contiguous q, k and v, as ``QKVLinear`` does."""
+    # [T, n_kv_heads * R * head_dim] -> [T, n_kv_heads, R, head_dim], R = heads_per_kv + 2.
+    # Use -1 for n_kv_heads so TP sharding is handled automatically.
+    num_tokens = qkv.shape[0]
+    with spmd.local():  # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
+        qkv = qkv.view(num_tokens, -1, heads_per_kv + 2, head_dim)
+        if spmd.is_type_checking():
+            spmd.assert_type(
+                qkv,
+                spmd.V,
+                spmd.PartitionSpec(("dp", "cp"), "tp", None, None),
+            )
+
+    local_num_tokens = qkv.shape[0]
+    xq, xk, xv = torch.split(qkv, [heads_per_kv, 1, 1], dim=-2)
+    # vLLM attention/KV-cache kernels read contiguous head-major memory.
+    return (
+        xq.reshape(local_num_tokens, -1, head_dim).contiguous(),
+        xk.reshape(local_num_tokens, -1, head_dim).contiguous(),
+        xv.reshape(local_num_tokens, -1, head_dim).contiguous(),
+    )
+
+
 class MuseSparkAttention(GQAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(GQAttention.Config):
@@ -119,13 +182,12 @@ class MuseSparkAttention(GQAttention):
         attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        query_TNH, key_TKH, value_TKH = self.qkv_linear(x_TD)
+        qkv = self.qkv_linear(x_TD)
         output_gate_TO = None
         if self.output_gate is not None:
             output_gate_TO = self.output_gate(x_TD)
 
-        remat.recompute_needs_tensor(query_TNH, key_TKH)
-        query_TNH, key_TKH = self._prepare_query_and_key(query_TNH, key_TKH, positions)
+        query_TNH, key_TKH, value_TKH = self._prepare_query_key_value(qkv, positions)
 
         output_TNH = remat.region(
             self.inner_attention,
@@ -155,17 +217,24 @@ class MuseSparkAttention(GQAttention):
         recompile_limit=16,
         options={"triton.autotune_pointwise": False},
     )
-    def _prepare_query_and_key(
+    def _prepare_query_key_value(
         self,
-        query_TNH: torch.Tensor,
-        key_TKH: torch.Tensor,
+        qkv: torch.Tensor,
         positions: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return the query and key as attention reads them. Each step runs only if configured.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Split qkv and return q, k, v as attention reads them. Steps after the split run only if configured.
 
-        query: q_norm -> * scale_query_by -> * position temperature -> RoPE
-        key:   k_norm -> RoPE
+        query: split -> q_norm -> * scale_query_by -> * position temperature -> RoPE
+        key:   split -> k_norm -> RoPE
+        value: split
         """
+        # The q/k copies fuse into the norms, and the norm backward writes the qkv grad
+        # directly.
+        query_TNH, key_TKH, value_TKH = _split_qkv(
+            qkv,
+            heads_per_kv=self.qkv_linear.heads_per_kv,
+            head_dim=self.qkv_linear.head_dim,
+        )
         if self.q_norm is not None or self.k_norm is not None:
             if self.q_norm is None or self.k_norm is None:
                 raise ValueError("MuseSparkAttention needs both q_norm and k_norm.")
@@ -188,7 +257,7 @@ class MuseSparkAttention(GQAttention):
 
         if self.rope is not None:
             query_TNH, key_TKH = self.rope(query_TNH, key_TKH, positions)
-        return query_TNH, key_TKH
+        return query_TNH, key_TKH, value_TKH
 
     @local_compile("muse_spark_attention_output", batch_invariant=False)
     def _flatten_attention_output(
@@ -214,10 +283,20 @@ class MuseSparkRMSNorm(RMSNorm):
     def __init__(self, config: Config):
         super().__init__(config)
         self.gain_center = config.gain_center
+        # Compiled code reads gain_center from this tensor, so every graph takes it as an
+        # input and saves the same tensors. A float is baked into layer 0's graph, and remat
+        # recompute of layer 0 can run layer 1's graph, which saves different tensors
+        # (CheckpointError). Eager keeps the float: SPMD typechecking rejects untyped tensors.
+        # TODO(pytorch/pytorch#166926): drop the copy once recompute reuses the forward's graph.
+        self._gain_center_tensor = torch.tensor(
+            config.gain_center, dtype=torch.float32, device="cpu"
+        )
 
     def _get_effective_weight(self) -> torch.Tensor | None:
         if self.weight is None:
             return None
+        if torch.compiler.is_compiling():
+            return self.weight + self._gain_center_tensor
         return self.weight + self.gain_center
 
     # Limit 32, not the default 8: all residual-stream norms share this region. Pretraining uses 12
@@ -406,6 +485,7 @@ class MuseSparkTransformerBlock(TransformerBlock):
 class MuseSparkModel(MultimodalModel):
     state_dict_adapter_cls = MuseSparkStateDictAdapter
     multimodal_encoder_fqns = ("vision_encoder", "audio_encoder")
+
     pipeline_first_stage_module_fqns = (
         "vision_encoder",
         "vision_adapter",
@@ -458,6 +538,7 @@ class MuseSparkModel(MultimodalModel):
         )
         # pyrefly: ignore [bad-override]
         tok_embeddings: MuseSparkEmbeddingWithNorm.Config
+        # pyrefly: ignore [bad-override]
         layers: list[MuseSparkTransformerBlock.Config]
         residual_dtype: torch.dtype = torch.float32
         final_norm_input_dtype: torch.dtype | None = None
@@ -483,40 +564,54 @@ class MuseSparkModel(MultimodalModel):
                         f"dataset_modalities requires a configured {modality}_encoder"
                     )
 
-        def get_nparams_and_flops(
+        def build_flops_estimator(
             self,
-            model: nn.Module,
+            model: Module,
+            *,
             seq_len: int,
-        ) -> tuple[int, int]:
-            # Perception modules run per image or audio clip rather than per
-            # text token, so this remains a decoder-only MFU estimate.
-            muse_model = cast("MuseSparkModel", model)
-            nparams, active_nparams = get_nparams_and_active_nparams(
-                model,
-                modules_excluded_from_active_params=(
-                    muse_model.vision_encoder,
-                    muse_model.vision_adapter,
-                    muse_model.vision_projection,
-                    muse_model.perception_emb_norm,
-                    muse_model.audio_encoder,
-                ),
+            excluded_submodules: tuple[Module | None, ...] = (),
+        ) -> FlopsEstimator:
+            from torchtitan.models.common.flops import active_parameter_flops_per_token
+
+            model = cast(MuseSparkModel, model)
+            vision_outputs = (
+                model.vision_adapter,
+                model.vision_projection,
+                model.perception_emb_norm,
             )
-            attention_op_flops = 0
-            for layer in self.layers:
-                attention = layer.attention
-                head_dim = (
-                    attention.head_dim
-                    if attention.head_dim is not None
-                    else attention.dim // attention.n_heads
-                )
-                attention_op_flops += quadratic_attention_flops_per_token(
-                    num_heads=attention.n_heads,
-                    qk_head_dim=head_dim,
-                    v_head_dim=head_dim,
-                    seq_len=seq_len,
-                    sliding_window_size=attention.window_size,
-                )
-            return nparams, 6 * active_nparams + attention_op_flops
+            base_estimate = super(MuseSparkModel.Config, self).build_flops_estimator(
+                model,
+                seq_len=seq_len,
+                excluded_submodules=(*vision_outputs, *excluded_submodules),
+            )
+            vision_config = self.vision_encoder
+            vision_output_flops = sum(
+                active_parameter_flops_per_token(module)
+                for module in vision_outputs
+                if module is not None
+            )
+            audio_config = self.audio_encoder
+            audio_output_flops = (
+                active_parameter_flops_per_token(model.perception_emb_norm)
+                if model.perception_emb_norm is not None
+                else 0
+            )
+
+            def estimate(input_dict) -> int:
+                flops = base_estimate(input_dict)
+                if vision_config is not None:
+                    flops += (
+                        vision_config.get_num_output_tokens(input_dict)
+                        * vision_output_flops
+                    )
+                if audio_config is not None:
+                    flops += (
+                        audio_config.get_num_output_tokens(input_dict)
+                        * audio_output_flops
+                    )
+                return flops
+
+            return estimate
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
@@ -549,7 +644,6 @@ class MuseSparkModel(MultimodalModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
@@ -587,7 +681,6 @@ class MuseSparkModel(MultimodalModel):
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
             )
 
         perception_input_sharding = multimodal_input_sharding()

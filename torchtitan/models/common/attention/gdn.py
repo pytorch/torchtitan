@@ -7,7 +7,7 @@
 """Gated DeltaNet linear attention backed by Attention Gym."""
 
 # Shape suffixes:
-# T = packed tokens, D = model dimension, C = projection channels,
+# B = batch, T = packed tokens, D = model dimension, C = projection channels,
 # H = attention heads, K = query/key head dimension, V = value head dimension,
 # S = state slots, W = convolution kernel width, G = key-head groups.
 
@@ -81,9 +81,11 @@ def _causal_conv1d_varlen(
 
 
 @torch.library.custom_op(
-    "torchtitan::recurrent_gdn_fwd", mutates_args=(), device_types="cuda"
+    "torchtitan::batch_invariant_recurrent_gdn_fwd",
+    mutates_args=(),
+    device_types="cuda",
 )
-def _recurrent_gdn_fwd(
+def _batch_invariant_recurrent_gdn_fwd(
     q_BTHK: torch.Tensor,
     k_BTHK: torch.Tensor,
     v_BTHV: torch.Tensor,
@@ -119,8 +121,9 @@ def _recurrent_gdn_fwd(
         device=q_BTHK.device,
     )
     # The recurrent operator consumes normalized Q/K.
-    normalized_q_BTHK = l2norm(q_BTHK, cu_seqlens=cu_seqlens)
-    normalized_k_BTHK = l2norm(k_BTHK, cu_seqlens=cu_seqlens)
+    autotune = not torch.are_deterministic_algorithms_enabled()
+    normalized_q_BTHK = l2norm(q_BTHK, cu_seqlens=cu_seqlens, autotune=autotune)
+    normalized_k_BTHK = l2norm(k_BTHK, cu_seqlens=cu_seqlens, autotune=autotune)
     out_BTHV, _ = recurrent_gdn(
         normalized_q_BTHK,
         normalized_k_BTHK,
@@ -133,12 +136,14 @@ def _recurrent_gdn_fwd(
         state_indices=state_indices,
         has_initial_state=has_initial_state,
         autotune=False,
+        # The scan otherwise picks its arithmetic from the batch shape.
+        kernel_options={"batch_invariant": True},
     )
     return out_BTHV.to(q_BTHK.dtype)
 
 
-@_recurrent_gdn_fwd.register_fake
-def _recurrent_gdn_fwd_fake(
+@_batch_invariant_recurrent_gdn_fwd.register_fake
+def _batch_invariant_recurrent_gdn_fwd_fake(
     q_BTHK: torch.Tensor,
     k_BTHK: torch.Tensor,
     v_BTHV: torch.Tensor,
@@ -163,11 +168,12 @@ def _chunk_gdn_gradients(
         inputs = tuple(
             tensor.detach().requires_grad_(True) for tensor in (q, k, v, g, beta)
         )
-        normalized_q = l2norm(inputs[0], cu_seqlens=cu_seqlens)
-        normalized_k = l2norm(inputs[1], cu_seqlens=cu_seqlens)
-        output, _ = chunk_gdn(
-            normalized_q,
-            normalized_k,
+        autotune = not torch.are_deterministic_algorithms_enabled()
+        normalized_q_BTHK = l2norm(inputs[0], cu_seqlens=cu_seqlens, autotune=autotune)
+        normalized_k_BTHK = l2norm(inputs[1], cu_seqlens=cu_seqlens, autotune=autotune)
+        output_BTHV, _ = chunk_gdn(
+            normalized_q_BTHK,
+            normalized_k_BTHK,
             inputs[2],
             inputs[3],
             inputs[4],
@@ -176,16 +182,16 @@ def _chunk_gdn_gradients(
             impl="fused",
         )
         grad_q, grad_k, grad_v, grad_g, grad_beta = torch.autograd.grad(
-            output, inputs, grad_output
+            output_BTHV, inputs, grad_output
         )
         return grad_q, grad_k, grad_v, grad_g, grad_beta
 
 
-def _recurrent_gdn_setup_context(ctx, inputs, output) -> None:
+def _batch_invariant_recurrent_gdn_setup_context(ctx, inputs, output) -> None:
     ctx.save_for_backward(*inputs)
 
 
-def _recurrent_gdn_backward(ctx, grad_output):
+def _batch_invariant_recurrent_gdn_backward(ctx, grad_output):
     q, k, v, g, beta, cu_seqlens = ctx.saved_tensors
     grads = _chunk_gdn_gradients(
         grad_output,
@@ -199,8 +205,9 @@ def _recurrent_gdn_backward(ctx, grad_output):
     return (*grads, None)
 
 
-_recurrent_gdn_fwd.register_autograd(
-    _recurrent_gdn_backward, setup_context=_recurrent_gdn_setup_context
+_batch_invariant_recurrent_gdn_fwd.register_autograd(
+    _batch_invariant_recurrent_gdn_backward,
+    setup_context=_batch_invariant_recurrent_gdn_setup_context,
 )
 
 
@@ -324,7 +331,7 @@ class GDNKernel(Module):
         beta_BTH = beta_TH.unsqueeze(0)
 
         if is_in_batch_invariant_mode() and cu_seqlens is not None:
-            return _recurrent_gdn_fwd(
+            return _batch_invariant_recurrent_gdn_fwd(
                 xq_BTHK,
                 xk_BTHK,
                 xv_BTHV,
@@ -333,11 +340,12 @@ class GDNKernel(Module):
                 cu_seqlens,
             ).squeeze(0)
 
-        normalized_q = l2norm(xq_BTHK, cu_seqlens=cu_seqlens)
-        normalized_k = l2norm(xk_BTHK, cu_seqlens=cu_seqlens)
-        output, _ = chunk_gdn(
-            normalized_q,
-            normalized_k,
+        autotune = not torch.are_deterministic_algorithms_enabled()
+        normalized_q_BTHK = l2norm(xq_BTHK, cu_seqlens=cu_seqlens, autotune=autotune)
+        normalized_k_BTHK = l2norm(xk_BTHK, cu_seqlens=cu_seqlens, autotune=autotune)
+        output_BTHV, _ = chunk_gdn(
+            normalized_q_BTHK,
+            normalized_k_BTHK,
             xv_BTHV,
             g_BTH,
             beta_BTH,
@@ -346,7 +354,7 @@ class GDNKernel(Module):
             impl="fused",
             kernel_options=chunk_kernel_options(xq_BTHK),
         )
-        return output.squeeze(0)
+        return output_BTHV.squeeze(0)
 
 
 class InnerGDN(InnerAttention):
@@ -568,6 +576,8 @@ class GDN(LinearAttention):
         # Query/key heads; n_heads counts value heads.
         n_key_heads: int
         conv_kernel_size: int = 4
+        # The gate reads A_log and dt_bias in float32.
+        preserve_dtype_params: tuple[str, ...] = ("A_log", "dt_bias")
 
         # Sub-module configs
         # One projection for q, k, v, z, a and b, with rows grouped by key head
@@ -608,6 +618,15 @@ class GDN(LinearAttention):
                     f"in_proj.out_features ({self.in_proj.out_features}) must be "
                     f"n_key_heads * sum(in_proj_split_sizes) ({in_proj_rows})"
                 )
+
+        def flops_per_token(self, seq_len: int) -> int:
+            from torchtitan.models.common.flops import delta_rule_flops_per_token
+
+            return delta_rule_flops_per_token(
+                num_heads=self.n_heads,
+                key_head_dim=self.key_head_dim,
+                v_head_dim=self.value_head_dim,
+            )
 
     def __init__(self, config: Config):
         super().__init__()

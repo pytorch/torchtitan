@@ -9,8 +9,10 @@ from unittest import mock
 
 import pytest
 
+from torchtitan.components.checkpointer.dcp import CheckpointManager
 from torchtitan.components.validator import Validator
-from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import DebugConfig, PrecisionConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.observability.sdc_replayer import SDCReplayer
@@ -41,8 +43,11 @@ def test_training_token_counts_are_positive() -> None:
         TrainingConfig(num_tokens_per_microbatch_per_dp_rank=0)
     with pytest.raises(ValueError, match="must be -1 or greater than 0"):
         TrainingConfig(num_tokens_per_train_step=0)
-    with pytest.raises(ValueError, match="must be greater than 0"):
-        TrainingConfig(max_context_length=0)
+
+
+def test_precision_rejects_bf16_storage_with_fp32_compute() -> None:
+    with pytest.raises(ValueError, match="fp32 compute needs fp32 parameters"):
+        PrecisionConfig(dtype="bfloat16", param_dtype="float32")
 
 
 def test_per_group_accelerator_graph_config_restrictions() -> None:
@@ -112,6 +117,25 @@ def test_graph_trainer_rejects_per_group_accelerator_graphs() -> None:
                 disable_accelerator_graphs=True,
             ),
         )
+
+
+def test_seed_checkpoint_requires_a_saving_checkpointer() -> None:
+    config = llama3_debugmodel()
+    config.create_seed_checkpoint = True
+    config.checkpointer = None
+    with pytest.raises(
+        ValueError, match="create_seed_checkpoint requires a checkpointer"
+    ):
+        config.__post_init__()
+
+    config.checkpointer = CheckpointManager.Config(load_only=True)
+    with pytest.raises(
+        ValueError, match="create_seed_checkpoint requires a checkpointer"
+    ):
+        config.__post_init__()
+
+    config.checkpointer = CheckpointManager.Config()
+    config.__post_init__()
 
 
 def test_accelerator_graphs_allow_pipeline_validation() -> None:
@@ -220,10 +244,10 @@ def test_varlen_accelerator_graphs_require_document_bound() -> None:
 def test_cpu_offload_requires_distinct_dp_shard_seeds() -> None:
     with pytest.raises(ValueError, match="distinct_seed_mesh_axes"):
         TrainingEngine.Config(
-            training=TrainingConfig(enable_cpu_offload=True),
+            parallelism=ParallelismConfig(fsdp_enable_cpu_offloading=True),
         )
 
     TrainingEngine.Config(
-        training=TrainingConfig(enable_cpu_offload=True),
+        parallelism=ParallelismConfig(fsdp_enable_cpu_offloading=True),
         debug=DebugConfig(distinct_seed_mesh_axes=["pp", "dp_shard"]),
     )

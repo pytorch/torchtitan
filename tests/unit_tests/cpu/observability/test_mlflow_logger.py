@@ -10,7 +10,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from torchtitan.observability.metrics import MetricsProcessor, MLFlowLogger
+from torchtitan.observability.metrics import (
+    MetricsProcessor,
+    MLFlowLogger,
+    TensorBoardLogger,
+)
 
 
 @pytest.fixture
@@ -23,7 +27,9 @@ def fake_mlflow(monkeypatch):
 
 
 def test_metrics_run_and_status(fake_mlflow):
-    metric_logger = MLFlowLogger(config_dict={"steps": 10}, tag="train")
+    metric_logger = MLFlowLogger.Config().build(
+        log_dir="unused", config_dict={"steps": 10}, tag="train"
+    )
     fake_mlflow.start_run.assert_called_once_with()
 
     metric_logger.log({"throughput(tps)": 42, "mfu(%)": 35}, step=2)
@@ -45,14 +51,14 @@ def test_metrics_run_and_status(fake_mlflow):
 
 
 def test_metric_name_collision(fake_mlflow):
-    metric_logger = MLFlowLogger()
+    metric_logger = MLFlowLogger.Config().build(log_dir="unused")
     with pytest.raises(ValueError, match="collide"):
         metric_logger.log({"mfu(%)": 35, "mfu_percent": 36}, step=1)
     metric_logger.close()
 
 
 def test_failed_run(fake_mlflow):
-    metric_logger = MLFlowLogger()
+    metric_logger = MLFlowLogger.Config().build(log_dir="unused")
     try:
         raise RuntimeError("training failed")
     except RuntimeError:
@@ -64,7 +70,7 @@ def test_existing_run_is_not_closed(fake_mlflow):
     fake_mlflow.active_run.return_value = SimpleNamespace(
         info=SimpleNamespace(run_id="existing")
     )
-    metric_logger = MLFlowLogger()
+    metric_logger = MLFlowLogger.Config().build(log_dir="unused")
     metric_logger.log({"loss": 0.5}, step=1)
     metric_logger.close()
     fake_mlflow.start_run.assert_not_called()
@@ -83,36 +89,44 @@ def test_existing_run_is_not_closed(fake_mlflow):
     ],
 )
 def test_only_metrics_rank_uses_mlflow(
-    fake_mlflow, monkeypatch, save_for_all_ranks, parallelism_context, rank, num_runs
+    fake_mlflow,
+    monkeypatch,
+    tmp_path,
+    save_for_all_ranks,
+    parallelism_context,
+    rank,
+    num_runs,
 ):
     monkeypatch.setattr("torch.distributed.get_rank", lambda: rank)
     monkeypatch.setattr(
         "torchtitan.observability.metrics._is_v_schedule", lambda _: False
     )
-    processor = object.__new__(MetricsProcessor)
-    result = processor._build_metric_logger(
-        config=MetricsProcessor.Config(
-            enable_mlflow=True, save_for_all_ranks=save_for_all_ranks
+    monkeypatch.setattr(
+        "torchtitan.observability.metrics.utils.get_peak_flops", lambda _: 1.0
+    )
+    result = MetricsProcessor.Config(
+        loggers=[TensorBoardLogger.Config(), MLFlowLogger.Config()],
+        save_for_all_ranks=save_for_all_ranks,
+    ).build(
+        device_memory_monitor=SimpleNamespace(
+            device_name="unused", reset_peak_stats=lambda: None
         ),
         parallelism_context=parallelism_context,
-        dump_folder="unused",
+        dump_folder=str(tmp_path),
         pp_schedule="1F1B",
     )
-    result.log({"loss": 1.0}, step=1)
+    for metric_logger in result.loggers:
+        metric_logger.log({"loss": 1.0}, step=1)
     assert fake_mlflow.start_run.call_count == num_runs
+    events_files = list(tmp_path.rglob("events.out.tfevents.*"))
+    assert len(events_files) == int(save_for_all_ranks or num_runs > 0)
     result.close()
 
 
 def test_missing_dependency_fails_before_rank_selection(monkeypatch):
     monkeypatch.setitem(sys.modules, "mlflow", None)
-    processor = object.__new__(MetricsProcessor)
     with pytest.raises(ModuleNotFoundError, match="pip install mlflow-skinny"):
-        processor._build_metric_logger(
-            config=MetricsProcessor.Config(enable_mlflow=True),
-            parallelism_context=SimpleNamespace(pp_enabled=False),
-            dump_folder="unused",
-            pp_schedule="1F1B",
-        )
+        MLFlowLogger.Config()
 
 
 def test_local_tracking_store(tmp_path, monkeypatch):
@@ -124,7 +138,9 @@ def test_local_tracking_store(tmp_path, monkeypatch):
     old_uri = mlflow.get_tracking_uri()
     mlflow.set_tracking_uri((tmp_path / "mlruns").as_uri())
     try:
-        metric_logger = MLFlowLogger(config_dict={"training": {"steps": 3}})
+        metric_logger = MLFlowLogger.Config().build(
+            log_dir="unused", config_dict={"training": {"steps": 3}}
+        )
         metric_logger.log({"loss": 1.25, "mfu(%)": 42}, step=1)
         run_id = mlflow.active_run().info.run_id
         metric_logger.log({"loss": 0.75, "validation_metrics/nll": 0.6}, step=3)

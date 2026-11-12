@@ -4,13 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import subprocess
 from unittest.mock import Mock
 
 import pytest
 import torch
 
 from torchtitan.tools.garbage_collector import GarbageCollector
-from torchtitan.tools.utils import get_cuda_flash_attention_impl, get_local_device
+from torchtitan.tools.utils import (
+    get_cuda_flash_attention_impl,
+    get_local_device,
+    get_peak_flops,
+)
 
 
 class _FakeDeviceModule:
@@ -122,3 +127,23 @@ def test_missing_flash_attention_raises(
     find_spec.assert_called_once_with(module)
     assert module in str(exc.value)
     assert f"Install a compatible {impl} wheel" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("device_name", "expected"),
+    [
+        ("NVIDIA H100 80GB HBM3", 989e12),
+        ("NVIDIA A100-SXM4-80GB", 312e12),
+        # Catches an unknown device silently using the A100 peak, which gives a
+        # plausible but wrong MFU.
+        ("Unlisted GPU", None),
+        ("TPU v99", None),
+    ],
+)
+def test_get_peak_flops(monkeypatch, device_name, expected):
+    # lspci finds no H100, so the device name decides.
+    monkeypatch.setattr(
+        "torchtitan.tools.utils.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout=""),
+    )
+    assert get_peak_flops(device_name) == expected

@@ -78,14 +78,16 @@ The package is organized by responsibility and dependency boundary:
 - `generator/` contains the standalone generator service (`generator.py`), the
   SPMD engine loop that drives it (`engine_loop.py`), request dispatch across
   data-parallel replicas (`dispatcher.py`), the inference engine interface
-  (`engine.py`, `GenerationEngine`), engine-agnostic types (`types.py`), and
-  inference parallelism. `generator/vllm/` holds everything vLLM-specific: the
+  (`engine.py`, `GenerationEngine`), engine-agnostic types (`types.py`), the
+  generator model's build and model state dict loads (`model.py`),
+  and inference parallelism. `generator/vllm/` holds everything vLLM-specific: the
   `VLLMEngine` implementation and its config (`Generator.Config.engine`), and
-  the model-side adapters that run TorchTitan models in vLLM.
+  the model-side adapters that run TorchTitan models in vLLM. `generator/sglang/`
+  holds the same for SGLang (`SGLangEngine`).
 - `rollout/` contains rollout execution (`rollouter.py`), the user extension
   APIs for environments (`message_env.py`, `token_env.py`) and rewards
   (`rubric.py`), advantages, data loading, rollout recording, and the rollout
-  data types including the generation contract (`types.py`: `GenerateFn`,
+  data types including the generation contract (`types.py`: `GenerateFn`, `Prompt`,
   `Completion`). Renderers are shared with SFT and live in core
   `torchtitan/components/renderer.py`.
 - `routing/` contains request routing across and within generators.
@@ -247,8 +249,12 @@ python -m torchtitan.rl.train \
 **NOTE:** The DAPO Math README documents checkpoint paths, expected outputs, and configuration variants.
 
 **Metrics:** W&B is on by default. Run `wandb login` first, or set
-`config.metrics.enable_wandb = False` in your recipe. Set
-`config.metrics.enable_tensorboard = True` to write TensorBoard metrics.
+`config.metrics.loggers = []` in your recipe. Append
+`TensorBoardLogger.Config()` to `config.metrics.loggers` to also write TensorBoard metrics.
+
+## Run on SLURM
+
+See [Launchers](./actors/monarch/README.md#launchers).
 
 ## Trainer/generator consistency
 
@@ -268,8 +274,8 @@ TitanRL exposes four complementary views of a run:
 Together these answer four different debugging questions: what the distributed system was doing, how the run was learning, how the inference engine was performing, and what the model actually produced.
 
 Reference recipes enable W&B by default. Run `wandb login` before launch, or
-disable it in the recipe with `config.metrics.enable_wandb = False`. Set
-`config.metrics.enable_tensorboard = True` to write TensorBoard metrics under
+disable it in the recipe with `config.metrics.loggers = []`. Append
+`TensorBoardLogger.Config()` to `config.metrics.loggers` to also write TensorBoard metrics under
 the output directory.
 
 The trainer supports the core `Profiler.Config`, including Kineto traces and

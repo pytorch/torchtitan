@@ -36,6 +36,7 @@ from torchtitan.tools.garbage_collector import GarbageCollector
 from .base import (
     BaseCheckpointManager,
     EMA,
+    export_state_dict,
     LR_SCHEDULER,
     MODEL,
     ModelWrapper,
@@ -468,6 +469,12 @@ class CheckpointManager(BaseCheckpointManager):
                         use_non_blocking_copy=True,
                     )
                 )
+            # DefaultStager copies on its own stream, which does not wait for the
+            # current stream. Without this wait, it can copy weights and optimizer
+            # state before the optimizer step finishes writing them.
+            staging_stream = self.stager._staging_stream
+            assert staging_stream is not None
+            staging_stream.wait_stream(torch.accelerator.current_stream())
 
             async_save_started_at = time.monotonic()
             result = self.dcp_save(
@@ -630,16 +637,10 @@ class CheckpointManager(BaseCheckpointManager):
 
         checkpoint_id = self._create_last_step_id(curr_step)
         if self.last_save_model_only:
-            states = self.states[MODEL].state_dict()
-
-            states = {
-                k: v.to(self.export_dtype)
-                if isinstance(v, torch.Tensor)
-                and v.is_floating_point()
-                and v.dtype != self.export_dtype
-                else v
-                for k, v in states.items()
-            }
+            model = self.states[MODEL]
+            states = export_state_dict(
+                model.state_dict(), dtype=self.export_dtype, model_parts=model.model
+            )
             logger.info(
                 f"Saving a model only checkpoint in {self.export_dtype} "
                 f"at last step, step {curr_step}, to {checkpoint_id}."
