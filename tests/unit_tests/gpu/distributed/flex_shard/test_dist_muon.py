@@ -333,6 +333,98 @@ class TestDistMuon(DTensorTestBase):
             second_local_blocks_grad,
         )
 
+    @with_comms(eager_init=True)
+    def test_newton_schulz_graph_replay_matches_eager_bitwise(self):
+        mesh = init_device_mesh(
+            self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)
+        )
+        device = torch.device(self.device_type, self.rank)
+        # The BlockShard parameter is redistributed (a 4-row block straddles the
+        # shard boundary) into strided matrix-batch views; the Owned one is a
+        # whole matrix on one rank.
+        compute_sharding_by_fqn = {
+            "layers.0.blocks": ComputeLayout(
+                shardings_by_mesh_axis={
+                    "dp_shard": BlockShard(dim=0, block_sizes=(4, 2))
+                },
+                compute_dtype=torch.bfloat16,
+            ),
+            "layers.0.owned": ComputeLayout(
+                shardings_by_mesh_axis={"dp_shard": Owned()},
+                compute_dtype=torch.bfloat16,
+            ),
+        }
+        values = (
+            torch.randn(
+                18, 8, device=device, generator=torch.Generator(device).manual_seed(0)
+            ),
+            torch.randn(
+                8, 12, device=device, generator=torch.Generator(device).manual_seed(1)
+            ),
+        )
+
+        def make_optimizer():
+            params = [
+                torch.nn.Parameter(distribute_tensor(value.clone(), mesh, (Shard(0),)))
+                for value in values
+            ]
+            optimizer = DistMuon(
+                [{"params": params, "param_names": list(compute_sharding_by_fqn)}],
+                compute_sharding_by_fqn=compute_sharding_by_fqn,
+                bucket_configs=[BucketConfig(patterns=("layers.0.*",))],
+                lr=0.03,
+                adjust_lr_fn="match_rms_adamw",
+            )
+            return params, optimizer
+
+        eager_params, eager_optimizer = make_optimizer()
+        graph_params, graph_optimizer = make_optimizer()
+        graphs = graph_optimizer._newton_schulz_graphs
+
+        def step_and_assert(step: int) -> None:
+            for params, optimizer, max_numel in (
+                (eager_params, eager_optimizer, 0),
+                (
+                    graph_params,
+                    graph_optimizer,
+                    dist_muon_module._NS_CUDA_GRAPH_MAX_NUMEL,
+                ),
+            ):
+                for param, value in zip(params, values, strict=True):
+                    param.grad = distribute_tensor(
+                        value.mul(step + 0.7).sin_(), mesh, (Shard(0),)
+                    )
+                with mock.patch.object(
+                    dist_muon_module, "_NS_CUDA_GRAPH_MAX_NUMEL", max_numel
+                ):
+                    optimizer.step()
+            for eager_param, graph_param in zip(
+                eager_params, graph_params, strict=True
+            ):
+                self.assertTrue(
+                    torch.equal(eager_param.to_local(), graph_param.to_local())
+                )
+                self.assertTrue(
+                    torch.equal(
+                        eager_optimizer.state[eager_param][
+                            "momentum_buffer"
+                        ].to_local(),
+                        graph_optimizer.state[graph_param][
+                            "momentum_buffer"
+                        ].to_local(),
+                    )
+                )
+
+        # Step 0 runs eagerly, step 1 captures, step 2 replays.
+        for step in range(3):
+            step_and_assert(step)
+        self.assertTrue(graphs._graphs)
+        graph_optimizer.load_state_dict(graph_optimizer.state_dict())
+        self.assertFalse(graphs._graphs)
+        for step in range(3, 6):
+            step_and_assert(step)
+        self.assertTrue(graphs._graphs)
+
 
 @instantiate_parametrized_tests
 @unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
