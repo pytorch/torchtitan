@@ -35,7 +35,7 @@ Test bitwise parity between the SGLang generator and the TorchTitan trainer.
 Debug models with random weights start from the trainer's weights, loaded through the
 same in-place model state dict load.
 
-Runs in the B200 RL CI job.
+Runs in the B200 RL unit-test workflow (unit_test_gpu_rl_b200.yaml).
 Run each class in its own launch, with as many processes as its TP degree (one for
 TestSGLangBitwiseParityKDA, else two), with the SGLang environment (see
 torchtitan/rl/generator/sglang/README.md; the Dist-MoE class also needs the dist_moe
