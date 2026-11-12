@@ -4,12 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import multiprocessing
 import os
-import subprocess
-import sys
 import tempfile
 import unittest
 import uuid
+from concurrent.futures import ProcessPoolExecutor
 from unittest import mock
 
 import fsspec
@@ -142,18 +142,13 @@ class TestRemoteOps(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as folder:
             root = f"listingcachinglocal://{folder}"
-            os.makedirs(os.path.join(folder, "step-10"))
+            os.makedirs(f"{folder}/step-10")
             self.assertEqual(filesystem.listdir(root), ["step-10"])
 
-            subprocess.run(
-                [
-                    sys.executable,
-                    "-c",
-                    "import os, sys; os.makedirs(sys.argv[1])",
-                    os.path.join(folder, "step-15"),
-                ],
-                check=True,
-            )
+            # spawn, not fork: forking a multi-threaded test process can deadlock.
+            spawn = multiprocessing.get_context("spawn")
+            with ProcessPoolExecutor(1, mp_context=spawn) as save_process:
+                save_process.submit(os.makedirs, f"{folder}/step-15").result()
 
             self.assertEqual(sorted(filesystem.listdir(root)), ["step-10", "step-15"])
 
