@@ -20,6 +20,7 @@ import pytest
 
 import spmd_types as spmd
 import torch
+from torch.nn.attention import SDPBackend
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform.base import convert_config_type
@@ -450,6 +451,44 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
             logits_TV = model(tokens_T, positions_T, metadata)
 
         self.assertEqual(logits_TV.shape, (num_tokens, 2048))
+
+
+@pytest.mark.parametrize(
+    "deterministic, expected",
+    [
+        (False, [SDPBackend.CUDNN_ATTENTION, SDPBackend.FLASH_ATTENTION]),
+        (True, [SDPBackend.FLASH_ATTENTION]),
+    ],
+)
+def test_deterministic_mode_skips_cudnn(deterministic, expected):
+    # Guards the backend selection; cuDNN's varlen backward is not deterministic.
+    attention = VarlenInnerAttention.Config().build()
+    metadata = create_varlen_metadata_for_document(torch.arange(4))
+    q_THK = torch.randn(4, 2, 8, dtype=torch.bfloat16)
+    with (
+        patch("torch.are_deterministic_algorithms_enabled", return_value=deterministic),
+        patch(
+            "torchtitan.models.common.attention.attention.sdpa_kernel",
+            return_value=nullcontext(),
+        ) as sdpa_kernel,
+        patch(
+            "torchtitan.models.common.attention.attention._varlen_attn",
+            return_value=q_THK,
+        ),
+    ):
+        attention(q_THK, q_THK, q_THK, attention_metadata=metadata)
+    assert sdpa_kernel.call_args.args[0] == expected
+
+
+def test_deterministic_mode_rejects_cudnn_only():
+    attention = VarlenInnerAttention.Config(sdpa_backends=["CUDNN_ATTENTION"]).build()
+    metadata = create_varlen_metadata_for_document(torch.arange(4))
+    q_THK = torch.randn(4, 2, 8, dtype=torch.bfloat16)
+    with (
+        patch("torch.are_deterministic_algorithms_enabled", return_value=True),
+        pytest.raises(ValueError, match="other than cuDNN"),
+    ):
+        attention(q_THK, q_THK, q_THK, attention_metadata=metadata)
 
 
 if __name__ == "__main__":
