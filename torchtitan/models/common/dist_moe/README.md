@@ -328,6 +328,10 @@ TorchTitan owns one optional Dist-MoE runtime through forward/backward setup:
 6. Partial initialization unwinds runtime-owned resources. Normal teardown
    removes registrations, detaches modules, and closes the Annex context.
 
+After forward/backward, the engine starts the annex's asynchronous capacity
+check. It finishes that check before optimizer mutation, so planner overflow
+raises instead of silently committing an incomplete update.
+
 The RL vLLM generator owns an inference runtime
 (`DistMoeRuntime.Config(inference=True)`, passed as
 `Generator.Config.dist_moe_runtime`): scratch-only planning, sized for

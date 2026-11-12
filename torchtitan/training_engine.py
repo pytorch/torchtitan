@@ -697,6 +697,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 global_loss_token_counts,
             )
 
+        if (dist_moe_runtime := self._dist_moe_runtime) is not None:
+            dist_moe_runtime.begin_overflow_check()
         self.loss = loss
         return ForwardBackwardResult(
             loss, loss_metrics, num_flops=self._forward_backward_num_flops
@@ -924,6 +926,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         current_step = self.num_completed_steps + 1
         if hasattr(self, "checkpointer"):
             self.checkpointer.maybe_wait_for_staging()
+        if (dist_moe_runtime := self._dist_moe_runtime) is not None:
+            dist_moe_runtime.finish_overflow_check()
         grad_norm = self.optim.step(
             self.loss,
             current_step=current_step,

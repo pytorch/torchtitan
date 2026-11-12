@@ -22,7 +22,7 @@ import math
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Literal, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING
 
 import torch
 from torch.distributed.pipelining import (
@@ -306,6 +306,7 @@ class DistMoeRuntime(Configurable):
         self.config = config
         self._num_local_input_tokens_per_call: int | None = None
         self._closed = False
+        self._pending_overflow_check: Any | None = None
         self._forward_context_handles: list[RemovableHandle] = []
         self._metadata_inference_cleanup_handle: RemovableHandle | None = None
         self._set_forward_context = set_forward_context
@@ -614,6 +615,34 @@ class DistMoeRuntime(Configurable):
             return self.context.max_num_local_input_tokens
         return self._num_local_input_tokens_per_call
 
+    def begin_overflow_check(self) -> None:
+        """Start copying planner low-water marks after forward/backward."""
+        if self._pending_overflow_check is not None:
+            raise RuntimeError("a Dist-MoE overflow check is already pending")
+        activation_buffer = self.context.activation_buffer
+        if activation_buffer is None:
+            raise RuntimeError("Dist-MoE training requires an activation buffer")
+        self._pending_overflow_check = activation_buffer.begin_check_overflow()
+
+    def finish_overflow_check(self) -> Any:
+        """Validate planner capacity before the optimizer mutates parameters.
+
+        Returns:
+            The Dist-MoE scratch-usage report for the completed update.
+
+        Raises:
+            RuntimeError: If no overflow check is pending.
+            ValueError: If the planner recorded a capacity overflow.
+        """
+        pending = self._pending_overflow_check
+        if pending is None:
+            raise RuntimeError("no Dist-MoE overflow check is pending")
+        self._pending_overflow_check = None
+        activation_buffer = self.context.activation_buffer
+        if activation_buffer is None:
+            raise RuntimeError("Dist-MoE training requires an activation buffer")
+        return activation_buffer.finish_check_overflow(pending)
+
     def close(self) -> None:
         """Remove PP registrations, detach modules, and close Annex state."""
         if self._closed:
@@ -629,5 +658,6 @@ class DistMoeRuntime(Configurable):
         for module in self._modules:
             if module._runtime is self:
                 module._runtime = None
+        self._pending_overflow_check = None
         self.context.close()
         self._closed = True
