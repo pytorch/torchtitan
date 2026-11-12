@@ -83,6 +83,8 @@ class _StubCompileConfig:
     extra_passes: list = field(default_factory=list)
     memory_policy: str = "default"
     full_recompute_save_ops: str = ""
+    ce_collectives: object = None
+    ce_workspace_size_mib: int = 128
     ep_overlap: EpOverlapConfig = field(default_factory=EpOverlapConfig)
 
 
@@ -303,6 +305,39 @@ class TestConfigFingerprint(unittest.TestCase):
         fp_a = compute_config_fingerprint(model_a, cfg, dims)
         fp_b = compute_config_fingerprint(model_b, cfg, dims)
         self.assertNotEqual(fp_a, fp_b)
+
+    def test_ce_collective_config_sensitivity(self):
+        from torchtitan.experiments.ce_collectives.configs import CECollectivesConfig
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+        )
+
+        configs = [
+            None,
+            CECollectivesConfig(),
+            CECollectivesConfig(all_gather=False),
+            CECollectivesConfig(reduce_scatter=False),
+            CECollectivesConfig(ranks_per_domain=2),
+            CECollectivesConfig(scope="dense"),
+        ]
+        fingerprints = {
+            compute_config_fingerprint(
+                _make_stub_model(),
+                _StubCompileConfig(ce_collectives=config),
+                _StubParallelismContext(),
+            )
+            for config in configs
+        }
+        self.assertEqual(len(fingerprints), len(configs))
+
+        different_workspace = compute_config_fingerprint(
+            _make_stub_model(),
+            _StubCompileConfig(
+                ce_collectives=CECollectivesConfig(), ce_workspace_size_mib=32
+            ),
+            _StubParallelismContext(),
+        )
+        self.assertNotIn(different_workspace, fingerprints)
 
     def test_parallelism_sensitivity(self):
         from torchtitan.experiments.graph_trainer.precompile import (
