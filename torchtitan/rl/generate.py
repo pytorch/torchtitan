@@ -41,7 +41,7 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import apply_overrides, ConfigLoader
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.rl.generator.vllm.batch_invariance import (
-    patch_vllm_logprob_and_temperature_kernels,
+    force_trainer_logprobs_for_batch_invariance,
 )
 from torchtitan.rl.generator.vllm.engine import add_extra_vllm_engine_args, VLLMEngine
 from torchtitan.rl.generator.vllm.registry import (
@@ -138,7 +138,7 @@ def generate() -> None:
     if gen_config.debug.batch_invariant:
         # vLLM's V2 sampler computes logprobs and divides by the temperature in Triton
         # kernels; use the trainer's PyTorch ops instead, as VLLMEngine does.
-        patch_vllm_logprob_and_temperature_kernels()
+        force_trainer_logprobs_for_batch_invariance()
     enable_ep = gen_config.parallelism.expert_parallel_degree > 1
 
     logger.debug("Initializing vLLM LLMEngine with TorchTitan model")

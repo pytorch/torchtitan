@@ -38,7 +38,7 @@ from torchtitan.rl.generator.types import (
     SamplingConfig,
 )
 from torchtitan.rl.generator.vllm.batch_invariance import (
-    patch_vllm_logprob_and_temperature_kernels,
+    force_trainer_logprobs_for_batch_invariance,
 )
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.multimodal_wrapper import image_prompt_to_engine_input
@@ -260,7 +260,7 @@ class VLLMEngine(GenerationEngine):
         if batch_invariant:
             # vLLM's v2 logprob and temperature Triton kernels bypass the batch-invariant
             # aten overrides; replace them with the trainer's PyTorch ops.
-            patch_vllm_logprob_and_temperature_kernels()
+            force_trainer_logprobs_for_batch_invariance()
 
     def _build_engine_args(
         self,

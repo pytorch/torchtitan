@@ -230,10 +230,10 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         # The v2 logprob and temperature Triton kernels bypass the aten overrides.
         # Apply the same generator-side patch the production Generator does.
         from torchtitan.rl.generator.vllm.batch_invariance import (
-            patch_vllm_logprob_and_temperature_kernels,
+            force_trainer_logprobs_for_batch_invariance,
         )
 
-        patch_vllm_logprob_and_temperature_kernels()
+        force_trainer_logprobs_for_batch_invariance()
 
     _set_generator_determinism(gen_config.debug)
 
