@@ -32,8 +32,12 @@ class _InterGeneratorRouterActorEndpoints:
         super().__init__(config, generators=generators)
 
     @concurrent_endpoint
-    async def reserve(self, request_id: str, *, routing_session_id: str | None) -> Any:
-        return super().reserve(request_id, routing_session_id=routing_session_id)
+    async def reserve(
+        self, request_id: str, *, routing_session_id: str | None, num_tokens: int
+    ) -> Any:
+        return super().reserve(
+            request_id, routing_session_id=routing_session_id, num_tokens=num_tokens
+        )
 
     @concurrent_endpoint
     async def release_reservation(self, request_id: str) -> None:

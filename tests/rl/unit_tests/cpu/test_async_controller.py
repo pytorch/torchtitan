@@ -1021,6 +1021,7 @@ def test_generate_fn_forwards_the_session_and_releases_on_failure() -> None:
         reserve=SimpleNamespace(call_one=reserve),
         release_reservation=SimpleNamespace(broadcast=release),
     )
+    controller._sampling = SimpleNamespace(max_tokens=100)
     generate = controller._make_generate_fn()
 
     with pytest.raises(RuntimeError, match="generator failed"):
@@ -1029,7 +1030,8 @@ def test_generate_fn_forwards_the_session_and_releases_on_failure() -> None:
         )
 
     # The session reaches both routing layers: the router and the generator's DP routing.
-    reserve.assert_awaited_once_with("r0", routing_session_id="s0")
+    # Without a sampling_config, the router reserves the prompt plus the default max_tokens.
+    reserve.assert_awaited_once_with("r0", routing_session_id="s0", num_tokens=102)
     generate_call.assert_awaited_once_with(
         [1, 2],
         request_id="r0",

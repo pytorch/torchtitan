@@ -147,7 +147,7 @@ class StickySessionRoutingStrategy(RoutingStrategy):
         """Routing strategy used for new sessions and requests without a session."""
 
         repin_load_ratio: float | None = 1.5
-        """Move a session off its pinned candidate once that candidate's in-flight load is above
+        """Move a session off its pinned candidate once that candidate's load is above
         `repin_load_ratio` x the mean load. The fallback picks the new candidate; the move
         re-prefills the session's context. None never moves it.
 

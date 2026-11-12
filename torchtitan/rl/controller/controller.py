@@ -623,6 +623,8 @@ class Controller(Configurable):
         # `self`. A GenerateFn may be shipped to another process, where an actor
         # handle serializes cheaply and the whole controller does not.
         generator_router = self.generator_router
+        # The generator samples with this when a call passes no sampling_config.
+        default_max_tokens = self._sampling.max_tokens
 
         @sl.log_trace_span("generate")
         async def generate(
@@ -636,8 +638,15 @@ class Controller(Configurable):
             # TODO: a cancelled caller releases while the generator still runs its call,
             #   and a caller that dies never releases. Moot today: nothing cancels a
             #   generate call, and a dead rollout worker fails the run.
+            max_tokens = (
+                default_max_tokens
+                if sampling_config is None
+                else sampling_config.max_tokens
+            )
             generator = await generator_router.reserve.call_one(
-                request_id, routing_session_id=routing_session_id
+                request_id,
+                routing_session_id=routing_session_id,
+                num_tokens=len(prompt_token_ids) + max_tokens,
             )
             try:
                 return await generator.generate.call_one(
