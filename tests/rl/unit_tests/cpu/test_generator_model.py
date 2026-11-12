@@ -4,12 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from unittest import mock
+
 import pytest
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
+from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -121,7 +124,9 @@ class TestLoadModelStateDictTwoRanks(DTensorTestBase):
 
         Guards that each group's sharded buffers are allocated before its fetch and
         freed after, and that a group left mid-forward (the tied group after a
-        standalone lm_head call) still receives the new weights.
+        standalone lm_head call) still receives the new weights, all-gathered outside
+        the forward state: in it, FSDP all-gathers on prefetch streams that do not wait
+        for the load's writes on GPU.
         """
         model = nn.Module()
         model.tok_embeddings = nn.Embedding(15, 16)
@@ -163,6 +168,14 @@ class TestLoadModelStateDictTwoRanks(DTensorTestBase):
         with torch.no_grad():
             model.lm_head(torch.zeros(1, 16))
 
+        comm_ctx = model._get_fsdp_state()._comm_ctx
+        get_all_gather_streams = comm_ctx.get_all_gather_streams
+        all_gather_states = []
+
+        def record_all_gather_state(async_op, training_state):
+            all_gather_states.append(training_state)
+            return get_all_gather_streams(async_op, training_state)
+
         for version in (1, 2):
             new_state_dict = {k: v + version for k, v in initial_state_dict.items()}
             fetched_keys = []
@@ -177,7 +190,11 @@ class TestLoadModelStateDictTwoRanks(DTensorTestBase):
                 )
                 return copy(state_dict)
 
-            loader.load(fetch)
+            with mock.patch.object(
+                comm_ctx, "get_all_gather_streams", record_all_gather_state
+            ):
+                loader.load(fetch)
+            self.assertEqual(set(all_gather_states), {TrainingState.IDLE})
 
             self.assertEqual(
                 fetched_keys,

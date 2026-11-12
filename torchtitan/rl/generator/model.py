@@ -25,6 +25,7 @@ from torchtitan.components import loss as _loss  # noqa: F401
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed.fsdp import maybe_store_frozen_params_in_param_dtype_
+from torchtitan.distributed.fsdp_lifecycle import complete_fsdp_grouped_forward
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.common.decoder import Decoder
@@ -540,15 +541,19 @@ def _sharded_param_storages(module: FSDPModule) -> Iterator[torch.Tensor]:
 
 
 def _reshard(module: FSDPModule) -> None:
-    """Reshard ``module``'s FSDP group unconditionally, like FSDP's load_state_dict pre-hook.
+    """Reshard ``module``'s FSDP group, first finishing a forward it was left in.
 
-    ``module.reshard()`` is a no-op for a group left in the FORWARD state with
-    reshard_after_forward=False, e.g. the tied [tok_embeddings, norm, lm_head]
-    group after the engine computes logits with lm_head alone.
+    The engine computes logits with lm_head alone, so the [norm, lm_head] group (or the
+    tied [tok_embeddings, norm, lm_head] one) stays in the FORWARD state: norm runs in
+    CUDA graph replays, without FSDP hooks. In that state:
+    - ``module.reshard()`` is a no-op (reshard_after_forward=False);
+    - ``module.unshard()`` copies the shards in and all-gathers on FSDP's prefetch
+      streams, which wait for the current stream only in the root's pre-forward, so
+      the load's all-gather would not wait for device work the load queued on the
+      current stream to fill the group's sharded buffers.
     """
-    # TODO: replace with a public FSDP API that reshards regardless of training state.
-    for param_group in module._get_fsdp_state()._fsdp_param_groups:
-        param_group._to_sharded()
+    complete_fsdp_grouped_forward(module, None)
+    module.reshard()
 
 
 def _restore_sharded_params(module: FSDPModule) -> None:
