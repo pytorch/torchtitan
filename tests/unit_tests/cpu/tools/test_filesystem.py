@@ -5,13 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 import uuid
 from unittest import mock
 
 import fsspec
-from fsspec.implementations.memory import MemoryFileSystem
+from fsspec.implementations.local import LocalFileSystem
 
 from torchtitan.tools import filesystem
 
@@ -72,12 +74,11 @@ class TestLocalOps(unittest.TestCase):
             filesystem.rmtree(step)
 
 
-class _ListingCachingMemoryFileSystem(MemoryFileSystem):
-    """Memory filesystem that caches listings per instance, as object-store
-    backends (gcsfs, s3fs, adlfs) do. Another process has its own instance, so
-    its writes never reach this process's cached listing."""
+class _ListingCachingLocalFileSystem(LocalFileSystem):
+    """Local filesystem behind a remote-style URI that caches listings per
+    instance, as object-store backends (gcsfs, s3fs, adlfs) do."""
 
-    protocol = "listingcachingmemory"
+    protocol = "listingcachinglocal"
 
     @classmethod
     def _strip_protocol(cls, path):
@@ -137,19 +138,24 @@ class TestRemoteOps(unittest.TestCase):
         # process. Answered from fsspec's listing cache, the new checkpoints
         # never showed up, so retention stopped deleting old ones.
         fsspec.register_implementation(
-            "listingcachingmemory", _ListingCachingMemoryFileSystem, clobber=True
+            "listingcachinglocal", _ListingCachingLocalFileSystem, clobber=True
         )
-        root = f"listingcachingmemory://{self.name}"
-        self._write(f"{root}/step-10/.metadata")
-        self.assertEqual(filesystem.listdir(root), ["step-10"])
+        with tempfile.TemporaryDirectory() as folder:
+            root = f"listingcachinglocal://{folder}"
+            os.makedirs(os.path.join(folder, "step-10"))
+            self.assertEqual(filesystem.listdir(root), ["step-10"])
 
-        # A separate instance has its own listing cache, like another process.
-        save_process_fs = fsspec.filesystem(
-            "listingcachingmemory", skip_instance_cache=True
-        )
-        save_process_fs.pipe(f"/{self.name}/step-15/.metadata", b"x")
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import os, sys; os.makedirs(sys.argv[1])",
+                    os.path.join(folder, "step-15"),
+                ],
+                check=True,
+            )
 
-        self.assertEqual(sorted(filesystem.listdir(root)), ["step-10", "step-15"])
+            self.assertEqual(sorted(filesystem.listdir(root)), ["step-10", "step-15"])
 
     def test_remote_filesystem_has_no_listing_cache(self):
         # The same guarantee, read off a real backend: the filesystem the
